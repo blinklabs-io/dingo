@@ -849,7 +849,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// Koios parity observer (dingo #3098): network mirrors the same
+	// Koios parity observer: network mirrors the same
 	// preview/preprod restriction internal/koiosparity.NewObserver enforces
 	// at construction time, checked here too so a bad value fails fast at
 	// config-validation time instead of only once the node reaches

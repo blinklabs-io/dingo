@@ -41,8 +41,7 @@ import (
 const stakeSnapshotRetentionEpochs = 3
 
 // checkAsOfEpochRecency rejects a historical epoch already outside the pool
-// mark-snapshot retention window, or ahead of the live epoch
-// (blinklabs-io/dingo#382).
+// mark-snapshot retention window, or ahead of the live epoch.
 //
 // The window is checked on the derived mark-snapshot epoch
 // (praos.StakeSnapshotEpoch(targetEpoch), i.e. targetEpoch-1), not on
@@ -205,8 +204,8 @@ type PoolStakeDistribution struct {
 	// TotalCirculatingSupply is genesis MaxLovelaceSupply minus the live
 	// reserves pot, clamped the same way as TotalActiveStake. It is a
 	// different total from TotalActiveStake -- see totalCirculatingSupply's
-	// doc comment (blinklabs-io/dingo#3824) for why GetStakeDistribution, and
-	// only GetStakeDistribution, needs this one instead.
+	// doc comment for why GetStakeDistribution, and only GetStakeDistribution,
+	// needs this one instead.
 	TotalCirculatingSupply uint64
 	// Pools is ordered by PoolKeyHash. Callers that place this in a repeated
 	// protobuf field or any other ordered encoding depend on that: without it
@@ -238,18 +237,18 @@ type PoolStakeDistribution struct {
 // fraction is unaffected by the omission.
 //
 // at pins the distribution to the historical point instead of
-// live-right-now (blinklabs-io/dingo#382): unpinned means live (the
-// existing default). A pinned at resolves to the epoch that governed that
-// slot and uses that epoch's mark snapshot instead of the live tip's --
-// this is a real historical reconstruction, not an approximation, because
-// the mark snapshot is already persisted per-epoch for leader election.
-// checkAsOfEpochRecency rejects a historical epoch already outside the
-// mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
-// since those rows are physically gone. at.Slot ahead of the transaction
-// tip is rejected directly (not just by epoch): GetEpochBySlot can resolve
-// a future slot within the live epoch to that same live epoch, which would
-// otherwise let a future-slot pin silently pass as "live epoch, therefore
-// fine" despite naming a point that has not happened yet.
+// live-right-now: unpinned means live (the existing default). A pinned at
+// resolves to the epoch that governed that slot and uses that epoch's mark
+// snapshot instead of the live tip's -- this is a real historical
+// reconstruction, not an approximation, because the mark snapshot is already
+// persisted per-epoch for leader election. checkAsOfEpochRecency rejects a
+// historical epoch already outside the mark-snapshot retention window
+// (ledger/snapshot's pool-snapshot pruning), since those rows are physically
+// gone. at.Slot ahead of the transaction tip is rejected directly (not just by
+// epoch): GetEpochBySlot can resolve a future slot within the live epoch to
+// that same live epoch, which would otherwise let a future-slot pin silently
+// pass as "live epoch, therefore fine" despite naming a point that has not
+// happened yet.
 //
 // txn reuses an already-open transaction (Query's point-validation
 // transaction, when called through it) rather than opening a fresh one, so
@@ -402,8 +401,8 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// The VRF key hash lives on the pool registration rather than the
 	// snapshot, so it is fetched in bulk rather than per pool. Unbounded
 	// (nil): this snapshot's own pinning behavior is pre-existing and
-	// unchanged by blinklabs-io/dingo#4237's fix to the separate
-	// GetStakeDistribution path -- out of scope here.
+	// unchanged by the separate GetStakeDistribution path's move to live stake
+	// -- out of scope here.
 	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, nil, metaTxn)
 	if err != nil {
 		return nil, err
@@ -434,19 +433,20 @@ func (ls *LedgerState) PoolStakeDistribution(
 			// Failing instead would cost far more. An error here does not fail
 			// one query: it aborts the LocalStateQuery protocol, the node drops
 			// the connection, and cardano-cli reports only a closed bearer --
-			// the exact opaque failure #2997 was filed for. Worse, the
-			// unfiltered form of this query covers every pool in the snapshot,
-			// so one unregistered pool anywhere on the chain would break
-			// leadership-schedule for every operator rather than for the one
-			// pool concerned. The same reasoning keeps chainDepStateLabNonce
-			// serving a slightly stale value instead of aborting.
+			// the exact opaque failure operators reported for cardano-cli
+			// leadership-schedule. Worse, the unfiltered form of this query
+			// covers every pool in the snapshot, so one unregistered pool
+			// anywhere on the chain would break leadership-schedule for every
+			// operator rather than for the one pool concerned. The same
+			// reasoning keeps chainDepStateLabNonce serving a slightly stale
+			// value instead of aborting.
 			//
-			// Also counted on a metric (blinklabs-io/dingo#4152), not just
-			// logged: a WARN line is easy to miss in normal operation, and
-			// this specific omission is what let a real cross-node
-			// comparison against cardano-node go unnoticed until a manual
-			// diff was run. A rising or persistently nonzero value here is
-			// visible to an operator's existing alerting without one.
+			// Also counted on a metric, not just logged: a WARN line is easy to
+			// miss in normal operation, and this specific omission is what let
+			// a real cross-node comparison against cardano-node go unnoticed
+			// until a manual diff was run. A rising or persistently nonzero
+			// value here is visible to an operator's existing alerting without
+			// one.
 			ls.metrics.incPoolStakeDistributionOmittedPool()
 			ls.config.Logger.Warn(
 				"omitting pool with snapshot stake but no registration",
@@ -504,7 +504,7 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 // asOfSlot pins that same resolution to a historical slot instead
 // (registeredPoolVrfKeyHashAsOfSlot), for a pinned caller: a pool that
 // re-registers with a new VRF key after asOfSlot must still be reported with
-// the key it held at that slot, not its current one (blinklabs-io/dingo#4237).
+// the key it held at that slot, not its current one.
 // Pass nil for a live lookup -- the caller's own targetSlot equals the current
 // tip, but registeredPoolVrfKeyHash's unbounded "latest registration" behavior
 // is kept for that case rather than routed through the slot-bounded path, so

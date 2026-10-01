@@ -307,13 +307,13 @@ func TestFetchEpochStopsSchedulingPoolsAfterPermanentError(t *testing.T) {
 }
 
 // TestFetchBackfillsAccountsForPreExistingCache is the fetch-side regression
-// test for the account-coverage-blind epoch-selection bug found in review of
-// #3097: a Dingo deployment that already ran koios-parity before #3097
-// landed has epochs with fresh koios_epoch_info/koios_totals rows but no
-// koios_account_coverage row at all. Turning on cfg.AccountsEnabled must
-// still get that epoch's accounts backfilled — GetUncachedEpochs alone
-// (keyed only on koios_epoch_info presence) would otherwise never re-select
-// it, since its pool-level data already looks "fetched" forever.
+// test for the account-coverage-blind epoch-selection bug found in the
+// per-account phase: a Dingo deployment that already ran koios-parity before
+// per-account parity landed has epochs with fresh koios_epoch_info/koios_totals
+// rows but no koios_account_coverage row at all. Turning on cfg.AccountsEnabled
+// must still get that epoch's accounts backfilled — GetUncachedEpochs alone
+// (keyed only on koios_epoch_info presence) would otherwise never re-select it,
+// since its pool-level data already looks "fetched" forever.
 //
 // This also exercises the chosen fix shape: the pool-level fetchEpoch call
 // (epoch_info/totals/pool_history) is skipped entirely for an epoch whose

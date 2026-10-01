@@ -1736,7 +1736,7 @@ func parsePoolParamsMap(
 // totals, producing PoolStakeSnapshot models suitable for database
 // storage. Every pool with at least one delegated credential gets a row,
 // even when every one of its delegators is at zero stake -- see the loop
-// below and blinklabs-io/dingo#4152.
+// below.
 func AggregatePoolStake(
 	snap *ParsedSnapShot,
 	epoch uint64,
@@ -1771,7 +1771,7 @@ func AggregatePoolStake(
 		// (its UTxOs spent, no reward balance) -- that is still a real
 		// delegator, not a decode gap, and a real cardano-node's own
 		// GetStakeDistribution reply reports the pool anyway (confirmed live
-		// against a real Preview cardano-node during blinklabs-io/dingo#4152:
+		// against a real Preview cardano-node:
 		// it answers with an explicit zero StakeFraction rather than omitting
 		// the pool). Gating the count on stake > 0, as this used to, made a
 		// pool whose only delegator(s) happened to be at zero stake
@@ -1787,7 +1787,7 @@ func AggregatePoolStake(
 	// this used to) is what made a registered, actively-delegated pool vanish
 	// from GetStakeDistribution/GetPoolDistr2 entirely after a Mithril
 	// bootstrap, rather than reporting it with a zero stake the way a real
-	// cardano-node does (blinklabs-io/dingo#4152). The row survives only
+	// cardano-node does. The row survives only
 	// until the live snapshot-rotation path (which never applied this skip)
 	// recomputes the epoch a few epochs later; until then the pool is simply
 	// missing.

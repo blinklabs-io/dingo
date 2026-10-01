@@ -1642,7 +1642,7 @@ func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
 // later changes to the pool's reward account, the reward-account
 // holder's DRep delegation, or the account's active flag must NOT
 // shift the tally for that epoch. Mirrors the cardano-ledger
-// ssDelegations/ssDReps semantics flagged in the PR review.
+// ssDelegations/ssDReps semantics.
 func TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges(t *testing.T) {
 	t.Parallel()
 

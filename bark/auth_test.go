@@ -282,7 +282,7 @@ func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
 	}, testDestinationRegistry, nil)
 }
 
-// TestStart_RejectsLifecycleWithoutClientCA pins bark#2988's fail-closed
+// TestStart_RejectsLifecycleWithoutClientCA pins the fail-closed
 // invariant: Start refuses to mount a DatabaseService (Lifecycle set)
 // without a configured client CA, rather than silently serving its
 // destructive RPCs to anonymous callers. This lives at Start, not NewBark —

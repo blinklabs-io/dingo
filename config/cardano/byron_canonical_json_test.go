@@ -47,13 +47,13 @@ func writeByronGenesisConfig(t *testing.T, byronGenesisJSON string) *CardanoNode
 	return cfg
 }
 
-// TestLoadGenesisConfigsByronDuplicateKeys covers dingo#4424: the reference
-// Byron genesis parser preserves every duplicate object member in the
+// TestLoadGenesisConfigsByronDuplicateKeys covers the reference behavior: the
+// reference Byron genesis parser preserves every duplicate object member in the
 // canonical bytes used for the genesis hash, but resolves duplicate keys by
 // first occurrence when populating configuration fields. Before the fix,
 // canonicalizeByronGenesisJSON round-tripped through encoding/json's
-// map[string]any, which discards every duplicate but the last for both the
-// hash and the decoded struct.
+// map[string]any, which discards every duplicate but the last for both the hash
+// and the decoded struct.
 func TestLoadGenesisConfigsByronDuplicateKeys(t *testing.T) {
 	t.Parallel()
 
@@ -138,11 +138,11 @@ func TestLoadGenesisConfigsByronDuplicateKeys(t *testing.T) {
 }
 
 // TestCanonicalizeByronGenesisJSONRejectsNonReferenceEscapes covers
-// dingo#4425. The Byron reference's canonical-JSON grammar accepts only the
-// \" and \\ string escapes; encoding/json (and general JSON) also accept
-// \uXXXX, \/, \n, \r, \t, \b and \f, and previously canonicalizeByronGenesisJSON
-// silently normalized those before hashing, so it could accept and hash a
-// document the reference would refuse to parse at all.
+// the reference grammar. The Byron reference's canonical-JSON grammar accepts
+// only the \" and \\ string escapes; encoding/json (and general JSON) also
+// accept \uXXXX, \/, \n, \r, \t, \b and \f, and previously
+// canonicalizeByronGenesisJSON silently normalized those before hashing, so it
+// could accept and hash a document the reference would refuse to parse at all.
 func TestCanonicalizeByronGenesisJSONRejectsNonReferenceEscapes(t *testing.T) {
 	t.Parallel()
 
@@ -233,7 +233,7 @@ func TestCanonicalizeByronGenesisJSONRejectsNonReferenceEscapes(t *testing.T) {
 }
 
 // TestCanonicalizeByronGenesisJSONAcceptsReferenceSupportedEscapes covers the
-// positive half of dingo#4425's acceptance criteria: \" and \\ are the two
+// positive half of the escape rule: \" and \\ are the two
 // escapes the Byron reference does support, and must keep working -- both
 // for parsing (the document is still accepted) and for the value itself
 // (the escaped character survives into the canonical hash bytes correctly
@@ -301,13 +301,13 @@ func TestCanonicalizeByronGenesisJSONKeyOrderFlexibility(t *testing.T) {
 	)
 }
 
-// TestLoadGenesisConfigsRejectsNegativeByronSlotDuration covers dingo#4427:
-// gouroboros's Byron genesis SlotDuration field is a signed int decoded from
-// a JSON string, so a genesis can carry slotDuration "-1". Before the fix,
-// nothing rejected that at genesis load time, and it reached a bare
-// uint(...) conversion in the Byron era-shape calculation
-// (ledger/eras/byron.go), wrapping to a very large unsigned duration instead
-// of failing where the bad value was introduced.
+// TestLoadGenesisConfigsRejectsNegativeByronSlotDuration covers negative
+// unsigned parameters: gouroboros's Byron genesis SlotDuration field is a
+// signed int decoded from a JSON string, so a genesis can carry slotDuration
+// "-1". Before the fix, nothing rejected that at genesis load time, and it
+// reached a bare uint(...) conversion in the Byron era-shape calculation
+// (ledger/eras/byron.go), wrapping to a very large unsigned duration instead of
+// failing where the bad value was introduced.
 func TestLoadGenesisConfigsRejectsNegativeByronSlotDuration(t *testing.T) {
 	t.Parallel()
 

@@ -71,7 +71,7 @@ func seedGovernanceVoteProposal(t *testing.T, store *Store) uint {
 	return proposal.ID
 }
 
-// TestGovernanceVoteRollbackRestoresReplacedVote covers dingo#4463: replacing
+// TestGovernanceVoteRollbackRestoresReplacedVote covers that replacing
 // a vote and then rolling back to a slot between the two casts must restore
 // the vote that was actually current at that slot, not delete it outright.
 func TestGovernanceVoteRollbackRestoresReplacedVote(t *testing.T) {

@@ -1126,9 +1126,9 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 		Reconnecting: true,
 	}
 	// The short-lived backoff escalates only while the hot pool is healthy; the
-	// issue #2765 cap engages when hot peers <= criticalHotPeerThreshold. Add
-	// hot fillers so this test exercises the escalation path rather than the
-	// critically-low cap (which has its own test below).
+	// critical-hot-peer cap engages when hot peers <= criticalHotPeerThreshold.
+	// Add hot fillers so this test exercises the escalation path rather than
+	// the critically-low cap (which has its own test below).
 	pg.mu.Lock()
 	pg.peers = []*Peer{
 		peer,
@@ -1182,12 +1182,12 @@ func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsume
 	}
 }
 
-// TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff verifies the
-// issue #2765 fix: when the hot pool is at or below criticalHotPeerThreshold,
-// the short-lived reconnect backoff is capped at emergencyReconnectDelay rather
-// than escalating toward maxReconnectDelay, so the node keeps reconnecting to
-// its known peers instead of collapsing to a single stalled upstream on a
-// network of few, flaky relays.
+// TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff verifies that
+// when the hot pool is at or below criticalHotPeerThreshold, the short-lived
+// reconnect backoff is capped at emergencyReconnectDelay rather than escalating
+// toward maxReconnectDelay, so the node keeps reconnecting to its known peers
+// instead of collapsing to a single stalled upstream on a network of few, flaky
+// relays.
 func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 	t *testing.T,
 ) {
@@ -1253,7 +1253,7 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 }
 
 // The peergov logger already carries component=peergov, so a call site that
-// passes the attribute again emits it twice in every record. See issue #3262.
+// passes the attribute again emits it twice in every record.
 func TestHandleConnectionClosedEvent_CriticalHotPeerLogHasSingleComponent(
 	t *testing.T,
 ) {

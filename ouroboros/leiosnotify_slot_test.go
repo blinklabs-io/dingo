@@ -33,7 +33,7 @@ import (
 // leiosEndorserBlocks and leiosFetchInProgress rely on: an entry (or an
 // in-flight claim) for one occurrence of a hash must not collide with -- and
 // so must not suppress or mask -- a legitimate, independent occurrence of the
-// same content-addressed hash at a different slot (issue #3513).
+// same content-addressed hash at a different slot.
 func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
 	t.Parallel()
 
@@ -47,7 +47,7 @@ func TestLeiosBlockKeyDistinguishesSlots(t *testing.T) {
 }
 
 // TestLeiosNotifyBlockOfferFetchesSameHashAtDifferentSlot is the offer-first
-// regression from wolf31o2's review: MsgBlockOffer's cache-hit skip used to
+// regression: MsgBlockOffer's cache-hit skip used to
 // key solely on hash, so a hash already cached at one slot silently swallowed
 // a genuine offer of the same content-addressed hash recurring at a different
 // slot -- the manifest was never fetched (or reconciled against an

@@ -5897,12 +5897,12 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
 }
 
-// TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
-// P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
-// processed while reachedTip is still false (it is stored true only after that
-// batch commits), so the per-block reachesTip signal must enable the guard on
-// its own. Without it that transition batch could still recover an unapplied
-// producer from the blob store.
+// TestStrictConsumedInputsEnabled pins the strict-consumed-inputs guard
+// condition, including the P1 transition-batch case: the first batch whose
+// blocks cross the tip cutoff is processed while reachedTip is still false (it
+// is stored true only after that batch commits), so the per-block reachesTip
+// signal must enable the guard on its own. Without it that transition batch
+// could still recover an unapplied producer from the blob store.
 func TestStrictConsumedInputsEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -6463,7 +6463,7 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 //
 // (0, true) is now doubly worth pinning. It used to be unreachable at the
 // staleness gate as well, because the sync gate refused every slot on
-// upstreamActive && upstreamTip == 0; #4013 replaced that blanket refusal with
+// upstreamActive && upstreamTip == 0; that blanket refusal was replaced with
 // a bound on the local tip's lag, so a node at tip passes it and the staleness
 // gate does see this pair. What keeps the bound quiet there is its own
 // upstreamTarget > newestKnown term -- see
@@ -6564,7 +6564,8 @@ func newActiveSlotCoeffLedgerState(
 // nearest binary64 value to 0.05 is strictly GREATER than 1/20, so a threshold
 // derived from it is strictly larger than the reference node's — a node using it
 // can only over-claim leader slots, never miss any. That is the one-sided
-// signature reported in dingo #2798, so the direction is pinned here even though
+// signature of the phantom leader slots seen in the field, so the direction
+// is pinned here even though
 // the magnitude (~5.6e-17 relative) is far too small to account for the three
 // phantom slots per epoch reported there.
 func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {
@@ -7040,8 +7041,8 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 	}
 }
 
-// TestCleanupConsumedUtxos_TimerStopsOnClose covers the first half of issue
-// #3439: the cleanup timer callback re-arms itself via
+// TestCleanupConsumedUtxos_TimerStopsOnClose covers a
+// shutdown leak: the cleanup timer callback re-arms itself via
 // scheduleCleanupConsumedUtxos, so a Close that does not stop it leaves a
 // self-perpetuating timer running against a database its owner closes
 // immediately after Close returns (LedgerState does not own the database --
@@ -7311,7 +7312,7 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 // actually prunes must durably record the floor it used, so a later pin
 // check can reject against it even if the tip subsequently moves in a way
 // that would otherwise make a freshly-computed floor look more lenient
-// (blinklabs-io/dingo#382 review -- see persistConsumedUtxoPruneFloor's doc
+// ( review -- see persistConsumedUtxoPruneFloor's doc
 // comment for the rollback and era-transition cases this closes).
 func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	t.Parallel()
@@ -7510,8 +7511,8 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	)
 }
 
-// TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
-// issue #2350: in API storage mode the periodic cleanup must leave
+// TestCleanupConsumedUtxos_APIModeRetains covers API
+// storage mode: the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
 // spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
@@ -8437,7 +8438,7 @@ func TestEmptyGenesisCommitteeReferenceResignation(t *testing.T) {
 }
 
 // hardForkRatifyFixture reproduces the exact Preview Plomin hard-fork
-// incident (dingo#4441) at a real epoch-rollover level: a HardForkInitiation
+// incident at a real epoch-rollover level: a HardForkInitiation
 // proposal, 49 SPO votes' worth of yes/no stake collapsed into two pools
 // carrying the real observed mark[740]/mark[741]/mark[742] ratios
 // (0.4779/0.4757/0.6283), and a single seated CC member voting yes with a
@@ -8483,7 +8484,7 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	pparams := donationTestConwayPParams(9)
 	pparams.MinCommitteeSize = 1
 
-	// mark[740]/mark[741]/mark[742], the exact ratios dingo#4441 measured on
+	// mark[740]/mark[741]/mark[742], the exact ratios measured on
 	// Preview. Yes stake is hfrYesPool's explicit Yes vote; the remainder is
 	// hfrSilentPool, which casts no vote at all -- HardForkInitiation always
 	// keeps a silent pool's stake in the active denominator as implicit No
@@ -8751,7 +8752,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		"epoch nonce must no longer be the NeutralNonce-collapsed candidate",
 	)
 	// The one-epoch-shifted assembly (candidate ⭒ epoch 5's OWN lab) must NOT
-	// be produced — that is the #2734 divergence.
+	// be produced — that is the divergence.
 	shifted, err := lcommon.CalculateEpochNonce(
 		candidate,
 		boundaryPrevHash,
@@ -9533,7 +9534,7 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 // or ahead of the ledger tip is unapplied forward work -- possibly a fork that
 // does not descend from the ledger tip at all -- and must NOT be offered as an
 // intersect point, which is the invariant the primary-chain ancestor check
-// (#2309) exists to protect. Only a chain tip strictly below the ledger tip,
+// exists to protect. Only a chain tip strictly below the ledger tip,
 // the signature of an in-flight rewind, qualifies.
 func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 	t *testing.T,
@@ -9956,7 +9957,7 @@ func newPipelineLoopLedger(t *testing.T) *LedgerState {
 }
 
 // TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure covers the terminal
-// half of issue #3261. Recovery raises errHaltLedgerPipeline once it has
+// recovery half. Recovery raises errHaltLedgerPipeline once it has
 // established that no local replay can change a block's verdict; the restart
 // loop must then stop rather than restart into the same block forever, and must
 // leave a terminal signal behind for an operator.
@@ -10307,7 +10308,7 @@ func newMultiEraForecastCfg(
 
 // TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary is
 // the normal-boundary counterpart of the era-fork forecast test above, and
-// the regression guard for issue #3061. Preview launches federated (Shelley
+// the regression guard: Preview launches federated (Shelley
 // genesis decentralisationParam = 1) and drops decentralization below 1 at
 // the epoch 1->2 boundary through an ordinary on-chain protocol-parameter
 // update, not an era hard fork. Before the fix, ProtocolParamsForSlot
@@ -10615,7 +10616,7 @@ func (s *scriptedGapLedgerReadIterator) Next(
 }
 
 // TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay is a regression
-// test for dingo#4464's confirmed premature-flush defect: the gather loop
+// test for confirmed premature-flush defect: the gather loop
 // used to flush a batch the moment a non-blocking iter.Next(false) returned
 // chain.ErrIteratorChainTip, even with only one block gathered and 49 more
 // blocks about to arrive. On the harness that produced the issue, this
@@ -10683,7 +10684,7 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 }
 
 // TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly confirms the
-// coalescing wait added for dingo#4464 does not regress live tip-following
+// coalescing wait added for does not regress live tip-following
 // latency: once isNearTip is true, a solitary new block must still commit
 // immediately rather than wait for a batch that will never fill.
 //
@@ -10783,7 +10784,7 @@ func tryLockGatherMutex(ls *LedgerState) bool {
 }
 
 // TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait pins the
-// safety property the dingo#4464 coalescing branch rests on: unlike the
+// safety property the coalescing branch rests on unlike the
 // genuinely-blocking wait for a still-empty batch, the coalescing wait keeps
 // blockPipelineGatherMutex's read lock held, because rawBatch already holds
 // real gathered blocks a concurrent rollback must not race ahead of.
@@ -11347,7 +11348,7 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
 // snapshot makes the next target window+1 below the chain's live tip, and
 // Chain.Rollback refuses it as exceeding K. The whole rewind then fails, the
 // pipeline restarts, and recovery recomputes the same doomed schedule against
-// a tip that has grown further -- issue #3889, where that loop ran for nine
+// a tip that has grown further --, where that loop ran for nine
 // hours and 1150 restarts without the chain ever being truncated.
 //
 // Each step must therefore be derived from the chain's live tip, so it is a
@@ -12064,7 +12065,7 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	return live
 }
 
-// TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers issue #3678.
+// TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers.
 //
 // A rollback target that shares the applied tip's slot but carries a different
 // hash used to fall through to database.TruncateAfterSlot's slot-only UTxO
@@ -12124,7 +12125,7 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 }
 
 // TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly covers the other
-// half of issue #3678's acceptance criteria: when the contested slot cannot be
+// half of acceptance criteria: when the contested slot cannot be
 // truncated because no applied ancestor below it can be found, the rollback
 // must fail with a persistent diagnostic instead of reporting a repair that
 // left the UTxO set diverged.
@@ -12150,7 +12151,7 @@ func TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly(t *testing.T) {
 }
 
 // TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault covers the
-// actual code path this session found responsible for blinklabs-io/dingo#3825:
+// actual code path the regression test exercises:
 // HardForkBabbage fabricates a PlutusV2 cost model whenever the previous
 // era's params don't have one -- real for any Alonzo genesis, since the
 // AlonzoGenesisCostModels format predates PlutusV2 entirely and never has a
@@ -12206,7 +12207,7 @@ func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
 }
 
 // TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): withoutSyntheticV2CostModel
+// reporting coverage: withoutSyntheticV2CostModel
 // originally had a single call site (queries.go's LocalStateQuery handler),
 // while every other interface reporting current parameters --
 // api/blockfrost, api/utxorpc, api/mesh -- read GetCurrentPParams()
@@ -12267,7 +12268,7 @@ func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
 }
 
 // TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
-// blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
+// PR review: LedgerState.syntheticV2CostModel must
 // survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
 // not silently reconstruct as false (the zero value) regardless of the
 // chain's real history.
@@ -12297,7 +12298,7 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 }
 
 // TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): a database that predates
+// pre-marker databases: a database that predates
 // this marker (or one that was reset by
 // database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not
 // silently behave as "not synthetic" -- it must compare the current PlutusV2
@@ -12402,7 +12403,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 }
 
 // TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): on a database that
+// covers pre-marker databases: on a database that
 // predates these markers entirely, a real PlutusV2 cost model already in
 // force (differing from the known synthetic default) can still pick up a
 // clearedEpoch marker from the first update tracked AFTER these markers
@@ -12701,7 +12702,7 @@ INSERT INTO auth_committee_hot (
 	}, nil))
 	poolCred := repeatByte(28, 0xDD)
 	// governance.predictedBoundaryStakeEpochFor(currentEpoch) resolves to
-	// currentEpoch itself (dingo#4441): the mid-epoch check tallies the SPO
+	// currentEpoch itself: the mid-epoch check tallies the SPO
 	// vote against mark[currentEpoch], the last mark durably written at the
 	// boundary that opened the currently active epoch. The boundary it
 	// predicts will instead tally mark[currentEpoch+1], which SNAP does not
@@ -13107,7 +13108,7 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
-// inLiveSet mirrors the probe used by the issue #3678 rollback tests: it asks
+// inLiveSet mirrors the probe used by the rollback tests: it asks
 // the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
 // exercises the deleted_slot filter that decides Conway bad-inputs and, through
 // it, the consumed term of value conservation. A row seeded straight into
@@ -13196,7 +13197,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 	}
 }
 
-// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers issue #3766.
+// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers.
 //
 // cleanupConsumedUtxos hard-deletes consumed UTxO rows whose deleted_slot is at
 // or below tip-stabilityWindow. database.TruncateAfterSlot restores consumed
@@ -13365,7 +13366,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 }
 
 // TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
-// hazard between the same-slot competitor redirect (issue #3678) and the prune
+// hazard between the same-slot competitor redirect and the prune
 // floor. rollbackChainAndStateDeferred truncates the primary chain and only then
 // synchronizes the ledger. A target sitting exactly on the floor whose hash
 // differs from the applied tip resolves to an applied ancestor strictly below

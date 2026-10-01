@@ -42,9 +42,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestAccountLifecycleMismatchesReportsZeroReward proves dingo #3099's
+// TestAccountLifecycleMismatchesReportsZeroReward proves
 // zero-reward-confirmed reporting: an address Koios answered for with no
-// reward rows is reported via CategoryAcctZeroReward — a dimension #3097's
+// reward rows is reported via CategoryAcctZeroReward — a dimension
 // merged CompareAccountEpoch structurally cannot see (it only ever compares
 // keys present in at least one side's row map). Reported as one aggregate
 // row (count + a capped sample), not one row per address — see
@@ -492,7 +492,7 @@ func TestAccountLifecycleMismatchesPropagatesCacheErrorAsDBError(t *testing.T) {
 }
 
 // TestDetermineStatusAccountLifecycleCategoriesAreInformational proves the
-// three dingo #3099 categories never affect Status: alone they must PASS,
+// three categories never affect Status: alone they must PASS,
 // and alongside a genuine FAIL-triggering mismatch they must not mask or
 // alter that FAIL.
 func TestDetermineStatusAccountLifecycleCategoriesAreInformational(
@@ -558,7 +558,7 @@ func newUniverseTestClient(srv *httptest.Server) *KoiosClient {
 // TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs is the point of
 // the cache. The crawl is 304 sequential /account_list requests on Preview, and
 // paying it once per epoch is why the in-process observer could not keep pace
-// with a syncing node (dingo #3796). A second epoch whose end time the cached
+// with a syncing node. A second epoch whose end time the cached
 // crawl already covers must not touch Koios again.
 func TestResolveKoiosAccountUniverseCachedReusesCrawlAcrossEpochs(
 	t *testing.T,
@@ -2715,7 +2715,7 @@ func TestKoiosTxInfoItem_ConsumedProduced(t *testing.T) {
 	})
 }
 
-// TestComparePoolEpochMemberRewardsBeforeApplication is the dingo #3852
+// TestComparePoolEpochMemberRewardsBeforeApplication is the
 // regression, built from the divergence a Preview replay reported at epoch 96.
 //
 // Dingo computed 4006269 in member rewards for the pool and Koios reported
@@ -2793,7 +2793,7 @@ func TestComparePoolEpochMemberRewardsBeforeApplication(t *testing.T) {
 	})
 }
 
-// TestComparePoolEpochMissingRewardsBeforeApplication is the dingo #3857
+// TestComparePoolEpochMissingRewardsBeforeApplication is the
 // regression.
 //
 // A reward_pool_output row for a stake epoch is not written until well after
@@ -2864,7 +2864,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 }
 
 // TestCompareAccountEpochPendingRewardsAreALag is the account-granularity half
-// of dingo #3857.
+// failure mode.
 //
 // When Dingo has not computed an epoch's rewards yet, every account Koios
 // reports a reward for is absent on the Dingo side. That is timing, not
@@ -2873,7 +2873,7 @@ func TestComparePoolEpochMissingRewardsBeforeApplication(t *testing.T) {
 // exactly the epochs with no reward row.
 //
 // The Dingo-only direction is the same statement read the other way (dingo
-// #4130): before the boundary a reward computed for a credential that
+// ): before the boundary a reward computed for a credential that
 // deregisters in the meantime is still marked spendable, so Dingo holds a row
 // Koios will never publish. That is timing too, and the branch claimed to be
 // symmetric with the Koios-only one while omitting the guard.
@@ -3340,7 +3340,7 @@ func TestCountSignificantCountsErrors(t *testing.T) {
 }
 
 // TestReferenceLagOnly pins the one non-pass shape strict mode does not treat
-// as fatal (dingo #4645): at least one significant mismatch, all of them
+// as fatal: at least one significant mismatch, all of them
 // reference_lag. The other ERROR-severity categories must not qualify, or a
 // row Dingo never wrote would stop failing a strict node once the grace
 // window closes.
@@ -3546,7 +3546,7 @@ func (d *testDB) Create(value any) testResult {
 	case *models.RewardSnapshot:
 		query = `INSERT INTO reward_snapshot (epoch,snapshot_type,total_active_stake,total_pool_count,total_delegators,captured_slot,boundary_slot,epoch_nonce,protocol_version,authoritative,calculation_version,excluded_active_stake) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
 		// ExcludedActiveStake is *types.Uint64: nil means "unknown" (a
-		// snapshot captured before dingo #4025 added the tracking), and its
+		// snapshot captured before added the tracking), and its
 		// Value() has a value receiver, so passing a nil pointer straight
 		// through would panic dereferencing it. Convert nil to a real SQL
 		// NULL instead of a driver.Valuer that can't be called.
@@ -3620,7 +3620,7 @@ func testSchema(includePools bool) []string {
 		`CREATE UNIQUE INDEX idx_epoch_epoch_id ON epoch(epoch_id)`,
 		`CREATE TABLE pparams (cbor BLOB, id INTEGER PRIMARY KEY AUTOINCREMENT, added_slot INTEGER, epoch INTEGER, era_id INTEGER)`,
 		// sync_state backs DingoDB.GetEarliestAvailableEpoch's read of the
-		// mithril_ledger_slot boundary (dingo #4172) -- created
+		// mithril_ledger_slot boundary -- created
 		// unconditionally like epoch/pparams above, since a check run reads
 		// it regardless of whether the test seeds a boundary row.
 		`CREATE TABLE sync_state (sync_key TEXT PRIMARY KEY, value TEXT NOT NULL)`,

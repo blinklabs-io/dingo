@@ -194,7 +194,7 @@ func callbackErr(format string, args ...any) error {
 // (isRetryableDingoConnErr) is not a hard failure: the whole pair is retried
 // against a freshly redialed connection, up to protocolParamsAndStakeRetries
 // times, the same persistent-connection pattern incrementalSession uses
-// (dingo#4183: hold one connection per attempt, and recover from its death by
+// (hold one connection per attempt, and recover from its death by
 // reconnecting).
 func runProtocolParamsAndStake(
 	ctx context.Context,
@@ -583,7 +583,7 @@ func RunFromGenesis(
 		// fresh session after a reconnect resumes chainsync from here
 		// instead of Origin, so hours of already-verified epochs are never
 		// replayed. Starts at startPoint instead of Origin when resumeFrom
-		// is set (dingo#4152 follow-up: a killed node-parity process has no
+		// is set (a killed node-parity process has no
 		// on-disk checkpoint, so a caller that already trusts a prior run's
 		// epochs up to some point passes it back in here to skip re-deriving
 		// them, the same way a mid-run reconnect already skips re-deriving
@@ -867,7 +867,7 @@ func RunFromGenesis(
 						// now, at this epoch boundary, instead of leaving
 						// UTxO comparison permanently disabled for the rest
 						// of the run once any single captureGenesisBaseline
-						// call fails: confirmed live (dingo#1900) that a
+						// call fails: confirmed live that a
 						// one-off transient dial error ("can't assign
 						// requested address") during a re-baseline attempt
 						// otherwise wedged utxoRefs at nil for the rest of a

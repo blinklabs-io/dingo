@@ -3123,7 +3123,7 @@ func parseGovActionState(
 	// parent. Without this, validateParentChain rejects every
 	// chained child of a pre-snapshot enactment as if the parent
 	// were missing, and chained proposals silently expire instead of
-	// ratifying. See issue #2195.
+	// ratifying.
 	switch prop.ActionType {
 	case 0, 1, 3, 4, 5:
 		if len(govAction) < 2 {

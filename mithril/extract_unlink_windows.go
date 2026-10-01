@@ -38,7 +38,7 @@ import (
 // not resolved from a path — and the deletion is applied to that open handle
 // (openRelativeForDeletion, setDeleteDisposition; see
 // extract_handlerelative_windows.go), which is what closes the residual
-// window issue #3228 tracked: nothing here resolves any component's name a
+// window: nothing here resolves any component's name a
 // second time, so a reparse point substituted at the leaf after the walk
 // finishes is refused at the open rather than followed.
 func removeExtractedFile(root *os.Root, name, fullPath string) error {
