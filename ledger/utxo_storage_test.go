@@ -23,15 +23,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
-
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/immutable"
-	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 // TestUtxoStorageAndRetrieval tests that UTxOs from regular blocks are stored

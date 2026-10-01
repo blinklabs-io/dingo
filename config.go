@@ -155,7 +155,11 @@ type TokenRegistryConfig struct {
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
+	MaxDecompressedBytes  int64
 	MaxEntryBytes         int64
+	MaxArchiveEntries     int
+	MaxAcceptedEntries    int
+	MaxBatchBytes         int64
 	Enabled               bool
 	StoreLogos            bool
 	AllowPrivateAddresses bool
@@ -252,6 +256,7 @@ type Config struct {
 	inboundPruneAfter, inboundCooldown                                                  time.Duration
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
+	maxTrustedLocalNtCConns                                                             int
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -825,7 +830,11 @@ func (c *Config) syncCompatFields() {
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxDecompressedBytes:  c.cfg.TokenRegistry.MaxDecompressedBytes,
 		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		MaxArchiveEntries:     c.cfg.TokenRegistry.MaxArchiveEntries,
+		MaxAcceptedEntries:    c.cfg.TokenRegistry.MaxAcceptedEntries,
+		MaxBatchBytes:         c.cfg.TokenRegistry.MaxBatchBytes,
 		Enabled:               c.cfg.TokenRegistry.Enabled,
 		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
 		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
@@ -868,6 +877,7 @@ func (c *Config) syncCompatFields() {
 	c.inboundHotScoreThreshold, c.inboundPruneAfter, c.inboundDuplexOnlyForHot, c.inboundCooldown = c.cfg.InboundHotScoreThreshold, c.cfg.InboundPruneAfter, c.cfg.InboundDuplexOnlyForHot, c.cfg.InboundCooldown
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
+	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
@@ -1458,6 +1468,25 @@ func WithMaxNtCConnectionsPerIP(n int) ConfigOptionFunc {
 	}
 }
 
+// WithMaxTrustedLocalNtCConns specifies the maximum number of node-to-client
+// connections accepted by listeners bound to local-only transports.
+// Non-positive values are ignored. Default: 100.
+func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.cfg.MaxTrustedLocalNtCConns = n
+		}
+	}
+}
+
+// WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
+// reward live-stake rows against the full UTxO table.
+func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.SkipRewardLiveStakeBackfillCheck = skip
+	}
+}
+
 // WithGenesisBootstrap enables Genesis-mode chain selection during from-origin
 // bootstrap. Genesis mode automatically exits once the local tip is within the
 // configured Genesis window of the best known peer tip.
@@ -1817,7 +1846,11 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
 			MaxBytes:              cfg.MaxBytes,
+			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
+			MaxArchiveEntries:     cfg.MaxArchiveEntries,
+			MaxAcceptedEntries:    cfg.MaxAcceptedEntries,
+			MaxBatchBytes:         cfg.MaxBatchBytes,
 			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 		}

@@ -927,6 +927,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
 	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
 	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
 	// that row is not durably written until the hook above runs, later in
@@ -938,6 +939,19 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			evt event.EpochTransitionEvent,
 		) ([]*models.PoolStakeSnapshot, error) {
 			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
+		},
+	)
+	// A Conway boundary leaves its mark snapshot to the ledger's post-commit
+	// job, which rebuilds the SNAP point from a read transaction pinned at the
+	// boundary's commit.
+	n.ledgerState.SetDeferredEpochBoundarySnapshotHooks(
+		n.snapshotMgr.DeferEpochBoundaryCapture,
+		n.snapshotMgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (ledger.DeferredBoundarySnapshot, error) {
+			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
 
@@ -1166,12 +1180,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:           n.config.promRegistry,
-			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
-			MaxInboundConns:        n.config.maxInboundConns,
-			MaxNtCConns:            n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
+			PromRegistry:            n.config.promRegistry,
+			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
+			MaxInboundConns:         n.config.maxInboundConns,
+			MaxNtCConns:             n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
+			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -2349,7 +2364,11 @@ func (n *Node) newTokenRegistrySync() (
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,
+			MaxDecompressedBytes:  n.config.tokenRegistry.MaxDecompressedBytes,
 			MaxEntryBytes:         n.config.tokenRegistry.MaxEntryBytes,
+			MaxArchiveEntries:     n.config.tokenRegistry.MaxArchiveEntries,
+			MaxAcceptedEntries:    n.config.tokenRegistry.MaxAcceptedEntries,
+			MaxBatchBytes:         n.config.tokenRegistry.MaxBatchBytes,
 			StoreLogos:            n.config.tokenRegistry.StoreLogos,
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
@@ -2399,4 +2418,25 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
 	return chainsyncCfg
+}
+
+// wireDeferredRewardStakeInputs lets the authoritative boundary capture leave
+// the snapshot's per-credential reward inputs to the ledger's background
+// writer instead of writing them inside the boundary transaction.
+func wireDeferredRewardStakeInputs(
+	ls *ledger.LedgerState,
+	mgr *snapshot.Manager,
+) {
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(
+			txn *database.Txn,
+		) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
+			if !ok {
+				return 0, 0, nil, false
+			}
+			return deferred.Epoch, deferred.BoundarySlot, deferred.Inputs, true
+		},
+	)
+	mgr.SetDeferRewardStakeInputs(true)
 }

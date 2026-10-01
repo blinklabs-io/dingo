@@ -94,6 +94,19 @@ Dashboards use your default Prometheus datasource automatically — see [Datasou
 
 The alert rules file is ready to use as-is — no editing required.
 
+To validate it after an edit:
+
+```bash
+promtool check rules docs/dashboards/alerts.yaml
+cd docs/dashboards && promtool test rules alerts_test.yaml
+```
+
+`check rules` only proves the file parses and the PromQL is well-formed.
+`test rules` replays synthetic series against the rules and asserts what
+fires, which is the only way to catch a rule that is valid but wrong — a
+counter pre-materialized at zero makes `rate() == 0` true from process
+start, so a liveness rule can alert against a perfectly healthy run.
+
 Copy the file to your Prometheus rules directory:
 
 ```bash
@@ -168,6 +181,7 @@ docs/dashboards/
   provisioning.yaml        Grafana provisioning config
   prometheus.yaml          Prometheus scrape config snippet
   alerts.yaml              Prometheus alert rules
+  alerts_test.yaml         promtool test cases for alerts.yaml
   README.md                This file
 ```
 

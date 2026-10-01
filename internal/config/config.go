@@ -455,8 +455,16 @@ type TokenRegistryConfig struct {
 	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
+	// MaxDecompressedBytes bounds all expanded tar content.
+	MaxDecompressedBytes int64 `yaml:"maxDecompressedBytes"  envconfig:"DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES"`
 	// MaxEntryBytes bounds a single registry mapping document.
 	MaxEntryBytes int64 `yaml:"maxEntryBytes"         envconfig:"DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES"`
+	// MaxArchiveEntries bounds all tar headers, including non-mappings.
+	MaxArchiveEntries int `yaml:"maxArchiveEntries"     envconfig:"DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES"`
+	// MaxAcceptedEntries bounds parsed rows and database upsert work.
+	MaxAcceptedEntries int `yaml:"maxAcceptedEntries"    envconfig:"DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES"`
+	// MaxBatchBytes bounds retained mapping payload per database batch.
+	MaxBatchBytes int64 `yaml:"maxBatchBytes"          envconfig:"DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES"`
 	// StoreLogos persists base64 logo payloads, which are roughly 90% of
 	// registry bytes. Off by default; text properties are what wallets need.
 	StoreLogos bool `yaml:"storeLogos"            envconfig:"DINGO_TOKEN_REGISTRY_STORE_LOGOS"`
@@ -731,6 +739,7 @@ type Config struct {
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
 	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
 	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
+	MaxTrustedLocalNtCConns  int           `yaml:"maxTrustedLocalNtCConns"  envconfig:"DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`

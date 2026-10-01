@@ -19,6 +19,7 @@ import (
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // testPoolOpCertSequencesExistAtSlot checks the exact-slot probe the ledger

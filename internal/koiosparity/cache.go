@@ -374,7 +374,7 @@ type Cache struct {
 // what the driver's FULL default costs the many small cache writes.
 //
 // busy_timeout is the one difference. It stays at 5s because the concurrency
-// tests in cache_concurrency_test.go are built around that bound.
+// tests in cache_test.go are built around that bound.
 func cacheDSN(path, synchronous string) string {
 	return path + "?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(5000)" +
