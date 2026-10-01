@@ -1246,7 +1246,7 @@ type LedgerState struct {
 	// eviction and floor computation without contending the hot header-validation
 	// read path on the main lock (issue #3727). The guard must NOT hold this mutex
 	// across the pool-snapshot prune (nor deletePersistedDeferredMarkers across
-	// DeleteSyncState): those open the single SQLite write connection, and block
+	// its delete): those can open the single SQLite write connection, and block
 	// apply holds that connection before taking this mutex via
 	// consumeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node (issue #3717). The eviction+floor read is
