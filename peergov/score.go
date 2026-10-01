@@ -23,17 +23,27 @@ import (
 // intended to be tuned via configuration in follow-up work.
 //
 // Weight distribution:
-// - BlockFetch latency: 35% - Primary signal for download performance
+// - BlockFetch latency: 30% - Primary signal for download performance
 // - BlockFetch success rate: 25% - Reliability of block fetches
 // - Connection stability: 10% - Connection durability
 // - Header arrival rate: 15% - ChainSync throughput
-// - Tip slot delta: 15% - How current the peer's chain is
+// - Tip slot delta: 10% - How current the peer's chain is
+// - Pool stake: 10% - Log-scaled delegated stake, a Sybil-resistance signal
 const (
-	defaultLatencyWeight    = 0.35
+	defaultLatencyWeight    = 0.30
 	defaultSuccessWeight    = 0.25
 	defaultStabilityWeight  = 0.10
 	defaultHeaderRateWeight = 0.15
-	defaultTipDeltaWeight   = 0.15
+	defaultTipDeltaWeight   = 0.10
+	defaultStakeWeight      = 0.10
+
+	// maxPoolStakeAda normalizes the stake score: a pool at this stake scores
+	// 1.0. It is far above any real pool, so the log curve stays in range.
+	maxPoolStakeAda = 1_000_000_000
+	// defaultStakeScore is the neutral score of a peer with unknown stake, so
+	// that a peer which did not come from the ledger is not penalized.
+	defaultStakeScore = 0.5
+	lovelacePerAda    = 1_000_000
 
 	// Minimal latency (ms) used to normalize inverse latency. Avoid div-by-zero.
 	minLatencyMs = 1.0
@@ -193,16 +203,19 @@ func (p *Peer) UpdatePeerScore() {
 		tipDeltaScore = 0.5 // conservative default
 	}
 
+	stakeScore := stakeScoreFor(p.StakeLovelace)
+
 	// Total weight for normalization
 	totalWeight := defaultLatencyWeight + defaultSuccessWeight + defaultStabilityWeight +
-		defaultHeaderRateWeight + defaultTipDeltaWeight
+		defaultHeaderRateWeight + defaultTipDeltaWeight + defaultStakeWeight
 
 	// Weighted aggregate (already in 0..1 range)
 	score := (latencyScore*defaultLatencyWeight +
 		success*defaultSuccessWeight +
 		stability*defaultStabilityWeight +
 		headerRateScore*defaultHeaderRateWeight +
-		tipDeltaScore*defaultTipDeltaWeight) / totalWeight
+		tipDeltaScore*defaultTipDeltaWeight +
+		stakeScore*defaultStakeWeight) / totalWeight
 
 	// Ensure within bounds
 	score = clamp01(score)
@@ -212,6 +225,17 @@ func (p *Peer) UpdatePeerScore() {
 		score = 0.0
 	}
 	p.PerformanceScore = score
+}
+
+// stakeScoreFor maps delegated stake in lovelace to a 0..1 score on a log
+// scale, so doubling a whale's stake moves the score far less than doubling a
+// small pool's. Zero stake means unknown and gets the neutral default.
+func stakeScoreFor(stakeLovelace uint64) float64 {
+	if stakeLovelace == 0 {
+		return defaultStakeScore
+	}
+	stakeAda := float64(stakeLovelace) / lovelacePerAda
+	return clamp01(math.Log10(1+stakeAda) / math.Log10(1+maxPoolStakeAda))
 }
 
 // decayScoreMetrics moves stale EMA values toward their neutral baselines.

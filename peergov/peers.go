@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,75 @@ var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 		ips[i] = addrs[i].IP
 	}
 	return ips, nil
+}
+
+// lookupSRV resolves the SRV records published directly at a hostname, as a
+// MultiHostName relay does. Like lookupIPAddr it honors the context and is a
+// package var so tests can inject a deterministic resolver.
+var lookupSRV = func(ctx context.Context, host string) ([]*net.SRV, error) {
+	// An empty service and protocol query the name itself, with no
+	// _service._proto prefix.
+	_, records, err := net.DefaultResolver.LookupSRV(ctx, "", "", host)
+	return records, err
+}
+
+// maxSRVTargets bounds how many SRV targets are resolved for one relay, so a
+// record set padded by its operator cannot multiply discovery-time lookups.
+const maxSRVTargets = 3
+
+// resolveMultiHost resolves a MultiHostName relay: SRV first, taking the
+// target and port from the first record whose target resolves, then A/AAAA
+// with the default port. When nothing resolves it returns the lowercased
+// hostname with the default port and resolved=false. lookup resolves a
+// target's address records; filter narrows them to the dialable families.
+// It must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveMultiHost(
+	ctx context.Context,
+	host string,
+	lookup func(context.Context, string) ([]net.IP, error),
+	filter bool,
+) (string, bool) {
+	pickIP := func(ips []net.IP) net.IP {
+		if filter {
+			hasV4, hasV6 := p.supportedDialFamilies()
+			ips = filterDialFamilies(ips, hasV4, hasV6)
+		}
+		return ips[0]
+	}
+	records, err := lookupSRV(ctx, host)
+	if err == nil {
+		for i, record := range records {
+			if i >= maxSRVTargets {
+				break
+			}
+			if record == nil || record.Port == 0 {
+				continue
+			}
+			target := strings.TrimSuffix(record.Target, ".")
+			if target == "" {
+				continue
+			}
+			ips, err := lookup(ctx, target)
+			if err != nil || len(ips) == 0 {
+				continue
+			}
+			return net.JoinHostPort(
+				pickIP(ips).String(),
+				strconv.FormatUint(uint64(record.Port), 10),
+			), true
+		}
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
+	return net.JoinHostPort(
+		pickIP(ips).String(),
+		defaultCardanoPort,
+	), true
 }
 
 // maxPeerListSize returns the hard cap for the total number of peers.
@@ -360,6 +430,31 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 		return net.JoinHostPort(ip.String(), port)
 	}
 
+	// Port 0 marks a MultiHostName relay, whose port lives in an SRV record.
+	if port == multiHostPort {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			dialDNSResolveTimeout,
+		)
+		defer cancel()
+		resolved, ok := p.resolveMultiHost(
+			ctx,
+			host,
+			func(_ context.Context, h string) ([]net.IP, error) {
+				return lookupIP(h)
+			},
+			false,
+		)
+		if !ok {
+			p.config.Logger.Warn(
+				"failed to resolve peer hostname",
+				"address", address,
+				"host", host,
+			)
+		}
+		return resolved
+	}
+
 	// It's a hostname - try to resolve it
 	ips, err := lookupIP(host)
 	if err != nil || len(ips) == 0 {
@@ -411,6 +506,12 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 	}
 
 	lowerHost := strings.ToLower(host)
+	// A MultiHostName relay carries port 0 until SRV resolution picks one;
+	// every fallback below must dial the default port, never port 0.
+	multiHost := port == multiHostPort
+	if multiHost {
+		port = defaultCardanoPort
+	}
 	// A hostname that just failed to resolve is not retried until its
 	// negative-cache entry expires. Discovery re-offers the whole relay set
 	// every round, so without this a dead hostname costs a lookup (and, for
@@ -422,6 +523,18 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
+	if multiHost {
+		resolved, ok := p.resolveMultiHost(
+			lookupCtx,
+			host,
+			lookupIPAddr,
+			true,
+		)
+		if !ok && ctx.Err() == nil {
+			p.recordNegativeDNS(lowerHost)
+		}
+		return resolved
+	}
 	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		// Debug, not Warn: a pool publishing a dead relay hostname is a fact

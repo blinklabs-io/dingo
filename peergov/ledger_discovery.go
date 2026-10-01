@@ -26,8 +26,9 @@ import (
 // LedgerPeerTarget. Emergency discovery may add one target-sized batch even
 // when the known ledger-peer target is already satisfied, because stale or
 // unusable peers must not block fresh relay candidates while the node is short
-// of connected upstreams. Candidates are shuffled uniformly so no single pool
-// dominates across refreshes.
+// of connected upstreams. Relays are drawn without replacement weighted by
+// their pool's delegated stake, so high-stake pools are favored while
+// zero-stake relays stay discoverable.
 //
 //nolint:unused // Kept as a context-free test helper for existing discovery tests.
 func (p *PeerGovernor) discoverLedgerPeers() {
@@ -393,12 +394,16 @@ func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
 //
 //nolint:unused // Kept as a context-free test helper for existing peer tests.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
-	return p.addLedgerPeerContext(context.Background(), address)
+	return p.addLedgerPeerContext(context.Background(), address, 0)
 }
 
+// addLedgerPeerContext adds a ledger peer for a relay whose pool has the given
+// delegated stake in lovelace, which the new peer carries as its StakeLovelace
+// scoring input. A peer that already exists keeps its own.
 func (p *PeerGovernor) addLedgerPeerContext(
 	ctx context.Context,
 	address string,
+	stake uint64,
 ) bool {
 	if err := ctx.Err(); err != nil {
 		return false
@@ -521,6 +526,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		Sharable:          true, // Ledger peers are public relays
 		EMAAlpha:          p.config.EMAAlpha,
 		FirstSeen:         time.Now(),
+		StakeLovelace:     stake,
 	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()

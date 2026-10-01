@@ -1283,6 +1283,7 @@ dingo/
 │   ├── quotas.go        # Per-source quotas
 │   ├── score.go         # Peer scoring
 │   ├── ledger.go        # Ledger-based peer discovery
+│   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
@@ -6007,6 +6008,19 @@ Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral
 ledger/database types, while `internal/node/ledgerpeers` converts that data to
 the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
+
+`ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
+batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
+stake at zero rather than failing discovery) and flags MultiHostName relays
+(hostname, no port). Discovery draws relay addresses without replacement
+weighted by that stake (`weightedSample` in `peergov/weighted_selection.go`,
+zero stake carrying a floor weight so such relays stay discoverable) and walks
+the draw until the ledger-peer deficit is filled. A MultiHostName relay is
+carried as `host:0`; resolution looks up its SRV record for target and port,
+falls back to A/AAAA on the default port, and never leaves port 0 as the
+dial target. A discovered peer keeps its pool's stake in `StakeLovelace`,
+which `UpdatePeerScore` folds in as a log-scaled sixth component (weight 0.10,
+neutral 0.5 when unknown).
 
 Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
 be triggered by enough connected ledger peers, or by the configured slot/progress

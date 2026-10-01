@@ -15,14 +15,19 @@
 package ledger
 
 import (
+	"bytes"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -565,4 +570,133 @@ func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
 
 	// Safe to call more than once.
 	require.NotPanics(t, adapter.Close)
+}
+
+// seedStakedPools registers two active pools: the first has a single-host
+// relay and a MultiHostName relay (hostname, no port) and 700 lovelace
+// delegated; the second has one relay and no delegation.
+func seedStakedPools(t *testing.T, db *database.Database) (poolA, poolB []byte) {
+	t.Helper()
+	poolA = bytes.Repeat([]byte{0xa1}, 28)
+	poolB = bytes.Repeat([]byte{0xb2}, 28)
+	vrfA := bytes.Repeat([]byte{0xa3}, 32)
+	vrfB := bytes.Repeat([]byte{0xb3}, 32)
+	reward := bytes.Repeat([]byte{0xc4}, 28)
+	ipA := net.ParseIP("44.0.0.1").To4()
+	ipB := net.ParseIP("44.0.0.2").To4()
+	for _, p := range []struct {
+		key, vrf []byte
+		relays   []models.PoolRegistrationRelay
+	}{
+		{poolA, vrfA, []models.PoolRegistrationRelay{
+			{Ipv4: &ipA, Port: 3001},
+			{Hostname: "multi.example.com"},
+		}},
+		{poolB, vrfB, []models.PoolRegistrationRelay{
+			{Ipv4: &ipB, Port: 3002},
+		}},
+	} {
+		require.NoError(t, db.ImportPool(
+			nil,
+			&models.Pool{
+				PoolKeyHash: p.key, VrfKeyHash: p.vrf, RewardAccount: reward,
+			},
+			&models.PoolRegistration{
+				PoolKeyHash: p.key, VrfKeyHash: p.vrf, RewardAccount: reward,
+				AddedSlot: 10, Relays: p.relays,
+			},
+		))
+	}
+	require.NoError(t, db.SetEpoch(
+		2, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 25, Hash: []byte("tip")},
+		BlockNumber: 1,
+	}, nil))
+	stakeKey := bytes.Repeat([]byte{0xd5}, 28)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey, Pool: poolA, Active: true,
+	}))
+	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		TxId:       bytes.Repeat([]byte{0xe6}, 32),
+		StakingKey: stakeKey, Amount: 700, AddedSlot: 15,
+	}))
+	return poolA, poolB
+}
+
+func relayByPort(t *testing.T, relays []PoolRelay, port uint) PoolRelay {
+	t.Helper()
+	for _, r := range relays {
+		if r.Port == port && r.Hostname == "" {
+			return r
+		}
+	}
+	t.Fatalf("no relay with port %d in %v", port, relays)
+	return PoolRelay{}
+}
+
+func TestPoolRelayProviderPopulatesStake(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+
+	relays, err := adapter.GetPoolRelays()
+	require.NoError(t, err)
+	require.Len(t, relays, 3)
+
+	require.Equal(t, uint64(700), relayByPort(t, relays, 3001).Stake)
+	require.Zero(t, relayByPort(t, relays, 3002).Stake)
+	for _, r := range relays {
+		if r.Hostname == "multi.example.com" {
+			// Both relays of the staked pool carry its stake.
+			require.Equal(t, uint64(700), r.Stake)
+			require.True(t, r.IsMultiHost)
+			require.Zero(t, r.Port)
+			continue
+		}
+		require.False(t, r.IsMultiHost)
+	}
+}
+
+func TestPoolRelayProviderStakeLookupFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+	adapter.stakeByPools = func([][]byte) (map[string]uint64, error) {
+		return nil, errors.New("stake store unavailable")
+	}
+
+	relays, err := adapter.GetPoolRelays()
+	require.NoError(t, err)
+	require.Len(t, relays, 3)
+	for _, r := range relays {
+		require.Zero(t, r.Stake)
+	}
+}
+
+func TestPoolRelayProviderStakeLookupGetsUniquePoolHashes(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	poolA, poolB := seedStakedPools(t, db)
+	adapter := newTestAdapter(t, db, nil, time.Minute)
+	var got [][]byte
+	adapter.stakeByPools = func(h [][]byte) (map[string]uint64, error) {
+		got = h
+		return nil, nil
+	}
+	_, err := adapter.GetPoolRelays()
+	require.NoError(t, err)
+	require.ElementsMatch(t, [][]byte{poolA, poolB}, got)
+}
+
+func TestCopyPoolRelaysCopiesStakeAndMultiHost(t *testing.T) {
+	t.Parallel()
+	original := []PoolRelay{
+		{Hostname: "multi.example.com", Stake: 99, IsMultiHost: true},
+	}
+	result := copyPoolRelays(original)
+	require.Equal(t, original, result)
 }

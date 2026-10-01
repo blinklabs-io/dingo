@@ -140,6 +140,11 @@ type Peer struct {
 	// GroupID identifies the topology group this peer belongs to (for valency tracking)
 	GroupID string
 
+	// StakeLovelace is the delegated stake, in lovelace, of the pool this
+	// peer was discovered from. Zero means unknown, as for any peer that did
+	// not come from the ledger.
+	StakeLovelace uint64
+
 	// Inbound admission metadata (phase 2). These fields are only
 	// populated on inbound arrivals, but they live on every Peer so that
 	// a configured topology peer that an inbound matched to can record

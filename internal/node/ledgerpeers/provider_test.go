@@ -119,3 +119,18 @@ func TestProviderReturnsRelayProviderError(t *testing.T) {
 	require.ErrorIs(t, err, expectedErr)
 	require.Nil(t, relays)
 }
+
+func TestProviderCarriesStakeAndMultiHost(t *testing.T) {
+	t.Parallel()
+	provider := NewProvider(&testRelayProvider{
+		relays: []ledger.PoolRelay{
+			{Hostname: "multi.example.com", Stake: 77, IsMultiHost: true},
+		},
+	})
+
+	relays, err := provider.GetPoolRelays()
+	require.NoError(t, err)
+	require.Len(t, relays, 1)
+	require.Equal(t, uint64(77), relays[0].Stake)
+	require.True(t, relays[0].IsMultiHost)
+}

@@ -16,7 +16,6 @@ package peergov
 
 import (
 	"context"
-	"math/rand/v2"
 	"net"
 
 	"github.com/blinklabs-io/dingo/topology"
@@ -95,22 +94,21 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 	relays []PoolRelay,
 	extraAdds int,
 ) int {
-	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
-	//nolint:gosec // relay spread, not security-sensitive
-	rand.Shuffle(len(candidates), func(i, j int) {
-		candidates[i], candidates[j] = candidates[j], candidates[i]
-	})
-
+	// Order every relay rather than only the deficit: an address can be
+	// denied, unroutable or already known, so the walk below must be able to
+	// continue past it until the deficit is filled.
 	added := 0
-	for _, addr := range candidates {
-		if err := ctx.Err(); err != nil {
-			break
-		}
-		if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
-			break
-		}
-		if p.addLedgerPeerContext(ctx, addr) {
-			added++
+	for _, relay := range weightedSample(relays, len(relays)) {
+		for _, addr := range relay.Addresses() {
+			if err := ctx.Err(); err != nil {
+				return added
+			}
+			if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
+				return added
+			}
+			if p.addLedgerPeerContext(ctx, addr, relay.Stake) {
+				added++
+			}
 		}
 	}
 	return added
