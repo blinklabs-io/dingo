@@ -19,7 +19,7 @@ package benchci
 // network throughput, and resource usage. Keep this in sync with the
 // Makefile bench-ci target's first `go test -bench` regex.
 var CuratedBenchmarks = []string{
-	// Block validation throughput (ledger/tests_61443820_test.go).
+	// Block validation throughput (ledger/state_test.go).
 	"BenchmarkBlockProcessingThroughput",
 	"BenchmarkBlockProcessingThroughputPredecoded",
 	"BenchmarkBlockBatchProcessingThroughput",
@@ -28,25 +28,25 @@ var CuratedBenchmarks = []string{
 	"BenchmarkTransactionValidation",
 
 	// Sync speed.
-	"BenchmarkChainSyncFromGenesis",             // ledger/tests_61443820_test.go
-	"BenchmarkRealBlockProcessing",              // ledger/tests_61443820_test.go
-	"BenchmarkEraTransitionPerformanceRealData", // ledger/tests_61443820_test.go
-	"BenchmarkTestLoad",                         // internal/integration/tests_7465a5ab_test.go
+	"BenchmarkChainSyncFromGenesis",             // ledger/benchmark_test.go
+	"BenchmarkRealBlockProcessing",              // ledger/benchmark_test.go
+	"BenchmarkEraTransitionPerformanceRealData", // ledger/benchmark_test.go
+	"BenchmarkTestLoad",                         // internal/integration/benchmark_test.go
 
 	// Network throughput.
-	"BenchmarkBlockfetchNearTipThroughput",             // ledger/tests_61443820_test.go
-	"BenchmarkBlockfetchNearTipThroughputPredecoded",   // ledger/tests_61443820_test.go
-	"BenchmarkBlockfetchNearTipFlushOnlyPredecoded",    // ledger/tests_61443820_test.go
-	"BenchmarkBlockfetchNearTipQueuedHeaderPredecoded", // ledger/tests_61443820_test.go
-	"BenchmarkBlockfetchVerifiedHeaderDispatch",        // ledger/tests_61443820_test.go
+	"BenchmarkBlockfetchNearTipThroughput",             // ledger/benchmark_test.go
+	"BenchmarkBlockfetchNearTipThroughputPredecoded",   // ledger/benchmark_test.go
+	"BenchmarkBlockfetchNearTipFlushOnlyPredecoded",    // ledger/benchmark_test.go
+	"BenchmarkBlockfetchNearTipQueuedHeaderPredecoded", // ledger/benchmark_test.go
+	"BenchmarkBlockfetchVerifiedHeaderDispatch",        // ledger/benchmark_test.go
 	"BenchmarkBlockfetchClientBlockMetrics",            // ouroboros/blockfetch_test.go
 	"BenchmarkUpdateConnectionMetrics",                 // connmanager/tests_test.go
 	"BenchmarkHasInboundPeerAddress",                   // connmanager/tests_test.go
 	"BenchmarkReconcile",                               // peergov/tests_test.go
-	"BenchmarkPublishSubscribers",                      // event/tests_13d10404_test.go
+	"BenchmarkPublishSubscribers",                      // event/backpressure_ext_test.go
 
 	// Resource usage.
-	"BenchmarkBlockMemoryUsage",             // ledger/tests_61443820_test.go
+	"BenchmarkBlockMemoryUsage",             // ledger/benchmark_test.go
 	"BenchmarkHotCacheGet",                  // database/cbor_cache_test.go
 	"BenchmarkHotCachePut",                  // database/cbor_cache_test.go
 	"BenchmarkHotCacheGetMiss",              // database/cbor_cache_test.go
@@ -56,8 +56,8 @@ var CuratedBenchmarks = []string{
 	"BenchmarkCachedBlockExtract",           // database/cbor_cache_test.go
 	"BenchmarkCborOffsetEncode",             // database/cbor_cache_test.go
 	"BenchmarkCborOffsetDecode",             // database/cbor_cache_test.go
-	"BenchmarkStorageModeIngest",            // ledger/tests_61443820_test.go
-	"BenchmarkStorageModeIngestSteadyState", // ledger/tests_61443820_test.go
+	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
+	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
 }
 
 // LockContentionBenchmarks lists the GOMAXPROCS lock-contention sweep
@@ -78,12 +78,12 @@ var LockContentionBenchmarks = []string{
 	"BenchmarkBlockLRUParallelReadOnly",      // database/block_lru_cache_test.go
 	"BenchmarkHotCacheParallelGet",           // database/cbor_cache_test.go
 	"BenchmarkTryReserveInboundSlotParallel", // connmanager/tests_test.go
-	"BenchmarkConcurrentQueries",             // ledger/tests_61443820_test.go
-	"BenchmarkTipSnapshotReadOnly",           // ledger/tests_61443820_test.go
-	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/tests_61443820_test.go
+	"BenchmarkConcurrentQueries",             // ledger/benchmark_test.go
+	"BenchmarkTipSnapshotReadOnly",           // ledger/benchmark_test.go
+	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/benchmark_test.go
 }
 
-// ledger/tests_61443820_test.go's RealData query benchmarks are deliberately
+// ledger/benchmark_test.go's RealData query benchmarks are deliberately
 // absent from both lists. Seeding writes fixture blocks to the block store,
 // but the accounts, pools, DReps, datums, protocol-parameter, nonce and
 // registration tables they query are populated by applying a block rather

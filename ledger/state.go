@@ -426,6 +426,26 @@ func blockApplyCandidatePoint(
 	)
 }
 
+// blocksBeforeEpochEnd returns the leading blocks that the block-apply
+// callback applies before it stops for an epoch rollover. It uses the same
+// stop condition as blockApplyCandidatePoint and the callback: a block at or
+// past the end of epoch, or any block while epoch is uninitialized.
+func blocksBeforeEpochEnd(
+	blocks []ledger.Block,
+	epoch models.Epoch,
+) []ledger.Block {
+	if epoch.SlotLength == 0 {
+		return nil
+	}
+	epochEnd := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	for idx, blk := range blocks {
+		if blk.SlotNumber() >= epochEnd {
+			return blocks[:idx]
+		}
+	}
+	return blocks
+}
+
 // submitBlockApplyDBTxn serializes a block-apply commit and its after-commit
 // transaction events against every primary-chain rollback that emits undo
 // events. The expected ledger tip and last block the batch will examine are
@@ -1744,7 +1764,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// the submitter synchronously, so errRestartLedgerPipeline /
 		// errStaleChainIterator cannot be expressed through it. Those
 		// upstream properties are pinned by the contract tests in
-		// ledger/tests_67e335ab_test.go; if a gouroboros
+		// ledger/block_pipeline_apply_contract_test.go; if a gouroboros
 		// bump makes any of them fail, revisit the decision rather than
 		// the test.
 		workerCount := blockPipelineWorkerCount()
@@ -7684,15 +7704,29 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// endorser transactions are applied ahead of the ranking blocks
 			// that endorse them. Runs outside the DB transaction opened below
 			// and is a no-op for blocks without Leios references.
-			if err := ls.ensureReferencedEndorserBlocks(
-				ctx,
+			//
+			// Only the blocks the transaction below applies are checked. It
+			// stops at the first block past the current epoch, and that block
+			// is re-checked on the pass after the rollover publishes its epoch:
+			// checking it now would resolve a certificate against an epoch
+			// that is not in the epoch cache yet (#4766).
+			ls.RLock()
+			precheckEpoch := ls.currentEpoch
+			ls.RUnlock()
+			if precheck := blocksBeforeEpochEnd(
 				nextBatch[i:end],
-			); err != nil {
-				completeReadResult()
-				return fmt.Errorf(
-					"ensure referenced Leios endorser blocks: %w",
-					err,
-				)
+				precheckEpoch,
+			); len(precheck) > 0 {
+				if err := ls.ensureReferencedEndorserBlocks(
+					ctx,
+					precheck,
+				); err != nil {
+					completeReadResult()
+					return fmt.Errorf(
+						"ensure referenced Leios endorser blocks: %w",
+						err,
+					)
+				}
 			}
 
 			// Capture snapshots of state needed during transaction.

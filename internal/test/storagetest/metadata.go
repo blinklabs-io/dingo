@@ -38,7 +38,7 @@ import (
 // sqlite, mysql, and postgres are thin driver shims around the one shared
 // database/plugin/metadata/sqlstore.Store implementation, so the domain
 // methods have no per-dialect business logic to differentiate here --
-// database/plugin/metadata/sqlstore/dialect_3d29378a_test.go already
+// database/plugin/metadata/sqlstore/dialect_integration_test.go already
 // exercises that shared implementation against real Postgres/MySQL.
 func RunMetadataStoreConformance(
 	t *testing.T,

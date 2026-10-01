@@ -1878,3 +1878,323 @@ func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 	// Row identity is unaffected by SkipAssets.
 	require.Equal(t, withAssets[0].TxId, skipped[0].TxId)
 }
+
+// utxoForInsertCacheTest builds a minimal, valid models.Utxo for exercising
+// insertUtxoModel directly: distinct txSeed/outputIdx pairs target distinct
+// rows, and the same pair can be reused deliberately to exercise the ON
+// CONFLICT DO NOTHING branch.
+func utxoForInsertCacheTest(
+	txSeed byte,
+	outputIdx uint32,
+	amount uint64,
+) *models.Utxo {
+	txID := make([]byte, 32)
+	txID[31] = txSeed
+	paymentKey := bytes.Repeat([]byte{txSeed}, lcommon.AddressHashSize)
+	return &models.Utxo{
+		TxId:       txID,
+		OutputIdx:  outputIdx,
+		PaymentKey: paymentKey,
+		AddedSlot:  1,
+		Amount:     types.Uint64(amount),
+	}
+}
+
+// insertUtxoInTxn runs insertUtxoModel inside its own write transaction.
+// This is simpler than production, not representative of it: production
+// applies many outputs within one shared write transaction --
+// LedgerDeltaBatch.apply (ledger/delta.go) applies a whole block batch under
+// the single txn ledger/state.go passes it, and genesis import
+// (ledger/chainsync.go) inserts the entire Byron and Shelley UTxO set inside
+// one txn.Do -- so a caller here that wants to observe the per-transaction
+// Tx-scoped statement retention this cache introduces must call
+// insertUtxoModel repeatedly against one shared transaction instead; see
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction.
+func insertUtxoInTxn(
+	t *testing.T,
+	store *Store,
+	utxo *models.Utxo,
+	ignoreConflict bool,
+) {
+	t.Helper()
+	err := store.withWriteTransaction(
+		nil,
+		func(db queryer, ctx context.Context) error {
+			return store.insertUtxoModel(ctx, db, utxo, ignoreConflict)
+		},
+	)
+	require.NoError(t, err)
+}
+
+// TestInsertUtxoModelReusesCachedStatementAcrossTransactions proves
+// insertUtxoModel's move onto the hot-statement cache (queryRowCached) does
+// not change its behavior: distinct inserts still get distinct ids, a
+// repeated (tx_id, output_idx) under ignoreConflict still resolves to the
+// existing row's id via the ON CONFLICT DO NOTHING + fallback SELECT branch,
+// and the stored row round-trips correctly through GetUtxo -- while the
+// cached *sql.Stmt for insertUtxoQueryIgnoreConflict is the same object
+// across independent write transactions. This exercises independent
+// transactions for simplicity; it is not the production access pattern --
+// see insertUtxoInTxn's doc comment, and
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction for the
+// real multi-output-per-transaction shape.
+func TestInsertUtxoModelReusesCachedStatementAcrossTransactions(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	first := utxoForInsertCacheTest(1, 0, 5_000_000)
+	insertUtxoInTxn(t, store, first, true)
+	require.NotZero(t, first.ID)
+
+	store.stmtMu.Lock()
+	cachedBefore := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.NotNil(
+		t,
+		cachedBefore,
+		"expected insertUtxoQueryIgnoreConflict to be cached on SQLite",
+	)
+
+	second := utxoForInsertCacheTest(2, 0, 7)
+	insertUtxoInTxn(t, store, second, true)
+	require.NotZero(t, second.ID)
+	require.NotEqual(t, first.ID, second.ID)
+
+	store.stmtMu.Lock()
+	cachedAfter := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.Same(
+		t,
+		cachedBefore,
+		cachedAfter,
+		"expected the same cached *sql.Stmt across independent write transactions",
+	)
+
+	// Re-inserting the same (tx_id, output_idx) under ignoreConflict must
+	// take the ON CONFLICT DO NOTHING branch and resolve to the existing
+	// row's id via the fallback SELECT, not error and not create a second
+	// row -- exactly like before this query went through the cache.
+	dup := utxoForInsertCacheTest(1, 0, 999)
+	insertUtxoInTxn(t, store, dup, true)
+	require.Equal(
+		t,
+		first.ID,
+		dup.ID,
+		"expected ON CONFLICT DO NOTHING to resolve to the existing row's id",
+	)
+
+	// Round-trip through the public read path: the row the cached statement
+	// wrote back is a correct, complete row, not just "an insert succeeded".
+	got, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, types.Uint64(5_000_000), got.Amount)
+
+	got2, err := store.GetUtxo(second.TxId, second.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got2)
+	require.Equal(t, types.Uint64(7), got2.Amount)
+}
+
+// TestImportUtxosReusesCachedStatementAcrossTransactions proves the snapshot
+// importer uses the same cached insert as the ordinary UTxO path. It also
+// exercises the ON CONFLICT DO NOTHING + fallback lookup that assigns the
+// existing row ID, preserving idempotent imports.
+func TestImportUtxosReusesCachedStatementAcrossTransactions(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	first := *utxoForInsertCacheTest(21, 0, 5_000_000)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{first}, nil))
+	gotFirst, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotFirst)
+
+	store.stmtMu.Lock()
+	cachedBefore := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.NotNil(
+		t,
+		cachedBefore,
+		"expected importer insert to use the cached statement on SQLite",
+	)
+
+	second := *utxoForInsertCacheTest(22, 0, 7)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{second}, nil))
+	gotSecond, err := store.GetUtxo(second.TxId, second.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotSecond)
+	require.NotEqual(t, gotFirst.ID, gotSecond.ID)
+
+	store.stmtMu.Lock()
+	cachedAfter := store.stmts[insertUtxoQueryIgnoreConflict]
+	store.stmtMu.Unlock()
+	require.Same(
+		t,
+		cachedBefore,
+		cachedAfter,
+		"expected the importer to reuse the same cached statement",
+	)
+
+	duplicate := first
+	duplicate.Amount = 999
+	require.NoError(t, store.ImportUtxos([]models.Utxo{duplicate}, nil))
+	gotDuplicate, err := store.GetUtxo(first.TxId, first.OutputIdx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotDuplicate)
+	require.Equal(t, gotFirst.ID, gotDuplicate.ID)
+	require.Equal(
+		t,
+		types.Uint64(5_000_000),
+		gotDuplicate.Amount,
+		"conflicting import must preserve the existing UTxO row",
+	)
+}
+
+func TestImportUtxosDeferredRewardLiveStakeRefreshRebuildsCorrectly(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	utxo := *utxoForInsertCacheTest(23, 0, 5_000_000)
+	utxo.CredentialTag = 0
+	utxo.StakingKey = bytes.Repeat([]byte{0x23}, lcommon.AddressHashSize)
+
+	require.NoError(t, store.ImportUtxosDeferredRewardLiveStakeRefresh(
+		[]models.Utxo{utxo},
+		nil,
+	))
+	var aggregateCount int
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT COUNT(*) FROM reward_live_stake",
+	).Scan(&aggregateCount))
+	require.Zero(t, aggregateCount,
+		"deferred import must not refresh the aggregate per batch")
+
+	require.NoError(t, store.RebuildRewardLiveStake(utxo.AddedSlot, nil))
+	var utxoStake string
+	require.NoError(t, store.writeDB.QueryRowContext(
+		context.Background(),
+		"SELECT utxo_stake FROM reward_live_stake WHERE credential_tag = 0 AND staking_key = ?",
+		utxo.StakingKey,
+	).Scan(&utxoStake))
+	require.Equal(t, "5000000", utxoStake)
+}
+
+// TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction exercises
+// the production shape: one import batch keeps a write transaction open while
+// it inserts many outputs. Reusing one Tx-scoped derivative keeps database/sql
+// from retaining one prepared statement per imported output.
+func TestImportUtxosBoundsTxScopedStatementRetentionInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	const outputCount = 2_000
+	utxos := make([]models.Utxo, outputCount)
+	for i := range outputCount {
+		utxos[i] = *utxoForBenchmarkIteration(uint64(i + 1))
+	}
+
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+	require.NoError(t, store.ImportUtxos(utxos, txn))
+
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+	require.LessOrEqual(
+		t,
+		retained,
+		1,
+		"expected one Tx-scoped importer statement for %d outputs, got %d",
+		outputCount,
+		retained,
+	)
+}
+
+// TestMergeStakeCredentialDeltasSumsPerCredential proves
+// mergeStakeCredentialDeltas adds every occurrence's delta for a credential
+// (unlike mergeStakeCredentialRefs, which keeps only the first), and that
+// order follows first occurrence.
+func TestMergeStakeCredentialDeltasSumsPerCredential(t *testing.T) {
+	t.Parallel()
+
+	a := models.NewStakeCredentialRef(0, []byte("credential-a"))
+	b := models.NewStakeCredentialRef(0, []byte("credential-b"))
+
+	t.Run("all empty", func(t *testing.T) {
+		t.Parallel()
+		got := mergeStakeCredentialDeltas(nil, []stakeCredentialDelta{}, nil)
+		require.Empty(t, got)
+	})
+
+	t.Run(
+		"sums overlapping deltas across and within slices",
+		func(t *testing.T) {
+			t.Parallel()
+			got := mergeStakeCredentialDeltas(
+				[]stakeCredentialDelta{{ref: a, delta: 5}, {ref: b, delta: -2}},
+				[]stakeCredentialDelta{{ref: a, delta: -3}},
+				[]stakeCredentialDelta{{ref: a, delta: 10}, {ref: b, delta: 1}},
+			)
+			byKey := make(map[string]int64, len(got))
+			for _, d := range got {
+				byKey[d.ref.MapKey()] = d.delta
+			}
+			require.Equal(t, int64(12), byKey[a.MapKey()]) // 5 - 3 + 10
+			require.Equal(t, int64(-1), byKey[b.MapKey()]) // -2 + 1
+			require.Len(t, got, 2)
+		},
+	)
+}
+
+// TestQueryUtxoStakeConsumedDeltasNegatesAmounts proves
+// queryUtxoStakeConsumedDeltas reports the exact negative delta for each
+// spent input's credential, grouping and summing when several consumed
+// inputs share a credential.
+func TestQueryUtxoStakeConsumedDeltasNegatesAmounts(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+	refA := models.NewStakeCredentialRef(0, credentialKeyForIndex(0))
+	refB := models.NewStakeCredentialRef(0, credentialKeyForIndex(1))
+
+	seedCredentialUtxos(t, store, 0, refA, []uint64{4_000_000, 6_000_000}, nil)
+	seedCredentialUtxos(t, store, 1, refB, []uint64{9_000_000}, nil)
+
+	ids := []models.UtxoId{
+		{Hash: utxoTxIDForGroup(0, 0), Idx: 0},
+		{Hash: utxoTxIDForGroup(0, 1), Idx: 0},
+		{Hash: utxoTxIDForGroup(1, 0), Idx: 0},
+	}
+	deltas, err := queryUtxoStakeConsumedDeltas(ctx, store.writeDB, ids)
+	require.NoError(t, err)
+
+	byKey := make(map[string]int64, len(deltas))
+	for _, d := range deltas {
+		byKey[d.ref.MapKey()] = d.delta
+	}
+	require.Equal(t, int64(-10_000_000), byKey[refA.MapKey()])
+	require.Equal(t, int64(-9_000_000), byKey[refB.MapKey()])
+	require.Len(t, deltas, 2)
+}
+
+// utxoTxIDForGroup reproduces seedCredentialUtxos' tx_id derivation from
+// (group, index) so a test can look its seeded rows back up by UtxoId.
+func utxoTxIDForGroup(group, index int) []byte {
+	txID := make([]byte, 32)
+	txID[0] = byte(group >> 24)
+	txID[1] = byte(group >> 16)
+	txID[2] = byte(group >> 8)
+	txID[3] = byte(group)
+	txID[4] = byte(index >> 24)
+	txID[5] = byte(index >> 16)
+	txID[6] = byte(index >> 8)
+	txID[7] = byte(index)
+	return txID
+}

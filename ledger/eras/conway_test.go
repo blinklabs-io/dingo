@@ -3921,3 +3921,294 @@ func TestConwayWithdrawalOrderPlacesScriptCredentialFirst(t *testing.T) {
 		},
 	)
 }
+
+// TestValidateTxConwayRejectsParameterChangeProtocolVersion is a production
+// ValidateTxConway regression (dingo#4439's "test through production
+// ValidateTxConway" and "end-to-end PV9, PV10, and PV11 rejection coverage"
+// criteria). Every other Conway rule is stubbed to a no-op so only the new
+// rule's contribution to the joined error is under test, matching the
+// isolation technique TestValidateTxDijkstraDoesNotTreatPhase1FailureAsPhase2Failure
+// uses below. The table covers every Conway-era major protocol version: the
+// rule must reject a protocol-version-setting ParameterChange regardless of
+// which Conway PV the ledger currently runs.
+func TestValidateTxConwayRejectsParameterChangeProtocolVersion(t *testing.T) {
+	originalRules := conwayUtxoValidationRules
+	conwayUtxoValidationRules = nil
+	t.Cleanup(func() { conwayUtxoValidationRules = originalRules })
+
+	for _, currentMajor := range []uint{9, 10, 11} {
+		t.Run(fmt.Sprintf("PV%d", currentMajor), func(t *testing.T) {
+			pp := conwayDivergencePparams()
+			pp.ProtocolVersion.Major = currentMajor
+
+			tx := &mockConwayFeeTx{
+				mockFeeTx: mockFeeTx{witnesses: &mockWitnessSet{}},
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conwayParameterChangeProposal(
+						&lcommon.ProtocolParametersProtocolVersion{
+							Major: currentMajor + 1,
+						},
+					),
+				},
+			}
+			err := ValidateTxConway(tx, 0, newMockLedgerState(), pp)
+			var protocolVersionErr ParameterChangeProtocolVersionError
+			require.ErrorAs(t, err, &protocolVersionErr)
+		})
+	}
+}
+
+// TestPParamsUpdateConwayIgnoresProtocolVersion is the defense-in-depth
+// regression for dingo#4439's "remove protocol-version mutation from Conway
+// PPU application" criterion: even called directly with an update that sets
+// protocol version, PParamsUpdateConway must not change it, while still
+// applying every other field normally.
+func TestPParamsUpdateConwayIgnoresProtocolVersion(t *testing.T) {
+	current := &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: conway.MinProtocolVersionConway,
+			Minor: 0,
+		},
+	}
+	minFeeA := uint(500)
+	updated, err := PParamsUpdateConway(
+		current,
+		conway.ConwayProtocolParameterUpdate{
+			MinFeeA: &minFeeA,
+			ProtocolVersion: &lcommon.ProtocolParametersProtocolVersion{
+				Major: conway.MinProtocolVersionConway + 1,
+			},
+		},
+	)
+	require.NoError(t, err)
+	conwayUpdated, ok := updated.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	require.Equal(
+		t,
+		uint(conway.MinProtocolVersionConway),
+		conwayUpdated.ProtocolVersion.Major,
+		"ParameterChange must not move protocol version",
+	)
+	require.Equal(
+		t,
+		minFeeA,
+		conwayUpdated.MinFeeA,
+		"other fields must still apply",
+	)
+}
+
+// EvaluateTxConway (also used for Dijkstra) builds the V3 context up front, so
+// it needs the same gate: estimating a redeemerless transaction's execution
+// units must not depend on translating its TTL.
+func TestEvaluateTxConwaySkipsScriptContextWithoutRedeemers(t *testing.T) {
+	inputHash := make([]byte, 32)
+	inputHash[0] = 0xaa
+	bodyMap := map[uint]any{
+		0: cbor.Tag{
+			Number: 258,
+			Content: []any{
+				[]any{inputHash, uint64(0)},
+			},
+		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		2: uint64(200_000),
+		3: uint64(testPastHorizonSlot),
+	}
+	txCbor, err := cbor.Encode(
+		[]any{bodyMap, map[uint]any{}, true, nil},
+	)
+	require.NoError(t, err)
+	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+	require.False(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	_, exUnits, redeemerExUnits, err := EvaluateTxConway(
+		tx,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, lcommon.ExUnits{}, exUnits)
+	assert.Empty(t, redeemerExUnits)
+	assert.Zero(t, ls.slotToTimeCalls)
+}
+
+// TestValidateTxConwayRejectsPlutusV2WhenSynthetic mirrors
+// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic for the Conway era: the
+// synthetic marker persists across era transitions until real data actually
+// clears it (LedgerState.syntheticV2CostModel's doc comment), so a chain
+// that reaches Conway without ever receiving a real PlutusV2 update has the
+// identical exposure ValidateTxBabbage does.
+func TestValidateTxConwayRejectsPlutusV2WhenSynthetic(t *testing.T) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 9,
+			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxConwayAllowsPlutusV2WhenNotSynthetic mirrors
+// TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic for Conway.
+func TestValidateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 9,
+			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		},
+	)
+
+	require.NoError(t, err)
+}
+
+// TestEvaluateTxConwayRejectsPlutusV2WhenSynthetic mirrors
+// TestEvaluateTxBabbageRejectsPlutusV2WhenSynthetic for Conway.
+func TestEvaluateTxConwayRejectsPlutusV2WhenSynthetic(t *testing.T) {
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	_, _, _, err := EvaluateTxConway(
+		tx,
+		ls,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 9,
+			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxConwayRejectsPlutusV2WhenSyntheticEvenIfDeclaredInvalid
+// verifies that validatePlutusOutcome
+// (ledger/eras/validation.go) treats a failed script as the expected,
+// acceptable outcome for a transaction declared invalid -- but only when
+// the phase-2 error is a conway.PlutusScriptFailedError specifically.
+// ErrNoCostModelForPlutusV2 is a hard UTXOW-level rejection (real
+// cardano-ledger raises it before any script runs), not a script-execution
+// failure, so it must still reject the transaction outright even when the
+// transaction declares itself invalid and provides collateral -- it must
+// not be silently accepted as "failed as declared."
+func TestValidateTxConwayRejectsPlutusV2WhenSyntheticEvenIfDeclaredInvalid(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	tx := newConwayValidityOutcomeTx(
+		t,
+		false,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 9,
+			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic mirrors
+// TestEvaluateTxBabbageAllowsPlutusV2WhenNotSynthetic for Conway.
+func TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
+	ls := newMockLedgerState()
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	_, _, _, err := EvaluateTxConway(
+		tx,
+		ls,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 9,
+			},
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		},
+	)
+
+	require.NoError(t, err)
+}

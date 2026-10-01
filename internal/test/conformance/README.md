@@ -143,7 +143,7 @@ temporary one per call; that directory is never cleared between vectors
 hashes and are simply never looked up again -- harmless, see
 `state_manager_postgres.go`'s doc comment). `TestMain` drops the process
 schema and removes this directory once, after every test in the process
-has finished -- see `tests_cc29688c_test.go`.
+has finished -- see `process_cleanup_test.go`.
 
 **Reset semantics.** Between vectors, `DingoStateManager.Reset()` does not
 call the metadata store's own `Resettable.Reset` (`database/plugin/metadata/postgres`'s
@@ -220,7 +220,7 @@ recreating them), keeping the already-open store's connection pool live
 throughout instead of paying for a close/reopen/re-migrate cycle on every
 vector. `TestMain` drops the process database and removes this directory
 once, after every test in the process has finished -- see
-`tests_cc29688c_test.go`.
+`process_cleanup_test.go`.
 
 `TestRulesConformanceVectorsMysql` follows the same count-comparison approach
 as the Postgres variant, for the same reason, and likewise reuses the memoized
@@ -284,7 +284,7 @@ and one synthetic rollback fixture. A complete SQLite run therefore reports
 2,575/2,575, 100%, with the breakdown by era and rule family shown in the
 verbose test output.
 
-`tests_cc29688c_test.go` closes that gap:
+`state_provider_test.go` closes that gap:
 
 - `TestConformanceVectorsExerciseDingoEraEntryPoints` replays the corpus a
   second time, routing every vector transaction through the production entry
@@ -319,7 +319,7 @@ Each backend replays the corpus **exactly once per `go test` process**, and
 every consumer reads that one memoized result set: the pass/fail gate, the
 progress statistics, and the cross-backend comparison. The vector extraction is
 shared the same way, once rather than once per replay. See
-`tests_cc29688c_test.go`.
+`state_provider_test.go`.
 
 The one deliberate exception is the SQLite-only entry-point replay described in
 [Dingo validation entry point coverage](#dingo-validation-entry-point-coverage).
@@ -372,9 +372,9 @@ access patterns. That needs **one** pass per dialect, not several.
 
 | File | Purpose |
 |---|---|
-| `tests_cc29688c_test.go` | SQLite conformance entry point, corpus replay and helpers, entry-point validation tests, and shared `TestMain` cleanup |
-| `tests_d4f17915_test.go` | PostgreSQL and MySQL conformance entry points and acceptance tests (`dingo_extra_plugins` build tag) |
-| `tests_ead0c46f_test.go` | Dijkstra state-manager regression tests |
+| `process_cleanup_test.go` | SQLite conformance entry point, corpus replay and helpers, entry-point validation tests, and shared `TestMain` cleanup |
+| `conformance_postgres_test.go` | PostgreSQL and MySQL conformance entry points and acceptance tests (`dingo_extra_plugins` build tag) |
+| `dijkstra_state_manager_test.go` | Dijkstra state-manager regression tests |
 | `database.go` | `openRealDatabase`/`closeRealDatabase` — composes a real blob+metadata `database.Database` via `plugin.Resolve`, shared by all three backend constructors |
 | `state_manager.go`    | `DingoStateManager` — implements `conformance.StateManager` against a real Dingo `database.Database` and `ledger/governance`, reusing production persistence code |
 | `state_manager_postgres.go` | `NewDingoPostgresStateManager` — same `DingoStateManager`, real Postgres connection with schema isolation (`dingo_extra_plugins` build tag) |
