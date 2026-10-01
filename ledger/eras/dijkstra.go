@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -598,8 +599,18 @@ func EvaluateTxDijkstra(
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
-	return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
+	var multiplier *big.Rat
+	if tmpPparams.RefScriptCostMultiplier != nil {
+		multiplier = tmpPparams.RefScriptCostMultiplier.ToBigRat()
+	}
+	return evaluateTxConway(
+		tx,
+		ls,
+		&tmpPparams.ConwayProtocolParameters,
+		uint64(tmpPparams.RefScriptCostStride),
+		multiplier,
+	)
 }
