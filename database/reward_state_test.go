@@ -15,8 +15,10 @@
 package database
 
 import (
+	"bytes"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
@@ -71,7 +73,7 @@ type batchRewardLiveStakeMetadataStore struct {
 	batchSlot     uint64
 	batchCalls    int
 	transactional int
-	runTxnSet     bool
+	credential    []byte
 }
 
 func (s *batchRewardLiveStakeMetadataStore) RebuildRewardLiveStakeFromRunningTotals(
@@ -88,20 +90,36 @@ func (s *batchRewardLiveStakeMetadataStore) RebuildRewardLiveStakeFromRunningTot
 ) error {
 	s.batchCalls++
 	s.batchSlot = slot
-	s.runTxnSet = runTxn != nil
-	return nil
+	if runTxn == nil {
+		return nil
+	}
+	return runTxn(func(txn types.Txn) error {
+		return s.MetadataStore.CreateAccount(txn, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    s.credential,
+			Active:        true,
+		})
+	})
 }
 
 func TestRebuildRewardLiveStakeFromRunningTotalsUsesBatchFinalizer(
 	t *testing.T,
 ) {
 	t.Parallel()
-	store := &batchRewardLiveStakeMetadataStore{}
-	db := &Database{metadata: store}
+	db, err := newTestDatabase(t, &Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	store := &batchRewardLiveStakeMetadataStore{
+		MetadataStore: db.Metadata(),
+		credential:    bytes.Repeat([]byte{0x42}, 28),
+	}
+	db.metadata = store
 
 	require.NoError(t, db.RebuildRewardLiveStakeFromRunningTotals(123, nil))
 	require.Equal(t, 1, store.batchCalls)
 	require.Equal(t, uint64(123), store.batchSlot)
-	require.True(t, store.runTxnSet)
 	require.Zero(t, store.transactional)
+	account, err := db.Metadata().GetAccountByCredential(0, store.credential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
 }

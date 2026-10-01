@@ -562,7 +562,9 @@ const liveUtxoStakeKeyFilter = `deleted_slot = 0
 func rewardLiveStakeKeySource(accountRange, utxoRange string) string {
 	return `
     SELECT credential_tag, staking_key FROM account
-    WHERE ` + accountRange + `
+    WHERE staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0
+      AND ` + accountRange + `
     UNION
     SELECT credential_tag, staking_key FROM utxo
     WHERE ` + liveUtxoStakeKeyFilter + `

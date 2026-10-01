@@ -139,6 +139,19 @@ func TestRebuildRewardLiveStakeBatchBoundaries(t *testing.T) {
 	testRewardLiveStakeBatchBoundaries(t, newMigratedSQLiteStore(t))
 }
 
+func TestRebuildRewardLiveStakeBatchSkipsLegacyNullAccountKey(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	_, err := store.writeDB.Exec(`
+INSERT INTO account (staking_key, credential_tag, added_slot, created_slot, reward)
+VALUES (NULL, 0, 1, 1, '0')`)
+	require.NoError(t, err)
+	keys := populateRewardLiveStakeBatchFixture(t, store)
+	store.rewardLiveStakeBatchSize = 1
+	require.NoError(t, store.RebuildRewardLiveStakeFromRunningTotals(500, nil))
+	require.Len(t, readRewardLiveStakeSnapshot(t, store), keys)
+}
+
 func TestRebuildRewardLiveStakeFromRunningTotalsCommitsAndRetriesBatches(
 	t *testing.T,
 ) {
