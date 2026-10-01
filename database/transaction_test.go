@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -29,10 +31,247 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+// TestConsumedInputKeyEquality verifies that consumedInputKey compares two
+// inputs by hash and index the same way the fmt.Sprintf("%x:%d", ...) string
+// key it replaced did: equal for a repeated (hash, index) pair, distinct
+// when either component differs. ensureTransactionConsumedUtxos and
+// ensureGapConsumedUtxos rely on this equality to dedup a transaction's
+// Consumed() set, which can legitimately list the same input more than once.
+func TestConsumedInputKeyEquality(t *testing.T) {
+	t.Parallel()
+
+	hashA := strings.Repeat("ab", 32)
+	hashB := strings.Repeat("cd", 32)
+
+	inputA0 := shelley.NewShelleyTransactionInput(hashA, 0)
+	inputA0Again := shelley.NewShelleyTransactionInput(hashA, 0)
+	inputA1 := shelley.NewShelleyTransactionInput(hashA, 1)
+	inputB0 := shelley.NewShelleyTransactionInput(hashB, 0)
+
+	require.Equal(
+		t,
+		newConsumedInputKey(inputA0),
+		newConsumedInputKey(inputA0Again),
+		"same hash and index must produce equal keys",
+	)
+	require.NotEqual(
+		t,
+		newConsumedInputKey(inputA0),
+		newConsumedInputKey(inputA1),
+		"same hash but different index must produce distinct keys",
+	)
+	require.NotEqual(
+		t,
+		newConsumedInputKey(inputA0),
+		newConsumedInputKey(inputB0),
+		"same index but different hash must produce distinct keys",
+	)
+}
+
+// TestConsumedInputKeyDedupsRepeatedInput exercises the exact dedup idiom
+// used by ensureTransactionConsumedUtxos/ensureGapConsumedUtxos: a "seen"
+// set keyed by consumedInputKey collapses a Consumed() slice that lists the
+// same input twice down to one entry, while distinct inputs are preserved.
+func TestConsumedInputKeyDedupsRepeatedInput(t *testing.T) {
+	t.Parallel()
+
+	hash := strings.Repeat("ef", 32)
+	consumed := []shelley.ShelleyTransactionInput{
+		shelley.NewShelleyTransactionInput(hash, 0),
+		shelley.NewShelleyTransactionInput(hash, 0), // repeated on-chain input
+		shelley.NewShelleyTransactionInput(hash, 1),
+	}
+
+	seen := make(map[consumedInputKey]struct{}, len(consumed))
+	var processed int
+	for _, input := range consumed {
+		key := newConsumedInputKey(input)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		processed++
+	}
+
+	require.Equal(
+		t,
+		2,
+		processed,
+		"the repeated (hash, index 0) input must be processed only once",
+	)
+}
+
+// TestConsumedInputKeyAllocationFree pins the perf property this type
+// exists for. The dedup key it replaced was built with
+// fmt.Sprintf("%x:%d", inputTxId, input.Index()), which profiling on a live
+// Preview-sync node showed allocating on essentially every consumed input
+// across every applied transaction (encoding/hex.EncodeToString and
+// fmt.Sprintf together accounted for a double-digit percentage of the
+// process's cumulative heap allocations). Building the key from
+// input.Id()/input.Index() as plain value types must not allocate at all.
+func TestConsumedInputKeyAllocationFree(t *testing.T) {
+	// Match the type consumed inputs actually have on the hot path:
+	// tx.Consumed() returns []lcommon.TransactionInput, so the loop variable
+	// is already interface-typed and boxing has already happened once
+	// upstream, not on every newConsumedInputKey call.
+	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+		strings.Repeat("11", 32),
+		7,
+	)
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		_ = newConsumedInputKey(input)
+	})
+
+	require.Equal(
+		t,
+		float64(0),
+		allocs,
+		"constructing the consumed-input dedup key must not allocate",
+	)
+}
+
+// BenchmarkConsumedInputKeyOldPattern reproduces, verbatim, the dedup-key
+// construction ensureTransactionConsumedUtxos and ensureGapConsumedUtxos
+// used before this change: a hex-formatted "hash:index" string built with
+// fmt.Sprintf, once per consumed input, purely to key a same-transaction
+// "seen" dedup set. Kept for direct before/after comparison against
+// BenchmarkConsumedInputKeyNewPattern.
+func BenchmarkConsumedInputKeyOldPattern(b *testing.B) {
+	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+		strings.Repeat("ab", 32),
+		3,
+	)
+	inputTxId := ledgerInputIDBytes(input)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = fmt.Sprintf("%x:%d", inputTxId, input.Index())
+	}
+}
+
+// BenchmarkConsumedInputKeyNewPattern measures the replacement: a
+// comparable consumedInputKey struct built directly from input.Id() and
+// input.Index(), with no formatting and no heap allocation. input is
+// interface-typed here to match tx.Consumed()'s []lcommon.TransactionInput,
+// the type consumed inputs actually have on the hot path.
+func BenchmarkConsumedInputKeyNewPattern(b *testing.B) {
+	var input lcommon.TransactionInput = shelley.NewShelleyTransactionInput(
+		strings.Repeat("ab", 32),
+		3,
+	)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = newConsumedInputKey(input)
+	}
+}
+
+func testPoolRegistrationCertificate(
+	seed byte,
+) *lcommon.PoolRegistrationCertificate {
+	return &lcommon.PoolRegistrationCertificate{
+		CertType: uint(lcommon.CertificateTypePoolRegistration),
+		Operator: lcommon.PoolKeyHash(
+			lcommon.NewBlake2b224([]byte{seed, 0x01}),
+		),
+		VrfKeyHash: lcommon.VrfKeyHash(
+			lcommon.NewBlake2b256([]byte{seed, 0x02}),
+		),
+		Pledge: 1_000_000,
+		Cost:   340_000_000,
+		Margin: cbor.Rat{Rat: big.NewRat(1, 20)},
+		RewardAccount: lcommon.AddrKeyHash(
+			lcommon.NewBlake2b224([]byte{seed, 0x03}),
+		),
+		PoolOwners: []lcommon.AddrKeyHash{
+			lcommon.AddrKeyHash(lcommon.NewBlake2b224([]byte{seed, 0x04})),
+		},
+	}
+}
+
+func TestSetTransactionMetadataOnlyRecordsCertificatesWithoutUtxos(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := openTestDB(t)
+
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0x88}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	cert := testPoolRegistrationCertificate(0x42)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0x42}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeDijkstra)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithCertificates(cert)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	point := ocommon.Point{
+		Slot: 12_345,
+		Hash: bytes.Repeat([]byte{0x24}, lcommon.Blake2b256Size),
+	}
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		point,
+		7,
+		map[int]uint64{0: 500_000_000},
+		nil,
+	))
+
+	gotTx, err := db.Metadata().GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, gotTx)
+	require.Equal(t, point.Slot, gotTx.Slot)
+	require.Equal(t, uint32(7), gotTx.BlockIndex)
+
+	regs, err := db.Metadata().GetPoolRegistrations(cert.Operator, nil)
+	require.NoError(t, err)
+	require.Len(t, regs, 1)
+	require.Equal(t, cert.VrfKeyHash, regs[0].VrfKeyHash)
+
+	var certCount int64
+	raw := rawSQLiteMetadataFixture(t, db)
+	require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM certs WHERE transaction_id = ?`,
+		gotTx.ID,
+	).Scan(&certCount))
+	require.Equal(t, int64(1), certCount)
+
+	produced := tx.Produced()
+	require.NotEmpty(t, produced)
+	gotUtxo, err := db.Metadata().GetUtxo(
+		tx.Hash().Bytes(),
+		produced[0].Id.Index(),
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, gotUtxo)
+
+	var addressTxCount int64
+	require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM address_transaction WHERE transaction_id = ?`,
+		gotTx.ID,
+	).Scan(&addressTxCount))
+	require.Equal(t, int64(0), addressTxCount)
+}
 
 type mockBlobStore struct {
 	deleteTxErrs     map[string]error

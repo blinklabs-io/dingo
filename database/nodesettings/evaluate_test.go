@@ -57,7 +57,7 @@ func TestEvaluateFrozenMismatchIsFatal(t *testing.T) {
 }
 
 func TestMismatchMessageUsesOperatorLabel(t *testing.T) {
-	// database/storage_mode_test.go asserts the message contains
+	// database/tests_test.go asserts the message contains
 	// "storage mode" with a space, so the label must not leak the
 	// underscored storage key.
 	persisted := nodesettings.Values{"storage_mode": "core"}

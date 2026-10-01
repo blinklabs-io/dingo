@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"slices"
 	"strconv"
@@ -28,12 +29,14 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -532,7 +535,7 @@ func processGapBlocks(
 		// Gap blocks were already parsed and body-hash validated by the
 		// blockfetch client when fetched from the relay. We only need a
 		// second decode here to extract transactions and offsets.
-		parsedBlock, err := gledger.NewBlockFromCbor(
+		parsedBlock, err := models.DecodeBlockCbor(
 			block.Type,
 			block.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
@@ -606,9 +609,16 @@ func processGapBlocks(
 			pparamsCache[epoch.EpochId] = blockPParams
 		}
 		blockConwayPParams := (*conway.ConwayProtocolParameters)(nil)
-		if epoch.EraId == conway.EraIdConway && blockPParams != nil {
-			conwayPParams, ok := blockPParams.(*conway.ConwayProtocolParameters)
-			if !ok {
+		switch params := blockPParams.(type) {
+		case *conway.ConwayProtocolParameters:
+			blockConwayPParams = params
+		case *dijkstra.DijkstraProtocolParameters:
+			if params != nil {
+				blockConwayPParams = &params.ConwayProtocolParameters
+			}
+		case nil:
+		default:
+			if epoch.EraId >= conway.EraIdConway {
 				return fmt.Errorf(
 					"unexpected protocol params %T for gap block at slot %d (epoch %d)",
 					blockPParams,
@@ -616,7 +626,6 @@ func processGapBlocks(
 					epoch.EpochId,
 				)
 			}
-			blockConwayPParams = conwayPParams
 		}
 		if err := processGapBlockTransactions(
 			db,
@@ -690,67 +699,85 @@ func processGapBlockTransactions(
 			return fmt.Errorf("gap block DRep dormancy boundary: %w", err)
 		}
 	}
+	var storageIndexOffset uint64
 	for i, tx := range txs {
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
+		levels := dledger.TransactionLevelsForApply(tx)
+		childCount := uint64(len(levels)) - 1
+		storageBaseIndex := uint64(i) + storageIndexOffset
+		storageParentIndex := storageBaseIndex + childCount
+		if storageParentIndex > math.MaxUint32 {
+			return fmt.Errorf(
+				"expanded transaction index out of range: %d",
+				storageParentIndex,
+			)
+		}
+		storageIndexOffset += childCount
 		protocolMajor := uint64(0)
 		if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
 			protocolMajor = uint64(versioned.ProtocolMajorVersion())
 		}
-		if tx.IsValid() {
-			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
-				tx,
+		for levelIndex, level := range levels {
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					level,
+					point,
+					db,
+					txn,
+				); err != nil {
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				}
+			}
+			if err := db.SetGapBlockTransaction(
+				level,
 				point,
+				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
+				gapCertDeposits(logger, level, point, eraId, pparams),
+				offsets,
+				txn,
+				protocolMajor,
+			); err != nil {
+				return fmt.Errorf(
+					"storing transaction body %d: %w",
+					levelIndex,
+					err,
+				)
+			}
+			if !level.IsValid() {
+				continue
+			}
+			hasGovernance := len(level.ProposalProcedures()) > 0 ||
+				len(level.VotingProcedures()) > 0
+			hasDRepActivity := governance.HasDRepActivityCertificates(level)
+			hasDRepDeregistration := governance.HasDRepDeregistrationCertificates(level)
+			if !hasGovernance && !hasDRepActivity && !hasDRepDeregistration {
+				continue
+			}
+			if (hasGovernance || hasDRepActivity) && conwayPParams == nil {
+				return errors.New(
+					"missing Conway protocol parameters for governance gap block processing",
+				)
+			}
+			drepInactivityPeriod := uint64(0)
+			govActionLifetime := uint64(0)
+			if conwayPParams != nil {
+				drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
+				govActionLifetime = conwayPParams.GovActionValidityPeriod
+			}
+			if err := governance.ProcessTransactionEffects(
+				level,
+				point,
+				epochId,
+				drepInactivityPeriod,
+				govActionLifetime,
+				protocolMajor,
 				db,
 				txn,
 			); err != nil {
-				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				return fmt.Errorf("processing body %d transaction governance: %w", levelIndex, err)
 			}
-		}
-		if err := db.SetGapBlockTransaction(
-			tx,
-			point,
-			uint32(i), // #nosec G115 -- tx index within a block
-			gapCertDeposits(logger, tx, point, eraId, pparams),
-			offsets,
-			txn,
-			protocolMajor,
-		); err != nil {
-			return fmt.Errorf("storing TX: %w", err)
-		}
-		if !tx.IsValid() {
-			continue
-		}
-		hasGovernance := len(tx.ProposalProcedures()) > 0 ||
-			len(tx.VotingProcedures()) > 0
-		hasDRepActivity := governance.HasDRepActivityCertificates(tx)
-		hasDRepDeregistration := governance.HasDRepDeregistrationCertificates(tx)
-		if !hasGovernance && !hasDRepActivity && !hasDRepDeregistration {
-			continue
-		}
-		if (hasGovernance || hasDRepActivity) && conwayPParams == nil {
-			return errors.New(
-				"missing Conway protocol parameters for governance gap block processing",
-			)
-		}
-		drepInactivityPeriod := uint64(0)
-		govActionLifetime := uint64(0)
-		if conwayPParams != nil {
-			drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
-			govActionLifetime = conwayPParams.GovActionValidityPeriod
-		}
-		if err := governance.ProcessTransactionEffects(
-			tx,
-			point,
-			epochId,
-			drepInactivityPeriod,
-			govActionLifetime,
-			protocolMajor,
-			db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("processing transaction governance: %w", err)
 		}
 	}
 	if err := txn.Commit(); err != nil {

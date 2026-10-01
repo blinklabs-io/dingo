@@ -206,10 +206,9 @@ func intConfigValue(cfg map[string]any, key string) int {
 }
 
 // dsnFromMetadataConfig builds a connection string from Dingo's resolved
-// plugins.storage.metadata.config map. A flat "dsn" key (the pattern used by
-// this repo's own k8s examples, e.g. examples/dingo-gov-lens/k8s/
-// dingo-values.yaml) is used verbatim; otherwise it's assembled from discrete
-// fields the same way database/plugin/metadata/{postgres,mysql}'s own
+// plugins.storage.metadata.config map. A flat "dsn" key is used verbatim;
+// otherwise it's assembled from discrete fields the same way
+// database/plugin/metadata/{postgres,mysql}'s own
 // RegisterProvider descriptor defaults + Start() methods do internally, so
 // this tool connects with the exact credentials the running Dingo node was
 // configured with.

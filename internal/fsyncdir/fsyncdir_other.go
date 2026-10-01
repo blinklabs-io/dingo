@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build !windows
 
 // Package fsyncdir syncs a directory's own entries (a new or renamed
 // file appearing in it) to disk, so that change is durable across a

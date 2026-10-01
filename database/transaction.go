@@ -353,9 +353,11 @@ func (d *Database) SetTransactionWithOpts(
 	for _, utxo := range produced {
 		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
+		var utxoTxHashArray [32]byte
+		copy(utxoTxHashArray[:], txId)
 
 		ref := UtxoRef{
-			TxId:      txHashArray,
+			TxId:      utxoTxHashArray,
 			OutputIdx: outputIdx,
 		}
 		offset, ok := offsets.UtxoOffsets[ref]
@@ -542,8 +544,10 @@ func (d *Database) SetGapBlockTransaction(
 	for _, utxo := range tx.Produced() {
 		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
+		var utxoTxHashArray [32]byte
+		copy(utxoTxHashArray[:], txId)
 		ref := UtxoRef{
-			TxId:      txHashArray,
+			TxId:      utxoTxHashArray,
 			OutputIdx: outputIdx,
 		}
 		offset, ok := offsets.UtxoOffsets[ref]

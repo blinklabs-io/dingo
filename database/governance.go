@@ -142,6 +142,27 @@ func (d *Database) GetActiveGovernanceProposals(
 	return proposals, nil
 }
 
+// GetGovernanceProposalSet returns the Conway proposals set: every proposal
+// not yet enacted, dropped, or soft-deleted.
+func (d *Database) GetGovernanceProposalSet(
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetGovernanceProposalSet(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get governance proposal set: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetExpiringGovernanceProposals returns unratified proposals whose
 // expires_epoch is strictly less than the given epoch and that have not yet
 // been enacted, expired, or soft-deleted.

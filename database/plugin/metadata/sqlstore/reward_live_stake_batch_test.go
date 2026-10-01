@@ -20,6 +20,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // populateRewardLiveStakeBatchFixture writes stake keys under both

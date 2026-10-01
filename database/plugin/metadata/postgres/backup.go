@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package postgres
 
@@ -130,7 +130,7 @@ func validatePostgresBackup(ctx context.Context, srcPath string) error {
 //
 // Any DSN query parameter pgconn doesn't recognize as one of the fields
 // above (e.g. an operator-set "timezone", or a "search_path" isolating
-// tests -- see dialect_integration_test.go's postgresDSNWithSearchPath) is
+// tests -- see database/plugin/metadata/sqlstore/dialect_integration_test.go's postgresDSNWithSearchPath) is
 // preserved in cfg.RuntimeParams, not silently dropped: real libpq (which
 // pg_dump/pg_restore link against, unlike pgx's own lenient Go parser)
 // rejects an unrecognized top-level connection keyword outright, so

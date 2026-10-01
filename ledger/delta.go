@@ -71,6 +71,9 @@ type LedgerDelta struct {
 	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
 	donation     uint64
 	txSlicePtr   *[]TransactionRecord // store original pointer from pool
+	// expandedIndexOffset reserves block indexes consumed by child bodies in
+	// earlier validation deltas for the same block.
+	expandedIndexOffset uint64
 	// skipConsumedInputRecovery applies transaction effects without the
 	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
 	// Set only for the Leios Musashi endorser-block apply, which mirrors the
@@ -96,6 +99,7 @@ func NewLedgerDelta(
 	delta.BlockNumber = blockNumber
 	delta.Offsets = nil // Reset offsets from previous use
 	delta.donation = 0
+	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
@@ -116,6 +120,7 @@ func (d *LedgerDelta) Release() {
 	// Clear offsets to avoid retaining large memory across blocks
 	d.Offsets = nil
 	d.donation = 0
+	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
 	// Return the delta to the pool
@@ -164,104 +169,116 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		protocolMajor = uint64(version.Major)
 	}
 	appliedTxs := make([]bool, len(d.Transactions))
+	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
-
-		// Extract protocol parameter updates
-		updateEpoch, paramUpdates := tr.Tx.ProtocolParameterUpdates()
-		if tr.Tx.IsValid() {
-			if err := governance.ResetDormantDRepExpiryBeforeCertificates(
-				tr.Tx,
-				d.Point,
-				ls.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
-			}
-		}
-
-		// Calculate certificate deposits
-		certs := tr.Tx.Certificates()
-		certDeposits := certDepositsMapPool.Get().(map[int]uint64)
-		// Clear the map
-		for k := range certDeposits {
-			delete(certDeposits, k)
-		}
-		if len(certs) > 0 && !snapshotLoaded {
-			snapshot := ls.loadConsensusSnapshot()
-			if snapshot == nil {
-				certDepositsMapPool.Put(certDeposits)
-				return errors.New(
-					"calculate certificate deposit: consensus snapshot unavailable",
-				)
-			}
-			pparams = snapshot.currentPParams
-			snapshotLoaded = true
-		}
-		for i, cert := range certs {
-			deposit, err := ls.calculateCertificateDeposit(
-				cert,
-				d.BlockEraId,
-				pparams,
+		levels := TransactionLevelsForApply(tr.Tx)
+		childCount := uint64(len(levels)) - 1
+		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
+		storageParentIndex := storageBaseIndex + childCount
+		if storageParentIndex > math.MaxUint32 {
+			return fmt.Errorf(
+				"expanded transaction index out of range: %d",
+				storageParentIndex,
 			)
-			if err != nil {
-				// Return the map to pool before returning error
-				certDepositsMapPool.Put(certDeposits)
-				return fmt.Errorf("calculate certificate deposit: %w", err)
-			}
-			// A nil deposit is unknown, not zero. Leave the index absent so
-			// the store records NULL rather than an authoritative zero that
-			// would later be refunded as zero by value conservation.
-			if deposit != nil {
-				certDeposits[i] = *deposit
-			}
 		}
-
-		// A withdrawal writes the balance it reads, so a credential with a
-		// pending reward round has that round's credit written first.
-		if err := ls.foldRewardCreditsForWithdrawals(tr.Tx, txn); err != nil {
-			certDepositsMapPool.Put(certDeposits)
-			return err
-		}
-		setErr := ls.db.SetTransactionWithOpts(
-			tr.Tx,
-			d.Point,
-			uint32(tr.Index), //nolint:gosec
-			updateEpoch,
-			paramUpdates,
-			certDeposits,
-			d.Offsets,
-			txn,
-			database.BatchedTxIngestOpts{
-				ProtocolMajor:                  protocolMajor,
-				SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
-				StrictAppliedInputConservation: d.strictConsumedInputs,
-				SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
-			},
-		)
-		// Return the map to pool
-		certDepositsMapPool.Put(certDeposits)
-		if setErr != nil {
-			if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
-				return &txValidationError{
-					BlockPoint: d.Point,
-					TxHash:     append([]byte(nil), tr.Tx.Hash().Bytes()...),
-					Inputs:     collectReferencedInputs(tr.Tx),
-					Cause:      setErr,
+		storageIndexOffset += childCount
+		for levelIndex, level := range levels {
+			storageIndex := storageBaseIndex + uint64(levelIndex)
+			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			certs := level.Certificates()
+			certDeposits := certDepositsMapPool.Get().(map[int]uint64)
+			for certIndex := range certDeposits {
+				delete(certDeposits, certIndex)
+			}
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					level,
+					d.Point,
+					ls.db,
+					txn,
+				); err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
 				}
 			}
-			return fmt.Errorf("record transaction: %w", setErr)
-		}
-		appliedTxs[i] = true
+			if len(certs) > 0 && !snapshotLoaded {
+				snapshot := ls.loadConsensusSnapshot()
+				if snapshot == nil {
+					certDepositsMapPool.Put(certDeposits)
+					return errors.New(
+						"calculate certificate deposit: consensus snapshot unavailable",
+					)
+				}
+				pparams = snapshot.currentPParams
+				snapshotLoaded = true
+			}
+			for certIndex, cert := range certs {
+				deposit, err := ls.calculateCertificateDeposit(
+					cert,
+					d.BlockEraId,
+					pparams,
+				)
+				if err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf("calculate certificate deposit: %w", err)
+				}
+				if deposit != nil {
+					certDeposits[certIndex] = *deposit
+				}
+			}
 
-		// Process governance proposals and votes for valid Conway-era transactions
-		if tr.Tx.IsValid() {
-			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
-				return fmt.Errorf("process governance: %w", err)
+			// A withdrawal writes the balance it reads, so a credential with a
+			// pending reward round has that round's credit written first.
+			if err := ls.foldRewardCreditsForWithdrawals(level, txn); err != nil {
+				certDepositsMapPool.Put(certDeposits)
+				return err
+			}
+			setErr := ls.db.SetTransactionWithOpts(
+				level,
+				d.Point,
+				uint32(storageIndex), //nolint:gosec
+				updateEpoch,
+				paramUpdates,
+				certDeposits,
+				d.Offsets,
+				txn,
+				database.BatchedTxIngestOpts{
+					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+					StrictAppliedInputConservation: d.strictConsumedInputs,
+					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
+					ProtocolMajor:                  protocolMajor,
+				},
+			)
+			certDepositsMapPool.Put(certDeposits)
+			if setErr != nil {
+				if errors.Is(setErr, models.ErrRewardWithdrawalExceedsBalance) {
+					return &txValidationError{
+						BlockPoint: d.Point,
+						TxHash:     append([]byte(nil), level.Hash().Bytes()...),
+						Inputs:     collectReferencedInputs(level),
+						Cause:      setErr,
+					}
+				}
+				return fmt.Errorf("record transaction body %d: %w", levelIndex, setErr)
+			}
+			if err := ApplyDijkstraDirectDeposits(
+				ls.db,
+				level,
+				d.Point.Slot,
+				txn,
+			); err != nil {
+				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
+			}
+			if level.IsValid() {
+				if err := d.processGovernance(ls, level, txn); err != nil {
+					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
+				}
 			}
 		}
+		appliedTxs[i] = true
 	}
 
 	// CIP-0163: renew reward-account expirations for the credentials witnessed
@@ -283,7 +300,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			if !appliedTxs[i] {
 				continue
 			}
-			witnessTxs = append(witnessTxs, tr.Tx)
+			witnessTxs = append(witnessTxs, TransactionLevelsForApply(tr.Tx)...)
 		}
 		if err := ls.renewWitnessedAccountExpirations(
 			txn,
@@ -373,20 +390,22 @@ func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) error {
 		if !tr.Tx.IsValid() {
 			continue
 		}
-		don := tr.Tx.Donation()
-		if don == nil || don.Sign() <= 0 {
-			continue
-		}
-		if !don.IsUint64() {
-			return fmt.Errorf(
-				"treasury donation exceeds uint64 range: %s",
-				don.String(),
-			)
-		}
-		var err error
-		donation, err = addUint64(donation, don.Uint64())
-		if err != nil {
-			return fmt.Errorf("accumulate treasury donation: %w", err)
+		for _, level := range TransactionLevelsForApply(tr.Tx) {
+			don := level.Donation()
+			if don == nil || don.Sign() <= 0 {
+				continue
+			}
+			if !don.IsUint64() {
+				return fmt.Errorf(
+					"treasury donation exceeds uint64 range: %s",
+					don.String(),
+				)
+			}
+			var err error
+			donation, err = addUint64(donation, don.Uint64())
+			if err != nil {
+				return fmt.Errorf("accumulate treasury donation: %w", err)
+			}
 		}
 	}
 	return d.donate(donation)
@@ -473,7 +492,7 @@ func (d *LedgerDelta) processGovernance(
 		ls.db,
 		txn,
 	); err != nil {
-		return err
+		return fmt.Errorf("process governance transaction effects: %w", err)
 	}
 
 	return nil

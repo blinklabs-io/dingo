@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"slices"
 	"strings"
 
@@ -2702,6 +2703,13 @@ func parseCommittee(data []byte) (
 	}
 	if quorum.Rat == nil {
 		return nil, nil, errors.New("committee quorum is nil")
+	}
+	// The quorum is a UnitInterval; a value outside [0,1] would otherwise
+	// reach ratification thresholds.
+	if quorum.Sign() < 0 || quorum.Cmp(big.NewRat(1, 1)) > 0 {
+		return nil, nil, fmt.Errorf(
+			"committee quorum %s is outside [0,1]", quorum.Rat,
+		)
 	}
 
 	// Decode the committee map using decodeMapEntries to

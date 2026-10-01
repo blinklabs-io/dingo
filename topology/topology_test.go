@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@ package topology_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +26,49 @@ import (
 	"github.com/blinklabs-io/dingo/topology"
 	"github.com/stretchr/testify/require"
 )
+
+func FuzzNewTopologyConfigFromReader(f *testing.F) {
+	for _, tc := range topologyTests {
+		f.Add(tc.jsonData)
+	}
+	f.Add(
+		`{"localRoots":[],"publicRoots":[],"bootstrapPeers":[],"useLedgerAfterSlot":0}`,
+	)
+
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 1024*1024 {
+			t.Skip("topology corpus input is too large for fast fuzzing")
+		}
+
+		cfg, err := topology.NewTopologyConfigFromReader(
+			strings.NewReader(input),
+		)
+		if err != nil {
+			return
+		}
+		if cfg == nil {
+			return
+		}
+
+		encoded, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("json.Marshal(parsed topology): %v", err)
+		}
+
+		roundTrip, err := topology.NewTopologyConfigFromReader(
+			bytes.NewReader(encoded),
+		)
+		if err != nil {
+			t.Fatalf("NewTopologyConfigFromReader(marshaled topology): %v", err)
+		}
+		if roundTrip == nil {
+			return
+		}
+		if !reflect.DeepEqual(roundTrip, cfg) {
+			t.Fatalf("round-trip topology = %#v, want %#v", roundTrip, cfg)
+		}
+	})
+}
 
 type topologyTestDefinition struct {
 	jsonData       string
