@@ -13899,10 +13899,16 @@ workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
 (`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
 which case validate workers use the same CPU-scaled count. Each gathered batch
-of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
-front and drained back from `Results()` in submission order — the
-pipeline's apply stage guarantees this ordering regardless of which worker
-decodes first — so decode work for multiple blocks can overlap while
+of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline from a
+separate goroutine while the caller drains `Results()` in submission order —
+the pipeline's apply stage guarantees this ordering regardless of which
+worker decodes first. Draining concurrently is required: `Submit` waits once
+`MaxPendingBlocks` sequences are outstanding, and once the `Results()`
+buffer is full the apply stage completes no further sequences until results
+are consumed, so a batch larger than that limit would otherwise stall in
+`Submit`. If a `Submit` fails, the results of the blocks already
+submitted are still drained before the error is returned, so none are left
+for a later batch to read. Decode work for multiple blocks can overlap while
 downstream ledger validation/apply remains fully serial and unchanged. The
 pipeline's own apply stage is a no-op here (`ApplyFunc` is nil): its only
 job in this phase is re-sequencing decoded results, not applying ledger
