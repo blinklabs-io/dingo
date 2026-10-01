@@ -26,8 +26,9 @@ import (
 // scoped journal delete removes exactly the named credentials' rows above the
 // slot from both account_reward_delta and account_withdrawal_witness, across
 // more credentials than one SQLite parameter chunk holds, and leaves rows at
-// or below the slot, rows of unnamed credentials, and rows sharing a named
-// staking key under the other credential tag untouched.
+// or below the slot (including rows at exactly the slot), rows of unnamed
+// credentials, and rows sharing a named staking key under the other
+// credential tag untouched.
 func TestDeleteAccountRewardJournalForCredentialsAfterSlotScope(t *testing.T) {
 	t.Parallel()
 	store, raw := newSharedSQLStore(t)
@@ -49,7 +50,7 @@ func TestDeleteAccountRewardJournalForCredentialsAfterSlotScope(t *testing.T) {
 		return k
 	}
 	seed := func(tag uint8, stakingKey []byte) {
-		for _, s := range []int64{belowSlot, aboveSlot} {
+		for _, s := range []int64{belowSlot, int64(slot), aboveSlot} {
 			txHash := append([]byte{byte(s)}, stakingKey...)
 			_, err := raw.Exec(
 				`INSERT INTO account_reward_delta (
@@ -108,9 +109,12 @@ func TestDeleteAccountRewardJournalForCredentialsAfterSlotScope(t *testing.T) {
 		require.Equal(t, survivorsAbove, count(
 			"SELECT COUNT(*) FROM "+table+" WHERE added_slot > ?", slot,
 		), "%s: only unnamed credentials keep rows above the slot", table)
-		require.Equal(t, totalCredentials, count(
+		require.Equal(t, 2*totalCredentials, count(
 			"SELECT COUNT(*) FROM "+table+" WHERE added_slot <= ?", slot,
 		), "%s: rows at or below the slot are never deleted", table)
+		require.Equal(t, totalCredentials, count(
+			"SELECT COUNT(*) FROM "+table+" WHERE added_slot = ?", slot,
+		), "%s: rows at exactly the slot are never deleted", table)
 		require.Equal(t, 1, count(
 			"SELECT COUNT(*) FROM "+table+
 				" WHERE added_slot > ? AND credential_tag = 1"+
