@@ -7359,6 +7359,13 @@ func epochBoundaryBenchHash(domain byte, index uint64) []byte {
 	return h
 }
 
+func epochBoundaryBenchVRFHash(index uint64) []byte {
+	h := make([]byte, 32)
+	h[0] = 0x11
+	binary.BigEndian.PutUint64(h[24:], index)
+	return h
+}
+
 // splitmix64 gives the fixture a heavy-tailed but reproducible stake
 // distribution without seeding math/rand.
 func splitmix64(x uint64) uint64 {
@@ -7737,15 +7744,16 @@ VALUES (?, ?, 0)`)
 	}
 	for p := range pools {
 		pool := &pools[p]
+		vrfKeyHash := epochBoundaryBenchVRFHash(uint64(p) + 1)
 		_, err := poolStmt.Exec(
-			p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			p+1, pool.key, vrfKeyHash,
 			pool.rewardAccount, pool.margin,
 			strconv.FormatUint(pool.pledge, 10),
 			strconv.FormatUint(pool.cost, 10),
 		)
 		require.NoError(tb, err)
 		_, err = poolRegStmt.Exec(
-			p+1, p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			p+1, p+1, pool.key, vrfKeyHash,
 			pool.rewardAccount, pool.margin,
 			strconv.FormatUint(pool.pledge, 10),
 			strconv.FormatUint(pool.cost, 10),
