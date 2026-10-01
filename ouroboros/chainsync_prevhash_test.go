@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -83,14 +84,12 @@ func testRollForwardPublishesParentHash(t *testing.T, boundary bool) {
 		},
 	))
 
-	select {
-	case evt := <-tipCh:
-		data, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-		require.True(t, ok)
-		require.Equal(t, header.PrevHash().Bytes(), data.ObservedPrevHash)
-		require.Equal(t, byte(0xbb), data.ObservedPrevHash[0])
-		require.Equal(t, boundary, data.ObservedBoundary)
-	case <-time.After(5 * time.Second):
-		t.Fatal("expected the header to be observed")
-	}
+	evt := testutil.RequireReceive(
+		t, tipCh, 5*time.Second, "expected the header to be observed",
+	)
+	data, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+	require.True(t, ok)
+	require.Equal(t, header.PrevHash().Bytes(), data.ObservedPrevHash)
+	require.Equal(t, byte(0xbb), data.ObservedPrevHash[0])
+	require.Equal(t, boundary, data.ObservedBoundary)
 }
