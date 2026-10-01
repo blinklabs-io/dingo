@@ -675,10 +675,7 @@ func EvaluateTxDijkstra(
 	}
 	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
 	if !ok || dijkstraTx == nil {
-		return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
-			"dijkstra evaluation requires *dijkstra.DijkstraTransaction, got %T",
-			tx,
-		)
+		return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
 	}
 	if syntheticV2CostModelInEffect(ls) {
 		if err := dijkstraSyntheticV2CostModelGuard(
