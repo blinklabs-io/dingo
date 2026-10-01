@@ -550,6 +550,20 @@ Each backup call is independently consistent, but `lifecycle.Snapshot` runs the 
 
 **Commit-pause bound and metrics.** The time `lifecycle.Snapshot` holds the commit barrier is recorded in the `dingo_snapshot_commit_pause_seconds` histogram (label `result`: `ok`, `failed`, or `exceeded`) on the database's `PromRegistry`, and the bytes each backup wrote to disk in `dingo_snapshot_bytes_written_total` (label `store`: `blob` or `metadata`); the latter is also the temporary disk a snapshot needs. `lifecycle.WithMaxCommitPause(d)` (a `ManifestOption`, so it flows through `SnapshotToCloud` unchanged) bounds the hold: the clock starts once the barrier is acquired, and when the backups are still running at `d` they are cancelled, the barrier is released, the partial snapshot directory is removed, and `Snapshot` returns an error wrapping `lifecycle.ErrCommitPauseExceeded`. Time spent waiting to acquire the barrier is bounded by the caller's context, not by `d`. Caller cancellation and a failure of either backup follow the same release-and-cleanup path and are not reported as `ErrCommitPauseExceeded`. The default is no bound.
 
+**Storage scale benchmarks.** `make bench-storage-scale` runs `BenchmarkStorageScaleUtxo`, `BenchmarkStorageScaleBlobBlocks` and `BenchmarkStorageScaleSnapshotPause` in `internal/integration` against file-backed Badger and SQLite stores, one iteration per scale (`-benchtime=1x`). Environment knobs:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DINGO_BENCH_SCALE` | `10000` (`1m` under the make target) | Comma-separated UTxO counts; `k`, `m` and `b` suffixes accepted. Invalid values fail the run. |
+| `DINGO_BENCH_UTXOS_PER_BLOCK` | `10` | Block count is UTxOs divided by this (100M UTxOs gives 10M blocks). |
+| `DINGO_BENCH_BLOCK_BYTES` | `32768` | Bytes per block payload. |
+| `DINGO_BENCH_LATENCY_SAMPLES` | `20000` | Latency samples kept per series; later samples are dropped. |
+| `DINGO_BENCH_DATADIR` | temporary directory | Volume the stores and snapshots are written to. Point it at the disk being measured. |
+
+Reported metrics: `lookup-*` and `write-batch-*` (p50, p95, p99, max nanoseconds per UTxO lookup and per 1000-row insert transaction), `read-*` (per block read), `seed-rows/s` and `write-blocks/s`, `disk-bytes` (data directory size), `blob-dir-bytes`, `blob-dir-bytes-after-flatten`, `sst-tables` and `flatten-s` (Badger table count, and size and duration of a forced compaction), `rss-bytes` (process resident set, Linux only), and for the snapshot benchmark `commit-pause-s` (the mean `dingo_snapshot_commit_pause_seconds` observation) with `snapshot-blob-bytes` and `snapshot-metadata-bytes`. RSS is process-wide and includes earlier sub-benchmarks, so compare it across separate runs of one scale rather than within one.
+
+To measure 100M UTxOs: `DINGO_BENCH_SCALE=100m DINGO_BENCH_DATADIR=/path/on/target/volume make bench-storage-scale`. The default block ratio and size write about 320 GB of blocks, and the snapshot benchmark needs further free space of the same order for the snapshot copy. To run one benchmark, call `go test -run='^$' -bench=<name> -benchtime=1x ./internal/integration` directly. Seeding dominates wall-clock time and is outside the timed region. Results are specific to the host and filesystem; record the hardware alongside them.
+
 **Snapshot directory layout**, written by `lifecycle.Snapshot`:
 
 ```
