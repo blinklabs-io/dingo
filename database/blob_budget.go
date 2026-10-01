@@ -30,8 +30,8 @@ import (
 // does not produce a partial blob cleanup, which callers tolerate -- it
 // produces a transaction that can no longer accept even a 35-byte timestamp,
 // so the whole rollback commit fails. On the startup rollback path that
-// leaves a node failing identically on every start
-// (blinklabs-io/dingo#4657). One entry would cover the timestamp; the margin
+// leaves a node failing identically on every start.
+// One entry would cover the timestamp; the margin
 // is larger so that ordinary growth in what a caller stages after its
 // deletes cannot silently consume it.
 const stagedBlobDeleteReserve = 1024

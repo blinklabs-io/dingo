@@ -979,7 +979,7 @@ func (m *Mempool) processChainEvents() {
 	if m.eventBus == nil {
 		return
 	}
-	// Sized for catch-up bursts (one event per block). See #2106.
+	// Sized for catch-up bursts (one event per block).
 	chainUpdateSubId, chainUpdateChan := m.eventBus.SubscribeWithBuffer(
 		chain.ChainUpdateEventType,
 		event.EventQueueSize,

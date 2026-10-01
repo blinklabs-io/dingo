@@ -736,7 +736,7 @@ func (h nonByronTestHeader) Era() gledger.Era {
 // proves that a header whose crypto verification returns a definite (not
 // deferred) error is excluded from chain-selection observation and triggers
 // a connection recycle, instead of being allowed to influence Genesis
-// density or corroboration (dingo #3517).
+// density or corroboration.
 func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	t *testing.T,
 ) {
@@ -1337,7 +1337,7 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 
 // TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor is the regression
 // test for the review finding that the origin-only rescue re-introduced the
-// #2309 violation one layer up.
+// violation one layer up.
 //
 // When the point list is empty because the primary chain is AHEAD on a fork
 // that does not contain the applied ledger tip, the ledger deliberately reports
@@ -1369,12 +1369,12 @@ func TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor(t *testing.T) {
 // the state a chain rewind leaves behind.
 //
 // This distinction is load-bearing: swapping this for the real block hash
-// converts the #2309 test below into the ordinary chain-ahead test beside it,
+// converts the test below into the ordinary chain-ahead test beside it,
 // which asserts the opposite outcome.
 var ledgerTipHashAbsentFromChain = bytes.Repeat([]byte{0xe8}, 32)
 
 // TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly is the
-// #2309 case: the primary chain is AHEAD of the ledger tip, and the ledger
+// case: the primary chain is AHEAD of the ledger tip, and the ledger
 // tip's own block row is missing (so the tip is not an ancestor on the primary
 // chain either). primaryChainTipAtOrAheadOfLedgerTip's ancestor check fails,
 // the authoritative path finds no tip row, and the ahead-gate refuses to anchor
@@ -1433,7 +1433,7 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 
 // TestIntersectPointsChainAheadWithLedgerTipRowPresentAdvertisesChainPoints is
 // the complementary case, and the one that must NOT be conflated with the
-// #2309 test above: the primary chain is ahead of the ledger tip, but the
+// test above: the primary chain is ahead of the ledger tip, but the
 // ledger tip is a real block on that chain. The chain is then a valid forward
 // extension, primaryChainTipAtOrAheadOfLedgerTip's ancestor check passes, and
 // the chain's real points are advertised with origin appended as the usual
@@ -1575,7 +1575,7 @@ func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
 }
 
 // TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork drives the
-// #2309 shape through the real call site: the primary chain is ahead of the
+// shape through the real call site: the primary chain is ahead of the
 // ledger tip on a fork that does not contain it, and the ledger tip row is
 // missing. Nothing may be advertised, so the wire request is origin-only.
 func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
@@ -1999,8 +1999,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 }
 
 // The tests in this file drive Dingo's real ChainSync server callbacks over a
-// real protocol connection using the shared ouroboros-mock harness
-// (blinklabs-io/ouroboros-mock#226), and assert the exact protocol messages the
+// real protocol connection using the shared ouroboros-mock harness,
+// and assert the exact protocol messages the
 // server emits back.
 //
 // This is the difference that matters versus calling the callbacks directly:
@@ -5279,7 +5279,7 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 }
 
 // TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly
-// verifies the fix preserves the protection added in #1699: when peergov
+// verifies the fix preserves the protection against inbound peers: when peergov
 // reports the peer as ineligible (e.g. a random downstream client pulling
 // data from us), its headers must not feed the ledger even though chainsync
 // is running against it.
@@ -5347,8 +5347,7 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 // verifies that when no ChainsyncIngressEligible policy is wired, an inbound
 // full-duplex chainsync client is not treated as ingress-eligible. Outbound
 // chainsync retains its legacy default of eligible so the fix does not
-// regress existing callers that don't pass a policy. Regression guard for
-// the review feedback on issue #1982.
+// regress existing callers that don't pass a policy. Regression guard.
 func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	t *testing.T,
 ) {

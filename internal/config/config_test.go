@@ -79,7 +79,7 @@ func resetGlobalConfig() {
 			VerifyCertificates: true,
 		},
 		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
-		// default (issue #3528) so this test-only reset does not silently
+		// default so this test-only reset does not silently
 		// diverge from what an operator actually gets. Unlike the several
 		// fields above left at their zero value on purpose (StorageMode,
 		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
@@ -2023,7 +2023,7 @@ func exampleConfigPath() string {
 	)
 }
 
-// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// TestLoad_ExampleConfigParses guards against regressions where
 // a single mis-indented line in dingo.yaml.example (the default config
 // shipped to operators) produced a YAML syntax error on startup with no
 // indication of which field was affected. Any change to dingo.yaml.example

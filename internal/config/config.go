@@ -328,7 +328,7 @@ type HistoryExpiryConfig struct {
 }
 
 // KoiosParityConfig controls the in-process Koios reward-parity observer
-// (dingo #3098). When enabled, Dingo subscribes an epoch-boundary observer to
+// When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
 // closed epoch's committed reward state directly against Koios reference
 // data as the node advances, instead of requiring a separate koios-parity
@@ -374,18 +374,18 @@ type KoiosParityConfig struct {
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
 	GraceHours int `yaml:"graceHours"           envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
-	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
 	// DefaultKoiosParityConfig): the in-process observer is the
-	// operationally-real, continuously-driven path #3098 exists to make
+	// operationally-real, continuously-driven path the observer exists to make
 	// possible, unlike the standalone koios-parity CLI's `--accounts` flag,
 	// which stays opt-in-only for cost/compatibility reasons (see
 	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
 	Accounts bool `yaml:"accounts"             envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request issued by the Accounts phase above, by
 	// both address count and encoded body size. 0 for either selects the
 	// package default (koiosparity.koiosAccountChunkSize/
@@ -398,7 +398,7 @@ type KoiosParityConfig struct {
 // observer settings. Strict and Accounts both default to true: once an
 // operator opts into the feature at all (Enabled), the safety-motivated
 // fail-stop behavior (Strict) and the complete per-account exact-parity
-// coverage (Accounts, #3097) it exists for are both on unless explicitly
+// coverage (Accounts) it exists for are both on unless explicitly
 // disabled with --koios-parity-strict=false/--koios-parity-accounts=false or
 // their DINGO_KOIOS_PARITY_STRICT/DINGO_KOIOS_PARITY_ACCOUNTS env var
 // equivalents — matching KoiosParityConfig.Strict/Accounts's and
@@ -673,7 +673,7 @@ type Config struct {
 	// known to be consistent).
 	//
 	// reward_live_stake.utxo_stake is a running total maintained
-	// incrementally by the block-application path (dingo #4421), so this
+	// incrementally by the block-application path, so this
 	// check is also the only automatic reconciliation of that total against
 	// the live UTxO set. Skipping it leaves any drift in place for the whole
 	// life of the process, including across the epoch boundaries whose stake
@@ -702,11 +702,11 @@ type Config struct {
 	// replay loop that reads blocks back from the primary chain and applies
 	// them to the ledger. Not consensus-affecting -- it only changes how
 	// CBOR decode work is scheduled, not validation or apply behavior -- but
-	// defaults off until throughput and stability are proven (issue #1894
-	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
+	// defaults off until throughput and stability are proven (phase 1 of the
+	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"                envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
-	// block-pipeline replay (issue #1894 phase 3). It requires
+	// block-pipeline replay (phase 3 of the pipeline rollout). It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
@@ -754,7 +754,7 @@ type Config struct {
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
 
 	// KoiosParity configures the optional in-process Koios reward-parity
-	// observer (dingo #3098). Disabled by default.
+	// observer Disabled by default.
 	KoiosParity KoiosParityConfig `yaml:"koiosParity"`
 
 	// Off-chain metadata fetcher configuration.
@@ -948,7 +948,7 @@ type APIPluginsConfig struct {
 // not API-specific (the relay/NtN and metrics listeners use it too),
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
-// today with no override need identified by dingo#2996/#2998, so
+// today with no override need identified, so
 // duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
@@ -1234,7 +1234,7 @@ var configMu sync.RWMutex
 // defaulting logic in isolation -- should call this instead of adding a
 // third hand-maintained copy. TestValidateForgedBlockDefaultsToTrue
 // (flags_test.go) is a regression test for exactly this: this literal
-// gained ValidateForgedBlock: true for issue #3528, but
+// gained ValidateForgedBlock: true as the fail-closed forging default, but
 // resetGlobalConfig's copy did not, and no test noticed.
 func newDefaultConfig() *Config {
 	return &Config{

@@ -27,7 +27,7 @@ func mkRefs(n int) []Ref {
 	return refs
 }
 
-// TestChunksBoundsDistinctShapes is the core property for issue #2943: across
+// TestChunksBoundsDistinctShapes is the core property: across
 // every input count in a wide range, only a small, bounded set of distinct SQL
 // shapes (Condition strings) is produced, so the prepared-statement cache can
 // reuse them. Without padding this set would grow with the input count.
@@ -211,7 +211,7 @@ func TestChunksNonPowerOfTwoMaxTerms(t *testing.T) {
 	}
 }
 
-// TestChunksNonPowerOfTwoMaxTermsBoundsShapes is the #2943 property for a
+// TestChunksNonPowerOfTwoMaxTermsBoundsShapes is the same property for a
 // non-power-of-two maxTerms: the distinct-shape set must still be bounded by
 // the powers of two under the effective bound, not gain an extra ragged shape.
 func TestChunksNonPowerOfTwoMaxTermsBoundsShapes(t *testing.T) {

@@ -112,7 +112,8 @@ func TestSyncStateConstants(t *testing.T) {
 	}
 }
 
-// TestManifestKeepsImportIdempotencyIndexes covers issue #3253.
+// TestManifestKeepsImportIdempotencyIndexes covers the import-idempotency index
+// manifest.
 //
 // The import path clears each of these tables by transaction_id once per
 // transaction before re-inserting, so deferring the index the predicate needs

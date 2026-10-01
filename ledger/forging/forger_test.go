@@ -62,7 +62,7 @@ func (f *fakeRemoteKESSigner) Sign(
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
 // opcert-lifetime gate applies inside kesSign itself, not only at its callers
-// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock). dingo#3115's
+// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock).
 // KES agent client bypassed exactly this: it signed through a direct call to
 // the agent instead of through this method, so the opcert-lifetime check both
 // of those callers otherwise rely on never ran for the agent path.
@@ -2279,7 +2279,7 @@ func (c forgerTestSlotClock) SecurityParam() int {
 // TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
 // an active upstream with no admitted target does not suppress forging based on
 // wall-clock distance from the local tip. That distance describes a network
-// quiet stretch, not whether a peer is ahead (issue #4201).
+// quiet stretch, not whether a peer is ahead.
 func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
 	t *testing.T,
 ) {
@@ -3249,7 +3249,7 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 // node never adopted.
 //
 // The forgeForged counter still increments before adoption, which is what
-// PR #2323 required: build-versus-adopt remains observable through
+// the forge metrics require: build-versus-adopt remains observable through
 // forgeForged and forgeCouldNot without publishing an unadopted block.
 func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
 	t *testing.T,
@@ -3749,7 +3749,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			// the forged ranking block's slot (10) or zero: the manifest is
 			// content-addressed, so the same hash could be a distinct,
 			// unrelated occurrence at another slot, and the wrong slot here
-			// would resolve the wrong occurrence (issue #3513 review).
+			// would resolve the wrong occurrence.
 			require.Equal(t, 1, leiosCerts.gotEbSlotCalls)
 			require.Equal(t, uint64(9), leiosCerts.gotEbSlot)
 		})

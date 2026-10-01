@@ -305,7 +305,7 @@ func TestMetadataStoreResourceCleanup(t *testing.T) {
 	})
 }
 
-// oldVotingPowerByTypeSQL is the pre-fix (blinklabs-io/dingo#4364) shape of
+// oldVotingPowerByTypeSQL is the pre-fix shape of
 // drepquery.VotingPowerByTypeSQL for sqlite: it scans every live utxo row and
 // runs a correlated EXISTS subquery against account per row, instead of
 // starting from the small set of drep-delegated accounts and joining outward
@@ -606,7 +606,7 @@ func TestDRepVotingPowerByTypeExpiryBoundary(t *testing.T) {
 }
 
 // TestDRepVotingPowerByTypeQueryPlanDrivesFromAccountNotUtxo is the
-// performance regression check for blinklabs-io/dingo#4364. At this test's
+// performance regression check. At this test's
 // row counts sqlite flattens the pre-fix query's EXISTS into an indexed
 // semi-join rather than literally naming it a "CORRELATED SCALAR SUBQUERY"
 // in EXPLAIN QUERY PLAN output (that wording is what the issue's comment
@@ -615,7 +615,7 @@ func TestDRepVotingPowerByTypeExpiryBoundary(t *testing.T) {
 // is forced to scan every live utxo row regardless of scale, then probe
 // account per row. The fixed query's FROM clause is `account`, so its
 // driving loop scans only the requested drep_type's accounts and probes
-// utxo per row -- the account-first shape from #4364. That FROM-clause
+// UTxO per row -- the account-first shape. That FROM-clause
 // difference, not a cardinality estimate, is what fixes the driving table,
 // so this assertion holds at any data size. Reverting the production fix
 // makes this test fail: drepquery.VotingPowerByTypeSQL would then also plan
@@ -1630,7 +1630,7 @@ func (f *pointerStakeFixture) stakeAt(t *testing.T, slot uint64) uint64 {
 	return stakes[string(f.pool)]
 }
 
-// TestPointerAddressStakeReachesItsCredential is the dingo #3854 regression,
+// TestPointerAddressStakeReachesItsCredential is the regression,
 // driven end to end through Store.SetTransaction and the historical stake
 // query rather than against the resolver in isolation.
 //
@@ -2061,7 +2061,7 @@ func TestPointerAddressStakeResolvesAnInGapRegistration(t *testing.T) {
 // int64. The columns holding it are signed, so the value cannot be stored.
 //
 // The block still has to apply. Failing the write would stall ingestion of a
-// block the network accepted -- the same class of failure #3854 exists to
+// block the network accepted -- the same class of failure exists to
 // avoid -- and the position names no certificate in any case, so the output is
 // simply left unattributed, as a pointer to an unoccupied position is.
 func TestPointerAddressStakeToleratesAnUnrepresentablePosition(t *testing.T) {
@@ -2376,7 +2376,7 @@ VALUES (?, ?, ?, ?)`,
 	require.NoError(t, err)
 }
 
-// TestGetPoolVrfKeyHashAtSlotFollowsRotation is the dingo #3842 regression,
+// TestGetPoolVrfKeyHashAtSlotFollowsRotation is the regression,
 // built from the rotation that wedged a Preview replay at epoch 38.
 //
 // The pool ran on one VRF key from slot 1014930, rotated to a second at slot

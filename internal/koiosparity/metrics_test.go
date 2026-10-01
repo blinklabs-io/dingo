@@ -135,7 +135,7 @@ func TestNewMetricsNilRegistererIsSafe(t *testing.T) {
 }
 
 // TestRecordResultPass drives one PASS result through a real registry and
-// checks every metric this change adds: the result counter, the
+// checks every metric it registers: the result counter, the
 // last-checked-epoch gauge, and the mismatch-count gauge (zero, since PASS
 // carries no mismatches). lastFailEpoch/lastErrorEpoch must stay at their
 // zero value -- a PASS is not "when did this last happen". The vecs
@@ -364,7 +364,7 @@ func TestRecordResultLastFailErrorEpochAreSticky(t *testing.T) {
 // declares "network" as one of its own variable labels conflicts with that
 // constant label, and registerCollector's fallback only recognizes
 // AlreadyRegisteredError, so any other registration error hits its
-// panic(err) branch (dingo#4723).
+// panic(err) branch.
 func TestNewMetricsWithNetworkConstantLabel(t *testing.T) {
 	t.Parallel()
 

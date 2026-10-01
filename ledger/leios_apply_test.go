@@ -219,7 +219,7 @@ WHERE tx_id = ? AND output_idx = ?`,
 // consume is Map.delete on a missing key -- a no-op -- and the transaction's
 // produced outputs are still added.
 //
-// This is the wedge reported as issue #3643 ("UTxO already spent" while
+// This is the wedge reported as ("UTxO already spent" while
 // applying the certified endorser block at ranking-block slot 1864040): the
 // failing apply is the endorser block's, and the conflict is between two
 // *different* certified transactions, so no transaction-hash dedup can address
@@ -1099,12 +1099,12 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 
 // TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency
 // regression from review: the manifest is content-addressed, so the same
-// hash can legitimately be required at two different slots at once (issue
-// #3513). Deduping in-flight fetches by hash alone let a still-in-flight
-// fetch for one slot silently suppress spawn for a different slot of the
-// same hash; awaitFetch's "not in flight" skip-fast then fired the moment
-// the *first* slot's fetch cleared the shared key, leaving the second slot's
-// requirement never fetched at all.
+// hash can legitimately be required at two different slots at once. Deduping
+// in-flight fetches by hash alone let a still-in-flight fetch for one slot
+// silently suppress spawn for a different slot of the same hash; awaitFetch's
+// "not in flight" skip-fast then fired the moment the *first* slot's fetch
+// cleared the shared key, leaving the second slot's requirement never fetched
+// at all.
 func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	t.Parallel()
 
@@ -1306,7 +1306,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 // companion regression to TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots
 // for classifyEndorserBlockFetches: two historical blocks announcing the
 // same hash at different slots must both reach backfill, not collapse to
-// one via the hash-only seen-map dedup (issue #3513 review).
+// one via the hash-only seen-map dedup.
 func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	t *testing.T,
 ) {
@@ -2290,7 +2290,7 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 // blocking set is non-empty and the guard is what decides. On this path a
 // missing closure is already retried by the bounded fetch that follows, so
 // paying a second diffusion window here would add head-of-line blocking on the
-// pipeline for nothing -- exactly what this PR removes.
+// pipeline for nothing.
 func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 	t *testing.T,
 ) {

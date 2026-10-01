@@ -464,7 +464,7 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // same signal NtC clients rely on for a live rollback. Previously this
 // deleted blocks directly with no depth bound and no rollback/iterator
 // signal, silently truncating the chain out from under downstream
-// consumers (issue #3516).
+// consumers.
 //
 // Do not call this before SetLedger: it returns ErrSecurityParamNotConfigured
 // rather than silently pruning without a bound. RewindPrimaryChainAtStartup
@@ -482,15 +482,14 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 // RewindPrimaryChainAtStartup prunes the persistent primary chain back to
 // the specified point without requiring the security parameter K to be
 // configured, for reconciling the primary chain against the ledger's own
-// applied tip during startup -- before SetLedger has run (issue #3516
-// review). It still publishes ChainRollbackEvent/ChainForkEvent and
-// wakes/marks chain iterators exactly once, the same as
-// RewindPrimaryChainToPoint; it only skips the K bound, since a startup
-// gap between two already-durable local stores is not the untrusted-peer
-// scenario that bound protects against. Never call this for a rollback an
-// untrusted peer requested -- use RewindPrimaryChainToPoint (or
-// SecurityParamConfigured to check readiness first) for anything reachable
-// from chainsync.
+// applied tip during startup -- before SetLedger has run. It still publishes
+// ChainRollbackEvent/ChainForkEvent and wakes/marks chain iterators exactly
+// once, the same as RewindPrimaryChainToPoint; it only skips the K bound, since
+// a startup gap between two already-durable local stores is not the
+// untrusted-peer scenario that bound protects against. Never call this for a
+// rollback an untrusted peer requested -- use RewindPrimaryChainToPoint (or
+// SecurityParamConfigured to check readiness first) for anything reachable from
+// chainsync.
 func (cm *ChainManager) RewindPrimaryChainAtStartup(
 	point ocommon.Point,
 ) error {

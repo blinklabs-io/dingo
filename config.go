@@ -79,7 +79,7 @@ type HistoryExpiryConfig struct {
 }
 
 // KoiosParityConfig controls the optional in-process Koios reward-parity
-// observer (dingo #3098). When Enabled, Run() subscribes an observer to the
+// observer. When Enabled, Run() subscribes an observer to the
 // node's own EventBus (event.EpochTransitionEventType) that validates each
 // newly closed epoch's committed reward state directly against Koios
 // reference data as the node advances — see internal/koiosparity and
@@ -116,14 +116,14 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
-	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. A nil pointer defaults to true — see
 	// internalconfig.DefaultKoiosParityConfig — since a plain bool's zero
 	// value (false) can't be distinguished from an explicit opt-out. Pass a
 	// pointer to false to disable account-level checking explicitly.
 	Accounts *bool
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request issued by the Accounts phase above, by
 	// both address count and encoded body size. 0 for either selects the
 	// package default. Unused when Accounts resolves to false.
@@ -1684,7 +1684,7 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
-// chainsync replay loop (issue #1894 phase 1). Not consensus-affecting; off
+// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
 // by default. See LedgerStateConfig.BlockPipelineEnabled.
 func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1693,7 +1693,7 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
-// validate stage to the block-decode pipeline (issue #1894 phase 3). Off by
+// validate stage to the block-decode pipeline (phase 3 of the pipeline). Off by
 // default; requires WithBlockPipelineEnabled. See
 // LedgerStateConfig.BlockPipelineValidateEnabled.
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
@@ -1772,7 +1772,7 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 }
 
 // WithKoiosParity configures the optional in-process Koios reward-parity
-// observer (dingo #3098). See KoiosParityConfig's doc comment. This is how a
+// observer. See KoiosParityConfig's doc comment. This is how a
 // library caller (or internal/node's composition of a real dingo.yaml/env
 // config) enables live-driven parity validation for the node Run() starts —
 // the one-off validation run and a normal sync share the same process and
@@ -1784,7 +1784,7 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 		// internalconfig.DefaultKoiosParityConfig) unless the caller
 		// explicitly opts out via a non-nil pointer to false — a plain bool
 		// field here would make an unset value indistinguishable from an
-		// explicit false, silently disabling #3097's per-account checking.
+		// explicit false, silently disabling per-account checking.
 		accounts := true
 		if cfg.Accounts != nil {
 			accounts = *cfg.Accounts

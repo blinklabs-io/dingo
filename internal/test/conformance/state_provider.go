@@ -196,7 +196,7 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 // UtxoValidateValueNotConservedUtxo's optional type assertion misses and
 // every legacy stake deregistration in the corpus is refunded at the current
 // KeyDeposit. The corpus then cannot distinguish a correct recorded refund
-// from the fallback, which is the gap #3831 covers.
+// from the fallback, which is the gap the recorded-deposit test covers.
 //
 // This mirrors ledger.LedgerView.StakeCredentialDeposit: the account lookup
 // gates on the same live registration state as
@@ -1365,7 +1365,7 @@ var (
 )
 
 // Keep the conformance provider on the same plural committee-authorization
-// capability as the production LedgerView (gouroboros#2574); see
+// capability as the production LedgerView; see
 // LedgerView.CommitteeHotCredentialMembers.
 var _ common.CommitteeHotCredentialMembers = (*DingoStateProvider)(nil)
 

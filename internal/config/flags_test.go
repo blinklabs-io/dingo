@@ -222,8 +222,8 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 }
 
 // TestValidateForgedBlockDefaultsToTrue is a regression test for a
-// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
-// (issue #3528's fail-closed forging default) had no test on the actual
+// gap: DefaultConfig's ValidateForgedBlock: true literal
+// (the fail-closed forging default) had no test on the actual
 // operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
 // separate NewConfig literal covered by
 // TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting

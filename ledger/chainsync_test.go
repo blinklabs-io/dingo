@@ -331,7 +331,7 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 
 // TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests
 // pins the blockfetchRequestsInFlight generalization from a single channel to
-// a slice (issue #4651): with pipelining, two requests can be outstanding on
+// a slice: with pipelining, two requests can be outstanding on
 // the same connection at once (the active batch and one pre-queued "next"
 // request), and gouroboros resolves them strictly FIFO, so the wait must
 // drain both, in order, not return after only the first.
@@ -1913,10 +1913,10 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 			Level: slog.LevelDebug,
 		}),
 	)
-	// Header crypto runs for every slot a Mithril certificate does not cover
-	// (issue #3528), and these synthetic blocks carry no VRF/KES material. An
+	// Header crypto runs for every slot a Mithril certificate does not cover,
+	// and these synthetic blocks carry no VRF/KES material. An
 	// epoch the cache covers but whose nonce is not published yet is the
-	// state a catching-up node is actually in when #3771's wedge appears:
+	// state a catching-up node is actually in when wedge appears:
 	// headerVerificationEpoch reports errEpochNonceUnavailable, which
 	// IsHeaderVerificationDeferred accepts, so the body is admitted and
 	// buffered with its stateful verification deferred instead of being
@@ -2060,8 +2060,8 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 	require.Equal(t, 1, f.ls.chain.HeaderCount())
 }
 
-// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives is issue
-// #3771. Fork resolution rolls the chain back to the common ancestor, queues
+// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives covers a
+// fork restart. Fork resolution rolls the chain back to the common ancestor, queues
 // the winning peer's header path from there, and only then restarts
 // blockfetch. That restart flushes whatever the abandoned batch had already
 // buffered, so the first body from the losing fork reached chain insertion
@@ -2163,7 +2163,7 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
 }
 
-// The bounded-recovery half of #3771: a batch that delivered bodies but
+// The bounded-recovery case: a batch that delivered bodies but
 // extended nothing, while headers stayed queued, must feed the same
 // same-range failure streak a NoBlocks reply feeds, so the range is dropped
 // and a fresh intersect requested rather than being re-requested forever.
@@ -2436,7 +2436,7 @@ func loadRealByronEBB(t *testing.T) models.Block {
 // TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip exercises the
 // real chain-selection caller (ledger/chainsync.go's
 // compareIncomingHeaderToLocalTip) end to end for the exact scenario
-// blinklabs-io/dingo#4413 describes: a locally applied Byron regular tip
+// describes: a locally applied Byron regular tip
 // against a peer's EBB successor sharing its block number. Canonical Byron
 // PBFT counts the boundary block as an additional block despite the shared
 // number, so the incoming EBB must beat the local regular tip.
@@ -3121,7 +3121,7 @@ func TestHandleEventBlockfetch_WarnsOnUnexpectedEventDataType(t *testing.T) {
 // active-connection switch (the newly active connection's next header
 // almost never fits a header queue built by the connection it replaced),
 // and that function previously tore down ANY in-flight batch unconditionally
-// -- bypassing handoffPipelineOnSwitchLocked's #1922 "preserve in-flight
+// -- bypassing handoffPipelineOnSwitchLocked's "preserve in-flight
 // blockfetch batch across chain switch" protection through this side
 // channel. handleEventBlockfetchBlockDeferred only accepts blocks whose
 // connection matches the CURRENT activeBlockfetchConnId, so every block
@@ -3481,7 +3481,7 @@ func assertPeerHeaderHistoryByteAccounting(t *testing.T, ls *LedgerState) {
 // cap -- required to build a path that exceeds MaxQueuedHeaders (the
 // default floor is 10,000), matching the shape of the live-sync freeze this
 // file regression-tests (a single reconciliation event with several
-// thousand fork-path headers, issue #1894 phase 3).
+// thousand fork-path headers, phase 3).
 func buildOverflowForkPath(
 	fixture *chainsyncRollbackFixture,
 	connId ouroboros.ConnectionId,
@@ -3717,7 +3717,7 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 }
 
 // TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow pins the
-// fix for the #1894 phase 3 live-sync freeze: a fork-resolution path whose
+// fix for the phase 3 live-sync freeze: a fork-resolution path whose
 // length exceeds the header queue's capacity fails partway through
 // (chain.ErrHeaderQueueFull) appending onto the current chain tip. Before
 // the fix, tryResolveFork's "fork extends from current tip" loop returned
@@ -4206,7 +4206,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // not been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so
+// EventBus.PublishOrdered, so
 // HandlePeerTipUpdateEvent returns before the lane worker has handed the event
 // to any subscriber. A lane is a FIFO drained by exactly one worker, so a
 // sentinel enqueued after those switches is delivered after them: receiving it
@@ -5003,7 +5003,7 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 }
 
 // TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback
-// captures the wedge described in issue #2177. After the
+// captures the wedge described above. After the
 // "fork extends from current tip" branch queues headers, the chain's
 // header tip sits ahead of the block tip. If the peer then sends a
 // RollBackward to the block tip, the no-op shortcut in
@@ -5358,7 +5358,7 @@ func insertTestDijkstraBlock(
 
 // TestCompareIncomingHeaderToLocalTip_Dijkstra exercises the actual
 // chain-selection caller (ledger/chainsync.go's compareIncomingHeaderToLocalTip,
-// the mechanism issue #3075 identified as reachable from
+// the mechanism identified as reachable from
 // ledger/chainsync.go:1855-1904 and ouroboros/chainsync.go:758) end to end for
 // Dijkstra headers: the local tip is a real Dijkstra block round-tripped
 // through storage (database.BlockByHash -> models.Block.Decode), and the
@@ -5776,7 +5776,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 // TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled is a
 // regression test for a human-review finding: no test failed if
 // handleEventBlockfetchBlockDeferred's Mithril-slot gate were reverted to
-// the previous validationEnabled check. Issue #3528 made header crypto
+// the previous validationEnabled check. made header crypto
 // verification unconditional -- before it, an entire
 // ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert
 // verification and stake-derived leader eligibility for every block. This
@@ -5926,7 +5926,7 @@ func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
 }
 
-// --- non-extending-block flood demotion (issue #4272) ---
+// --- non-extending-block flood demotion ---
 
 // TestEvaluateNonExtendingBlockRejection exercises the pure threshold/window
 // decision directly against synthetic timestamps, matching
@@ -6359,7 +6359,7 @@ func TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled(t *testing.T) {
 	)
 }
 
-// Regression for #2107: replayBufferedHeadersAsync must be a no-op once
+// Regression: replayBufferedHeadersAsync must be a no-op once
 // Close has been observed, so its goroutine can never reach DB reads
 // after the database is closed.
 func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
@@ -6387,7 +6387,7 @@ func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
 	)
 }
 
-// Regression for #2107: Close must drain in-flight replay goroutines
+// Regression: Close must drain in-flight replay goroutines
 // before returning, so callers (Node.shutdown phase 3) can safely close
 // the database without racing the replay's DB reads.
 func TestCloseWaitsForInFlightReplay(t *testing.T) {
@@ -6425,7 +6425,7 @@ func TestCloseWaitsForInFlightReplay(t *testing.T) {
 
 	// With closed=true and the worker blocked on chainsyncMutex, Close
 	// must not return: doing so would close the DB while the worker is
-	// still alive (the original #2107 panic).
+	// still alive.
 	testutil.RequireNoReceive(
 		t,
 		closeReturned,
@@ -6583,7 +6583,7 @@ func TestRequestChainsyncResyncDefersPublishUnderChainsyncBlockfetchMutex(
 // A crossable rollback the node actually applies must not leave its point in
 // the per-connection loop detector. Otherwise a later, legitimate rollback to
 // the same fork point counts the crossing we already made and is suppressed as
-// a false loop, which is the reconnect-churn wedge in issue #2790.
+// a false loop, which is the reconnect-churn wedge.
 func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	t *testing.T,
 ) {
@@ -6607,7 +6607,7 @@ func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	}
 }
 
-// The #2790 loop shape: after crossing a fork point the node advances forward
+// The loop shape: after crossing a fork point the node advances forward
 // on the peer's chain, then the peer rolls it back to the same fork point
 // again. Because the successful first cross reset the loop counter, the second
 // crossable rollback must be applied, not suppressed as a false loop.
@@ -6652,10 +6652,10 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 }
 
 // When the loop detector breaks a loop for a genuinely un-crossable rollback,
-// the skip path must surface the stuck condition through the point-keyed #2728
+// the skip path must surface the stuck condition through the point-keyed
 // unrecoverable-rollback tracker so the escalation and metric can fire,
 // instead of silently skipping and hiding a persistently un-recoverable
-// divergence (issue #2790 bullet 6).
+// divergence.
 func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 	t *testing.T,
 ) {
@@ -6702,8 +6702,7 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 
 // A crossable rollback that reaches the per-connection loop threshold must
 // still be APPLIED, not suppressed as a false loop: the loop detector only
-// breaks loops for rollbacks the node cannot cross (issue #2790, requirement
-// 1). This exercises the appliability guard directly by pre-seeding history to
+// breaks loops for rollbacks the node cannot cross. This exercises the appliability guard directly by pre-seeding history to
 // the threshold, unlike the reset-on-success path which never reaches it.
 func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	t *testing.T,
@@ -7042,7 +7041,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	// applied even when it repeats (see
 	// TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback and
 	// TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold),
-	// which is the issue #2790 fix.
+	// which is the fix.
 	uncrossablePoint := ocommon.Point{
 		Slot: fixture.currentTip.Point.Slot - 3,
 		Hash: testHashBytes("uncrossable-missing-fork-block"),
@@ -7073,7 +7072,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 }
 
 // TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip
-// covers issue #3516's rollback-depth bound: the common ancestor between the
+// covers rollback-depth bound: the common ancestor between the
 // diverged primary chain and the stale ledger tip here sits 3 blocks behind
 // the primary chain's tip, beyond the fixture's K=2. Live reconciliation
 // must decline rather than force that rewind through, leaving chain and
@@ -7153,7 +7152,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 }
 
 // TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor
-// covers wolf31o2's review on PR #3611: when an over-K rollback triggers
+// covers wolf31o2's review on when an over-K rollback triggers
 // reconcileLivePrimaryChainLedgerDivergence and the common ancestor that
 // reconciliation itself finds sits at or below the Mithril boundary,
 // reconcilePrimaryChainTipWithLedgerTip's own pre-check (added earlier
@@ -7372,7 +7371,7 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 }
 
 // TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile is the
-// pipeline-level regression a wolf31o2 review on PR #3611 required.
+// pipeline-level regression a wolf31o2 review on required.
 // TestLedgerReadChainRequestsResyncOnOverKReconcile above only proves
 // ledgerReadChain itself returns and publishes a resync event; it says
 // nothing about what happens to block processing afterward. Before this
@@ -7381,11 +7380,10 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 // turned into a nil error -- ledgerProcessBlocksWithAttempt's err == nil
 // branch then exited its restart loop for good, permanently and silently
 // halting all ledger block processing with nothing to resume it short of a
-// full LedgerState restart. That the K-bounded rewind added by #3516 is
+// full LedgerState restart. That the K-bounded rewind is
 // what made this branch reachable at all (RewindPrimaryChainToPoint had no
-// bound before) is what makes this a merge blocker for this PR rather than
-// a candidate for the general, already-deferred pattern tracked in issue
-// #3776.
+// bound before) is why it must be fixed here rather than
+// folded into the general, already-deferred pattern.
 //
 // This wires the real ledgerReadChain/ledgerProcessBlocksFromSource pair
 // through ledgerProcessBlocksWithAttempt exactly as production
@@ -7561,7 +7559,7 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 	// so it cannot be exempted as Mithril-covered either (that would forbid
 	// the very rollback this fork resolution performs). An unverified fork
 	// header is still admitted onto the local header chain -- that's
-	// ordinary, safe chain-shape bookkeeping -- but issue #3528 requires
+	// ordinary, safe chain-shape bookkeeping -- but requires
 	// genuine trust (real verification or a Mithril certificate) before it
 	// may advance the shared "trusted sync progress" frontier
 	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
@@ -7836,7 +7834,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 }
 
 // TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip covers
-// issue #3516's rollback-depth bound from the fork-resolution call site: the
+// rollback-depth bound from the fork-resolution call site: the
 // common ancestor here sits 3 blocks behind the fixture's K=2, so live
 // reconciliation must decline the rewind rather than force it through, and
 // fork resolution must fall back to rejecting the fork and requesting a
@@ -10410,7 +10408,7 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 // and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
 //
 // currentBoundarySPOStakeState is a second read at the same point, resolving
-// mark[NewEpoch] for RATIFY's SPO tally (dingo#4441). Its position is load
+// mark[NewEpoch] for RATIFY's SPO tally. Its position is load
 // bearing for the same reason: when no SNAP-point distribution was stashed it
 // reconstructs the boundary itself, and the reconstruction counts reward
 // deltas up to and including the boundary slot. Moved below
@@ -11006,7 +11004,7 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
-		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// its slot Mithril-covered so the header crypto gate (:
 		// required by default, exempt only for a Mithril-certified slot)
 		// exempts it, letting this test isolate batch-ownership bookkeeping
 		// from crypto verification.
@@ -11107,7 +11105,7 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
-		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// its slot Mithril-covered so the header crypto gate (:
 		// required by default, exempt only for a Mithril-certified slot)
 		// exempts it, letting this test isolate connection-equivalence
 		// bookkeeping from crypto verification.
@@ -12011,7 +12009,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate frontier-tracking from crypto verification.
 	ls.mithrilLedgerSlot = accepted.slot
@@ -12101,7 +12099,7 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 		},
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate connection-buffering from crypto verification.
 	ls.mithrilLedgerSlot = header1.slot
@@ -12412,7 +12410,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate buffered-header replay from crypto verification.
 	ls.mithrilLedgerSlot = 1
@@ -14924,7 +14922,7 @@ func loadByronGenesisForTest(
 // epoch's era) instead, matching what verify_header.go already does and
 // what the function's own comment claims it does.
 //
-// This is the smaller of the two distinct VRF wedges in #2125: the bug
+// This is the smaller of the two distinct VRF wedges: the bug
 // only fires at TPraos→Praos boundaries (Alonzo→Babbage) because that's
 // the only transition where the two stability-window formulas disagree.
 // All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,
@@ -15066,7 +15064,7 @@ func newAlonzoToBabbageStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
 }
 
 // TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff
-// reproduces the persisted-state shape that issue #2128 reports after a
+// reproduces the persisted-state shape that reports after a
 // Mithril bootstrap inside a Conway epoch:
 //
 //   - The bootstrap epoch row carries CandidateNonce == EvolvingNonce
@@ -15090,7 +15088,7 @@ func newAlonzoToBabbageStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
 // candidate (i.e. it inherited prevEpoch.CandidateNonce without ever
 // iterating past the cutoff), the next epoch's nonce diverges from peers
 // and every header in that epoch fails VRF verification — the freeze
-// described in #2128.
+// described by this test.
 func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 	t *testing.T,
 ) {
@@ -15375,7 +15373,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 // TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint covers
 // the operational hazard where a deployment was bootstrapped with an
 // importer that did not write the block_nonce checkpoint at the
-// snapshot tip slot (older code paths predating PR #2032). Branch B
+// snapshot tip slot. Branch B
 // in calculateEpochNonce searches for a block_nonce row matching
 // prevEpoch.EvolvingNonce; with no checkpoint that row does not
 // exist, and the resume seam is not found.
@@ -16457,7 +16455,7 @@ func constitutionRowCount(t *testing.T, db *database.Database) int {
 }
 
 // TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap is the
-// same-bug-class regression test the #4151 PR review recommended: it
+// same-bug-class regression test the PR review recommended: it
 // found that SetGenesisStaking (and SetGenesisGovernance, covered by
 // TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap below)
 // weren't gated by the same bootstrappedFromMithril guard as genesis UTxO
@@ -16886,7 +16884,7 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 }
 
 // TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap is the
-// regression test for blinklabs-io/dingo#4151: after a Mithril bootstrap,
+// regression test: after a Mithril bootstrap,
 // createGenesisBlock unconditionally recreated every Byron/Shelley genesis
 // UTxO as a live row, without checking whether the imported ledger snapshot
 // already reflects that output as spent. Found via cmd/node-parity against

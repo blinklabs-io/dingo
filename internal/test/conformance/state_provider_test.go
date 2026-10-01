@@ -249,7 +249,7 @@ func stakeDepositVectorTx(
 }
 
 // TestConformanceProviderRefundsRecordedStakeDepositNotKeyDeposit is the
-// regression test for #3831. It runs gouroboros'
+// It runs gouroboros'
 // UtxoValidateValueNotConservedUtxo against the conformance state provider
 // with a recorded deposit of 5 ADA while the KeyDeposit in force during
 // validation is 2 ADA.
