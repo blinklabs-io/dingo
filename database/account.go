@@ -316,6 +316,26 @@ func (d *Database) AddAccountRewardByCredential(
 	)
 }
 
+// AddAccountRewardsByCredential applies a batch of reward credits with the
+// effect of one AddAccountRewardByCredential call per credit; see
+// metadata.MetadataStore.AddAccountRewardsByCredential.
+func (d *Database) AddAccountRewardsByCredential(
+	credits []models.AccountRewardCredit,
+	txn *Txn,
+) error {
+	if len(credits) == 0 {
+		return nil
+	}
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.AddAccountRewardsByCredential(
+			credits, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to add account rewards: %w", err)
+		}
+		return nil
+	})
+}
+
 // AddPostSnapshotAccountRewardByCredential credits a reward account with an
 // epoch-boundary credit that cardano-ledger applies AFTER the boundary stake
 // snapshot (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and

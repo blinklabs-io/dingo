@@ -48,7 +48,8 @@ package ledgerstate
 //   - DataHash (SafeHash): PackedBytes 32 = 32 raw bytes, big-endian
 //     Word64 packing inside PackedBytes.
 //
-//   - DataHash32: 4 * Word64 LE = 32 bytes (same physical layout).
+//   - DataHash32: 4 * Word64 LE = 32 bytes. Each word must be
+//     converted to big-endian bytes to reconstruct the hash digest.
 //
 //   - Datum (era): tag 0=NoDatum, tag 1=DatumHash(+32 bytes),
 //     tag 2=Datum(+BinaryData as ShortByteString)
@@ -566,6 +567,13 @@ func decodeTxOutAddrHash28(
 				"reading DataHash32: %w", err,
 			)
 		}
+		// MemPack serializes DataHash32 as Word64s, whereas the hash
+		// digest uses PackedBytes32's big-endian representation. The
+		// SafeHash fields in the other TxOut variants are already bytes.
+		for i := 0; i < len(datumHash); i += 8 {
+			word := binary.LittleEndian.Uint64(datumHash[i : i+8])
+			binary.BigEndian.PutUint64(datumHash[i:i+8], word)
+		}
 	}
 
 	// Reconstruct the full Shelley address from Addr28Extra
@@ -794,10 +802,15 @@ func decodeFlatMultiAsset(
 		uniquePidOffs[entries[i].pidOff] = struct{}{}
 	}
 
-	// Compute the sum of known name lengths from non-last
-	// assets (bounded by adjacent name offsets). Offsets are
-	// ascending since names are stored contiguously in entry
-	// order.
+	// Validate name offsets are non-decreasing and compute the sum of
+	// per-step gaps between adjacent entries. This sum telescopes to
+	// entries[last].nameOff - entries[0].nameOff regardless of how many
+	// entries share a duplicated (repeated) offset along the way, so it
+	// remains a correct total even though a later, offset-keyed pass
+	// computes each individual asset's name length. A negative gap
+	// means a backward-pointing offset, which is real corruption (as
+	// opposed to a repeated offset that exactly matches an earlier
+	// entry's, which is valid deduplication) and is rejected here.
 	knownNameBytes := 0
 	for i := range numAssets - 1 {
 		nameLen := entries[i+1].nameOff - entries[i].nameOff
@@ -848,6 +861,37 @@ func decodeFlatMultiAsset(
 
 	namesContentEnd := len(flat)
 
+	// Build a map from each distinct asset-name offset to its length.
+	// The Haskell encoder (toCompact in Value.hs) deduplicates asset
+	// names: when two or more entries carry byte-identical names, the
+	// name is written ONCE in Region E and every such entry's nameOff
+	// points at that single occurrence. entries[].nameOff is already
+	// validated above to be non-decreasing, so walking entries in
+	// order and recording the first occurrence of each offset yields
+	// the distinct offsets in ascending order -- mirroring the
+	// reference decoder's `nubOrd` step (Value.hs `from`). Each
+	// distinct offset's length is the gap to the next larger distinct
+	// offset, or to the end of the buffer for the largest one, which
+	// also matches the encoder's special case of pointing a genuinely
+	// empty asset name past the end of Region E.
+	distinctNameOffsets := make([]int, 0, numAssets)
+	seenNameOffsets := make(map[int]struct{}, numAssets)
+	for i := range numAssets {
+		off := entries[i].nameOff
+		if _, ok := seenNameOffsets[off]; !ok {
+			seenNameOffsets[off] = struct{}{}
+			distinctNameOffsets = append(distinctNameOffsets, off)
+		}
+	}
+	nameLenByOffset := make(map[int]int, len(distinctNameOffsets))
+	for i, off := range distinctNameOffsets {
+		end := namesContentEnd
+		if i+1 < len(distinctNameOffsets) {
+			end = distinctNameOffsets[i+1]
+		}
+		nameLenByOffset[off] = end - off
+	}
+
 	assets := make([]ParsedAsset, numAssets)
 
 	for i := range numAssets {
@@ -864,12 +908,13 @@ func decodeFlatMultiAsset(
 		policyId := make([]byte, 28)
 		copy(policyId, flat[e.pidOff:e.pidOff+28])
 
-		// Extract asset name from absolute offset. Names are
-		// stored contiguously in entry order with ascending
-		// offsets. Validate offset bounds for all assets
-		// (not just those with non-zero length) to catch
-		// corrupted offsets consistently.
-		var assetName []byte
+		// Extract asset name from absolute offset. Names may be
+		// deduplicated, so several entries can share one nameOff
+		// when their names are byte-identical: look the length up
+		// by offset (nameLenByOffset), not by position relative to
+		// the next entry, so every entry sharing an offset decodes
+		// the same (correct) name rather than the earlier ones
+		// getting a spurious zero length.
 		if e.nameOff > len(flat) {
 			return nil, fmt.Errorf(
 				"asset name offset %d for asset %d "+
@@ -877,37 +922,23 @@ func decodeFlatMultiAsset(
 				e.nameOff, i, len(flat),
 			)
 		}
-		if i+1 < numAssets {
-			nameLen := entries[i+1].nameOff - e.nameOff
-			nameEnd := e.nameOff + nameLen
-			if nameEnd > len(flat) {
-				return nil, fmt.Errorf(
-					"asset name offset %d "+
-						"(len %d) out of "+
-						"bounds (flat len %d)",
-					e.nameOff, nameLen,
-					len(flat),
-				)
-			}
-			if nameLen > 0 {
-				assetName = make([]byte, nameLen)
-				copy(
-					assetName,
-					flat[e.nameOff:nameEnd],
-				)
-			}
-		} else {
-			// Last asset: name extends to the end of
-			// the buffer (no padding in the rep).
-			nameLen := namesContentEnd - e.nameOff
-			if nameLen > 0 {
-				assetName = make([]byte, nameLen)
-				copy(
-					assetName,
-					flat[e.nameOff:namesContentEnd],
-				)
-			}
+		nameLen := nameLenByOffset[e.nameOff]
+		nameEnd := e.nameOff + nameLen
+		if nameEnd > len(flat) {
+			return nil, fmt.Errorf(
+				"asset name offset %d (len %d) for "+
+					"asset %d out of bounds "+
+					"(flat len %d)",
+				e.nameOff, nameLen, i, len(flat),
+			)
 		}
+		// Always allocate, even for a zero-length name. A
+		// genuinely empty asset name is valid on Cardano and
+		// must decode as a proper empty byte slice, never Go
+		// nil -- a nil Name encodes as CBOR null instead of an
+		// empty bytestring, corrupting the stored asset.
+		assetName := make([]byte, nameLen)
+		copy(assetName, flat[e.nameOff:nameEnd])
 
 		assets[i] = ParsedAsset{
 			PolicyId: policyId,

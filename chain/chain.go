@@ -358,6 +358,29 @@ func (c *Chain) headerTip() ochainsync.Tip {
 	}
 }
 
+// IsFirstOnHeaderChain reports whether a header with the given hash is the
+// first header of a chain that has no applied block: the primary tip is at
+// origin and no queued header precedes it.
+//
+// Chainsync verifies and queues headers ahead of blockfetch applying any
+// block, so the primary tip alone cannot tell the first header from a later
+// one while the queue is filling. addBlockHeader anchors non-first headers to
+// the header tip for the same reason. Rolling back to origin drops the queue,
+// so the answer is true again afterwards.
+func (c *Chain) IsFirstOnHeaderChain(hash []byte) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	tip := c.currentTip
+	if tip.Point.Slot != 0 || len(tip.Point.Hash) != 0 {
+		return false
+	}
+	return len(c.headers) == 0 ||
+		bytes.Equal(c.headers[0].point.Hash, hash)
+}
+
 // MaxQueuedHeaders returns the maximum number of headers that may be
 // queued. The limit is the larger of securityParam * 2 and
 // DefaultMaxQueuedHeaders. Using the default as a floor ensures the
@@ -439,6 +462,23 @@ func (c *Chain) addBlockHeader(
 				queued.blockNumber,
 				headerTip.BlockNumber,
 			)
+		}
+		// The prev-hash check above makes the header tip this header's
+		// parent. A Byron epoch-boundary header passes the block-number rule
+		// with its parent's number and carries no signature, so this is the
+		// only check that keeps one from extending a post-Byron block.
+		parentEra, found, err := c.parentEraLocked(queued.prevHash)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve parent era of header %s: %w",
+				headerHash.String(),
+				err,
+			)
+		}
+		if found {
+			if err := CheckEraOrder(header.Era().Id, parentEra); err != nil {
+				return fmt.Errorf("header %s: %w", headerHash.String(), err)
+			}
 		}
 	} else if c.atOriginAfterMutation() &&
 		!firstBlockNumberValid(queued.blockNumber) {
@@ -1703,7 +1743,7 @@ func (c *Chain) rollbackPointBlock(
 		occupantHash = occupant.Hash
 	}
 	c.manager.recordRollbackPointNotOnChain()
-	slog.Default().Error(
+	slog.Default().Warn(
 		"cross-fork splice prevented: rejecting rollback to a point this chain no longer holds",
 		"component", "chain",
 		"chain_id", c.id,
@@ -2612,6 +2652,22 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 		return models.Block{}, models.ErrBlockNotFound
 	}
 	return result, nil
+}
+
+// HoldsPoint reports whether point is currently part of this chain. A block
+// that remains resolvable only through the manager's retained-block cache
+// after a rollback, or that lives on a fork, is not held.
+func (c *Chain) HoldsPoint(point ocommon.Point) bool {
+	if c == nil || c.manager == nil {
+		return false
+	}
+	blk, err := c.BlockByPoint(point, nil)
+	if err != nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.holdsBlockAtIndex(blk.ID, point.Hash)
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with

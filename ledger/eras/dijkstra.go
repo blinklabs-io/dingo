@@ -18,12 +18,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
@@ -268,14 +270,15 @@ func ValidateTxDijkstra(
 			)
 		}
 	}
-	// CIP-23: reject pool registration certificates whose margin is below the
-	// operator-configured minimum pool margin. No-op when disabled (nil floor).
-	// Wired only here, so Conway and earlier eras are unaffected.
-	if err := checkPoolMarginFloor(
-		tx.Certificates(),
-		minPoolMarginFromLedgerState(ls),
-	); err != nil {
-		errs = append(errs, err)
+	// Pool registration is an ENTITIES transition, so its operator-configured
+	// margin floor applies only when the transaction's body effects are valid.
+	if tx.IsValid() {
+		if err := checkPoolMarginFloor(
+			tx.Certificates(),
+			minPoolMarginFromLedgerState(ls),
+		); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if err := validateParameterChangeExcludesProtocolVersion(tx, slot, ls, pp); err != nil {
 		errs = append(
@@ -311,6 +314,9 @@ func ValidateTxDijkstra(
 	// for Dijkstra guarding redeemers and sub-transaction witness scripts.
 	phase2Tx, err := dijkstraTransactionForPhase2(tx)
 	if err != nil {
+		return err
+	}
+	if err := validateDijkstraPlutusV4ReferenceInputOverlap(phase2Tx, ls); err != nil {
 		return err
 	}
 	phase2Err := gdijkstra.UtxoValidatePlutusScripts(
@@ -389,10 +395,6 @@ func buildDijkstraValidationRules() []indexedUtxoValidationRule {
 	)
 	ret = append(ret,
 		indexedUtxoValidationRule{
-			index:          indexes[0],
-			validationFunc: validateDijkstraPlutusV3ReferenceInputs,
-		},
-		indexedUtxoValidationRule{
 			index:          indexes[1],
 			validationFunc: validateCommitteeCertificates,
 		},
@@ -424,6 +426,170 @@ func dijkstraTransactionForPhase2(
 	phase2Tx := *dijkstraTx
 	phase2Tx.TxIsValid = true
 	return &phase2Tx, nil
+}
+
+type dijkstraPlutusScriptLevel struct {
+	body       lcommon.TransactionBody
+	witnesses  lcommon.TransactionWitnessSet
+	resolved   []lcommon.Utxo
+	overlap    lcommon.TransactionInput
+	hasOverlap bool
+}
+
+// validateDijkstraPlutusV4ReferenceInputOverlap supplies the Plutus V4
+// context-construction check missing from gOuroboros v0.208.0. It checks each
+// transaction level only when that level has a redeemer for an available V4
+// script, matching the script execution boundary in the ledger rules.
+func validateDijkstraPlutusV4ReferenceInputOverlap(
+	tx *gdijkstra.DijkstraTransaction,
+	ls lcommon.LedgerState,
+) error {
+	subTransactions := tx.Body.TxSubTransactions.Items()
+	levels := make([]dijkstraPlutusScriptLevel, 0, len(subTransactions)+1)
+	for index := range subTransactions {
+		levels = append(levels, dijkstraPlutusScriptLevel{
+			body:      &subTransactions[index].Body,
+			witnesses: subTransactions[index].WitnessSet,
+		})
+	}
+	levels = append(levels, dijkstraPlutusScriptLevel{
+		body:      &tx.Body,
+		witnesses: tx.WitnessSet,
+	})
+	hasOverlap := false
+	for levelIndex := range levels {
+		level := &levels[levelIndex]
+		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(level.body)
+		hasOverlap = hasOverlap || level.hasOverlap
+	}
+	if !hasOverlap {
+		return nil
+	}
+	if !dijkstraLevelsHaveRedeemers(levels) {
+		return nil
+	}
+	if ls == nil {
+		return errors.New("ledger state is required for Dijkstra script validation")
+	}
+
+	available := make(map[lcommon.ScriptHash]lcommon.Script)
+	for levelIndex := range levels {
+		level := &levels[levelIndex]
+		inputs, referenceInputs, err := resolveDijkstraScriptLevelInputs(
+			level.body,
+			ls,
+		)
+		if err != nil {
+			return err
+		}
+		level.resolved = script.ConcatResolvedInputs(inputs, referenceInputs)
+		maps.Copy(available, script.PlutusWitnessScripts(level.witnesses))
+		for _, utxo := range level.resolved {
+			if utxo.Output == nil {
+				continue
+			}
+			candidate := utxo.Output.ScriptRef()
+			if candidate == nil {
+				continue
+			}
+			if _, ok := lcommon.PlutusScriptVersion(candidate); ok {
+				available[candidate.Hash()] = candidate
+			}
+		}
+	}
+
+	for _, level := range levels {
+		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
+			continue
+		}
+		redeemers := make(map[lcommon.RedeemerKey]struct{})
+		for key := range level.witnesses.Redeemers().Iter() {
+			redeemers[key] = struct{}{}
+		}
+		if !level.hasOverlap {
+			continue
+		}
+		for _, needed := range script.ScriptPurposes(level.body, level.resolved) {
+			if _, ok := redeemers[needed.Key]; !ok {
+				continue
+			}
+			candidate, ok := available[needed.Purpose.ScriptHash()]
+			if !ok {
+				continue
+			}
+			version, ok := lcommon.PlutusScriptVersion(candidate)
+			if !ok || version != 3 {
+				continue
+			}
+			return conway.ScriptContextConstructionError{
+				Err: fmt.Errorf(
+					"plutus V4 reference input %s is also a regular input",
+					level.overlap.String(),
+				),
+			}
+		}
+	}
+	return nil
+}
+
+func dijkstraLevelsHaveRedeemers(levels []dijkstraPlutusScriptLevel) bool {
+	for _, level := range levels {
+		if level.witnesses == nil || level.witnesses.Redeemers() == nil {
+			continue
+		}
+		for range level.witnesses.Redeemers().Iter() {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveDijkstraScriptLevelInputs(
+	body lcommon.TransactionBody,
+	ls lcommon.LedgerState,
+) (inputs, referenceInputs []lcommon.Utxo, err error) {
+	inputs = make([]lcommon.Utxo, 0, len(body.Inputs()))
+	for _, input := range body.Inputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, nil, lcommon.InputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		inputs = append(inputs, utxo)
+	}
+	referenceInputs = make(
+		[]lcommon.Utxo,
+		0,
+		len(body.ReferenceInputs()),
+	)
+	for _, input := range body.ReferenceInputs() {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, nil, lcommon.ReferenceInputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		referenceInputs = append(referenceInputs, utxo)
+	}
+	return inputs, referenceInputs, nil
+}
+
+func dijkstraReferenceInputOverlap(
+	body lcommon.TransactionBody,
+) (lcommon.TransactionInput, bool) {
+	inputs := make(map[string]struct{}, len(body.Inputs()))
+	for _, input := range body.Inputs() {
+		inputs[input.String()] = struct{}{}
+	}
+	for _, input := range body.ReferenceInputs() {
+		if _, ok := inputs[input.String()]; ok {
+			return input, true
+		}
+	}
+	return nil, false
 }
 
 func EvaluateTxDijkstra(

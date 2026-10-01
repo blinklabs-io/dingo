@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
@@ -132,64 +133,60 @@ func TestTxBodyMapValueRangeMissingKey(t *testing.T) {
 	require.False(t, found)
 }
 
-func TestExtractInvalidTxIndices_PreAlonzo(t *testing.T) {
+func TestRawBlockTransactionValidity_PreAlonzo(t *testing.T) {
 	t.Parallel()
 
-	const blockHex = "8480808080"
-
-	blockBytes, err := hex.DecodeString(blockHex)
+	// Shelley through Mary blocks carry no invalid_transactions field.
+	block, err := cbor.Encode([]any{
+		uint64(0),
+		[]cbor.RawMessage{
+			cbor.RawMessage(rawInvalidTxTestBody(t, 1)),
+			cbor.RawMessage(rawInvalidTxTestBody(t, 2)),
+		},
+		[]any{map[uint64]any{}, map[uint64]any{}},
+		map[uint64]any{},
+	})
+	require.NoError(t, err)
+	offsets, err := lcommon.ExtractTransactionOffsets(block)
 	require.NoError(t, err)
 
-	var blockArray []cbor.RawMessage
-	_, err = cbor.Decode(blockBytes, &blockArray)
+	validity, err := rawBlockTransactionValidity(offsets)
 	require.NoError(t, err)
-	require.Len(t, blockArray, 4)
-
-	invalidTxs, err := extractInvalidTxIndices(blockBytes)
-	require.NoError(t, err)
-	require.Empty(t, invalidTxs)
+	require.Equal(t, []bool{true, true}, validity)
 }
 
-func TestExtractInvalidTxIndices_AlonzoEmpty(t *testing.T) {
+func TestRawBlockTransactionValidity_AlonzoEmpty(t *testing.T) {
 	t.Parallel()
 
-	const blockHex = "858080808080"
-
-	blockBytes, err := hex.DecodeString(blockHex)
+	offsets, err := lcommon.ExtractTransactionOffsets(rawInvalidTxTestBlock(
+		t,
+		[][]byte{rawInvalidTxTestBody(t, 1), rawInvalidTxTestBody(t, 2)},
+		nil,
+	))
 	require.NoError(t, err)
 
-	var blockArray []cbor.RawMessage
-	_, err = cbor.Decode(blockBytes, &blockArray)
+	validity, err := rawBlockTransactionValidity(offsets)
 	require.NoError(t, err)
-	require.Len(t, blockArray, 5)
-
-	invalidTxs, err := extractInvalidTxIndices(blockBytes)
-	require.NoError(t, err)
-	require.Empty(t, invalidTxs)
+	require.Equal(t, []bool{true, true}, validity)
 }
 
-func TestExtractInvalidTxIndices_AlonzoMultiple(t *testing.T) {
+func TestRawBlockTransactionValidity_AlonzoMultiple(t *testing.T) {
 	t.Parallel()
 
-	const blockHex = "858080808083010307"
-
-	blockBytes, err := hex.DecodeString(blockHex)
+	bodies := make([][]byte, 8)
+	for i := range bodies {
+		bodies[i] = rawInvalidTxTestBody(t, uint64(i)+1)
+	}
+	offsets, err := lcommon.ExtractTransactionOffsets(
+		rawInvalidTxTestBlock(t, bodies, []uint{1, 3, 7}),
+	)
 	require.NoError(t, err)
 
-	var blockArray []cbor.RawMessage
-	_, err = cbor.Decode(blockBytes, &blockArray)
-	require.NoError(t, err)
-	require.Len(t, blockArray, 5)
-
-	invalidTxs, err := extractInvalidTxIndices(blockBytes)
+	validity, err := rawBlockTransactionValidity(offsets)
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		map[int]struct{}{
-			1: {},
-			3: {},
-			7: {},
-		},
-		invalidTxs,
+		[]bool{true, false, true, false, true, true, true, false},
+		validity,
 	)
 }

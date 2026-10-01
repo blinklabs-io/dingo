@@ -327,20 +327,20 @@ WHERE deleted_slot > ?;
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING id;
 
 -- name: SavePoolStakeSnapshot :one
 INSERT INTO pool_stake_snapshot (
     epoch, snapshot_type, pool_key_hash, total_stake, stake_denominator,
     delegator_count, captured_slot, leios_key_public,
-    leios_key_possession_proof, calculation_version,
+    leios_key_possession_proof, leios_key_registration_epoch, calculation_version,
     reward_account_auto_vote,
     reward_account_auto_vote_resolved
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     total_stake = excluded.total_stake,
     stake_denominator = excluded.stake_denominator,
@@ -348,6 +348,7 @@ ON CONFLICT (epoch, snapshot_type, pool_key_hash) DO UPDATE SET
     captured_slot = excluded.captured_slot,
     leios_key_public = excluded.leios_key_public,
     leios_key_possession_proof = excluded.leios_key_possession_proof,
+    leios_key_registration_epoch = excluded.leios_key_registration_epoch,
     calculation_version = excluded.calculation_version,
     reward_account_auto_vote = excluded.reward_account_auto_vote,
     reward_account_auto_vote_resolved =
@@ -358,6 +359,7 @@ RETURNING id;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -367,6 +369,7 @@ WHERE epoch = ? AND snapshot_type = ? AND pool_key_hash = ?;
 SELECT id, epoch, snapshot_type, pool_key_hash, total_stake,
        stake_denominator, delegator_count, captured_slot,
        leios_key_public, leios_key_possession_proof,
+       leios_key_registration_epoch,
        calculation_version, reward_account_auto_vote,
        reward_account_auto_vote_resolved
 FROM pool_stake_snapshot
@@ -607,6 +610,15 @@ FROM reward_stake_input
 WHERE epoch = ?
 ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
 
+-- name: GetRewardStakeInputsInPoolKeyHashRange :many
+SELECT pool_key_hash, staking_key, id, epoch, credential_tag, stake, owner,
+       registered, captured_slot, boundary_slot
+FROM reward_stake_input
+WHERE epoch = ?
+  AND pool_key_hash >= ?
+  AND pool_key_hash <= ?
+ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
+
 -- name: DeleteRewardPoolInputsForEpoch :exec
 DELETE FROM reward_pool_input WHERE epoch = ?;
 
@@ -697,12 +709,10 @@ DELETE FROM reward_stake_input
 WHERE captured_slot > ? OR boundary_slot > ?;
 
 -- name: DeleteRewardPoolOutputsAfterSlot :exec
-DELETE FROM reward_pool_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_pool_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardAccountOutputsAfterSlot :exec
-DELETE FROM reward_account_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_account_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardStakeInputsBeforeEpoch :exec
 DELETE FROM reward_stake_input WHERE epoch < ?;

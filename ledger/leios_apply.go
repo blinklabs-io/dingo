@@ -387,42 +387,54 @@ func buildEndorserBlockBlob(
 		return uint32(off), uint32(len(b)), nil
 	}
 	for i, tx := range txs {
-		var txHash [32]byte
-		copy(txHash[:], tx.Hash().Bytes())
-		off, length, err := writeRange(bodyCbors[i])
-		if err != nil {
-			return nil, nil, err
-		}
-		result.TxOffsets[txHash] = database.CborOffset{
-			BlockSlot:  ebSlot,
-			BlockHash:  ebHash,
-			ByteOffset: off,
-			ByteLength: length,
-		}
-		for _, utxo := range tx.Produced() {
-			outCbor := utxo.Output.Cbor()
-			if len(outCbor) == 0 {
-				enc, err := cbor.Encode(utxo.Output)
-				if err != nil {
-					return nil, nil, fmt.Errorf(
-						"encode endorser output: %w",
-						err,
-					)
-				}
-				outCbor = enc
+		levels := TransactionLevelsForApply(tx)
+		for levelIdx, level := range levels {
+			// The last level is always the enclosing transaction, and its
+			// Cbor() is the whole [body, witnesses, isValid, aux] envelope
+			// whether or not it carries sub-transactions. Store its body
+			// element, as BlockIndexer.TxOffsets does under the same hash.
+			// Only sub-transaction levels expose their own body bytes.
+			bodyCbor := level.Cbor()
+			if levelIdx == len(levels)-1 {
+				bodyCbor = bodyCbors[i]
 			}
-			off, length, err := writeRange(outCbor)
+			off, length, err := writeRange(bodyCbor)
 			if err != nil {
 				return nil, nil, err
 			}
-			result.UtxoOffsets[database.UtxoRef{
-				TxId:      txHash,
-				OutputIdx: utxo.Id.Index(),
-			}] = database.CborOffset{
+			var levelHash [32]byte
+			copy(levelHash[:], level.Hash().Bytes())
+			result.TxOffsets[levelHash] = database.CborOffset{
 				BlockSlot:  ebSlot,
 				BlockHash:  ebHash,
 				ByteOffset: off,
 				ByteLength: length,
+			}
+			for _, utxo := range level.Produced() {
+				outCbor := utxo.Output.Cbor()
+				if len(outCbor) == 0 {
+					enc, err := cbor.Encode(utxo.Output)
+					if err != nil {
+						return nil, nil, fmt.Errorf(
+							"encode endorser output: %w",
+							err,
+						)
+					}
+					outCbor = enc
+				}
+				off, length, err := writeRange(outCbor)
+				if err != nil {
+					return nil, nil, err
+				}
+				result.UtxoOffsets[database.UtxoRef{
+					TxId:      levelHash,
+					OutputIdx: utxo.Id.Index(),
+				}] = database.CborOffset{
+					BlockSlot:  ebSlot,
+					BlockHash:  ebHash,
+					ByteOffset: off,
+					ByteLength: length,
+				}
 			}
 		}
 	}
@@ -483,6 +495,15 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 				slot: infos[i].slot,
 				hash: infos[i].ebHash,
 			}
+		}
+	}
+	// Certificate validation precedes both asynchronous historical backfill
+	// and the apply-time certified fetch. Invalid certificates therefore never
+	// trigger certified endorser-block work, including during replay. Resolve a
+	// parent announcement from this batch before falling back to persisted data.
+	for _, block := range blocks {
+		if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
+			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 		}
 	}
 	// On the Haskell-conformant (Musashi) path, settled-backlog fetches are
@@ -1123,6 +1144,72 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 	return info
 }
 
+func (ls *LedgerState) validateDijkstraLeiosCertificate(
+	block ledger.Block,
+	batchAnnouncements map[string]leiosEbRef,
+) error {
+	dijkstraBlock, ok := block.(*dijkstra.DijkstraBlock)
+	if !ok {
+		return nil
+	}
+	certifier, ok := dijkstraBlock.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return errors.New("dijkstra header has no Leios certification accessor")
+	}
+	certified, flagPresent := certifier.LeiosCertified()
+	certificate := dijkstraBlock.BlockBody.LeiosCertificate
+	if !flagPresent {
+		if certificate != nil {
+			return errors.New("certificate body is present without a certified header flag")
+		}
+		return nil
+	}
+	if certified != (certificate != nil) {
+		return fmt.Errorf(
+			"certified header flag is %t but certificate body presence is %t",
+			certified,
+			certificate != nil,
+		)
+	}
+	if !certified {
+		return nil
+	}
+	if ls.config.ValidateLeiosCertificate == nil {
+		return errors.New("no Dijkstra Leios certificate validator configured")
+	}
+	var (
+		ebSlot    uint64
+		announced bool
+		err       error
+	)
+	if batchAnnouncement, ok := batchAnnouncements[string(block.PrevHash().Bytes())]; ok {
+		ebSlot, announced = batchAnnouncement.slot, true
+	} else {
+		_, ebSlot, _, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+			block.PrevHash().Bytes(),
+		)
+		if err != nil {
+			return fmt.Errorf("%w: resolve certified parent announcement: %w", errCertifiedEndorserBlockUnavailable, err)
+		}
+	}
+	if !announced {
+		return fmt.Errorf(
+			"%w: certifying block parent has no endorser-block announcement",
+			errCertifiedEndorserBlockUnavailable,
+		)
+	}
+	epochInfo, err := ls.epochForSlot(ebSlot)
+	if err != nil {
+		return fmt.Errorf("resolve certified endorser-block epoch: %w", err)
+	}
+	return ls.config.ValidateLeiosCertificate(
+		epochInfo.EpochId,
+		block.PrevHash().Bytes(),
+		certificate.Signers,
+		certificate.AggregatedSignature,
+	)
+}
+
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a
 // batch of ranking blocks, by where each block sits relative to the live head:
 //
@@ -1288,6 +1375,11 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
 	prevHash []byte,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
+	if ls.db == nil {
+		return lcommon.Blake2b256{}, 0, 0, false, errors.New(
+			"resolve certifying block parent: database unavailable",
+		)
+	}
 	parent, perr := ls.BlockByHash(prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(

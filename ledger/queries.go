@@ -450,6 +450,14 @@ func (ls *LedgerState) query(
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
+	// The latest boundary's mark snapshot and RATIFY marks may still be
+	// written by its background job; answer ledger-state queries from the
+	// state it decided, and before any pinned read opens.
+	if _, ok := query.(*olocalstatequery.BlockQuery); ok {
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			return nil, err
+		}
+	}
 	// txn is nil on the live (unpinned) path -- every handler below falls
 	// back to opening its own transaction in that case, unchanged from
 	// before this point-pinning existed. When pinned, this one transaction
@@ -2027,8 +2035,26 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		seen[key] = struct{}{}
 		stakeCreds = append(stakeCreds, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(stakeCreds, false, nil)
-	if err != nil {
+	var accounts map[string]*models.Account
+	pending := make(map[string]uint64)
+	readTxn := ls.db.Transaction(false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		accounts, err = ls.db.GetAccountsByCredential(stakeCreds, false, txn)
+		if err != nil {
+			return err
+		}
+		for key, account := range accounts {
+			amount, err := ls.pendingRewardCredit(
+				txn, account.CredentialTag, account.StakingKey,
+			)
+			if err != nil {
+				return err
+			}
+			pending[key] = amount
+		}
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	for _, cred := range creds {
@@ -2036,14 +2062,21 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		if err != nil {
 			return nil, err
 		}
-		account, ok := accounts[models.StakeCredentialRef{
+		mapKey := models.StakeCredentialRef{
 			Tag: credentialTag,
 			Key: cred.Bytes[:],
-		}.MapKey()]
+		}.MapKey()
+		account, ok := accounts[mapKey]
 		if !ok {
 			continue
 		}
-		rewards[cred] = uint64(account.Reward)
+		balance, overflow := addRewardUint64(
+			uint64(account.Reward), pending[mapKey],
+		)
+		if overflow {
+			return nil, errors.New("reward account balance overflow")
+		}
+		rewards[cred] = balance
 		if len(account.Pool) > 0 {
 			delegations[cred] = ledger.NewBlake2b224(account.Pool)
 		}
@@ -2184,8 +2217,9 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 func (ls *LedgerState) queryShelleyGetProposals(
 	actionIds []lcommon.GovActionId,
 ) (any, error) {
-	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
-	proposals, err := ls.db.GetActiveGovernanceProposals(epoch, nil)
+	// GetProposals returns the Conway proposals set, which keeps an action
+	// RATIFY classified expired until the boundary that drops it.
+	proposals, err := ls.db.GetGovernanceProposalSet(nil)
 	if err != nil {
 		return nil, err
 	}

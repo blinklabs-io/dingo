@@ -19,9 +19,11 @@ current branch.
 | How does secure from-origin synchronization work? | [Ouroboros Genesis operator guide](../GENESIS_SYNC.md) |
 | What does a Go package or exported symbol do? | [Go code reference](code-reference.md), package `doc.go` files, and `go doc` |
 | How do I add a compiled-in provider? | [Plugin development](../database/plugin/PLUGIN_DEVELOPMENT.md) |
-| How do I run conformance or end-to-end tests? | [Conformance tests](../internal/test/conformance/README.md) and [DevNet](../internal/test/devnet/README.md) |
+| How do I run the multi-node DevNet test harness? | [DevNet harness](../internal/test/devnet/README.md) |
+| How do I run Dingo locally against a single-node devnet? | [Local DevNet helper](devnet.md) |
+| How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
+| How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
 | How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
-| Where are runnable API examples? | [Examples](../examples/README.md) |
 | How do I install the Grafana dashboards? | [Dashboards](dashboards/README.md) |
 
 Contributor rules live in [`AGENTS.md`](../AGENTS.md) and

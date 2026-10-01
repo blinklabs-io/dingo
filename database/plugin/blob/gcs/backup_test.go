@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package gcs
 
@@ -32,7 +32,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// hasGCSCredentials mirrors internal/integration/cloud_test.go's helper of
+// hasGCSCredentials mirrors internal/integration/storage_migration_test.go's helper of
 // the same purpose, scoped locally so this package's tests can skip
 // cleanly without real GCS credentials -- there is currently no live GCS
 // emulator in CI (unlike S3, which CI covers via a MinIO service), so this

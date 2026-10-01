@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package forging
 
@@ -136,10 +136,25 @@ type forgingMetrics struct {
 	// selection, validation, publication), by phase.
 	forgePanicRecovered *prometheus.CounterVec
 
+	// Outcomes of forge attempts whose first transaction selection was
+	// aborted by the chain moving underneath it, by result. Only
+	// incremented when the abort happened, so a quiet producer reports
+	// zero on every series.
+	forgeSelectionFallback *prometheus.CounterVec
+
 	// Leios EB forging outcomes
-	leiosEbForged  prometheus.Counter
-	leiosEbSkipped *prometheus.CounterVec
-	leiosEbFailed  prometheus.Counter
+	// leiosEbSelectionSeconds records how long endorser-block transaction
+	// selection ran. It is the dominant cost of a Leios leader slot and
+	// scales with mempool depth, so it is what an operator alerts on when
+	// blocks start arriving late.
+	leiosEbSelectionSeconds prometheus.Histogram
+	// leiosEbSelectionTruncated counts passes stopped by the slot deadline
+	// rather than by running out of candidates -- i.e. slots where the
+	// budget, not the mempool, decided the endorser block's size.
+	leiosEbSelectionTruncated prometheus.Counter
+	leiosEbForged             prometheus.Counter
+	leiosEbSkipped            *prometheus.CounterVec
+	leiosEbFailed             prometheus.Counter
 }
 
 // initForgingMetrics initializes all forging metrics using the
@@ -310,6 +325,38 @@ func initForgingMetrics(
 		},
 		[]string{"phase"},
 	)
+	m.leiosEbSelectionSeconds = factory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_forge_eb_selection_seconds",
+			Help: "wall-clock time spent selecting transactions for a Leios endorser block; every candidate costs a full ledger re-validation, so this scales with mempool depth",
+			Buckets: prometheus.ExponentialBuckets(
+				0.001, 2, 14,
+			), // 1ms to ~8s
+		},
+	)
+	m.leiosEbSelectionTruncated = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_eb_selection_truncated_total",
+			Help: "Leios endorser-block selection passes stopped by the slot deadline before considering every candidate",
+		},
+	)
+
+	m.forgeSelectionFallback = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_selection_fallback_total",
+			Help: "forge attempts whose transaction selection was aborted by a concurrent ledger publication or chain-tip move, by how the slot ended, counted after local adoption: retried (a later selection attempt produced the adopted block), empty (a transaction-free block was adopted instead), lost (the slot produced no adopted block)",
+		},
+		[]string{"result"},
+	)
+	// Materialize every result so dashboards and alerts see a zero series
+	// before the first abort rather than a missing one.
+	for _, result := range []string{
+		forgeSelectionResultRetried,
+		forgeSelectionResultEmpty,
+		forgeSelectionResultLost,
+	} {
+		m.forgeSelectionFallback.WithLabelValues(result)
+	}
 	m.leiosEbForged = factory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_metrics_leios_forge_eb_forged_total",

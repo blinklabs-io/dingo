@@ -1268,7 +1268,8 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 // commit timestamp set without a matching blob one, mirroring
 // TestCheckCommitTimestamp_MetadataOnly in the database package) via the
 // node's own already-open db handle, then invokes Truncate with a target
-// ahead of the tip so the resulting error is classified
+// that is deliberately in range, so the corrupted commit timestamp is the
+// only thing that can classify the result as
 // lifecycle.ErrTruncateNotStarted (nothing on disk was touched, so resume
 // is expected to succeed). If tmpDB leaked its lock, reinitializeCoreStorage's
 // own reopen attempt fails with a lock error instead of gracefully
@@ -1280,6 +1281,18 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	// Nothing may commit between the corruption below and Truncate's tmpDB
+	// open: a both-store read-write commit rewrites BOTH commit timestamps
+	// to time.Now() (database.Txn.Commit's updateCommitTimestamp), which
+	// heals the injected mismatch, so the truncate below would really run
+	// and succeed instead of being classified ErrTruncateNotStarted. The
+	// helper leaves the ledger's startup work running (block processing,
+	// the database worker pool, the reward precompute), and Truncate only
+	// drains it later, inside its own quiesce -- so close the ledger state
+	// first, before the corruption lands. Truncate closes it again, which
+	// LedgerState.Close replays from its memoized result.
+	require.NoError(t, n.ledgerState.Close())
 
 	// Corrupt the on-disk commit timestamps via the node's own already-open
 	// db handle: set metadata's without touching blob's, so the NEXT fresh

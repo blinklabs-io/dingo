@@ -8,15 +8,16 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1246,11 +1247,30 @@ func paginateAssetHolders(
 	return holders[start:end]
 }
 
+// drepRatificationWait bounds how long a DRep request waits for the latest
+// boundary's RATIFY decision, whose expiry marks decide which proposal
+// deposits count toward DRep power.
+const drepRatificationWait = 2 * time.Minute
+
+func (a *NodeAdapter) waitEpochBoundaryJob() error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(), drepRatificationWait,
+	)
+	defer cancel()
+	if err := a.ledgerState.WaitEpochBoundaryJob(ctx); err != nil {
+		return fmt.Errorf("wait for governance ratification: %w", err)
+	}
+	return nil
+}
+
 // DRep returns governance DRep information for the requested
 // credential.
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
+	if err := a.waitEpochBoundaryJob(); err != nil {
+		return DRepInfo{}, err
+	}
 	if credential.Predefined != nil {
 		return a.predefinedDRep(credential)
 	}
@@ -1500,6 +1520,9 @@ func cip129DRepHeader(hasScript bool) byte {
 func (a *NodeAdapter) DReps(
 	params DRepListParams,
 ) ([]DRepListItemInfo, int, error) {
+	if err := a.waitEpochBoundaryJob(); err != nil {
+		return nil, 0, err
+	}
 	db := a.ledgerState.Database()
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
@@ -2346,14 +2369,29 @@ func (a *NodeAdapter) Account(
 	}
 
 	db := a.ledgerState.Database()
-	account, err := db.GetAccountByCredential(
-		credentialTag,
-		stakeKey,
-		true,
-		nil,
-	)
-	if err != nil {
+	var account *models.Account
+	var pendingReward uint64
+	readTxn := db.Transaction(false)
+	if err := readTxn.Do(func(txn *database.Txn) error {
+		var err error
+		account, err = db.GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			txn,
+		)
+		if err != nil {
+			return err
+		}
+		pendingReward, err = a.ledgerState.PendingRewardCredit(
+			txn, credentialTag, stakeKey,
+		)
+		return err
+	}); err != nil {
 		return AccountInfo{}, err
+	}
+	if account == nil {
+		return AccountInfo{}, models.ErrAccountNotFound
 	}
 	controlledAmount, err := a.ledgerState.Database().
 		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
@@ -2411,7 +2449,7 @@ func (a *NodeAdapter) Account(
 		)
 	}
 
-	reward := strconv.FormatUint(uint64(account.Reward), 10)
+	reward := strconv.FormatUint(uint64(account.Reward)+pendingReward, 10)
 	return AccountInfo{
 		StakeAddress:       stakeAddress,
 		Active:             delegating,
