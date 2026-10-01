@@ -4733,10 +4733,11 @@ counts blocks in `(intersection, intersection + window]`, where the window is
 the Genesis window (`3k/f`). Peer B is disconnected when the blocks peer A has
 delivered in that window exceed the most B can still have there: B's delivered
 blocks plus every slot between B's head and the window end, unless B's head
-already reached the window end. A peer whose window is incomplete is never
-disconnected, including one that has delivered up to its advertised tip: that
-tip can still advance, so an honest peer at its own tip on a short fork must
-not count as complete. Fragments retain at most k+1 headers and the
+already reached the window end. A peer whose window is incomplete can still be
+disconnected, but only when the rival's delivered blocks exceed that upper
+bound. A peer that has delivered up to its advertised tip is treated the same
+way, not as complete: that tip can still advance, so an honest peer at its own
+tip on a short fork keeps the trailing slots in its upper bound. Fragments retain at most k+1 headers and the
 intersection must lie in both, so the dominating peer contributes at most k
 blocks; a sparse peer with k or more blocks in its window is not detected.
 Pairs with no shared point in the retained fragments, and pairs
@@ -4746,9 +4747,11 @@ reported peers stop counting as rivals, including peers reported earlier in
 the same pass, so the last remaining candidate is never disconnected even when
 pairwise density comparisons, each taken at its own intersection, form a
 cycle. The selector hands each peer to
-`ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer to
-peer governance's deny list for ten minutes (`DenyPeer`), closes the
-connection, and counts it in `dingo_chainselection_gdd_disconnects_total`.
+`ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer's
+remote address to peer governance's deny list for ten minutes (`DenyPeer`),
+closes the connection if it is still open, logs whether the deny was applied,
+and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
+or not a connection was left to close.
 The disconnector does not implement the Limit on Eagerness; it only removes
 sparse peers from the candidate set that cap is measured across.
 

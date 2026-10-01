@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"testing"
@@ -260,4 +261,31 @@ func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
 		),
 	)
 	assert.True(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+}
+
+// The disconnect log reports whether the peer was actually denied: a
+// connection ID with no remote address cannot be put on the deny list, and a
+// log that only carries the deny duration would claim a denial that did not
+// happen.
+func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	n, _ := newMetricsTestNode(t)
+	n.config.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+
+	withAddr := newNodeTestConnId(3304)
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: withAddr,
+	})
+	require.Contains(t, logs.String(), "denied=true")
+	require.True(t, n.peerGov.IsDenied(withAddr.RemoteAddr.String()))
+
+	logs.Reset()
+	noAddr := newNodeTestConnId(3305)
+	noAddr.RemoteAddr = nil
+	n.onGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: noAddr,
+	})
+	require.Contains(t, logs.String(), "denied=false")
 }
