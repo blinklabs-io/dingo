@@ -687,6 +687,7 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	staleFork := rewardRepairTestBlock(
 		t, 1025, 99, bytes.Repeat([]byte{0xee}, 32),
 	)
+	txID := bytes.Repeat([]byte{0x62}, 32)
 	fixture := newV2Fixture(t, v2FixtureOptions{
 		immutableFileNumber:     0,
 		validImmutable:          true,
@@ -721,6 +722,22 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	for _, block := range []models.Block{block1050, staleFork, block1100} {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
+	utxoTxn := db.Transaction(true)
+	t.Cleanup(utxoTxn.Release)
+	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+		TxId: txID, AddedSlot: 900,
+	}))
+	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
+		utxoTxn.Metadata(),
+		[]types.UtxoKey{{TxId: txID, OutputIdx: 0}},
+		1000,
+	))
+	require.NoError(t, utxoTxn.Commit())
+	spent, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, spent)
+	require.EqualValues(t, 1000, spent.DeletedSlot,
+		"fixture must model a snapshot-live output spent at the certified tip")
 	require.NoError(t, setImmutableImportMarker(db, 0))
 	require.NoError(t, db.SetSyncState(
 		mithrilLedgerSlotSyncKey, "999", nil,
@@ -780,6 +797,11 @@ func TestSyncRewardRepairBelowCertifiedTipDropsOnlyForkBlocks(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, epoch,
 		"epochs after a state below the certified tip must be removed")
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(txID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	require.Zero(t, utxo.DeletedSlot,
+		"repair below the certified tip must unspend snapshot-live outputs")
 }
 
 func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
