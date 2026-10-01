@@ -986,6 +986,25 @@ func TestHandleBehindHorizonLeavesUnknownEpochLengthUnset(t *testing.T) {
 	assert.Zero(t, gaugeValue(t, metrics.epochLengthSlots))
 }
 
+// initScheduler is where the slot clock is handed handleBehindHorizon. The
+// handleBehindHorizon tests call it directly and the slot clock tests build
+// their own config, so without this test deleting that wiring leaves every
+// other test green and a from-genesis sync reads as fully synced again.
+func TestInitSchedulerWiresBehindHorizonCallback(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+	ls.currentEpoch.SlotLength = 1000
+	require.NoError(t, ls.initScheduler())
+	t.Cleanup(ls.Scheduler.Stop)
+
+	callback := ls.slotClock.config.OnBehindHorizon
+	require.NotNil(t, callback)
+	callback(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+}
+
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	t *testing.T,
 ) {
