@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -2484,18 +2483,6 @@ func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
 	)
 }
 
-// freeTCPPort finds an OS-assigned free port by binding then immediately
-// closing a listener. NewBark substitutes its own default (9091) for
-// Port: 0, so this is how a test asks for "any free port" instead.
-func freeTCPPort(t *testing.T) uint {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port //nolint:forcetypeassert // always *net.TCPAddr for a "tcp" listener
-	require.NoError(t, ln.Close())
-	return uint(port)
-}
-
 // mtlsHTTPClient builds an HTTP/2-over-TLS client suitable for talking to a
 // bark.Bark server started with TlsCertFilePath/TlsKeyFilePath: it skips
 // verifying the server's certificate (these tests always use
@@ -2580,7 +2567,6 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		Lifecycle:           svc,
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,
