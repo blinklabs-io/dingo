@@ -70,15 +70,16 @@ type witnessRows struct {
 // witnessBatch queues witness rows for multi-row insertion. Shapes are kept
 // in first-queued order so a flush is deterministic.
 type witnessBatch struct {
-	order []string
-	byKey map[string]*witnessRows
+	entries []witnessRows
+	// index maps a shape key to its position in entries.
+	index map[string]int
 	// queued records which transactions have rows pending, so replacing a
 	// transaction's rows only scans when it actually has some.
 	queued map[int64]struct{}
 }
 
 func (b *witnessBatch) empty() bool {
-	return b == nil || len(b.order) == 0
+	return b == nil || len(b.entries) == 0
 }
 
 func (b *witnessBatch) add(
@@ -86,23 +87,24 @@ func (b *witnessBatch) add(
 	transactionID int64,
 	row ...any,
 ) {
-	if b.byKey == nil {
-		b.byKey = make(map[string]*witnessRows)
+	if b.index == nil {
+		b.index = make(map[string]int)
 		b.queued = make(map[int64]struct{})
 	}
 	key := shape.table + "(" + strings.Join(shape.columns, ",") + ")"
-	entry, ok := b.byKey[key]
+	i, ok := b.index[key]
 	if !ok {
-		entry = &witnessRows{shape: shape}
-		for i, column := range shape.columns {
+		entry := witnessRows{shape: shape}
+		for col, column := range shape.columns {
 			if column == "transaction_id" {
-				entry.txIDCol = i
+				entry.txIDCol = col
 			}
 		}
-		b.byKey[key] = entry
-		b.order = append(b.order, key)
+		i = len(b.entries)
+		b.entries = append(b.entries, entry)
+		b.index[key] = i
 	}
-	entry.rows = append(entry.rows, row)
+	b.entries[i].rows = append(b.entries[i].rows, row)
 	b.queued[transactionID] = struct{}{}
 }
 
@@ -115,22 +117,21 @@ func (b *witnessBatch) dropTransaction(transactionID int64) {
 		return
 	}
 	delete(b.queued, transactionID)
-	for _, entry := range b.byKey {
-		kept := entry.rows[:0]
+	for i := range b.entries {
+		entry := &b.entries[i]
+		kept := make([][]any, 0, len(entry.rows))
 		for _, row := range entry.rows {
 			if id, _ := row[entry.txIDCol].(int64); id != transactionID {
 				kept = append(kept, row)
 			}
 		}
-		clear(entry.rows[len(kept):])
 		entry.rows = kept
 	}
 }
 
 // merge moves every queued row of other into b.
 func (b *witnessBatch) merge(other *witnessBatch) {
-	for _, key := range other.order {
-		entry := other.byKey[key]
+	for _, entry := range other.entries {
 		for _, row := range entry.rows {
 			id, _ := row[entry.txIDCol].(int64)
 			b.add(entry.shape, id, row...)
@@ -142,8 +143,8 @@ func (b *witnessBatch) reset() {
 	if b == nil {
 		return
 	}
-	b.order = nil
-	b.byKey = nil
+	b.entries = nil
+	b.index = nil
 	b.queued = nil
 }
 
@@ -158,8 +159,7 @@ func (b *witnessBatch) flush(
 		return nil
 	}
 	defer b.reset()
-	for _, key := range b.order {
-		entry := b.byKey[key]
+	for _, entry := range b.entries {
 		width := len(entry.shape.columns)
 		perStatement := max(1, parameterLimit/width)
 		placeholder := "(" + strings.TrimSuffix(
