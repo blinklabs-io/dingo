@@ -271,6 +271,67 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	)
 }
 
+// TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks submits more
+// validation-failing blocks than the pipeline's default MaxPendingBlocks.
+// Submit waits for completions that only happen once Results() is consumed,
+// so decodeReadChainBatch must read results while it is still submitting
+// rather than after the whole batch is in.
+func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
+
+	errLog := &capturedErrorLog{}
+	ls := &LedgerState{
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 432000,
+				Nonce:         nil,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
+			Logger:                       errLog.logger(),
+			BlockPipelineValidateEnabled: true,
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.publishSnapshotsLocked()
+
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(2),
+		pipeline.WithValidateWorkers(2),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(129600),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	ls.blockPipelineErrorsDone = make(chan struct{})
+	go ls.drainBlockPipelineErrors()
+	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
+	defer stopAndDrain()
+
+	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = ls.decodeReadChainBatch(t.Context(), rawBatch)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"decodeReadChainBatch blocked in Submit on a batch larger than "+
+			"MaxPendingBlocks while Results() was unread",
+	)
+}
+
 // stopAndDrainBlockPipeline returns an idempotent function that stops ls's
 // block pipeline and waits for drainBlockPipelineErrors to exit. Stop()
 // closes errorsChan, which is what ends the drain goroutine's range loop, so
