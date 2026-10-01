@@ -1222,8 +1222,8 @@ func TestUtxosByAddressManyZeroArgBranches(t *testing.T) {
 }
 
 // TestResolveUtxoCborWithRecoveryReconstructsMissingBlob is a regression
-// test for a bot-review finding on blinklabs-io/dingo#4082's worker-pool
-// fix (PR #4084): ledger.queryShelleyUtxoWhole switched from
+// test for a bot-review finding on worker-pool
+// fix: ledger.queryShelleyUtxoWhole switched from
 // IterateLiveUtxos' inline loadCbor (which recovers a missing blob from the
 // producing block via recoverUtxoCbor) to a bare CborCache().ResolveUtxoCbor
 // call that silently dropped the row on ErrBlobKeyNotFound instead. This
@@ -1291,7 +1291,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 }
 
 // TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery covers a
-// human-review finding on PR #4084: a caller resolving many refs
+// human-review finding on a caller resolving many refs
 // concurrently (queryShelleyUtxoWhole's worker pool) passes a blob-only
 // *Txn (BlobTxn, Metadata() == nil) so the resolve hot path never holds a
 // metadata connection from the shared read pool. This proves recovery's
@@ -1536,7 +1536,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 }
 
 // TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn
-// is the regression test for a chrisguiney review finding on PR #4084: the
+// is the regression test for a chrisguiney review finding on the
 // !t.sharedBlob guard added to Txn.rollback() (see withMetadataForRecovery)
 // was load-bearing but untested -- every existing recovery test resolves
 // only one row per caller txn, so removing the guard still left

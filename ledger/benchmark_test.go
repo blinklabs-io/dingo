@@ -3376,7 +3376,7 @@ func BenchmarkTipSnapshotReadOnly(b *testing.B) {
 // continuously republishes the consensus/tip snapshots (the same
 // publishSnapshotsLocked call a real per-block writer makes), while readers
 // run concurrently. Run with -cpu=1,4,8,16 to see the scaling curve; per
-// #2601's regression, an implementation using a plain RWMutex here would
+// regression, an implementation using a plain RWMutex here would
 // degrade sharply at higher core counts, while the atomic.Pointer
 // implementation should stay close to BenchmarkTipSnapshotReadOnly.
 //

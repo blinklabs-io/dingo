@@ -81,7 +81,7 @@ type LedgerDelta struct {
 	// deltas so their behavior is unchanged.
 	skipConsumedInputRecovery bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
-	// from the blob store and treats it as a hard error instead (issue #3005).
+	// from the blob store and treats it as a hard error instead.
 	// Set only when the block is applied in the steady-state, at-tip, validated
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.

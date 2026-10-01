@@ -32,11 +32,12 @@ import (
 )
 
 // TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt is the core
-// regression test for issue #2435: once a ledger relay hostname has been
-// resolved (peer.NormalizedAddress is already an IP), resolveLedgerDialTarget
-// must return that same IP without consulting the resolver again. A
-// compromised authoritative DNS server that answers a second lookup with an
-// internal address must have no effect, because no second lookup happens.
+// regression test for dialing ledger relays by resolved IP: once a ledger relay
+// hostname has been resolved (peer.NormalizedAddress is already an IP),
+// resolveLedgerDialTarget must return that same IP without consulting the
+// resolver again. A compromised authoritative DNS server that answers a second
+// lookup with an internal address must have no effect, because no second lookup
+// happens.
 func TestResolveLedgerDialTarget_LockedInIPUnaffectedByRebindAttempt(
 	t *testing.T,
 ) {
@@ -581,7 +582,7 @@ func TestIsResolvableHost(t *testing.T) {
 		want bool
 		why  string
 	}{
-		// The address observed on a preview block producer (issue #2018).
+		// The address observed on a preview block producer.
 		{"--pool-relay-port", false, "leading hyphen label"},
 		{"", false, "empty"},
 		{".", false, "root only"},
