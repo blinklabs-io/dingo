@@ -37,7 +37,7 @@ What this suite intentionally does not cover: the domain methods themselves
 `postgres` are thin driver shims around one shared
 `database/plugin/metadata/sqlstore.Store` implementation, so those methods
 have no per-dialect logic to differentiate here;
-`database/plugin/metadata/sqlstore/dialect_3d29378a_test.go` already
+`database/plugin/metadata/sqlstore/dialect_integration_test.go` already
 exercises that shared implementation against real Postgres/MySQL. The one
 read per extracted domain above is not an exception to that: it exists to
 prove each newly narrowed interface is wired to a working backend on this
@@ -97,7 +97,7 @@ suite:
 
 ## Migration tests
 
-`internal/integration/tests_24a0bc11_test.go` covers a distinct concern
+`internal/integration/storage_migration_test.go` covers a distinct concern
 from the conformance suite above: migrating data between two *different*
 plugins, not just checking each plugin in isolation. It writes a small
 dataset through one backend's typed API and replays the exact retrieved

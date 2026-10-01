@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -120,12 +121,66 @@ func HardForkDijkstra(
 			if err := ret.UpdateFromGenesis(dijkstraGenesis); err != nil {
 				return nil, err
 			}
+			keepConwayGovernanceParams(
+				&ret,
+				conwayPParams,
+				&dijkstraGenesis.ConwayGenesis,
+			)
 		}
 	}
+	applyDijkstraRefScriptDefaults(&ret)
 	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
 		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
+}
+
+// keepConwayGovernanceParams restores the Conway governance parameters that
+// conway.UpdateFromGenesis copies unconditionally. A Dijkstra genesis that
+// sets only Dijkstra fields leaves them zero, which would otherwise wipe the
+// deposits, lifetimes and committee bounds carried over from Conway.
+func keepConwayGovernanceParams(
+	p *gdijkstra.DijkstraProtocolParameters,
+	prev *conway.ConwayProtocolParameters,
+	genesis *conway.ConwayGenesis,
+) {
+	if genesis.MinCommitteeSize == 0 {
+		p.MinCommitteeSize = prev.MinCommitteeSize
+	}
+	if genesis.CommitteeTermLimit == 0 {
+		p.CommitteeTermLimit = prev.CommitteeTermLimit
+	}
+	if genesis.GovActionValidityPeriod == 0 {
+		p.GovActionValidityPeriod = prev.GovActionValidityPeriod
+	}
+	if genesis.GovActionDeposit == 0 {
+		p.GovActionDeposit = prev.GovActionDeposit
+	}
+	if genesis.DRepDeposit == 0 {
+		p.DRepDeposit = prev.DRepDeposit
+	}
+	if genesis.DRepInactivityPeriod == 0 {
+		p.DRepInactivityPeriod = prev.DRepInactivityPeriod
+	}
+}
+
+// applyDijkstraRefScriptDefaults fills reference-script parameters the genesis
+// left unset with the fixed Conway values. A zero stride makes the tiered
+// reference-script fee calculation fail, and zero size limits reject every
+// transaction that consumes a reference script.
+func applyDijkstraRefScriptDefaults(p *gdijkstra.DijkstraProtocolParameters) {
+	if p.RefScriptCostStride == 0 {
+		p.RefScriptCostStride = uint32(conway.RefScriptCostStride)
+	}
+	if p.RefScriptCostMultiplier == nil {
+		p.RefScriptCostMultiplier = &cbor.Rat{Rat: big.NewRat(6, 5)}
+	}
+	if p.MaxRefScriptSizePerTx == 0 {
+		p.MaxRefScriptSizePerTx = uint32(conway.MaxRefScriptSizePerTx)
+	}
+	if p.MaxRefScriptSizePerBlock == 0 {
+		p.MaxRefScriptSizePerBlock = uint32(conway.MaxRefScriptSizePerBlock)
+	}
 }
 
 func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
@@ -137,7 +192,19 @@ func isEmptyDijkstraGenesis(genesis *gdijkstra.DijkstraGenesis) bool {
 		genesis.RefScriptCostStride != 0 ||
 		genesis.RefScriptCostMultiplier != nil ||
 		genesis.CommitteeStakeCoverage != nil ||
-		genesis.QuorumStakeThreshold != nil {
+		genesis.QuorumStakeThreshold != nil ||
+		genesis.MaxPledgeLeverage != nil ||
+		genesis.MinPoolMargin != nil ||
+		len(genesis.PlutusV4CostModel) > 0 ||
+		genesis.LeiosAnnouncementPeriodLength != 0 ||
+		genesis.LeiosVotePeriodLength != 0 ||
+		genesis.LeiosDiffusionPeriodLength != 0 ||
+		genesis.LeiosCommitteeSize != 0 ||
+		genesis.LeiosQuorumStakeThreshold != nil ||
+		genesis.MaxEndorserBlockReferencesSize != 0 ||
+		genesis.MaxEndorserBlockTxsSize != 0 ||
+		genesis.MaxEndorserBlockExUnits != (lcommon.ExUnits{}) ||
+		genesis.MaxRefScriptSizePerEndorserBlock != 0 {
 		return false
 	}
 	return isEmptyConwayGenesis(&genesis.ConwayGenesis)

@@ -36,19 +36,24 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	omockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -4069,4 +4074,3706 @@ func TestPreprodVoteOnDescendantOfExpiredActionIsValid(t *testing.T) {
 	require.NoError(t, conway.UtxoValidateVotingOnExpiredGovAction(
 		tx, voteSlot, lv, pparams,
 	))
+}
+
+func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
+	t.Parallel()
+
+	lv := &LedgerView{}
+
+	rewards, err := lv.CalculateRewards(
+		lcommon.AdaPots{},
+		lcommon.RewardSnapshot{},
+		lcommon.RewardParameters{},
+	)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Nil(t, rewards)
+
+	snapshot, err := lv.GetRewardSnapshot(0)
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Equal(t, lcommon.RewardSnapshot{}, snapshot)
+
+	adaPots, err := lv.GetAdaPotsWithError()
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Equal(t, lcommon.AdaPots{}, adaPots)
+
+	// GetAdaPots satisfies common.RewardState, which gives it no way to
+	// report the sentinel, so it stands in a zero value rather than killing
+	// a caller that reaches it through the interface.
+	var rewardState lcommon.RewardState = lv
+	var interfacePots lcommon.AdaPots
+	require.NotPanics(t, func() {
+		interfacePots = rewardState.GetAdaPots()
+	})
+	require.Equal(t, lcommon.AdaPots{}, interfacePots)
+
+	err = lv.UpdateAdaPots(lcommon.AdaPots{})
+	require.ErrorIs(t, err, ErrNotImplemented)
+}
+
+func TestLedgerViewRewardAccountBalance(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
+	for _, tag := range []uint8{0, 1} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey:    key,
+			CredentialTag: tag,
+			Reward:        types.Uint64(100 + uint64(tag)),
+			Active:        true,
+		}))
+	}
+	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: inactive,
+		Reward:     55,
+		Active:     false,
+	}))
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+	credential := func(tag uint, value []byte) lcommon.Credential {
+		return lcommon.Credential{
+			CredType:   tag,
+			Credential: lcommon.NewBlake2b224(value),
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		cred lcommon.Credential
+		want *uint64
+	}{
+		{name: "key credential", cred: credential(0, key), want: new(uint64(100))},
+		{name: "script credential", cred: credential(1, key), want: new(uint64(101))},
+		{name: "missing credential", cred: credential(0, bytes.Repeat([]byte{0xa3}, 28))},
+		{name: "inactive credential", cred: credential(0, inactive)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lv.RewardAccountBalance(tc.cred)
+			require.NoError(t, err)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+	zero := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: zero,
+		Reward:     0,
+		Active:     true,
+	}))
+	got, err := lv.RewardAccountBalance(credential(0, zero))
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Zero(t, *got)
+
+	_, err = lv.RewardAccountBalance(lcommon.Credential{CredType: 2})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "unsupported stake credential tag")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err = lv.RewardAccountBalance(credential(0, key))
+	require.Error(t, err)
+}
+
+func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	sharedHash := bytes.Repeat([]byte{0xb1}, lcommon.AddressHashSize)
+	credential := func(tag uint, value []byte) lcommon.Credential {
+		return lcommon.Credential{
+			CredType:   tag,
+			Credential: lcommon.NewBlake2b224(value),
+		}
+	}
+	keyCredential := credential(lcommon.CredentialTypeAddrKeyHash, sharedHash)
+	scriptCredential := credential(lcommon.CredentialTypeScriptHash, sharedHash)
+	zeroCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xb6}, lcommon.AddressHashSize),
+	)
+	importedKeyCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xb8}, lcommon.AddressHashSize),
+	)
+	importedScriptCredential := credential(
+		lcommon.CredentialTypeScriptHash,
+		bytes.Repeat([]byte{0xb9}, lcommon.AddressHashSize),
+	)
+	importedThenRegisteredCredential := credential(
+		lcommon.CredentialTypeAddrKeyHash,
+		bytes.Repeat([]byte{0xbc}, lcommon.AddressHashSize),
+	)
+	persistViewStakeRegistration(t, db, keyCredential, 2_000_000, 100, 0xb2)
+	persistViewStakeRegistration(t, db, scriptCredential, 3_000_000, 101, 0xb3)
+	persistViewStakeRegistration(t, db, zeroCredential, 0, 102, 0xb7)
+	persistViewStakeRegistration(
+		t,
+		db,
+		importedKeyCredential,
+		1_000_000,
+		90,
+		0xba,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedKeyCredential,
+		4_000_000,
+		103,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedScriptCredential,
+		5_000_000,
+		104,
+	)
+	persistViewImportedStakeAccount(
+		t,
+		db,
+		importedThenRegisteredCredential,
+		4_500_000,
+		105,
+	)
+	persistViewStakeRegistration(
+		t,
+		db,
+		importedThenRegisteredCredential,
+		6_000_000,
+		106,
+		0xbd,
+	)
+
+	inactiveHash := bytes.Repeat([]byte{0xb4}, lcommon.AddressHashSize)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    inactiveHash,
+		CredentialTag: 0,
+		Active:        false,
+	}))
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		cred lcommon.Credential
+		want *uint64
+	}{
+		{name: "key credential", cred: keyCredential, want: new(uint64(2_000_000))},
+		{name: "script credential", cred: scriptCredential, want: new(uint64(3_000_000))},
+		{name: "zero deposit", cred: zeroCredential, want: new(uint64(0))},
+		{
+			name: "imported key credential",
+			cred: importedKeyCredential,
+			want: new(uint64(4_000_000)),
+		},
+		{
+			name: "imported script credential",
+			cred: importedScriptCredential,
+			want: new(uint64(5_000_000)),
+		},
+		{
+			name: "newer registration supersedes import",
+			cred: importedThenRegisteredCredential,
+			want: new(uint64(6_000_000)),
+		},
+		{
+			name: "missing credential",
+			cred: credential(
+				lcommon.CredentialTypeAddrKeyHash,
+				bytes.Repeat([]byte{0xb5}, lcommon.AddressHashSize),
+			),
+		},
+		{
+			name: "inactive credential",
+			cred: credential(lcommon.CredentialTypeAddrKeyHash, inactiveHash),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := lv.StakeCredentialDeposit(tc.cred)
+			require.NoError(t, err)
+			if tc.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *tc.want, *got)
+		})
+	}
+
+	importHistory, err := db.GetAccountRegistrationHistoryByCredential(
+		1,
+		importedScriptCredential.Credential[:],
+		10,
+		0,
+		"desc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, importHistory)
+
+	require.NoError(t, db.DeleteCertificatesAfterSlot(105, nil))
+	require.NoError(t, db.RestoreAccountStateAtSlot(105, nil))
+	depositAfterRollback, err := lv.StakeCredentialDeposit(
+		importedThenRegisteredCredential,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, depositAfterRollback)
+	require.Equal(t, uint64(4_500_000), *depositAfterRollback)
+
+	_, err = lv.StakeCredentialDeposit(lcommon.Credential{CredType: 2})
+	require.ErrorContains(t, err, "unsupported stake credential tag")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err = lv.StakeCredentialDeposit(keyCredential)
+	require.Error(t, err)
+}
+
+func persistViewImportedStakeAccount(
+	t *testing.T,
+	db *database.Database,
+	credential lcommon.Credential,
+	deposit uint64,
+	slot uint64,
+) {
+	t.Helper()
+	credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+	require.NoError(t, err)
+	importDeposit := types.Uint64(deposit)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    credential.Credential[:],
+		CredentialTag: credentialTag,
+		AddedSlot:     slot,
+		Active:        true,
+		ImportDeposit: &importDeposit,
+	}, nil))
+}
+
+func persistViewStakeRegistration(
+	t *testing.T,
+	db *database.Database,
+	credential lcommon.Credential,
+	deposit uint64,
+	slot uint64,
+	seed byte,
+) {
+	t.Helper()
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(bytes.Repeat([]byte{seed}, 32))
+	builder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{seed + 1}, 32),
+		0,
+	)
+	require.NoError(t, err)
+	builder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(
+			"addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd",
+		).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	builder.WithOutputs(output)
+	builder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+		StakeCredential: credential,
+	})
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
+		0,
+		map[int]uint64{0: deposit},
+		nil,
+	))
+}
+
+// TestLedgerViewPoolCurrentStatePendingRetirement proves PoolCurrentState's
+// pending-retirement epoch tracks the pool's latest retirement certificate
+// by insertion order (AddedSlot), not the maximum epoch value across every
+// retirement row on the pool: a later retirement certificate replaces the
+// prior schedule even when it targets an earlier epoch, and a later pool
+// registration cancels a pending retirement entirely -- mirroring
+// poolIsActive's ordering rule in
+// internal/test/conformance/state_provider.go, which this adapter's own
+// review caught duplicating this same defect from.
+func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	lv := &LedgerView{
+		ls: &LedgerState{
+			db: db,
+			config: LedgerStateConfig{
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+			},
+		},
+	}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xb1}, 28)),
+	)
+
+	applyCert := func(slot uint64, txIDSeed byte, cert lcommon.Certificate) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+	registrationCert := func(seed byte) *lcommon.PoolRegistrationCertificate {
+		return &lcommon.PoolRegistrationCertificate{
+			CertType: uint(lcommon.CertificateTypePoolRegistration),
+			Operator: poolKeyHash,
+			VrfKeyHash: lcommon.VrfKeyHash(
+				lcommon.NewBlake2b256([]byte{seed, 0x02}),
+			),
+			Pledge: 1_000_000,
+			Cost:   340_000_000,
+			Margin: cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{seed, 0x03}),
+			),
+		}
+	}
+	retirementCert := func(epoch uint64) *lcommon.PoolRetirementCertificate {
+		return &lcommon.PoolRetirementCertificate{
+			CertType:    uint(lcommon.CertificateTypePoolRetirement),
+			PoolKeyHash: poolKeyHash,
+			Epoch:       epoch,
+		}
+	}
+
+	applyCert(1, 0x01, registrationCert(0x01))
+
+	// A retirement targeting epoch 10, then a later retirement targeting an
+	// EARLIER epoch (5): the later certificate must win regardless of its
+	// epoch value being smaller than the one it replaces.
+	applyCert(2, 0x02, retirementCert(10))
+	applyCert(3, 0x03, retirementCert(5))
+
+	_, pendingEpoch, err := lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, pendingEpoch)
+	require.Equal(
+		t,
+		uint64(5),
+		*pendingEpoch,
+		"a later retirement certificate must replace the prior schedule even when it moves the target epoch earlier",
+	)
+
+	// A later re-registration cancels the pending retirement entirely.
+	applyCert(4, 0x04, registrationCert(0x04))
+
+	_, pendingEpoch, err = lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		pendingEpoch,
+		"a later pool registration must cancel a pending retirement",
+	)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral is the
+// LedgerView-level regression test for issue #4352, exercised through the
+// real certificate-application pipeline rather than the store layer
+// directly: a pool re-registering with a new VRF key mid-epoch must not
+// free its old key before the epoch boundary IsVrfKeyInUse is asked about.
+func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xc1}, 28)),
+	)
+	oldVrfKeyHash := lcommon.NewBlake2b256([]byte{0xc2, 0x01})
+	newVrfKeyHash := lcommon.NewBlake2b256([]byte{0xc2, 0x02})
+
+	applyRegistration := func(
+		slot uint64,
+		txIDSeed byte,
+		vrfKeyHash lcommon.VrfKeyHash,
+	) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	// A genesis registration predating both keys under test makes the
+	// pinned epochStartSlot load-bearing rather than coincidental: without
+	// it, GetPoolByVrfKeyHash's earliest-registration fallback (for a
+	// pool with no pre-boundary registration) would resolve to this
+	// genesis key instead of oldVrfKeyHash whenever epochStartSlot is
+	// wrong, giving a visibly different, wrong answer rather than
+	// happening to still match.
+	applyRegistration(1, 0x09, lcommon.NewBlake2b256([]byte{0xc2, 0x00}))
+	// P registers with the old key before the current epoch begins.
+	applyRegistration(10, 0x01, oldVrfKeyHash)
+	// P re-registers with a new key mid-epoch (slot 50), inside the epoch
+	// that starts at slot 30 below. Not yet effective.
+	applyRegistration(50, 0x02, newVrfKeyHash)
+
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
+
+	inUse, owner, err := lv.IsVrfKeyInUse(oldVrfKeyHash)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"the pre-boundary key must still be reported as reserved")
+	assert.Equal(t, poolKeyHash, owner)
+
+	// The new key is already claimed by P itself, as its same-epoch
+	// pending registration -- reported as "in use, by P" rather than
+	// free, which is what lets gouroboros's caller compare against
+	// PoolCurrentState and still allow P to keep using its own pending
+	// key without being rejected as a self-conflict.
+	inUse, owner, err = lv.IsVrfKeyInUse(newVrfKeyHash)
+	require.NoError(t, err)
+	assert.True(t, inUse, "P's own pending key must be reported claimed")
+	assert.Equal(t, poolKeyHash, owner)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish verifies
+// that IsVrfKeyInUse must
+// use the epoch boundary pinned on the view at construction time, not
+// whatever ls.loadConsensusSnapshot() returns when it happens to be
+// called. A validation operation can run long enough that the writer
+// publishes a newer snapshot -- and a new epoch boundary -- while it is
+// still in progress; if IsVrfKeyInUse re-read that live snapshot, two
+// calls against the same view could disagree with each other depending
+// on exactly when each one ran, and would disagree with PoolCurrentState
+// and every other pinned field (committeeEpoch, pp, syntheticV2CostModel)
+// the same view is validating against.
+func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xc9}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xca, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xca, 0x02})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, vrfKeyHash lcommon.VrfKeyHash) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch (starts at 30): deferred
+
+	// Pinned once, as if at the start of a long-running validation.
+	lv.epochStartSlot = 30
+
+	inUse, owner, err := lv.IsVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	require.True(t, inUse)
+	require.Equal(t, poolKeyHash, owner)
+
+	// The writer advances the published epoch past the deferred
+	// re-registration's slot while this view's validation is still
+	// notionally in progress -- exactly the race the pinning avoids.
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 60}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	// The same view, asked again, must still answer as of its pinned
+	// boundary (30): keyA still active, keyB still not yet effective.
+	// Reading the live snapshot instead would flip this to keyA freed,
+	// keyB active -- the boundary having "already passed" from the
+	// writer's perspective, but not from this validation's.
+	inUse, owner, err = lv.IsVrfKeyInUse(keyA)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"a concurrent snapshot republish must not change this view's answer")
+	assert.Equal(t, poolKeyHash, owner)
+
+	inUse, _, err = lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.True(t, inUse,
+		"keyB is still claimed by P's own same-epoch pending registration "+
+			"per this view's pinned boundary, regardless of the live one")
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
+// is the LedgerView-level regression test for the PV11+ follow-up to
+// #4352: pool P cycles A -> B -> C within one epoch, then attempts to
+// reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
+// though B is neither P's effective key, A, nor its current pending key,
+// C), which is the signal gouroboros's validatePoolRegistration needs to
+// compare against PoolCurrentState and reject the reuse: PoolCurrentState
+// returns P's latest registration (C), which does not equal the requested
+// key (B).
+// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins dingo#4466 at the
+// LedgerView production entry point: once a pool's same-epoch registration
+// is itself superseded by a later same-epoch registration, IsVrfKeyInUse
+// must report it free, not still claimed.
+func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	lv := &LedgerView{ls: ls}
+
+	poolKeyHash := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xd1}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xd2, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xd2, 0x02})
+	keyC := lcommon.NewBlake2b256([]byte{0xd2, 0x03})
+
+	applyRegistration := func(
+		slot uint64,
+		txIDSeed byte,
+		vrfKeyHash lcommon.VrfKeyHash,
+	) {
+		input, err := mockledger.NewSimpleTransactionInput(
+			bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+			0,
+		)
+		require.NoError(t, err)
+		output, err := mockledger.NewTransactionOutputBuilder().
+			WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+			WithLovelace(1_000_000).
+			Build()
+		require.NoError(t, err)
+		cert := &lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   poolKeyHash,
+			VrfKeyHash: vrfKeyHash,
+			Pledge:     1_000_000,
+			Cost:       340_000_000,
+			Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+			RewardAccount: lcommon.AddrKeyHash(
+				lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+			),
+		}
+		txBuilder := mockledger.NewTransactionBuilder()
+		txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+		txBuilder.WithType(gledger.TxTypeDijkstra)
+		txBuilder.WithValid(true)
+		txBuilder.WithInputs(input)
+		txBuilder.WithOutputs(output)
+		txBuilder.WithCertificates(cert)
+		tx, err := txBuilder.Build()
+		require.NoError(t, err)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
+	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
+
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
+
+	inUse, _, err := lv.IsVrfKeyInUse(keyB)
+	require.NoError(t, err)
+	assert.False(t, inUse,
+		"a superseded same-epoch future key must be freed once a "+
+			"later same-epoch registration replaces it")
+
+	// P's current (latest) registration is genuinely C, not B: B was
+	// never P's effective key and is no longer its pending one.
+	current, _, err := lv.PoolCurrentState(poolKeyHash)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	assert.Equal(t, keyC, current.VrfKeyHash)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// newUnwrittenDijkstraPoolRegistrationTx builds a real
+// *gdijkstra-compatible transaction carrying one pool registration
+// certificate, WITHOUT writing it to the database -- for passing directly
+// to eras.ValidateTxDijkstra so the actual rejection path (not just its
+// preconditions) is exercised, the way dijkstra_pool_margin_floor_e2e_test.go
+// does for the CIP-23 rule.
+func newUnwrittenDijkstraPoolRegistrationTx(
+	t *testing.T,
+	txIDSeed byte,
+	operator lcommon.PoolKeyHash,
+	vrfKeyHash lcommon.VrfKeyHash,
+) lcommon.Transaction {
+	t.Helper()
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	cert := &lcommon.PoolRegistrationCertificate{
+		CertType:   uint(lcommon.CertificateTypePoolRegistration),
+		Operator:   operator,
+		VrfKeyHash: vrfKeyHash,
+		Pledge:     1_000_000,
+		Cost:       340_000_000,
+		Margin:     cbor.Rat{Rat: big.NewRat(1, 20)},
+		RewardAccount: lcommon.AddrKeyHash(
+			lcommon.NewBlake2b224([]byte{txIDSeed, 0x03}),
+		),
+	}
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeDijkstra)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	txBuilder.WithCertificates(cert)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	return tx
+}
+
+// TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
+// is the full end-to-end proof of #4352's acceptance criterion "reject a
+// different pool registering the active key during the deferral window":
+// not just that IsVrfKeyInUse reports the right owner, but that the real
+// validation entry point actually returns a rejection for it. Protocol
+// version 12 (Dijkstra) is required: DuplicateVrfKeysDisallowed only
+// applies the check for major > 10.
+func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// newRewardCalculationTestLedger, not a bare &LedgerState{}: other
+	// Dijkstra/Conway UTxO rules ValidateTxDijkstra also runs (e.g.
+	// UtxoValidateProposalNetworkIds) call LedgerView.NetworkId(), which
+	// needs a real config.CardanoNodeConfig with loaded genesis.
+	ls, db := newRewardCalculationTestLedger(t)
+	lv := &LedgerView{ls: ls}
+
+	poolP := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xe1}, 28)),
+	)
+	poolQ := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xe2}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xe3, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xe3, 0x02})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, operator lcommon.PoolKeyHash, vrfKeyHash lcommon.VrfKeyHash) {
+		tx := newUnwrittenDijkstraPoolRegistrationTx(
+			t, txIDSeed, operator, vrfKeyHash,
+		)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, poolP, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, poolP, keyB) // this epoch: P: A -> B, deferred
+
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
+
+	// Q attempts to claim key A, which is still P's active key during the
+	// deferral window. Not written to the database -- this is the
+	// certificate under validation, not setup.
+	conflictingTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x03, poolQ, keyA)
+	err := eras.ValidateTxDijkstra(
+		conflictingTx,
+		60,
+		lv,
+		dijkstraTestProtocolParameters(),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already registered")
+}
+
+// TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
+// the full end-to-end proof of the PV11+ follow-up to #4352: pool P cycles
+// A -> B -> C within one epoch, then attempts to reuse B again. This
+// proves the actual rejection fires through the real validation entry
+// point, not just that IsVrfKeyInUse and PoolCurrentState individually
+// return the values the rejection depends on.
+// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins dingo#4466
+// through the full production validation entry point: a key a pool cycled
+// through and then superseded within the same epoch is free for any pool
+// (including the pool that originally proposed it) to register.
+func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	lv := &LedgerView{ls: ls}
+
+	poolP := lcommon.PoolKeyHash(
+		lcommon.NewBlake2b224(bytes.Repeat([]byte{0xf1}, 28)),
+	)
+	keyA := lcommon.NewBlake2b256([]byte{0xf2, 0x01})
+	keyB := lcommon.NewBlake2b256([]byte{0xf2, 0x02})
+	keyC := lcommon.NewBlake2b256([]byte{0xf2, 0x03})
+
+	applyRegistration := func(slot uint64, txIDSeed byte, vrfKeyHash lcommon.VrfKeyHash) {
+		tx := newUnwrittenDijkstraPoolRegistrationTx(
+			t, txIDSeed, poolP, vrfKeyHash,
+		)
+		point := ocommon.Point{
+			Slot: slot,
+			Hash: bytes.Repeat([]byte{txIDSeed}, lcommon.Blake2b256Size),
+		}
+		require.NoError(
+			t,
+			db.SetTransactionMetadataOnly(
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+			),
+		)
+	}
+
+	applyRegistration(10, 0x01, keyA) // pre-epoch: P's active key
+	applyRegistration(50, 0x02, keyB) // this epoch: P: A -> B
+	applyRegistration(70, 0x03, keyC) // this epoch: P: B -> C, supersedes B
+
+	// Pinned directly on the view, mirroring how real validation call
+	// sites (NewView, ledgerProcessBlock, validateTxCore) pin
+	// epochStartSlot at construction time rather than leaving
+	// IsVrfKeyInUse to re-read ls.loadConsensusSnapshot() live.
+	lv.epochStartSlot = 30
+
+	// P re-registers with B, a key it itself proposed and then superseded
+	// within the same epoch. B is free -- neither P's effective key (still
+	// A) nor its current pending key (now C) -- so the VRF-duplicate rule
+	// must not fire. This deliberately minimal transaction (unresolvable
+	// input, no witnesses, mismatched network) trips other, unrelated
+	// Dijkstra UTxO validation rules; ValidateTxDijkstra joins all rule
+	// errors, and this test only asserts on the VRF-duplicate substring,
+	// the same pattern TestValidateTxDijkstraAcceptsAtOrAboveFloorPoolMarginThroughLedgerView
+	// uses for its own companion negative assertion.
+	reuseTx := newUnwrittenDijkstraPoolRegistrationTx(t, 0x04, poolP, keyB)
+	err := eras.ValidateTxDijkstra(
+		reuseTx,
+		80,
+		lv,
+		dijkstraTestProtocolParameters(),
+	)
+	if err != nil {
+		assert.NotContains(t, err.Error(), "already registered by pool")
+	}
+}
+
+// TestLedgerStateNewViewPinsEpochStartSlot is the regression test for a
+// human reviewer finding on this PR: every prior epochStartSlot-pinning
+// test set the field by hand on a bare &LedgerView{ls: ls}, so a real
+// construction site (NewView, ledgerProcessBlock, validateTxCore,
+// ValidateTxWithOverlay, EvaluateTx) could drop its own epochStartSlot:
+// assignment without any test failing. This calls the real NewView
+// directly and asserts the pin happened there.
+func TestLedgerStateNewViewPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 42}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	view := ls.NewView(nil)
+	assert.Equal(t, uint64(42), view.epochStartSlot)
+}
+
+// TestLedgerStateValidateTxPinsEpochStartSlot is the companion regression
+// test for validateTxCore (reached through the real, public ls.ValidateTx
+// entry point): a custom era descriptor's ValidateTxFunc captures the
+// *LedgerView it is actually given, so this proves the pin reaches
+// IsVrfKeyInUse's caller through the real path, not a hand-set field.
+func TestLedgerStateValidateTxPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	var capturedEpochStartSlot uint64
+	var captured bool
+	capturingEra := eras.ShelleyEraDesc
+	capturingEra.ValidateTxFunc = func(
+		_ lcommon.Transaction,
+		_ uint64,
+		ls lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) error {
+		lv, ok := ls.(*LedgerView)
+		require.True(t, ok, "validateTxCore must pass a *LedgerView")
+		capturedEpochStartSlot = lv.epochStartSlot
+		captured = true
+		return nil
+	}
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     capturingEra,
+		currentPParams: dijkstraTestProtocolParameters(),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 77}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0xd9}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xd9}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeShelley)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	require.NoError(t, ls.ValidateTx(tx))
+	require.True(t, captured, "ValidateTxFunc must have been called")
+	assert.Equal(t, uint64(77), capturedEpochStartSlot)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+// TestLedgerStateEvaluateTxPinsEpochStartSlot is the EvaluateTx companion
+// of the two tests above.
+func TestLedgerStateEvaluateTxPinsEpochStartSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	var capturedEpochStartSlot uint64
+	var captured bool
+	capturingEra := eras.ShelleyEraDesc
+	capturingEra.EvaluateTxFunc = func(
+		_ lcommon.Transaction,
+		ls lcommon.LedgerState,
+		_ lcommon.ProtocolParameters,
+	) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+		lv, ok := ls.(*LedgerView)
+		require.True(t, ok, "EvaluateTx must pass a *LedgerView")
+		capturedEpochStartSlot = lv.epochStartSlot
+		captured = true
+		return 0, lcommon.ExUnits{}, nil, nil
+	}
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     capturingEra,
+		currentPParams: dijkstraTestProtocolParameters(),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.Lock()
+	ls.currentEpoch = models.Epoch{StartSlot: 88}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{0xda}, lcommon.Blake2b256Size),
+		0,
+	)
+	require.NoError(t, err)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(bytes.Repeat([]byte{0xda}, lcommon.Blake2b256Size))
+	txBuilder.WithType(gledger.TxTypeShelley)
+	txBuilder.WithValid(true)
+	txBuilder.WithInputs(input)
+	txBuilder.WithOutputs(output)
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+
+	_, _, _, err = ls.EvaluateTx(tx)
+	require.NoError(t, err)
+	require.True(t, captured, "EvaluateTxFunc must have been called")
+	assert.Equal(t, uint64(88), capturedEpochStartSlot)
+
+	require.NoError(t, dbtest.CloseDatabase(db))
+}
+
+func TestLedgerViewSkipPhase2Validation(t *testing.T) {
+	t.Parallel()
+
+	lv := &LedgerView{}
+	require.False(t, lv.SkipPhase2Validation())
+
+	lv.skipPhase2Validation = true
+	require.True(t, lv.SkipPhase2Validation())
+}
+
+// TestLedgerViewMinPoolMargin guards the CIP-23 bridge: MinPoolMargin() must
+// forward from the LedgerState embedded via the named ls field, since Go does
+// not promote methods across a named (non-embedded) field. Without this
+// forwarding method, ls.(eras.MinPoolMarginProvider) in ledger/eras always fails
+// for the *LedgerView actually passed to ValidateTx*, silently disabling the
+// pool-margin-floor certificate rule.
+func TestLedgerViewMinPoolMargin(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	lv := &LedgerView{ls: ls}
+	require.Nil(t, lv.MinPoolMargin())
+
+	ls.config.MinPoolMargin = 150
+	require.Zero(t, big.NewRat(150, 10_000).Cmp(lv.MinPoolMargin()))
+}
+
+func TestExtractCostModelsFromPParams_Nil(t *testing.T) {
+	t.Parallel()
+
+	result := extractCostModelsFromPParams(nil)
+	require.Empty(t, result)
+}
+
+func TestExtractCostModelsFromPParams_Alonzo(t *testing.T) {
+	t.Parallel()
+
+	pp := &alonzo.AlonzoProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {100, 200, 300},
+		},
+	}
+	result := extractCostModelsFromPParams(pp)
+	require.Len(t, result, 1)
+	_, ok := result[lcommon.PlutusLanguage(1)]
+	assert.True(t, ok, "expected PlutusV1 cost model")
+}
+
+func TestExtractCostModelsFromPParams_Babbage(t *testing.T) {
+	t.Parallel()
+
+	pp := &babbage.BabbageProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {100, 200, 300},
+			1: {400, 500, 600},
+		},
+	}
+	result := extractCostModelsFromPParams(pp)
+	require.Len(t, result, 2)
+	_, hasV1 := result[lcommon.PlutusLanguage(1)]
+	_, hasV2 := result[lcommon.PlutusLanguage(2)]
+	assert.True(t, hasV1, "expected PlutusV1 cost model")
+	assert.True(t, hasV2, "expected PlutusV2 cost model")
+}
+
+func TestExtractCostModelsFromPParams_Conway(t *testing.T) {
+	t.Parallel()
+
+	pp := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {100, 200, 300},
+			1: {400, 500, 600},
+			2: {700, 800, 900},
+		},
+	}
+	result := extractCostModelsFromPParams(pp)
+	require.Len(t, result, 3)
+	_, hasV1 := result[lcommon.PlutusLanguage(1)]
+	_, hasV2 := result[lcommon.PlutusLanguage(2)]
+	_, hasV3 := result[lcommon.PlutusLanguage(3)]
+	assert.True(t, hasV1, "expected PlutusV1 cost model")
+	assert.True(t, hasV2, "expected PlutusV2 cost model")
+	assert.True(t, hasV3, "expected PlutusV3 cost model")
+}
+
+func TestExtractCostModelsFromPParams_NilCostModels(t *testing.T) {
+	t.Parallel()
+
+	pp := &babbage.BabbageProtocolParameters{
+		CostModels: nil,
+	}
+	result := extractCostModelsFromPParams(pp)
+	require.Empty(t, result)
+}
+
+func TestExtractCostModelsFromPParams_SkipsUnknownVersions(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pp := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {100},
+			1: {200},
+			2: {300},
+			3: {400}, // unknown version, should be skipped
+			9: {500}, // unknown version, should be skipped
+		},
+	}
+	result := extractCostModelsFromPParams(pp)
+	require.Len(t, result, 3,
+		"should only include versions 0-2")
+}
+
+func TestCostModels_WithCurrentPParams(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		currentPParams: &conway.ConwayProtocolParameters{
+			CostModels: map[uint][]int64{
+				0: {1, 2, 3},
+				1: {4, 5, 6},
+				2: {7, 8, 9},
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+	result := lv.CostModels()
+	require.Len(t, result, 3)
+}
+
+func TestCostModels_NilPParams(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		currentPParams: nil,
+	}
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+	result := lv.CostModels()
+	require.NotNil(t, result,
+		"should return empty map, not nil")
+	require.Empty(t, result)
+}
+
+func TestIsCommitteeThresholdMet(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		yesVotes             int
+		totalActiveMembers   int
+		thresholdNumerator   uint64
+		thresholdDenominator uint64
+		expected             bool
+	}{
+		{
+			name:                 "no committee - threshold trivially met",
+			yesVotes:             0,
+			totalActiveMembers:   0,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             true,
+		},
+		{
+			name:                 "zero threshold - always met",
+			yesVotes:             0,
+			totalActiveMembers:   5,
+			thresholdNumerator:   0,
+			thresholdDenominator: 1,
+			expected:             true,
+		},
+		{
+			name:                 "zero denominator - not met",
+			yesVotes:             5,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 0,
+			expected:             false,
+		},
+		{
+			name:                 "2/3 threshold met exactly",
+			yesVotes:             4,
+			totalActiveMembers:   6,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             true,
+		},
+		{
+			name:                 "2/3 threshold not met",
+			yesVotes:             3,
+			totalActiveMembers:   6,
+			thresholdNumerator:   2,
+			thresholdDenominator: 3,
+			expected:             false,
+		},
+		{
+			name:                 "simple majority met",
+			yesVotes:             3,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 2,
+			expected:             true,
+		},
+		{
+			name:                 "simple majority not met",
+			yesVotes:             2,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 2,
+			expected:             false,
+		},
+		{
+			name:                 "unanimous met",
+			yesVotes:             5,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 1,
+			expected:             true,
+		},
+		{
+			name:                 "unanimous not met",
+			yesVotes:             4,
+			totalActiveMembers:   5,
+			thresholdNumerator:   1,
+			thresholdDenominator: 1,
+			expected:             false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := IsCommitteeThresholdMet(
+				tc.yesVotes,
+				tc.totalActiveMembers,
+				tc.thresholdNumerator,
+				tc.thresholdDenominator,
+			)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+// A member seated by an UpdateCommittee enactment keeps only the committee
+// certificates it recorded in the epoch the boundary closes: at the boundary
+// before, it was not in the committee, so cardano-ledger dropped its
+// csCommitteeCreds entry there (Conway EPOCH, updateCommitteeState). The
+// RATIFY tally at the enactment boundary sees the same state: a member with
+// no committee entry is not counted, while one with a hot key that did not
+// vote counts as No (committeeAcceptedRatio). Here that decides whether a
+// treasury withdrawal the incumbent member voted for is ratified.
+func TestEpochRolloverSeatsMemberWithOnlyItsClosingEpochAuthorization(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		authSlot uint64
+		hasHot   bool
+	}{
+		{name: "authorized before the closing epoch", authSlot: 499},
+		{name: "authorized in the closing epoch", authSlot: 500, hasHot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newTreasuryRolloverFixture(t, 100)
+			require.Equal(t, uint64(500), f.currentEpoch.StartSlot)
+			cold := lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(repeatByte(28, 0xd1)),
+			}
+			hot := repeatByte(28, 0xd2)
+			action, err := lcommon.NewUpdateCommitteeGovAction(
+				nil,
+				nil,
+				map[*lcommon.Credential]uint64{
+					&cold: f.currentEpoch.EpochId + 20,
+				},
+				cbor.Rat{Rat: big.NewRat(1, 1)},
+			)
+			require.NoError(t, err)
+			actionCbor, err := cbor.Encode(action)
+			require.NoError(t, err)
+			ratifiedEpoch := f.currentEpoch.EpochId
+			ratifiedSlot := f.currentEpoch.StartSlot + 50
+			update := &models.GovernanceProposal{
+				TxHash:        repeatByte(32, 0xd3),
+				ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+				ProposedEpoch: f.currentEpoch.EpochId - 2,
+				ExpiresEpoch:  f.currentEpoch.EpochId + 20,
+				AnchorHash:    repeatByte(32, 0xd4),
+				ReturnAddress: repeatByte(29, 0xd5),
+				GovActionCbor: actionCbor,
+				AddedSlot:     350,
+				RatifiedEpoch: &ratifiedEpoch,
+				RatifiedSlot:  &ratifiedSlot,
+			}
+			require.NoError(t, f.db.SetGovernanceProposal(update, nil))
+			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`, cold.Credential[:], hot, 2, tc.authSlot)
+			require.NoError(t, err)
+			withdrawAddress, returnAddress, _ := f.rewardAddress(t, 0xd6)
+			withdrawal := f.addProposal(
+				t,
+				0xd7,
+				510,
+				map[*lcommon.Address]uint64{withdrawAddress: 40},
+				returnAddress,
+				0,
+				false,
+			)
+
+			result := f.rollover(t, f.currentEpoch, f.currentPParams)
+			enacted := f.proposal(t, update)
+			require.NotNil(t, enacted.EnactedSlot)
+
+			state, err := governance.LoadCommitteeVotingState(
+				f.db, nil, result.NewCurrentEpoch.EpochId,
+			)
+			require.NoError(t, err)
+			wantActive := 1
+			if tc.hasHot {
+				wantActive = 2
+			}
+			require.Equal(t, wantActive, state.ActiveMemberCount)
+			ratified := f.proposal(t, withdrawal)
+			require.Equal(
+				t,
+				!tc.hasHot,
+				ratified.RatifiedSlot != nil,
+				"withdrawal ratification: %s",
+				fmt.Sprint(ratified.RatifiedSlot),
+			)
+
+			lv := f.ls.NewView(nil)
+			lv.epochStartSlot = result.NewCurrentEpoch.StartSlot
+			member, err := lv.CommitteeHotCredentialMember(lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(hot),
+			})
+			require.NoError(t, err)
+			require.Equal(t, tc.hasHot, member != nil)
+
+			members, err := f.db.GetCommitteeMembers(nil)
+			require.NoError(t, err)
+			var seated *models.CommitteeMember
+			for _, member := range members {
+				if lcommon.NewBlake2b224(
+					member.ColdCredHash,
+				) == cold.Credential {
+					seated = member
+				}
+			}
+			require.NotNil(t, seated)
+			require.Equal(t, f.currentEpoch.StartSlot, seated.TermStartSlot)
+		})
+	}
+}
+
+// Committee pruning is applied when committee state is read, not by deleting
+// rows, so rolling an enactment back restores the pre-boundary answers
+// exactly: the seated member is pending again, and its authorization from
+// the restored epoch counts again.
+func TestCommitteeEnactmentRollbackRestoresPendingAuthorization(t *testing.T) {
+	t.Parallel()
+
+	f := newTreasuryRolloverFixture(t, 100)
+	cold := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(repeatByte(28, 0xe1)),
+	}
+	hot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(repeatByte(28, 0xe2)),
+	}
+	action, err := lcommon.NewUpdateCommitteeGovAction(
+		nil,
+		nil,
+		map[*lcommon.Credential]uint64{&cold: f.currentEpoch.EpochId + 20},
+		cbor.Rat{Rat: big.NewRat(1, 1)},
+	)
+	require.NoError(t, err)
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	ratifiedEpoch := f.currentEpoch.EpochId
+	ratifiedSlot := f.currentEpoch.StartSlot + 50
+	update := &models.GovernanceProposal{
+		TxHash:        repeatByte(32, 0xe3),
+		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
+		ProposedEpoch: f.currentEpoch.EpochId - 2,
+		ExpiresEpoch:  f.currentEpoch.EpochId + 20,
+		AnchorHash:    repeatByte(32, 0xe4),
+		ReturnAddress: repeatByte(29, 0xe5),
+		GovActionCbor: actionCbor,
+		AddedSlot:     350,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+	}
+	require.NoError(t, f.db.SetGovernanceProposal(update, nil))
+	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`, cold.Credential[:], hot.Credential[:], 2, 520)
+	require.NoError(t, err)
+
+	type committeeAnswers struct {
+		hotKnown bool
+		colds    []lcommon.Credential
+		elected  bool
+		resigned bool
+	}
+	answers := func(epoch, epochStartSlot uint64) committeeAnswers {
+		t.Helper()
+		lv := f.ls.NewView(nil).pinCommitteeState(epoch, f.currentPParams)
+		lv.epochStartSlot = epochStartSlot
+		member, err := lv.CommitteeHotCredentialMember(hot)
+		require.NoError(t, err)
+		colds, err := lv.CommitteeHotCredentialColdCredentials(hot)
+		require.NoError(t, err)
+		elected, err := lv.CommitteeCredentialIsElected(cold)
+		require.NoError(t, err)
+		coldMember, err := lv.CommitteeCredentialMember(cold)
+		require.NoError(t, err)
+		require.NotNil(t, coldMember)
+		return committeeAnswers{
+			hotKnown: member != nil,
+			colds:    colds,
+			elected:  elected,
+			resigned: coldMember.Resigned,
+		}
+	}
+	before := answers(f.currentEpoch.EpochId, f.currentEpoch.StartSlot)
+	require.Equal(t, committeeAnswers{
+		hotKnown: true,
+		colds:    []lcommon.Credential{cold},
+	}, before)
+
+	result := f.rollover(t, f.currentEpoch, f.currentPParams)
+	require.Equal(t, committeeAnswers{
+		hotKnown: true,
+		colds:    []lcommon.Credential{cold},
+		elected:  true,
+	}, answers(
+		result.NewCurrentEpoch.EpochId,
+		result.NewCurrentEpoch.StartSlot,
+	))
+
+	boundary := result.NewCurrentEpoch.StartSlot
+	require.NoError(t, f.db.DeleteCommitteeMembersAfterSlot(boundary-1, nil))
+	require.NoError(t, f.db.DeleteGovernanceProposalsAfterSlot(boundary-1, nil))
+	require.Equal(
+		t,
+		before,
+		answers(f.currentEpoch.EpochId, f.currentEpoch.StartSlot),
+	)
+	// Without the rollback, the same authorization would not survive into the
+	// next epoch for a credential that stayed pending.
+	require.Equal(t, committeeAnswers{
+		colds: []lcommon.Credential{},
+	}, answers(result.NewCurrentEpoch.EpochId, boundary))
+}
+
+// seatExpiredCommitteeMember seats a cold credential whose term ended before
+// the view's epoch. cardano-ledger keeps it in committeeMembers until an
+// enacted action removes it, so it is still elected.
+func seatExpiredCommitteeMember(
+	t *testing.T,
+	db *database.Database,
+	cold lcommon.Credential,
+) {
+	t.Helper()
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: uint8(cold.CredType),
+		ColdCredHash:      cold.Credential[:],
+		ExpiresEpoch:      1,
+	}}, nil))
+}
+
+// gOuroboros common.CommitteeVotingState: CommitteeHotCredentialColdCredentials
+// returns every cold credential currently authorizing the exact tagged hot
+// credential and does not filter by enacted membership or expiry; only a
+// resigned cold credential has no authorization to return. The current
+// authorizations are the csCommitteeCreds entries that survive the epoch
+// boundary (Conway EPOCH updateCommitteeState).
+func TestLedgerViewCommitteeHotCredentialColdCredentialsReturnsEveryAuthorization(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const epochStartSlot = 100
+	pparams := committeeVotingConway.pparams(lcommon.ProtocolVersionVanRossem)
+	lv, db := committeeTestView(t, pparams)
+	lv.pinCommitteeState(5, pparams)
+	lv.epochStartSlot = epochStartSlot
+	hot := committeeTestCredential(0x11)
+	scriptHot := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: hot.Credential,
+	}
+
+	seated := committeeTestCredential(0x21)
+	expired := committeeTestCredential(0x22)
+	resignedSeated := committeeTestCredential(0x23)
+	movedAway := committeeTestCredential(0x24)
+	scriptTwin := committeeTestCredential(0x25)
+	seatCommitteeMembers(t, db, seated, resignedSeated, movedAway, scriptTwin)
+	seatExpiredCommitteeMember(t, db, expired)
+	seedCommitteeCredentialAuthorization(t, db, seated, hot, 1, 1)
+	seedCommitteeCredentialAuthorization(t, db, expired, hot, 2, 1)
+	seedCommitteeCredentialAuthorization(t, db, resignedSeated, hot, 3, 1)
+	seedCommitteeCredentialResignation(t, db, resignedSeated, 4, 2)
+	seedCommitteeCredentialAuthorization(t, db, movedAway, hot, 5, 1)
+	seedCommitteeCredentialAuthorization(
+		t, db, movedAway, committeeTestCredential(0x12), 6, 2,
+	)
+	seedCommitteeCredentialAuthorization(t, db, scriptTwin, scriptHot, 7, 1)
+
+	pending := committeeTestCredential(0x31)
+	pendingResigned := committeeTestCredential(0x32)
+	pendingLastEpoch := committeeTestCredential(0x33)
+	for i, cold := range []lcommon.Credential{
+		pending, pendingResigned, pendingLastEpoch,
+	} {
+		storeCommitteeUpdateProposal(t, db, byte(0x41+i), cold, 10)
+	}
+	seedCommitteeCredentialAuthorization(
+		t, db, pending, hot, 8, epochStartSlot,
+	)
+	seedCommitteeCredentialAuthorization(
+		t, db, pendingResigned, hot, 9, epochStartSlot,
+	)
+	seedCommitteeCredentialResignation(
+		t, db, pendingResigned, 10, epochStartSlot+1,
+	)
+	seedCommitteeCredentialAuthorization(
+		t, db, pendingLastEpoch, hot, 11, epochStartSlot-1,
+	)
+
+	coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(hot)
+	require.NoError(t, err)
+	require.ElementsMatch(
+		t,
+		[]lcommon.Credential{seated, expired, pending},
+		coldCredentials,
+	)
+	coldCredentials, err = lv.CommitteeHotCredentialColdCredentials(scriptHot)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Credential{scriptTwin}, coldCredentials)
+
+	for _, cold := range []lcommon.Credential{seated, expired} {
+		elected, err := lv.CommitteeCredentialIsElected(cold)
+		require.NoError(t, err)
+		require.True(t, elected)
+	}
+	elected, err := lv.CommitteeCredentialIsElected(pending)
+	require.NoError(t, err)
+	require.False(t, elected)
+}
+
+// Reference verdicts for one committee hot voter at PV9, PV10 and PV11:
+// VotersDoNotExist unless a surviving csCommitteeCreds entry authorizes the
+// hot credential (at every version), plus UnelectedCommitteeVoters from PV11
+// unless that entry's cold credential is in the enacted committee. Expiry is
+// not consulted by GOV.
+func TestValidateTxCommitteeVoterVerdictsByProtocolVersion(t *testing.T) {
+	t.Parallel()
+
+	const epochStartSlot = 100
+	type verdict int
+	const (
+		accept verdict = iota
+		unknown
+		unelected
+	)
+	versions := []struct {
+		label string
+		major uint
+	}{
+		{label: "PV9", major: lcommon.ProtocolVersionPlomin - 1},
+		{label: "PV10", major: lcommon.ProtocolVersionPlomin},
+		{label: "PV11", major: lcommon.ProtocolVersionVanRossem},
+	}
+	members := []struct {
+		name string
+		seed func(
+			t *testing.T,
+			db *database.Database,
+			cold, hot lcommon.Credential,
+		)
+		verdicts [3]verdict
+	}{
+		{
+			name: "seated",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatCommitteeMembers(t, db, cold)
+				seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+			},
+			verdicts: [3]verdict{accept, accept, accept},
+		},
+		{
+			name: "seated expired",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatExpiredCommitteeMember(t, db, cold)
+				seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+			},
+			verdicts: [3]verdict{accept, accept, accept},
+		},
+		{
+			name: "seated resigned",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatCommitteeMembers(t, db, cold)
+				seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
+				seedCommitteeCredentialResignation(t, db, cold, 2, 2)
+			},
+			verdicts: [3]verdict{unknown, unknown, unelected},
+		},
+		{
+			name: "pending authorized this epoch",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatCommitteeMembers(t, db, committeeTestCredential(0x5f))
+				storeCommitteeUpdateProposal(t, db, 0x5e, cold, 10)
+				seedCommitteeCredentialAuthorization(
+					t, db, cold, hot, 1, epochStartSlot,
+				)
+			},
+			verdicts: [3]verdict{accept, accept, unelected},
+		},
+		{
+			name: "pending authorized last epoch",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatCommitteeMembers(t, db, committeeTestCredential(0x5f))
+				storeCommitteeUpdateProposal(t, db, 0x5e, cold, 10)
+				seedCommitteeCredentialAuthorization(
+					t, db, cold, hot, 1, epochStartSlot-1,
+				)
+			},
+			verdicts: [3]verdict{unknown, unknown, unelected},
+		},
+		{
+			name: "pending resigned",
+			seed: func(t *testing.T, db *database.Database, cold, hot lcommon.Credential) {
+				seatCommitteeMembers(t, db, committeeTestCredential(0x5f))
+				storeCommitteeUpdateProposal(t, db, 0x5e, cold, 10)
+				seedCommitteeCredentialAuthorization(
+					t, db, cold, hot, 1, epochStartSlot,
+				)
+				seedCommitteeCredentialResignation(
+					t, db, cold, 2, epochStartSlot+1,
+				)
+			},
+			verdicts: [3]verdict{unknown, unknown, unelected},
+		},
+	}
+	for _, era := range []committeeVotingEra{
+		committeeVotingConway,
+		committeeVotingDijkstra,
+	} {
+		for _, member := range members {
+			for i, version := range versions {
+				name := fmt.Sprintf(
+					"%s/%s/%s",
+					era.name,
+					member.name,
+					version.label,
+				)
+				want := member.verdicts[i]
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					pparams := era.pparams(version.major)
+					lv, db := committeeTestView(t, pparams)
+					lv.pinCommitteeState(5, pparams)
+					lv.epochStartSlot = epochStartSlot
+					cold := committeeTestCredential(0x51)
+					hot, hotKey := committeeTestVotingKey(0x52)
+					member.seed(t, db, cold, hot)
+
+					err := committeeVotingValidate(
+						t, era, lv, pparams, hotKey,
+						lcommon.VotingProcedures{committeeVoter(hot): {}},
+						nil,
+					)
+					switch want {
+					case accept:
+						require.NoError(t, err)
+					case unknown:
+						requireUnknownCommitteeVoter(t, err)
+					case unelected:
+						var unelectedErr conway.UnelectedCommitteeVoterError
+						require.ErrorAs(t, err, &unelectedErr)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A seated committee_member row whose cold hash is not 28 bytes is corrupt
+// state. Resolving an unseated authorization consults the seated set, so the
+// lookup must fail rather than truncate or zero-pad the stored bytes into a
+// credential: a 29-byte row whose first 28 bytes are the pending member's
+// hash would otherwise hide that member's authorization, and a short row
+// would otherwise be silently ignored. Validation fails closed on the error.
+func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, length := range []int{
+		lcommon.Blake2b224Size - 1,
+		lcommon.Blake2b224Size + 1,
+	} {
+		t.Run(fmt.Sprintf("%d bytes", length), func(t *testing.T) {
+			t.Parallel()
+			era := committeeVotingConway
+			pparams := era.pparams(lcommon.ProtocolVersionPlomin)
+			lv, db := committeeTestView(t, pparams)
+			pending := committeeTestCredential(0x91)
+			hot, hotKey := committeeTestVotingKey(0x92)
+			malformed := make([]byte, length)
+			copy(malformed, pending.Credential[:])
+			require.NoError(t, db.SetCommitteeMembers(
+				[]*models.CommitteeMember{{
+					ColdCredentialTag: uint8(pending.CredType),
+					ColdCredHash:      malformed,
+					ExpiresEpoch:      10,
+				}},
+				nil,
+			))
+			storeCommitteeUpdateProposal(t, db, 0x93, pending, 10)
+			seedCommitteeCredentialAuthorization(t, db, pending, hot, 1, 1)
+
+			member, err := lv.CommitteeHotCredentialMember(hot)
+			require.Nil(t, member)
+			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+			coldCredentials, err := lv.CommitteeHotCredentialColdCredentials(
+				hot,
+			)
+			require.Nil(t, coldCredentials)
+			require.ErrorContains(t, err, fmt.Sprintf("got %d", length))
+
+			err = committeeVotingValidate(
+				t, era, lv, pparams, hotKey,
+				lcommon.VotingProcedures{committeeVoter(hot): {}},
+				nil,
+			)
+			var lookup conway.CommitteeMemberLookupError
+			require.ErrorAs(t, err, &lookup)
+			require.ErrorContains(t, err, "invalid blake2b-224 hash")
+		})
+	}
+}
+
+// incorrectRefundSubstring is the message
+// conway.CertificateRefundIncorrectError renders. These tests match on the
+// message rather than on a rule index, which is an offset into an upstream
+// slice and moves whenever gouroboros inserts or reorders a rule.
+const incorrectRefundSubstring = "incorrect refund for certificate type 17"
+
+const (
+	// Deliberately different values. drepRefundTestPparamDeposit is what a
+	// *registration* certificate must supply, and is the value a refund
+	// would be judged against if the deregistration path fell back to
+	// protocol parameters; drepRefundTestRecordedDeposit is what the
+	// registration row actually recorded. Keeping them apart is what stops
+	// these tests passing for the wrong reason.
+	drepRefundTestPparamDeposit   = 1_000_000
+	drepRefundTestRecordedDeposit = 500_000_000
+)
+
+func drepRefundTestPparams() *conway.ConwayProtocolParameters {
+	return &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 9,
+		},
+		KeyDeposit:           2_000_000,
+		DRepDeposit:          drepRefundTestPparamDeposit,
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+}
+
+func drepRefundTestCredential(seed byte) lcommon.Credential {
+	return lcommon.Credential{
+		CredType: lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(
+			bytes.Repeat([]byte{seed}, lcommon.AddressHashSize),
+		),
+	}
+}
+
+// drepDeregistrationTx builds a real *conway.ConwayTransaction carrying a
+// single DRep deregistration, which is the certificate whose refund
+// conway.UtxoValidateCertificateDeposits checks against the deposit the
+// ledger state reports for the credential.
+func drepDeregistrationTx(
+	cred lcommon.Credential,
+	refund int64,
+) *conway.ConwayTransaction {
+	cert := &lcommon.DeregistrationDrepCertificate{
+		CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: cred,
+		Amount:         refund,
+	}
+	return &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxCertificates: []lcommon.CertificateWrapper{
+				{
+					Type: uint(
+						lcommon.CertificateTypeDeregistrationDrep,
+					),
+					Certificate: cert,
+				},
+			},
+		},
+	}
+}
+
+// seedImportedDrep writes the DRep and registration rows the Mithril
+// ledger-state import produces: a registration_drep row with no certificate
+// behind it, so certificate_id stays 0 while deposit_amount carries the real
+// amount owed. On a bootstrapped node this is frequently a DRep's only
+// registration row.
+func seedImportedDrep(
+	t *testing.T,
+	db *database.Database,
+	cred lcommon.Credential,
+	deposit uint64,
+	slot uint64,
+	active bool,
+) {
+	t.Helper()
+	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
+	require.NoError(t, err)
+	hash := append([]byte(nil), cred.Credential[:]...)
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: tag,
+			Credential:    hash,
+			AddedSlot:     slot,
+			Active:        active,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  tag,
+			DrepCredential: hash,
+			AddedSlot:      slot,
+			DepositAmount:  types.Uint64(deposit),
+		},
+		nil,
+	))
+}
+
+// TestDRepDeregistrationRefundsRecordedDeposit is the regression test for the
+// live rejection this fix addresses. LedgerView.DRepRegistration is the
+// common.DRepState gouroboros consults for a DRep deregistration's refund;
+// it built a DRepRegistration without assigning Deposit, so every refund was
+// judged against zero and a certificate supplying the real deposit was
+// rejected with "incorrect refund for certificate type 17: supplied
+// 500000000, expected 0".
+//
+// The assertion is on the validation outcome through the production Conway
+// rule with a real *LedgerView, not on the helper's return value, because the
+// defect was a plausible internal value becoming the wrong consensus
+// decision.
+func TestDRepDeregistrationRefundsRecordedDeposit(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := drepRefundTestCredential(0xd1)
+	seedImportedDrep(t, db, cred, drepRefundTestRecordedDeposit, 100, true)
+	pp := drepRefundTestPparams()
+
+	// Balanced at the recorded deposit: accepted.
+	require.NoError(t, conway.UtxoValidateCertificateDeposits(
+		drepDeregistrationTx(cred, drepRefundTestRecordedDeposit),
+		200,
+		lv,
+		pp,
+	))
+
+	// A refund of zero is what the defect accepted, and it must now be
+	// rejected. This is the assertion that cannot hold both before and
+	// after the fix.
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, 0),
+			200,
+			lv,
+			pp,
+		),
+		incorrectRefundSubstring,
+	)
+
+	// And the recorded value must win over the protocol parameter, so the
+	// acceptance above is not a fallback to DRepDeposit that happened to
+	// balance.
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			pp,
+		),
+		incorrectRefundSubstring,
+	)
+
+	// Supporting evidence for why the acceptance holds.
+	reg, err := lv.DRepRegistration(cred)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.NotNil(t, reg.Deposit)
+	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *reg.Deposit)
+}
+
+// TestDRepRegistrationsReportRecordedDeposits covers the plural view, which
+// gouroboros declares on common.DRepState alongside the singular form. It
+// reads its deposits through the batched query, so this is what executes
+// GetDrepLastRegistrationDeposits' derived-table join.
+func TestDRepRegistrationsReportRecordedDeposits(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	active := drepRefundTestCredential(0xd2)
+	inactive := drepRefundTestCredential(0xd3)
+	seedImportedDrep(t, db, active, drepRefundTestRecordedDeposit, 100, true)
+	// Registered once, since deregistered. Its registration history must
+	// not appear in a listing of active DReps.
+	seedImportedDrep(t, db, inactive, 900_000_000, 101, false)
+
+	regs, err := lv.DRepRegistrations()
+	require.NoError(t, err)
+	require.Len(t, regs, 1)
+	require.Equal(t, active, regs[0].Credential)
+	require.NotNil(t, regs[0].Deposit)
+	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *regs[0].Deposit)
+}
+
+// TestDRepRegistrationReportsNilForUnregisteredCredential pins the absence
+// case the batched map leaves out entirely: a DRep row with no
+// registration_drep history reports no deposit rather than an error, through
+// both views.
+func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := drepRefundTestCredential(0xd4)
+	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
+	require.NoError(t, err)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: tag,
+		Credential:    append([]byte(nil), cred.Credential[:]...),
+		AddedSlot:     100,
+		Active:        true,
+	}))
+
+	reg, err := lv.DRepRegistration(cred)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.Nil(t, reg.Deposit)
+
+	regs, err := lv.DRepRegistrations()
+	require.NoError(t, err)
+	require.Len(t, regs, 1)
+	require.Nil(t, regs[0].Deposit)
+}
+
+// inconsistentDepositSubstring is the message
+// conway.DRepDepositStateInconsistentError renders when a registration
+// reports no recorded deposit. Matched on the message rather than on a rule
+// index, which moves whenever gouroboros inserts or reorders a rule.
+const inconsistentDepositSubstring = "registered DRep credential has no recorded deposit"
+
+// newDrepFallbackTestView returns a *LedgerView whose published consensus
+// snapshot is Conway with drepRefundTestPparams, so the unknown-deposit
+// fallback resolves through the same era certificate-deposit function the
+// certificate write path uses. newStakeRefundTestView leaves the snapshot
+// unpublished and the era Shelley, which is the "current era charges no DRep
+// deposit" case rather than this one.
+func newDrepFallbackTestView(
+	t *testing.T,
+) (*LedgerView, *database.Database) {
+	t.Helper()
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = drepRefundTestPparams()
+	ls.publishSnapshotsLocked()
+	return &LedgerView{ls: ls}, db
+}
+
+// seedActiveDrepWithoutRegistration reproduces the state the vote-replay
+// recovery path leaves behind. ledger/governance/processing.go calls
+// InsertDrepIfAbsent when a valid DRep vote proves the credential exists
+// on-chain but the metadata row was lost during recovery or bootstrap; that
+// writes an active drep row and no registration_drep row at all, so the
+// credential is registered with no recorded deposit.
+func seedActiveDrepWithoutRegistration(
+	t *testing.T,
+	db *database.Database,
+	cred lcommon.Credential,
+	slot uint64,
+) {
+	t.Helper()
+	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
+	require.NoError(t, err)
+	require.NoError(t, db.InsertDrepIfAbsent(
+		tag,
+		cred.Credential[:],
+		slot,
+		"",
+		nil,
+		true,
+		nil,
+	))
+	// The recovery path really does leave no registration row behind; if it
+	// ever starts writing one this test is measuring the wrong thing.
+	recorded, err := db.GetDrepLastRegistrationDeposit(
+		tag,
+		cred.Credential[:],
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		recorded,
+		"the recovery path must leave no recorded deposit for this test to exercise the fallback",
+	)
+}
+
+// TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded is the
+// regression test. An active DRep with no registration_drep row reported
+// Deposit == nil, and gouroboros fails closed on that
+// (DRepDepositStateInconsistentError), so the deregistration was rejected and
+// a node reaching that block stopped making progress. The refund is now
+// judged against the DRep deposit the current protocol parameters charge,
+// which is what the certificate write path would have recorded.
+func TestDrepDeregistrationFallsBackToCurrentDepositWhenUnrecorded(
+	t *testing.T,
+) {
+	lv, db := newDrepFallbackTestView(t)
+	cred := drepRefundTestCredential(0xe1)
+	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+
+	pp := drepRefundTestPparams()
+	tx := drepDeregistrationTx(cred, drepRefundTestPparamDeposit)
+	// The rule is invoked directly so a nil error means the refund
+	// comparison actually ran and matched, rather than that the substring
+	// was absent because an unrelated rule failed first.
+	require.NoError(
+		t,
+		conway.UtxoValidateCertificateDeposits(tx, 200, lv, pp),
+	)
+	if err := eras.ValidateTxConway(tx, 200, lv, pp); err != nil {
+		require.NotContains(t, err.Error(), inconsistentDepositSubstring)
+		require.NotContains(t, err.Error(), incorrectRefundSubstring)
+	}
+
+	// Supporting evidence for why the acceptance holds.
+	reg, err := lv.DRepRegistration(cred)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.NotNil(
+		t,
+		reg.Deposit,
+		"an unrecorded deposit must be reported as the current parameter, not as absence",
+	)
+	require.Equal(t, uint64(drepRefundTestPparamDeposit), *reg.Deposit)
+}
+
+// TestDrepDeregistrationKeepsRecordedZeroAuthoritative pins the distinction
+// the fallback must preserve. A zero dRepDeposit is a legitimate
+// configuration, so a recorded zero is a real value: folding it into the
+// unrecorded case would refund the current parameter and reject a valid
+// deregistration.
+func TestDrepDeregistrationKeepsRecordedZeroAuthoritative(t *testing.T) {
+	lv, db := newDrepFallbackTestView(t)
+	cred := drepRefundTestCredential(0xe4)
+	seedImportedDrep(t, db, cred, 0, 100, true)
+
+	reg, err := lv.DRepRegistration(cred)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.NotNil(
+		t,
+		reg.Deposit,
+		"a recorded zero must stay a value, not become absence",
+	)
+	require.Equal(t, uint64(0), *reg.Deposit)
+
+	pp := drepRefundTestPparams()
+	require.NoError(t, conway.UtxoValidateCertificateDeposits(
+		drepDeregistrationTx(cred, 0),
+		200,
+		lv,
+		pp,
+	))
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			pp,
+		),
+		incorrectRefundSubstring,
+	)
+}
+
+// TestDrepRegistrationsFallBackForUnrecordedDeposit covers the plural view,
+// which builds its deposits from a batched map lookup and so has its own
+// absence path.
+func TestDrepRegistrationsFallBackForUnrecordedDeposit(t *testing.T) {
+	lv, db := newDrepFallbackTestView(t)
+	unrecorded := drepRefundTestCredential(0xe5)
+	recorded := drepRefundTestCredential(0xe6)
+	seedActiveDrepWithoutRegistration(t, db, unrecorded, 100)
+	seedImportedDrep(t, db, recorded, drepRefundTestRecordedDeposit, 101, true)
+
+	registrations, err := lv.DRepRegistrations()
+	require.NoError(t, err)
+	byCredential := map[string]*uint64{}
+	for _, reg := range registrations {
+		byCredential[string(reg.Credential.Credential[:])] = reg.Deposit
+	}
+
+	got := byCredential[string(unrecorded.Credential[:])]
+	require.NotNil(t, got, "the plural view must not report absence either")
+	require.Equal(t, uint64(drepRefundTestPparamDeposit), *got)
+
+	got = byCredential[string(recorded.Credential[:])]
+	require.NotNil(t, got)
+	require.Equal(t, uint64(drepRefundTestRecordedDeposit), *got)
+}
+
+// TestDrepRegistrationReportsAbsenceInAPreConwayEra keeps the fallback from
+// inventing a refund where the current era charges no DRep deposit.
+//
+// The era has to be published for this to mean anything. CertDepositShelley
+// through CertDepositBabbage have no *RegistrationDrepCertificate case and
+// fall through to "default: return 0, nil", so before the drepDepositParams
+// guard this reported a non-nil zero and gouroboros accepted a zero refund
+// instead of failing closed.
+func TestDrepRegistrationReportsAbsenceInAPreConwayEra(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.BabbageEraDesc
+	ls.currentPParams = &babbage.BabbageProtocolParameters{
+		KeyDeposit: 2_000_000,
+		MaxTxSize:  16_384,
+	}
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+	// The era's own deposit function really does answer zero-without-error
+	// for a DRep registration, which is what makes the guard load-bearing
+	// rather than defensive.
+	deposit, err := eras.BabbageEraDesc.CertDepositFunc(
+		&lcommon.RegistrationDrepCertificate{},
+		ls.currentPParams,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), deposit)
+
+	cred := drepRefundTestCredential(0xe7)
+	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+
+	reg, err := lv.DRepRegistration(cred)
+	require.NoError(t, err)
+	require.NotNil(t, reg)
+	require.Nil(
+		t,
+		reg.Deposit,
+		"a pre-Conway era has no DRep deposit to fall back to; absence must be reported",
+	)
+
+	registrations, err := lv.DRepRegistrations()
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Nil(
+		t,
+		registrations[0].Deposit,
+		"the plural view must report absence in a pre-Conway era too",
+	)
+
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			drepRefundTestPparams(),
+		),
+		inconsistentDepositSubstring,
+	)
+}
+
+// TestDrepRegistrationReportsAbsenceForTypedNilParams covers the other way the
+// capability assertion can be satisfied without a usable deposit behind it.
+//
+// A typed-nil *DijkstraProtocolParameters implements drepDepositParams, so the
+// call-site guard admits it; CertDepositDijkstra then asserted the type
+// successfully and dereferenced nil, panicking inside DRep view construction.
+// It now reports ErrIncompatibleProtocolParams, which currentDRepDeposit turns
+// into absence, so gouroboros fails closed as it does for every other
+// no-deposit-available case.
+//
+// The two guards are complementary and both are asserted here: the era helper
+// is what stops the panic, and the call-site capability check is what keeps a
+// pre-Conway era from reaching it at all.
+func TestDrepRegistrationReportsAbsenceForTypedNilParams(t *testing.T) {
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.currentPParams = (*dijkstra.DijkstraProtocolParameters)(nil)
+	ls.publishSnapshotsLocked()
+	lv := &LedgerView{ls: ls}
+
+	// The typed nil really does satisfy the capability the call-site guard
+	// tests, so this case reaches the era helper rather than stopping early.
+	_, implements := ls.currentPParams.(drepDepositParams)
+	require.True(
+		t,
+		implements,
+		"a typed-nil pointer must still satisfy drepDepositParams for this test to exercise the era helper",
+	)
+
+	cred := drepRefundTestCredential(0xe9)
+	seedActiveDrepWithoutRegistration(t, db, cred, 100)
+
+	require.NotPanics(t, func() {
+		reg, err := lv.DRepRegistration(cred)
+		require.NoError(t, err)
+		require.NotNil(t, reg)
+		require.Nil(
+			t,
+			reg.Deposit,
+			"unusable parameters must report absence, not a fabricated deposit",
+		)
+	})
+	require.NotPanics(t, func() {
+		registrations, err := lv.DRepRegistrations()
+		require.NoError(t, err)
+		require.Len(t, registrations, 1)
+		require.Nil(t, registrations[0].Deposit)
+	})
+
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateCertificateDeposits(
+			drepDeregistrationTx(cred, drepRefundTestPparamDeposit),
+			200,
+			lv,
+			drepRefundTestPparams(),
+		),
+		inconsistentDepositSubstring,
+	)
+}
+
+func epochBoundaryBenchStart(epoch uint64) uint64 {
+	return epoch * epochBoundaryBenchEpochLength
+}
+
+// TestBoundaryPromotesRewardAfterReregistration pins the other eligibility
+// transition: a row made nonspendable by a deregistration before precompute is
+// credited when the credential registers and delegates again before boundary.
+func TestBoundaryPromotesRewardAfterReregistration(t *testing.T) {
+	t.Parallel()
+	type outcome struct {
+		storedReward uint64
+		balance      *uint64
+		treasury     uint64
+		amount       uint64
+		spendable    bool
+	}
+	run := func(reregister bool) outcome {
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		key := epochBoundaryBenchHash(0x30, 1)
+		raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+		require.NoError(t, err)
+		var pool []byte
+		require.NoError(t, raw.QueryRow(
+			`SELECT pool FROM account WHERE credential_tag = 0 AND staking_key = ?`,
+			key,
+		).Scan(&pool))
+		deregisterSlot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000
+		_, err = raw.Exec(`
+UPDATE account SET active = 0, pool = NULL, added_slot = ?
+WHERE credential_tag = 0 AND staking_key = ?`, deregisterSlot, key)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+UPDATE reward_live_stake SET registered = 0, pool_key_hash = NULL,
+    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
+			deregisterSlot, key,
+		)
+		require.NoError(t, err)
+		_, err = raw.Exec(`
+INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
+VALUES (?, ?, 0, '2000000')`, deregisterSlot, key)
+		require.NoError(t, err)
+		require.NoError(t, raw.Close())
+
+		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+			epochBoundaryBenchPrecomputeEvent(),
+		))
+		precomputed, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		require.NoError(t, err)
+		var targetAmount uint64
+		for _, output := range precomputed {
+			if string(output.StakingKey) == string(key) {
+				require.False(t, output.Spendable,
+					"precompute observes the deregistered account")
+				targetAmount += uint64(output.Amount)
+			}
+		}
+		require.Positive(t, targetAmount)
+
+		if reregister {
+			raw, err = dbtest.RawSQLiteMetadata(t, f.db)
+			require.NoError(t, err)
+			registerSlot := deregisterSlot + 1_000
+			_, err = raw.Exec(`
+UPDATE account SET active = 1, pool = ?, added_slot = ?
+WHERE credential_tag = 0 AND staking_key = ?`, pool, registerSlot, key)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+UPDATE reward_live_stake SET registered = 1, pool_key_hash = ?,
+    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
+				pool, registerSlot, key,
+			)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO registration (staking_key, credential_tag, added_slot)
+VALUES (?, 0, ?)`, key, registerSlot)
+			require.NoError(t, err)
+			_, err = raw.Exec(`
+INSERT INTO stake_delegation
+    (staking_key, credential_tag, pool_key_hash, added_slot)
+VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
+			require.NoError(t, err)
+			require.NoError(t, raw.Close())
+		}
+
+		f.rollover(t)
+		f.ls.waitEpochBoundaryBenchBackground()
+		account, err := f.db.GetAccountByCredential(0, key, true, nil)
+		require.NoError(t, err)
+		var balance *uint64
+		if account.Active {
+			balance, err = (&LedgerView{ls: f.ls}).RewardAccountBalance(
+				lcommon.Credential{
+					CredType: lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.CredentialHash(
+						lcommon.NewBlake2b224(key),
+					),
+				},
+			)
+			require.NoError(t, err)
+			require.NotNil(t, balance)
+		}
+		outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+		require.NoError(t, err)
+		var spendable bool
+		for _, output := range outputs {
+			if string(output.StakingKey) == string(key) {
+				spendable = output.Spendable
+			}
+		}
+		state, err := f.db.Metadata().GetNetworkState(nil)
+		require.NoError(t, err)
+		return outcome{
+			storedReward: uint64(account.Reward), balance: balance,
+			treasury: uint64(state.Treasury),
+			amount:   targetAmount, spendable: spendable,
+		}
+	}
+
+	deregistered := run(false)
+	reregistered := run(true)
+	require.False(t, deregistered.spendable)
+	require.True(t, reregistered.spendable)
+	baseReward := stakeRewardSeedReward(string(epochBoundaryBenchHash(0x30, 1)))
+	require.Equal(t, baseReward, deregistered.storedReward)
+	require.Equal(t, baseReward, reregistered.storedReward,
+		"the boundary keeps deferred credits out of account.reward")
+	require.Nil(t, deregistered.balance)
+	require.NotNil(t, reregistered.balance)
+	require.Equal(t, baseReward+reregistered.amount, *reregistered.balance)
+	require.Equal(t, deregistered.treasury,
+		reregistered.treasury+reregistered.amount,
+		"the re-registered reward moves from treasury to the account")
+}
+
+const musashiGenesisCommitteeExpiry = 293
+
+func TestGenesisCommitteeStateUnavailableWithoutHistory(t *testing.T) {
+	t.Parallel()
+	ls, db := genesisConstitutionTestState(t)
+	for _, cfg := range []*cardano.CardanoNodeConfig{
+		ls.config.CardanoNodeConfig,
+		{},
+		nil,
+	} {
+		ls.config.CardanoNodeConfig = cfg
+		require.Zero(t, committeeMemberRowCount(t, db))
+		available, err := ls.NewView(nil).CommitteeStateAvailable()
+		require.NoError(t, err)
+		require.False(t, available)
+	}
+}
+
+func TestEmptyGenesisCommitteeLookupFailure(t *testing.T) {
+	t.Parallel()
+	ls, _ := genesisConstitutionTestState(t)
+	ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = nil
+	wantErr := errors.New("committee storage unavailable")
+	ls.db = newStorageFaultTestDB(t, errInjectingMetadataStore{
+		getCommitteeMembersErr: wantErr,
+	})
+	available, err := ls.NewView(nil).CommitteeStateAvailable()
+	require.ErrorIs(t, err, wantErr)
+	require.False(t, available)
+}
+
+func TestEmptyGenesisCommitteeStateAvailable(t *testing.T) {
+	t.Parallel()
+
+	for _, members := range []map[string]int{nil, {}} {
+		name := "empty map"
+		if members == nil {
+			name = "nil map"
+		}
+		t.Run(name, func(t *testing.T) {
+			ls, db := genesisConstitutionTestState(t)
+			ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = members
+			for range 2 {
+				require.NoError(t, ls.createGenesisBlock())
+				require.Zero(t, committeeMemberRowCount(t, db))
+				available, err := ls.NewView(nil).CommitteeStateAvailable()
+				require.NoError(t, err)
+				require.True(
+					t,
+					available,
+					"empty genesis committee is authoritative",
+				)
+			}
+		})
+	}
+}
+
+// TestCreateGenesisBlockSeedsCommittee proves a node initialized from Conway
+// genesis recognizes every genesis Constitutional Committee member for
+// hot-key authorization. Without the seed (blinklabs-io/dingo#3785) a
+// genesis member never touched by an UpdateCommittee action has no row at
+// all, and AuthCommitteeHot/ResignCommitteeCold validation rejects it as
+// "not a CC member" even though the real chain has recognized it since the
+// hard fork.
+func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys {
+		coldKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(coldKey),
+		})
+		require.NoError(t, err)
+		require.NotNil(
+			t,
+			member,
+			"genesis committee member %s must resolve",
+			coldKeyHex,
+		)
+		require.False(t, member.Resigned)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
+	}
+}
+
+// TestCreateGenesisBlockCommitteeEnactmentWins proves a real UpdateCommittee
+// enactment for a genesis cold credential outranks the genesis seed, and
+// that a later genesis initialization pass does not revert it back to the
+// genesis term -- the hazard a naive unconditional reseed on every startup
+// would create.
+func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+
+	coldKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
+	require.NoError(t, err)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{
+			ColdCredentialTag: 0,
+			ColdCredHash:      coldKey,
+			ExpiresEpoch:      999,
+			TermStartSlot:     100,
+			TermStartSlotSet:  true,
+			AddedSlot:         100,
+		},
+	}, nil))
+
+	ls.currentTip.Point = ocommon.Point{Slot: 200}
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(coldKey),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, member)
+	require.Equal(t, uint64(999), member.ExpiryEpoch)
+
+	// The other two genesis members are untouched and still resolve.
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys[1:] {
+		otherKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		other, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(otherKey),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, other)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			other.ExpiryEpoch,
+		)
+	}
+}
+
+// TestCreateGenesisBlockConstitutionEnactmentWins proves an enacted
+// NewConstitution action outranks the slot-0 genesis seed, and that a later
+// genesis initialization pass does not restore the genesis constitution over
+// it.
+func TestCreateGenesisBlockConstitutionEnactmentWins(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+
+	enactedAnchor := bytes.Repeat([]byte{0xe1}, lcommon.Blake2b256Size)
+	enactedScript := bytes.Repeat([]byte{0xe2}, lcommon.Blake2b224Size)
+	require.NoError(t, db.SetConstitution(&models.Constitution{
+		AnchorURL:  "https://example.invalid/enacted",
+		AnchorHash: enactedAnchor,
+		PolicyHash: enactedScript,
+		AddedSlot:  100,
+	}, nil))
+
+	ls.currentTip.Point = ocommon.Point{Slot: 200}
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	got, err := lv.Constitution()
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "https://example.invalid/enacted", got.Anchor.Url)
+	require.Equal(t, enactedAnchor, got.Anchor.DataHash[:])
+	require.Equal(t, enactedScript, got.ScriptHash)
+
+	require.NoError(t, constitutionTestGuardrails(t, lv, enactedScript))
+}
+
+const treasuryRolloverGenesisHash = "0101010101010101010101010101010101010101010101010101010101010101"
+
+type treasuryRolloverFixture struct {
+	ls             *LedgerState
+	db             *database.Database
+	currentEpoch   models.Epoch
+	currentPParams *conway.ConwayProtocolParameters
+	hotCredential  []byte
+}
+
+func newTreasuryRolloverFixture(
+	t *testing.T,
+	treasury uint64,
+) *treasuryRolloverFixture {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	cfg := newTestEraHistoryCfg(t)
+	cfg.ShelleyGenesisHash = treasuryRolloverGenesisHash
+	currentEpoch := newTestEpoch(5, 500, 100, eras.ConwayEraDesc.Id)
+	require.NoError(t, db.SetEpoch(
+		currentEpoch.StartSlot,
+		currentEpoch.EpochId,
+		currentEpoch.Nonce,
+		currentEpoch.EvolvingNonce,
+		currentEpoch.CandidateNonce,
+		currentEpoch.LastEpochBlockNonce,
+		currentEpoch.EraId,
+		currentEpoch.SlotLength,
+		currentEpoch.LengthInSlots,
+		nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(treasury, 1_000, 499, nil))
+
+	pparams := donationTestConwayPParams(10)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.TreasuryWithdrawal = cbor.Rat{
+		Rat: big.NewRat(0, 1),
+	}
+
+	coldCredential := repeatByte(28, 0xc1)
+	hotCredential := repeatByte(28, 0xc2)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredHash: coldCredential,
+		ExpiresEpoch: currentEpoch.EpochId + 20,
+		AddedSlot:    1,
+	}}, nil))
+	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(1, 1), 1, nil))
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+INSERT INTO auth_committee_hot (
+    cold_credential, host_credential, certificate_id, added_slot
+) VALUES (?, ?, ?, ?)`, coldCredential, hotCredential, 1, 1)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		currentEpoch:   currentEpoch,
+		currentPParams: pparams,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewJSONHandler(
+				io.Discard,
+				nil,
+			)),
+		},
+	}
+	return &treasuryRolloverFixture{
+		ls:             ls,
+		db:             db,
+		currentEpoch:   currentEpoch,
+		currentPParams: pparams,
+		hotCredential:  hotCredential,
+	}
+}
+
+func (f *treasuryRolloverFixture) rollover(
+	t *testing.T,
+	currentEpoch models.Epoch,
+	currentPParams lcommon.ProtocolParameters,
+) *EpochRolloverResult {
+	t.Helper()
+	var result *EpochRolloverResult
+	txn := f.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		result, rolloverErr = f.ls.processEpochRollover(
+			txn,
+			currentEpoch,
+			eras.ConwayEraDesc,
+			currentPParams,
+			false,
+		)
+		return rolloverErr
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	return result
+}
+
+func (f *treasuryRolloverFixture) proposal(
+	t *testing.T,
+	proposal *models.GovernanceProposal,
+) *models.GovernanceProposal {
+	t.Helper()
+	loaded, err := f.db.GetGovernanceProposal(
+		proposal.TxHash,
+		proposal.ActionIndex,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	return loaded
+}
+
+// donationTestConwayPParams builds Conway pparams with voting thresholds so
+// governance.ProcessEpoch's ratification phase has the fields it reads.
+func donationTestConwayPParams(major uint) *conway.ConwayProtocolParameters {
+	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
+	p := &conway.ConwayProtocolParameters{}
+	p.ProtocolVersion.Major = major
+	p.MinCommitteeSize = 3
+	p.DRepVotingThresholds = conway.DRepVotingThresholds{
+		MotionNoConfidence:    rat(67, 100),
+		CommitteeNormal:       rat(67, 100),
+		CommitteeNoConfidence: rat(60, 100),
+		UpdateToConstitution:  rat(75, 100),
+		HardForkInitiation:    rat(60, 100),
+		PpNetworkGroup:        rat(67, 100),
+		PpEconomicGroup:       rat(67, 100),
+		PpTechnicalGroup:      rat(67, 100),
+		PpGovGroup:            rat(75, 100),
+		TreasuryWithdrawal:    rat(67, 100),
+	}
+	p.PoolVotingThresholds = conway.PoolVotingThresholds{
+		MotionNoConfidence:    rat(51, 100),
+		CommitteeNormal:       rat(51, 100),
+		CommitteeNoConfidence: rat(51, 100),
+		HardForkInitiation:    rat(51, 100),
+		PpSecurityGroup:       rat(51, 100),
+	}
+	return p
+}
+
+// TestEpochProcessWithdrawalThenDonation drives the real Conway enactment path:
+// a ratified treasury withdrawal is enacted by governance.ProcessEpoch and then
+// the ending epoch's donation is applied, exactly as processEpochRollover
+// sequences them. It proves the withdrawal is checked/applied against the
+// pre-donation treasury (the value the ledger uses at the boundary) and the
+// donation is added afterwards.
+func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
+	t.Parallel()
+
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+
+	const (
+		initialTreasury = uint64(1_000)
+		initialReserves = uint64(200)
+		withdrawal      = uint64(400)
+		donation        = uint64(300)
+		endedEpoch      = uint64(4)
+		boundarySlot    = uint64(500)
+	)
+
+	// Registered reward account that the withdrawal pays out to.
+	stakeCred := make([]byte, 28)
+	for i := range stakeCred {
+		stakeCred[i] = 0x42
+	}
+	withdrawAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	withdrawAddrBytes, err := withdrawAddr.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}))
+
+	// A ratified treasury-withdrawal proposal so ProcessEpoch enacts it.
+	withdrawalCbor, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type:        2,
+		Withdrawals: map[*lcommon.Address]uint64{&withdrawAddr: withdrawal},
+	})
+	require.NoError(t, err)
+	ratifiedEpoch := endedEpoch
+	ratifiedSlot := uint64(400)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        make([]byte, 32),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: 3,
+		ExpiresEpoch:  10,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+		AnchorURL:     "https://example.invalid/withdrawal",
+		AnchorHash:    make([]byte, 32),
+		Deposit:       0,
+		ReturnAddress: withdrawAddrBytes,
+		GovActionCbor: withdrawalCbor,
+		AddedSlot:     101,
+	}, nil))
+
+	// Initial treasury/reserves and the ending epoch's donation.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		initialTreasury, initialReserves, 1, nil,
+	))
+	require.NoError(t, db.Metadata().AddNetworkDonation(
+		70, endedEpoch, donation, nil,
+	))
+
+	runBoundary := func() uint64 {
+		t.Helper()
+		var providerTreasury uint64
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if _, err := governance.ProcessEpoch(&governance.EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    endedEpoch,
+				NewEpoch:     endedEpoch + 1,
+				BoundarySlot: boundarySlot,
+				PParams:      donationTestConwayPParams(10),
+				UpdateFn: func(
+					p lcommon.ProtocolParameters, _ any,
+				) (lcommon.ProtocolParameters, error) {
+					return p, nil
+				},
+			}); err != nil {
+				return err
+			}
+			if err := ls.applyEpochDonations(
+				txn,
+				endedEpoch,
+				boundarySlot,
+			); err != nil {
+				return err
+			}
+			var err error
+			providerTreasury, err = ls.NewView(txn).TreasuryValue()
+			return err
+		}))
+		return providerTreasury
+	}
+
+	require.Equal(t, uint64(900), runBoundary())
+
+	// Withdrawal (400) was applied against the pre-donation treasury (1000),
+	// then the donation (300) was added: 1000 - 400 + 300 = 900.
+	treasury, reserves, _ := networkState(t, db)
+	assert.Equal(t, uint64(900), treasury,
+		"treasury = initial - withdrawal + donation")
+	assert.Equal(t, initialReserves, reserves)
+
+	// The withdrawal credited the registered reward account.
+	account, err := db.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, withdrawal, uint64(account.Reward),
+		"withdrawal paid to the reward account")
+
+	// A crash between the boundary transaction and the tip advance replays
+	// the boundary after reward application rewrites the absolute pot row.
+	// The enacted proposal and reward credit are replay-idempotent, while the
+	// provider must still expose the same post-withdrawal, post-donation value.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		initialTreasury,
+		initialReserves,
+		boundarySlot,
+		nil,
+	))
+	require.Equal(t, uint64(900), runBoundary())
+	requireTreasuryValue(t, ls, nil, 900)
+
+	account, err = db.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, withdrawal, uint64(account.Reward),
+		"boundary replay must not double-credit the withdrawal")
+
+	// Rewinding before both the donation block and boundary restores the
+	// earlier pot row. These are the same slot-keyed deletes used by the
+	// database rollback path.
+	require.NoError(t, db.DeleteNetworkStateAfterSlot(1, nil))
+	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(1, nil))
+	requireTreasuryValue(t, ls, nil, initialTreasury)
+}
+
+// errHorizonProbeDone stops ledgerProcessBlock right after the probe has run,
+// so the assertion is about the LedgerView it was handed rather than about
+// everything block application does afterwards.
+var errHorizonProbeDone = errors.New("horizon probe complete")
+
+// TestLedgerProcessBlockAnchorsValidationHorizonAtParent proves the anchor is
+// actually wired from block application, not merely available on LedgerView.
+// The reference implementation ticks from the applied block's immediate
+// predecessor, so that predecessor — not the published tip, which lags by a
+// whole block batch during replay — is what the safe zone must be measured
+// from.
+func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		parentSlot uint64
+		wantErr    error
+	}{
+		{
+			// Block 168145's real predecessor on Preview is block 168144 at
+			// slot 3516496, so this is the case that has to succeed.
+			name:       "applied predecessor",
+			parentSlot: previewParentSlot,
+		},
+		{
+			// The published tip trails by one block. Before the fix this was
+			// the only anchor available, and it rejected the block.
+			name:       "published tip",
+			parentSlot: previewPublishedTipSlot,
+			wantErr:    hardfork.ErrPastHorizon,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			db := newTestDB(t)
+			ls := previewWedgeLedgerState(t)
+			ls.db = db
+
+			var probeErr error
+			var probed bool
+			testEra := eras.BabbageEraDesc
+			testEra.ValidateTxFunc = func(
+				_ lcommon.Transaction,
+				_ uint64,
+				view lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				lv, ok := view.(*LedgerView)
+				require.True(t, ok,
+					"block application must hand the era validator the "+
+						"LedgerView that carries the horizon anchor")
+				probed = true
+				_, probeErr = lv.SlotToTime(previewTxUpperBound)
+				return errHorizonProbeDone
+			}
+			ls.activeEras = []eras.EraDesc{testEra}
+
+			blocks, err := omockfixtures.GenerateBabbageChain(
+				168_145, lcommon.Blake2b256{}, previewBlockSlot, 1, 1,
+			)
+			require.NoError(t, err)
+			block, ok := blocks[0].(*babbage.BabbageBlock)
+			require.True(t, ok)
+			block.TransactionBodies = []babbage.BabbageTransactionBody{{}}
+			block.TransactionWitnessSets = []babbage.BabbageTransactionWitnessSet{
+				{},
+			}
+			pparams := &babbage.BabbageProtocolParameters{
+				ProtocolMajor:      8,
+				MaxBlockBodySize:   100_000,
+				MaxBlockHeaderSize: 100_000,
+			}
+			processErr := db.Transaction(true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						txn,
+						ocommon.NewPoint(
+							previewBlockSlot,
+							block.Hash().Bytes(),
+						),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{
+							slot:        test.parentSlot,
+							blockNumber: 168_144,
+						},
+						&database.BlockIngestionResult{},
+						testEra,
+						pparams,
+						nil,
+						previewEraStartEpoch,
+						0,
+						false,
+					)
+					return err
+				})
+			require.ErrorIs(t, processErr, errHorizonProbeDone)
+			require.True(t, probed)
+			if test.wantErr != nil {
+				require.ErrorIs(t, probeErr, test.wantErr)
+				return
+			}
+			require.NoError(t, probeErr,
+				"the block that wedged the Preview replay must convert its "+
+					"Plutus validity bound")
+		})
+	}
+}
+
+// newPPUPWindowLedgerState builds a ledger whose Shelley genesis carries the
+// given security parameter and active-slot coefficient and whose epoch cache
+// holds epochs.
+func newPPUPWindowLedgerState(
+	t *testing.T,
+	securityParam int,
+	activeSlotsCoeff *big.Rat,
+	epochs []models.Epoch,
+) *LedgerState {
+	t.Helper()
+	cfg := newGenesisDelegateShelleyGenesisCfg(
+		t,
+		strings.Repeat("aa", lcommon.Blake2b224Size),
+		strings.Repeat("bb", lcommon.Blake2b256Size),
+	)
+	genesis := cfg.ShelleyGenesis()
+	genesis.SecurityParam = securityParam
+	genesis.ActiveSlotsCoeff = cbor.Rat{Rat: activeSlotsCoeff}
+	ls := &LedgerState{}
+	ls.config.CardanoNodeConfig = cfg
+	ls.consensus.Store(&consensusSnapshot{epochCache: epochs})
+	return ls
+}
+
+// The reference slot of no return is
+// epochInfoFirst (succ e) *- Duration (2 * stabilityWindow), with
+// stabilityWindow = computeStabilityWindow k f = ceiling (3k/f)
+// (cardano-ledger Cardano.Ledger.Slot.getTheSlotOfNoReturn and
+// Cardano.Ledger.Shelley.StabilityWindow). When 3k/f is not an integer,
+// 2 * ceiling (3k/f) is larger than floor (6k/f).
+func TestProtocolParameterUpdateWindowMatchesReferenceSlotOfNoReturn(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		securityParam    int
+		activeSlotsCoeff *big.Rat
+		epoch            models.Epoch
+		noReturn         uint64
+	}{
+		{
+			// Mainnet and preprod: 2 * 3 * 2160 / 0.05 = 259200.
+			name:             "mainnet first Shelley epoch",
+			securityParam:    2160,
+			activeSlotsCoeff: big.NewRat(1, 20),
+			epoch:            models.Epoch{EpochId: 208, StartSlot: 4_492_800, LengthInSlots: 432_000},
+			noReturn:         4_492_800 + 432_000 - 259_200,
+		},
+		{
+			// Preview: 2 * 3 * 432 / 0.05 = 51840.
+			name:             "preview",
+			securityParam:    432,
+			activeSlotsCoeff: big.NewRat(1, 20),
+			epoch:            models.Epoch{EpochId: 700, StartSlot: 60_480_000, LengthInSlots: 86_400},
+			noReturn:         60_480_000 + 86_400 - 51_840,
+		},
+		{
+			// 3k/f = 30/7: ceiling 5, so 2 * 5 = 10 where floor (60/7) = 8.
+			name:             "fractional window below one half",
+			securityParam:    1,
+			activeSlotsCoeff: big.NewRat(7, 10),
+			epoch:            models.Epoch{EpochId: 4, StartSlot: 500, LengthInSlots: 100},
+			noReturn:         600 - 10,
+		},
+		{
+			// 3k/f = 300/7: ceiling 43, so 2 * 43 = 86 where floor (600/7) = 85.
+			name:             "fractional window above one half",
+			securityParam:    1,
+			activeSlotsCoeff: big.NewRat(7, 100),
+			epoch:            models.Epoch{EpochId: 4, StartSlot: 500, LengthInSlots: 200},
+			noReturn:         700 - 86,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls := newPPUPWindowLedgerState(
+				t,
+				tc.securityParam,
+				tc.activeSlotsCoeff,
+				[]models.Epoch{tc.epoch},
+			)
+			view := &LedgerView{ls: ls}
+			for _, slot := range []uint64{
+				tc.epoch.StartSlot,
+				tc.noReturn - 1,
+				tc.noReturn,
+				tc.epoch.StartSlot + uint64(tc.epoch.LengthInSlots) - 1,
+			} {
+				epoch, noReturn, err := view.ProtocolParameterUpdateWindow(slot)
+				require.NoError(t, err, "slot %d", slot)
+				require.Equal(t, tc.epoch.EpochId, epoch, "slot %d", slot)
+				require.Equal(t, tc.noReturn, noReturn, "slot %d", slot)
+			}
+		})
+	}
+}
+
+// valueNotConservedSubstring is the message
+// shelley.ValueNotConservedUtxoError renders. These tests match on that
+// message and never on the rule index: the index is an offset into the
+// upstream gouroboros slice and moves whenever upstream inserts or reorders a
+// rule. It printed as 32 on v0.202.5 and prints as 33 on the currently pinned
+// v0.202.6, which inserted UtxoValidateCurrentTreasuryValue at index 0.
+const valueNotConservedSubstring = "value not conserved"
+
+const stakeRefundTestKeyDeposit = 2_000_000
+
+// stakeRefundTestPparams returns Conway protocol parameters whose KeyDeposit
+// is the value a legacy stake deregistration falls back to when the ledger
+// state cannot report the deposit recorded at registration.
+func stakeRefundTestPparams() *conway.ConwayProtocolParameters {
+	return &conway.ConwayProtocolParameters{
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: 9,
+		},
+		KeyDeposit:           stakeRefundTestKeyDeposit,
+		MaxTxSize:            16_384,
+		MaxValueSize:         5_000,
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
+	}
+}
+
+// stakeDeregistrationTx builds a real *conway.ConwayTransaction carrying a
+// single legacy stake deregistration and no inputs or outputs, so value
+// conservation reduces to "refund must equal fee". The refund is the only
+// consumed value and the fee is the only produced value, which isolates the
+// recorded-deposit lookup from every other term in the equation.
+func stakeDeregistrationTx(
+	cred lcommon.Credential,
+	fee uint64,
+) *conway.ConwayTransaction {
+	cert := &lcommon.StakeDeregistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeStakeDeregistration),
+		StakeCredential: cred,
+	}
+	return &conway.ConwayTransaction{
+		TxIsValid: true,
+		Body: conway.ConwayTransactionBody{
+			TxFee: fee,
+			TxCertificates: []lcommon.CertificateWrapper{
+				{
+					Type: uint(
+						lcommon.CertificateTypeStakeDeregistration,
+					),
+					Certificate: cert,
+				},
+			},
+		},
+	}
+}
+
+// seedStakeRegistration drives a stake registration through the production
+// certificate write path, which is what decides whether the recorded deposit
+// lands in the database as a value or as NULL. Passing a nil deposit omits the
+// certificate index from the certDeposits map exactly as
+// ledger.calculateCertificateDeposit and backfill.calculateCertDeposits do
+// when the deposit cannot be computed.
+func seedStakeRegistration(
+	t *testing.T,
+	db *database.Database,
+	cred lcommon.Credential,
+	deposit *uint64,
+	slot uint64,
+	seed byte,
+) {
+	t.Helper()
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(bytes.Repeat([]byte{seed}, 32))
+	builder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(
+		bytes.Repeat([]byte{seed + 1}, 32),
+		0,
+	)
+	require.NoError(t, err)
+	builder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress("addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd").
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	builder.WithOutputs(output)
+	builder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+		StakeCredential: cred,
+	})
+	tx, err := builder.Build()
+	require.NoError(t, err)
+	certDeposits := map[int]uint64{}
+	if deposit != nil {
+		certDeposits[0] = *deposit
+	}
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
+		0,
+		certDeposits,
+		nil,
+	))
+}
+
+// newStakeRefundTestView returns a *LedgerView over a real database, built
+// from the same *LedgerState the other end-to-end validation tests use so the
+// Conway rules that read genesis configuration (network ids, slot
+// conversion) run rather than panic.
+func newStakeRefundTestView(
+	t *testing.T,
+) (*LedgerView, *database.Database) {
+	t.Helper()
+	ls, db := newRewardCalculationTestLedger(t)
+	return &LedgerView{ls: ls}, db
+}
+
+func stakeRefundTestCredential(seed byte) lcommon.Credential {
+	return lcommon.Credential{
+		CredType: lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(
+			bytes.Repeat([]byte{seed}, lcommon.AddressHashSize),
+		),
+	}
+}
+
+// requireValueConserved asserts the transaction clears value conservation
+// through the production Conway validation path. Other rules error on these
+// deliberately minimal transactions (the input set is empty by design), so the
+// assertion is on the absence of the value-conservation failure specifically,
+// which is what the recorded-deposit refund decides.
+func requireValueConserved(
+	t *testing.T,
+	lv *LedgerView,
+	tx *conway.ConwayTransaction,
+) {
+	t.Helper()
+	pp := stakeRefundTestPparams()
+	// Invoke the rule directly first. This assertion cannot pass vacuously:
+	// a nil error means value conservation actually ran and balanced, rather
+	// than merely that the substring was absent because some unrelated rule
+	// failed first and short-circuited the message.
+	require.NoError(
+		t,
+		conway.UtxoValidateValueNotConservedUtxo(tx, 200, lv, pp),
+	)
+	// Then assert the same outcome through the production path.
+	if err := eras.ValidateTxConway(tx, 200, lv, pp); err != nil {
+		require.NotContains(t, err.Error(), valueNotConservedSubstring)
+	}
+}
+
+func requireValueNotConserved(
+	t *testing.T,
+	lv *LedgerView,
+	tx *conway.ConwayTransaction,
+) {
+	t.Helper()
+	pp := stakeRefundTestPparams()
+	// The rule itself must reject, so the rejection is attributable to value
+	// conservation rather than to any other rule the production path joins.
+	require.ErrorContains(
+		t,
+		conway.UtxoValidateValueNotConservedUtxo(tx, 200, lv, pp),
+		valueNotConservedSubstring,
+	)
+	err := eras.ValidateTxConway(tx, 200, lv, pp)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), valueNotConservedSubstring)
+}
+
+// TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit is the
+// regression test for #3829. A registration ingested without a computable
+// deposit records NULL, LedgerView.StakeCredentialDeposit reports absence, and
+// gouroboros' UtxoValidateValueNotConservedUtxo falls back to the current
+// KeyDeposit. Before the fix the three zero-reporting sites stored an
+// authoritative 0, the rule refunded 0, and this otherwise valid transaction
+// failed value conservation.
+//
+// The assertion is on acceptance through eras.ValidateTxConway with a real
+// *LedgerView, not on the helper's return value, because the defect was that
+// a plausible internal value became the wrong validation outcome.
+func TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := stakeRefundTestCredential(0xc1)
+	seedStakeRegistration(t, db, cred, nil, 100, 0xc1)
+
+	// The refund falls back to KeyDeposit, so a fee of exactly KeyDeposit
+	// conserves value. This acceptance is the assertion that carries the
+	// regression: it is the validation outcome, one layer above the recorded
+	// value that produces it.
+	requireValueConserved(
+		t,
+		lv,
+		stakeDeregistrationTx(cred, stakeRefundTestKeyDeposit),
+	)
+
+	// Supporting evidence for why the acceptance holds: the recorded deposit
+	// is genuinely absent rather than a zero that happened to balance.
+	recorded, err := lv.StakeCredentialDeposit(cred)
+	require.NoError(t, err)
+	assert.Nil(
+		t,
+		recorded,
+		"an uncomputable registration deposit must be recorded as absent, not zero",
+	)
+}
+
+// TestValueConservationRefundsRecordedStakeDepositNotKeyDeposit is the second
+// mandatory negative case: a correctly recorded non-zero deposit must be
+// refunded at its recorded value, never at the current KeyDeposit. The
+// recorded 5 ADA deliberately differs from the 2 ADA KeyDeposit, so the two
+// possible refunds give opposite outcomes and the test cannot pass by
+// accident.
+func TestValueConservationRefundsRecordedStakeDepositNotKeyDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := stakeRefundTestCredential(0xc3)
+	recordedDeposit := uint64(5_000_000)
+	require.NotEqual(
+		t,
+		uint64(stakeRefundTestKeyDeposit),
+		recordedDeposit,
+		"the recorded deposit must differ from KeyDeposit for this test to discriminate",
+	)
+	seedStakeRegistration(t, db, cred, &recordedDeposit, 100, 0xc3)
+
+	got, err := lv.StakeCredentialDeposit(cred)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, recordedDeposit, *got)
+
+	// Balanced at the recorded deposit: accepted.
+	requireValueConserved(t, lv, stakeDeregistrationTx(cred, recordedDeposit))
+	// Balanced at the current KeyDeposit instead: rejected, which is what
+	// proves the recorded value won.
+	requireValueNotConserved(
+		t,
+		lv,
+		stakeDeregistrationTx(cred, stakeRefundTestKeyDeposit),
+	)
+}
+
+// TestValueConservationRefundsRecordedZeroStakeDepositAsZero pins the
+// distinction the fix must preserve. A recorded zero is reachable and
+// authoritative: config/cardano/devnet/shelley-genesis.json sets
+// "keyDeposit": 0, so every stake registration on dingo's own devnet records
+// a real zero deposit. Folding zero into the unknown case would refund
+// KeyDeposit there and break value conservation on the devnet, which is why
+// only the uncomputable case reports absence.
+func TestValueConservationRefundsRecordedZeroStakeDepositAsZero(t *testing.T) {
+	t.Parallel()
+
+	lv, db := newStakeRefundTestView(t)
+	cred := stakeRefundTestCredential(0xc4)
+	recordedZero := uint64(0)
+	seedStakeRegistration(t, db, cred, &recordedZero, 100, 0xc4)
+
+	got, err := lv.StakeCredentialDeposit(cred)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		got,
+		"a recorded zero deposit must stay a value, not become absence",
+	)
+	require.Equal(t, uint64(0), *got)
+
+	// Refunded as zero, so a zero fee conserves value.
+	requireValueConserved(t, lv, stakeDeregistrationTx(cred, 0))
+	// And the KeyDeposit fallback must not be taken.
+	requireValueNotConserved(
+		t,
+		lv,
+		stakeDeregistrationTx(cred, stakeRefundTestKeyDeposit),
+	)
+}
+
+// TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal covers
+// the query-boundary filter: when synthetic is true, the returned value
+// omits PlutusV2 while every other key survives, and the original pparams
+// (still reachable from internal validation state) is never mutated.
+func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	original := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{
+			0: {1, 1, 1},
+			1: {2, 2, 2},
+			2: {3, 3, 3},
+		},
+	}
+
+	filtered := withoutSyntheticV2CostModel(original, true, nil)
+
+	fp, ok := filtered.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.NotContains(t, fp.CostModels, uint(1))
+	assert.Equal(t, []int64{1, 1, 1}, fp.CostModels[0])
+	assert.Equal(t, []int64{3, 3, 3}, fp.CostModels[2])
+
+	// The original, still reachable from ls.currentPParams / the published
+	// snapshot for internal script validation, must be untouched.
+	assert.Contains(t, original.CostModels, uint(1))
+	assert.Equal(t, []int64{2, 2, 2}, original.CostModels[1])
+}
+
+// TestWithoutSyntheticV2CostModel_CoversEveryEraType covers
+// blinklabs-io/dingo#3825's PR review: the filter's type switch must handle
+// every era type ShelleyCurrentProtocolParamsQuery can actually return
+// (Alonzo, Babbage, Conway, Dijkstra), not just Conway -- a regression in
+// any branch would otherwise pass the suite silently.
+func TestWithoutSyntheticV2CostModel_CoversEveryEraType(t *testing.T) {
+	t.Parallel()
+
+	costModels := map[uint][]int64{0: {1}, 1: {2}, 2: {3}}
+
+	t.Run("Alonzo", func(t *testing.T) {
+		pp := &alonzo.AlonzoProtocolParameters{CostModels: cloneMap(costModels)}
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		fp, ok := got.(*alonzo.AlonzoProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Babbage", func(t *testing.T) {
+		pp := &babbage.BabbageProtocolParameters{
+			CostModels: cloneMap(costModels),
+		}
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		fp, ok := got.(*babbage.BabbageProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Conway", func(t *testing.T) {
+		pp := &conway.ConwayProtocolParameters{CostModels: cloneMap(costModels)}
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		fp, ok := got.(*conway.ConwayProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+	t.Run("Dijkstra", func(t *testing.T) {
+		pp := &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: conway.ConwayProtocolParameters{
+				CostModels: cloneMap(costModels),
+			},
+		}
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		fp, ok := got.(*dijkstra.DijkstraProtocolParameters)
+		require.True(t, ok)
+		assert.NotContains(t, fp.CostModels, uint(1))
+		assert.Contains(t, pp.CostModels, uint(1), "original must be untouched")
+	})
+}
+
+func cloneMap(m map[uint][]int64) map[uint][]int64 {
+	out := make(map[uint][]int64, len(m))
+	for k, v := range m {
+		out[k] = append([]int64(nil), v...)
+	}
+	return out
+}
+
+// TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic covers
+// blinklabs-io/dingo#3825's PR review: a concrete-typed nil pointer
+// (lcommon.ProtocolParameters holding e.g. a nil *conway.ConwayProtocolParameters)
+// still matches its type's case in the switch, so each case must guard
+// against nil before dereferencing rather than panicking.
+func TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	var nilConway *conway.ConwayProtocolParameters
+	var pp lcommon.ProtocolParameters = nilConway
+
+	require.NotPanics(t, func() {
+		got := withoutSyntheticV2CostModel(pp, true, nil)
+		assert.Equal(t, pp, got)
+	})
+}
+
+// TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic covers the common
+// case: once real data has been observed (or none was ever fabricated),
+// the filter must return the value unchanged, identical pointer included,
+// so a caller reading it sees the exact same struct internal validation
+// uses.
+func TestWithoutSyntheticV2CostModel_NoOpWhenNotSynthetic(t *testing.T) {
+	t.Parallel()
+
+	pp := &conway.ConwayProtocolParameters{
+		CostModels: map[uint][]int64{0: {1}, 1: {2}, 2: {3}},
+	}
+
+	got := withoutSyntheticV2CostModel(pp, false, nil)
+
+	assert.Same(t, pp, got)
+}
+
+// unknownProtocolParameters is a lcommon.ProtocolParameters implementation
+// the withoutSyntheticV2CostModel switch has no case for -- standing in for
+// a future era type this switch hasn't been taught yet.
+type unknownProtocolParameters struct {
+	lcommon.ProtocolParameters
+}
+
+// TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered covers
+// blinklabs-io/dingo#3825's PR review (wolf31o2): a protocol-parameters type
+// the switch doesn't recognize falls to the default branch, which -- unlike
+// every other branch -- returns pp unfiltered even though synthetic is true.
+// That silently reintroduces #3825 for whatever type this is; the least this
+// path can do is log so the gap is observable instead of invisible.
+func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	pp := &unknownProtocolParameters{}
+
+	got := withoutSyntheticV2CostModel(pp, true, logger)
+
+	assert.Same(t, pp, got,
+		"an unrecognized type must still be returned, unfiltered")
+	assert.Contains(
+		t,
+		buf.String(),
+		"does not recognize this protocol-parameters type",
+	)
+}
+
+// TestExtractRawCostModels_CoversDijkstra covers blinklabs-io/dingo#3825's PR
+// review (wolf31o2): extractRawCostModels' type switch lacked a Dijkstra
+// case (falling to its own default: return nil), asymmetric with
+// withoutSyntheticV2CostModel, which does handle Dijkstra -- meaning
+// injectedSyntheticV2CostModel (built on extractRawCostModels) could never
+// detect a Dijkstra-era injection even though the filter it feeds covers
+// that era.
+func TestExtractRawCostModels_CoversDijkstra(t *testing.T) {
+	t.Parallel()
+
+	pp := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			CostModels: map[uint][]int64{0: {1}, 1: {2}},
+		},
+	}
+
+	got := extractRawCostModels(pp)
+
+	assert.Equal(t, map[uint][]int64{0: {1}, 1: {2}}, got)
+}
+
+// TestExtractRawCostModels_NilPointerDoesNotPanic verifies that a concrete-typed
+// nil pointer (lcommon.ProtocolParameters
+// holding e.g. a nil *dijkstra.DijkstraProtocolParameters) still matches its
+// type's case in the switch, so every case must guard against nil before
+// dereferencing rather than panicking -- mirroring the guard
+// withoutSyntheticV2CostModel already has for the identical hazard.
+func TestExtractRawCostModels_NilPointerDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		pp   lcommon.ProtocolParameters
+	}{
+		{"Alonzo", (*alonzo.AlonzoProtocolParameters)(nil)},
+		{"Babbage", (*babbage.BabbageProtocolParameters)(nil)},
+		{"Conway", (*conway.ConwayProtocolParameters)(nil)},
+		{"Dijkstra", (*dijkstra.DijkstraProtocolParameters)(nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				got := extractRawCostModels(tc.pp)
+				assert.Nil(t, got)
+			})
+		})
+	}
+}
+
+func repeatByte(length int, b byte) []byte {
+	out := make([]byte, length)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }
