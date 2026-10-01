@@ -501,7 +501,10 @@ func (r *Recycler) tick(
 // stream at the Limit on Eagerness. Every path here that closes, resyncs or
 // removes a connection must consult it, so a held peer is never released by
 // the recycler's own timing.
-func isEagernessHeld(selector ChainSelector, connId ouroboros.ConnectionId) bool {
+func isEagernessHeld(
+	selector ChainSelector,
+	connId ouroboros.ConnectionId,
+) bool {
 	return selector != nil && selector.EagernessPaused(connId)
 }
 
@@ -688,9 +691,12 @@ func (r *Recycler) checkLocalTipPlateau(
 	if isEagernessHeld(live.ChainSelector, *targetConn) {
 		r.logger.Info(
 			"local tip plateau is a hold at the Limit on Eagerness, not resyncing chainsync",
-			"connection_id", connKey,
-			"local_tip_slot", localTipSlot,
-			"plateau_duration", now.Sub(st.lastProgressAt),
+			"connection_id",
+			connKey,
+			"local_tip_slot",
+			localTipSlot,
+			"plateau_duration",
+			now.Sub(st.lastProgressAt),
 		)
 		st.lastProgressAt = now
 		delete(st.recycleAt, connKey)

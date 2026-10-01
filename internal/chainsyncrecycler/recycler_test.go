@@ -652,7 +652,9 @@ func TestTickDoesNotRecycleStalledClientHeldAtEagernessLimit(t *testing.T) {
 				ChainSelector:  sel,
 			}, now, 100)
 
-			recycled := pub.byType(connmanager.ConnectionRecycleRequestedEventType)
+			recycled := pub.byType(
+				connmanager.ConnectionRecycleRequestedEventType,
+			)
 			removed := pub.byType(chainsync.ClientRemoveRequestedEventType)
 			if tc.wantEvt == "" {
 				assert.Empty(t, recycled, "a held client must not be recycled")

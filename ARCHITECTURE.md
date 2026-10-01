@@ -5034,7 +5034,7 @@ window-wide density the Genesis Density Disconnector compares, and the limit
 would not move. The disconnector therefore also resolves two standoffs
 (`eagernessStandoffDisconnectsLocked`), in the same pass and through the same
 `OnGenesisDensityDisconnect` callback, with `EagernessStandoff` set. A peer is
-reported once, so the last candidate is never removed, and a peer that is a
+reported once, so the last candidate is never removed. A held peer that is a
 prefix of another is not a fork and decides nothing.
 
 - Two held forks: the blocks each delivered in `(intersection, min(head
@@ -5047,11 +5047,12 @@ prefix of another is not a fork and decides nothing.
   not a proof: it exists because Dingo stops header download at `k` blocks
   rather than at the forecast horizon, and a temporarily sparse honest fork can
   lose it.
-- A held fork against an idle one: a peer that has delivered every header up
-  to the tip it advertises is idle. Keepalive traffic refreshes an idle peer's
+- A held peer against an idle one: a peer that has delivered every header up
+  to the tip it advertises is idle. The idle peer may be a fork or a prefix of
+  the held chain, such as a peer that stopped at an older tip. Keepalive traffic refreshes an idle peer's
   liveness, so it is never aged out as stale, and its trailing slots keep the
   provable comparison from excluding it; left alone it would hold the limit at
-  its fork point until the stall recycler removed it. This is upstream's
+  its fork point or tip until the stall recycler removed it. This is upstream's
   idling rule: an idling peer loses to a rival that offers more than `k`
   blocks past the intersection and has at least as many blocks in the Genesis
   window. A held peer was offered a header beyond the limit, so it offers more

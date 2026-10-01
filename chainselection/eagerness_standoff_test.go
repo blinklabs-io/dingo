@@ -347,3 +347,51 @@ func TestLimitOnEagernessIdleDenserForkIsNotRemovedByHeldPeer(t *testing.T) {
 	assert.Equal(t, idle, got[0].DominatingConnectionId)
 	assert.False(t, got[0].EagernessStandoff, "removed by the provable rule")
 }
+
+// A peer that stopped at an older tip on the held peer's own chain is a
+// prefix, not a fork, but it pins the limit at its tip just as an idle fork
+// does. Upstream's idling rule removes it too.
+func TestLimitOnEagernessIdlePrefixPeerIsRemovedWhileKeepaliveTouches(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	f.cs.config.StaleTipThreshold = time.Minute
+	behind := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, behind, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 16, denseSlot)
+	hold(t, f.cs, held)
+
+	var got []GenesisDensityDisconnect
+	for range 20 {
+		f.mu.Lock()
+		f.now = f.now.Add(50 * time.Second)
+		f.mu.Unlock()
+		f.cs.TouchPeerActivity(behind)
+		got = append(got, f.evaluate()...)
+	}
+	require.Len(t, got, 1, "the idle prefix peer must be removed exactly once")
+	assert.Equal(t, behind, got[0].ConnectionId)
+	assert.Equal(t, held, got[0].DominatingConnectionId)
+	assert.True(t, got[0].EagernessStandoff)
+}
+
+// A peer behind on the held peer's chain that is still streaming toward its
+// advertised tip is not idle, and decides nothing.
+func TestLimitOnEagernessStreamingPrefixPeerIsNotRemovedByHeldPeer(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newStandoffFixture()
+	behind := newTestConnectionId(1)
+	held := newTestConnectionId(2)
+	feedStandoff(f.cs, behind, "c", 1, 9, sharedSlot)
+	advanceStreaming(t, f.cs, behind, "c", 10, sharedSlot)
+	feedStandoff(f.cs, held, "c", 1, 10, sharedSlot)
+	feedStandoff(f.cs, held, "h", 11, 16, denseSlot)
+	hold(t, f.cs, held)
+
+	assert.Empty(t, f.evaluate())
+}
