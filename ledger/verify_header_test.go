@@ -1439,6 +1439,31 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 	require.False(t, deferredMarkerPersisted(t, ls, point))
 }
 
+// TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker requires the blob
+// marker to outlive an apply transaction that rolls back: the block is still
+// unapplied, so the retry must find the marker and run the stateful check.
+func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedBlockPoolRegistration(t, db, tb.block)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	txn := db.Transaction(true)
+	require.NoError(t, ls.verifyDeferredBlockHeaderState(txn, point, tb.block))
+	require.NoError(t, txn.Rollback())
+
+	require.True(t, deferredMarkerPersisted(t, ls, point))
+	required, err := ls.deferredHeaderValidationRequired(point, nil)
+	require.NoError(t, err)
+	require.True(t, required, "rolled-back apply must leave the check pending")
+}
+
 // TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply is the
 // apply-path regression for the d=1 / genesis-overlay defer (issue #3717 review,
 // wolf, verify_header.go ~560). A header at a d=1 overlay slot is deferred at
