@@ -7081,7 +7081,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
 	// TestProcessEpochRollover_RewardOrdering and
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
-	// chainsync_ordering_test.go and chainsync_snap_ordering_test.go, is:
+	// chainsync_test.go and chainsync_test.go, is:
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable

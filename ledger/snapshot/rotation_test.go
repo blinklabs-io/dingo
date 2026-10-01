@@ -20,14 +20,302 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/require"
 )
+
+// setupTestDBWithStorageMode mirrors setupTestDB (calculator_test.go) but
+// pins the storage mode, so retention tests can compare CORE vs API mode
+// pruning of reward_account_output (dingo #1875).
+func setupTestDBWithStorageMode(
+	t *testing.T,
+	storageMode string,
+) *database.Database {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     tmpDir,
+		StorageMode: storageMode,
+	})
+	require.NoError(t, err, "create database")
+
+	return db
+}
+
+// TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput pins that CORE
+// storage mode's retention behavior is unchanged by dingo #1875: both
+// reward_stake_input and reward_account_output are pruned to the same
+// rotation/reward-replay window. Also pins pool_stake_snapshot's own
+// CORE-mode window (dingo#1900/#382: no test previously exercised the
+// apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
+// mode's pool-snapshot pruning is unchanged from before that commit.
+func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
+	require.Equal(t, types.StorageModeCore, db.StorageMode())
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(10)
+	const firstRetainedEpoch = currentEpoch - 3
+	poolKeyHash := bytes.Repeat([]byte{0x11}, 28)
+
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	for epoch := range firstRetainedEpoch {
+		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Empty(
+			t,
+			accountOutputs,
+			"core mode must prune reward_account_output for epoch %d",
+			epoch,
+		)
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Empty(
+			t,
+			stakeInputs,
+			"core mode must prune reward_stake_input for epoch %d",
+			epoch,
+		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Empty(
+			t,
+			poolSnapshots,
+			"core mode must prune pool_stake_snapshot for epoch %d",
+			epoch,
+		)
+	}
+	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Len(
+			t,
+			accountOutputs,
+			1,
+			"core mode retains reward_account_output inside the window for epoch %d",
+			epoch,
+		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Len(
+			t,
+			poolSnapshots,
+			1,
+			"core mode retains pool_stake_snapshot inside the window for epoch %d",
+			epoch,
+		)
+	}
+}
+
+// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the dingo #1875
+// regression test: in API storage mode, reward_account_output must be
+// retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
+// can serve an account's full history), while reward_stake_input still
+// cannot be kept and continues to be pruned to the rotation/reward-replay
+// window exactly as in core mode. Also the dingo#1900/#382 regression test:
+// pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
+// so a from-genesis historical Acquire pinned well outside the ordinary
+// 3-epoch window can still be validated
+// (VerifyPointQueryable's stake-retention check) and answered
+// (GetStakeDistribution/GetPoolDistr2) -- confirmed live before this test
+// existed, but never previously pinned by an automated test.
+func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
+	require.Equal(t, types.StorageModeAPI, db.StorageMode())
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(10)
+	const firstRetainedEpoch = currentEpoch - 3
+	poolKeyHash := bytes.Repeat([]byte{0x22}, 28)
+
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	// reward_account_output and pool_stake_snapshot both survive for every
+	// epoch, including those outside the rotation/reward-replay window.
+	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
+		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Len(
+			t,
+			accountOutputs,
+			1,
+			"API mode must retain reward_account_output for epoch %d",
+			epoch,
+		)
+		poolSnapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch, models.PoolStakeSnapshotTypeMark, nil,
+		)
+		require.NoError(t, err, "get pool stake snapshots %d", epoch)
+		require.Len(
+			t,
+			poolSnapshots,
+			1,
+			"API mode must retain pool_stake_snapshot for epoch %d",
+			epoch,
+		)
+	}
+
+	// reward_stake_input is still pruned to the same window as core mode.
+	for epoch := range firstRetainedEpoch {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Empty(
+			t,
+			stakeInputs,
+			"API mode must still prune reward_stake_input for epoch %d",
+			epoch,
+		)
+	}
+	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Len(
+			t,
+			stakeInputs,
+			1,
+			"reward_stake_input for epoch %d is inside the retained window",
+			epoch,
+		)
+	}
+}
+
+// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the dingo #4188
+// regression test: enabling SetRewardAccountOutputRetentionUnbounded on a
+// CORE-mode database (the koios-parity observer's node.go wiring) must retain
+// reward_account_output without bound, exactly like API storage mode, instead
+// of pruning it to the 4-epoch rotation/reward-replay window. Without this,
+// the observer's own network-bound epoch validation routinely falls behind
+// chain progression during a catch-up sync and reads an epoch's
+// reward_account_output rows only after cleanupOldSnapshots has already
+// deleted them, making every koios-parity account check fail permanently with
+// a row that genuinely no longer exists.
+func TestCleanupOldSnapshotsKoiosParityRetentionUnbounded(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDBWithStorageMode(t, types.StorageModeCore)
+	require.Equal(t, types.StorageModeCore, db.StorageMode())
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr.SetRewardAccountOutputRetentionUnbounded(true)
+	require.True(t, mgr.RewardAccountOutputRetentionUnbounded())
+	meta := db.Metadata()
+
+	const currentEpoch = uint64(10)
+	const firstRetainedEpoch = currentEpoch - 3
+	poolKeyHash := bytes.Repeat([]byte{0x44}, 28)
+
+	seedRetentionRows(t, db, poolKeyHash, currentEpoch)
+	require.NoError(
+		t,
+		mgr.cleanupOldSnapshots(context.Background(), currentEpoch),
+	)
+
+	// reward_account_output survives for every epoch, including those
+	// outside the rotation/reward-replay window, exactly like API mode.
+	for epoch := uint64(0); epoch <= currentEpoch; epoch++ {
+		accountOutputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Len(
+			t,
+			accountOutputs,
+			1,
+			"koios-parity retention must retain reward_account_output for epoch %d",
+			epoch,
+		)
+	}
+
+	// reward_stake_input is still pruned to the same window as core mode.
+	for epoch := range firstRetainedEpoch {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Empty(
+			t,
+			stakeInputs,
+			"koios-parity retention must still prune reward_stake_input for epoch %d",
+			epoch,
+		)
+	}
+	for epoch := firstRetainedEpoch; epoch <= currentEpoch; epoch++ {
+		stakeInputs, err := meta.GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err, "get reward stake inputs %d", epoch)
+		require.Len(
+			t,
+			stakeInputs,
+			1,
+			"reward_stake_input for epoch %d is inside the retained window",
+			epoch,
+		)
+	}
+}
+
+// TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention is the rollback
+// correctness check for dingo #1875: retaining reward_account_output without
+// bound in API storage mode must not stop a rollback from removing rows
+// captured above the rollback point. DeleteRewardStateAfterSlot is
+// unconditional (it does not read storage mode at all), so this pins that
+// behavior directly rather than relying on that being true by omission.
+func TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention(t *testing.T) {
+	t.Parallel()
+
+	db := setupTestDBWithStorageMode(t, types.StorageModeAPI)
+	meta := db.Metadata()
+
+	poolKeyHash := bytes.Repeat([]byte{0x33}, 28)
+	const throughEpoch = uint64(5)
+	seedRetentionRows(t, db, poolKeyHash, throughEpoch)
+
+	// seedRetentionRows uses boundarySlot := epoch * 432000; roll back to a
+	// slot inside epoch 3's boundary so epochs 0-2 predate the rollback slot
+	// and epochs 3-5 postdate it.
+	rollbackSlot := uint64(3)*432000 - 1
+	require.NoError(t, meta.DeleteRewardStateAfterSlot(rollbackSlot, nil))
+
+	for epoch := range uint64(3) {
+		outputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Len(
+			t,
+			outputs,
+			1,
+			"epoch %d predates the rollback slot and must survive",
+			epoch,
+		)
+	}
+	for epoch := uint64(3); epoch <= throughEpoch; epoch++ {
+		outputs, err := meta.GetRewardAccountOutputs(epoch, nil)
+		require.NoError(t, err, "get reward account outputs %d", epoch)
+		require.Empty(
+			t,
+			outputs,
+			"epoch %d is above the rollback slot and must be removed even in API mode",
+			epoch,
+		)
+	}
+}
 
 // fixedFloorGuard builds a PoolSnapshotRetentionGuard that lowers the prune
 // boundary to a fixed floor, standing in for

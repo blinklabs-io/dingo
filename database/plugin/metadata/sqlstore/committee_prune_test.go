@@ -147,6 +147,29 @@ WHERE cold_credential_tag = ? AND cold_credential = ?`,
 	return count
 }
 
+func TestCommitteeHotPruneSelectionUsesOrderedIndex(t *testing.T) {
+	store := newMigratedSQLiteStore(t)
+	plan := queryPlan(t, store.writeDB, `
+SELECT id
+FROM auth_committee_hot
+WHERE cold_credential_tag = ?
+  AND cold_credential = ?
+  AND added_slot <= ?
+ORDER BY added_slot DESC, certificate_id DESC
+LIMIT ? OFFSET 1`,
+		0,
+		[]byte{0x01},
+		100,
+		committeeAuthPruneBatch,
+	)
+	require.Contains(
+		t,
+		plan,
+		"idx_auth_committee_hot_cold_credential_prune_order",
+	)
+	require.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY")
+}
+
 // applyAuthCertificate drives the production certificate write path --
 // applyTransactionCertificates is what Store.SetTransaction calls for every
 // applied block -- rather than calling the pruning helper directly.
