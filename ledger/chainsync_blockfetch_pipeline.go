@@ -74,9 +74,10 @@ func (ls *LedgerState) startQueuedBlockfetchPrefetchLocked(
 		ls.nextBlockfetchRequest != nil {
 		return
 	}
-	nextStart, nextEnd, available := ls.chain.HeaderRangeAfter(
+	nextStart, nextEnd, available := ls.chain.HeaderRangeAfterBytes(
 		claimedHeaders,
 		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
 	)
 	if available == 0 {
 		return

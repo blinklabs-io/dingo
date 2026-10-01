@@ -16,7 +16,9 @@
 
 package sqlstore
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestPostgresGetCommitteeHotAuthorizationsSince(t *testing.T) {
 	dsn, schema := newPostgresIntegrationSchema(t)
@@ -29,6 +31,22 @@ func TestPostgresGetCommitteeHotAuthorizationsSince(t *testing.T) {
 func TestMySQLGetCommitteeHotAuthorizationsSince(t *testing.T) {
 	dsn, database := newMySQLIntegrationDatabase(t)
 	exerciseCommitteeHotAuthorizationsSince(
+		t,
+		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
+	)
+}
+
+func TestPostgresPoolOpCertSequencesExistAtSlot(t *testing.T) {
+	dsn, schema := newPostgresIntegrationSchema(t)
+	testPoolOpCertSequencesExistAtSlot(
+		t,
+		newIntegrationSQLStore(t, "pgx", dsn, "postgres", schema),
+	)
+}
+
+func TestMySQLPoolOpCertSequencesExistAtSlot(t *testing.T) {
+	dsn, database := newMySQLIntegrationDatabase(t)
+	testPoolOpCertSequencesExistAtSlot(
 		t,
 		newIntegrationSQLStore(t, "mysql", dsn, "mysql", database),
 	)

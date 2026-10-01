@@ -42,6 +42,7 @@ type ListenerConfig struct {
 	ListenAddress  string
 	ConnectionOpts []ouroboros.ConnectionOptionFunc
 	UseNtC         bool
+	TrustedLocal   bool
 	ReuseAddress   bool
 }
 
@@ -263,7 +264,7 @@ func (c *ConnectionManager) startListener(
 			}
 
 			if l.UseNtC {
-				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr())
+				releaseNtCSlot := c.reserveNtCSlot(conn.RemoteAddr(), l.TrustedLocal)
 				if releaseNtCSlot == nil {
 					closeConnAndLog(
 						c.config.Logger,
@@ -485,13 +486,14 @@ func (c *ConnectionManager) setupAcceptedConnection(
 			"remote_addr",
 			peerAddr,
 		)
-		if !c.addConnectionImpl(
+		if !c.addConnectionImplWithTrust(
 			oConn,
 			true,
 			true,
 			peerAddr,
 			"",
 			releaseNtCSlot,
+			l.TrustedLocal,
 		) {
 			return
 		}
