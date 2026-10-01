@@ -2358,15 +2358,15 @@ type ParsedPrevGovActionIds struct {
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution         *ParsedConstitution
-	Committee            []ParsedCommitteeMember
-	CommitteeQuorum      *cbor.Rat
-	CommitteeParseError  error
-	Proposals            []ParsedGovProposal
+	Constitution        *ParsedConstitution
+	Committee           []ParsedCommitteeMember
+	CommitteeQuorum     *cbor.Rat
+	CommitteeParseError error
+	Proposals           []ParsedGovProposal
 	// ImportParseError covers a skipped proposal or undecodable
 	// constitution policy hash, which would make imported governance state
 	// incomplete. Warnings about enacted proposal history remain recoverable.
-	ImportParseError    error
+	ImportParseError     error
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
 	// EnactCommittee and EnactCommitteeQuorum are the committee carried
