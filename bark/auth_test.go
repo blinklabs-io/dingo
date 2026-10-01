@@ -297,7 +297,6 @@ func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
 		Lifecycle:       newTestLifecycleService(t),
 		SnapshotDir:     t.TempDir(),
 		Host:            "127.0.0.1",
-		Port:            freeTCPPort(t),
 		TlsCertFilePath: serverCertPath,
 		TlsKeyFilePath:  serverKeyPath,
 		// TlsClientCAFilePath deliberately left unset.
@@ -322,7 +321,6 @@ func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
 		Lifecycle:           newTestLifecycleService(t),
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsClientCAFilePath: caCertPath,
 		// TlsCertFilePath/TlsKeyFilePath deliberately left unset.
 	})
@@ -348,7 +346,6 @@ func TestStartRejectsLifecycleWithoutOperatorAllowlist(t *testing.T) {
 		Lifecycle:           newTestLifecycleService(t),
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,
@@ -390,7 +387,6 @@ func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
 	b, err := NewBark(BarkConfig{
 		DB:                  newTestDB(t),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsClientCAFilePath: caCertPath,
 	})
 	require.NoError(t, err)
@@ -459,7 +455,6 @@ func TestDatabaseServiceAuthenticationAndOperatorAuthorization(t *testing.T) {
 		Lifecycle:           svc,
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: trustedCACertPath,

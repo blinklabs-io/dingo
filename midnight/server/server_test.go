@@ -75,16 +75,21 @@ const startServerOnFreePortAttempts = 5
 // address (protocol/network address/port) is normally permitted"; the same race
 // exists on other platforms but is far less likely to be lost.
 //
+// newConfig is called once per attempt because New registers the server's
+// metrics on cfg.PromRegistry, so an attempt must not reuse a registry a lost
+// attempt already registered on.
+//
 // The returned cancel function shuts the server down and is registered for
 // cleanup, so callers that do not need to cancel early may ignore it. Stopping
 // the server is left to the caller, whose ordering requirements differ.
 func startServerOnFreePort(
 	t *testing.T,
-	cfg server.Config,
+	newConfig func() server.Config,
 ) (*server.Server, uint, context.CancelFunc) {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
 		port := freePort(t)
+		cfg := newConfig()
 		cfg.Host = "127.0.0.1"
 		cfg.Port = port
 		srv, err := server.New(cfg)
@@ -116,10 +121,32 @@ func startServerOnFreePort(
 
 // startTestServerWithConfig is like startTestServer but lets the caller
 // supply Database/SlotTimer (and any other Config field); Host and Port are
-// always overridden to a free loopback address.
+// always overridden to a free loopback address. A PromRegistry would be
+// registered on again by a retry, so tests needing one use
+// startTestServerWithRegistry.
 func startTestServerWithConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
-	srv, port, _ := startServerOnFreePort(t, cfg)
+	require.Nil(t, cfg.PromRegistry, "use startTestServerWithRegistry")
+	return startTestServerEach(t, func() server.Config { return cfg })
+}
+
+// startTestServerWithRegistry starts a server whose metrics register on the
+// returned registry, a fresh one for each attempt.
+func startTestServerWithRegistry(t *testing.T) (string, *prometheus.Registry) {
+	t.Helper()
+	var reg *prometheus.Registry
+	addr := startTestServerEach(t, func() server.Config {
+		reg = prometheus.NewRegistry()
+		return server.Config{PromRegistry: reg}
+	})
+	return addr, reg
+}
+
+// startTestServerEach starts a server built from newConfig, stopped on test
+// cleanup, and returns its dial address.
+func startTestServerEach(t *testing.T, newConfig func() server.Config) string {
+	t.Helper()
+	srv, port, _ := startServerOnFreePort(t, newConfig)
 	t.Cleanup(func() {
 		stopCtx, stopCancel := context.WithTimeout(
 			context.Background(),
@@ -168,8 +195,7 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 // returning Unimplemented (no Metadata backing configured) is irrelevant:
 // the interceptor records every request regardless of the handler's outcome.
 func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+	addr, reg := startTestServerWithRegistry(t)
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -228,8 +254,7 @@ func TestUnaryInterceptor_RecordsRealRPCThroughDialedConnection(t *testing.T) {
 func TestUnaryInterceptor_ExcludesHealthCheckFromMidnightStateMetrics(
 	t *testing.T,
 ) {
-	reg := prometheus.NewRegistry()
-	addr := startTestServerConfig(t, server.Config{PromRegistry: reg})
+	addr, reg := startTestServerWithRegistry(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -390,7 +415,9 @@ func TestNewAllowsRemoteHostWithTLS(t *testing.T) {
 
 // Cancelling the context passed to Start must shut the server down.
 func TestShutdownOnContextCancel(t *testing.T) {
-	srv, port, cancel := startServerOnFreePort(t, server.Config{})
+	srv, port, cancel := startServerOnFreePort(
+		t, func() server.Config { return server.Config{} },
+	)
 	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
 	addr := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
 
