@@ -4975,7 +4975,38 @@ the same budget as the reference node's 100,000 tokens at 500 per second. The
 rate is lower than the reference because Dingo pipelines 10 ChainSync
 requests, so one honest peer delivers about `10/RTT` headers per second; at 5
 per second a peer with up to two seconds of round-trip time keeps a full
-bucket. The Limit on Eagerness is separate and not implemented.
+bucket.
+
+#### Limit on Eagerness
+
+`ChainSelector.EagernessLimit` caps chain selection at `k` blocks past the
+intersection of all candidate fragments, so a syncing node cannot commit to one
+peer's chain so far that a slower honest candidate can no longer win. The limit
+is computed from the candidate fragments of live, eligible, non-stale peers
+that have delivered a header, and is gated on the selection mode, which is
+Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
+
+- Genesis mode (syncing): the cap is active. Before any candidate has
+  delivered a header, and when the candidates share no retained point, the
+  limit is `k` past the local tip, its most conservative value. Otherwise it is
+  `k` past the highest point common to every fragment. A single candidate is
+  its own intersection, so the cap never holds back a lone peer.
+- Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
+  false.
+
+While Genesis mode is active a candidate fragment retains `2k+1` delivered
+points instead of `k+1`, so that a fork point more than `k` behind a candidate's
+head is still found. Peers whose block numbers both reach the limit are
+indistinguishable to `comparePeerTips`; the incumbent is kept, then connection
+priority, blockfetch latency, and connection ID break the tie, before density
+and Praos comparison run. `ChainSelector.SelectedTip` returns the selected
+peer's tip truncated at the limit.
+
+The limit constrains which candidate chain selection prefers. It is not an
+ingress gate: `ShouldApplyIngress` does not consult it, so headers a peer
+delivers past the limit are still handed to the ledger. The limit is exported as
+the `dingo_chainselection_loe_block_number` and
+`dingo_chainselection_loe_intersection_slot` gauges (0 while inactive).
 
 #### Anti-flap incumbent pin
 

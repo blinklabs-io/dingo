@@ -289,3 +289,47 @@ func TestGenesisDensityDisconnectLogReportsDenial(t *testing.T) {
 	})
 	require.Contains(t, logs.String(), "denied=false")
 }
+
+func chainSelectionGaugeValue(
+	t *testing.T,
+	registry *prometheus.Registry,
+	name string,
+) float64 {
+	t.Helper()
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == name {
+			require.Len(t, family.GetMetric(), 1)
+			return family.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric %s not registered", name)
+	return 0
+}
+
+// The Limit on Eagerness gauges are registered before the selector exists, so
+// they read 0 until Run publishes it, then follow the selector's limit.
+func TestLimitOnEagernessGauges(t *testing.T) {
+	t.Parallel()
+	n, registry := newMetricsTestNode(t)
+	const blockGauge = "dingo_chainselection_loe_block_number"
+	const slotGauge = "dingo_chainselection_loe_intersection_slot"
+	assert.Zero(t, chainSelectionGaugeValue(t, registry, blockGauge))
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 5,
+		},
+	)
+	selector.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1000, Hash: []byte("local")},
+		BlockNumber: 10,
+	})
+	n.chainSelectorForGauges.Store(selector)
+
+	assert.Equal(t, 15.0, chainSelectionGaugeValue(t, registry, blockGauge))
+	assert.Zero(t, chainSelectionGaugeValue(t, registry, slotGauge),
+		"no candidate has delivered a header, so there is no intersection")
+}

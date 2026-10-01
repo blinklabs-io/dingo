@@ -288,6 +288,11 @@ type ChainSelector struct {
 	// lock-free read never observes a stale pair for longer than one such
 	// update.
 	genesisSelection atomic.Pointer[genesisSelectionSnapshot]
+
+	// eagerness caches the Limit on Eagerness for one evaluation. It is set
+	// and cleared under mutex by beginEagernessLocked/endEagernessLocked; nil
+	// means comparisons apply no cap.
+	eagerness *EagernessLimit
 }
 
 // genesisSelectionSnapshot is the immutable pair GenesisSelectionState
@@ -603,7 +608,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
-				safeAddUint64(cs.securityParam, 1),
+				cs.candidateFragmentCapacityLocked(),
 			)
 		} else {
 			var ok bool
@@ -629,7 +634,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			)
 			peerTip.recordObservedTipHistory(
 				observedTip,
-				safeAddUint64(cs.securityParam, 1),
+				cs.candidateFragmentCapacityLocked(),
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -1461,6 +1466,7 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	cs.advanceSelectionModeLocked()
+	defer cs.endEagernessLocked(cs.beginEagernessLocked())
 	if len(cs.peerTips) == 0 {
 		return nil
 	}
@@ -1634,6 +1640,12 @@ func (cs *ChainSelector) comparePeerTips(
 	if peerTipA == nil || peerTipB == nil {
 		return ChainComparisonUnknown
 	}
+	if cs.indistinguishableUnderEagernessLocked(
+		peerTipA.SelectionTip(),
+		peerTipB.SelectionTip(),
+	) {
+		return cs.compareTransportLocked(connIdA, connIdB, true)
+	}
 	if cs.mode == SelectionModeGenesis {
 		genesisWindow := cs.genesisWindowSlotsLocked()
 		densityA := peerTipA.observedDensity(genesisWindow)
@@ -1676,40 +1688,60 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 		}
 		// The chains are the same block. The remaining checks choose a
 		// peer transport for that block, not a different chain.
-		priorityA := cs.connectionPriority(connIdA)
-		priorityB := cs.connectionPriority(connIdB)
-		if priorityA > priorityB {
-			return ChainABetter
-		}
-		if priorityB > priorityA {
-			return ChainBBetter
-		}
-		// Latency tiebreaker: prefer the peer with lower blockfetch
-		// EWMA when VRF and SelectionTip are equal. Only fires when
-		// both peers have at least one sample; otherwise fall through
-		// to the connId string tiebreaker.
-		if cs.config.BlockfetchLatency != nil {
-			latencyA, okA := cs.config.BlockfetchLatency(connIdA)
-			latencyB, okB := cs.config.BlockfetchLatency(connIdB)
-			if okA && okB {
-				if latencyA < latencyB {
-					return ChainABetter
-				}
-				if latencyB < latencyA {
-					return ChainBBetter
-				}
-			}
-		}
-		if connIdA.String() < connIdB.String() {
-			return ChainABetter
-		}
-		if connIdB.String() < connIdA.String() {
-			return ChainBBetter
-		}
-		return ChainEqual
+		return cs.compareTransportLocked(connIdA, connIdB, false)
 	default:
 		return ChainComparisonUnknown
 	}
+}
+
+// compareTransportLocked orders two peers whose chains are equivalent for
+// selection: connection priority, then (optionally) the incumbent, then
+// blockfetch latency, then connection ID. The incumbent is preferred only when
+// the equivalence is the Limit on Eagerness, where the peers' tips differ and
+// would otherwise swap places on every evaluation.
+func (cs *ChainSelector) compareTransportLocked(
+	connIdA, connIdB ouroboros.ConnectionId,
+	preferIncumbent bool,
+) ChainComparisonResult {
+	priorityA := cs.connectionPriority(connIdA)
+	priorityB := cs.connectionPriority(connIdB)
+	if priorityA > priorityB {
+		return ChainABetter
+	}
+	if priorityB > priorityA {
+		return ChainBBetter
+	}
+	if preferIncumbent && cs.bestPeerConn != nil {
+		if *cs.bestPeerConn == connIdA {
+			return ChainABetter
+		}
+		if *cs.bestPeerConn == connIdB {
+			return ChainBBetter
+		}
+	}
+	// Latency tiebreaker: prefer the peer with lower blockfetch
+	// EWMA when VRF and SelectionTip are equal. Only fires when
+	// both peers have at least one sample; otherwise fall through
+	// to the connId string tiebreaker.
+	if cs.config.BlockfetchLatency != nil {
+		latencyA, okA := cs.config.BlockfetchLatency(connIdA)
+		latencyB, okB := cs.config.BlockfetchLatency(connIdB)
+		if okA && okB {
+			if latencyA < latencyB {
+				return ChainABetter
+			}
+			if latencyB < latencyA {
+				return ChainBBetter
+			}
+		}
+	}
+	if connIdA.String() < connIdB.String() {
+		return ChainABetter
+	}
+	if connIdB.String() < connIdA.String() {
+		return ChainBBetter
+	}
+	return ChainEqual
 }
 
 func sameSelectionTip(a, b ochainsync.Tip) bool {
@@ -2135,6 +2167,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	// reports why the densest fast source was denied.
 	corroborationEvent := cs.genesisCorroborationFailureLocked()
 
+	defer cs.endEagernessLocked(cs.beginEagernessLocked())
 	newBest := cs.selectBestChainLocked()
 	if newBest == nil {
 		// Selection stalled. Stage an explicit selected-to-none transition when

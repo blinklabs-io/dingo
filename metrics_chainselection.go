@@ -91,6 +91,42 @@ func (n *Node) registerChainSelectionMetrics() {
 		metrics.rollbackRegistrations.WithLabelValues(string(outcome))
 	}
 	n.chainSelectionMetrics = metrics
+	// Both read 0 while the cap is inactive (caught up) so a scrape never
+	// reports a stale limit.
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainselection_loe_block_number",
+			Help: "highest block number chain selection may reach under the Limit on Eagerness, 0 when the cap is inactive",
+		},
+		func() float64 { return n.eagernessLimitGauge(false) },
+	)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainselection_loe_intersection_slot",
+			Help: "slot of the point common to all candidate fragments that anchors the Limit on Eagerness, 0 when inactive or no common point",
+		},
+		func() float64 { return n.eagernessLimitGauge(true) },
+	)
+}
+
+// eagernessLimitGauge reads the current Limit on Eagerness at scrape time:
+// the intersection slot when slot is true, the block-number limit otherwise.
+// It reads chainSelectorForGauges rather than chainSelector because the gauges
+// are registered in New, before Run creates the selector, and a scrape may
+// race that assignment.
+func (n *Node) eagernessLimitGauge(slot bool) float64 {
+	selector := n.chainSelectorForGauges.Load()
+	if selector == nil {
+		return 0
+	}
+	limit := selector.EagernessLimit()
+	if !limit.Active {
+		return 0
+	}
+	if slot {
+		return float64(limit.Point.Slot)
+	}
+	return float64(limit.BlockNumber)
 }
 
 // recordChainSelectionStall counts one selected-to-none transition. Safe to
