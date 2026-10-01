@@ -226,7 +226,9 @@ func TestLimitOnEagernessIndependentOfCandidateOrder(t *testing.T) {
 	}
 	assert.False(t, first.Intersected,
 		"C retains no point A holds, so no point is common to every fragment")
-	assert.Equal(t, uint64(5+loeTestK), first.BlockNumber)
+	// A and B agreed up to block 10 while C was still short, and the limit
+	// stays k past that last common point rather than k past the local tip.
+	assert.Equal(t, uint64(10+loeTestK), first.BlockNumber)
 }
 
 // awaitAsync runs AwaitEagernessLimit on its own goroutine and reports its
@@ -356,10 +358,10 @@ func TestAwaitEagernessLimitReturnsOnContextCancel(t *testing.T) {
 	}
 }
 
-// With no common point the limit is the applied tip plus k. The selector's own
-// local tip is refreshed only periodically, so the wait must follow the live
-// applied tip it is given or a paused peer would wait out that interval.
-func TestAwaitEagernessLimitFollowsLiveLocalTip(t *testing.T) {
+// Once the candidates have shared a point, a later loss of that point from a
+// window must not hand the limit to the applied ledger tip: that tip follows
+// the selected peer's blocks, so the cap would move with the chain it bounds.
+func TestAwaitEagernessLimitIgnoresAppliedTipOnceAnchored(t *testing.T) {
 	t.Parallel()
 	var applied atomic.Uint64
 	applied.Store(10)
@@ -380,9 +382,91 @@ func TestAwaitEagernessLimitFollowsLiveLocalTip(t *testing.T) {
 	require.False(t, cs.EagernessLimit().Intersected)
 	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
 
-	done := awaitAsyncApplied(t.Context(), cs, a, 40, appliedTip)
-	requireStillBlocked(t, done)
-
 	applied.Store(40 - loeTestK)
+	assert.False(t, cs.withinEagernessLimit(a, 40, appliedTip))
+	assert.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+}
+
+// B is not paused, so its window slides past the fork point while A waits.
+// The cap must stay where the candidates last agreed.
+func TestAwaitEagernessLimitHoldsWhenCompetitorWindowDropsForkPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs, a, b := newLoEScenario(true, 16, 20)
+	appliedTip := func() ochainsync.Tip { return loeTip("c", 15) }
+	require.False(t, cs.withinEagernessLimit(a, 16, appliedTip))
+
+	feedLoEChain(cs, b, "b", 21, 21)
+	assert.False(t, cs.withinEagernessLimit(a, 16, appliedTip),
+		"a competitor's window passing the fork point released the cap")
+	assert.False(t, cs.withinEagernessLimit(a, 60, appliedTip))
+	assert.True(t, cs.withinEagernessLimit(a, 15, appliedTip))
+	feedLoEChain(cs, b, "b", 22, 40)
+	assert.False(t, cs.withinEagernessLimit(a, 16, appliedTip))
+}
+
+func TestAwaitEagernessLimitReleasesWhenCompetitorRemoved(t *testing.T) {
+	t.Parallel()
+	cs, a, b := newLoEScenario(true, 16, 20)
+	done := awaitAsync(t.Context(), cs, a, 16)
+	requireStillBlocked(t, done)
+	cs.RemovePeer(b)
 	requireAdmitted(t, done)
+}
+
+type atomicClock struct{ nanos atomic.Int64 }
+
+func (c *atomicClock) Now() time.Time { return time.Unix(0, c.nanos.Load()) }
+
+func (c *atomicClock) Advance(d time.Duration) { c.nanos.Add(int64(d)) }
+
+func pausedWaiters(cs *ChainSelector, connId ouroboros.ConnectionId) int {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.peerTips[connId].eagernessPaused
+}
+
+// Two forks both paused at the limit send no tips. The pause must not age
+// either into staleness, or each drops out of the other's candidate set and
+// both are released with no new evidence.
+func TestAwaitEagernessLimitPauseDoesNotAgePeersStale(t *testing.T) {
+	t.Parallel()
+	clock := &atomicClock{}
+	clock.nanos.Store(time.Now().UnixNano())
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:       true,
+		SecurityParam:     loeTestK,
+		StaleTipThreshold: time.Second,
+	})
+	installFakeClock2(cs, clock.Now)
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	feedLoEChain(cs, a, "a", 11, 16)
+	feedLoEChain(cs, b, "b", 11, 16)
+	cs.SetLocalTip(loeTip("c", 10))
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+
+	doneA := awaitAsync(t.Context(), cs, a, 16)
+	doneB := awaitAsync(t.Context(), cs, b, 16)
+	require.Eventually(t, func() bool {
+		return pausedWaiters(cs, a) == 1 && pausedWaiters(cs, b) == 1
+	}, 10*time.Second, time.Millisecond)
+
+	clock.Advance(10 * time.Second)
+	cs.cleanupStalePeers()
+	assert.Equal(t, 2, cs.PeerCount(),
+		"a paused peer was removed as very stale")
+	assert.False(t, cs.withinEagernessLimit(a, 16, nil))
+	assert.False(t, cs.withinEagernessLimit(b, 16, nil))
+	requireStillBlocked(t, doneA)
+	requireStillBlocked(t, doneB)
+}
+
+func installFakeClock2(cs *ChainSelector, now func() time.Time) {
+	cs.mutex.Lock()
+	cs.nowFn = now
+	cs.mutex.Unlock()
 }

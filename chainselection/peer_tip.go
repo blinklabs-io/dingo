@@ -45,9 +45,12 @@ type PeerChainTip struct {
 	// it as a peer implausibly far behind and skip it until its next
 	// MsgRollForward. Cleared by the first delivered header.
 	awaitingFirstHeader bool
-	VRFOutput           []byte // VRF output from tip block for tie-breaking
-	PraosView           PraosTiebreakerView
-	LastUpdated         time.Time
+	// eagernessPaused counts AwaitEagernessLimit calls holding this peer's
+	// header stream at the Limit on Eagerness. Guarded by the selector mutex.
+	eagernessPaused int
+	VRFOutput       []byte // VRF output from tip block for tie-breaking
+	PraosView       PraosTiebreakerView
+	LastUpdated     time.Time
 	// observedSlots is the recent observed slot frontier used for Genesis
 	// density. observedPoints is the same frontier with block hashes, used
 	// for Genesis corroboration (detecting whether other peers report the

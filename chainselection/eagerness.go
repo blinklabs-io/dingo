@@ -34,13 +34,16 @@ type EagernessLimit struct {
 	Active bool
 	// Intersected is true when the limit was derived from a point common to
 	// every candidate fragment, and false when the candidates share no
-	// retained point and the limit fell back to the local tip.
+	// retained point and the limit fell back to the last point they shared,
+	// or to the local tip if they never shared one.
 	Intersected bool
-	// Point is the common point of the candidate fragments. It is the zero
-	// Point unless Intersected.
+	// Point is the common point of the candidate fragments, or the last one
+	// they shared when not Intersected. It is the zero Point when the limit
+	// is measured from the local tip.
 	Point ocommon.Point
 	// BlockNumber is the highest block number selection may reach: k past the
-	// intersection, or k past the local tip when there is no intersection.
+	// intersection or the last shared point, or k past the local tip when the
+	// candidates never shared a point.
 	BlockNumber uint64
 }
 
@@ -62,11 +65,15 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 //
 // With a single candidate the intersection is that candidate's own head, so
 // the cap never holds back a lone peer. Retained fragments are bounded, so
-// candidates can share no retained point; the limit then also falls back to
-// the local tip, which keeps it conservative without needing history older
-// than the fragments hold.
+// candidates can stop sharing a retained point; the limit then stays k past
+// the last common point recorded. The local tip is not used once a common
+// point is known: it advances as the selected peer's blocks are applied, so a
+// limit measured from it would move with the chain it bounds. Only before the
+// candidates have ever overlapped is the limit k past the local tip. The
+// recorded point is the one piece of state this method writes, under its own
+// mutex, so it is safe under the read lock.
 //
-// localTip is the applied tip the fallback limit is measured from. include
+// localTip is the applied tip the no-overlap-yet limit is measured from. include
 // names a peer that counts as a candidate even when it is stale or
 // ineligible, so a header's own sender is never held back by a candidate set
 // that has dropped it. Pass nil for the selection view.
@@ -75,6 +82,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	localTip ochainsync.Tip,
 ) EagernessLimit {
 	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 {
+		cs.setEagernessAnchor(nil)
 		return EagernessLimit{}
 	}
 	limit := EagernessLimit{
@@ -101,6 +109,23 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 		)
 	}
 	if len(fragments) == 0 {
+		if include == nil {
+			cs.setEagernessAnchor(nil)
+		}
+		return limit
+	}
+	// Without a common retained point the limit holds at the last one the
+	// candidates shared.
+	fallback := func() EagernessLimit {
+		anchor := cs.eagernessAnchorValue()
+		if anchor == nil {
+			return limit
+		}
+		limit.Point = clonePoint(anchor.point)
+		limit.BlockNumber = safeAddUint64(
+			anchor.blockNumber,
+			cs.securityParam,
+		)
 		return limit
 	}
 	// Every point shared by all fragments lies on the first fragment, and the
@@ -113,7 +138,7 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	for _, other := range fragments[1:] {
 		tip, ok := fragments[0].intersectTip(other)
 		if !ok {
-			return limit
+			return fallback()
 		}
 		if tip.BlockNumber < common.BlockNumber {
 			common = tip
@@ -121,13 +146,29 @@ func (cs *ChainSelector) computeEagernessLimitLocked(
 	}
 	for _, fragment := range fragments[1:] {
 		if !fragment.containsPoint(common.Point) {
-			return limit
+			return fallback()
 		}
 	}
+	cs.setEagernessAnchor(&eagernessAnchor{
+		point:       clonePoint(common.Point),
+		blockNumber: common.BlockNumber,
+	})
 	limit.Intersected = true
 	limit.Point = clonePoint(common.Point)
 	limit.BlockNumber = safeAddUint64(common.BlockNumber, cs.securityParam)
 	return limit
+}
+
+func (cs *ChainSelector) setEagernessAnchor(anchor *eagernessAnchor) {
+	cs.eagernessAnchorMu.Lock()
+	cs.eagernessAnchor = anchor
+	cs.eagernessAnchorMu.Unlock()
+}
+
+func (cs *ChainSelector) eagernessAnchorValue() *eagernessAnchor {
+	cs.eagernessAnchorMu.Lock()
+	defer cs.eagernessAnchorMu.Unlock()
+	return cs.eagernessAnchor
 }
 
 // containsPoint reports whether the fragment retains point.
@@ -224,8 +265,8 @@ const eagernessPollInterval = 100 * time.Millisecond
 // it is cancelled first. It returns immediately when the cap is inactive, when
 // connId is not a tracked peer, or when the header is within the limit.
 //
-// appliedTip, when non-nil, supplies the applied ledger tip that the fallback
-// limit is measured from and is re-read on every check. A running node gives
+// appliedTip, when non-nil, supplies the applied ledger tip that the limit is
+// measured from before the candidates have shared a point and is re-read on every check. A running node gives
 // the selector its local tip only at startup and then on the stall recycler's
 // tick, which would hold a paused peer for the length of that interval; nil
 // uses the selector's own local tip. The
@@ -244,6 +285,7 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 	if cs.withinEagernessLimit(connId, blockNumber, appliedTip) {
 		return nil
 	}
+	defer cs.pauseEagerness(connId)()
 	ticker := time.NewTicker(eagernessPollInterval)
 	defer ticker.Stop()
 	for {
@@ -257,6 +299,29 @@ func (cs *ChainSelector) AwaitEagernessLimit(
 				return nil
 			}
 		}
+	}
+}
+
+// pauseEagerness records that connId's header stream is held at the limit and
+// returns the function that ends the pause. While a peer is paused it sends no
+// tip updates, so without the record the pause itself would age the peer into
+// staleness, drop it from every other candidate's view and release the cap.
+func (cs *ChainSelector) pauseEagerness(
+	connId ouroboros.ConnectionId,
+) func() {
+	cs.mutex.Lock()
+	peerTip, ok := cs.peerTips[connId]
+	if ok {
+		peerTip.eagernessPaused++
+	}
+	cs.mutex.Unlock()
+	if !ok {
+		return func() {}
+	}
+	return func() {
+		cs.mutex.Lock()
+		peerTip.eagernessPaused--
+		cs.mutex.Unlock()
 	}
 }
 

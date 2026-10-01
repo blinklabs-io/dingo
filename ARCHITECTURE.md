@@ -4987,10 +4987,14 @@ that have delivered a header, and is gated on the selection mode, which is
 Dingo's only sync-state signal (there is no Genesis State Machine equivalent):
 
 - Genesis mode (syncing): the cap is active. Before any candidate has
-  delivered a header, and when the candidates share no retained point, the
-  limit is `k` past the local tip, its most conservative value. Otherwise it is
-  `k` past the highest point common to every fragment. A single candidate is
-  its own intersection, so the cap never holds back a lone peer.
+  delivered a header, and before the candidates have ever shared a retained
+  point, the limit is `k` past the local tip. Otherwise it is `k` past the
+  highest point common to every fragment. When the bounded fragments later stop
+  overlapping, the limit stays `k` past the last common point; it does not fall
+  back to the local tip, which advances with the chain the limit bounds. The
+  recorded point is cleared when no candidate remains or Genesis mode ends. A
+  single candidate is its own intersection, so the cap never holds back a lone
+  peer.
 - Praos mode (caught up): the cap is disabled and `EagernessLimit().Active` is
   false.
 
@@ -5009,9 +5013,11 @@ before it is handed to the ledger, the ChainSync roll-forward callback calls
 `OuroborosConfig.ChainsyncAwaitEagerness`). A header numbered past the limit
 blocks that peer's callback, which pauses only its header stream: nothing is
 dropped and the peer's cursor does not move, so the header is delivered once
-the limit admits it. The wait re-evaluates every 100ms because the fallback
-limit follows the applied ledger tip, which has no change notification, and it
-returns when the connection's ChainSync client stops. The header's sender
+the limit admits it. The wait re-evaluates every 100ms because the applied
+ledger tip has no change notification, and it returns when the connection's
+ChainSync client stops. While a peer is paused it is never treated as stale and
+is not removed by stale-peer cleanup: a paused peer sends no tips, and aging it
+out would release the cap with no new evidence. The header's sender
 always counts as a candidate, even when stale, and a header from an untracked
 peer is admitted, so a lone peer is never held back. The limit does not hold
 back a rollback. Two candidates that both run more than `k` past their fork

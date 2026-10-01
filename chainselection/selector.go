@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -293,6 +294,19 @@ type ChainSelector struct {
 	// and cleared under mutex by beginEagernessLocked/endEagernessLocked; nil
 	// means comparisons apply no cap.
 	eagerness *EagernessLimit
+
+	// eagernessAnchor is the last point every candidate fragment shared. The
+	// limit stays k past it when the bounded fragments later stop overlapping,
+	// instead of falling back to the applied tip, which advances with the
+	// chain the limit bounds. It has its own mutex because the limit is
+	// computed under the read lock.
+	eagernessAnchorMu sync.Mutex
+	eagernessAnchor   *eagernessAnchor
+}
+
+type eagernessAnchor struct {
+	point       ocommon.Point
+	blockNumber uint64
 }
 
 // genesisSelectionSnapshot is the immutable pair GenesisSelectionState
@@ -640,6 +654,9 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		}
 
 		modeChanged = cs.advanceSelectionModeLocked()
+		// Record the common point while every window still holds it, whether
+		// or not anyone is waiting on the limit.
+		cs.computeEagernessLimitLocked(nil, cs.localTip)
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
@@ -1627,7 +1644,9 @@ func (cs *ChainSelector) connectionPriority(
 }
 
 func (cs *ChainSelector) isPeerTipStale(peerTip *PeerChainTip) bool {
-	return peerTip != nil &&
+	// A peer held at the Limit on Eagerness sends no tips because the pause
+	// stops them, so the silence is not evidence that it is gone.
+	return peerTip != nil && peerTip.eagernessPaused == 0 &&
 		peerTip.IsStale(cs.config.StaleTipThreshold)
 }
 
@@ -2481,6 +2500,7 @@ func (cs *ChainSelector) applyRollbackToTrackedPeer(e PeerRollbackEvent) bool {
 		return false
 	}
 	peerTip.ApplyRollback(e.Point, e.Tip)
+	cs.computeEagernessLimitLocked(nil, cs.localTip)
 	return true
 }
 
@@ -2696,7 +2716,8 @@ func (cs *ChainSelector) cleanupStalePeers() {
 			// skipped from selection after StaleTipThreshold, but we keep them
 			// tracked for an additional period in case they reconnect or update.
 			// After 2x the threshold, we consider them truly gone and remove them.
-			if peerTip.IsStale(cs.config.StaleTipThreshold * 2) {
+			if peerTip.eagernessPaused == 0 &&
+				peerTip.IsStale(cs.config.StaleTipThreshold*2) {
 				cs.config.Logger.Debug(
 					"removing very stale peer",
 					"connection_id", connId.String(),
