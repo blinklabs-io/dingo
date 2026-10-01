@@ -708,6 +708,12 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 			"",
 		},
 		{
+			"regular to EBB same slot",
+			byronOrderingEbb(2, 7),
+			regular(2*epochSlots, 7),
+			"does not follow parent slot",
+		},
+		{
 			"regular to EBB with next number",
 			byronOrderingEbb(2, 8),
 			regular(2*epochSlots-1, 7),
