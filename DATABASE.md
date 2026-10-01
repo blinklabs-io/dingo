@@ -952,7 +952,13 @@ the delete: nothing else touches that account's `account.reward` during
 import, so deleting its journal would let replay double-apply a credit
 already reflected in its current, untouched balance. This runs on every
 import, not only `Reconcile: true`, since a non-reconcile catch-up or the
-legacy reward-repair shape hits the identical gap. Confirmed reachable on
+legacy reward-repair shape hits the identical gap. An import resumed from a
+checkpoint at or past `certstate` but short of `tip` skips cert-state import,
+so it repeats the delete for the snapshot's accounts, re-derived from its
+cert state; this also repairs a cert-state phase checkpointed without the
+cleanup. A `tip` checkpoint marks a completed import whose journal may since
+hold legitimate post-anchor rows, so a re-run at `tip` deletes nothing.
+Confirmed reachable on
 ordinary replay this way: transaction withdrawals (direct per-transaction
 processing, no round-level gate); POOLREAP deposit refunds
 (`ledger.applyPoolRetirements` re-derives retiring pools fresh at every

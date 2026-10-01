@@ -778,3 +778,171 @@ func TestImportLedgerStateCatchUpLeavesUncoveredAccountUntouched(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, anchorReward, uint64(coveredAfterCatchUp.Reward))
 }
+
+// resumeImportConfig builds an ImportConfig for a one-account snapshot
+// anchored at slot 1000, with resume tracking under importKey.
+func resumeImportConfig(
+	t *testing.T,
+	db *database.Database,
+	addrSeed byte,
+	stakingKey []byte,
+	anchorReward uint64,
+	importKey string,
+) ImportConfig {
+	t.Helper()
+	nonce := make([]byte, 32)
+	return ImportConfig{
+		Database:  db,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ImportKey: importKey,
+		State: &RawLedgerState{
+			UTxOData: inlineUTxOMap(
+				t,
+				buildShelleyAddr(
+					0, 1,
+					bytes.Repeat([]byte{addrSeed}, 28),
+					bytes.Repeat([]byte{addrSeed + 1}, 28),
+				),
+				[]uint64{5_000_000},
+			),
+			CertStateData: accountCertStateData(
+				t, stakingKey, anchorReward, 2_000_000,
+			),
+			Epoch:               100,
+			EraIndex:            EraConway,
+			EraBounds:           make([]EraBound, EraConway+1),
+			EpochNonce:          nonce,
+			EvolvingNonce:       nonce,
+			CandidateNonce:      nonce,
+			LastEpochBlockNonce: nonce,
+			Tip: &SnapshotTip{
+				Slot:      1_000,
+				BlockHash: make([]byte, 32),
+			},
+		},
+		EpochLength: func(uint) (uint, uint, error) { return 1, 1_000, nil },
+	}
+}
+
+// TestImportLedgerStateResumePastCertStateRollsBackJournal covers an import
+// resumed from a cert-state checkpoint whose cert-state phase overwrote
+// account.reward without the journal cleanup. The resumed run skips the
+// cert-state phase, so it must still clear the stale post-anchor journal
+// rows for the snapshot's accounts; otherwise replay of the dropped credit
+// no-ops against the surviving row.
+func TestImportLedgerStateResumePastCertStateRollsBackJournal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	stakingKey := bytes.Repeat([]byte{0xd1}, 28)
+	const anchorReward = uint64(1_000_000)
+	const creditAmount = uint64(300_000)
+	const creditSlot = uint64(1_200)
+	creditSourceHash := []byte{0xc5}
+	const importKey = "resume:1000"
+
+	// 1. Bootstrap without resume tracking.
+	require.NoError(t, ImportLedgerState(
+		context.Background(),
+		resumeImportConfig(t, db, 0x8b, stakingKey, anchorReward, ""),
+	))
+
+	// 2. A post-anchor credit is applied locally.
+	require.NoError(t, db.AddAccountRewardByCredential(
+		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		creditSourceHash, nil,
+	))
+
+	// 3. An interrupted import without the cleanup: cert-state overwrote
+	// account.reward from the snapshot and the run checkpointed cert-state
+	// before failing in a later phase.
+	cfg := resumeImportConfig(t, db, 0x8b, stakingKey, anchorReward, importKey)
+	_, _, err = importCertState(
+		context.Background(), cfg, 1_000, func(ImportProgress) {},
+	)
+	require.NoError(t, err)
+	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseCertState))
+	acct, err := db.GetAccountByCredential(
+		accountCredTagKey, stakingKey, false, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, anchorReward, uint64(acct.Reward),
+		"precondition: reward reset to the anchor value, journal row kept",
+	)
+
+	// 4. Resume the same import.
+	require.NoError(t, ImportLedgerState(context.Background(), cfg))
+
+	// 5. Replay of the credit must land on top of the anchor value.
+	require.NoError(t, db.AddAccountRewardByCredential(
+		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		creditSourceHash, nil,
+	))
+	acct, err = db.GetAccountByCredential(
+		accountCredTagKey, stakingKey, false, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, anchorReward+creditAmount, uint64(acct.Reward),
+		"a resumed import past cert-state must clear the stale journal so "+
+			"replay re-applies the credit",
+	)
+}
+
+// TestImportLedgerStateCompletedCheckpointKeepsJournal covers a re-run of an
+// import whose checkpoint is already at tip. Every phase is skipped and no
+// account balance is overwritten, so post-anchor journal rows recorded
+// since that import completed are legitimate and must survive; deleting
+// them would let replay double-apply a credit the balance already holds.
+func TestImportLedgerStateCompletedCheckpointKeepsJournal(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	stakingKey := bytes.Repeat([]byte{0xd2}, 28)
+	const anchorReward = uint64(1_000_000)
+	const creditAmount = uint64(300_000)
+	const creditSlot = uint64(1_200)
+	creditSourceHash := []byte{0xc6}
+	cfg := resumeImportConfig(
+		t, db, 0x8d, stakingKey, anchorReward, "completed:1000",
+	)
+
+	// 1. A completed import leaves its checkpoint at tip.
+	require.NoError(t, ImportLedgerState(context.Background(), cfg))
+	cp, err := db.Metadata().GetImportCheckpoint(cfg.ImportKey, nil)
+	require.NoError(t, err)
+	require.NotNil(t, cp)
+	require.Equal(t, models.ImportPhaseTip, cp.Phase)
+
+	// 2. The node then applies a post-anchor credit.
+	require.NoError(t, db.AddAccountRewardByCredential(
+		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		creditSourceHash, nil,
+	))
+
+	// 3. Re-running the same import skips every phase.
+	require.NoError(t, ImportLedgerState(context.Background(), cfg))
+
+	// 4. Replay of the credit must no-op against the surviving journal row.
+	require.NoError(t, db.AddAccountRewardByCredential(
+		accountCredTagKey, stakingKey, creditAmount, creditSlot,
+		creditSourceHash, nil,
+	))
+	acct, err := db.GetAccountByCredential(
+		accountCredTagKey, stakingKey, false, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t, anchorReward+creditAmount, uint64(acct.Reward),
+		"a completed import's re-run must leave the journal intact",
+	)
+}
