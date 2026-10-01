@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
@@ -200,4 +201,98 @@ func TestBatchAccumulatorResetDropsQueuedWitnessRows(t *testing.T) {
 	acc.Reset()
 	require.NoError(t, store.FlushBatch(acc, txn))
 	require.Zero(t, keyWitnessCount(t, store, txn))
+}
+
+// allShapesWitnessTx builds a transaction carrying a row for every witness
+// insert shape, so each shape's transaction_id column position is exercised.
+func allShapesWitnessTx(t *testing.T, seed byte) (lcommon.Transaction, ocommon.Point) {
+	t.Helper()
+	txID := make([]byte, 32)
+	txID[0] = seed
+	var datum lcommon.Datum
+	datum.SetCbor([]byte{0x01})
+	var redeemerData lcommon.Datum
+	redeemerData.SetCbor([]byte{0x02})
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(txID)
+	tx.WithValid(true)
+	tx.WithWitnesses(
+		mockledger.NewMockTransactionWitnessSet().
+			WithVkeyWitnesses(lcommon.VkeyWitness{
+				Vkey:      []byte{seed, 0x01},
+				Signature: []byte{seed, 0x02},
+			}).
+			WithBootstrapWitnesses(lcommon.BootstrapWitness{
+				PublicKey:  []byte{seed, 0x03},
+				Signature:  []byte{seed, 0x04},
+				ChainCode:  []byte{seed, 0x05},
+				Attributes: []byte{0xa0},
+			}).
+			WithPlutusV1Scripts(lcommon.PlutusV1Script{seed, 0x06}).
+			WithPlutusData(datum).
+			WithRedeemers(&conway.ConwayRedeemers{
+				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
+					{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
+						Data:    redeemerData,
+						ExUnits: lcommon.ExUnits{Memory: 10, Steps: 20},
+					},
+				},
+			}),
+	)
+	return tx, ocommon.Point{Slot: 200 + uint64(seed), Hash: txID}
+}
+
+func witnessTableCounts(
+	t *testing.T,
+	store *Store,
+	txn types.Txn,
+) map[string]int {
+	t.Helper()
+	db, ctx, err := store.dbFromTxn(txn)
+	require.NoError(t, err)
+	counts := make(map[string]int)
+	for _, table := range []string{
+		"key_witness", "witness_scripts", "plutus_data", "redeemer",
+	} {
+		var count int
+		require.NoError(t, db.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM "+table,
+		).Scan(&count))
+		counts[table] = count
+	}
+	return counts
+}
+
+// TestBatchedWitnessRowsReplacePendingRowsOfEveryShape re-applies one
+// transaction inside a window and checks that each witness table ends with
+// the rows of a single application, matching the immediate path.
+func TestBatchedWitnessRowsReplacePendingRowsOfEveryShape(t *testing.T) {
+	t.Parallel()
+	want := map[string]int{
+		"key_witness": 2, "witness_scripts": 1, "plutus_data": 1, "redeemer": 1,
+	}
+
+	immediate := newAPIModeSQLiteStore(t, nil)
+	immediateTxn := immediate.Transaction(context.Background())
+	t.Cleanup(func() { _ = immediateTxn.Rollback() })
+	tx, point := allShapesWitnessTx(t, 11)
+	require.NoError(t, immediate.SetTransaction(
+		tx, point, 0, nil, true, immediateTxn,
+	))
+	require.Equal(t, want, witnessTableCounts(t, immediate, immediateTxn))
+
+	store := newAPIModeSQLiteStore(t, nil)
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+	for range 2 {
+		tx, point := allShapesWitnessTx(t, 11)
+		require.NoError(t, store.SetTransactionBatchedHistorical(
+			tx, point, 0, nil, true, true, acc, txn,
+		))
+	}
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.Equal(t, want, witnessTableCounts(t, store, txn))
 }
