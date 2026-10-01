@@ -95,12 +95,12 @@ func proposalDepositAccountActive(
 // depositor's active voting stake for as long as the proposal remains
 // active, so it must be added on top of the depositor's ordinary UTxO and
 // reward-account stake -- exactly what VotingPowerBatchSQL/
-// VotingPowerByTypeSQL compute without it (blinklabs-io/dingo#4355). The
-// conformance harness (internal/test/conformance/state_manager.go,
+// VotingPowerByTypeSQL compute without it. The conformance harness
+// (internal/test/conformance/state_manager.go,
 // activeProposalDeposits/credentialVotingStake) implements the same rule
-// locally for NoConfidence/UpdateCommittee ratification; this is the
-// production counterpart that LoadDRepVotingState folds into every
-// DRep-gated action's tally.
+// locally for NoConfidence/UpdateCommittee ratification; this is the production
+// counterpart that LoadDRepVotingState folds into every DRep-gated action's
+// tally.
 //
 // The return account's own active/CIP-0163 expiry gates are applied the
 // same way VotingPowerBatchSQL applies them to ordinary stake, so a return

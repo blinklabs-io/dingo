@@ -40,7 +40,7 @@ import (
 )
 
 // TestLedgerProcessBlockRejectsLateMIRCertificate is the block-application
-// half of #4362: a block carrying a MIR certificate inside the final
+// other half: a block carrying a MIR certificate inside the final
 // stability window fails validation, so the certificate is never stored for
 // applyMIRCerts to credit at the boundary.
 func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
@@ -1635,9 +1635,9 @@ func mirDelegState(
 	return state
 }
 
-// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example in
-// blinklabs-io/dingo#4362: a boundary at 1,000,000 and a 129,600-slot window
-// put it at 870,400, whichever slot of the epoch asks.
+// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example: a
+// boundary at 1,000,000 and a 129,600-slot window put it at 870,400, whichever
+// slot of the epoch asks.
 func TestLedgerView_MIRDelegState_Cutoff(t *testing.T) {
 	t.Parallel()
 
@@ -1749,14 +1749,13 @@ func TestLedgerView_MIRDelegState_PotsAndTransfers(t *testing.T) {
 	assert.Equal(t, big.NewInt(260), state.DeltaTreasury)
 }
 
-// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover addresses a
-// human review finding on PR #4415: the query must read lv.epochStartSlot, a
-// value pinned once when this view was built for a specific transaction's
-// validation, never a fresh read of LedgerState.currentEpoch -- because a
-// concurrent writer can roll the epoch over while this transaction's
-// validation is still in flight. A view built fresh after the rollover
-// (ls.NewView, exactly what a caller must not do mid-validation) reproduces
-// the bug the review flagged: the rolled-over epoch's later start slot
+// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover pins that the
+// query must read lv.epochStartSlot, a value pinned once when this view was
+// built for a specific transaction's validation, never a fresh read of
+// LedgerState.currentEpoch -- because a concurrent writer can roll the epoch
+// over while this transaction's validation is still in flight. A view built
+// fresh after the rollover (ls.NewView, exactly what a caller must not do
+// mid-validation) reproduces the bug: the rolled-over epoch's later start slot
 // exceeds the still-valid slot and hides every pending delta.
 func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
 	t *testing.T,

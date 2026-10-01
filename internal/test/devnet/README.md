@@ -447,6 +447,9 @@ Run the complete scenario with:
 ./run-tests.sh --leios
 ```
 
+The `devnet-leios` workflow runs this scenario daily and on manual dispatch,
+and uploads the failure artifacts described below when it fails.
+
 For a manually started network, `./start.sh --leios` prints the environment
 and Go command for the matching producer-to-peer test. The test-only signing
 key and proof are paired fixtures under `testdata/`; a focused unit test

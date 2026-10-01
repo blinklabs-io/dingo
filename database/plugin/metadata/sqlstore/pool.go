@@ -149,7 +149,7 @@ func poolPositionPredicate(
 //
 // A nil `charged` means the era's deposit function could not compute an
 // amount, and a nil return carries that through so the column stores NULL
-// rather than an authoritative zero (dingo #3829). A carried-forward amount
+// rather than an authoritative zero. A carried-forward amount
 // may also be unknown when both deposit columns on the earlier row are NULL;
 // preserve that absence rather than turning unknown into zero.
 func poolRegistrationDepositHeld(
@@ -1606,7 +1606,7 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 // built from a stake snapshot captured at an earlier boundary, and a block's
 // header carries the key registered at that capture. Validating a header
 // against the current registration rejects every block the pool makes for the
-// rest of the epoch it rotated in (issue #3842).
+// rest of the epoch it rotated in.
 //
 // The selection is the same latest-certificate-wins ordering
 // GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
@@ -2613,7 +2613,7 @@ WHERE ret.epoch = ?
 // it matches every retirement effective up to and including epoch rather than
 // only the one landing on it, and returns bare key hashes because no deposit
 // refund is being applied. See MetadataStore's doc comment for why the parity
-// checker needs the wider comparison (dingo #3925).
+// checker needs the wider comparison.
 //
 // "Same resolution" includes the synthetic-retirement key every
 // latest-retirement query in the tree shares. A reconcile retirement

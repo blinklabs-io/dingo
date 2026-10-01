@@ -60,7 +60,7 @@ func (f *fakeRemoteKESSigner) Sign(
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
 // opcert-lifetime gate applies inside kesSign itself, not only at its callers
-// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock). dingo#3115's
+// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock).
 // KES agent client bypassed exactly this: it signed through a direct call to
 // the agent instead of through this method, so the opcert-lifetime check both
 // of those callers otherwise rely on never ran for the agent path.
@@ -1533,13 +1533,13 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
 }
 
-// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins the state #4013
+// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins the state
 // made reachable here.
 //
 // LedgerState publishes (0, true) from UpstreamSyncStatus for the whole window
 // between an active-connection switch and the newly selected peer's first
-// admitted trusted header. Before #4013 the sync gate refused every slot in
-// that window outright, so this bound never saw it. #4013 bounded that branch
+// admitted trusted header. Before the sync gate refused every slot in
+// that window outright, so this bound never saw it. bounded that branch
 // by the local tip's lag instead -- a node at tip forges, and the header it
 // produces is what ends the window -- so a node at tip now arrives at this
 // gate with a live upstream and a target of zero.
@@ -1548,8 +1548,8 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 // newestKnown cannot hold for a zero target, and NOT because anything below
 // refuses the slot first. Substituting a value for the missing target -- the
 // admitted header frontier was the obvious candidate, and an earlier revision
-// did it -- would refuse leader slots in exactly the window #4013 opened them
-// up for, which is the #4010 wedge again for any operator who set the knob.
+// did it -- would refuse leader slots in exactly the window opened them
+// up for, which is the wedge again for any operator who set the knob.
 func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 	var logs bytes.Buffer
 	block := newForgerTestBlock(300, 2)
@@ -1565,7 +1565,7 @@ func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 		BlockBroadcaster: &forgerTestBroadcaster{},
 		SlotClock: forgerTestSlotClock{
 			// At tip: the previous slot's block, one slot behind the
-			// current slot, so #4013's local-lag bound passes it through.
+			// current slot, so local-lag bound passes it through.
 			currentSlot:        300,
 			chainTipSlot:       299,
 			primaryTipExplicit: true,
@@ -2057,7 +2057,7 @@ func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 // TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
 // an active upstream with no admitted target does not suppress forging based on
 // wall-clock distance from the local tip. That distance describes a network
-// quiet stretch, not whether a peer is ahead (issue #4201).
+// quiet stretch, not whether a peer is ahead.
 func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
 	t *testing.T,
 ) {
@@ -3027,7 +3027,7 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 // node never adopted.
 //
 // The forgeForged counter still increments before adoption, which is what
-// PR #2323 required: build-versus-adopt remains observable through
+// the forge metrics require: build-versus-adopt remains observable through
 // forgeForged and forgeCouldNot without publishing an unadopted block.
 func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
 	t *testing.T,
@@ -3527,7 +3527,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			// the forged ranking block's slot (10) or zero: the manifest is
 			// content-addressed, so the same hash could be a distinct,
 			// unrelated occurrence at another slot, and the wrong slot here
-			// would resolve the wrong occurrence (issue #3513 review).
+			// would resolve the wrong occurrence.
 			require.Equal(t, 1, leiosCerts.gotEbSlotCalls)
 			require.Equal(t, uint64(9), leiosCerts.gotEbSlot)
 		})

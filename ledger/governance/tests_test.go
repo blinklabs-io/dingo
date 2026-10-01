@@ -127,7 +127,7 @@ func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 }
 
 // TestMithrilSeededRootUnblocksChainedProposal mirrors the failure
-// shape of issue #2195: a chained HardForkInitiation arriving on a
+// shape: a chained HardForkInitiation arriving on a
 // node whose only enacted-root visibility comes from a Mithril
 // snapshot must be accepted by validateParentChain when the per-
 // purpose root has been seeded as a synthetic enacted row.
@@ -258,13 +258,13 @@ func seedNoConfidenceProposal(
 }
 
 // TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark covers the
-// second SPO-gated action type dingo#4441's fix touches (HardForkInitiation
+// second SPO-gated action type fix touches (HardForkInitiation
 // being the first, covered by ledger's TestHardForkInitiation_* tests).
 // stakeEpochFor(newEpoch) resolves to newEpoch, so the SPO tally must read
 // mark[newEpoch] -- seeded here directly, matching how a standalone
 // ProcessEpoch caller (as opposed to a real epoch-rollover transaction)
 // seeds it. The 0.51 threshold and 0.4779/0.6283 stake ratios are the same
-// real values dingo#4441 measured on Preview for HardForkInitiation; using
+// real values measured on Preview for HardForkInitiation; using
 // them here for NoConfidence proves the fix is the shared stakeEpochFor
 // primitive, not a HardForkInitiation-specific patch.
 func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
@@ -351,7 +351,7 @@ func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
 // votes and the same pparams yield no mid-epoch prediction during epoch 741
 // and a ratification at the boundary into 742.
 //
-// The stakes are Preview's own Plomin numbers (dingo#4441): mark[741] at
+// The stakes are Preview's own Plomin numbers: mark[741] at
 // 0.4757 against the 0.51 pvtHardForkInitiation threshold, mark[742] at
 // 0.6283.
 func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
@@ -876,7 +876,7 @@ func seedSPONonVoterProposal(
 	return stored
 }
 
-// TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes covers dingo#4463 at
+// TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes covers at
 // the RATIFY layer rather than only the database layer: a DRep, an SPO, and
 // a committee member each cast Yes, flip to No after the cast slot, and a
 // rollback to a slot between the cast and the flip must restore Yes for all
@@ -973,7 +973,7 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	)
 
 	// Every voter replaces their vote with No after the cast slot. Forward
-	// replacement must flip the outcome (dingo#4463's "preserve normal
+	// replacement must flip the outcome ( "preserve normal
 	// forward replacement behavior" criterion).
 	cast(models.VoterTypeDRep, drepCred, models.VoteNo, replacedSlot)
 	cast(models.VoterTypeSPO, poolKeyHash, models.VoteNo, replacedSlot)

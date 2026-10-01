@@ -185,7 +185,7 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 }
 
 // TestProcessEpochExpiresProposalWithoutRefundingDeposit pins the first half
-// of the expire/drop split (dingo#4411): marking a proposal expired must not
+// of the expire/drop split: marking a proposal expired must not
 // itself refund its deposit. cardano-ledger does not return an expired
 // governance action's deposit until one full epoch after it is marked
 // expired -- refunding it immediately inflated the very next mark snapshot's
@@ -269,9 +269,9 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 }
 
 // TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch is the
-// regression test for dingo#4411: a proposal marked expired at epoch E must
-// have its deposit refunded only when ProcessEpoch runs for epoch E+1, not
-// immediately.
+// regression test for the early proposal-deposit refund: a proposal marked
+// expired at epoch E must have its deposit refunded only when ProcessEpoch runs
+// for epoch E+1, not immediately.
 func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	t *testing.T,
 ) {
@@ -360,9 +360,9 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 }
 
 // TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch covers the
-// crash-replay half of dingo#4411. A boundary that is reprocessed reruns
-// against the expiry the first pass already wrote, so the drop step's own
-// `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
+// crash-replay half of the early-refund fix. A boundary that is reprocessed
+// reruns against the expiry the first pass already wrote, so the drop step's
+// own `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
 // expiry step -- is what keeps the refund out of the epoch that expired it.
 func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 	t *testing.T,
@@ -1014,7 +1014,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 }
 
 // TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a real ratify+enact
+// pins: a real ratify+enact
 // cycle through ProcessEpoch, not EnactProposal called in isolation, must
 // still surface PlutusV2CostModelWritten on the resulting EpochOutput --
 // proving applyEnactmentResult's OR into EpochOutput actually connects to

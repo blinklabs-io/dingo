@@ -515,7 +515,7 @@ func postgresConformanceDSN() string {
 // postgresConformanceDSN survives a legal libpq password containing a
 // space, a quote, and a backslash -- exactly the class of credential
 // storagetest.EscapeLibpqValue exists to handle, and exactly what a
-// reviewer's probe found broken here before every DSN component was passed
+// probe once found broken here before every DSN component was passed
 // through it: an unquoted, unescaped keyword/value pair ends at the first
 // whitespace, so pgx.ParseConfig(postgresConformanceDSN()) silently
 // truncated this password to just "review" -- a real POSTGRES_PASSWORD

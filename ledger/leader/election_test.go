@@ -52,7 +52,7 @@ const (
 // recordingStakeProvider records the snapshot epoch each half of the sigma
 // ratio was queried with, so a test can prove both come from the SAME stake
 // snapshot generation. A numerator taken from a later generation than the
-// denominator is exactly the one-sided sigma drift dingo #2798 reported.
+// denominator is exactly the one-sided sigma drift reported.
 type recordingStakeProvider struct {
 	poolStakeEpochs  []uint64
 	totalStakeEpochs []uint64
@@ -61,7 +61,7 @@ type recordingStakeProvider struct {
 }
 
 // GetPoolAndTotalActiveStake records the snapshot epoch for BOTH halves on
-// every call. Since dingo #3815 the pair is read through one method, so the
+// every call. Since the pair is read through one method, so the
 // two recorded slices are necessarily the same length and carry the same
 // epochs -- which is itself the property TestComputeScheduleDrawsSigmaInputs\
 // FromSameSnapshotEpoch asserts.
@@ -234,7 +234,7 @@ func TestComputeScheduleWithoutExactCoeffUsesFloatFallback(t *testing.T) {
 // calculated" record as a single, self-contained audit of every input to the
 // leader check, so a reported schedule divergence can be diffed against the
 // reference node's `query stake-snapshot` / `query protocol-state` without
-// re-running the node with extra instrumentation (dingo #2798).
+// re-running the node with extra instrumentation.
 func TestComputeScheduleLogsAuditableSigmaInputs(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{
@@ -326,7 +326,7 @@ func (p *generationStakeProvider) GetPoolAndTotalActiveStake(
 }
 
 // TestComputeScheduleReadsSigmaPairInOneProviderCall is the regression test
-// for dingo #3815, driven through the real schedule computation.
+// driven through the real schedule computation.
 //
 // computeSchedule used to call GetPoolStake and GetTotalActiveStake in
 // sequence (election.go:773 and :804), each opening its own db.MetadataTxn in

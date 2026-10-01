@@ -145,7 +145,7 @@ const leiosBackfillConnCooldownMaxShift = 5
 // FetchEndorserBlockByPoint can fail over to another connection. Without it, a
 // slow-but-alive relay that keeps dribbling transactions within the leios-fetch
 // protocol per-message timeout (so that timeout never fires) parks the whole
-// ledger apply loop on one peer for minutes (issue #2819). It is deliberately
+// ledger apply loop on one peer for minutes. It is deliberately
 // well under the ledger-side leiosBackfillMaxWait (2m) so several connections
 // can be tried within one await window, yet comfortably above the few seconds a
 // legitimately large endorser block takes to serve, so a healthy fetch is never
@@ -165,7 +165,7 @@ var errLeiosBackfillConnBusy = errors.New(
 // leiosFetchFailureClass is how a failed by-point fetch attempt on one
 // connection is classified, so a momentarily busy connection, a stalled one,
 // and one whose leios-fetch protocol can never answer again each get the
-// failover weight they need rather than one shared cooldown (dingo #3552).
+// failover weight they need rather than one shared cooldown.
 type leiosFetchFailureClass int
 
 const (
@@ -206,11 +206,11 @@ func classifyLeiosFetchFailure(err error) leiosFetchFailureClass {
 
 // leiosBackfillAttemptBudget divides the remaining fetch budget across the
 // connections still to be tried. Splitting it means a multi-peer failover still
-// bounds each peer at leiosBackfillPerAttemptTimeout (issue #2819), while the
+// bounds each peer at leiosBackfillPerAttemptTimeout, while the
 // last remaining candidate -- the normal case on a topology with a single Leios
 // relay -- gets the whole remainder instead of having its only attempt truncated
 // at 30s with nothing to fail over to, which is what turned a slow relay into a
-// permanent wedge (dingo #3552).
+// permanent wedge.
 func leiosBackfillAttemptBudget(
 	remaining time.Duration,
 	candidatesLeft int,
@@ -260,7 +260,7 @@ const leiosBackfillAffinityWindow = 2 * time.Minute
 //   - dead: this connection's leios-fetch request slot is permanently
 //     abandoned. A cooldown cannot repair it, so the connection is recycled
 //     (one request per connection) and ordered last; the replacement dialled by
-//     peer governance is what makes failover real (dingo #3552).
+//     peer governance is what makes failover real.
 //   - transient: escalating per-connection cooldown.
 //
 // The leios-fetch protocol has no absence reply for a Block or BlockTxs
@@ -281,14 +281,14 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	// from a peer offer before an announcement corroborated it: a matching
 	// entry is promoted (and published) here, a contradicting one is evicted so
 	// the fetch below replaces it rather than serving a poisoned slot to the
-	// ledger (issue #3513).
+	// ledger.
 	if publish := o.bindLeiosEndorserBlockSlot(ebHash, ebSlot); publish != nil {
 		publish()
 	}
 	// The lookup is keyed by (slot, hash): loadLeiosEBFromDB's blob reload
 	// only satisfies this specific occurrence when its persisted slot
 	// actually matches ebSlot, so a stale reload of a different occurrence
-	// cannot satisfy this check (issue #3513 review).
+	// cannot satisfy this check.
 	if data, ok := o.lookupLeiosEndorserBlock(ebSlot, ebHash); ok &&
 		data.completeTxCache() && data.slotVerified {
 		return nil
@@ -483,7 +483,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	}
 	defer g.mu.Unlock()
 	// Bound this connection's attempt so a slow-but-alive relay cannot park the
-	// whole backfill on one peer (issue #2819); on expiry the tx fetch returns a
+	// whole backfill on one peer; on expiry the tx fetch returns a
 	// deadline error, this attempt is marked failed, and FetchEndorserBlockByPoint
 	// moves on to the next connection. Busy connections are skipped above, so the
 	// deadline can cover only serving time without leaving lock acquisition
@@ -523,7 +523,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 	// Keyed by (slot, hash): a cached or blob-reloaded entry for a different
 	// occurrence of this hash lives under its own key and is simply not
 	// found here, so it cannot be mistaken for this attempt's authoritative
-	// point (issue #3513 review).
+	// point.
 	data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash)
 	if !ok {
 		reqCtx, cancel := leiosFetchRequestContext(ctx, deadline)
@@ -559,7 +559,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		// rather than falling through: completeTxCache() below would
 		// otherwise return nil on every connection this backfill tries
 		// without any of them ever verifying the entry, since none would
-		// take the !ok branch above (issue #3513 review).
+		// take the !ok branch above.
 		if publish := o.bindLeiosEndorserBlockSlot(point.Hash, point.Slot); publish != nil {
 			publish()
 		}

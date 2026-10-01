@@ -290,7 +290,7 @@ func BenchmarkRefreshRewardLiveStakeAggregateAccountAndUpsert(b *testing.B) {
 }
 
 // BenchmarkRefreshRewardLiveStakeAggregateDeltaAtScale is the direct
-// before/after comparison for dingo #4421: refreshRewardLiveStakeAggregate's
+// before/after comparison of refreshRewardLiveStakeAggregate's
 // full sumCredentialUtxoStake rescan against
 // refreshRewardLiveStakeAggregateDelta's O(1) running-total update, for a
 // credential holding as many live UTxOs as the 20,003-UTxO case the issue

@@ -94,7 +94,7 @@ func TestParseCommitteeQuorumRange(t *testing.T) {
 // pots and is skipped — and a skipped round is never made up. Reward
 // balances, and the leadership stake derived from them, stay short by an
 // epoch's rewards for the life of the database, which is what makes such a
-// node reject canonical blocks near the eligibility threshold (#3165).
+// node reject canonical blocks near the eligibility threshold.
 func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 	t.Parallel()
 
@@ -143,7 +143,7 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 // pre-anchor fee pot, UTxOState.utxosFees (RawLedgerState.Fees) minus
 // SnapShots' ssFee. A later local boundary calculation adds it to the fees
 // this node observes after the anchor instead of silently omitting
-// everything before it (dingo #3975).
+// everything before it.
 func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	t.Parallel()
 
@@ -185,8 +185,7 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 // epoch, so RawLedgerState.Fees < SnapShots.Fee means the snapshot was not
 // decoded as a consistent ledger state. seedImportedRewardBasis must refuse
 // it: leaving ImportedEpochFees unset would make the next boundary sum only
-// the local post-anchor fees and credit that round short, the defect in
-// dingo #3975.
+// the local post-anchor fees and credit that round short.
 func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 	t.Parallel()
 

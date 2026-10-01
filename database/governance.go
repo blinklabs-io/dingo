@@ -182,7 +182,7 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 // expired_epoch is strictly below the given epoch and whose deposit has not
 // yet been returned. Used at epoch start, before marking any new proposals
 // expired, to return the deposit and finalize proposals expired as of a prior
-// boundary (dingo#4411).
+// boundary.
 func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 	epoch uint64,
 	txn *Txn,

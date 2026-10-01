@@ -367,7 +367,7 @@ func ProcessEpoch(
 	// enforces the delay, not this step's position ahead of EXPIRY: a
 	// boundary reprocessed after a commit crash reruns EXPIRY's writes from
 	// the first pass, so ordering alone would let the rerun drop them in the
-	// epoch that expired them (dingo#4411: refunding an epoch early inflated
+	// epoch that expired them (refunding an epoch early inflated
 	// the very next mark snapshot's total active stake by the deposit amount
 	// for any refund landing on a delegated, still-registered account).
 	replayedDropped, err := in.DB.GetDroppedGovernanceProposalsAt(
@@ -774,13 +774,11 @@ func decideRatification(
 		if !validateParentChain(proposal, root) {
 			// A chained proposal that references a parent we
 			// don't have an enacted root for is the silent
-			// failure mode behind issue #2195: on a Mithril-
-			// bootstrapped node missing per-purpose seeded
-			// roots, every chained proposal hits this branch and
-			// silently expires. Log a warning so the next
-			// occurrence shows up in operator logs instead of
-			// only as a block-producer divergence at the next
-			// enactment boundary.
+			// failure mode on a Mithril- bootstrapped node missing per-purpose
+			// seeded roots, every chained proposal hits this branch and
+			// silently expires. Log a warning so the next occurrence shows up
+			// in operator logs instead of only as a block-producer divergence
+			// at the next enactment boundary.
 			if in.Logger != nil &&
 				root == nil &&
 				proposal.ParentTxHash != nil &&
@@ -1162,7 +1160,7 @@ func ratificationEnactmentPrecondition(
 // tick's ratify decision, taken at the boundary into newEpoch, must use
 // mark[newEpoch].
 //
-// Confirmed against the Preview Plomin hard fork (dingo#4441): mark[742]'s
+// Confirmed against the Preview Plomin hard fork: mark[742]'s
 // SPO yes ratio was 0.6283 (>= the 0.51 pvtHardForkInitiation threshold),
 // matching the real network's ratified_epoch=742/enacted_epoch=743; mark[740]
 // (0.4779) and mark[741] (0.4757) do not clear the threshold and reproduce
@@ -1194,7 +1192,7 @@ func stakeEpochFor(newEpoch uint64) uint64 {
 // votes do freeze at the voting deadline, but the SPO denominator does not,
 // and stake moving across the boundary can carry an action over or under its
 // threshold after this answer was computed. Preview's Plomin hard fork
-// (dingo#4441) straddled the 0.51 SPO threshold exactly that way --
+// straddled the 0.51 SPO threshold exactly that way --
 // mark[741] 0.4757 against mark[742] 0.6283 -- so the mid-epoch check
 // published nothing through epoch 741 and the boundary into 742 ratified.
 // The boundary decision is the authoritative one; this one only surfaces it

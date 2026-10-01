@@ -3301,6 +3301,18 @@ replayed from before that CertRB (a clean metadata resync is the supported
 recovery); weakening registered-VRF or stake-distribution checks is not a safe
 repair.
 
+**Startup replay:** the node starts the ledger, and the ledger replays any stored
+blocks it has not applied, before it creates Ouroboros networking
+(`ledgerState.Start`, then `ouroborosRef.Store` in `Run`). The endorser-block
+callbacks in `ledgerStateConfig` (provider, by-point fetcher, blockfetch range
+request, decode-cache reject) therefore run while `n.ouroboros()` is nil. The
+provider answers "not available", the fetcher and range request return
+`errOuroborosNotStarted`, and the reject is a no-op, so a certified closure takes
+the pipeline's normal unavailable/retry path above and is never reported present.
+The retries back off and the pipeline stops as stuck after 50 consecutive
+no-progress restarts, so networking has to come up within a few minutes of the
+replay starting.
+
 The two paths differ in how endorser transactions are validated on apply, not
 whether they are applied. The Musashi prototype's ledger applies a certified
 endorser block's transactions to the ledger state when the certifying ranking
@@ -8325,7 +8337,10 @@ Readiness reads its tip gap from `(*dingo.Node).TipGapSlots`
 (`node_health.go`), which is fed by `ledger.LedgerStateConfig.ReportTipGapFunc`
 from the ledger's slot-tick loop — the same value published as the
 `dingo_tip_gap_slots` gauge, read directly so readiness does not depend on
-the Prometheus listener. The reading lives in a mutex-guarded `nodeHealth`
+the Prometheus listener. While the applied ledger is behind the era horizon the
+slot clock emits no ticks, so the gauge is instead kept live from the wall-clock
+slot (`handleBehindHorizon`) and readiness stays *unknown* until a real tick
+arrives. The reading lives in a mutex-guarded `nodeHealth`
 value on `Node` rather than behind `n.ledgerState`, which a live database
 Restore/Truncate replaces; `ledgerStateConfig` closes over the node, so a
 rebuilt ledger keeps reporting into the same state. That state carries a
@@ -14966,6 +14981,21 @@ and type-asserts the `lcommon.LedgerState` it was given, falling back to an
 uncached `cek.NewEvalContext` call (identical to this cache's absence) for
 any implementation — including most unit-test stand-ins — that doesn't
 provide one.
+
+The cached context is also what lets evaluation reuse CEK machines.
+gouroboros's `Plutus*Script.Evaluate` keeps a `sync.Pool` of `cek.Machine`
+instances per `(language version, *cek.EvalContext)` pair and takes a machine
+from it for each redeemer, so every redeemer that resolves the same cached
+context shares one pool. A context built per call, as in the uncached
+fallback, gets a new pool each time, so its redeemers never reuse a machine.
+The pool holds its context only weakly, and its entry is removed once the
+context becomes unreachable. Evicting a cache entry therefore frees that
+entry's machines after the last evaluation holding the context returns, so
+the cache bound also bounds the retained machines. Dijkstra phase-2
+validation runs inside gouroboros's own rule and uses gouroboros's
+process-wide `common.PooledEvalContext`, not this cache. That function keys
+on language version, protocol major version and cost model only, with no
+synthetic-V2 flag, so the Alonzo, Babbage and Conway paths keep this cache.
 
 ### Live Restore/Truncate LedgerStateConfig Parity
 

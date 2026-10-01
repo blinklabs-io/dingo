@@ -229,7 +229,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 //  2. The Tx-scoped *sql.Stmt retention stmtForQueryer/txScopedStmt creates
 //     against the shared *sql.Tx (see prepared_stmt.go) stays bounded by the
 //     distinct cached queries consulted, not by how many SetTransaction calls
-//     share the transaction -- the mechanism #4271 (commit 00bedb10) fixed.
+//     share the transaction -- the mechanism the prepared-statement cache
+//     fix addressed.
 func TestSetTransactionSharedOuterTxnKeepsCredentialsIndependent(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)

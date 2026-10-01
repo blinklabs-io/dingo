@@ -82,9 +82,9 @@ type BatchedTxIngestOpts struct {
 	// StrictAppliedInputConservation marks the steady-state, at-tip, validated
 	// path. Past the Mithril trust boundary, a missing producer row is recovered
 	// only when the producer block is still on the applied primary chain. This
-	// allows rollback recovery after core-mode cleanup removed a spent row
-	// (issue #3170), while refusing recovery from a retained abandoned-fork block
-	// (issue #3005). The option is retained for callers that identify this path;
+	// allows rollback recovery after core-mode cleanup removed a spent row,
+	// while refusing recovery from a retained abandoned-fork block.
+	// The option is retained for callers that identify this path;
 	// the primary-chain check also protects validated catch-up paths. It takes
 	// effect only when StrictUtxoValidation is enabled on the Database.
 	StrictAppliedInputConservation bool
@@ -99,14 +99,15 @@ type BatchedTxIngestOpts struct {
 	// delegator-inactivity gate's rollback/renewal paths
 	// (MetadataStore.AccountsWitnessedAfterSlot, AccountLastWitnessSlots); with
 	// the gate off -- the default on every node not running CIP-0163 -- the
-	// insert is pure write amplification on a table nothing reads (issue
-	// #2919). The ledger sets this to !DelegatorInactivityEnabled on the live-
-	// apply path (ledger/delta.go), and internal/node.Backfill derives it the
-	// same way from its own delegatorInactivityEnabled field for the batched
-	// historical-replay path -- see that field's doc comment for why the
-	// gate can genuinely be on there too and why the value must always be set
-	// explicitly rather than assumed. Defaults to false here, preserving the
-	// unconditional write for any caller that does not opt in.
+	// insert is pure write amplification on a table nothing reads (see
+	// DelegatorInactivityEnabled). The ledger sets this to
+	// !DelegatorInactivityEnabled on the live- apply path (ledger/delta.go),
+	// and internal/node.Backfill derives it the same way from its own
+	// delegatorInactivityEnabled field for the batched historical-replay path
+	// -- see that field's doc comment for why the gate can genuinely be on
+	// there too and why the value must always be set explicitly rather than
+	// assumed. Defaults to false here, preserving the unconditional write for
+	// any caller that does not opt in.
 	SkipWithdrawalWitnessWrite bool
 
 	// HistoricalBackfill records already-ledger-validated historical

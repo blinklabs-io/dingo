@@ -1101,7 +1101,7 @@ const (
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
-// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+// rebootstrap for the epochs the version bump actually changed.
 //
 // pool_stake_snapshot's stored values never depended on calculation version
 // -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
