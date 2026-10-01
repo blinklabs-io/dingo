@@ -41,7 +41,7 @@ import (
 // Stop that cancels its own context and then waits for a goroutine to exit
 // with no deadline of its own -- a call site that went back to calling Stop
 // directly would drop out of this list and escape the bound, exactly the gap
-// dingo#1649 (case R9) describes.
+// the shutdown audit found.
 func TestShutdownPhase1ComponentStopsCoverEveryUnboundedStop(t *testing.T) {
 	t.Parallel()
 
@@ -86,14 +86,14 @@ func TestShutdownPhase1ComponentStopsSkipsAbsentComponents(t *testing.T) {
 }
 
 // TestNodeStopEscalatesWhenPhase1ComponentNeverReturns is the point of the
-// change (dingo#1649 case R9). Before this fix, node_shutdown.go called each
+// change. Before this fix, node_shutdown.go called each
 // phase-1 component's Stop directly; a Stop that cancelled its own context
 // and then waited on a WaitGroup with no bound of its own (see
 // stopWithDeadline's doc comment in node_lifecycle.go) could wedge Node.Stop
 // forever, well past the configured shutdown timeout, with no error the
-// caller could act on. #3558 bounded this same style of wait in
-// quiesceForLiveLifecycleOp but not on this, the normal process-shutdown
-// path.
+// caller could act on. Live restore and truncate already bound this same style
+// of wait in quiesceForLiveLifecycleOp but not on this, the normal
+// process-shutdown path.
 //
 // None of the real phase-1 components can be made to block from outside the
 // package (their WaitGroups and done channels are unexported in other

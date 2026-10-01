@@ -87,15 +87,15 @@ func (b *parameterChangeGovernanceTestBlock) BlockBodyHash() lcommon.Blake2b256 
 }
 
 // TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoProposal
-// is the dingo#4439 "verify no proposal row is persisted" regression, driven
-// through the real production pipeline rather than asserted structurally.
-// It runs the transaction through LedgerState.ledgerProcessBlock with the
-// real, unstubbed eras.ConwayEraDesc.ValidateTxFunc (ValidateTxConway) --
-// the same function TestEraDescWiresProtocolVersionProtection (package eras)
-// pins ConwayEraDesc to -- so this exercises the actual validate-before-persist
-// ordering ledgerProcessBlock enforces (ledger/state.go), not a re-derivation
-// of it. Asserts both that block processing rejects the transaction and that
-// no governance_proposal row exists afterward.
+// is the "no proposal row is persisted" regression, driven through the real
+// production pipeline rather than asserted structurally. It runs the
+// transaction through LedgerState.ledgerProcessBlock with the real, unstubbed
+// eras.ConwayEraDesc.ValidateTxFunc (ValidateTxConway) -- the same function
+// TestEraDescWiresProtocolVersionProtection (package eras) pins ConwayEraDesc
+// to -- so this exercises the actual validate-before-persist ordering
+// ledgerProcessBlock enforces (ledger/state.go), not a re-derivation of it.
+// Asserts both that block processing rejects the transaction and that no
+// governance_proposal row exists afterward.
 func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoProposal(
 	t *testing.T,
 ) {

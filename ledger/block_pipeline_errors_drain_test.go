@@ -140,7 +140,7 @@ func buildNoNonceValidateBatch(t *testing.T, numBlocks int) []models.Block {
 }
 
 // TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors is a
-// regression test for issue #1894's block-processing-pipeline deadlock:
+// regression test for the block-processing-pipeline deadlock:
 // gouroboros' pipeline.StageWorkerPool.worker pushes every non-nil
 // validate-stage error onto a fixed-size errorsChan (default capacity 1000,
 // PipelineConfig.PrefetchBufferSize) *before* forwarding the item onward,
@@ -490,7 +490,7 @@ func TestDecodeReadChainBatchStalledSequenceBackpressuresSubmit(
 }
 
 // TestRecordBlockPipelineErrorClassificationDeferredIsNotUnexpected is a
-// regression test for the observability gap flagged on PR #3232:
+// regression test for an observability gap:
 // errHeaderVerificationDeferred (the pipeline's epoch cache has not yet
 // caught up with an already-committed block -- ARCHITECTURE.md's
 // "resolves once the epoch cache catches up" case) must be counted

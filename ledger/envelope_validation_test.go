@@ -662,7 +662,7 @@ func byronOrderingMain(
 	return block
 }
 
-// TestValidateInboundBlockEnvelopeByronEbbOrdering covers #4408: the four
+// TestValidateInboundBlockEnvelopeByronEbbOrdering pins: the four
 // parent/block combinations of the Byron envelope, including consecutive
 // EBBs across an otherwise empty epoch. These structured blocks deliberately
 // have no wire CBOR, so this isolates the ordering rule; the golden-fixture

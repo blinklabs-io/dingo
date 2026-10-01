@@ -60,7 +60,7 @@ type rewardInputBundle struct {
 // A node bootstrapped from a Mithril snapshot has no reward basis for the
 // epochs preceding the import, so the first reward rounds after it are
 // skipped — and a skipped round is never made up, leaving reward balances and
-// the leadership stake derived from them permanently short (issue #3165). The
+// the leadership stake derived from them permanently short. The
 // snapshot itself carries what those rounds need: each of mark, set and go
 // holds the per-credential stake, the credential-to-pool delegations, and the
 // pool parameters for one epoch, and the three of them line up with exactly
@@ -216,7 +216,7 @@ func deriveRewardInputs(
 
 	// This basis excludes no pool: every pool it could aggregate from the
 	// import is included in poolInputs, so TotalActiveStake is exactly their
-	// summed delegated stake with nothing held back (dingo #4025).
+	// summed delegated stake with nothing held back.
 	noExcludedActiveStake := types.Uint64(0)
 
 	return &rewardInputBundle{
@@ -422,7 +422,7 @@ var errRewardPParamsUnavailable = errors.New(
 // and the two before it. Those are exactly the epochs whose reward rounds a
 // freshly bootstrapped node cannot otherwise compute, which is why a node that
 // skips them ends up roughly three epochs of rewards short -- the shortfall
-// measured on preview in issue #3165.
+// measured on preview.
 //
 // Each epoch is gated independently: a basis that does not reconcile is
 // dropped with a warning rather than written, leaving that round to be skipped
@@ -852,12 +852,12 @@ func rewardPoolParamsFromRegistrations(
 //
 // The snapshot's own parameters win within that scoped set. They are the ones
 // that were in force during the epoch it captured, which is what the round
-// needs, and -- the reason issue #3165 stayed open -- the snapshot describes
-// every pool that held stake then, including pools that have since retired. A
-// retired pool is gone from cert state and from the current pool distribution,
-// so nothing else in an imported database can describe it; its delegators'
-// stake could not be attributed, and the gate dropped that whole epoch's basis
-// rather than seed a partial one.
+// needs, and -- the reason a snapshot-only resolver falls short -- the snapshot
+// describes every pool that held stake then, including pools that have since
+// retired. A retired pool is gone from cert state and from the current pool
+// distribution, so nothing else in an imported database can describe it; its
+// delegators' stake could not be attributed, and the gate dropped that whole
+// epoch's basis rather than seed a partial one.
 //
 // Registration parameters remain the fallback, for a snapshot whose pool
 // entries are the compact shape carrying only a VRF key. Usability is decided

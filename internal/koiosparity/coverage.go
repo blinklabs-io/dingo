@@ -26,10 +26,10 @@ const (
 )
 
 // KoiosFieldCoverage documents one field in the Koios endpoints used by the
-// epoch/pool/account checker. #3097 wired up exact per-account comparison
+// epoch/pool/account checker. Exact per-account comparison is wired up
 // (CompareAccountEpoch, /account_reward_history) against Dingo's committed
-// reward_account_output rows; #3099's chunked/resumable large-account fetch
-// is still open and does not change which fields are compared, only how
+// reward_account_output rows; the chunked/resumable large-account fetch
+// does not change which fields are compared, only how
 // reliably the account universe is fetched.
 type KoiosFieldCoverage struct {
 	Endpoint   string        `json:"endpoint"`
@@ -349,7 +349,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "Dingo has no persisted annualised return-on-stake aggregate",
 	},
 
-	// /epoch_params (dingo #3931): CompareEpochProtocolParams compares the
+	// /epoch_params: CompareEpochProtocolParams compares the
 	// effective pparams row for the epoch — resolved from the epoch's own era,
 	// since the table holds one row per parameter change — against every
 	// parameter below classified exact-match. Numeric comparison goes through
@@ -724,7 +724,7 @@ var koiosCoverageMatrix = []KoiosFieldCoverage{
 		Reason:   "Conway governance parameter; cross-side representation not yet verified against a Conway-era reference chain",
 	},
 
-	// /account_reward_history (#3097): CompareAccountEpoch compares every
+	// /account_reward_history: CompareAccountEpoch compares every
 	// reference row against reward_account_output exactly, per aggregated
 	// (stake_address, type) total — member/leader rows only, since
 	// koiosAccountRewardTypesOutOfScope filters out reward mechanisms

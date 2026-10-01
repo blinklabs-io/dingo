@@ -67,7 +67,7 @@ func txsubmissionPanicReply(
 }
 
 // TestValidateTxsubmissionReplyContainsDecoderPanic covers the transaction-body
-// half of blinklabs-io/gouroboros#2075: a peer
+// other half: a peer
 // body whose bytes panic the ledger decoder must be rejected as a decode
 // failure, not unwound into the per-peer txsubmission goroutine, which has no
 // recover above it and would take the node process down. Drop the containment
@@ -507,7 +507,7 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 // prefix, in the order the ids were offered, and preserves the bodies of ids
 // the peer has not yet acknowledged so they remain available to retry.
 // Regression test for
-// https://github.com/blinklabs-io/dingo/issues/3424, where any nonzero ack
+// the case where any nonzero ack
 // cleared the entire offered cache and silently dropped unacknowledged
 // bodies.
 func TestTxSubmissionClientRequestTxIdsPartialAck(t *testing.T) {
@@ -2037,7 +2037,7 @@ func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
 }
 
 // TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement is the
-// regression test for the size-validation regression from #3883: a
+// regression test for the size-validation regression: a
 // cardano-node peer advertises the wrapped wire size in MsgReplyTxIds while
 // gouroboros hands Dingo only the unwrapped body, so an equality check
 // against len(TxBody) rejects every batch such a peer offers.

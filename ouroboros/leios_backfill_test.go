@@ -280,7 +280,7 @@ func (r *dribbleBlockTxsRequester) BlockTxsRequest(
 // TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay verifies that a relay which
 // keeps making progress (so the no-progress and tail-stall guards never fire)
 // but is too slow to finish is abandoned at the per-attempt deadline, returning
-// the contiguous prefix fetched so far. This is the #2819 case: without the
+// the contiguous prefix fetched so far. This is the case: without the
 // deadline the fetch would run until every transaction was served, parking the
 // whole backfill on one peer.
 func TestFetchLeiosEbTxsBatchedUntilAbandonsSlowRelay(t *testing.T) {

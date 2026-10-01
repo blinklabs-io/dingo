@@ -1440,9 +1440,8 @@ func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
 
 // newByronGenesisAnchorTestLedger builds a LedgerState wired to a fresh,
 // real *chain.Chain and a Byron genesis hash, for testing
-// validateByronPBFTHeaderCrypto's origin-anchor checks
-// (blinklabs-io/dingo#4399). The chain starts at origin unless the caller
-// adds blocks to it first.
+// validateByronPBFTHeaderCrypto's origin-anchor checks.
+// The chain starts at origin unless the caller adds blocks to it first.
 func newByronGenesisAnchorTestLedger(
 	t *testing.T,
 	genesisHash string,
@@ -1480,7 +1479,7 @@ func newByronGenesisAnchorTestLedger(
 }
 
 // TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb is the
-// blinklabs-io/dingo#4399 positive case: at origin, an epoch-boundary block
+// positive case: at origin, an epoch-boundary block
 // whose previous hash matches the configured Byron genesis hash is accepted.
 func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 	t.Parallel()
@@ -1503,7 +1502,7 @@ func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
-// blinklabs-io/dingo#4399 regression itself: at origin, an epoch-boundary
+// regression itself: at origin, an epoch-boundary
 // block whose previous hash does not match the configured Byron genesis
 // hash must be rejected, even though it is otherwise correctly placed and
 // sized. The reference rejects this with ChainValidationGenesisHashMismatch.
@@ -1571,7 +1570,7 @@ func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
-// blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
+// acceptance criterion that a PBFT-signed regular
 // Byron block must never be accepted as the first block of a from-genesis
 // chain, even one that (like the genuine first block) carries block number
 // and difficulty 0. Only an epoch-boundary block may open the chain. This
@@ -1600,7 +1599,7 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
 // genesis, and a ledger started from a trusted snapshot or bulk import at a
 // non-origin point has the same shape: its primary chain tip is that
 // trusted point, not origin. Both must reach the ordinary current-slot
-// check unaffected by the genesis hash, matching pre-#4399 behavior.
+// check unaffected by the genesis hash, matching the earlier behavior.
 func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -1634,7 +1633,7 @@ func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin is
-// the blinklabs-io/dingo#4399 acceptance criterion that the EBB-only
+// the acceptance criterion that the EBB-only
 // anchor rule applies identically after a rollback empties the chain back
 // to origin, not only on a chain that has never been touched.
 // chain.Chain.atOriginAfterMutation documents the equivalent chain-layer
@@ -2163,7 +2162,7 @@ func stateAt(
 	return state, params
 }
 
-// TestByronAdoptedParamsRestoredFromStoredChain covers #4418 and #4419 for a
+// TestByronAdoptedParamsRestoredFromStoredChain covers and for a
 // node that synced from genesis: a ledger with no cached state, as after a
 // restart, replays the stored chain to the adopted limits and fee policy at
 // every tip, and each of two successive adoptions replaces the previous one.
@@ -2203,7 +2202,7 @@ func TestByronAdoptedParamsRestoredFromStoredChain(t *testing.T) {
 	require.Equal(t, big.NewInt(124_000), fee)
 }
 
-// TestByronAdoptedParamsRollbackAcrossAdoptions covers #4418 and #4419: a
+// TestByronAdoptedParamsRollbackAcrossAdoptions covers the case where a
 // rollback to before an adoption restores the parameters adopted before it,
 // whether the ledger cached the state at the abandoned tip or not, and
 // replaying forward adopts them again.
@@ -2250,8 +2249,8 @@ func TestByronAdoptedParamsRollbackAcrossAdoptions(t *testing.T) {
 	requireByronParams(t, params, c.adoptedB, "replayed forward")
 }
 
-// TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption covers #4418 and
-// #4419: when the chain switches to a fork that never endorsed update A, a
+// TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption covers
+// fork switching: when the chain switches to a fork that never endorsed update A, a
 // cached state from the abandoned fork's adoption is not reused, though the
 // new tip is later than the cached one.
 func TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption(t *testing.T) {
@@ -2348,7 +2347,7 @@ func TestByronTrustedMidByronStartHasUnknownAdoption(t *testing.T) {
 	)
 }
 
-// TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint covers the #4378
+// TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint covers the
 // criterion that an adopted update's ppMaxBlockSize and ppMaxHeaderSize
 // govern inbound regular-block validation from the adoption point. A real
 // proposal is registered, voted, endorsed and stable through the update

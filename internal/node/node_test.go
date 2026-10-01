@@ -716,7 +716,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
 // internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
-// regression test for the top-level API security defaults (dingo#2998)
+// regression test for the top-level API security defaults
 // being silently dropped because Run's real composition call never invoked
 // dingo.WithAPIConfig.
 func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
@@ -1033,14 +1033,13 @@ func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 }
 
 // TestBuildDingoConfigWiresBlockPipelineFlags is the regression test for
-// dingo#4599: BlockPipelineEnabled and BlockPipelineValidateEnabled were
-// correctly parsed into internal/config.Config but buildDingoConfig never
-// called a With... option to forward either one, so dingo.NewConfig built
-// its internal config from fresh Go zero values and the parallel block
-// decode pipeline (ledger/state.go's
-// "if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never
-// constructed on the live serve path, regardless of the flag or environment
-// variable.
+// the block pipeline flags: BlockPipelineEnabled and
+// BlockPipelineValidateEnabled were correctly parsed into
+// internal/config.Config but buildDingoConfig never called a With... option to
+// forward either one, so dingo.NewConfig built its internal config from fresh
+// Go zero values and the parallel block decode pipeline (ledger/state.go's "if
+// cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never constructed on
+// the live serve path, regardless of the flag or environment variable.
 func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 	t.Parallel()
 
@@ -1081,14 +1080,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 }
 
 // TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
-// coverage for the defect class dingo#4599 belongs to, not just the single
-// field it reported: buildDingoConfig hand-lists roughly 85 individual
-// dingo.With...(...) calls, one per field, and has now silently dropped a
-// field from that list twice -- AccountChunkSize/AccountChunkMaxBytes for
-// KoiosParity (caught and fixed separately, see the comment on
-// dingo.WithKoiosParity's call site in node.go), then
-// BlockPipelineEnabled/BlockPipelineValidateEnabled (this issue) -- with no
-// general check that every field actually made the list.
+// coverage for the defect class of the block pipeline flags, not just the
+// single field it reported: buildDingoConfig hand-lists roughly 85 individual
+// dingo.With...(...) calls, one per field, and has now silently dropped a field
+// from that list twice -- AccountChunkSize/AccountChunkMaxBytes for KoiosParity
+// (caught and fixed separately, see the comment on dingo.WithKoiosParity's call
+// site in node.go), then BlockPipelineEnabled/BlockPipelineValidateEnabled (the
+// second time) -- with no general check that every field actually made the
+// list.
 //
 // It enumerates every top-level internal/config.Config field whose Kind is a
 // plain scalar (bool, a signed/unsigned integer, float64, string, or
@@ -1143,14 +1142,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 //     mithril/sync.go instead.
 //
 // Known, pre-existing gaps of this same shape found while writing this test
-// are excluded below rather than fixed here; dingo#4600 tracks them.
+// are excluded below rather than fixed here.
 func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	t.Parallel()
 
-	// knownGaps are real forwarding gaps of the same shape as dingo#4599,
-	// found while writing this test and deliberately not fixed in the same
-	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
-	// entry here once its fix lands, so this test starts asserting it.
+	// knownGaps are real forwarding gaps of the same shape as the block
+	// pipeline flags, found while writing this test and deliberately not fixed
+	// in the same commit as that unrelated fix. Remove an entry here once its
+	// fix lands, so this test starts asserting it.
 	knownGaps := map[string]string{}
 	// excluded are cfg fields resolved through a separate buildDingoConfig
 	// parameter, or otherwise not part of the direct cfg-to-dingo.Config

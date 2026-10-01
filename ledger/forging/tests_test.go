@@ -175,7 +175,7 @@ func TestChainSelectionPrefersLongerChainOverLowerSlot(t *testing.T) {
 
 // corruptBlock mirrors the Conway block envelope but encodes
 // transaction_bodies as a CBOR map instead of an array — the structural
-// defect behind issue #2063. Used only to exercise forgedBlockDiagnostics.
+// defect behind. Used only to exercise forgedBlockDiagnostics.
 type corruptBlock struct {
 	cbor.StructAsArray
 	Header                 cbor.RawMessage
@@ -187,7 +187,7 @@ type corruptBlock struct {
 
 // TestForgedBlockDiagnosticsPinpointsBadBodiesField verifies that the
 // diagnostic dump labels the offending block field. When the bodies slot
-// holds a map instead of an array (issue #2063), the notation must show
+// holds a map instead of an array, the notation must show
 // "transaction_bodies" rendered as a map so the mismatch is obvious.
 func TestForgedBlockDiagnosticsPinpointsBadBodiesField(t *testing.T) {
 	// A minimal but structurally valid Conway header: [header_body, sig].
@@ -762,7 +762,7 @@ func TestEqualSlotAlternativeLosingChainSelectionIsNotPublished(
 }
 
 // TestEqualSlotAlternativeReservesTheFenceBeforeSigning pins the ordering the
-// #3734 fence depends on. The slot must be recorded durably before the builder
+// fence depends on. The slot must be recorded durably before the builder
 // is asked for a block, so a crash between signing and adoption still leaves
 // the slot unusable.
 func TestEqualSlotAlternativeReservesTheFenceBeforeSigning(t *testing.T) {
@@ -1655,7 +1655,7 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 // behind.
 //
 // This test replaces TestForgeSkipsLeaderSlotWhenUpstreamTargetUnknownEvenAtTip
-// and reverses its assertion. That test asserted the behaviour #3955
+// and reverses its assertion. That test asserted the behaviour
 // deliberately left in place -- a best-peer switch disabled forging outright,
 // independent of local tip freshness and of forgeSyncToleranceSlots -- and
 // said in as many words that keying the gate on local tip freshness instead
@@ -1664,7 +1664,7 @@ func TestCheckAndForgeProductionEqualSlotDoesNotReForgeOurOwnSlot(
 // zero target for the window before the new peer's first admitted trusted
 // header, and on a network where forging is the only source of headers no node
 // forges, so none is admitted, so nothing lifts the target and the window never
-// closes (issue #4010).
+// closes.
 //
 // The clock below is a healthy steady-state producer: the tip is the previous
 // slot's block, so the node is at tip and has no evidence it is behind. It is
@@ -1748,7 +1748,7 @@ func TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip(
 // TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale verifies that a
 // quiet network is not mistaken for an upstream peer being ahead. The target
 // is unknown, so the forge gate has no peer-relative evidence that this node
-// is behind (issue #4201).
+// is behind.
 func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 	t *testing.T,
 ) {
@@ -1787,10 +1787,10 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
-	// #4013 asserted 991 here, the local tip's lag behind the wall clock,
+	// This once asserted 991, the local tip's lag behind the wall clock,
 	// because the sync-skip path was then the only writer that could make
-	// dingo_forge_tip_gap_slots non-zero on this branch. This PR gives that
-	// gauge a single meaning -- the ledger-apply backlog, primary chain tip
+	// dingo_forge_tip_gap_slots non-zero on this branch. The gauge now has
+	// a single meaning -- the ledger-apply backlog, primary chain tip
 	// minus applied tip -- and sets it once per leader check instead, so the
 	// skip paths no longer overwrite it. The primary tip mirrors the applied tip
 	// on this fixture, so the backlog is 0 and the gauge says so.
@@ -2324,7 +2324,7 @@ func (c *forgerMovingTipSlotClock) reads() (int, int) {
 //
 // What must change is that the loss stops being silent. Reporting it as
 // "slot already has our own block" at Debug is both false and exactly
-// the invisible leader-slot loss this PR exists to remove, so the
+// an invisible leader-slot loss, so the
 // declined leader slot is counted as a could-not-forge and logged at
 // Warn with both hashes.
 //
@@ -3216,7 +3216,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 }
 
 // TestForgeMarksTheReResolvedEndorserBlockSlot pins the pairing of the two
-// values that identify an embedded endorser block. Since #4123 the
+// values that identify an embedded endorser block. Since the
 // occurrence is (hash, slot), not hash alone: the same endorser-block hash
 // can be a distinct occurrence at another slot, so marking a re-resolved
 // hash against the slot of the endorser block it replaced would retire the
@@ -3225,7 +3225,7 @@ func TestForgeReResolvesLeiosDataWhenParentChangesBeforeTheFirstBuild(
 // A retry re-resolves the whole payload against the new parent, so both
 // halves move together. Carrying only the hash back out of the retry leaves
 // the slot at the value the first attempt resolved, which is exactly the
-// mismatch #4123 exists to prevent.
+// mismatch exists to prevent.
 func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 	oldParentRb := leiosHash(0xC1)
 	oldEb := leiosHash(0xD1)
@@ -4123,7 +4123,7 @@ func TestForgeCountsARetriedSlotOnlyAfterAdoption(t *testing.T) {
 	)
 }
 
-// The tests below are the second blocker: after #4053 the entry gates decide
+// The tests below are the second blocker: after the entry gates decide
 // a slot against BOTH tips, and a re-check that reads only the applied tip
 // lets through exactly the builds the entry gates refuse. All three share
 // one shape -- the applied tip stays below the forged slot for the whole
@@ -4845,7 +4845,7 @@ func TestSelectValidLeiosTransactionsRejectsUnrepresentableParent(
 // CBOR (not the Cardano tx-id / body hash). This is exactly the check the
 // fetch-side validator (ouroboros.validateLeiosEndorserBlockTxs) performs —
 // Blake2b256(txCbor) == ref.TransactionHash — so a peer fetching a locally
-// forged EB validates every tx instead of rejecting it (blinklabs-io/dingo#3641).
+// forged EB validates every tx instead of rejecting it.
 func TestBuildLeiosEBReferencesUseFullTransactionHash(t *testing.T) {
 	txs := []MempoolTransaction{
 		{Hash: strings.Repeat("11", 32), Cbor: []byte{0x01, 0x02, 0x03}},
@@ -5324,7 +5324,7 @@ func leiosCandidateTxs(t *testing.T, count int) []MempoolTransaction {
 }
 
 // TestLeiosEBSelectionStopsAtTheDeadline is the endorser-block half of the
-// lost-slot defect fixed for ranking blocks in #3988. Endorser-block
+// lost-slot defect fixed in ranking-block selection. Endorser-block
 // selection re-validated every mempool candidate serially with no clock, so
 // on a chain holding ~1000 transactions it spent seconds of a 1-second slot
 // before the ranking block was even started. An endorser block with fewer
@@ -6268,7 +6268,7 @@ func TestPraosOpCertEncodesCounterBeyondUint32(t *testing.T) {
 //
 // buildBlock re-decodes the block it encoded, so the assertion depends on
 // gouroboros decoding the field at full width: the module is pinned past
-// gouroboros #2256, which widened
+// gouroboros, which widened
 // shelley.ShelleyBlockHeaderBody.OpCertSequenceNumber from uint32 to
 // uint64, so the re-decode now returns a block whose header carries the
 // full counter rather than reporting an upstream overflow.

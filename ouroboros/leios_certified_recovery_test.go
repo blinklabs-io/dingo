@@ -36,7 +36,7 @@ import (
 )
 
 // TestClassifyLeiosFetchFailure pins the failure taxonomy the by-point backfill
-// reacts to. Before dingo #3552 every one of these outcomes was folded into a
+// reacts to. Previously every one of these outcomes was folded into a
 // single undifferentiated error with a single cooldown, so the one class that
 // requires the connection to be replaced (a permanently abandoned request slot)
 // was instead cooled down and retried for the life of the connection.
@@ -100,9 +100,9 @@ func TestClassifyLeiosFetchFailure(t *testing.T) {
 
 // TestLeiosBackfillAttemptBudget verifies the per-connection attempt budget is
 // derived from the candidates still to be tried. The multi-peer case keeps the
-// issue #2819 bound; the single-candidate case -- the normal shape of a topology
-// with one Leios relay -- gets the whole remaining budget instead of having its
-// only attempt truncated at 30s with nothing to fail over to.
+// per-attempt bound; the single-candidate case -- the normal shape of a
+// topology with one Leios relay -- gets the whole remaining budget instead of
+// having its only attempt truncated at 30s with nothing to fail over to.
 func TestLeiosBackfillAttemptBudget(t *testing.T) {
 	t.Parallel()
 	require.Equal(
@@ -192,7 +192,7 @@ func leiosCertifiedRecoveryFixture(
 // permanently abandoned, exactly as a by-point attempt whose deadline expires
 // before the relay answers does. Do not probe the slot here: the next request's
 // ErrRequestSlotAbandoned is what fails the connection, and the production path
-// under test must be the caller that observes and classifies it (dingo #3552).
+// under test must be the caller that observes and classifies it.
 func poisonLeiosFetchBlockTxsSlot(
 	t *testing.T,
 	conn *gouroboros.Connection,
@@ -211,7 +211,7 @@ func poisonLeiosFetchBlockTxsSlot(
 }
 
 // TestFetchEndorserBlockByPointRecyclesDeadConnectionAndFailsOver is the
-// unavailable-certified-EB recovery path for dingo #3552.
+// unavailable-certified-EB recovery path.
 //
 // A connection whose leios-fetch request slot is permanently abandoned can
 // never answer again, so a cooldown only re-tries a corpse: the connection has
@@ -712,8 +712,8 @@ func TestLeiosFetchRequestContextReusesParentAtEqualDeadline(t *testing.T) {
 		},
 		{
 			// A genuinely truncated multi-candidate attempt must still get
-			// its own independent timer, preserving backfill failover
-			// (dingo #2819 / #3552): ctx.Err() being nil for this attempt's
+			// its own independent timer, preserving backfill failover:
+			// ctx.Err() being nil for this attempt's
 			// failure is correct, not a bug.
 			name:              "deadline strictly earlier than parent needs its own timer",
 			parentDeadline:    now,
@@ -763,20 +763,20 @@ func (d leiosFetchRequestContextTestDeadline) Deadline() (time.Time, bool) {
 //
 // The "equal parent and requested deadline" case is the discriminating one:
 // if leiosFetchRequestContext is changed to call
-// context.WithDeadline(parent, deadline) unconditionally (reintroducing dingo
-// #4154), that subtest fails. The "parent deadline earlier" case pins the
-// same contract but does not discriminate that particular mutation, because
-// Go's own context.WithDeadline already takes the parent-reuse shortcut
-// itself when the parent's deadline is *strictly* earlier (cur.Before(d));
-// it only misses it at cur == d, which is exactly the boundary this fix
-// closes and dingo #4154 hit. Both subtests are kept because both are part
-// of the contract leiosFetchRequestContextReusesParent states.
+// context.WithDeadline(parent, deadline) unconditionally (reintroducing the
+// equal-deadline bug), that subtest fails. The "parent deadline earlier" case
+// pins the same contract but does not discriminate that particular mutation,
+// because Go's own context.WithDeadline already takes the parent-reuse shortcut
+// itself when the parent's deadline is *strictly* earlier (cur.Before(d)); it
+// only misses it at cur == d, which is exactly the boundary this fix closes.
+// Both subtests are kept because both are part of the contract
+// leiosFetchRequestContextReusesParent states.
 //
 // context.WithDeadline and context.WithCancel report identical Deadline() and
 // Cause() values once a context has actually been cancelled, so nothing
 // observable after the fact distinguishes them (see leiosFetchRequestContext's
 // doc comment), and racing the two real timers against each other is exactly
-// the scenario dingo #4154 showed cannot be forced deterministically. This
+// the scenario that cannot be forced deterministically. This
 // test sidesteps the race instead of trying to win it: the parent passed to
 // leiosFetchRequestContext reports a deadline via
 // leiosFetchRequestContextTestDeadline but has no timer of its own (it is a
@@ -804,7 +804,7 @@ func TestLeiosFetchRequestContextDoesNotArmIndependentTimerAtEqualOrEarlierParen
 		deadline       time.Duration
 	}{
 		{
-			// The exact boundary from dingo #4154: the last/only backfill
+			// The exact boundary: the last/only backfill
 			// candidate's attempt deadline equals the caller's own.
 			name:           "equal parent and requested deadline",
 			parentDeadline: 5 * time.Second,
