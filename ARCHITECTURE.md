@@ -13731,13 +13731,10 @@ remain zero. The per-pool precompute declines such a round, as does the
 single-pass precompute, and reuse of persisted outputs rejects it; the
 boundary always calculates it fresh with the single-pass calculation.
 
-The pinned gouroboros decoder rejects a stored Dijkstra `maxPledgeLeverage`
-outside the governance-update range [1, 10000], while cardano-ledger types it
-as a `NonNegativeInterval`. The reward path therefore loads both its
-performance-epoch and calculation-epoch Dijkstra parameters through
-`loadPersistedRewardProtocolParameters`, which decodes such a row with the
-field normalized and then restores the enacted non-negative value. Every
-other reader keeps the decoder's bounds.
+Stored Dijkstra parameters use the era decoder's `NonNegativeInterval`
+validation for `maxPledgeLeverage`, matching cardano-ledger. The governance
+update rules may impose a narrower range, but reward calculations use the
+enacted value directly, including zero.
 
 After an epoch-transition event, ledger precomputes the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. The calculation
