@@ -217,3 +217,47 @@ func TestGDDEvaluationIsRateLimited(t *testing.T) {
 	f.cs.EvaluateAndSwitch()
 	assert.Equal(t, []ouroboros.ConnectionId{late}, f.disconnected())
 }
+
+// A peer that has delivered everything up to its advertised tip is not
+// thereby complete: its tip can still move forward. Treating it as unable to
+// gain density would let any denser fork, honest or fabricated ahead of
+// local ledger verification, disconnect honest peers sitting at their own
+// tip on a short fork.
+func TestGDDKeepsIdlePeerOnShortFork(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, idle := corrConn(1), corrConn(2)
+	f.deliver(t, dense, 0, append([]uint64{1000}, slotRange(1001, 1040)...)...)
+	// One block in (1000,1120], at its advertised tip (1050): idle, window
+	// not complete. Slots start at 1000 so the advertised tip does not end
+	// Genesis mode.
+	f.deliver(t, idle, 1050, 1000, 1050)
+
+	f.evaluate()
+
+	assert.Empty(t, f.disconnected())
+}
+
+// Density is compared at each pair's own intersection, so "sparser than"
+// is not transitive: X loses to Y and Z at slot 1000, while Z beats Y at their
+// later fork (1010). Every peer then has a rival in the same pass, and a pass
+// that let an already-reported peer serve as a rival would disconnect all
+// three.
+func TestGDDKeepsOnePeerWhenDensityIsCyclic(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	x, y, z := corrConn(1), corrConn(2), corrConn(3)
+	shared := slotRange(1001, 1010)
+	// (1000,1120]: X 20, Y 21, Z 19. (1010,1130]: Y 11, Z 19.
+	f.deliver(t, x, 0, append([]uint64{1000}, slotRange(1101, 1120)...)...)
+	yslots := append([]uint64{1000}, shared...)
+	yslots = append(yslots, slotRange(1011, 1021)...)
+	f.deliver(t, y, 0, append(yslots, 1200)...)
+	zslots := append([]uint64{1000}, shared...)
+	zslots = append(zslots, slotRange(1031, 1039)...)
+	f.deliver(t, z, 0, append(zslots, slotRange(1121, 1130)...)...)
+
+	f.evaluate()
+
+	assert.Len(t, f.disconnected(), 2)
+}

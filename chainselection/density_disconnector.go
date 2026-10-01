@@ -41,20 +41,23 @@ type GenesisDensityDisconnect struct {
 	// the window.
 	DominatingDensity uint64
 	// MaxDensity is the most blocks ConnectionId could still have in the
-	// window: what it delivered plus every slot it has not yet covered unless
-	// it has nothing further to deliver.
+	// window: what it delivered plus every slot it has not yet covered.
 	MaxDensity uint64
 }
 
 // fragmentWindowBounds returns the lower and upper bound on the number of
 // blocks a candidate has in (after, windowEnd] along its own chain. The lower
 // bound is what it has delivered. The upper bound adds every slot between its
-// head and windowEnd, unless the window is already complete (the head reached
-// windowEnd) or the peer advertises no tip beyond its head, in which case it
-// has nothing further to deliver.
+// head and windowEnd unless the head already reached windowEnd.
+//
+// A peer that has delivered up to its advertised tip still gets the trailing
+// slots: its tip can move forward, so an honest peer sitting at its own tip on
+// a short fork is not complete. ouroboros-consensus densityDisconnect only
+// disconnects such a peer for a rival offering more than k blocks after the
+// anchor, which a k+1 header fragment that still holds the intersection can
+// never show.
 func fragmentWindowBounds(
 	points []ocommon.Point,
-	advertisedSlot uint64,
 	after uint64,
 	windowEnd uint64,
 ) (uint64, uint64) {
@@ -65,7 +68,7 @@ func fragmentWindowBounds(
 		}
 	}
 	head := points[len(points)-1].Slot
-	if head >= windowEnd || advertisedSlot <= head {
+	if head >= windowEnd {
 		return lower, lower
 	}
 	return lower, safeAddUint64(lower, windowEnd-head)
@@ -98,10 +101,9 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 
 	window := cs.genesisWindowSlotsLocked()
 	type candidate struct {
-		connId     ouroboros.ConnectionId
-		fragment   CandidateFragment
-		points     []ocommon.Point
-		advertised uint64
+		connId   ouroboros.ConnectionId
+		fragment CandidateFragment
+		points   []ocommon.Point
 	}
 	candidates := make([]candidate, 0, len(cs.peerTips))
 	for connId, peerTip := range cs.peerTips {
@@ -114,10 +116,9 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			continue
 		}
 		candidates = append(candidates, candidate{
-			connId:     connId,
-			fragment:   fragment,
-			points:     fragment.Points(),
-			advertised: peerTip.Tip.Point.Slot,
+			connId:   connId,
+			fragment: fragment,
+			points:   fragment.Points(),
 		})
 	}
 
@@ -140,14 +141,24 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			}
 			windowEnd := safeAddUint64(intersection.Slot, window)
 			dominating, _ := fragmentWindowBounds(
-				a.points, a.advertised, intersection.Slot, windowEnd,
+				a.points, intersection.Slot, windowEnd,
 			)
 			_, maxDensity := fragmentWindowBounds(
-				b.points, b.advertised, intersection.Slot, windowEnd,
+				b.points, intersection.Slot, windowEnd,
 			)
 			if dominating <= maxDensity {
 				continue
 			}
+			// Mark now rather than after the pass: density is compared at
+			// each pair's own intersection and is not transitive, so a peer
+			// reported in this pass must not serve as a rival for a later
+			// one, or a cycle could report every candidate.
+			if cs.genesisDensityDisconnected == nil {
+				cs.genesisDensityDisconnected = make(
+					map[ouroboros.ConnectionId]struct{},
+				)
+			}
+			cs.genesisDensityDisconnected[b.connId] = struct{}{}
 			out = append(out, GenesisDensityDisconnect{
 				ConnectionId:           b.connId,
 				DominatingConnectionId: a.connId,
@@ -158,17 +169,6 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 			})
 			break
 		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	if cs.genesisDensityDisconnected == nil {
-		cs.genesisDensityDisconnected = make(
-			map[ouroboros.ConnectionId]struct{},
-		)
-	}
-	for _, d := range out {
-		cs.genesisDensityDisconnected[d.ConnectionId] = struct{}{}
 	}
 	return out
 }
