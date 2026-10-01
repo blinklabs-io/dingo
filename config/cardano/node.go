@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"os"
 	"path"
 	"path/filepath"
@@ -60,6 +62,9 @@ type CardanoNodeConfig struct {
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
 	CheckpointsFile                            string `yaml:"CheckpointsFile"`
 	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
+	// PBftSignatureThreshold is the optional Byron PBFT signature threshold,
+	// the maximum share of the last k blocks one genesis key may sign.
+	PBftSignatureThreshold *CardanoNodeDouble `yaml:"PBftSignatureThreshold"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -91,6 +96,27 @@ type CardanoNodeConfig struct {
 	PeerSharing *bool `yaml:"PeerSharing"`
 }
 
+// CardanoNodeDouble is a numeric node-config value that cardano-node reads as
+// a Double.
+type CardanoNodeDouble float64
+
+// UnmarshalYAML accepts finite numeric scalars only.
+func (d *CardanoNodeDouble) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode ||
+		(node.Tag != "!!float" && node.Tag != "!!int") {
+		return fmt.Errorf("expected a numeric scalar, got %s", node.Tag)
+	}
+	var value float64
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("expected a finite number, got %s", node.Value)
+	}
+	*d = CardanoNodeDouble(value)
+	return nil
+}
+
 const (
 	defaultMithrilGenesisVerificationKeyFile          = "genesis.vkey"
 	defaultMithrilGenesisAncillaryVerificationKeyFile = "ancillary.vkey"
@@ -103,6 +129,31 @@ func NewCardanoNodeConfigFromReader(r io.Reader) (*CardanoNodeConfig, error) {
 		return nil, err
 	}
 	return &ret, nil
+}
+
+// PBFTSignatureLimit returns the most blocks one genesis key may sign in a
+// window of the last securityParam Byron blocks. ouroboros-consensus computes
+// floor(threshold * k) in Double arithmetic and stores it as a Word64, so a
+// product just below an integer rounds down and a negative product wraps.
+// configured is false when PBftSignatureThreshold is absent, in which case
+// cardano-node's default of 0.22 applies.
+func (c *CardanoNodeConfig) PBFTSignatureLimit(
+	securityParam uint64,
+) (limit uint64, configured bool, err error) {
+	if c == nil || c.PBftSignatureThreshold == nil {
+		return 0, false, nil
+	}
+	product := float64(*c.PBftSignatureThreshold) * float64(securityParam)
+	if math.IsNaN(product) || math.IsInf(product, 0) {
+		return 0, true, fmt.Errorf(
+			"PBftSignatureThreshold %v times k %d is not finite",
+			float64(*c.PBftSignatureThreshold),
+			securityParam,
+		)
+	}
+	floor, _ := big.NewFloat(math.Floor(product)).Int(nil)
+	modulus := new(big.Int).Lsh(big.NewInt(1), 64)
+	return floor.Mod(floor, modulus).Uint64(), true, nil
 }
 
 func NewCardanoNodeConfigFromFile(file string) (*CardanoNodeConfig, error) {
@@ -174,7 +225,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		}
 		// Store computed hash if config does not contain hash.
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromFile(byronGenesisPath)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -260,7 +311,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromFile(conwayGenesisPath)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -462,9 +513,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ByronGenesisHash = byronHash
-		byronGenesis, err := byron.NewByronGenesisFromReader(
-			bytes.NewReader(byronGenesisBytes),
-		)
+		byronGenesis, err := loadByronGenesisFromBytes(byronGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -552,9 +601,7 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.ConwayGenesisHash = conwayHash
-		conwayGenesis, err := conway.NewConwayGenesisFromReader(
-			bytes.NewReader(conwayGenesisBytes),
-		)
+		conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 		if err != nil {
 			return err
 		}
@@ -683,7 +730,12 @@ func (c *CardanoNodeConfig) ConwayGenesis() *conway.ConwayGenesis {
 // LoadConwayGenesisFromReader loads a Conway genesis config from an io.Reader
 // This is useful mostly for tests
 func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
-	conwayGenesis, err := conway.NewConwayGenesisFromReader(r)
+	// Decode one value rather than io.ReadAll: the reader need not reach EOF.
+	var conwayGenesisBytes json.RawMessage
+	if err := json.NewDecoder(r).Decode(&conwayGenesisBytes); err != nil {
+		return err
+	}
+	conwayGenesis, err := loadConwayGenesisFromBytes(conwayGenesisBytes)
 	if err != nil {
 		return err
 	}
@@ -791,11 +843,143 @@ func validateGenesisHash(
 }
 
 func canonicalizeByronGenesisJSON(genesisBytes []byte) ([]byte, error) {
-	var payload any
-	if err := json.Unmarshal(genesisBytes, &payload); err != nil {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(payload)
+	return renderByronCanonicalHash(parsed), nil
+}
+
+// loadConwayGenesisFromBytes parses a Conway genesis, tolerating members that
+// cardano-node's lenient JSON parser ignores but gouroboros's strict decoder
+// rejects: the top-level genDelegs and the legacy committee.quorum, both
+// present in Vector Testnet's genesis. Dingo consumes neither. quorum is
+// stripped only beside threshold. Any other unknown member is still rejected.
+func loadConwayGenesisFromBytes(
+	genesisBytes []byte,
+) (conway.ConwayGenesis, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(genesisBytes, &doc); err != nil {
+		return conway.ConwayGenesis{}, err
+	}
+	stripped := false
+	if _, ok := doc["genDelegs"]; ok {
+		delete(doc, "genDelegs")
+		stripped = true
+	}
+	if rawCommittee, ok := doc["committee"]; ok {
+		var committee map[string]json.RawMessage
+		if err := json.Unmarshal(rawCommittee, &committee); err == nil {
+			// cardano-ledger requires threshold and ignores quorum; stripping
+			// quorum beside a missing or null threshold would decode to a nil
+			// threshold and silently fall back to the default committee quorum.
+			_, hasQuorum := committee["quorum"]
+			threshold, hasThreshold := committee["threshold"]
+			if hasQuorum && hasThreshold &&
+				!bytes.Equal(bytes.TrimSpace(threshold), []byte("null")) {
+				// Re-encoding the map keeps only the last of duplicate
+				// members, hiding an earlier one from the strict decoder.
+				if err := rejectDuplicateJSONMembers(rawCommittee); err != nil {
+					return conway.ConwayGenesis{}, fmt.Errorf(
+						"conway genesis committee: %w", err,
+					)
+				}
+				delete(committee, "quorum")
+				out, err := json.Marshal(committee)
+				if err != nil {
+					return conway.ConwayGenesis{}, err
+				}
+				doc["committee"] = out
+				stripped = true
+			}
+		}
+	}
+	if stripped {
+		if err := rejectDuplicateJSONMembers(genesisBytes); err != nil {
+			return conway.ConwayGenesis{}, fmt.Errorf("conway genesis: %w", err)
+		}
+		out, err := json.Marshal(doc)
+		if err != nil {
+			return conway.ConwayGenesis{}, err
+		}
+		genesisBytes = out
+	}
+	return conway.NewConwayGenesisFromReader(bytes.NewReader(genesisBytes))
+}
+
+// rejectDuplicateJSONMembers returns an error if the JSON object in raw names
+// any member more than once. Only the object's own members are checked.
+func rejectDuplicateJSONMembers(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{})
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return fmt.Errorf("unexpected JSON token %v", tok)
+		}
+		if _, dup := seen[key]; dup {
+			return fmt.Errorf("duplicate member %q", key)
+		}
+		seen[key] = struct{}{}
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// loadByronGenesisFromBytes decodes a Byron genesis document into the
+// gouroboros schema type using the Byron reference's first-occurrence
+// semantics for duplicate object keys, then rejects genesis fields that are
+// unsigned in the reference schema but were parsed as negative.
+//
+// gouroboros's byron.ByronGenesis decoder (like encoding/json generally)
+// resolves duplicate JSON object keys last-occurrence-wins, which disagrees
+// with the Byron reference's first-occurrence rule. Rather than changing
+// that decoder (an upstream gouroboros concern -- see dingo#4424), this
+// pre-filters the parsed document down to one member per key, keeping
+// whichever occurred first, before handing it to the decoder.
+func loadByronGenesisFromBytes(
+	genesisBytes []byte,
+) (byron.ByronGenesis, error) {
+	parsed, err := parseByronCanonicalJSON(genesisBytes)
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	deduped := renderByronFirstOccurrenceJSON(parsed)
+	genesis, err := byron.NewByronGenesisFromReader(bytes.NewReader(deduped))
+	if err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	if err := validateByronGenesisUnsignedFields(&genesis); err != nil {
+		return byron.ByronGenesis{}, err
+	}
+	return genesis, nil
+}
+
+// validateByronGenesisUnsignedFields rejects Byron genesis fields that the
+// reference schema declares unsigned but which gouroboros parses into a
+// signed Go int, allowing a negative value such as slotDuration "-1" through
+// genesis loading undetected. Left unchecked, a negative SlotDuration reaches
+// a bare uint conversion in the Byron era-shape calculation and wraps to a
+// very large duration instead of failing here, at the point the bad value
+// was introduced.
+func validateByronGenesisUnsignedFields(genesis *byron.ByronGenesis) error {
+	if genesis.BlockVersionData.SlotDuration < 0 {
+		return fmt.Errorf(
+			"byron genesis: slotDuration must not be negative, got %d",
+			genesis.BlockVersionData.SlotDuration,
+		)
+	}
+	return nil
 }
 
 func replaceGenesisLineEndings(genesisBytes []byte) []byte {

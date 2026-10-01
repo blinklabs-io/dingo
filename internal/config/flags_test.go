@@ -29,6 +29,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func FuzzNormalizeRunMode(f *testing.F) {
+	f.Add("")
+	f.Add("serve")
+	f.Add("LOAD")
+	f.Add("dev")
+	f.Add("leios")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeRunMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
+		default:
+			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStorageMode(f *testing.F) {
+	f.Add("")
+	f.Add("core")
+	f.Add("API")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStorageMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case storageModeCore, storageModeAPI:
+		default:
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
+		}
+	})
+}
+
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	resetGlobalConfig()
 
@@ -570,6 +654,59 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.Midnight.Host,
 		)
 	}
+}
+
+func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES", "1001")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, int64(1001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--token-registry-max-decompressed-bytes=2001",
+		"--token-registry-max-archive-entries=2002",
+		"--token-registry-max-accepted-entries=2003",
+		"--token-registry-max-batch-bytes=2004",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+}
+
+func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`
+tokenRegistry:
+  maxDecompressedBytes: 3001
+  maxArchiveEntries: 3002
+  maxAcceptedEntries: 3003
+  maxBatchBytes: 3004
+`), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(3001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
 }
 
 func TestMempoolProviderSourcePrecedence(t *testing.T) {

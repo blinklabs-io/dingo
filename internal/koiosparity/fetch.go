@@ -41,11 +41,15 @@ type FetchConfig struct {
 	// NewKoiosClient. Local dev and test only, including the httptest
 	// servers this package's own tests point BaseURL at.
 	AllowInsecureHTTP bool
-	CachePath         string
-	Concurrency       int
-	FromEpoch         uint64 // 0 = resume from last cached + 1
-	ThroughEpoch      uint64 // 0 = tip - 1
-	ForceRefresh      bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false unless the operator intentionally runs Koios on
+	// such a network.
+	AllowPrivateAddresses bool
+	CachePath             string
+	Concurrency           int
+	FromEpoch             uint64 // 0 = resume from last cached + 1
+	ThroughEpoch          uint64 // 0 = tip - 1
+	ForceRefresh          bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
 	// AccountsEnabled additionally fetches #3097's per-account Koios
 	// reference data (FetchAccountRewardsForEpoch) for every epoch this run
 	// fetches. False by default: per-account fetching issues far more Koios
@@ -221,6 +225,7 @@ func Fetch(
 		cfg.APIKey,
 		cfg.BaseURL,
 		cfg.AllowInsecureHTTP,
+		cfg.AllowPrivateAddresses,
 	)
 	if err != nil {
 		return nil, err

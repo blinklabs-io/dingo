@@ -25,8 +25,9 @@
 # statement volume turns a suite that finishes in well under a minute on
 # CI into one that takes many minutes locally. fsync/durability guarantees
 # are pointless for these throwaway, disposable containers -- nothing here
-# survives a `down -v` -- so both services disable them for local runs
-# only; CI does not use this compose file (see .github/workflows/go-test.yml).
+# survives a `down -v` -- so both services disable them. CI does not use this
+# compose file; its service containers set their own relaxed-durability
+# options in .github/workflows/go-test.yml and publish.yml.
 services:
   postgres:
     image: postgres:16

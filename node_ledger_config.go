@@ -16,16 +16,25 @@ package dingo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+// errOuroborosNotStarted is returned by ledger callbacks that run before the
+// node has created its Ouroboros networking. The ledger starts, and replays
+// any stored blocks it has not applied, ahead of that, so these callbacks must
+// report "unavailable" for the ledger's normal retry path to handle.
+var errOuroborosNotStarted = errors.New("ouroboros networking is not started")
 
 func (n *Node) chainsyncSyncTarget(
 	update chainselection.PeerTipUpdateEvent,
@@ -89,7 +98,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			ebHash []byte,
 			ebSlot uint64,
 		) ([]cbor.RawMessage, bool) {
-			return n.ouroboros().EndorserBlockTxsByHash(ebHash, ebSlot)
+			o := n.ouroboros()
+			if o == nil {
+				return nil, false
+			}
+			return o.EndorserBlockTxsByHash(ebHash, ebSlot)
 		},
 		// Actively fetches a referenced endorser block by point and caches
 		// it. Used during historical catch-up: the prototype relay serves
@@ -101,7 +114,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			ebSlot uint64,
 			ebHash []byte,
 		) error {
-			return n.ouroboros().FetchEndorserBlockByPoint(
+			o := n.ouroboros()
+			if o == nil {
+				return errOuroborosNotStarted
+			}
+			return o.FetchEndorserBlockByPoint(
 				ctx,
 				ebSlot,
 				ebHash,
@@ -124,6 +141,28 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		// dingo's forward path applies the current announcement normally
 		// (CIP-conformant).
 		LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
+		ValidateLeiosCertificate: func(
+			epoch uint64,
+			announcingBlockHash []byte,
+			signers []byte,
+			aggregatedSignature []byte,
+		) error {
+			if n.config.prototypeTrustBypassesEnabled() {
+				return nil
+			}
+			if n.leiosVoteManager == nil {
+				return errors.New("leios vote manager is unavailable")
+			}
+			message := leios.PrototypeVoteMessageBytes(
+				lcommon.Blake2b256(announcingBlockHash),
+			)
+			return n.leiosVoteManager.ValidateDijkstraCertificate(
+				epoch,
+				signers,
+				aggregatedSignature,
+				message,
+			)
+		},
 		// The leadership stake includes reward-account balances; see
 		// LedgerStateConfig.SkipLeaderStakeThresholdCheck. The check
 		// rejected the dominant pool's eligible blocks on Musashi's
@@ -156,8 +195,16 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 			start ocommon.Point,
 			end ocommon.Point,
 		) (uint64, error) {
-			return n.ouroboros().
-				BlockfetchClientRequestRange(connId, start, end)
+			o := n.ouroboros()
+			if o == nil {
+				return 0, errOuroborosNotStarted
+			}
+			return o.BlockfetchClientRequestRange(connId, start, end)
+		},
+		RejectBlockDecodeCacheFunc: func(blockType uint, raw []byte) {
+			if o := n.ouroboros(); o != nil {
+				o.InvalidateBlockDecodeCache(blockType, raw)
+			}
 		},
 		PeersWithBlockFunc: func(
 			origin ouroboros.ConnectionId,

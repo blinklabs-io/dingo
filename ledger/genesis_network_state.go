@@ -18,8 +18,38 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/database"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+// rejectDuplicateGenesisUtxos returns an error if any two genesis UTxOs
+// (Byron or Shelley) reference the same transaction ID and output index.
+// The reference implementation rejects overlapping initial UTxOs before
+// constructing genesis state; Dingo's downstream views of this list
+// (reserve-balance summation, synthetic CBOR, and the offset-keyed metadata
+// insert) each resolve a duplicate differently, so a duplicate must be
+// caught here rather than left for one of those views to silently win.
+func rejectDuplicateGenesisUtxos(genesisUtxos []lcommon.Utxo) error {
+	seen := make(map[database.UtxoRef]struct{}, len(genesisUtxos))
+	for i := range genesisUtxos {
+		if genesisUtxos[i].Id == nil {
+			return fmt.Errorf("genesis UTxO %d has no input reference", i)
+		}
+		ref := database.UtxoRef{
+			TxId:      genesisUtxos[i].Id.Id(),
+			OutputIdx: genesisUtxos[i].Id.Index(),
+		}
+		if _, ok := seen[ref]; ok {
+			return fmt.Errorf(
+				"duplicate genesis UTxO reference %x#%d",
+				ref.TxId,
+				ref.OutputIdx,
+			)
+		}
+		seen[ref] = struct{}{}
+	}
+	return nil
+}
 
 // genesisReserveBalance returns the reserves remaining after every Byron and
 // Shelley genesis UTxO has been placed into circulation.

@@ -909,20 +909,24 @@ func navigateTelescope(
 		)
 	}
 
+	if len(items) == 0 {
+		return 0, nil, errors.New("telescope is empty")
+	}
+
+	// Detect format: try to decode first item as uint64 (tag).
+	// In nested format, items[0] is a tag integer (0 or 1).
+	// In flat format, items[0] is an array [bound, payload]. A flat
+	// telescope of a chain still in Byron has that single entry.
+	var firstTag uint64
+	if _, err := cbor.Decode(items[0], &firstTag); err != nil {
+		// Flat format: each item is [bound, payload]
+		return navigateTelescopeFlat(items)
+	}
 	if len(items) < 2 {
 		return 0, nil, fmt.Errorf(
 			"telescope has %d items, expected at least 2",
 			len(items),
 		)
-	}
-
-	// Detect format: try to decode first item as uint64 (tag).
-	// In nested format, items[0] is a tag integer (0 or 1).
-	// In flat format, items[0] is an array [bound, payload].
-	var firstTag uint64
-	if _, err := cbor.Decode(items[0], &firstTag); err != nil {
-		// Flat format: each item is [bound, payload]
-		return navigateTelescopeFlat(items)
 	}
 
 	// Nested format: [tag, payload, rest] or [tag, payload]

@@ -49,6 +49,23 @@ func (d *Database) GetCommitteeMember(
 	return ret, nil
 }
 
+// GetCommitteeHotAuthorizationsSince returns, for each cold credential, its
+// latest hot-key authorization when that authorization was recorded at or
+// after minSlot. Seated and unseated cold credentials are both included.
+func (d *Database) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
+	txn *Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetCommitteeHotAuthorizationsSince(
+		minSlot,
+		txn.Metadata(),
+	)
+}
+
 // GetActiveCommitteeMembers returns all active committee members
 func (d *Database) GetActiveCommitteeMembers(
 	txn *Txn,
@@ -132,8 +149,8 @@ func (d *Database) SetCommitteeQuorum(
 	if quorum == nil {
 		return errors.New("committee quorum cannot be nil")
 	}
-	if quorum.Sign() <= 0 {
-		return errors.New("committee quorum must be positive")
+	if quorum.Sign() < 0 {
+		return errors.New("committee quorum cannot be negative")
 	}
 	stored := &types.Rat{Rat: new(big.Rat).Set(quorum)}
 	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
@@ -149,7 +166,7 @@ func (d *Database) SetCommitteeQuorum(
 // ClearCommitteeQuorum records at the given slot that no quorum is
 // in effect (e.g. after a NoConfidence action is enacted). A later
 // GetCommitteeQuorum will return nil until a subsequent
-// SetCommitteeQuorum writes a new positive value.
+// SetCommitteeQuorum writes a new threshold.
 func (d *Database) ClearCommitteeQuorum(
 	slot uint64,
 	txn *Txn,

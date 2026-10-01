@@ -57,18 +57,40 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		// Ledger peers are disabled
 		return
 	}
+	// Below UseLedgerAfterSlot the provider cannot answer. An urgent node
+	// with a loaded peer snapshot still refills from the snapshot's unused
+	// candidates, or a correlated collapse of the initial peer set would
+	// leave it without leads until the threshold slot is reached.
+	var snapshotRelays []PoolRelay
+	belowLedgerSlot := false
 	if p.config.UseLedgerAfterSlot > 0 {
 		currentSlot := p.config.LedgerPeerProvider.CurrentSlot()
 		// Safe conversion: UseLedgerAfterSlot is already checked to be > 0
 		useLedgerAfterSlot := uint64(p.config.UseLedgerAfterSlot) // #nosec G115
 		if currentSlot < useLedgerAfterSlot {
-			p.config.Logger.Debug(
-				"ledger peers not yet enabled",
-				"current_slot", currentSlot,
-				"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
-			)
-			return
+			belowLedgerSlot = true
+			p.mu.Lock()
+			snapshotRelays = p.peerSnapshotRelays
+			p.mu.Unlock()
+			urgent := p.ledgerPeersUrgent()
+			if !urgent {
+				p.emergencyRefreshRounds.Store(0)
+			}
+			if len(snapshotRelays) == 0 || !urgent {
+				p.config.Logger.Debug(
+					"ledger peers not yet enabled",
+					"current_slot", currentSlot,
+					"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
+				)
+				return
+			}
 		}
+	}
+
+	if !belowLedgerSlot &&
+		p.snapshotRefreshPending.CompareAndSwap(true, false) {
+		p.lastLedgerPeerRefresh.Store(0)
+		p.emergencyRefreshRounds.Store(0)
 	}
 
 	// Count existing ledger peers to determine how many we need.
@@ -139,14 +161,18 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	relays, err := p.config.LedgerPeerProvider.GetPoolRelays()
-	if err != nil {
-		p.config.Logger.Error(
-			"failed to get ledger peers",
-			"error", err,
-			"emergency", urgent,
-		)
-		return
+	relays := snapshotRelays
+	if !belowLedgerSlot {
+		var err error
+		relays, err = p.config.LedgerPeerProvider.GetPoolRelays()
+		if err != nil {
+			p.config.Logger.Error(
+				"failed to get ledger peers",
+				"error", err,
+				"emergency", urgent,
+			)
+			return
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return
@@ -193,6 +219,9 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		// Count only a complete urgent round. Interval-gated, failed, canceled,
 		// or panicking rounds retain the existing backoff and retry immediately.
 		p.emergencyRefreshRounds.Add(1)
+	}
+	if belowLedgerSlot {
+		p.snapshotRefreshPending.Store(true)
 	}
 	completed = true
 }

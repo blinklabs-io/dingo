@@ -14,7 +14,12 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 // RewardStakeCalculationVersion identifies the stake-accounting algorithm
 // used to produce persisted live stake and consensus snapshots. Bump it when
@@ -28,13 +33,24 @@ const RewardStakeCalculationVersion uint = 2
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
-	ID           uint
-	Epoch        uint64
-	Treasury     types.Uint64
-	Reserves     types.Uint64
-	Fees         types.Uint64
-	Rewards      types.Uint64
-	CapturedSlot uint64
+	ID       uint
+	Epoch    uint64
+	Treasury types.Uint64
+	Reserves types.Uint64
+	Fees     types.Uint64
+	Rewards  types.Uint64
+	// ImportedEpochFees is the fee pot a Mithril bootstrap collected for this
+	// row's own epoch up to and including its anchor block
+	// (UTxOState.utxosFees minus SnapShots.ssFee at import time; see
+	// seedImportedRewardBasis). A live-computed row never sets it. It exists
+	// because this epoch's locally stored transactions only cover slots
+	// after CapturedSlot: rewardEpochFees adds it to a post-anchor local sum
+	// instead of summing the whole epoch, which would silently omit the
+	// fees collected before the anchor. Nil means the row was computed live
+	// or imported by a release predating this field; either way the
+	// whole-epoch local sum applies.
+	ImportedEpochFees *types.Uint64
+	CapturedSlot      uint64
 }
 
 // RewardSnapshot captures reward-calculation snapshot metadata for an epoch.
@@ -178,3 +194,48 @@ type RewardAccountOutput struct {
 	CapturedSlot uint64
 	BoundarySlot uint64
 }
+
+// RewardCreditRound records a reward snapshot applied at an epoch boundary.
+// It remains indexed until rollback crosses that boundary; the folded flag on
+// reward_account_output rows tracks which account balances already include
+// those credits.
+type RewardCreditRound struct {
+	SnapshotEpoch uint64 `json:"snapshot_epoch"`
+	BoundarySlot  uint64 `json:"boundary_slot"`
+}
+
+// StakeRewardSourcePrefix namespaces the sync_state keys and the journal
+// source hashes of the stake-reward round.
+const StakeRewardSourcePrefix = "dingo:stake-reward:"
+
+// StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
+// reward_account_output row produces, which makes crediting it idempotent.
+func StakeRewardSourceHash(
+	epoch uint64,
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+	rewardType string,
+) []byte {
+	h := sha256.New()
+	h.Write([]byte(StakeRewardSourcePrefix)) //nolint:errcheck
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], epoch)
+	h.Write(buf[:])                //nolint:errcheck
+	h.Write(poolKeyHash)           //nolint:errcheck
+	h.Write([]byte{credentialTag}) //nolint:errcheck
+	h.Write(stakingKey)            //nolint:errcheck
+	h.Write([]byte(rewardType))    //nolint:errcheck
+	return h.Sum(nil)
+}
+
+// PendingRewardCreditRoundsKey is the legacy sync_state key migrated into
+// the reward_credit_round table.
+const PendingRewardCreditRoundsKey = "dingo:reward-credit:pending-rounds" //nolint:gosec // a sync_state key, not a credential
+
+// RewardEligibilityRecheckKey is the sync_state key holding the credentials
+// whose account registration a rollback restored, as a JSON list of
+// StakeCredentialRef. A reward round precomputed before that rollback read
+// their registration before it was restored, so the boundary that applies the
+// round re-reads it.
+const RewardEligibilityRecheckKey = "dingo:reward-credit:eligibility-recheck"

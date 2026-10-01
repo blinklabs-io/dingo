@@ -70,6 +70,13 @@ genesisBootstrap:
   # Set this to the number of independent snapshot/ledger peers you expect to
   # corroborate the fast source.
   corroborationPeers: 2
+  # Genesis Limit on Patience: disconnect a ChainSync peer that delivers its
+  # advertised progress more slowly than limitOnPatienceRate headers per
+  # second beyond a limitOnPatienceCapacity token allowance. 0 selects the
+  # defaults (1000 tokens, 5 per second: a 200-second allowance).
+  limitOnPatienceEnabled: true
+  limitOnPatienceCapacity: 0
+  limitOnPatienceRate: 0
 ```
 
 Equivalent CLI flags / environment variables:
@@ -77,6 +84,9 @@ Equivalent CLI flags / environment variables:
 - `--genesis-bootstrap-enabled` / `DINGO_GENESIS_BOOTSTRAP_ENABLED`
 - `--genesis-bootstrap-window-slots` / `DINGO_GENESIS_BOOTSTRAP_WINDOW_SLOTS`
 - `--genesis-bootstrap-corroboration-peers` / `DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS`
+- `--genesis-bootstrap-limit-on-patience-enabled` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED`
+- `--genesis-bootstrap-limit-on-patience-capacity` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY`
+- `--genesis-bootstrap-limit-on-patience-rate` / `DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE`
 
 ## Topology: fast source + corroborating snapshot
 
@@ -144,6 +154,14 @@ Snapshot relays must have a host/IP address and an explicit TCP port from 1 to
   transition also logs `chain selection stalled: no selectable peer` and emits
   `chainselection.selected_none`. Investigate whether the snapshot peers are
   reachable and on the same chain as the fast source.
+- **Slow peer disconnected**: a peer that keeps advertising a better tip but
+  delivers headers too slowly logs
+  `chainsync client exhausted the Genesis Limit on Patience, disconnecting`,
+  emits `chainsync.client_patience_exhausted`, increments
+  `dingo_chainsync_patience_exhausted_total`, and is closed with recycle reason
+  `genesis_patience_exhausted`. A peer that goes silent is instead reported as
+  `chainsync.client_stalled` by the two-minute stall watchdog. A caught-up peer
+  waiting for new blocks is not charged.
 - **Exit to Praos**: once the local tip catches up to within the Genesis window
   of the best corroborated peer's *advertised* tip (the network tip — not the
   headers delivered so far), the node logs `exiting Genesis selection mode` and

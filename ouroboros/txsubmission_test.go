@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/utxoref"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -38,8 +40,158 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+// txsubmissionPanicReply builds a well-formed two-body reply whose sizes and
+// hashes all match, so nothing but the decode can reject it.
+func txsubmissionPanicReply(
+	t *testing.T,
+) ([]txsubmission.TxIdAndSize, []txsubmission.TxBody) {
+	t.Helper()
+	fixtures := txsubmissionTestFixtures(t)[:2]
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32(len(fixture.body)), // #nosec G115 -- real fixture
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+	return requested, returned
+}
+
+// TestValidateTxsubmissionReplyContainsDecoderPanic covers the transaction-body
+// half of blinklabs-io/gouroboros#2075: a peer
+// body whose bytes panic the ledger decoder must be rejected as a decode
+// failure, not unwound into the per-peer txsubmission goroutine, which has no
+// recover above it and would take the node process down. Drop the containment
+// and each subtest crashes the test binary rather than failing.
+func TestValidateTxsubmissionReplyContainsDecoderPanic(t *testing.T) {
+	t.Parallel()
+
+	requested, returned := txsubmissionPanicReply(t)
+	inner := errors.New("runtime error: index out of range [4] with length 2")
+	tests := []struct {
+		name    string
+		panic   func()
+		wrapped error
+	}{
+		{name: "string value", panic: func() { panic("cbor: bad header") }},
+		{
+			name:    "error value",
+			panic:   func() { panic(inner) },
+			wrapped: inner,
+		},
+		{name: "nil value", panic: func() { panic(nil) }},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			validated, err := validateTxsubmissionReply(
+				requested,
+				returned,
+				func(uint, []byte) (gledger.Transaction, error) {
+					testCase.panic()
+					return nil, nil
+				},
+			)
+			require.ErrorIs(t, err, safedecode.ErrDecodePanic)
+			require.ErrorContains(
+				t,
+				err,
+				"txsubmission reply transaction 0 decode failed",
+			)
+			if testCase.wrapped != nil {
+				require.ErrorIs(t, err, testCase.wrapped)
+			}
+			// The reply is rejected outright: no body reaches admission, so
+			// a panicking decode can never mark a peer's reply valid.
+			require.Nil(t, validated)
+		})
+	}
+}
+
+// TestValidateTxsubmissionReplyPanicDropsWholeReply pins that a panic on one
+// body discards the bodies that decoded before it. A partially valid batch
+// from a peer that can crash the decoder is not trusted, matching how an
+// ordinary decode failure is handled.
+func TestValidateTxsubmissionReplyPanicDropsWholeReply(t *testing.T) {
+	t.Parallel()
+
+	requested, returned := txsubmissionPanicReply(t)
+	var decoded int
+	validated, err := validateTxsubmissionReply(
+		requested,
+		returned,
+		func(txType uint, txCbor []byte) (gledger.Transaction, error) {
+			decoded++
+			if decoded == 2 {
+				panic("cbor: bad header")
+			}
+			return gledger.NewTransactionFromCbor(txType, txCbor)
+		},
+	)
+	require.ErrorIs(t, err, safedecode.ErrDecodePanic)
+	require.ErrorContains(
+		t,
+		err,
+		"txsubmission reply transaction 1 decode failed",
+	)
+	require.Nil(t, validated)
+	require.Equal(t, 2, decoded)
+}
+
+// TestValidateTxsubmissionReplyNonPanickingFailuresUnchanged keeps the two
+// outcomes that must not move: a valid reply still decodes, and a
+// malformed-but-non-panicking body still produces the plain decode error it
+// produced before, classified as an ordinary failure rather than a panic.
+func TestValidateTxsubmissionReplyNonPanickingFailuresUnchanged(t *testing.T) {
+	t.Parallel()
+
+	requested, returned := txsubmissionPanicReply(t)
+
+	t.Run("valid reply decodes", func(t *testing.T) {
+		t.Parallel()
+		validated, err := validateTxsubmissionReply(
+			requested,
+			returned,
+			gledger.NewTransactionFromCbor,
+		)
+		require.NoError(t, err)
+		require.Len(t, validated, len(returned))
+	})
+
+	t.Run("malformed body reports an ordinary decode error", func(t *testing.T) {
+		t.Parallel()
+		corrupt := []txsubmission.TxBody{{
+			EraId:  returned[0].EraId,
+			TxBody: []byte{0xff, 0xff, 0xff},
+		}}
+		want := []txsubmission.TxIdAndSize{{
+			TxId: requested[0].TxId,
+			Size: 3,
+		}}
+		validated, err := validateTxsubmissionReply(
+			want,
+			corrupt,
+			gledger.NewTransactionFromCbor,
+		)
+		require.Error(t, err)
+		require.ErrorContains(
+			t,
+			err,
+			"txsubmission reply transaction 0 decode failed",
+		)
+		require.NotErrorIs(t, err, safedecode.ErrDecodePanic)
+		require.Nil(t, validated)
+	})
+}
 
 // txsubmissionRelayTestTxHex is a real, decodable Conway-era transaction.
 // The server-init relay loop parses relayed bodies with
@@ -730,12 +882,12 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 	}
 
 	t.Run("matching batch", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned)
+		validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 	})
 	t.Run("ordered subset", func(t *testing.T) {
-		validated, err := validateTxsubmissionReply(requested, returned[1:])
+		validated, err := validateTxsubmissionReply(requested, returned[1:], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 		require.Equal(t, returned[1], validated[0].body)
@@ -765,7 +917,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 					TxId: fixtures[0].txId,
 					Size: uint32(testCase.advertised), // #nosec G115 -- bounded fixture
 				}}
-				validated, err := validateTxsubmissionReply(want, returned[:1])
+				validated, err := validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 				if testCase.shouldPass {
 					require.NoError(t, err)
 					require.Len(t, validated, 1)
@@ -784,11 +936,11 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 				Size: uint32(len(fixture.body) - 32), // #nosec G115 -- real fixtures
 			}
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, len(returned))
 
-		validated, err = validateTxsubmissionReply(want, returned[:1])
+		validated, err = validateTxsubmissionReply(want, returned[:1], gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 1)
 	})
@@ -799,13 +951,13 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			{TxId: fixtures[0].txId, Size: uint32(len(fixtures[0].body) - 60)}, // #nosec G115 -- real fixture
 			{TxId: fixtures[1].txId, Size: uint32(len(fixtures[1].body) - 4)},  // #nosec G115 -- real fixture
 		}
-		validated, err := validateTxsubmissionReply(want, returned)
+		validated, err := validateTxsubmissionReply(want, returned, gledger.NewTransactionFromCbor)
 		require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
 		require.Nil(t, validated)
 	})
 	t.Run("reordered reply preserves admission order", func(t *testing.T) {
 		got := []txsubmission.TxBody{returned[1], returned[0]}
-		validated, err := validateTxsubmissionReply(requested, got)
+		validated, err := validateTxsubmissionReply(requested, got, gledger.NewTransactionFromCbor)
 		require.NoError(t, err)
 		require.Len(t, validated, 2)
 		require.Equal(t, returned[0], validated[0].body)
@@ -866,7 +1018,7 @@ func TestValidateTxsubmissionReply(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(want, got)
 			}
-			validated, err := validateTxsubmissionReply(want, got)
+			validated, err := validateTxsubmissionReply(want, got, gledger.NewTransactionFromCbor)
 			require.ErrorContains(t, err, tt.match)
 			require.Nil(t, validated)
 			if tt.name == "hash" {
@@ -928,7 +1080,7 @@ func TestValidateTxsubmissionReplyChecksByteBudgetBeforeDecode(t *testing.T) {
 					TxBody: testCase.bodies[index],
 				}
 			}
-			validated, err := validateTxsubmissionReply(requested, returned)
+			validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
 			require.Nil(t, validated)
 			if testCase.overLimit {
 				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
@@ -984,6 +1136,8 @@ type txSubmissionRelayHarness struct {
 	cmB   *connmanager.ConnectionManager
 	mA    *mempool.Mempool
 	mB    *mempool.Mempool
+	busA  *event.EventBus
+	busB  *event.EventBus
 }
 
 // newTxSubmissionRelayHarness intentionally does not register any
@@ -1045,8 +1199,13 @@ func newTxSubmissionRelayHarnessWithOpts(
 	if capacityA == 0 {
 		capacityA = 1024 * 1024
 	}
+	// Without an EventBus a blocking NextTx returns at once, so node B would
+	// answer a blocking RequestTxIds with no ids, a protocol violation.
+	busA := event.NewEventBus(nil, logger)
+	busB := event.NewEventBus(nil, logger)
 	configA := mempool.MempoolConfig{
 		Logger:          logger,
+		EventBus:        busA,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validatorA,
 		MempoolCapacity: capacityA,
@@ -1072,6 +1231,7 @@ func newTxSubmissionRelayHarnessWithOpts(
 	}
 	mB, err := mempool.NewMempool(mempool.MempoolConfig{
 		Logger:          logger,
+		EventBus:        busB,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       validatorB,
 		MempoolCapacity: 1024 * 1024,
@@ -1229,6 +1389,8 @@ func newTxSubmissionRelayHarnessWithOpts(
 		cmB:   cmB,
 		mA:    mA,
 		mB:    mB,
+		busA:  busA,
+		busB:  busB,
 	}
 }
 
@@ -1244,6 +1406,25 @@ func (h *txSubmissionRelayHarness) close(t *testing.T) {
 	_ = h.cmB.Stop(stopCtx)
 	_ = h.mA.Stop(context.Background())
 	_ = h.mB.Stop(context.Background())
+	h.busA.Close()
+	h.busB.Close()
+}
+
+// requireSessionEnds waits for node A to drop the connection. gouroboros
+// validates every reply body against the request and advertised sizes on
+// both ends, so a mismatched reply is a protocol violation that ends the
+// session rather than a reply for the relay loop to discard.
+func (h *txSubmissionRelayHarness) requireSessionEnds(t *testing.T) {
+	t.Helper()
+	require.Eventually(
+		t,
+		func() bool {
+			return h.cmA.GetConnectionById(h.connA.Id()) == nil
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the mismatched reply to end the session",
+	)
 }
 
 // TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd drives the real
@@ -1315,15 +1496,7 @@ func TestTxSubmissionServerInitAcceptsReferenceSizeDiscrepancy(t *testing.T) {
 func TestTxSubmissionServerInitRejectsOutOfRangeAdvertisedSize(t *testing.T) {
 	t.Parallel()
 
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:             logger,
 		advertiseSizeDelta: 40,
 	})
 	defer h.close(t)
@@ -1331,20 +1504,7 @@ func TestTxSubmissionServerInitRejectsOutOfRangeAdvertisedSize(t *testing.T) {
 	addTxSubmissionTestFixtures(t, h.mB, fixture)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the out-of-range size reply to be rejected",
-	)
-	logOutput := logBuf.String()
-	require.Contains(t, logOutput, "txsubmission reply size mismatch")
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(fixture.hash)
 	require.False(t, admitted, "out-of-range advertised body was admitted")
 }
@@ -1554,26 +1714,13 @@ func TestTxSubmissionServerInitContinuesAfterMempoolRejection(
 	)
 }
 
-// TestTxSubmissionServerInitRejectsMalformedReply verifies a mismatched reply
-// is dropped in full and that the per-peer pull loop keeps running, so one
-// bad reply cannot end tx ingest from that peer for the life of the
-// connection.
+// TestTxSubmissionServerInitRejectsMalformedReply verifies a reply body that
+// does not match the requested id is never admitted.
 func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	t.Parallel()
 
-	fixtures := txsubmissionTestFixtures(t)
-	malformed := fixtures[0]
-	accepted := fixtures[1]
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
+	malformed := txsubmissionTestFixtures(t)[0]
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
 		corruptOfferHash: malformed.hash,
 	})
 	defer h.close(t)
@@ -1581,83 +1728,9 @@ func TestTxSubmissionServerInitRejectsMalformedReply(t *testing.T) {
 	addTxSubmissionTestFixtures(t, h.mB, malformed)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the malformed transaction to be logged",
-	)
-	require.Contains(t, logBuf.String(), "decode failed")
-	require.Contains(t, logBuf.String(), h.connA.Id().String())
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(malformed.hash)
 	require.False(t, admitted, "mismatched body was admitted")
-
-	// The pull loop must survive the rejection and admit the next offer.
-	addTxSubmissionTestFixtures(t, h.mB, accepted)
-	require.Eventually(
-		t,
-		func() bool {
-			_, ok := h.mA.GetTransaction(accepted.hash)
-			return ok
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"pull loop stopped after rejecting a single mismatched reply",
-	)
-	require.NotContains(
-		t,
-		logBuf.String(),
-		"stopping tx ingest after repeated mismatched txsubmission replies",
-	)
-}
-
-// TestTxSubmissionServerInitStopsAfterRepeatedMismatches verifies a peer
-// that returns nothing but mismatched replies is eventually given up on,
-// so continuing the pull loop cannot become an unbounded hot loop.
-func TestTxSubmissionServerInitStopsAfterRepeatedMismatches(t *testing.T) {
-	t.Parallel()
-
-	fixtures := txsubmissionTestFixtures(t)
-	require.GreaterOrEqual(
-		t,
-		len(fixtures),
-		txsubmissionMaxConsecutiveReplyMismatches,
-	)
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
-	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
-		corruptAllOffers: true,
-	})
-	defer h.close(t)
-
-	addTxSubmissionTestFixtures(t, h.mB, fixtures...)
-	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
-
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"stopping tx ingest after repeated mismatched txsubmission replies",
-			)
-		},
-		10*time.Second,
-		10*time.Millisecond,
-		"expected tx ingest to stop after repeated mismatched replies",
-	)
 }
 
 // TestTxSubmissionServerInitRejectsBatchAtomically verifies a valid prefix is
@@ -1670,16 +1743,7 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 	fixtures := txsubmissionTestFixtures(t)
 	omitted := fixtures[0]
 	malformed := fixtures[1]
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-
 	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
-		logger:           logger,
 		corruptOfferHash: malformed.hash,
 		batchRequestsA:   true,
 	})
@@ -1688,20 +1752,7 @@ func TestTxSubmissionServerInitRejectsBatchAtomically(
 	addTxSubmissionTestFixtures(t, h.mB, omitted, malformed)
 	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
 
-	require.Eventually(
-		t,
-		func() bool {
-			return strings.Contains(
-				logBuf.String(),
-				"rejected mismatched txsubmission reply",
-			)
-		},
-		5*time.Second,
-		10*time.Millisecond,
-		"expected the mismatched batch to be rejected",
-	)
-	logOutput := logBuf.String()
-	require.Contains(t, logOutput, "transaction 1 decode failed")
+	h.requireSessionEnds(t)
 	_, admitted := h.mA.GetTransaction(omitted.hash)
 	require.False(t, admitted, "valid prefix was partially admitted")
 }
@@ -1782,4 +1833,541 @@ func TestTxSubmissionServerInitRestoresOrderForReorderedReply(t *testing.T) {
 	require.Len(t, admitted, 2)
 	require.Equal(t, fixtures[0].body, admitted[0].Cbor)
 	require.Equal(t, fixtures[1].body, admitted[1].Cbor)
+}
+
+// doubleHex returns the value a %x verb produces for an operand that
+// implements fmt.Stringer with a hex String method: the hex encoding of the
+// hex string, twice the intended length.
+func doubleHex(t *testing.T, hexId string) string {
+	t.Helper()
+	encoded := hex.EncodeToString([]byte(hexId))
+	require.Len(t, encoded, 2*len(hexId))
+	return encoded
+}
+
+// txsubmissionLoggedMessages returns the "msg" field of every JSON log record
+// in buf whose message starts with prefix.
+func txsubmissionLoggedMessages(
+	t *testing.T,
+	buf string,
+	prefix string,
+) []string {
+	t.Helper()
+	var ret []string
+	for line := range strings.SplitSeq(buf, "\n") {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Msg string `json:"msg"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue
+		}
+		if strings.HasPrefix(record.Msg, prefix) {
+			ret = append(ret, record.Msg)
+		}
+	}
+	return ret
+}
+
+// TestTxSubmissionServerInitRejectionLogsSingleHexTxId is the regression test
+// for the mempool-rejection log line carrying a double-hex-encoded
+// transaction id.
+//
+// tx.Hash() is an lcommon.Blake2b256, which implements fmt.Stringer with a hex
+// String method, and fmt routes the x verb through String for such operands.
+// Formatting the hash value itself with %x therefore hex-encoded its hex
+// string, producing a 128-character id in the message prefix that matches no
+// real transaction hash -- defeating the obvious use of the line, which is to
+// grep for a transaction id seen on the wire or on chain. The 64-character id
+// must appear in the message itself, not only inside the wrapped validation
+// error further along the line.
+func TestTxSubmissionServerInitRejectionLogsSingleHexTxId(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	rejected := fixtures[0]
+	require.Len(t, rejected.hash, 64)
+
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(
+			logBuf,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger: logger,
+		validatorA: txsubmissionSelectiveRejectingValidator{
+			rejectedHash: rejected.hash,
+		},
+	})
+	defer h.close(t)
+
+	addTxSubmissionTestFixtures(t, h.mB, rejected)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	const prefix = "failed to add tx "
+	var messages []string
+	require.Eventually(
+		t,
+		func() bool {
+			messages = txsubmissionLoggedMessages(t, logBuf.String(), prefix)
+			return len(messages) > 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the mempool rejection to be logged",
+	)
+
+	for _, msg := range messages {
+		require.True(
+			t,
+			strings.HasPrefix(msg, prefix+rejected.hash+" to mempool: "),
+			"rejection message must name the transaction by its 64-character id, got %q",
+			msg,
+		)
+		require.NotContains(
+			t,
+			msg,
+			doubleHex(t, rejected.hash),
+			"transaction id must not be hex-encoded twice",
+		)
+	}
+}
+
+// TestValidateTxsubmissionReplyMismatchReportsSingleHexTxId covers the second
+// %x-on-a-Stringer site in this file: the reply hash/order mismatch error also
+// formatted the Blake2b256 value directly, so the id an operator would search
+// for was double-hex encoded.
+func TestValidateTxsubmissionReplyMismatchReportsSingleHexTxId(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
+	requested := []txsubmission.TxIdAndSize{{
+		TxId: fixtures[0].txId,
+		Size: uint32(len(fixtures[0].body)), // #nosec G115 -- test fixture
+	}}
+	returned := []txsubmission.TxBody{{
+		EraId:  fixtures[1].txId.EraId,
+		TxBody: fixtures[1].body,
+	}}
+
+	_, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "received "+fixtures[1].hash)
+	require.NotContains(t, err.Error(), doubleHex(t, fixtures[1].hash))
+}
+
+// txsubmissionWireEncodedItem returns the bytes gouroboros puts on the wire
+// for a single MsgReplyTxs item, [eraId, #6.24(txBody)]. The decode side
+// keeps only the tag-24 payload, so this encoding is the only place the
+// wrapper length is observable from Go.
+func txsubmissionWireEncodedItem(
+	t *testing.T,
+	eraId uint16,
+	body []byte,
+) []byte {
+	t.Helper()
+	item := txsubmission.TxBody{EraId: eraId, TxBody: body}
+	encoded, err := item.MarshalCBOR()
+	require.NoError(t, err)
+	return encoded
+}
+
+// TestTxsubmissionWireSizeMatchesWireEncoding checks the derived wire size
+// against the real encoder across all four CBOR byte-string length header
+// bands, which is what makes the observed delta 6 bytes for a 24..255 byte
+// body and 7 bytes for a 256..65535 byte body.
+func TestTxsubmissionWireSizeMatchesWireEncoding(t *testing.T) {
+	t.Parallel()
+
+	for _, bodyLen := range []int{
+		0,     // empty
+		1,     // length header 1 byte
+		23,    // largest body with a 1-byte length header
+		24,    // smallest body with a 2-byte length header
+		255,   // largest body with a 2-byte length header
+		256,   // smallest body with a 3-byte length header
+		65535, // largest body with a 3-byte length header
+		65536, // smallest body with a 5-byte length header
+	} {
+		for _, eraId := range []uint16{0, 6, 23, 24, 255} {
+			t.Run(
+				fmt.Sprintf("era%d/len%d", eraId, bodyLen),
+				func(t *testing.T) {
+					body := make([]byte, bodyLen)
+					encoded := txsubmissionWireEncodedItem(t, eraId, body)
+					require.Equal(
+						t,
+						uint64(len(encoded)),
+						txsubmissionWireSize(eraId, bodyLen),
+					)
+				},
+			)
+		}
+	}
+}
+
+// TestTxsubmissionWireSizeOverheadBands documents the exact per-band
+// overhead observed against cardano-node peers.
+func TestTxsubmissionWireSizeOverheadBands(t *testing.T) {
+	t.Parallel()
+
+	const conwayEraId = txsubmissionRelayTestEraId
+	for _, tc := range []struct {
+		bodyLen  int
+		overhead uint64
+	}{
+		{bodyLen: 23, overhead: 5},
+		{bodyLen: 24, overhead: 6},
+		{bodyLen: 238, overhead: 6},
+		{bodyLen: 255, overhead: 6},
+		{bodyLen: 256, overhead: 7},
+		{bodyLen: 2331, overhead: 7},
+		{bodyLen: 65535, overhead: 7},
+		{bodyLen: 65536, overhead: 9},
+	} {
+		t.Run(fmt.Sprintf("len%d", tc.bodyLen), func(t *testing.T) {
+			require.Equal(
+				t,
+				uint64(tc.bodyLen)+tc.overhead,
+				txsubmissionWireSize(conwayEraId, tc.bodyLen),
+			)
+		})
+	}
+}
+
+// TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement is the
+// regression test for the size-validation regression from #3883: a
+// cardano-node peer advertises the wrapped wire size in MsgReplyTxIds while
+// gouroboros hands Dingo only the unwrapped body, so an equality check
+// against len(TxBody) rejects every batch such a peer offers.
+func TestValidateTxsubmissionReplyAcceptsWireSizeAdvertisement(t *testing.T) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		wireSize := len(
+			txsubmissionWireEncodedItem(
+				t,
+				fixture.txId.EraId,
+				fixture.body,
+			),
+		)
+		require.Greater(t, wireSize, len(fixture.body))
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32(wireSize), // #nosec G115 -- test fixture
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+
+	validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
+	require.NoError(t, err)
+	require.Len(t, validated, len(returned))
+}
+
+// TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch verifies the
+// wire-size allowance does not turn the size check into an unbounded range:
+// only sizes within the reference discrepancy of the unwrapped body or exact
+// derived wire size are accepted.
+func TestValidateTxsubmissionReplyRejectsGenuineSizeMismatch(t *testing.T) {
+	t.Parallel()
+
+	fixture := txsubmissionTestFixtures(t)[0]
+	returned := []txsubmission.TxBody{
+		{EraId: fixture.txId.EraId, TxBody: fixture.body},
+	}
+	wireSize := uint32( // #nosec G115 -- test fixture
+		len(
+			txsubmissionWireEncodedItem(t, fixture.txId.EraId, fixture.body),
+		),
+	)
+	bodySize := uint32(len(fixture.body)) // #nosec G115 -- test fixture
+	for _, tc := range []struct {
+		name  string
+		size  uint32
+		match string
+	}{
+		// A single body below the tolerance is rejected by the aggregate
+		// budget before the per-body predicate is evaluated.
+		{name: "beyond body tolerance below", size: bodySize - 33, match: "reply exceeds byte limit"},
+		{name: "zero", size: 0, match: "size mismatch"},
+		{name: "beyond body tolerance above", size: bodySize + 40, match: "size mismatch"},
+		// This value is the same as bodySize-33 for this fixture, so the
+		// aggregate budget rejects it before the per-body predicate runs.
+		{name: "beyond wire tolerance below", size: wireSize - 40, match: "reply exceeds byte limit"},
+		{name: "beyond wire tolerance above", size: wireSize + 33, match: "size mismatch"},
+		{name: "double", size: bodySize * 2, match: "size mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requested := []txsubmission.TxIdAndSize{
+				{TxId: fixture.txId, Size: tc.size},
+			}
+			validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
+			require.ErrorContains(t, err, tc.match)
+			require.Nil(t, validated)
+		})
+	}
+}
+
+// TestTxSubmissionRelayAdmitsWireSizeAdvertisedTransaction drives the real
+// pull loop end to end. Since Dingo's client now advertises the wrapped
+// wire size, node B stands in for a cardano-node peer: node A must accept
+// and admit the body and count the acceptance under the wire-size outcome.
+func TestTxSubmissionRelayAdmitsWireSizeAdvertisedTransaction(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		promRegistryA: reg,
+	})
+	defer h.close(t)
+
+	fixture := txsubmissionTestFixtures(t)[0]
+	addTxSubmissionTestFixtures(t, h.mB, fixture)
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			_, ok := h.mA.GetTransaction(fixture.hash)
+			return ok
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected a wire-size-advertised transaction to be admitted",
+	)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			h.nodeA.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeAcceptedWire),
+		),
+	)
+	require.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			h.nodeA.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeRejected),
+		),
+	)
+}
+
+// TestTxsubmissionReplySizeMetricPreMaterialized verifies both outcomes are
+// exported as zero before the first mismatch, so an alert on the counter
+// does not have to tolerate a missing series.
+func TestTxsubmissionReplySizeMetricPreMaterialized(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	outcomes := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "dingo_txsubmission_reply_size_mismatch_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "outcome" {
+					outcomes[label.GetValue()] = metric.GetCounter().
+						GetValue()
+				}
+			}
+		}
+	}
+	require.Equal(
+		t,
+		map[string]float64{
+			txsubmissionReplySizeAcceptedWire: 0,
+			txsubmissionReplySizeRejected:     0,
+		},
+		outcomes,
+	)
+
+	o.recordTxsubmissionReplySize(txsubmissionReplySizeRejected, 1)
+	o.recordTxsubmissionReplySize(txsubmissionReplySizeAcceptedWire, 3)
+	// A zero or negative count must not create spurious observations.
+	o.recordTxsubmissionReplySize(txsubmissionReplySizeRejected, 0)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			o.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeRejected),
+		),
+	)
+	require.Equal(
+		t,
+		float64(3),
+		testutil.ToFloat64(
+			o.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeAcceptedWire),
+		),
+	)
+}
+
+// TestRecordTxsubmissionReplySizeWithoutMetrics verifies the recorder is a
+// no-op when metrics were never initialized.
+func TestRecordTxsubmissionReplySizeWithoutMetrics(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+	require.Nil(t, o.protocolMetrics)
+	require.NotPanics(t, func() {
+		o.recordTxsubmissionReplySize(txsubmissionReplySizeRejected, 1)
+	})
+}
+
+// TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted covers a
+// peer advertising a size SMALLER than the body it returns. That case used
+// to trip the aggregate byte-budget check before the per-body size check
+// ran, so the reply was dropped without being classified or counted as a
+// size mismatch.
+func TestValidateTxsubmissionReplyUndersizedAdvertisementIsCounted(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := txsubmissionTestFixtures(t)[0]
+	returned := []txsubmission.TxBody{
+		{EraId: fixture.txId.EraId, TxBody: fixture.body},
+	}
+	requested := []txsubmission.TxIdAndSize{
+		{
+			TxId: fixture.txId,
+			Size: uint32(len(fixture.body)) - 33, // #nosec G115 -- fixture
+		},
+	}
+
+	validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
+	require.Nil(t, validated)
+	require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+	// The operator needs both numbers and the era to tell an undersized
+	// advertisement apart from a wrapper-size disagreement.
+	require.ErrorContains(t, err, "advertised")
+	require.ErrorContains(t, err, "body")
+	require.ErrorContains(t, err, "wire")
+	require.ErrorContains(t, err, "era")
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	o.recordTxsubmissionReplyOutcome(validated, len(returned), err)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			o.protocolMetrics.txsubmissionReplySizeMismatch.
+				WithLabelValues(txsubmissionReplySizeRejected),
+		),
+	)
+}
+
+// TestRecordTxsubmissionReplyOutcomeCountsBodies pins the unit of both
+// outcomes: each counts reply BODIES, never replies. A three-body reply
+// that is accepted adds three to accepted_wire_size, and a three-body
+// reply dropped for a size mismatch adds three to rejected, because the
+// whole reply is dropped.
+func TestRecordTxsubmissionReplyOutcomeCountsBodies(t *testing.T) {
+	t.Parallel()
+
+	fixtures := txsubmissionTestFixtures(t)
+	require.Len(t, fixtures, 3)
+	requested := make([]txsubmission.TxIdAndSize, 0, len(fixtures))
+	returned := make([]txsubmission.TxBody, 0, len(fixtures))
+	for _, fixture := range fixtures {
+		requested = append(requested, txsubmission.TxIdAndSize{
+			TxId: fixture.txId,
+			Size: uint32( // #nosec G115 -- test fixture
+				len(
+					txsubmissionWireEncodedItem(
+						t,
+						fixture.txId.EraId,
+						fixture.body,
+					),
+				),
+			),
+		})
+		returned = append(returned, txsubmission.TxBody{
+			EraId:  fixture.txId.EraId,
+			TxBody: fixture.body,
+		})
+	}
+
+	t.Run("accepted counts three bodies", func(t *testing.T) {
+		reg := prometheus.NewRegistry()
+		o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+		validated, err := validateTxsubmissionReply(requested, returned, gledger.NewTransactionFromCbor)
+		require.NoError(t, err)
+		require.Len(t, validated, 3)
+		o.recordTxsubmissionReplyOutcome(validated, len(returned), err)
+		require.Equal(
+			t,
+			float64(3),
+			testutil.ToFloat64(
+				o.protocolMetrics.txsubmissionReplySizeMismatch.
+					WithLabelValues(txsubmissionReplySizeAcceptedWire),
+			),
+		)
+		require.Equal(
+			t,
+			float64(0),
+			testutil.ToFloat64(
+				o.protocolMetrics.txsubmissionReplySizeMismatch.
+					WithLabelValues(txsubmissionReplySizeRejected),
+			),
+		)
+	})
+
+	// One bad advertisement drops the whole three-body reply, so all three
+	// bodies are counted as rejected regardless of which one was bad.
+	for _, badIdx := range []int{0, 1, 2} {
+		t.Run(
+			fmt.Sprintf("rejected counts three bodies bad%d", badIdx),
+			func(t *testing.T) {
+				bad := make([]txsubmission.TxIdAndSize, len(requested))
+				copy(bad, requested)
+				bad[badIdx].Size += 40
+				reg := prometheus.NewRegistry()
+				o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+				validated, err := validateTxsubmissionReply(bad, returned, gledger.NewTransactionFromCbor)
+				require.ErrorIs(t, err, errTxsubmissionReplySizeMismatch)
+				o.recordTxsubmissionReplyOutcome(
+					validated,
+					len(returned),
+					err,
+				)
+				require.Equal(
+					t,
+					float64(3),
+					testutil.ToFloat64(
+						o.protocolMetrics.txsubmissionReplySizeMismatch.
+							WithLabelValues(
+								txsubmissionReplySizeRejected,
+							),
+					),
+				)
+				// A dropped reply contributes nothing to the accepted
+				// outcome, even when earlier bodies validated.
+				require.Equal(
+					t,
+					float64(0),
+					testutil.ToFloat64(
+						o.protocolMetrics.txsubmissionReplySizeMismatch.
+							WithLabelValues(
+								txsubmissionReplySizeAcceptedWire,
+							),
+					),
+				)
+			},
+		)
+	}
 }

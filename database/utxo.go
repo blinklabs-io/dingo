@@ -354,7 +354,7 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob
 				// handle to fetch the producing block's raw CBOR, which
 				// txn doesn't have. Mirrors the metadata-missing case
-				// above for the opposite gap (cubic review).
+				// above for the opposite gap.
 				recoveryTxn, cleanup = txn.withBlobForRecovery()
 			}
 			if cleanup != nil {

@@ -605,7 +605,8 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				observedTipSet: true,
 				VRFOutput:      vrfOutput,
 				PraosView:      praosView,
-				LastUpdated:    time.Now(),
+				nowFn:          cs.nowFn,
+				LastUpdated:    cs.now(),
 			}
 			peerTip.recordObservedPoint(
 				observedTip.Point,
@@ -718,11 +719,8 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 		var advertisedReferenceBlock uint64
 		var maxPlausibleBlock uint64
 		var maxPlausibleAdvertisedBlock uint64
-		prevTip, known := cs.peerTips[connId]
-		if known && prevTip.awaitingFirstHeader {
-			known = false
-		}
-		if known {
+		prevTip := cs.peerTips[connId]
+		if prevTip != nil && !prevTip.awaitingFirstHeader {
 			// Case 1: known peer — compare against the peer's own
 			// previous delivered frontier.
 			hasReference = true
@@ -732,7 +730,7 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			// Case 2: new peer — check against the best observed and
 			// advertised frontiers separately.
 			for _, pt := range cs.peerTips {
-				if pt.awaitingFirstHeader {
+				if pt == nil || pt.awaitingFirstHeader {
 					continue
 				}
 				hasReference = true
@@ -1349,6 +1347,9 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	peerTip *PeerChainTip,
 	logSkip bool,
 ) bool {
+	if peerTip == nil {
+		return false
+	}
 	// Shared live/eligible/non-stale prerequisite (single source of truth,
 	// also used by the Genesis corroboration witness check).
 	if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
@@ -2466,11 +2467,14 @@ func (cs *ChainSelector) registerPeerFromRollbackLocked(
 	if !ok {
 		return nil, RollbackRegistrationAtCapacity
 	}
-	cs.peerTips[e.ConnectionId] = newPeerChainTipFromRollback(
+	newPeer := newPeerChainTipFromRollback(
 		e.ConnectionId,
 		e.Point,
 		e.Tip,
 	)
+	newPeer.nowFn = cs.nowFn
+	newPeer.LastUpdated = cs.now()
+	cs.peerTips[e.ConnectionId] = newPeer
 	cs.advanceSelectionModeLocked()
 	cs.config.Logger.Info(
 		"registered peer from chainsync rollback",

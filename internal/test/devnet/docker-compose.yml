@@ -14,7 +14,7 @@
 
 # DevNet Docker Compose configuration
 #
-# Two profiles are defined; select one via COMPOSE_PROFILES (.env defaults to
+# Select a profile via COMPOSE_PROFILES (.env defaults to
 # COMPOSE_PROFILES=dingo).
 #
 # Default profile: dingo (all-dingo network)
@@ -35,6 +35,11 @@
 #   from its unix socket by socat via SOCAT_PORT). cardano-relay has no NtC
 #   host port; only the two producers' ledger states are compared
 #   (blinklabs-io/dingo#1900).
+#
+# Opt-in profile: koios-parity (Preview sync and observability)
+#   - dingo-preview:          Dingo node syncing Preview, optional Koios parity
+#   - koios-parity-prometheus: Prometheus scrape and storage
+#   - koios-parity-grafana:    Provisioned dashboards
 #
 # Usage:
 #   docker compose up -d       # Start all services in the selected profile
@@ -80,6 +85,7 @@ services:
     profiles: ["dingo"]
     environment:
       DINGO_POOL_IDS: "1 2 3"
+      DEVNET_LEIOS_ENABLED: "${DEVNET_LEIOS_ENABLED:-0}"
       # Must match the dingo user pinned in the repo root Dockerfile;
       # configurator.sh chowns the pool key directories to it.
       DINGO_UID: "${DEVNET_DINGO_UID:-1000}"
@@ -88,6 +94,10 @@ services:
       # Network spec: canonical by default, accelerated when the scripts'
       # --accelerated flag exports DEVNET_DINGO_SPEC.
       - ${DEVNET_DINGO_SPEC:-./testnet-dingo.yaml}:/testnet.yaml
+      - ./testdata/byron-heavy-delegation.json:/byron-heavy-delegation.json:ro
+      - ../../../config/cardano/musashi/dijkstra-genesis.json:/dijkstra-genesis.json:ro
+      - ./testdata/leios-key.json:/leios-key.json:ro
+      - ./testdata/leios-vote.skey:/leios-vote.skey:ro
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - p3-configs:/configs/3
@@ -103,6 +113,8 @@ services:
     environment: &dingo-node-env
       CARDANO_NETWORK: devnet
       CARDANO_CONFIG: /configs/configs/config.json
+      DINGO_RUN_MODE: "${DEVNET_DINGO_RUN_MODE:-serve}"
+      DINGO_START_ERA: "${DEVNET_DINGO_START_ERA:-}"
       CARDANO_TOPOLOGY: /topology/topology.json
       CARDANO_DATABASE_PATH: /data/db
       CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
@@ -114,6 +126,7 @@ services:
       DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
       DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
       DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
+      DINGO_LEIOS_VOTE_SIGNING_KEY_FILE: "${DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE:-}"
       DINGO_PLUGINS_MEMPOOL_PROVIDER: "${DEVNET_MEMPOOL_PROVIDER:-fifo}"
       DINGO_BLOCK_PIPELINE_ENABLED: "${DEVNET_BLOCK_PIPELINE_ENABLED:-false}"
       DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED: "${DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED:-false}"
@@ -260,6 +273,7 @@ services:
       TXPUMP_COOLDOWN_MIN: "5000"
       TXPUMP_COOLDOWN_MAX: "15000"
       TXPUMP_TYPES: "payment"
+      TXPUMP_TRANSACTION_ERA: "${DEVNET_TXPUMP_TRANSACTION_ERA:-conway}"
       TXPUMP_LOG_DIR: "/logs"
       # The configurator writes the effective system start here. txpump waits
       # for it even when Docker reports all Dingo services healthy earlier.
@@ -461,6 +475,64 @@ services:
       retries: 30
       start_period: 10s
 
+  dingo-preview:
+    build:
+      context: ../../..
+    profiles: ["koios-parity"]
+    image: ${DINGO_IMAGE:-dingo-koios-parity:local}
+    restart: unless-stopped
+    entrypoint: ["/koios-parity/entrypoint-wrapper.sh"]
+    command: ["-n", "preview", "serve"]
+    environment:
+      CARDANO_NETWORK: preview
+      CARDANO_DATABASE_PATH: /data/db
+      DINGO_SOCKET_PATH: /ipc/dingo.socket
+      KOIOS_PARITY_ENABLED: "${DEVNET_KOIOS_PARITY_ENABLED:-false}"
+      KOIOS_PARITY_BASE_URL: "${DEVNET_KOIOS_PARITY_BASE_URL:-https://preview-koios.tosidrop.me/api/v1}"
+    volumes:
+      - koios-parity-dingo-data:/data/db
+      - koios-parity-dingo-ipc:/ipc
+      - ./koios-parity/entrypoint-wrapper.sh:/koios-parity/entrypoint-wrapper.sh:ro
+    ports:
+      - "${DEVNET_KOIOS_PARITY_RELAY_PORT:-13701}:3001"
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_METRICS_PORT:-13798}:12798"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:12798/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  koios-parity-prometheus:
+    image: prom/prometheus:v3.0.1
+    profiles: ["koios-parity"]
+    restart: unless-stopped
+    depends_on:
+      dingo-preview:
+        condition: service_started
+    volumes:
+      - ./koios-parity/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - koios-parity-prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_PROMETHEUS_PORT:-13900}:9090"
+
+  koios-parity-grafana:
+    image: grafana/grafana:11.3.1
+    profiles: ["koios-parity"]
+    restart: unless-stopped
+    depends_on:
+      koios-parity-prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: "${DEVNET_GRAFANA_ADMIN_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${DEVNET_GRAFANA_ADMIN_PASSWORD:-admin}"
+    volumes:
+      - ./koios-parity/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./koios-parity/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - koios-parity-grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${DEVNET_KOIOS_PARITY_GRAFANA_PORT:-13930}:3000"
+
 networks:
   devnet:
     driver: bridge
@@ -488,3 +560,7 @@ volumes:
   dingo-2-ipc:
   dingo-3-ipc:
   dingo-relay-ipc:
+  koios-parity-dingo-data:
+  koios-parity-dingo-ipc:
+  koios-parity-prometheus-data:
+  koios-parity-grafana-data:

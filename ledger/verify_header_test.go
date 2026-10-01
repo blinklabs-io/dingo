@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -48,6 +49,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -998,7 +1000,7 @@ func newTestShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 		"blockVersionData": { "slotDuration": "20000" },
 		"protocolConsts": { "k": 432 }
 	}`
-	err := cfg.LoadByronGenesisFromReader(
+	err := loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	)
 	require.NoError(t, err)
@@ -1645,7 +1647,7 @@ func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -1695,7 +1697,7 @@ func newGenesisDelegateShelleyGenesisCfgWithActiveSlots(
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	byronGenesisJSON := `{"blockVersionData":{"slotDuration":"20000"},"protocolConsts":{"k":432}}`
-	err := cfg.LoadByronGenesisFromReader(strings.NewReader(byronGenesisJSON))
+	err := loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
 	require.NoError(t, err)
 	err = cfg.LoadShelleyGenesisFromReader(
 		strings.NewReader(shelleyGenesisJSON),
@@ -2400,9 +2402,59 @@ func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 		BlockIndex:          0,
 		CertIndex:           0,
 	})
+	genesisKeyHash := lcommon.Blake2b224{}
+	copy(genesisKeyHash[:], bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size))
+	view := &LedgerView{ls: ls}
+	delegates, err := view.GenesisDelegateKeyHashes(5)
+	require.NoError(t, err)
+	require.Equal(t, []lcommon.Blake2b224{delegateHash}, delegates)
+	activeDelegate, found, err := view.GenesisDelegateForGenesisKey(
+		genesisKeyHash,
+		5,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, delegateHash, activeDelegate)
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.NoError(t, err)
+}
+
+func TestProtocolParameterUpdateWindowUsesShelleyStabilityWindow(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	genesisConfig := newGenesisDelegateShelleyGenesisCfg(
+		t,
+		strings.Repeat("aa", lcommon.Blake2b224Size),
+		strings.Repeat("bb", lcommon.Blake2b256Size),
+	)
+	shelleyGenesis := genesisConfig.ShelleyGenesis()
+	shelleyGenesis.SecurityParam = 1
+	shelleyGenesis.ActiveSlotsCoeff = cbor.Rat{Rat: big.NewRat(1, 5)}
+	ls.config.CardanoNodeConfig = genesisConfig
+	ls.consensus.Store(&consensusSnapshot{
+		epochCache: []models.Epoch{{
+			EpochId:       4,
+			StartSlot:     500,
+			LengthInSlots: 100,
+		}},
+	})
+
+	for _, tc := range []struct {
+		name     string
+		slot     uint64
+		noReturn uint64
+	}{
+		{name: "before boundary", slot: 569, noReturn: 570},
+		{name: "at boundary", slot: 570, noReturn: 570},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			epoch, noReturn, err := (&LedgerView{ls: ls}).ProtocolParameterUpdateWindow(tc.slot)
+			require.NoError(t, err)
+			require.Equal(t, uint64(4), epoch)
+			require.Equal(t, tc.noReturn, noReturn)
+		})
+	}
 }
 
 // seedPoolStakeSnapshot inserts a pool stake snapshot using the store interface.
@@ -4675,7 +4727,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 }
 
 // TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDelete
-// closes the marker delete's TOCTOU window (issue #3717 review / cubic P1). The
+// closes the marker delete's TOCTOU window. The
 // membership test in deletePersistedDeferredMarkers cannot be atomic with the
 // delete -- holding deferredHeaderValidationMu across the DB write would invert
 // the lock order against block apply and deadlock the node -- so a point
@@ -4864,4 +4916,1634 @@ func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
 		IsHeaderVerificationDeferred(err),
 		"an unresolvable overlay parameter set must not recycle the peer",
 	)
+}
+
+// TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover
+// mirrors the basic bootstrap scenario but exercises the header
+// verification path (advanceEpochCache → computeEpochNonceForSlot)
+// instead of the rollover path (calculateEpochNonce). The two paths
+// must agree: header verification of any block in the new epoch
+// uses the cached epoch-nonce computed by computeEpochNonceForSlot,
+// while the persisted epoch row written by processEpochRollover uses
+// calculateEpochNonce. Disagreement means peer headers verifying
+// against one nonce while we recompute another — the freeze pattern
+// in #2128.
+func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		snapTipSlot uint64 = 1010
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+	)
+
+	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
+	nonceAtPreCut := bytes.Repeat([]byte{0xbb}, 32)
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+
+	hashAtSnap := bytes.Repeat([]byte{0x10}, 32)
+	hashAtPreCut := bytes.Repeat([]byte{0x14}, 32)
+	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
+	prevHashAtSnap := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     snapTipSlot,
+			Hash:     hashAtSnap,
+			PrevHash: prevHashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     preCutSlot,
+			Hash:     hashAtPreCut,
+			PrevHash: hashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     postCutSlot,
+			Hash:     hashAtPostCut,
+			PrevHash: hashAtPreCut,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtSnap, snapTipSlot, importedNonce, true, txn,
+		); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+		)
+	}))
+
+	prevEpoch := models.Epoch{
+		EpochId:             100,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1000,
+		EraId:               eras.ConwayEraDesc.Id,
+		Nonce:               bytes.Repeat([]byte{0xee}, 32),
+		EvolvingNonce:       importedNonce,
+		CandidateNonce:      importedNonce,
+		LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.ConwayEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// Header verification path.
+	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
+		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+	require.NoError(t, err)
+
+	// Rollover path, run in a transaction (production behaviour).
+	var rNonce, rEvolving, rCandidate, rLab []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(
+			txn,
+			epochEnd,
+			eras.ConwayEraDesc,
+			prevEpoch,
+			nil,
+		)
+		rNonce = n
+		rEvolving = ev
+		rCandidate = c
+		rLab = lab
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+		"header-verification candidate must match rollover candidate. "+
+			"hv=%x, rollover=%x.", hvCandidate, rCandidate,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(rEvolving),
+		hex.EncodeToString(hvEvolving),
+		"header-verification evolving must match rollover evolving. "+
+			"hv=%x, rollover=%x.", hvEvolving, rEvolving,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(rNonce),
+		hex.EncodeToString(hvNonce),
+		"header-verification epoch nonce must match rollover epoch "+
+			"nonce. hv=%x, rollover=%x. Disagreement here is the "+
+			"#2128 freeze: peer headers pass one nonce, our cache "+
+			"verifies against another.", hvNonce, rNonce,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(rLab),
+		hex.EncodeToString(hvLab),
+		"header-verification labNonce must match rollover labNonce. "+
+			"hv=%x, rollover=%x.", hvLab, rLab,
+	)
+	// And separately confirm both paths produce the expected candidate
+	// (the last pre-cutoff block's stored nonce), just so a future
+	// change that breaks both in lock-step doesn't pass this test.
+	require.Equal(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(rCandidate),
+		"both paths must freeze candidate at last pre-cutoff block",
+	)
+}
+
+const (
+	forecastBoundaryEpoch      = uint64(4)
+	forecastByronEpochLength   = uint(21_600)
+	forecastShelleyEpochLength = uint(432_000)
+	forecastBoundaryStartSlot  = uint64(64_800)
+	forecastWithinEraStartSlot = uint64(43_200)
+)
+
+func newEpochCacheForecastLedger(
+	t *testing.T,
+	epoch models.Epoch,
+	transition hardfork.TransitionInfo,
+	configuredBoundary bool,
+) *LedgerState {
+	t.Helper()
+	cfg := newTestEraHistoryCfg(t)
+	cfg.ShelleyGenesisHash = strings.Repeat("01", 32)
+	if configuredBoundary {
+		enabled := true
+		boundary := forecastBoundaryEpoch
+		cfg.ExperimentalHardForksEnabled = &enabled
+		cfg.TestShelleyHardForkAtEpoch = &boundary
+	}
+	ls := &LedgerState{
+		currentEpoch:   epoch,
+		currentEra:     eras.ByronEraDesc,
+		epochCache:     []models.Epoch{epoch},
+		transitionInfo: transition,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger: slog.New(
+				slog.NewJSONHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+func TestAdvanceEpochCacheRejectsHardForkBoundary(t *testing.T) {
+	t.Parallel()
+
+	require.NotEqual(t, forecastByronEpochLength, forecastShelleyEpochLength,
+		"fixture must expose the previous-era length overlap")
+	lastByronEpoch := models.Epoch{
+		EpochId:       forecastBoundaryEpoch - 1,
+		StartSlot:     forecastBoundaryStartSlot,
+		LengthInSlots: forecastByronEpochLength,
+		SlotLength:    20_000,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+
+	for _, tc := range []struct {
+		name               string
+		transition         hardfork.TransitionInfo
+		configuredBoundary bool
+	}{
+		{
+			name:       "confirmed transition",
+			transition: hardfork.NewTransitionKnown(forecastBoundaryEpoch),
+		},
+		{
+			name:               "configured epoch trigger",
+			transition:         hardfork.NewTransitionUnknown(),
+			configuredBoundary: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := newEpochCacheForecastLedger(
+				t, lastByronEpoch, tc.transition, tc.configuredBoundary,
+			)
+
+			err := ls.advanceEpochCache()
+			require.ErrorContains(t, err, "hard-fork boundary")
+			require.ErrorIs(t, err, errEpochCacheForecastBoundary)
+			require.Len(t, ls.loadConsensusSnapshot().epochCache, 1,
+				"forecast must not publish a previous-era boundary row")
+
+			_, err = ls.epochForSlot(
+				lastByronEpoch.StartSlot + uint64(lastByronEpoch.LengthInSlots),
+			)
+			require.Error(t, err,
+				"post-fork slot must remain uncovered until full rollover")
+		})
+	}
+}
+
+func TestAdvanceEpochCachePreservesWithinEraForecast(t *testing.T) {
+	t.Parallel()
+
+	lastByronEpoch := models.Epoch{
+		EpochId:       forecastBoundaryEpoch - 2,
+		StartSlot:     forecastWithinEraStartSlot,
+		LengthInSlots: forecastByronEpochLength,
+		SlotLength:    20_000,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls := newEpochCacheForecastLedger(
+		t,
+		lastByronEpoch,
+		hardfork.NewTransitionKnown(forecastBoundaryEpoch),
+		true,
+	)
+
+	require.NoError(t, ls.advanceEpochCache())
+	cache := ls.loadConsensusSnapshot().epochCache
+	require.Len(t, cache, 2)
+	forecast := cache[1]
+	require.Equal(t, forecastBoundaryEpoch-1, forecast.EpochId)
+	require.Equal(t, eras.ByronEraDesc.Id, forecast.EraId)
+	require.Equal(t, forecastByronEpochLength, forecast.LengthInSlots)
+
+	got, err := ls.epochForSlot(forecast.StartSlot)
+	require.NoError(t, err)
+	require.Equal(t, forecast, got)
+}
+
+func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
+	t.Parallel()
+
+	lastByronEpoch := models.Epoch{
+		EpochId:       forecastBoundaryEpoch - 1,
+		StartSlot:     forecastBoundaryStartSlot,
+		LengthInSlots: forecastByronEpochLength,
+		SlotLength:    20_000,
+		EraId:         eras.ByronEraDesc.Id,
+	}
+	ls := newEpochCacheForecastLedger(
+		t,
+		lastByronEpoch,
+		hardfork.NewTransitionKnown(forecastBoundaryEpoch),
+		false,
+	)
+
+	_, err := ls.headerVerificationEpoch(
+		lastByronEpoch.StartSlot+uint64(lastByronEpoch.LengthInSlots),
+		true,
+	)
+	require.ErrorContains(t, err, "hard-fork boundary")
+	require.ErrorIs(t, err, errHeaderVerificationDeferred,
+		"boundary wait must not be classified as an honest-peer fault")
+	require.Len(t, ls.loadConsensusSnapshot().epochCache, 1)
+}
+
+// TestEpochNonceUsesCarriedLastEpochBlockNonce verifies the cardano-ledger
+// epoch-nonce assembly (#2734): the epoch nonce mixes the frozen candidate with
+// the CARRIED last-block-of-previous-epoch nonce
+// (prevEpoch.LastEpochBlockNonce == cardano praosStateLastEpochBlockNonce),
+// NOT the hash of the last block of the epoch being closed. The closing epoch's
+// last block hash is stored on the new epoch record for use at the NEXT
+// boundary.
+//
+// Confirmed against preview mainnet: for the 1347->1348 boundary, koios
+// eta_1348 = blake2b(frozenCandidate || epoch1347.LastEpochBlockNonce), where
+// epoch1347.LastEpochBlockNonce is the last block of epoch 1346 (the carried
+// value), not the last block of epoch 1347.
+func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+	)
+
+	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
+	nonceAtPreCut := bytes.Repeat([]byte{0xbb}, 32) // frozen candidate
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+	carriedLab := bytes.Repeat(
+		[]byte{0xfa},
+		32,
+	) // = last block of the PREVIOUS epoch
+
+	hashAtPreCut := bytes.Repeat([]byte{0x14}, 32)
+	hashAtPostCut := bytes.Repeat(
+		[]byte{0x70},
+		32,
+	) // last block of the CLOSING epoch
+	prevHashAtPreCut := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
+			Cbor: []byte{0x80}, Number: 1, Type: conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot: postCutSlot, Hash: hashAtPostCut, PrevHash: hashAtPreCut,
+			Cbor: []byte{0x80}, Number: 2, Type: conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
+	}))
+
+	prevEpoch := models.Epoch{
+		EpochId:             100,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1000,
+		EraId:               eras.ConwayEraDesc.Id,
+		Nonce:               bytes.Repeat([]byte{0xee}, 32),
+		EvolvingNonce:       importedNonce,
+		CandidateNonce:      importedNonce,
+		LastEpochBlockNonce: carriedLab,
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.ConwayEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	hvNonce, _, hvCandidate, hvLab, err :=
+		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+	require.NoError(t, err)
+
+	var rNonce, rCandidate, rLab []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, _, c, lab, err := ls.calculateEpochNonce(
+			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
+			nil,
+		)
+		rNonce, rCandidate, rLab = n, c, lab
+		return err
+	}))
+
+	// Correct assembly: eta = candidate ⭒ carriedLab (prevEpoch.LastEpochBlockNonce).
+	wantEta, err := lcommon.CalculateEpochNonce(nonceAtPreCut, carriedLab, nil)
+	require.NoError(t, err)
+	// Old (buggy) assembly: eta = candidate ⭒ last block of closing epoch.
+	oldEta, err := lcommon.CalculateEpochNonce(
+		nonceAtPreCut,
+		hashAtPostCut,
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.Equal(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(
+			rCandidate,
+		),
+		"candidate is the frozen pre-cutoff nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(wantEta.Bytes()),
+		hex.EncodeToString(rNonce),
+		"epoch nonce must mix the candidate with the CARRIED lab, not the closing epoch's last block",
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(oldEta.Bytes()),
+		hex.EncodeToString(rNonce),
+		"epoch nonce must NOT use the closing epoch's own last block (the #2734 bug)",
+	)
+	// The carried lab stored for the NEXT boundary is the PARENT hash of the
+	// closing epoch's last block (prevHashToNonce(lastBlock.prevHash) ==
+	// hashAtPreCut, the post-cutoff block's PrevHash), NOT the last block's own
+	// hash — a one-block Praos lag (#2734 eta_1349 root cause).
+	require.Equal(
+		t,
+		hex.EncodeToString(hashAtPreCut),
+		hex.EncodeToString(rLab),
+		"stored lastEpochBlockNonce must be the closing epoch's last-block PrevHash, for the next boundary",
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(hashAtPostCut),
+		hex.EncodeToString(rLab),
+		"stored lastEpochBlockNonce must NOT be the closing epoch's last block's own hash",
+	)
+
+	// The eager header-verification path must agree with the rollover path.
+	require.Equal(t, hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce),
+		"eager epoch nonce must match rollover")
+	require.Equal(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+		"eager candidate must match rollover",
+	)
+	require.Equal(t, hex.EncodeToString(rLab), hex.EncodeToString(hvLab),
+		"eager lab must match rollover")
+}
+
+// TestEpochNonceGenesisEdgeUsesNeutralLab pins the from-genesis initialization
+// of the carried lastEpochBlockNonce (#2734). When the initial epoch is created
+// (no prior nonce), the epoch/evolving/candidate nonces are the genesis nonce
+// but the carried lab is Neutral (nil) — NOT the genesis nonce. cardano-ledger
+// initializes praosStateLastEpochBlockNonce to NeutralNonce at genesis
+// (Cardano.Ledger.Shelley.API.Protocol.initialChainDepState: csLabNonce =
+// NeutralNonce; Cardano.Protocol.TPraos.BHeader.prevHashToNonce GenesisHash =
+// NeutralNonce), so the FIRST from-genesis boundary uses the identity
+// (eta_1 = candidate ⭒ NeutralNonce = candidate). Devnet confirmed cardano's
+// epoch-1 epochNonce == its candidate. Seeding the lab with the genesis nonce
+// instead combines and diverges at the first boundary. The Mithril bootstrap
+// path is unaffected (bootstrap epoch imports a non-nil lastEpochBlockNonce and
+// never takes this branch).
+func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+	// ShelleyGenesisHash set by the helper is 32 bytes of 0x11.
+	genesisHash := bytes.Repeat([]byte{0x11}, 32)
+
+	// Initial epoch: no nonce/evolving/candidate yet (from-genesis creation).
+	initialEpoch := models.Epoch{
+		EpochId: 0,
+		EraId:   eras.ConwayEraDesc.Id,
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.ConwayEraDesc,
+		currentEpoch: initialEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
+		ls.computeEpochNonceForSlot(500, initialEpoch)
+	require.NoError(t, err)
+
+	var rNonce, rEvolving, rCandidate, rLab []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(
+			txn, 500, eras.ConwayEraDesc, initialEpoch,
+			nil,
+		)
+		rNonce, rEvolving, rCandidate, rLab = n, ev, c, lab
+		return err
+	}))
+
+	// Epoch/evolving/candidate are the genesis nonce for the initial epoch.
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rNonce),
+		"initial epoch nonce is the genesis nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rEvolving),
+		"initial evolving nonce is the genesis nonce",
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(genesisHash),
+		hex.EncodeToString(rCandidate),
+		"initial candidate nonce is the genesis nonce",
+	)
+	// The key #2734 assertion: the carried lab is Neutral (nil), NOT the genesis
+	// nonce, so the first from-genesis boundary uses the identity.
+	require.Empty(
+		t,
+		rLab,
+		"initial carried lastEpochBlockNonce must be Neutral (nil), not the genesis nonce",
+	)
+
+	// The eager header-verification path must agree with the rollover path.
+	require.Equal(t, hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce))
+	require.Equal(
+		t,
+		hex.EncodeToString(rEvolving),
+		hex.EncodeToString(hvEvolving),
+	)
+	require.Equal(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(hvCandidate),
+	)
+	require.Empty(t, hvLab,
+		"eager path initial carried lab must also be Neutral (nil)")
+}
+
+// TestComputeEpochNonceForSlotFoldsExtraEntropy covers the header-verification
+// path (advanceEpochCache -> computeEpochNonceForSlot), which computes the new
+// epoch's nonce speculatively, before the rollover enacts that epoch's
+// protocol parameters. The extraEntropy it must fold therefore comes from the
+// pending update submitted in the previous epoch, exactly as cardano-ledger's
+// TICKF forecast supplies it to TICKN.
+func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+		prevEpochID uint64 = 258
+	)
+
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	frozenCandidate := mustDecodeHex(t, mainnetEpoch259Candidate)
+	carriedLab := mustDecodeHex(t, mainnetEpoch259Lab)
+
+	importedNonce := mustDecodeHex(t, mainnetEpoch259Lab)
+	nonceAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	hashAtPreCut := mustDecodeHex(t, mainnetEpoch259Candidate)
+	hashAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	prevHashAtPreCut := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
+			Cbor: []byte{0x80}, Number: 1, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot: postCutSlot, Hash: hashAtPostCut, PrevHash: hashAtPreCut,
+			Cbor: []byte{0x80}, Number: 2, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, frozenCandidate, false, txn); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
+	}))
+
+	// Parameters in effect for the ending epoch: no extra entropy yet.
+	_, baseCbor := maryPParamsWithExtraEntropy(t, nil)
+	require.NoError(t, db.SetPParams(
+		baseCbor, epochStart, prevEpochID, eras.MaryEraDesc.Id, nil,
+	))
+
+	// The genesis-key update proposal submitted during the ending epoch, which
+	// the rollover will enact as the new epoch's parameters.
+	entropyNonce := lcommon.Nonce{Type: lcommon.NonceTypeNonce}
+	copy(entropyNonce.Value[:], entropy)
+	// A parameter update is a sparse map. Encoding the struct also serializes
+	// unset rational fields as null, which the classic update decoder rejects.
+	updateCbor, err := cbor.Encode(map[uint]any{
+		13: entropyNonce,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01}, updateCbor, epochStart+1, prevEpochID, nil,
+	))
+
+	prevEpoch := models.Epoch{
+		EpochId:             prevEpochID,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1000,
+		EraId:               eras.MaryEraDesc.Id,
+		Nonce:               mustDecodeHex(t, mainnetEpoch259Lab),
+		EvolvingNonce:       importedNonce,
+		CandidateNonce:      importedNonce,
+		LastEpochBlockNonce: carriedLab,
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.MaryEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	nonce, _, candidate, _, err := ls.computeEpochNonceForSlot(
+		epochEnd, prevEpoch,
+	)
+	require.NoError(t, err)
+	// Guard the fixture: the frozen candidate must be the mainnet value, or
+	// the nonce comparison below would be testing arithmetic on other inputs.
+	require.Equal(
+		t,
+		frozenCandidate,
+		candidate,
+		"candidate nonce must freeze at the pre-cutoff block nonce",
+	)
+
+	withoutEntropy, err := lcommon.CalculateEpochNonce(
+		frozenCandidate, carriedLab, nil,
+	)
+	require.NoError(t, err)
+	require.NotEqual(
+		t,
+		withoutEntropy.Bytes(),
+		nonce,
+		"epoch nonce must not be the extraEntropy-free value",
+	)
+	require.Equal(
+		t,
+		mainnetEpoch259Nonce,
+		hex.EncodeToString(nonce),
+		"epoch nonce must fold the pending extraEntropy update",
+	)
+}
+
+// TestEpochNonce_SnapshotTipPastCutoff covers the one Mithril-bootstrap
+// shape the existing #2128 suite does not: a snapshot whose tip slot lies
+// PAST the candidate-freeze cutoff of its epoch. In that shape the imported
+// epoch row carries CandidateNonce != EvolvingNonce — psCandidateNonce
+// froze at the cutoff (before the tip) while psEvolvingNonce kept rolling
+// to the tip. The existing tests always set the two equal (snapshot taken
+// before the cutoff), so this exercises the distinct-values path.
+//
+// Expected: the bootstrap epoch's rollover must return candidate equal to
+// the imported (frozen) CandidateNonce — NOT the imported EvolvingNonce,
+// and NOT a value re-derived from a pre-cutoff block (there are none with
+// stored nonces; pre-cutoff blocks were imported as immutable). Both the
+// rollover path (calculateEpochNonce) and the header-verification path
+// (computeEpochNonceForSlot) must agree, because the first header of the
+// new epoch is verified against the eagerly-cached value.
+func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	// k=6, f=0.4 -> 4k/f = 60. Epoch [1000,1075), cutoff = 1075-60 = 1015.
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		cutoffSlot  uint64 = 1015
+		preImpSlot  uint64 = 1010 // pre-cutoff, imported immutable (no nonce row)
+		snapTipSlot uint64 = 1040 // snapshot tip: PAST the cutoff
+		postCutSlot uint64 = 1070 // last block of epoch (post-import)
+	)
+
+	// Imported tip-time evolving nonce (psEvolvingNonce at slot 1040).
+	importedEvolving := bytes.Repeat([]byte{0xaa}, 32)
+	// Imported frozen candidate (psCandidateNonce, frozen at the cutoff
+	// well before the tip). Distinct from evolving on purpose.
+	importedCandidate := bytes.Repeat([]byte{0xdd}, 32)
+	// Per-block evolving nonce stored by post-import processing.
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+
+	hashPreImp := bytes.Repeat([]byte{0x10}, 32)
+	hashAtSnap := bytes.Repeat([]byte{0x40}, 32)
+	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
+	prevHashPreImp := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		// Pre-cutoff block imported as immutable: present in the blob
+		// store, but with NO block_nonce row (importTip only checkpoints
+		// the tip).
+		if err := db.BlockCreate(models.Block{
+			Slot:     preImpSlot,
+			Hash:     hashPreImp,
+			PrevHash: prevHashPreImp,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// Snapshot tip block (past the cutoff).
+		if err := db.BlockCreate(models.Block{
+			Slot:     snapTipSlot,
+			Hash:     hashAtSnap,
+			PrevHash: hashPreImp,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// Post-import block.
+		if err := db.BlockCreate(models.Block{
+			Slot:     postCutSlot,
+			Hash:     hashAtPostCut,
+			PrevHash: hashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// importTip checkpoint at the snapshot tip = imported evolving.
+		if err := db.SetBlockNonce(
+			hashAtSnap, snapTipSlot, importedEvolving, true, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+		)
+	}))
+
+	prevEpoch := models.Epoch{
+		EpochId:             100,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1000,
+		EraId:               eras.ConwayEraDesc.Id,
+		Nonce:               bytes.Repeat([]byte{0xee}, 32),
+		EvolvingNonce:       importedEvolving,
+		CandidateNonce:      importedCandidate,
+		LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.ConwayEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	// Header-verification (eager) path.
+	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
+		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
+	require.NoError(t, err)
+
+	// Rollover (authoritative) path.
+	var rNonce, rEvolving, rCandidate, rLab []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, ev, c, lab, err := ls.calculateEpochNonce(
+			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
+			nil,
+		)
+		rNonce, rEvolving, rCandidate, rLab = n, ev, c, lab
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(importedCandidate),
+		hex.EncodeToString(rCandidate),
+		"with the snapshot tip past the cutoff (tip=%d, cutoff=%d), the "+
+			"frozen candidate is the imported psCandidateNonce. Got %x. "+
+			"If this equals importedEvolving (0xaa...) the computation "+
+			"confused evolving for candidate.",
+		snapTipSlot, cutoffSlot, rCandidate,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPostCut),
+		hex.EncodeToString(rEvolving),
+		"evolving must equal the last block's stored nonce (slot %d). Got %x.",
+		postCutSlot, rEvolving,
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(rCandidate),
+		hex.EncodeToString(rEvolving),
+		"candidate (frozen pre-tip) and evolving (at tip) must differ",
+	)
+
+	// Eager path must match rollover, or the first new-epoch header is
+	// verified against a nonce the rollover later disagrees with -> VRF
+	// failure at turnover.
+	require.Equal(t,
+		hex.EncodeToString(rCandidate), hex.EncodeToString(hvCandidate),
+		"eager candidate must match rollover candidate")
+	require.Equal(t,
+		hex.EncodeToString(rEvolving), hex.EncodeToString(hvEvolving),
+		"eager evolving must match rollover evolving")
+	require.Equalf(t,
+		hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce),
+		"eager epoch nonce must match rollover epoch nonce. hv=%x rollover=%x",
+		hvNonce, rNonce)
+	require.Equal(t,
+		hex.EncodeToString(rLab), hex.EncodeToString(hvLab),
+		"eager labNonce must match rollover labNonce")
+}
+
+func TestGenesisOverlayRejectsUnavailableProtocolParams(t *testing.T) {
+	t.Parallel()
+
+	for _, available := range []bool{false, true} {
+		name := "unavailable"
+		if available {
+			name = "available"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := newGenesisDelegateShelleyGenesisCfg(t,
+				strings.Repeat("22", 28), strings.Repeat("33", 32))
+			epoch := models.Epoch{
+				EpochId: 0, StartSlot: 0, LengthInSlots: 75,
+				EraId: eras.BabbageEraDesc.Id,
+			}
+			ls := &LedgerState{
+				currentEra: eras.BabbageEraDesc, currentEpoch: epoch,
+				epochCache: []models.Epoch{epoch},
+				config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+			}
+			if available {
+				ls.currentPParams = &babbage.BabbageProtocolParameters{}
+			}
+			ls.publishSnapshotsLocked()
+			handled, err := ls.verifyGenesisDelegateHeader(
+				&mockBabbageBlock{slot: 50}, false)
+			if available {
+				require.NoError(t, err)
+				require.False(t, handled,
+					"Babbage parameters correctly disable the genesis overlay")
+				return
+			}
+			require.ErrorContains(t, err, "protocol parameters unavailable")
+			require.True(t, handled,
+				"unavailable parameters must not fall through as a non-overlay slot")
+		})
+	}
+}
+
+// TestHeaderVerificationEpoch_ForecastBuildFailureDeferred pins the
+// classification of a hard-fork summary that cannot be BUILT: the era shape,
+// the genesis behind it, and the epoch cache are local inputs, so the failure
+// says nothing about the header. ouroboros/chainsync.go routes every
+// non-deferred header error to ConnectionRecycleRequestedEvent, so returning
+// the build failure unwrapped recycles the honest peer that served the header
+// and stalls the node at every epoch boundary.
+func TestHeaderVerificationEpoch_ForecastBuildFailureDeferred(t *testing.T) {
+	t.Parallel()
+
+	ls := newShelleyOnlyForecastLedger(t)
+
+	// Confirm the premise: the config genuinely cannot build a summary.
+	_, sumErr := ls.HardForkSummary()
+	require.Error(t, sumErr, "Shelley-only config must not build a shape")
+
+	// A slot past the cached epoch forces the summary path.
+	_, err := ls.headerVerificationEpoch(532_000, false)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errHeaderVerificationDeferred,
+		"an unbuildable forecast must not be reported as a peer fault")
+	require.True(t, IsHeaderVerificationDeferred(err))
+}
+
+// TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader proves that a
+// header whose crypto is valid and whose leader eligibility can already be
+// checked against local ledger state passes with no error -- the baseline
+// "fully verified" case chain selection must count toward Genesis density.
+func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	seedBlockPoolRegistration(t, db, tb.block)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	// Pool owns 100% of stake, matching createTestBlock's threshold
+	// assumption, at the epoch-5 block's "mark" snapshot (epoch 4).
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.NoError(
+		t,
+		err,
+		"a header with valid crypto and confirmed leader eligibility must verify",
+	)
+}
+
+// TestValidateChainSelectionHeaderCryptoRejectsTamperedProof proves that a
+// header with an internally-invalid VRF proof is a definite (non-deferred)
+// failure, even while local ledger state has not caught up to the header's
+// slot. An invalid header must never be counted toward Genesis density
+// regardless of local sync state (dingo #3517).
+func TestValidateChainSelectionHeaderCryptoRejectsTamperedProof(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperVRFProof)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// Behind the block's slot, same as the deferred-eligibility fixtures
+	// below -- proves a real crypto failure is not masked by state-defer
+	// tolerance.
+	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.False(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"a tampered VRF proof must be a definite failure, not deferred",
+	)
+}
+
+// TestValidateChainSelectionHeaderCryptoDefersAheadOfLocalState proves that a
+// header this node cannot yet confirm leader eligibility for -- because local
+// ledger application has not reached its slot -- is reported as deferred, not
+// rejected. This is the fast-sync/Genesis-bootstrap case the fix must
+// preserve: an honest peer legitimately racing ahead of local ledger apply
+// must still be eligible for chain-selection density.
+func TestValidateChainSelectionHeaderCryptoDefersAheadOfLocalState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"a header ahead of local ledger state must defer, not fail closed",
+	)
+}
+
+// TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce is a
+// regression test for a bot-review finding: a cached epoch entry that
+// genuinely covers the header's slot but has no published nonce yet (a
+// post-Byron epoch transiently, or Byron always) must defer, not hard-fail.
+// ShouldVerifyChainSelectionHeaderCrypto now returns true for every
+// non-Mithril slot (see TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce),
+// so this case is reachable in practice: without IsHeaderVerificationDeferred
+// also recognizing errEpochNonceUnavailable, an honest peer whose header
+// simply arrived before the local nonce was published would be treated as
+// invalid and have its connection recycled.
+func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
+	t *testing.T,
+) {
+	const targetSlot = uint64(500)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    1_000,
+			LengthInSlots: 1_000,
+			EraId:         eras.ConwayEraDesc.Id,
+			Nonce:         nil,
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	err := ls.ValidateChainSelectionHeaderCrypto(
+		&mockBabbageBlock{slot: targetSlot},
+	)
+	require.Error(t, err)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"a covered epoch with no published nonce yet must defer, not "+
+			"hard-fail an honest header",
+	)
+}
+
+// TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate proves that
+// ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
+// the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),
+// so a competing peer's header is exempt under exactly the same condition the
+// applied chain already is. Issue #3528: a coarse ValidateHistorical=false
+// historical-sync toggle must not exempt header crypto -- only a slot a
+// Mithril certificate already covers may skip it, regardless of
+// validationEnabled.
+func TestShouldVerifyChainSelectionHeaderCryptoMatchesChainsyncGate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	slot := tb.block.SlotNumber()
+
+	assert.True(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
+		"verification must run once the epoch nonce is cached, "+
+			"independent of validationEnabled",
+	)
+
+	ls.validationEnabled = true
+	ls.publishSnapshotsLocked()
+	assert.True(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
+		"verification must still run once live validation is enabled and the "+
+			"epoch nonce is cached",
+	)
+
+	ls.mithrilLedgerSlot = slot
+	ls.publishSnapshotsLocked()
+	assert.False(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(slot),
+		"a Mithril-covered slot must be exempt, matching the applied-chain gate",
+	)
+}
+
+// TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce is a
+// regression test for a bot-review finding: ShouldVerifyChainSelectionHeaderCrypto
+// used to delegate to shouldEnforceBlockPipelineCrypto, which also returns
+// false when the epoch nonce isn't cached yet -- a condition the chainsync
+// header-queue path can safely retry later, but chain selection cannot (a
+// header it skips verifying is never re-verified). That let an unverified
+// peer header influence Genesis density/corroboration silently, with no
+// later check. It must instead return true for any non-Mithril slot and let
+// ValidateChainSelectionHeaderCrypto's own deferred-error handling decide,
+// which is safe to call unconditionally.
+func TestShouldVerifyChainSelectionHeaderCryptoIgnoresMissingNonce(
+	t *testing.T,
+) {
+	const futureSlot = uint64(999_999)
+	ls := &LedgerState{
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(500, []byte("tip"))},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	require.False(
+		t,
+		ls.hasCachedEpochNonceForSlot(futureSlot),
+		"test setup: this slot's epoch nonce must not be cached",
+	)
+	assert.True(
+		t,
+		ls.ShouldVerifyChainSelectionHeaderCrypto(futureSlot),
+		"a missing epoch nonce must not exempt a non-Mithril slot from "+
+			"verification -- ValidateChainSelectionHeaderCrypto must be given "+
+			"the chance to return a deferred error instead",
+	)
+
+	err := ls.ValidateChainSelectionHeaderCrypto(
+		&mockBabbageBlock{slot: futureSlot},
+	)
+	require.Error(t, err)
+	assert.True(
+		t,
+		IsHeaderVerificationDeferred(err),
+		"missing epoch data must defer, not silently pass or hard-reject",
+	)
+}
+
+// prunedSnapshotFixture builds a ledger that has advanced to epoch 8 while the
+// block's mark snapshot (epoch 4) has been pruned by the default 3-epoch
+// pool-snapshot retention window, the way cleanupOldSnapshots leaves it.
+func prunedSnapshotFixture(
+	t *testing.T,
+	tb *testBlockResult,
+	withSummary bool,
+	onChain bool,
+) *LedgerState {
+	t.Helper()
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	pool := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, pool[:], 1_000_000_000)
+	if withSummary {
+		require.NoError(t, db.Metadata().SaveEpochSummary(&models.EpochSummary{
+			Epoch:            4,
+			TotalActiveStake: types.Uint64(1_000_000_000),
+			TotalPoolCount:   1,
+			SnapshotReady:    true,
+		}, nil))
+	}
+	seedBlockPoolRegistration(t, db, tb.block)
+	require.NoError(
+		t,
+		db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(5, nil),
+	)
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	hash := tb.block.Header().Hash().Bytes()
+	if !onChain {
+		// A different block at the same slot: the header is on a fork.
+		hash = append([]byte{0xff}, hash[1:]...)
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+		Slot:        tb.block.SlotNumber(),
+		Hash:        hash,
+		BlockNumber: 1,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}}))
+	ls.chain = cm.PrimaryChain()
+
+	ls.currentEpoch = models.Epoch{EpochId: 8}
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{
+		Slot: tb.block.SlotNumber() + 1_000,
+	}}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+// A header the node already applied must not be re-judged against pool
+// snapshots the retention window has since pruned.
+func TestValidateChainSelectionHeaderCryptoAppliedHeaderSurvivesPruning(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, withSummary := range []bool{false, true} {
+		name := "no-summary"
+		if withSummary {
+			name = "summary"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{30}, 0, tamperNone)
+			ls := prunedSnapshotFixture(t, tb, withSummary, true)
+			err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// A block can join the chain with its state checks deferred until the ledger
+// applies it, so holding the point is not enough to skip verification while
+// the ledger tip is still behind the header's slot.
+func TestValidateChainSelectionHeaderCryptoChainHeldUnappliedHeaderStillVerified(
+	t *testing.T,
+) {
+	t.Parallel()
+	tb := createTestBlock(t, [32]byte{34}, 0, tamperVRFProof)
+	ls := prunedSnapshotFixture(t, tb, true, true)
+	ls.Lock()
+	ls.currentTip = ochainsync.Tip{Point: ocommon.Point{
+		Slot: tb.block.SlotNumber() - 1,
+	}}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err), "%v", err)
+}
+
+// A header on a fork is still verified, but pruned history is "cannot
+// evaluate" (deferred), not proof the pool is absent.
+func TestValidateChainSelectionHeaderCryptoForkHeaderPrunedSnapshotDefers(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, withSummary := range []bool{false, true} {
+		name := "no-summary"
+		if withSummary {
+			name = "summary"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{31}, 0, tamperNone)
+			ls := prunedSnapshotFixture(t, tb, withSummary, false)
+			err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+			require.Error(t, err)
+			assert.True(
+				t,
+				IsHeaderVerificationDeferred(err),
+				"pruned snapshot must defer, not reject: %v",
+				err,
+			)
+		})
+	}
+}
+
+// Header crypto is still checked for a header that is not on the chain, even
+// when its stake snapshot is pruned.
+func TestValidateChainSelectionHeaderCryptoForkHeaderStillVerified(
+	t *testing.T,
+) {
+	t.Parallel()
+	tb := createTestBlock(t, [32]byte{32}, 0, tamperVRFProof)
+	ls := prunedSnapshotFixture(t, tb, true, false)
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err), "%v", err)
+}
+
+// A pool absent from a populated, unpruned snapshot is still a hard
+// rejection.
+func TestValidateChainSelectionHeaderCryptoPoolAbsentFromPopulatedSnapshotRejects(
+	t *testing.T,
+) {
+	t.Parallel()
+	tb := createTestBlock(t, [32]byte{33}, 0, tamperNone)
+	ls := prunedSnapshotFixture(t, tb, true, false)
+	other := make([]byte, 28)
+	other[0] = 0xee
+	seedPoolStakeSnapshot(t, ls.db, 4, other, 1_000_000_000)
+	err := ls.ValidateChainSelectionHeaderCrypto(tb.block.Header())
+	require.Error(t, err)
+	assert.False(t, IsHeaderVerificationDeferred(err), "%v", err)
+	assert.Contains(t, err.Error(), "has no stake in epoch 4 snapshot")
+}
+
+// TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey verifies the
+// consensus-critical binding of a block's VRF verification key to the producing
+// pool's on-chain registered VRF key. The VRF proof is validated only against
+// the key carried in the header, so a block whose VRF key is not the one the
+// pool registered must be rejected — otherwise an attacker can grind VRF keys
+// offline and win slots regardless of stake. With no pool registration present
+// for the block's issuer, the block's VRF key cannot match any registered key,
+// so verification must fail (it must never pass by default).
+func TestVerifyRegisteredVrfKey_RejectsUnregisteredOrMismatchedKey(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	// No pool registration seeded for this block's issuer, so the header's VRF
+	// key is not bound to any registered VRF key.
+	err := ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block))
+	require.Error(
+		t,
+		err,
+		"a block whose VRF key is not the issuer pool's registered VRF key must be rejected",
+	)
+	// The rejection is specifically about the VRF key / pool registration, not
+	// some unrelated failure.
+	msg := err.Error()
+	assert.True(
+		t,
+		containsAny(
+			msg,
+			"VRF key",
+			"registered VRF key",
+			"registration lookup",
+		),
+		"rejection should cite the VRF-key registration binding, got: %s",
+		msg,
+	)
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, vrfKey)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		"INSERT INTO pool (pool_key_hash, vrf_key_hash) VALUES (?, ?)",
+		poolKeyHash[:],
+		lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	)
+	require.NoError(t, err)
+
+	err = ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block))
+	require.Error(
+		t,
+		err,
+		"a denormalized pool row without a registration must not bind "+
+			"the header VRF key",
+	)
+	assert.Contains(t, err.Error(), "registered VRF key hash unavailable")
+}
+
+// TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch
+// pins the reference behaviour for a pool that has only ever registered once,
+// inside the epoch the electing snapshot was captured in.
+//
+// cardano-ledger's POOL rule inserts a first registration into psStakePools
+// immediately and defers only a re-registration through
+// psFutureStakePoolParams (Shelley/Rules/Pool.hs), so such a pool is already
+// in psStakePools when SNAP runs and the snapshot carries its VRF key. The
+// parameter cutoff predates that registration, so resolving strictly at the
+// cutoff finds nothing — and rejecting there would reject a canonical block
+// from every pool for its first epochs, which is what this test previously
+// asserted.
+func TestVerifyRegisteredVrfKeyAcceptsAFirstRegistrationInsideTheCapturedEpoch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	blockSlot := tb.block.SlotNumber()
+	ls.epochCache = []models.Epoch{
+		{EpochId: 4, StartSlot: 0, LengthInSlots: uint(blockSlot)},
+		{EpochId: 5, StartSlot: blockSlot, LengthInSlots: 1_000_000},
+	}
+	ls.publishSnapshotsLocked()
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  lcommon.Blake2b256Hash(vrfKey).Bytes(),
+			AddedSlot:   blockSlot,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        4,
+			SnapshotType: models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:  poolKeyHash[:],
+			TotalStake:   1,
+			CapturedSlot: blockSlot,
+		},
+		nil,
+	))
+
+	require.NoError(t, ls.verifyRegisteredVrfKey(tb.block, 5),
+		"a pool whose only registration lands inside the captured epoch is "+
+			"in psStakePools when SNAP runs, so the snapshot carries its key")
+}
+
+// TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch is the
+// positive-and-mismatch counterpart to the unregistered-pool case: it proves
+// the binding accepts a block whose header VRF key hashes to the pool's
+// registered VRF key hash, and rejects one whose does not. The VRF proof is
+// only ever validated against the header-carried key, so this equality is the
+// sole barrier preventing an attacker from registering with one VRF key and
+// producing blocks with a different, offline-ground key.
+func TestVerifyRegisteredVrfKey_AcceptsMatchingKeyRejectsMismatch(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// --- Matching registered VRF key is accepted ---
+	tbMatch := createTestBlock(t, [32]byte{72}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tbMatch.epochNonce)
+
+	matchVrfKey, ok, err := headerVrfKeyFromBodyCbor(tbMatch.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, matchVrfKey)
+
+	matchPoolKeyHash := tbMatch.block.IssuerVkey().Hash()
+	seedPoolRegistration(
+		t,
+		db,
+		matchPoolKeyHash[:],
+		lcommon.Blake2b256Hash(matchVrfKey).Bytes(),
+	)
+
+	require.NoError(
+		t,
+		ls.verifyRegisteredVrfKey(
+			tbMatch.block,
+			blockEpochId(t, ls, tbMatch.block),
+		),
+		"block whose header VRF key hashes to the pool's registered "+
+			"VRF key hash must be accepted",
+	)
+
+	// --- Mismatched registered VRF key is rejected ---
+	tbMismatch := createTestBlock(t, [32]byte{73}, 0, tamperNone)
+	mismatchVrfKey, ok, err := headerVrfKeyFromBodyCbor(
+		tbMismatch.block.Header(),
+	)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	wrongVrfKeyHash := make([]byte, len(lcommon.Blake2b256{}))
+	for i := range wrongVrfKeyHash {
+		wrongVrfKeyHash[i] = 0xAB
+	}
+	// Guard against an accidental collision with the block's real VRF key hash.
+	require.NotEqual(
+		t,
+		lcommon.Blake2b256Hash(mismatchVrfKey).Bytes(),
+		wrongVrfKeyHash,
+	)
+
+	mismatchPoolKeyHash := tbMismatch.block.IssuerVkey().Hash()
+	seedPoolRegistration(t, db, mismatchPoolKeyHash[:], wrongVrfKeyHash)
+
+	err = ls.verifyRegisteredVrfKey(
+		tbMismatch.block,
+		blockEpochId(t, ls, tbMismatch.block),
+	)
+	require.Error(
+		t,
+		err,
+		"block whose header VRF key does not match the registered "+
+			"VRF key must be rejected",
+	)
+	assert.Contains(t, err.Error(), "VRF key does not match")
+}
+
+func TestVerifyRegisteredVrfKey_AcceptsRetiredPoolRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, vrfKey)
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolRegistration(
+		t,
+		db,
+		poolKeyHash[:],
+		lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	)
+
+	require.NoError(t, db.SetEpoch(
+		0,
+		0,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		1_000,
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		2_000,
+		2,
+		nil,
+		nil,
+		nil,
+		nil,
+		0,
+		1,
+		1_000,
+		nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: 2_000,
+			Hash: make([]byte, 32),
+		},
+		BlockNumber: 2,
+	}, nil))
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var poolID uint
+	require.NoError(t, raw.QueryRow(
+		"SELECT id FROM pool WHERE pool_key_hash = ?",
+		poolKeyHash[:],
+	).Scan(&poolID))
+	_, err = raw.Exec(`
+INSERT INTO pool_retirement (pool_id, pool_key_hash, epoch, added_slot)
+VALUES (?, ?, 2, 2)`,
+		poolID, poolKeyHash[:],
+	)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
+		"registered VRF-key binding must not depend on current-tip "+
+			"active pool filtering",
+	)
+}
+
+func TestVerifyRegisteredVrfKey_UsesLatestRegistrationBeforePoolRowHash(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{75}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotEmpty(t, vrfKey)
+	registeredVrfHash := lcommon.Blake2b256Hash(vrfKey).Bytes()
+
+	staleVrfHash := make([]byte, len(lcommon.Blake2b256{}))
+	for i := range staleVrfHash {
+		staleVrfHash[i] = 0xCD
+	}
+	require.NotEqual(t, registeredVrfHash, staleVrfHash)
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	err = db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  staleVrfHash,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash[:],
+			VrfKeyHash:  registeredVrfHash,
+			AddedSlot:   1,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.NoError(
+		t,
+		ls.verifyRegisteredVrfKey(tb.block, blockEpochId(t, ls, tb.block)),
+		"latest registration VRF hash should take precedence over stale "+
+			"denormalized pool VRF hash",
+	)
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if len(sub) > 0 && len(s) >= len(sub) {
+			for i := 0; i+len(sub) <= len(s); i++ {
+				if s[i:i+len(sub)] == sub {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

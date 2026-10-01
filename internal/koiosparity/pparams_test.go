@@ -685,7 +685,7 @@ func TestSeededProtocolParamsFixturesAgree(t *testing.T) {
 	defer dingo.Close() //nolint:errcheck
 	seedDingoBabbageProtocolParams(t, gdb, 10)
 
-	cache, err := OpenCache(filepath.Join(t.TempDir(), "cache.db"), nil)
+	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	seedKoiosBabbageProtocolParams(t, cache, "preview", 10)
@@ -829,7 +829,7 @@ func seedProtocolParamsCheckFixture(
 	require.NoError(t, sqlDB.Close())
 
 	cachePath = filepath.Join(t.TempDir(), "cache.db")
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 
@@ -872,7 +872,7 @@ func runProtocolParamsCheck(
 	require.NoError(t, err)
 	require.Equal(t, 1, result.EpochsChecked)
 
-	cache, err := OpenCache(cachePath, nil)
+	cache, err := openTestCache(cachePath, nil)
 	require.NoError(t, err)
 	defer cache.Close() //nolint:errcheck
 	mismatches, err := cache.GetMismatches(network, koiosEpoch, "")

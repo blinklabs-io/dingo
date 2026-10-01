@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -86,13 +87,24 @@ func (s *Store) GetActiveGovernanceProposals(
 	)
 }
 
+func (s *Store) GetGovernanceProposalSet(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"enacted_epoch IS NULL AND dropped_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+	)
+}
+
 func (s *Store) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
 	return s.queryGovernanceProposals(
 		txn,
-		"expires_epoch < ? AND enacted_epoch IS NULL "+
+		"expires_epoch < ? AND ratified_epoch IS NULL AND enacted_epoch IS NULL "+
 			"AND expired_epoch IS NULL AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
 		epoch,
@@ -462,6 +474,23 @@ func (s *Store) SetGovernanceVote(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			var previousVote sql.NullByte
+			var previousAnchorURL sql.NullString
+			var previousAnchorHash []byte
+			previousErr := db.QueryRowContext(ctx, `
+SELECT vote, anchor_url, anchor_hash
+FROM governance_vote
+WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
+    AND voter_credential = ?`,
+				vote.ProposalID,
+				vote.VoterType,
+				vote.VoterCredentialTag,
+				vote.VoterCredential,
+			).Scan(&previousVote, &previousAnchorURL, &previousAnchorHash)
+			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+				return previousErr
+			}
+
 			var id uint
 			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_vote (
@@ -488,9 +517,38 @@ RETURNING id`,
 				vote.VoteUpdatedSlot,
 				vote.DeletedSlot,
 			).Scan(&id)
-			if err == nil {
-				vote.ID = id
+			if err != nil {
+				return err
 			}
+			vote.ID = id
+
+			// Record a history entry whenever this call changes the
+			// effective vote (including the first cast, where no previous
+			// row exists), so a later rollback that lands between two
+			// replacements can restore the value that was actually current
+			// at the target slot instead of losing it (dingo#4463).
+			unchanged := previousErr == nil &&
+				previousVote.Valid &&
+				previousVote.Byte == vote.Vote &&
+				previousAnchorURL.String == vote.AnchorURL &&
+				bytes.Equal(previousAnchorHash, vote.AnchorHash)
+			if unchanged {
+				return nil
+			}
+			transitionSlot := vote.AddedSlot
+			if vote.VoteUpdatedSlot != nil {
+				transitionSlot = *vote.VoteUpdatedSlot
+			}
+			_, err = db.ExecContext(ctx, `
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash
+) VALUES (?, ?, ?, ?, ?)`,
+				id,
+				transitionSlot,
+				vote.Vote,
+				vote.AnchorURL,
+				vote.AnchorHash,
+			)
 			return err
 		},
 	)
@@ -576,20 +634,94 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
-DELETE FROM governance_vote
-WHERE added_slot > ? OR vote_updated_slot > ?`,
-				slot,
-				slot,
-			); err != nil {
-				return err
+			// Drop history entries for transitions past the rollback point
+			// before restoring from what remains, and drop votes that did
+			// not exist at all before the rollback point (their history
+			// goes with them via ON DELETE CASCADE).
+			queries := []struct {
+				query string
+				args  []any
+			}{
+				{
+					query: `DELETE FROM governance_vote_history
+				 WHERE transition_slot > ?`,
+					args: []any{slot},
+				},
+				{
+					// A vote with no surviving history cannot be restored.
+					// This is the pre-v22 fallback: a vote replaced before
+					// the v22 backfill ran only got one history row for its
+					// current-at-migration value (DATABASE.md's
+					// governance_vote_history entry documents this data-loss
+					// limit), so a rollback landing between that vote's
+					// added_slot and its pre-migration replacement deletes
+					// that one history row and leaves nothing to restore
+					// from. Falling back to deletion here matches the
+					// pre-fix behavior instead of writing NULL into the
+					// NOT NULL vote column below.
+					query: `DELETE FROM governance_vote
+				 WHERE added_slot > ?
+				    OR NOT EXISTS (
+				        SELECT 1 FROM governance_vote_history AS history
+				        WHERE history.vote_id = governance_vote.id
+				    )`,
+					args: []any{slot},
+				},
+				{
+					// Restore the vote value that was current at the
+					// rollback point from the latest surviving history
+					// entry (dingo#4463). This is a no-op for a vote whose
+					// vote_updated_slot was already at or before slot, since
+					// that entry is still the latest remaining one. Scoped to
+					// rows with surviving history: every other row was just
+					// deleted above.
+					query: `UPDATE governance_vote
+				 SET vote = (
+				     SELECT history.vote
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), anchor_url = (
+				     SELECT history.anchor_url
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), anchor_hash = (
+				     SELECT history.anchor_hash
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), vote_updated_slot = (
+				     SELECT history.transition_slot
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 )
+				 WHERE EXISTS (
+				     SELECT 1 FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				 )`,
+				},
+				{
+					query: `UPDATE governance_vote SET deleted_slot = NULL
+				 WHERE deleted_slot > ?`,
+					args: []any{slot},
+				},
 			}
-			_, err := db.ExecContext(ctx, `
-UPDATE governance_vote SET deleted_slot = NULL
-WHERE deleted_slot > ?`,
-				slot,
-			)
-			return err
+			for _, query := range queries {
+				if _, err := db.ExecContext(
+					ctx,
+					query.query,
+					query.args...,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	)
 }
@@ -718,6 +850,55 @@ LIMIT 1`,
 		return nil, nil
 	}
 	return &member, err
+}
+
+// GetCommitteeHotAuthorizationsSince filters before ranking: a cold
+// credential's latest authorization is at or after minSlot exactly when its
+// latest authorization among rows at or after minSlot is, so the added_slot
+// index bounds the scan to the window without changing the answer.
+func (s *Store) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
+	txn types.Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+       host_credential, id, certificate_id, added_slot
+FROM (
+    SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+           host_credential, id, certificate_id, added_slot,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential_tag, cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+    WHERE added_slot >= ?
+) auth
+WHERE auth.rn = 1`, minSlot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.AuthCommitteeHot{}
+	for rows.Next() {
+		var member models.AuthCommitteeHot
+		if err := rows.Scan(
+			&member.ColdCredentialTag,
+			&member.ColdCredential,
+			&member.HotCredentialTag,
+			&member.HotCredential,
+			&member.ID,
+			&member.CertificateID,
+			&member.AddedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &member)
+	}
+	return ret, rows.Err()
 }
 
 func (s *Store) GetActiveCommitteeMembers(

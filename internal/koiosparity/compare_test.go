@@ -238,6 +238,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 			0,
 			time.Time{},
 			false,
+			false,
 		),
 	)
 
@@ -250,6 +251,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -265,6 +267,7 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -313,6 +316,7 @@ func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "fixed_cost", ms[0].Field)
@@ -328,6 +332,7 @@ func TestComparePoolEpochEmptyDingoSideIsFlagged(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -375,6 +380,7 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
@@ -391,6 +397,7 @@ func TestComparePoolEpochParamsNotPresent(t *testing.T) {
 		now,
 		24,
 		recentClose,
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -438,6 +445,7 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_stake", ms[0].Field)
@@ -458,6 +466,7 @@ func TestComparePoolEpochStakeNotPresent(t *testing.T) {
 		now,
 		24,
 		recentClose,
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -501,6 +510,7 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 			0,
 			time.Time{},
 			false,
+			false,
 		),
 	)
 
@@ -518,6 +528,7 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(
@@ -540,6 +551,7 @@ func TestComparePoolEpochMemberRewards(t *testing.T) {
 		now,
 		0,
 		time.Time{},
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -584,6 +596,7 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 		0,
 		time.Time{},
 		false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
@@ -601,6 +614,7 @@ func TestComparePoolEpochMemberRewardsNotPresent(t *testing.T) {
 		now,
 		24,
 		recentClose,
+		false,
 		false,
 	)
 	require.Len(t, ms, 1)
@@ -1233,6 +1247,7 @@ func TestComparePoolEpochDepartedPoolIsInformational(t *testing.T) {
 		0,
 		time.Time{},
 		true,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "reward_pool_input_params", ms[0].Field)
@@ -1247,6 +1262,7 @@ func TestComparePoolEpochDepartedPoolIsInformational(t *testing.T) {
 	// Same shape inside the grace window: still a departure, not lag.
 	ms = ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 24, now.Add(-time.Hour), true,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryPoolDeparted, ms[0].Category)
@@ -1280,6 +1296,7 @@ func TestComparePoolEpochUncapturedParamEpochStillErrors(t *testing.T) {
 
 	ms := ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, CategoryDBMissing, ms[0].Category)
@@ -1307,6 +1324,7 @@ func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
 
 	ms := ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, true,
+		false,
 	)
 	for _, m := range ms {
 		require.NotEqual(
@@ -1314,6 +1332,41 @@ func TestComparePoolEpochDepartedRequiresStakeEpochRow(t *testing.T) {
 			CategoryPoolDeparted,
 			m.Category,
 			"a pool with no stake-epoch row never departed epoch 5's basis",
+		)
+	}
+	require.Equal(t, StatusError, DetermineStatus(ms))
+}
+
+// TestComparePoolEpochZeroStakeRequiresStakeEpochRow anchors the zero-stake
+// classification to the pool having been in epoch K's stake basis, the same
+// way TestComparePoolEpochDepartedRequiresStakeEpochRow anchors departure: an
+// epoch-level completeness proof must not downgrade a pool absent from both
+// reward-input reads (dingo #4691).
+func TestComparePoolEpochZeroStakeRequiresStakeEpochRow(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:  "pool1test",
+		ActiveStake: "1000",
+		BlockCnt:    15,
+		Delegators:  3,
+	}
+	dingo := &DingoPoolEpochData{
+		StakePresent:  false,
+		ParamsPresent: false,
+	}
+
+	ms := ComparePoolEpoch(
+		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		true,
+	)
+	for _, m := range ms {
+		require.NotEqual(
+			t,
+			CategoryPoolZeroStake,
+			m.Category,
+			"a pool with no stake-epoch row cannot be classified zero-stake",
 		)
 	}
 	require.Equal(t, StatusError, DetermineStatus(ms))
@@ -1356,6 +1409,7 @@ func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
 	}
 	require.Empty(t, ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	), "an unspendable member reward is not a divergence")
 
 	// A real disagreement in the spendable sum still fails, and reports the
@@ -1363,6 +1417,7 @@ func TestComparePoolEpochMemberRewardsExcludesUnspendable(t *testing.T) {
 	dingo.SpendableMemberRewardTotal = "327005333"
 	ms := ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1)
 	require.Equal(t, "member_rewards", ms[0].Field)
@@ -1407,6 +1462,7 @@ func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
 	}
 	require.Empty(t, ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	), "with nothing withheld the pool total is the spendable total")
 
 	// The same missing rows, but the pool withheld something, so the pool
@@ -1415,6 +1471,7 @@ func TestComparePoolEpochMemberRewardsWithoutAccountOutputs(t *testing.T) {
 	dingo.MemberRewardTotal = "327076660"
 	ms := ComparePoolEpoch(
 		"preview", 5, koios, dingo, now, 0, time.Time{}, false,
+		false,
 	)
 	require.Len(t, ms, 1,
 		"an unformable comparison must not read as a pass")

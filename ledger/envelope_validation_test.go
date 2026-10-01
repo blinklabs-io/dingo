@@ -356,7 +356,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	err = validateInboundBlockEnvelope(
@@ -369,7 +369,7 @@ func TestValidateInboundBlockEnvelopeRejectsSubstitutedByronMainBody(
 	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
 }
 
-func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
+func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProofIsOpaque(t *testing.T) {
 	genuine := loadEnvelopeByronFixture(
 		t,
 		"Block_Byron_EBB",
@@ -377,7 +377,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 	)
 	config := newByronEnvelopeNodeConfig(
 		t,
-		len(genuine.Cbor()),
+		len(genuine.Cbor())+64,
 		len(genuine.Header().Cbor()),
 	)
 	require.NoError(t, validateInboundBlockEnvelope(
@@ -403,8 +403,7 @@ func TestValidateInboundBlockEnvelopeByronEpochBoundaryBodyProof(t *testing.T) {
 		config,
 		envelopeParent{origin: true},
 	)
-	require.Error(t, err)
-	require.ErrorIs(t, err, byron.ErrBodyProofMismatch)
+	require.NoError(t, err)
 }
 
 func TestValidateInboundBlockEnvelopeByronSizeLimits(t *testing.T) {
@@ -559,7 +558,11 @@ func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
 		},
 	}
 
-	require.NoError(t, validateBlockOrder(block, envelopeParent{origin: true}))
+	require.NoError(t, validateBlockOrder(
+		block,
+		envelopeParent{origin: true},
+		byron.ByronSlotsPerEpoch,
+	))
 }
 
 // TestValidateBlockOrderAllowsByronMainBlockAfterEbb verifies that the main
@@ -580,7 +583,7 @@ func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
 		byronEbb:    true,
 	}
 
-	require.NoError(t, validateBlockOrder(block, parent))
+	require.NoError(t, validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch))
 }
 
 // TestEnvelopeParentFromTipPreservesByronEbb verifies that reconstructing a
@@ -605,7 +608,7 @@ func TestEnvelopeParentFromTipPreservesByronEbb(t *testing.T) {
 	}
 
 	require.True(t, parent.byronEbb)
-	require.NoError(t, validateBlockOrder(block, parent))
+	require.NoError(t, validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch))
 }
 
 func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
@@ -631,34 +634,130 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	require.False(t, parent.byronEbb)
 	require.ErrorContains(
 		t,
-		validateBlockOrder(block, parent),
+		validateBlockOrder(block, parent, byron.ByronSlotsPerEpoch),
 		"does not follow parent slot",
 	)
 }
 
-// TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
-// that an EBB shares its parent's block number instead of incrementing it.
-func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
-	t.Parallel()
-
-	parent := envelopeParent{
-		slot:        byron.ByronSlotsPerEpoch,
-		blockNumber: 7,
-	}
+func byronOrderingEbb(
+	epoch, blockNumber uint64,
+) *byron.ByronEpochBoundaryBlock {
 	ebb := &byron.ByronEpochBoundaryBlock{
 		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
 	}
-	ebb.BlockHeader.ConsensusData.Epoch = 1
-	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber
-	// This structured block deliberately has no wire CBOR: this test isolates
-	// the EBB ordering rule. The golden-fixture test above covers the body proof
-	// against the real serialized body.
-	require.NoError(t, validateInboundBlockEnvelope(ebb, nil, nil, parent))
+	ebb.BlockHeader.ConsensusData.Epoch = epoch
+	ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return ebb
+}
 
-	ebb.BlockHeader.ConsensusData.Difficulty.Value = parent.blockNumber + 1
-	err := validateInboundBlockEnvelope(ebb, nil, nil, parent)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not match parent block number")
+func byronOrderingMain(
+	epoch, slot, blockNumber uint64,
+) *byron.ByronMainBlock {
+	block := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{},
+	}
+	block.BlockHeader.ConsensusData.SlotId.Epoch = epoch
+	block.BlockHeader.ConsensusData.SlotId.Slot = slot
+	block.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+	return block
+}
+
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers #4408: the four
+// parent/block combinations of the Byron envelope, including consecutive
+// EBBs across an otherwise empty epoch. These structured blocks deliberately
+// have no wire CBOR, so this isolates the ordering rule; the golden-fixture
+// test above covers the body proof against the real serialized body.
+func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
+	t.Parallel()
+
+	const epochSlots = byron.ByronSlotsPerEpoch
+	regular := func(slot, blockNumber uint64) envelopeParent {
+		return envelopeParent{slot: slot, blockNumber: blockNumber}
+	}
+	ebbParent := func(epoch, blockNumber uint64) envelopeParent {
+		return envelopeParent{
+			slot:        epoch * epochSlots,
+			blockNumber: blockNumber,
+			byronEbb:    true,
+		}
+	}
+	tests := []struct {
+		name    string
+		block   gledger.Block
+		parent  envelopeParent
+		wantErr string
+	}{
+		{
+			"regular to regular",
+			byronOrderingMain(1, 5, 8),
+			regular(epochSlots+4, 7),
+			"",
+		},
+		{
+			"regular to regular same slot",
+			byronOrderingMain(1, 4, 8),
+			regular(epochSlots+4, 7),
+			"does not follow parent slot",
+		},
+		{
+			"regular to EBB",
+			byronOrderingEbb(2, 7),
+			regular(2*epochSlots-1, 7),
+			"",
+		},
+		{
+			"regular to EBB with next number",
+			byronOrderingEbb(2, 8),
+			regular(2*epochSlots-1, 7),
+			"does not match expected block number 7",
+		},
+		{
+			"EBB to regular same slot",
+			byronOrderingMain(2, 0, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to regular same number",
+			byronOrderingMain(2, 0, 7),
+			ebbParent(2, 7),
+			"does not follow parent block number",
+		},
+		{
+			"EBB to EBB across an empty epoch",
+			byronOrderingEbb(3, 8),
+			ebbParent(2, 7),
+			"",
+		},
+		{
+			"EBB to EBB with equal number",
+			byronOrderingEbb(3, 7),
+			ebbParent(2, 7),
+			"does not match expected block number 8",
+		},
+		{
+			"EBB to EBB with equal slot",
+			byronOrderingEbb(2, 8),
+			ebbParent(2, 7),
+			"does not follow parent slot",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateInboundBlockEnvelope(
+				test.block,
+				nil,
+				nil,
+				test.parent,
+			)
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, test.wantErr)
+		})
+	}
 }
 
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs
@@ -666,7 +765,10 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
 	t.Parallel()
 
-	err := validateByronEbbPlacement(&byron.ByronEpochBoundaryBlock{})
+	err := validateByronEbbPlacement(
+		&byron.ByronEpochBoundaryBlock{},
+		byron.ByronSlotsPerEpoch,
+	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "nil header")
 
@@ -723,15 +825,21 @@ func newByronEnvelopeNodeConfig(
 ) *cardano.CardanoNodeConfig {
 	t.Helper()
 	config := &cardano.CardanoNodeConfig{}
-	genesis := fmt.Sprintf(`{
-		"blockVersionData": {
-			"maxBlockSize": "%d",
-			"maxHeaderSize": "%d"
-		}
-	}`, maxBlockSize, maxHeaderSize)
+	genesis := strings.Replace(
+		testByronGenesisJSON,
+		`"maxBlockSize": "1"`,
+		fmt.Sprintf(`"maxBlockSize": "%d"`, maxBlockSize),
+		1,
+	)
+	genesis = strings.Replace(
+		genesis,
+		`"maxHeaderSize": "1"`,
+		fmt.Sprintf(`"maxHeaderSize": "%d"`, maxHeaderSize),
+		1,
+	)
 	require.NoError(
 		t,
-		config.LoadByronGenesisFromReader(strings.NewReader(genesis)),
+		loadByronGenesisForTest(t, config, strings.NewReader(genesis)),
 	)
 	return config
 }
@@ -771,7 +879,7 @@ func substituteByronMainTxPayload(t *testing.T, blockCbor []byte) []byte {
 	_, err = cbor.Decode(block[1], &body)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(body), 4)
-	emptyTxPayload, err := cbor.Encode([]any{})
+	emptyTxPayload, err := cbor.Encode(cbor.IndefLengthList{})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(body[0]), emptyTxPayload)
 	body[0] = emptyTxPayload
@@ -788,7 +896,7 @@ func substituteByronEbbBody(t *testing.T, blockCbor []byte) []byte {
 	_, err := cbor.Decode(blockCbor, &block)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(block), 2)
-	emptyBody, err := cbor.Encode([]any{})
+	emptyBody, err := cbor.Encode(cbor.IndefLengthList{[]byte{0}})
 	require.NoError(t, err)
 	require.NotEqual(t, []byte(block[1]), emptyBody)
 	block[1] = emptyBody
@@ -832,7 +940,7 @@ func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
 	err := validateBlockOrder(sameSlotParent, envelopeParent{
 		slot:        contestedSlot,
 		blockNumber: rivalNumber,
-	})
+	}, byron.ByronSlotsPerEpoch)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not follow parent slot")
 
@@ -848,5 +956,201 @@ func TestValidateBlockOrderPinsTheEqualSlotAlternativeShape(t *testing.T) {
 	require.NoError(t, validateBlockOrder(alternative, envelopeParent{
 		slot:        predecessorSlot,
 		blockNumber: predecessorNumber,
-	}))
+	}, byron.ByronSlotsPerEpoch))
+}
+
+// TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof covers the
+// reference decoder reading an EBB body proof as a byte string of any length
+// and discarding it: a 31-byte proof and a wrong 32-byte proof are both valid.
+func TestValidateInboundBlockEnvelopeAcceptsArbitraryByronEbbProof(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	config := newByronEnvelopeNodeConfig(
+		t,
+		len(genuine.Cbor())+64,
+		len(genuine.Header().Cbor()),
+	)
+	shortProof := substituteByronEbbProof(t, genuine.Cbor(), make([]byte, 31))
+	shortProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		shortProof,
+	)
+	require.NoError(t, err)
+	parsedShortProof, ok := shortProofBlock.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	decodedProof, ok := parsedShortProof.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, decodedProof, 31)
+	require.NoError(t, validateInboundBlockEnvelope(
+		shortProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+
+	wrongProofValue := []byte(strings.Repeat("x", 32))
+	genuineEbb, ok := genuine.(*byron.ByronEpochBoundaryBlock)
+	require.True(t, ok)
+	originalProof, ok := genuineEbb.BlockHeader.BodyProof.([]byte)
+	require.True(t, ok)
+	require.Len(t, wrongProofValue, 32)
+	require.NotEqual(t, originalProof, wrongProofValue)
+	wrongProof := substituteByronEbbProof(t, genuine.Cbor(), wrongProofValue)
+	wrongProofBlock, err := gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		wrongProof,
+	)
+	require.NoError(t, err)
+	require.NoError(t, validateInboundBlockEnvelope(
+		wrongProofBlock,
+		nil,
+		config,
+		envelopeParent{origin: true},
+	))
+}
+
+// TestByronEbbNonBytesProofIsRejectedAtDecode pins the one check the
+// reference applies to an EBB body proof: its decoder reads the field as a
+// byte string, so an inbound EBB carrying any other CBOR value never decodes.
+func TestByronEbbNonBytesProofIsRejectedAtDecode(t *testing.T) {
+	genuine := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(genuine.Cbor(), &block)
+	require.NoError(t, err)
+	var header []cbor.RawMessage
+	_, err = cbor.Decode(block[0], &header)
+	require.NoError(t, err)
+	header[2], err = cbor.Encode(uint64(7))
+	require.NoError(t, err)
+	block[0], err = cbor.Encode(header)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(block)
+	require.NoError(t, err)
+
+	_, err = gledger.NewBlockFromCbor(
+		uint(gledger.BlockTypeByronEbb),
+		encoded,
+	)
+	require.ErrorIs(t, err, byron.ErrMalformedBodyProof)
+}
+
+func TestValidateInboundBlockEnvelopeByronEbbFixedSizeLimit(t *testing.T) {
+	fixture := loadEnvelopeByronFixture(
+		t,
+		"Block_Byron_EBB",
+		uint(gledger.BlockTypeByronEbb),
+	)
+	for _, tc := range []struct {
+		name         string
+		blockSize    int
+		maxBlockSize int
+		maxHeader    int
+		wantErr      string
+	}{
+		{
+			name:         "accept at limit below configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 1_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "accept at limit above configured max block size",
+			blockSize:    2_000_000,
+			maxBlockSize: 2_500_000,
+			maxHeader:    1,
+		},
+		{
+			name:         "reject one byte over fixed limit despite configured max",
+			blockSize:    2_000_001,
+			maxBlockSize: 2_500_000,
+			maxHeader:    100_000,
+			wantErr:      "exceeds fixed limit 2000000",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blockCbor := byronEbbBlockWithSize(t, fixture.Cbor(), tc.blockSize)
+			block, err := gledger.NewBlockFromCbor(
+				uint(gledger.BlockTypeByronEbb),
+				blockCbor,
+			)
+			require.NoError(t, err)
+			require.Len(t, block.Cbor(), tc.blockSize)
+
+			config := newByronEnvelopeNodeConfig(t, tc.maxBlockSize, tc.maxHeader)
+			err = validateInboundBlockEnvelope(
+				block,
+				nil,
+				config,
+				envelopeParent{origin: true},
+			)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func substituteByronEbbProof(t *testing.T, blockCbor, proof []byte) []byte {
+	t.Helper()
+	var block []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &block)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(block), 2)
+	var header []cbor.RawMessage
+	_, err = cbor.Decode(block[0], &header)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(header), 3)
+	header[2], err = cbor.Encode(proof)
+	require.NoError(t, err)
+	block[0], err = cbor.Encode(header)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(block)
+	require.NoError(t, err)
+	return encoded
+}
+
+func byronEbbBlockWithSize(
+	t *testing.T,
+	blockCbor []byte,
+	targetSize int,
+) []byte {
+	t.Helper()
+	var fields []cbor.RawMessage
+	_, err := cbor.Decode(blockCbor, &fields)
+	require.NoError(t, err)
+	require.Len(t, fields, 3)
+
+	low, high := 0, targetSize
+	for low <= high {
+		bodySize := low + (high-low)/2
+		body, err := cbor.Encode(cbor.IndefLengthList{
+			make([]byte, bodySize),
+		})
+		require.NoError(t, err)
+		encoded, err := cbor.Encode([]cbor.RawMessage{
+			fields[0],
+			body,
+			fields[2],
+		})
+		require.NoError(t, err)
+		switch {
+		case len(encoded) == targetSize:
+			return encoded
+		case len(encoded) < targetSize:
+			low = bodySize + 1
+		default:
+			high = bodySize - 1
+		}
+	}
+	t.Fatalf("could not encode Byron EBB at %d bytes", targetSize)
+	return nil
 }
