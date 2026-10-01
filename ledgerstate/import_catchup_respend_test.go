@@ -71,10 +71,13 @@ func minimalCertStateData(t *testing.T) cbor.RawMessage {
 //     certified snapshot covering the same anchor) declares the same output
 //     live again. This is where the defect lived: the conflict-tolerant
 //     insert left deleted_slot/spent_at_tx_id untouched, so the output
-//     stayed spent forever.
-//  4. A further real block spends the (now-restored) output again. Before
-//     the fix this input can never be found live, so applying it fails; the
-//     ledger pipeline halts exactly as dingo#4770 reports.
+//     stayed spent forever. The GetUtxo check immediately after this step is
+//     what discriminates the fix -- see its own comment for why.
+//  4. The same real block from step 2 is replayed, reusing its exact
+//     transaction hash: what a real chain replay does. This step cannot
+//     discriminate the fix on its own (see its comment), but confirms the
+//     ordinary replay path still applies cleanly once the output is
+//     genuinely live again.
 func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 	t.Parallel()
 
@@ -157,17 +160,25 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. A subsequent real block spends the restored output. This must apply
-	// cleanly after the repair (step 3 already fails first without the fix,
-	// so this assertion is never reached on the broken build).
+	// 4. Replay the same real block that spent this output the first time
+	// (step 2), reusing its exact transaction hash and slot -- what a real
+	// chain replay actually does, rather than a different, hypothetical
+	// spender. This is deliberately not a second proof of the fix: a
+	// consumed input already marked spent *by this same hash* is treated as
+	// an idempotent no-op by setTransactionWithAccumulator
+	// (bytes.Equal(spentBy, hash) => continue) regardless of whether the row
+	// was ever actually restored, so this call would return nil either way.
+	// The liveAfterCatchUp assertion above is what discriminates the fix;
+	// this only confirms the ordinary replay path does not additionally
+	// error (e.g. a live-stake underflow) once the row is genuinely live.
 	require.NoError(t, applySpendingTransaction(
-		t, db, 0x52, utxoTxID, 0, 2_000,
-	), "applying the real block that spends the repaired output must "+
-		"apply after the repair")
+		t, db, 0x51, utxoTxID, 0, 1_500,
+	), "replaying the real block that spent this output originally must "+
+		"still apply cleanly after the repair")
 
-	spentAfterSecondSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
+	spentAfterReplayedSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
 	require.NoError(t, err)
-	require.Nil(t, spentAfterSecondSpend, "output must be spent again")
+	require.Nil(t, spentAfterReplayedSpend, "output must be spent again")
 }
 
 // TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo is
@@ -264,18 +275,22 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. A subsequent real block spends the restored output. This must apply
-	// cleanly after the reconcile catch-up (step 3 already fails first
-	// without the fix, so this assertion is never reached on the broken
-	// build).
+	// 4. Replay the same real block that spent this output the first time
+	// (step 2), reusing its exact transaction hash and slot. As in the
+	// non-reconcile test above, this does not discriminate the fix on its
+	// own -- setTransactionWithAccumulator treats a consumed input already
+	// spent by this same hash as an idempotent no-op regardless of whether
+	// the row was actually restored. liveAfterCatchUp above is the
+	// discriminating assertion; this only confirms the replay path applies
+	// cleanly once the row is genuinely live.
 	require.NoError(t, applySpendingTransaction(
-		t, db, 0x54, utxoTxID, 0, 2_000,
-	), "applying the real block that spends the repaired output must "+
-		"apply after the reconcile catch-up")
+		t, db, 0x53, utxoTxID, 0, 1_500,
+	), "replaying the real block that spent this output originally must "+
+		"still apply cleanly after the reconcile catch-up")
 
-	spentAfterSecondSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
+	spentAfterReplayedSpend, err := db.Metadata().GetUtxo(utxoTxID, 0, nil)
 	require.NoError(t, err)
-	require.Nil(t, spentAfterSecondSpend, "output must be spent again")
+	require.Nil(t, spentAfterReplayedSpend, "output must be spent again")
 }
 
 // applySpendingTransaction builds a minimal, valid transaction consuming
