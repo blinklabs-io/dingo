@@ -32,7 +32,9 @@ var ErrCommitPauseExceeded = errors.New(
 // WithMaxCommitPause bounds how long Snapshot may hold the commit barrier
 // once it has acquired it. When the backups are still running at the limit
 // they are cancelled, the barrier is released, the partial snapshot is
-// removed, and Snapshot returns ErrCommitPauseExceeded. Time spent
+// removed, and Snapshot returns ErrCommitPauseExceeded. The barrier is
+// released once the cancelled backups return, so the hold can exceed the
+// limit by however long a backup takes to observe cancellation. Time spent
 // waiting to acquire the barrier is not counted: that wait is bounded by the
 // caller's context. Zero (the default) means no limit; negative values are
 // rejected before any I/O.
