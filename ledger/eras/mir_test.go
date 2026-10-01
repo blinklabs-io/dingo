@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
@@ -30,7 +30,7 @@ import (
 // valid transaction to clear the unrelated UTXO validation rules first,
 // following the same direct-unit-test convention as
 // validateDelegationConwayBootstrapAware in
-// conway_bootstrap_vote_delegation_test.go); the wiring itself is a plain
+// conway_test.go); the wiring itself is a plain
 // unconditional call from both, visible directly in the diff.
 type mirTx struct {
 	lcommon.Transaction

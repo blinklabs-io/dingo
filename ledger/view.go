@@ -88,6 +88,16 @@ type LedgerView struct {
 	// the cached Output and must not mutate it. Lazily allocated; never
 	// shared across views.
 	utxoMemo map[utxoref.Key]lcommon.Utxo
+	// prefetchedUtxos holds the live UTxOs a block's transactions reference,
+	// resolved with one batch query before the first transaction is
+	// validated (see prefetchBlockUtxos). It is owned by block application,
+	// shared read-only by that block's per-transaction views, and consulted
+	// only after the overlays and the memo. Block application deletes a
+	// transaction's inputs and collateral, including those of Dijkstra
+	// sub-transactions, once that transaction is applied, so a later
+	// transaction cannot be answered with an output that is already spent.
+	// A miss falls through to the database read.
+	prefetchedUtxos map[utxoref.Key]lcommon.Utxo
 	// skipPhase2Validation is set for accepted block replay, where
 	// the producer's isValid flag is authoritative for Phase-2 results.
 	// Currently unreachable from production: ledgerProcessBlock's sole
@@ -135,6 +145,12 @@ type LedgerView struct {
 	// -- the exact protocol parameters this operation is actually
 	// evaluating against. See blinklabs-io/dingo#3962's PR review.
 	syntheticV2CostModel bool
+	// byronParamsFromBlock is set for block application, where a Byron
+	// block's rules must read the parameters its update state adopted for
+	// the block's own epoch, passed as pparams. ByronProtocolParameters then
+	// refuses rather than answer with the parameters adopted as of the tip,
+	// which belong to an earlier epoch once a block crosses a boundary.
+	byronParamsFromBlock bool
 	// storageErr is the first non-not-found storage error observed by one of
 	// this view's boolean LedgerState predicates. It is sticky: only the
 	// first recorded error is kept, matching the single LedgerView built per
@@ -212,6 +228,24 @@ func (lv *LedgerView) MinPoolMargin() *big.Rat {
 // in the MinPoolMarginProvider method signature a compile error instead of a
 // silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
 var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
+
+// PlutusEvalContextCache forwards the underlying LedgerState's shared
+// PlutusEvalContextCache so that a *LedgerView (the value passed to
+// ValidateTx*/EvaluateTx*) satisfies eras.PlutusEvalContextCacheProvider.
+// Returns nil for a bare-constructed LedgerView with no ls (test-only),
+// which era script evaluation already treats as "no cache available".
+func (lv *LedgerView) PlutusEvalContextCache() *eras.PlutusEvalContextCache {
+	if lv.ls == nil {
+		return nil
+	}
+	return lv.ls.PlutusEvalContextCache()
+}
+
+// var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil) makes any
+// future drift in the PlutusEvalContextCacheProvider method signature a
+// compile error instead of a silent fallback to uncached EvalContext
+// construction.
+var _ eras.PlutusEvalContextCacheProvider = (*LedgerView)(nil)
 
 // MIRDelegState returns the move instantaneous rewards DELEG state that a
 // certificate at slot is checked against: the chain account pots, the
@@ -342,13 +376,11 @@ var (
 // witnesses rather than fail to build.
 var _ eras.ByronProtocolMagicProvider = (*LedgerView)(nil)
 
-// Byron minimum-fee validation requires the fee policy from Byron genesis.
-// Pin the optional capability to the concrete validation view so interface
-// drift fails at build time instead of disabling the rule.
-var _ eras.ByronFeePolicyProvider = (*LedgerView)(nil)
-
-// The same holds for the Byron ppMaxTxSize rule.
-var _ eras.ByronMaxTxSizeProvider = (*LedgerView)(nil)
+// Byron minimum-fee and maximum-size validation read the adopted Byron
+// protocol parameters through this capability. Pin it to the concrete
+// validation view so interface drift fails at build time instead of disabling
+// the rules.
+var _ eras.ByronProtocolParametersProvider = (*LedgerView)(nil)
 
 // UtxoValidateValueNotConservedUtxo discovers this capability with a runtime
 // type assertion and, unlike the assertions above, degrades rather than fails
@@ -377,13 +409,21 @@ func (lv *LedgerView) ByronProtocolMagic() (uint32, error) {
 	return lv.ls.ByronProtocolMagic()
 }
 
-func (lv *LedgerView) ByronFeePolicy() (int64, int64, error) {
-	return lv.ls.ByronFeePolicy()
+func (lv *LedgerView) ByronProtocolParameters() (
+	*eras.ByronProtocolParameters,
+	error,
+) {
+	if lv.byronParamsFromBlock {
+		return nil, errByronBlockParamsNotPassed
+	}
+	return lv.ls.ByronProtocolParameters()
 }
 
-func (lv *LedgerView) ByronMaxTxSize() (uint64, error) {
-	return lv.ls.ByronMaxTxSize()
-}
+// errByronBlockParamsNotPassed reports a Byron block applied without its
+// adopted protocol parameters.
+var errByronBlockParamsNotPassed = errors.New(
+	"byron block application must pass the block's adopted protocol parameters",
+)
 
 func (lv *LedgerView) UtxoById(
 	utxoId lcommon.TransactionInput,
@@ -417,6 +457,10 @@ func (lv *LedgerView) UtxoById(
 		}
 	}
 	lv.utxoMemoMu.Unlock()
+
+	if utxo, ok := lv.prefetchedUtxos[key]; ok {
+		return utxo, nil
+	}
 
 	lv.ls.utxoByRefReads.Add(1)
 	utxo, err := lv.ls.db.UtxoByRef(
@@ -1366,13 +1410,12 @@ func (lv *LedgerView) populateCommitteeMemberStatus(
 func (lv *LedgerView) proposedCommitteeMember(
 	coldCredential lcommon.Credential,
 ) (*lcommon.CommitteeMember, error) {
-	epoch, pparams := lv.committeeSnapshot()
-	proposals, err := lv.ls.db.GetActiveGovernanceProposals(
-		epoch,
-		lv.txn,
-	)
+	_, pparams := lv.committeeSnapshot()
+	// GOVCERT's isPotentialFutureMember reads the whole proposals set, which
+	// keeps an expired UpdateCommittee until the boundary that drops it.
+	proposals, err := lv.ls.db.GetGovernanceProposalSet(lv.txn)
 	if err != nil {
-		return nil, fmt.Errorf("get active governance proposals: %w", err)
+		return nil, fmt.Errorf("get governance proposal set: %w", err)
 	}
 	// NoConfidence and UpdateCommittee chain off the same committee root, so
 	// the root must be the latest enacted member of the pair. Querying only
@@ -2118,8 +2161,12 @@ func (lv *LedgerView) GovActionById(
 		}
 		return nil, fmt.Errorf("get governance proposal: %w", err)
 	}
-	// Expired proposals are no longer members of their purpose tree.
-	if proposal.ExpiredEpoch != nil {
+	// The Conway GOV rule resolves votes and parents against the proposals
+	// set, which loses an expired action only when EPOCH removes it one
+	// boundary after RATIFY classified it (DroppedEpoch). The expiry mark
+	// itself must not hide it: a vote is refused by gasExpiresAfter
+	// arithmetic on ExpirySlot, and a child may still name it as parent.
+	if proposal.DroppedEpoch != nil {
 		return nil, nil
 	}
 	// The current enacted root must remain resolvable because content-aware
@@ -2356,10 +2403,11 @@ func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 		}
 		return false
 	}
-	// Voting procedures may target only pending actions. GovActionById also
-	// resolves the current enacted purpose root for content-aware predecessor
-	// rules, so it cannot be used as the existence predicate here.
-	return proposal.EnactedEpoch == nil && proposal.ExpiredEpoch == nil
+	// Voting procedures may target only members of the proposals set.
+	// GovActionById also resolves the current enacted purpose root for
+	// content-aware predecessor rules, so it cannot be used as the existence
+	// predicate here.
+	return proposal.EnactedEpoch == nil && proposal.DroppedEpoch == nil
 }
 
 // StakeDistribution represents the stake distribution at an epoch boundary.

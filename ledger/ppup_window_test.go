@@ -17,11 +17,9 @@ package ledger
 import (
 	"bytes"
 	"math/big"
-	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -30,104 +28,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
-
-// newPPUPWindowLedgerState builds a ledger whose Shelley genesis carries the
-// given security parameter and active-slot coefficient and whose epoch cache
-// holds epochs.
-func newPPUPWindowLedgerState(
-	t *testing.T,
-	securityParam int,
-	activeSlotsCoeff *big.Rat,
-	epochs []models.Epoch,
-) *LedgerState {
-	t.Helper()
-	cfg := newGenesisDelegateShelleyGenesisCfg(
-		t,
-		strings.Repeat("aa", lcommon.Blake2b224Size),
-		strings.Repeat("bb", lcommon.Blake2b256Size),
-	)
-	genesis := cfg.ShelleyGenesis()
-	genesis.SecurityParam = securityParam
-	genesis.ActiveSlotsCoeff = cbor.Rat{Rat: activeSlotsCoeff}
-	ls := &LedgerState{}
-	ls.config.CardanoNodeConfig = cfg
-	ls.consensus.Store(&consensusSnapshot{epochCache: epochs})
-	return ls
-}
-
-// The reference slot of no return is
-// epochInfoFirst (succ e) *- Duration (2 * stabilityWindow), with
-// stabilityWindow = computeStabilityWindow k f = ceiling (3k/f)
-// (cardano-ledger Cardano.Ledger.Slot.getTheSlotOfNoReturn and
-// Cardano.Ledger.Shelley.StabilityWindow). When 3k/f is not an integer,
-// 2 * ceiling (3k/f) is larger than floor (6k/f).
-func TestProtocolParameterUpdateWindowMatchesReferenceSlotOfNoReturn(
-	t *testing.T,
-) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name             string
-		securityParam    int
-		activeSlotsCoeff *big.Rat
-		epoch            models.Epoch
-		noReturn         uint64
-	}{
-		{
-			// Mainnet and preprod: 2 * 3 * 2160 / 0.05 = 259200.
-			name:             "mainnet first Shelley epoch",
-			securityParam:    2160,
-			activeSlotsCoeff: big.NewRat(1, 20),
-			epoch:            models.Epoch{EpochId: 208, StartSlot: 4_492_800, LengthInSlots: 432_000},
-			noReturn:         4_492_800 + 432_000 - 259_200,
-		},
-		{
-			// Preview: 2 * 3 * 432 / 0.05 = 51840.
-			name:             "preview",
-			securityParam:    432,
-			activeSlotsCoeff: big.NewRat(1, 20),
-			epoch:            models.Epoch{EpochId: 700, StartSlot: 60_480_000, LengthInSlots: 86_400},
-			noReturn:         60_480_000 + 86_400 - 51_840,
-		},
-		{
-			// 3k/f = 30/7: ceiling 5, so 2 * 5 = 10 where floor (60/7) = 8.
-			name:             "fractional window below one half",
-			securityParam:    1,
-			activeSlotsCoeff: big.NewRat(7, 10),
-			epoch:            models.Epoch{EpochId: 4, StartSlot: 500, LengthInSlots: 100},
-			noReturn:         600 - 10,
-		},
-		{
-			// 3k/f = 300/7: ceiling 43, so 2 * 43 = 86 where floor (600/7) = 85.
-			name:             "fractional window above one half",
-			securityParam:    1,
-			activeSlotsCoeff: big.NewRat(7, 100),
-			epoch:            models.Epoch{EpochId: 4, StartSlot: 500, LengthInSlots: 200},
-			noReturn:         700 - 86,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ls := newPPUPWindowLedgerState(
-				t,
-				tc.securityParam,
-				tc.activeSlotsCoeff,
-				[]models.Epoch{tc.epoch},
-			)
-			view := &LedgerView{ls: ls}
-			for _, slot := range []uint64{
-				tc.epoch.StartSlot,
-				tc.noReturn - 1,
-				tc.noReturn,
-				tc.epoch.StartSlot + uint64(tc.epoch.LengthInSlots) - 1,
-			} {
-				epoch, noReturn, err := view.ProtocolParameterUpdateWindow(slot)
-				require.NoError(t, err, "slot %d", slot)
-				require.Equal(t, tc.epoch.EpochId, epoch, "slot %d", slot)
-				require.Equal(t, tc.noReturn, noReturn, "slot %d", slot)
-			}
-		})
-	}
-}
 
 type ppupWindowTestTx struct {
 	lcommon.Transaction

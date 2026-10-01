@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -27,7 +28,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/dingo/ledger"
+	dingleios "github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -76,6 +79,7 @@ type leiosForgedEBEntry struct {
 const (
 	leiosNotifyMaxAnnouncementAge   = 10 * time.Minute
 	leiosNotifyRelayAnnouncementAge = 5 * time.Minute
+	leiosAnnouncementClockSkew      = 2 * time.Second
 )
 
 type leiosAnnouncement struct {
@@ -93,6 +97,99 @@ type leiosDeferredAnnouncement struct {
 }
 
 const leiosMaxDeferredAnnouncements = 128
+
+const leiosMaxAnnouncementValidationInFlight = 64
+
+const leiosNotifyMaxVoteVerificationsPerOffer = 64
+
+const (
+	leiosInvalidAnnouncementWindow   = time.Minute
+	leiosInvalidAnnouncementLimit    = 3
+	leiosInvalidAnnouncementMaxPeers = 1024
+)
+
+var errLeiosAnnouncementValidationBudget = errors.New(
+	"leios announcement validation budget exhausted",
+)
+
+var errLeiosAnnouncementLocalState = errors.New(
+	"local leios announcement state unavailable",
+)
+
+var errLeiosAnnouncementClockSkew = errors.New(
+	"announcement is within the permitted clock-skew window",
+)
+
+func (o *Ouroboros) recordInvalidLeiosAnnouncement(
+	connectionID string,
+	err error,
+) error {
+	now := time.Now()
+	o.leiosInvalidAnnouncementMu.Lock()
+	defer o.leiosInvalidAnnouncementMu.Unlock()
+	if o.leiosInvalidAnnouncements == nil {
+		o.leiosInvalidAnnouncements = ratewindow.NewFixedWindow(
+			leiosInvalidAnnouncementWindow,
+			0,
+			0,
+			leiosInvalidAnnouncementMaxPeers,
+		)
+	}
+	count, tracked := o.leiosInvalidAnnouncements.Record(connectionID, now)
+	if !tracked {
+		return err
+	}
+	if count >= leiosInvalidAnnouncementLimit {
+		return fmt.Errorf("repeated invalid announcements from connection %s: %w", connectionID, err)
+	}
+	return nil
+}
+
+func validateLeiosNotifyVoteOffer(m *oleiosnotify.MsgVotesOffer) error {
+	count := len(m.FullVotes) + len(m.PrototypeVotes)
+	if count > leiosNotifyMaxVoteVerificationsPerOffer {
+		return fmt.Errorf(
+			"leios-notify vote offer contains %d votes, maximum is %d",
+			count,
+			leiosNotifyMaxVoteVerificationsPerOffer,
+		)
+	}
+	return nil
+}
+
+func (o *Ouroboros) reserveLeiosAnnouncementValidation(
+	key string,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	raw []byte,
+) (bool, func(), error) {
+	o.leiosAnnouncementsMu.Lock()
+	if previous, exists := o.leiosAnnouncements[key]; exists {
+		o.leiosAnnouncementsMu.Unlock()
+		if previous.ebHash == ebHash && previous.ebSize == ebSize &&
+			bytes.Equal(previous.raw, raw) {
+			return true, nil, nil
+		}
+		return false, nil, errors.New(
+			"announcement is inconsistent with a previously observed ranking block",
+		)
+	}
+	if _, exists := o.leiosAnnouncementInFlight[key]; exists {
+		o.leiosAnnouncementsMu.Unlock()
+		return true, nil, nil
+	}
+	if len(o.leiosAnnouncementInFlight) >= leiosMaxAnnouncementValidationInFlight {
+		o.leiosAnnouncementsMu.Unlock()
+		return false, nil, errLeiosAnnouncementValidationBudget
+	}
+	o.leiosAnnouncementInFlight[key] = struct{}{}
+	o.leiosAnnouncementsMu.Unlock()
+	return false, func() {
+		o.leiosAnnouncementsMu.Lock()
+		delete(o.leiosAnnouncementInFlight, key)
+		o.leiosAnnouncementsMu.Unlock()
+	}, nil
+}
 
 type leiosDeliveryReservation struct {
 	index int
@@ -615,6 +712,44 @@ func (o *Ouroboros) leiosTipPrefetchEnabled() bool {
 	return o.ledgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
 }
 
+func (o *Ouroboros) handleInvalidLeiosAnnouncement(
+	connectionID string,
+	err error,
+) error {
+	if errors.Is(err, errLeiosAnnouncementValidationBudget) {
+		o.config.Logger.Debug(
+			"dropping leios announcement while validation budget is full",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", connectionID,
+		)
+		return nil
+	}
+	if ledger.IsHeaderVerificationDeferred(err) ||
+		errors.Is(err, errLeiosAnnouncementLocalState) ||
+		errors.Is(err, errLeiosAnnouncementClockSkew) {
+		o.config.Logger.Debug(
+			"dropping leios announcement while local validation state is unavailable",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", connectionID,
+			"error", err,
+		)
+		return nil
+	}
+	if penaltyErr := o.recordInvalidLeiosAnnouncement(connectionID, err); penaltyErr != nil {
+		return penaltyErr
+	}
+	o.config.Logger.Debug(
+		"suppressing invalid leios announcement",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"error", err,
+	)
+	return nil
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
@@ -626,18 +761,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	}
 	switch m := msg.(type) {
 	case *oleiosnotify.MsgBlockAnnouncement:
-		// w31 carries the full ranking-block header. Validate before accepting
-		// it into the relay log; invalid announcements are deliberately
-		// suppressed so a peer cannot tear down a shared connection with a
-		// malformed or stale experimental message.
+		// w31 carries the full ranking-block header. Suppress isolated invalid
+		// announcements, but disconnect a peer that repeats them within a
+		// bounded window.
 		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
-			o.config.Logger.Debug(
-				"suppressing invalid leios announcement",
-				"component", "network",
-				"protocol", "leios-notify",
-				"connection_id", connId,
-				"error", err,
-			)
+			return o.handleInvalidLeiosAnnouncement(connId, err)
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
@@ -936,8 +1064,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		if o.leiosVotes == nil {
 			return nil
 		}
+		if err := validateLeiosNotifyVoteOffer(m); err != nil {
+			return err
+		}
 		for _, vote := range m.FullVotes {
 			if err := o.leiosVotes.HandleVote(connId, vote); err != nil {
+				if errors.Is(err, dingleios.ErrPeerMisbehavior) {
+					return err
+				}
 				o.config.Logger.Debug(
 					"failed to handle pushed leios vote",
 					"component", "network",
@@ -951,6 +1085,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		for _, vote := range m.PrototypeVotes {
 			if err := o.leiosVotes.HandlePrototypeVote(connId, vote); err != nil {
+				if errors.Is(err, dingleios.ErrPeerMisbehavior) {
+					return err
+				}
 				o.config.Logger.Debug(
 					"failed to handle pushed prototype leios vote",
 					"component", "network",
@@ -1571,8 +1708,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	deferVerification bool,
 ) error {
 	if isNilInterface(o.leiosAnnouncementLedger) {
-		return errors.New(
-			"cannot accept leios announcement without announcement ledger",
+		return fmt.Errorf(
+			"%w: cannot accept leios announcement without announcement ledger",
+			errLeiosAnnouncementLocalState,
 		)
 	}
 	// raw is the header bytes a LeiosNotify peer put on the wire, decoded on
@@ -1590,28 +1728,65 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
+	announcementKey := string(header.Hash().Bytes())
+	alreadyKnown, releaseValidation, err := o.reserveLeiosAnnouncementValidation(
+		announcementKey,
+		ebHash,
+		ebSize,
+		raw,
+	)
+	if err != nil {
+		return err
+	}
+	if alreadyKnown {
+		return nil
+	}
+	defer releaseValidation()
 	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
-			"read current slot for announcement validation: %w",
+			"%w: read current slot for announcement validation: %w",
+			errLeiosAnnouncementLocalState,
 			slotErr,
-		)
-	}
-	if header.SlotNumber() > currentSlot {
-		return fmt.Errorf(
-			"announcement slot %d is ahead of current slot %d",
-			header.SlotNumber(),
-			currentSlot,
 		)
 	}
 	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
 		header.SlotNumber(),
 	)
 	if timeErr != nil {
-		return fmt.Errorf("read announcement slot time: %w", timeErr)
+		return fmt.Errorf(
+			"%w: read announcement slot time: %w",
+			errLeiosAnnouncementLocalState,
+			timeErr,
+		)
+	}
+	if header.SlotNumber() > currentSlot {
+		earlyBy := time.Until(announcementStart)
+		if earlyBy >= 0 && earlyBy <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d is ahead of current slot %d by %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				currentSlot,
+				earlyBy,
+			)
+		}
+		return fmt.Errorf(
+			"announcement slot %d is ahead of current slot %d",
+			header.SlotNumber(),
+			currentSlot,
+		)
 	}
 	age := time.Since(announcementStart)
 	if age < 0 {
+		if -age <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d begins in %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				-age,
+			)
+		}
 		return fmt.Errorf(
 			"announcement slot %d is in the future",
 			header.SlotNumber(),
