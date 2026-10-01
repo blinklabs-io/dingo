@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -230,4 +231,33 @@ func TestNewRegistersChainSelectionMetrics(t *testing.T) {
 		),
 		string(chainselection.RollbackRegistrationRegistered),
 	)
+}
+
+// The composed selector config installs the Genesis Density Disconnector
+// callback; a reported peer is counted and put on peer governance's deny list
+// so it is not redialed straight away.
+func TestBuildChainSelectorConfigWiresGenesisDensityDisconnect(t *testing.T) {
+	t.Parallel()
+	n, registry := newMetricsTestNode(t)
+	n.peerGov = peergov.NewPeerGovernor(peergov.PeerGovernorConfig{})
+	conn := newNodeTestConnId(3303)
+
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.OnGenesisDensityDisconnect)
+	require.False(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
+
+	cfg.OnGenesisDensityDisconnect(chainselection.GenesisDensityDisconnect{
+		ConnectionId: conn,
+	})
+
+	assert.Equal(
+		t,
+		map[string]float64{"": 1},
+		counterValues(
+			t,
+			registry,
+			"dingo_chainselection_gdd_disconnects_total",
+		),
+	)
+	assert.True(t, n.peerGov.IsDenied(conn.RemoteAddr.String()))
 }

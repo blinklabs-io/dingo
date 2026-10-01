@@ -4722,6 +4722,30 @@ Eagerness and the Genesis Density Disconnector need to find the intersection
 across candidate fragments and compare per-candidate density there; neither is
 implemented by this type.
 
+**Genesis Density Disconnector** (`chainselection/density_disconnector.go`)
+disconnects peers whose candidate chain is provably sparser than another
+candidate's. It runs only in Genesis mode, from `EvaluateAndSwitch`, at most
+once per `GenesisDensityEvaluationInterval` (one second, as upstream's
+`gcfGDDRateLimit`), because the pairwise comparison is quadratic in the number
+of tracked peers. For each ordered pair of live, eligible, non-stale
+candidates it takes the `CandidateFragment.Intersect` of the two fragments and
+counts blocks in `(intersection, intersection + window]`, where the window is
+the Genesis window (`3k/f`). Peer B is disconnected when the blocks peer A has
+delivered in that window exceed the most B can still have there: B's delivered
+blocks plus every slot between B's head and the window end, unless B's head
+already reached the window end or B advertises no tip beyond its head. A peer
+whose window is incomplete and could still catch up is therefore never
+disconnected. Pairs with no shared point in the retained fragments, and pairs
+where either peer is a prefix of the other (a peer that is only behind), are
+not decidable and never trigger a disconnect. A peer is reported once, and
+reported peers stop counting as rivals, so the last remaining candidate is
+never disconnected. The selector hands each peer to
+`ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer to
+peer governance's deny list for ten minutes (`DenyPeer`), closes the
+connection, and counts it in `dingo_chainselection_gdd_disconnects_total`.
+The disconnector does not implement the Limit on Eagerness; it only removes
+sparse peers from the candidate set that cap is measured across.
+
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
 quickly but are not themselves trustworthy — is that the densest/longest source
