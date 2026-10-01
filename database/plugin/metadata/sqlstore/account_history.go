@@ -768,6 +768,11 @@ WHERE %[1]s.credential_tag = ? AND %[1]s.staking_key = ?`,
 	return strings.Join(parts, " UNION ALL "), args
 }
 
+// unboundedLimit is the LIMIT operand used when a positive offset has no
+// limit. MySQL requires a LIMIT before OFFSET and rejects SQLite's -1, while
+// PostgreSQL and SQLite also accept the largest signed 64-bit value.
+const unboundedLimit = "9223372036854775807"
+
 func addLimitOffset(
 	query string,
 	args []any,
@@ -778,7 +783,7 @@ func addLimitOffset(
 		query += " LIMIT ?"
 		args = append(args, limit)
 	} else if offset > 0 {
-		query += " LIMIT -1"
+		query += " LIMIT " + unboundedLimit
 	}
 	if offset > 0 {
 		query += " OFFSET ?"

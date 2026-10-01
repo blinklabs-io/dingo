@@ -186,6 +186,7 @@ func testSQLStoreIntegration(
 	store := newIntegrationSQLStore(t, driver, dsn, dialectName, lockNamespace)
 	db, dialect := store.writeDB, store.dialect
 	testBatchedTransactionWrites(t, store)
+	testLimitOffset(t, store)
 
 	txn := store.Transaction(t.Context())
 	require.NoError(t, store.SetCommitTimestamp(42, txn))

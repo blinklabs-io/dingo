@@ -481,7 +481,7 @@ WHERE id IN (
 )
 ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction
-	query, args = appendLimitOffset(query, args, limit, offset)
+	query, args = addLimitOffset(query, args, limit, offset)
 	return s.queryTransactions(ctx, db, query, args)
 }
 
@@ -508,7 +508,7 @@ WHERE id IN (
 ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction
 	args := []any{strconv.FormatUint(label, 10)}
-	query, args = appendLimitOffset(query, args, limit, offset)
+	query, args = addLimitOffset(query, args, limit, offset)
 	ret, err := s.queryTransactions(ctx, db, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("get txs by metadata label %d: %w", label, err)
@@ -543,7 +543,7 @@ WHERE credential_tag = ? AND staking_key = ? AND LENGTH(payment_key) > 0
 GROUP BY payment_key, credential_tag, staking_key
 ORDER BY payment_key ` + direction
 	args := []any{credentialTag, stakingKey}
-	query, args = appendLimitOffset(query, args, limit, offset)
+	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(query),
@@ -632,7 +632,7 @@ func (s *Store) GetAddressTransactionsByCredential(
 	} else {
 		query += " ORDER BY at.slot DESC, at.tx_index DESC, at.payment_key DESC"
 	}
-	query, args = appendLimitOffset(query, args, limit, offset)
+	query, args = addLimitOffset(query, args, limit, offset)
 	rows, err := db.QueryContext(
 		ctx,
 		s.dialect.Rebind(query),
@@ -786,26 +786,6 @@ func addressTransactionPredicate(
 	default:
 		return "", nil
 	}
-}
-
-func appendLimitOffset(
-	query string,
-	args []any,
-	limit int,
-	offset int,
-) (string, []any) {
-	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
-		if offset > 0 {
-			query += " OFFSET ?"
-			args = append(args, offset)
-		}
-	} else if offset > 0 {
-		query += " LIMIT -1 OFFSET ?"
-		args = append(args, offset)
-	}
-	return query, args
 }
 
 func transactionsFromSQLite(
