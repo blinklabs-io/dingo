@@ -749,3 +749,44 @@ func TestPlutusEvalContextCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	require.Equal(t, built+1, calls.Load(), "the evicted key must rebuild")
 	require.NotSame(t, first[1], rebuilt)
 }
+
+// BenchmarkPlutusEvalContextPerBlock measures EvalContext construction for
+// one block's worth of same-version PlutusV3 redeemers. The cached case
+// starts every block from an empty cache, so it pays one build per block and
+// never benefits from reuse across blocks.
+func BenchmarkPlutusEvalContextPerBlock(b *testing.B) {
+	const redeemersPerBlock = 16
+	costModel := defaultMachineCostModel(b, lang.LanguageVersionV3)
+	protoVersion := cek.ProtoVersion{Major: 10}
+
+	b.Run("uncached", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			for range redeemersPerBlock {
+				if _, err := cek.NewEvalContext(
+					lang.LanguageVersionV3,
+					protoVersion,
+					costModel,
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+	b.Run("cached", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			cache := NewPlutusEvalContextCache()
+			for range redeemersPerBlock {
+				if _, err := cache.get(
+					lang.LanguageVersionV3,
+					protoVersion,
+					costModel,
+					false,
+				); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+}
