@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -185,6 +186,10 @@ type Store struct {
 	vacuumDone        chan struct{}
 	vacuumState       atomic.Uint32
 
+	// tickDelay returns how long a periodic job waits before its next run.
+	// New sets it to jitteredInterval; tests replace it before Start.
+	tickDelay func(time.Duration) time.Duration
+
 	// checkpoint/checkpointEvery back an independent ticker from
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
 	// why WAL checkpointing needs a much shorter cadence than VACUUM.
@@ -283,6 +288,7 @@ func New(config Config) (*Store, error) {
 		migrations:                  config.Migrations,
 		migrationLocker:             config.MigrationLocker,
 		diskSize:                    config.DiskSize,
+		tickDelay:                   jitteredInterval,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
 		vacuum:                      config.Vacuum,
@@ -626,47 +632,68 @@ func (s *Store) startMaintenance() {
 	s.maintenanceDone = make(chan struct{})
 	go func() {
 		defer close(s.maintenanceDone)
-		ticker := time.NewTicker(s.maintenanceEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, s.maintenanceEvery) {
+			// Admission is an atomic state transition. Close moves the
+			// state to closed before cancelling the callback context, so a
+			// racing tick cannot start maintenance against closing pools.
+			if !s.maintenanceState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				// Admission is an atomic state transition. Close moves the
-				// state to closed before cancelling the callback context, so a
-				// racing tick cannot start maintenance against closing pools.
-				if !s.maintenanceState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.maintenanceState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.runMaintenance(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.maintenanceState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database maintenance failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.runMaintenance(ctx)
+			s.maintenanceState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database maintenance complete",
+				s.logger.Error(
+					"metadata database maintenance failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database maintenance complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
+}
+
+// jitteredInterval returns every plus up to a tenth of it. A fixed cadence
+// measured from process start lands on the same wall-clock offset every day,
+// so it would meet the same recurring network activity every day.
+func jitteredInterval(every time.Duration) time.Duration {
+	return every + rand.N(every/10+1) //nolint:gosec // schedule jitter, not a secret
+}
+
+// waitForTick blocks until a periodic job is due and the write pool is
+// quiet, and returns false once ctx ends. A job that comes due while a
+// ledger write holds a write-pool connection is retried after a short
+// delay instead of running on top of that write path or waiting out a full
+// interval.
+func (s *Store) waitForTick(ctx context.Context, every time.Duration) bool {
+	delay := s.tickDelay(every)
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+		if s.writeDB.Stats().InUse == 0 {
+			return true
+		}
+		delay = s.tickDelay(min(every, time.Minute))
+	}
 }
 
 func (s *Store) runMaintenance(ctx context.Context) error {
@@ -700,42 +727,34 @@ func (s *Store) startVacuumTicker() {
 	s.vacuumDone = make(chan struct{})
 	go func() {
 		defer close(s.vacuumDone)
-		ticker := time.NewTicker(s.vacuumEvery)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
+		for s.waitForTick(ctx, s.vacuumEvery) {
+			if !s.vacuumState.CompareAndSwap(0, 1) {
 				return
-			case <-ticker.C:
-				if !s.vacuumState.CompareAndSwap(0, 1) {
-					return
-				}
-				if ctx.Err() != nil || s.closed.Load() {
-					s.vacuumState.CompareAndSwap(1, 0)
-					return
-				}
-				started := time.Now()
-				err := s.vacuum(ctx)
+			}
+			if ctx.Err() != nil || s.closed.Load() {
 				s.vacuumState.CompareAndSwap(1, 0)
-				if err != nil {
-					if ctx.Err() == nil {
-						s.logger.Error(
-							"metadata database vacuum failed",
-							"dialect", s.dialect.Name(),
-							"duration", time.Since(started),
-							"error", err,
-						)
-					} else {
-						return
-					}
-					continue
+				return
+			}
+			started := time.Now()
+			err := s.vacuum(ctx)
+			s.vacuumState.CompareAndSwap(1, 0)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-				s.logger.Debug(
-					"metadata database vacuum complete",
+				s.logger.Error(
+					"metadata database vacuum failed",
 					"dialect", s.dialect.Name(),
 					"duration", time.Since(started),
+					"error", err,
 				)
+				continue
 			}
+			s.logger.Debug(
+				"metadata database vacuum complete",
+				"dialect", s.dialect.Name(),
+				"duration", time.Since(started),
+			)
 		}
 	}()
 }

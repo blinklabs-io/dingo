@@ -200,6 +200,11 @@ authorization cleanup schedule. It runs on a dedicated short-lived connection
 for or running a VACUUM never occupies the pool's only connection; ledger
 writes still wait on SQLite's database-wide lock while the file is rewritten.
 
+The maintenance and VACUUM tickers wait their interval plus up to 10% random
+jitter between runs, so they do not recur at the same offset every day. A run
+that comes due while a write-pool connection is in use is postponed and
+rechecked after the shorter of the interval and one minute.
+
 Dingo stores chain state in two sibling stores:
 
 - The metadata store is a relational SQL database managed by the metadata
