@@ -2533,7 +2533,12 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	release := func() {
 		releaseOnce.Do(func() { close(unblock) })
 	}
-	defer release()
+	t.Cleanup(func() {
+		release()
+		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
+			t.Errorf("shutdown database worker pool during cleanup: %v", err)
+		}
+	})
 
 	results := make([]chan DatabaseResult, 5)
 	for i := range results {
@@ -2561,6 +2566,40 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	}
 	shutdownDone := make(chan error, 1)
 	go func() { shutdownDone <- pool.Shutdown(5 * time.Second) }()
+	poolAddress := fmt.Sprintf("%p", pool)
+	testutil.WaitForCondition(t, func() bool {
+		select {
+		case err := <-shutdownDone:
+			t.Fatalf(
+				"shutdown returned before in-flight operations completed: %v",
+				err,
+			)
+		default:
+		}
+		if !pool.closed.Load() {
+			return false
+		}
+		stack := make([]byte, 1<<20)
+		var stackSize int
+		for {
+			stackSize = runtime.Stack(stack, true)
+			if stackSize < len(stack) {
+				break
+			}
+			stack = make([]byte, len(stack)*2)
+		}
+		shutdownFrame := "(*DatabaseWorkerPool).Shutdown(" + poolAddress
+		for _, goroutine := range strings.Split(
+			string(stack[:stackSize]),
+			"\n\n",
+		) {
+			if strings.Contains(goroutine, shutdownFrame) &&
+				strings.Contains(goroutine, "[select") {
+				return true
+			}
+		}
+		return false
+	}, testutil.AsyncWait, "Shutdown should wait for in-flight operations")
 	select {
 	case err := <-shutdownDone:
 		t.Fatalf("shutdown returned before in-flight operations completed: %v", err)
