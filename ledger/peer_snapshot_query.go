@@ -41,8 +41,8 @@ import (
 // LedgerPeerKindBig; LedgerPeerKindAll returns every relay-advertising pool.
 //
 // Tuning the big-peer quota is part of the broader peer-governance roadmap
-// (#1787-#1796) and intentionally out of scope here; this constant only
-// shapes the GetLedgerPeerSnapshot query result.
+// and intentionally out of scope here; this constant only shapes the
+// GetLedgerPeerSnapshot query result.
 var bigLedgerPeerQuota = big.NewRat(9, 10)
 
 // queryLedgerPeerSnapshot answers the LocalStateQuery GetLedgerPeerSnapshot
@@ -52,7 +52,7 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 // peer discovery.
 //
 // Point-in-time behavior: LocalStateQuery Acquire/Release are still no-ops
-// pending ViewManager snapshot isolation (#382), so the snapshot reflects the
+// pending ViewManager snapshot isolation, so the snapshot reflects the
 // current chain tip rather than the acquired point. The reported slot is the
 // current tip slot. When that isolation lands, only the data-sourcing here
 // needs to observe the acquired view; the query surface stays the same.
@@ -130,9 +130,9 @@ func poolKeyHashesFromActivePoolBytes(
 // emptyLedgerPeerSnapshot builds a well-formed empty snapshot at the given
 // point. A node with no active pools still returns a valid result.
 //
-// Version 0 is gouroboros's "unset" sentinel (LedgerPeerSnapshotResult docs,
-// gouroboros#2557): MarshalCBOR always emits its own currently-supported wire
-// version regardless of this value, so this does not pin V1 on the wire.
+// Version 0 is gouroboros's "unset" sentinel (LedgerPeerSnapshotResult docs):
+// MarshalCBOR always emits its own currently-supported wire version regardless
+// of this value, so this does not pin V1 on the wire.
 func emptyLedgerPeerSnapshot(
 	slot olocalstatequery.WithOriginSlot,
 ) olocalstatequery.LedgerPeerSnapshotResult {

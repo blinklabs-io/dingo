@@ -14,7 +14,12 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"crypto/sha256"
+	"encoding/binary"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
 
 // RewardStakeCalculationVersion identifies the stake-accounting algorithm
 // used to produce persisted live stake and consensus snapshots. Bump it when
@@ -60,7 +65,7 @@ type RewardSnapshot struct {
 	// verify reward_pool_input's stake sum against TotalActiveStake exactly
 	// instead of only checking it does not exceed the total, closing a gap
 	// where a proportionally reduced (rather than merely incomplete) input
-	// set passed the same bound silently (dingo #4025). Nil means the
+	// set passed the same bound silently. Nil means the
 	// snapshot predates this tracking: the exclusion, if any, is unknown, so
 	// only the non-exceeding bound can still be checked.
 	ExcludedActiveStake *types.Uint64
@@ -189,3 +194,48 @@ type RewardAccountOutput struct {
 	CapturedSlot uint64
 	BoundarySlot uint64
 }
+
+// RewardCreditRound records a reward snapshot applied at an epoch boundary.
+// It remains indexed until rollback crosses that boundary; the folded flag on
+// reward_account_output rows tracks which account balances already include
+// those credits.
+type RewardCreditRound struct {
+	SnapshotEpoch uint64 `json:"snapshot_epoch"`
+	BoundarySlot  uint64 `json:"boundary_slot"`
+}
+
+// StakeRewardSourcePrefix namespaces the sync_state keys and the journal
+// source hashes of the stake-reward round.
+const StakeRewardSourcePrefix = "dingo:stake-reward:"
+
+// StakeRewardSourceHash is the account_reward_delta tx_hash of the credit a
+// reward_account_output row produces, which makes crediting it idempotent.
+func StakeRewardSourceHash(
+	epoch uint64,
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+	rewardType string,
+) []byte {
+	h := sha256.New()
+	h.Write([]byte(StakeRewardSourcePrefix)) //nolint:errcheck
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], epoch)
+	h.Write(buf[:])                //nolint:errcheck
+	h.Write(poolKeyHash)           //nolint:errcheck
+	h.Write([]byte{credentialTag}) //nolint:errcheck
+	h.Write(stakingKey)            //nolint:errcheck
+	h.Write([]byte(rewardType))    //nolint:errcheck
+	return h.Sum(nil)
+}
+
+// PendingRewardCreditRoundsKey is the legacy sync_state key migrated into
+// the reward_credit_round table.
+const PendingRewardCreditRoundsKey = "dingo:reward-credit:pending-rounds" //nolint:gosec // a sync_state key, not a credential
+
+// RewardEligibilityRecheckKey is the sync_state key holding the credentials
+// whose account registration a rollback restored, as a JSON list of
+// StakeCredentialRef. A reward round precomputed before that rollback read
+// their registration before it was restored, so the boundary that applies the
+// round re-reads it.
+const RewardEligibilityRecheckKey = "dingo:reward-credit:eligibility-recheck"

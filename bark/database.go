@@ -1350,6 +1350,7 @@ func (h *databaseServiceHandler) GetDatabaseInfo(
 		BlockCount:          blockCount,
 		OldestSlot:          oldestSlot,
 		OperationInProgress: busy,
+		Tier:                db.StorageMode(),
 	}
 	if currentID != "" {
 		resp.CurrentOperationId = new(currentID)

@@ -193,11 +193,10 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 // row whose CBOR cannot be resolved even via recovery (no blob entry and no
 // producer transaction metadata to reconstruct it from): the whole query
 // must fail rather than silently return a reply missing that row.
-// GetUTxOWhole's contract is every live UTxO, and node-parity (#1900)
-// compares this reply against a real cardano-node -- a silently short reply
-// would read as a ledger divergence rather than the storage fault it
-// actually is, exactly like IterateLiveUtxos' own loadCbor path already
-// fails rather than omits.
+// GetUTxOWhole's contract is every live UTxO, and node-parity compares this
+// reply against a real cardano-node -- a silently short reply would read as a
+// ledger divergence rather than the storage fault it actually is, exactly like
+// IterateLiveUtxos' own loadCbor path already fails rather than omits.
 func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 	t.Parallel()
 
@@ -231,7 +230,7 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess is the
-// regression test for a chrisguiney review finding on PR #4084: a panic
+// regression test for a worker panic: a panic
 // during a worker's resolve or decode step used to escape the worker
 // goroutine entirely and terminate the whole node process, where the
 // previous sequential implementation (running inside IterateLiveUtxos'
@@ -274,13 +273,12 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 		t, queryErr, database.ErrTxnPanic,
 		"a recovered worker panic must be identifiable via "+
 			"errors.Is(err, database.ErrTxnPanic), matching the "+
-			"sequential implementation's Txn.Do recovery contract "+
-			"(cubic review)",
+			"sequential implementation's Txn.Do recovery contract",
 	)
 }
 
 // TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression
-// test for a chrisguiney review finding on PR #4084: once one row's
+// test for early abort: once one row's
 // resolve fails, the previous implementation kept feeding every remaining
 // row to the worker pool instead of stopping -- unlike the earlier
 // sequential implementation, which aborted its whole traversal on the
@@ -290,14 +288,10 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 // Every seeded row is otherwise identical and independently resolvable
 // (no single row is "the" unrecoverable one): whichever row a worker
 // happens to reach first fails immediately, and every row reached after
-// that is slow but succeeds. This is deliberate, per a cubic review
-// finding on an earlier version of this test that keyed the failure to a
-// specific seeded row: IterateLiveUtxos issues its live-row scan with no
-// ORDER BY, so which row a database iteration visits first is
-// unspecified, not a contract this test may depend on. Keying the
-// failure to "whichever row is first," rather than to a specific row's
-// identity, makes the test's outcome independent of that unspecified
-// order.
+// that is slow but succeeds. IterateLiveUtxos does not order its live-row
+// scan, so the test cannot depend on visit order. The failure is tied to
+// whichever row the database yields first, keeping the test independent of
+// row identity and iteration order.
 func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
 	db := newTestDB(t)
@@ -336,7 +330,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 		// internal done channel, so nothing here depends on decode
 		// speed or on a hand-tuned sleep duration that could silently
 		// stop covering this if utxoWholeResolveWorkers or decode cost
-		// ever changed (cubic review).
+		// ever changed.
 		<-release
 		decodedCount.Add(1)
 		return decodeUtxoWholeCbor(ref, cborBytes)
@@ -383,7 +377,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt covers
-// the core blinklabs-io/dingo#382 fix: a pin must not report a UTxO
+// the core pinning fix: a pin must not report a UTxO
 // created after the pinned slot. Before this fix, queryShelleyUtxoWhole
 // took no point argument at all and always answered from live state --
 // confirmed live against a real Preview cardano-node during node-parity's

@@ -240,7 +240,7 @@ func TestParsePoolRegistrationFieldsRejectMalformedValues(t *testing.T) {
 		_, err = parseRelays(data)
 		require.ErrorContains(t, err, "relay 0")
 	})
-	t.Run("metadata hash", func(t *testing.T) {
+	t.Run("short metadata hash is preserved", func(t *testing.T) {
 		t.Parallel()
 		data, err := cbor.Encode([]any{
 			"https://example.invalid/pool.json",
@@ -249,8 +249,8 @@ func TestParsePoolRegistrationFieldsRejectMalformedValues(t *testing.T) {
 		require.NoError(t, err)
 		var pool ParsedPool
 		err = parsePoolMetadata(data, &pool)
-		require.ErrorContains(t, err, "pool metadata hash is 31 bytes")
-		require.Empty(t, pool.MetadataHash)
+		require.NoError(t, err)
+		require.Equal(t, bytes.Repeat([]byte{0x06}, 31), pool.MetadataHash)
 	})
 	t.Run("absent metadata", func(t *testing.T) {
 		t.Parallel()

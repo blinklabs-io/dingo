@@ -317,7 +317,7 @@ func LoadDRepVotingState(
 	// CIP-1694: an active governance proposal's own deposit still counts as
 	// part of the depositor's active voting stake, so it must be folded into
 	// its return account's delegated DRep voting power here (see
-	// ActiveProposalDepositDRepPower's doc comment / dingo#4355).
+	// ActiveProposalDepositDRepPower's doc comment).
 	drepDepositPower, noConfidenceDepositPower, err := ActiveProposalDepositDRepPower(
 		db, txn, currentEpoch, expiryEpoch,
 	)

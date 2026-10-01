@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"slices"
 	"strings"
 
@@ -1736,12 +1737,6 @@ func parsePoolMetadata(
 	if _, err := cbor.Decode(meta[1], &hash); err != nil {
 		return fmt.Errorf("pool metadata hash: %w", err)
 	}
-	if len(hash) != 32 {
-		return fmt.Errorf(
-			"pool metadata hash is %d bytes, expected 32",
-			len(hash),
-		)
-	}
 	pool.MetadataUrl = url
 	pool.MetadataHash = hash
 	return nil
@@ -2368,6 +2363,10 @@ type ParsedGovState struct {
 	CommitteeQuorum      *cbor.Rat
 	CommitteeParseError  error
 	Proposals            []ParsedGovProposal
+	// ImportParseError covers a skipped proposal or undecodable
+	// constitution policy hash, which would make imported governance state
+	// incomplete. Warnings about enacted proposal history remain recoverable.
+	ImportParseError    error
 	PrevGovActionIds     *ParsedPrevGovActionIds
 	RatifiedGovActionIds []ParsedGovActionId
 	// EnactCommittee and EnactCommitteeQuorum are the committee carried
@@ -2462,6 +2461,9 @@ func ParseGovState(
 	}
 	result.Constitution = constitution
 	if constitution.ParseWarning != nil {
+		result.ImportParseError = errors.Join(
+			result.ImportParseError, constitution.ParseWarning,
+		)
 		warnings = append(
 			warnings, constitution.ParseWarning,
 		)
@@ -2481,6 +2483,9 @@ func ParseGovState(
 	// Parse proposals (field 0) — best-effort
 	proposals, prevIds, err := parseProposals(fields[0])
 	if err != nil {
+		result.ImportParseError = errors.Join(
+			result.ImportParseError, err,
+		)
 		warnings = append(warnings, fmt.Errorf(
 			"parsing proposals: %w", err,
 		))
@@ -2674,6 +2679,13 @@ func parseCommittee(data []byte) (
 	}
 	if quorum.Rat == nil {
 		return nil, nil, errors.New("committee quorum is nil")
+	}
+	// The quorum is a UnitInterval; a value outside [0,1] would otherwise
+	// reach ratification thresholds.
+	if quorum.Sign() < 0 || quorum.Cmp(big.NewRat(1, 1)) > 0 {
+		return nil, nil, fmt.Errorf(
+			"committee quorum %s is outside [0,1]", quorum.Rat,
+		)
 	}
 
 	// Decode the committee map using decodeMapEntries to
@@ -3203,7 +3215,7 @@ func parseGovActionState(
 	// parent. Without this, validateParentChain rejects every
 	// chained child of a pre-snapshot enactment as if the parent
 	// were missing, and chained proposals silently expire instead of
-	// ratifying. See issue #2195.
+	// ratifying.
 	switch prop.ActionType {
 	case 0, 1, 3, 4, 5:
 		if len(govAction) < 2 {
@@ -3231,22 +3243,28 @@ func parseGovActionState(
 		}
 	}
 
-	// anchor = [url, hash] — best-effort: proposals are still
-	// useful for deposit tracking even without anchor metadata.
+	// Conway proposal anchors are mandatory and contain a 32-byte SafeHash.
 	anchorArr, err := decodeRawArray(procedure[3])
-	if err == nil && len(anchorArr) >= 2 {
-		var url string
-		if _, err := cbor.Decode(
-			anchorArr[0], &url,
-		); err == nil {
-			prop.AnchorURL = url
-		}
-		var hash []byte
-		if _, err := cbor.Decode(
-			anchorArr[1], &hash,
-		); err == nil {
-			prop.AnchorHash = hash
-		}
+	if err != nil {
+		return nil, fmt.Errorf("decoding gov action anchor: %w", err)
+	}
+	if len(anchorArr) != 2 {
+		return nil, fmt.Errorf(
+			"gov action anchor has %d fields, expected 2",
+			len(anchorArr),
+		)
+	}
+	if _, err := cbor.Decode(anchorArr[0], &prop.AnchorURL); err != nil {
+		return nil, fmt.Errorf("decoding gov action anchor url: %w", err)
+	}
+	if _, err := cbor.Decode(anchorArr[1], &prop.AnchorHash); err != nil {
+		return nil, fmt.Errorf("decoding gov action anchor hash: %w", err)
+	}
+	if len(prop.AnchorHash) != 32 {
+		return nil, fmt.Errorf(
+			"gov action anchor hash is %d bytes, expected 32",
+			len(prop.AnchorHash),
+		)
 	}
 
 	// proposedIn (epoch)

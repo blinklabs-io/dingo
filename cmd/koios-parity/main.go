@@ -206,10 +206,9 @@ func intConfigValue(cfg map[string]any, key string) int {
 }
 
 // dsnFromMetadataConfig builds a connection string from Dingo's resolved
-// plugins.storage.metadata.config map. A flat "dsn" key (the pattern used by
-// this repo's own k8s examples, e.g. examples/dingo-gov-lens/k8s/
-// dingo-values.yaml) is used verbatim; otherwise it's assembled from discrete
-// fields the same way database/plugin/metadata/{postgres,mysql}'s own
+// plugins.storage.metadata.config map. A flat "dsn" key is used verbatim;
+// otherwise it's assembled from discrete fields the same way
+// database/plugin/metadata/{postgres,mysql}'s own
 // RegisterProvider descriptor defaults + Start() methods do internally, so
 // this tool connects with the exact credentials the running Dingo node was
 // configured with.
@@ -474,7 +473,7 @@ func addKoiosURLFlag(cmd *cobra.Command) {
 			"KOIOS_ALLOW_PRIVATE_ADDRESSES=true)")
 }
 
-// addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
+// addAccountsFlag registers the per-account exact-parity opt-in flag,
 // shared by fetch/check/run/watch. Per-account fetching/checking issues far
 // more Koios requests than pool-level work (a chunked request set covering
 // the full address universe per epoch, versus one request per pool), so this
@@ -503,7 +502,7 @@ func accountsEnabled(cmd *cobra.Command) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// addAccountChunkFlags registers dingo #3099's --account-chunk-size/
+// addAccountChunkFlags registers the --account-chunk-size/
 // --account-chunk-max-bytes flags, shared by fetch/run/watch (the
 // subcommands that actually issue /account_reward_history requests — check
 // only reads the cache, so it has no use for these). 0 (the default for

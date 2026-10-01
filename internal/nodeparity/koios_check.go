@@ -14,7 +14,7 @@
 
 package nodeparity
 
-// Koios-backed comparison (blinklabs-io/dingo#1900): validates a Dingo
+// Koios-backed comparison: validates a Dingo
 // instance replaying from genesis against Koios instead of a reference
 // cardano-node, epoch by epoch.
 //
@@ -56,23 +56,19 @@ package nodeparity
 //     separate pool_info call per pool per epoch, deferred as follow-up
 //     scope.
 //
-//     KNOWN GAP: this only iterates the
-//     pools Dingo itself reports via GetPoolDistr2, so it can detect a
-//     pool whose Dingo-reported stake disagrees with Koios, but not a pool
-//     Dingo's ledger state is missing entirely (a real bug that would look
-//     identical to "this pool just isn't active yet" from here). Closing
-//     this gap properly needs a per-epoch source of Koios's own active-pool
-//     set to compare Dingo's list against -- Koios has no bulk endpoint for
-//     that (pool_history is single-pool only; pool_list returns every
-//     pool ever registered, historically 1000+ on preview alone, with only
-//     a live/current active_stake, not a historical one). Iterating that
-//     full list per epoch would reintroduce, one level up the call stack,
-//     the exact sequential-Koios-call cost this file's own concurrency
-//     work (stakeCheckConcurrency) was written to eliminate, and using
-//     pool_list's current registration status as a stand-in for a
-//     historical epoch's membership would be actively wrong for any epoch
-//     not near Koios's live tip -- worse than the documented gap it would
-//     replace. Deferred rather than rushed, as follow-up scope.
+//     The per-pool loop only iterates the pools Dingo itself reports via
+//     GetPoolDistr2, so on its own it cannot see a pool Dingo's ledger
+//     state is missing entirely -- that looks identical to "this pool just
+//     isn't active yet" from here. compareTotalActiveStake
+//     closes that: Dingo's per-pool stakes are summed and compared against
+//     Koios's epoch-wide active_stake, so a dropped pool carrying stake
+//     moves the sum and is reported, without needing Koios's own
+//     historical pool set. Verified across 1,321 cached Preview epochs
+//     (2-1322), where Koios's own per-pool active_stake values sum to its
+//     epoch_info active_stake with no epoch disagreeing, so the comparison
+//     needs no tolerance. It reports THAT a pool is missing, not which one; naming the
+//     culprit would need a per-epoch pool_history call per pool, and is
+//     only worth paying for once the totals actually disagree.
 //   - UTxO set: full content (address, ADA amount, multi-asset tokens,
 //     datum presence/form, reference script hash), not just existence --
 //     built from Koios's own /tx_info input/output data via a
@@ -90,7 +86,7 @@ package nodeparity
 //
 // Each of the three runs its own independent Acquire, on its own
 // connection, rather than sharing one the way Check's live-tip-agreement
-// mode does. #4320 added Acquire-time validation (VerifyPointQueryable) that
+// mode does. Acquire-time validation (VerifyPointQueryable)
 // rejects a point up front if ANY point-aware query type's own retention
 // floor has passed it, not only the one the caller actually intends to ask,
 // so a shared Acquire would cut protocol params and stake off at the UTxO
@@ -101,10 +97,10 @@ package nodeparity
 //
 // Running Dingo with --storage-mode api removes the UTxO half of that
 // exposure entirely (checkUtxoRetentionWindow skips its own retention check
-// in that mode, the same way cleanupConsumedUtxos does). #4320 added the
-// equivalent carve-out to pool-stake snapshot pruning
-// (ledger/snapshot/rotation.go's cleanupOldSnapshots), so in API mode the
-// stake comparison is no longer bounded by that window either.
+// in that mode, the same way cleanupConsumedUtxos does). Pool-stake snapshot
+// pruning has the equivalent carve-out (ledger/snapshot/rotation.go's
+// cleanupOldSnapshots), so in API mode the stake comparison is no longer
+// bounded by that window either.
 
 import (
 	"context"
@@ -112,6 +108,7 @@ import (
 	"math/big"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/koiosparity"
@@ -293,32 +290,50 @@ func CheckProtocolParams(
 	), nil
 }
 
-// StakeMismatch is one pool's active-stake disagreement between Dingo and
-// Koios for an epoch, as absolute lovelace amounts.
+// StakeMismatch is an active-stake disagreement between Dingo and Koios for
+// an epoch, as absolute lovelace amounts. It covers two shapes: one pool's
+// stake (PoolIDBech32 set) and the epoch-wide total (PoolIDBech32 empty,
+// Reason ReasonTotalActiveStakeMismatch -- see compareTotalActiveStake).
 type StakeMismatch struct {
+	// PoolIDBech32 is empty only for the epoch-wide total comparison, which
+	// knows a pool is missing but not which one.
 	PoolIDBech32 string
 	DingoStake   uint64
-	// KoiosStake is Koios's literal decimal string, kept exact -- "" when
-	// Koios has no pool_history row for this pool/epoch at all (Reason
-	// explains why that itself counts as a mismatch here).
+	// KoiosStake is Koios's literal decimal string, kept exact -- "" for
+	// every case where Koios produced no value to record: no pool_history
+	// row for this pool/epoch, ReasonNoKoiosActiveStake, and
+	// ReasonKoiosEpochInfoUnavailable. Reason explains why each still
+	// counts as a mismatch here.
 	KoiosStake string
-	// DiffLovelace is the exact signed difference (Dingo - Koios), in
-	// whole lovelace. Meaningless (left 0) when Reason is set: those cases
-	// have no numeric Koios value to diff against.
+	// DiffLovelace is the exact signed difference (Dingo - Koios), in whole
+	// lovelace. Left 0 for every Reason that has no numeric Koios value to
+	// diff against, which is all of them EXCEPT
+	// ReasonTotalActiveStakeMismatch: that one is an ordinary numeric
+	// disagreement and carries both a Reason and a real difference, because
+	// it needs the Reason to say the sum diverged rather than one pool.
 	DiffLovelace int64
-	// Reason is non-empty only for the two cases that are not a numeric
-	// disagreement: "no koios row for nonzero dingo stake" or "unparseable
-	// koios active_stake value". Empty for an ordinary numeric mismatch.
+	// Reason is empty for an ordinary per-pool numeric mismatch, and
+	// otherwise one of:
+	//   - "no koios pool_history row for nonzero dingo stake"
+	//   - "unparseable koios active_stake value" (KoiosFault)
+	//   - "stake difference too large to represent ..."
+	//   - ReasonTotalActiveStakeMismatch (numeric; see DiffLovelace)
+	//   - ReasonNoKoiosActiveStake (KoiosFault)
+	//   - ReasonKoiosEpochInfoUnavailable, followed by ": " and the fetch
+	//     error (KoiosFault) -- the only Reason that is not a fixed
+	//     string, so match it by prefix rather than equality
 	Reason string
-	// KoiosFault is true only for the "unparseable koios active_stake
-	// value" case: a comparison Koios's own data made untrustworthy, not a
-	// real Dingo/Koios disagreement -- matching koiosparity.StatusError's
-	// treatment of a Koios-side fetch failure, and unlike the "no koios row
-	// for nonzero dingo stake" case (KoiosFault false), which is a genuine
-	// divergence. A caller counting real mismatches must exclude this case
-	// the same way it already excludes a StakeErr; a caller comparing on
-	// Reason's literal string instead would silently miscount if this
-	// doc-comment's wording ever changed.
+	// KoiosFault is true for the cases Koios's own data or availability
+	// made the comparison untrustworthy rather than a real Dingo/Koios
+	// disagreement: an unparseable active_stake value,
+	// ReasonNoKoiosActiveStake, and ReasonKoiosEpochInfoUnavailable. It matches
+	// koiosparity.StatusError's treatment of a Koios-side fetch failure,
+	// and is deliberately false for "no koios pool_history row for nonzero
+	// dingo stake" and for the overflow case, both of which are genuine
+	// divergences. A caller counting real mismatches must exclude
+	// KoiosFault the same way it already excludes a StakeErr; a caller
+	// comparing on Reason's literal string instead would silently miscount
+	// if any wording above ever changed.
 	KoiosFault bool
 }
 
@@ -481,6 +496,13 @@ func evaluatePoolStake(
 	return nil
 }
 
+// poolStake is one pool's Dingo-reported active stake, shared by the
+// per-pool comparison and compareTotalActiveStake's sum.
+type poolStake struct {
+	bech32 string
+	stake  uint64
+}
+
 // CheckStakeDistribution compares Dingo's own pool-by-pool active stake
 // (queried live via client, already Acquired to the point under test)
 // against Koios's /pool_history for epoch, for every pool Dingo itself
@@ -503,6 +525,16 @@ func evaluatePoolStake(
 // per-process single-connection WAL pool). A cache error (read or write)
 // never fails the check: it degrades to "fetch this pool live from Koios,"
 // never to a hard error.
+//
+// Beyond the per-pool comparison it also reads Koios's epoch-wide
+// active_stake from /epoch_info (cache first) and compares Dingo's summed
+// pool stakes against it, which is the only way a pool Dingo lost entirely
+// surfaces -- see compareTotalActiveStake. That mismatch carries an empty
+// PoolIDBech32 and Reason ReasonTotalActiveStakeMismatch. A failure to
+// fetch /epoch_info is likewise reported as a mismatch, carrying
+// KoiosFault, rather than returned as an error: an error would discard the
+// per-pool mismatches already found, letting an outage of that endpoint
+// hide a real divergence.
 func CheckStakeDistribution(
 	ctx context.Context,
 	client *localstatequery.Client,
@@ -516,13 +548,34 @@ func CheckStakeDistribution(
 		return nil, fmt.Errorf("dingo stake distribution query: %w", err)
 	}
 
-	type poolStake struct {
-		bech32 string
-		stake  uint64
-	}
 	pools := make([]poolStake, 0, len(pd.Pools))
 	for pid, entry := range pd.Pools {
 		pools = append(pools, poolStake{pid.String(), entry.TotalPoolStake})
+	}
+
+	// Koios computes pool_history only after it has processed an epoch, so
+	// for an epoch it has not published every pool Dingo reports looks
+	// absent and the per-pool loop below calls each one a divergence. The
+	// window covers both an epoch that has not closed (negative elapsed)
+	// and one Koios has not caught up on (small positive), which is the
+	// case actually observed -- see koiosPublishGrace. Reported as one
+	// KoiosFault rather than returning no mismatch at all: an empty result
+	// makes from-genesis log "stake distribution match" and count the
+	// epoch verified, claiming every pool was compared when none were.
+	total, endTime, infoErr := koiosActiveStakeForEpoch(
+		ctx, koios, cache, network, epoch,
+	)
+	if infoErr == nil && !endTime.IsZero() &&
+		time.Since(endTime) < koiosPublishGrace {
+		var got uint64
+		for _, p := range pools {
+			got += p.stake
+		}
+		return []StakeMismatch{{
+			DingoStake: got,
+			Reason:     ReasonKoiosEpochNotPublished,
+			KoiosFault: true,
+		}}, nil
 	}
 
 	var cached map[string]koiosparity.KoiosPoolEpoch
@@ -587,17 +640,216 @@ func CheckStakeDistribution(
 			mismatches = append(mismatches, *m)
 		}
 	}
+	// Appended, never returned as an error: an error here would discard
+	// every per-pool mismatch collected above, so an /epoch_info outage
+	// would hide a real pool divergence the per-pool half had already
+	// found. A KoiosFault entry keeps the epoch unverified (from-genesis
+	// counts any fault as incomplete) AND keeps those findings reportable.
+	if t := compareTotalActiveStake(
+		total, infoErr, epoch, pools,
+	); t != nil {
+		mismatches = append(mismatches, *t)
+	}
 	sort.Slice(mismatches, func(i, j int) bool {
 		return mismatches[i].PoolIDBech32 < mismatches[j].PoolIDBech32
 	})
 	return mismatches, nil
 }
 
+// ReasonTotalActiveStakeMismatch marks the one StakeMismatch that is not
+// about a specific pool: Dingo's per-pool stakes do not sum to Koios's
+// epoch-wide active stake. PoolIDBech32 is empty for it.
+const ReasonTotalActiveStakeMismatch = "dingo pool stakes do not sum to koios active_stake"
+
+// ReasonNoKoiosActiveStake marks the total-stake comparison as unrunnable
+// because Koios answered with no epoch-wide active_stake at all. It carries
+// KoiosFault, so a caller counting real divergences skips it the same way it
+// skips an unparseable value -- but it is still reported, because a check
+// that could not run must not look like one that ran and found nothing.
+//
+// Never used for an epoch koiosparity.IsPreStakingEpoch accepts: Koios's
+// null is permanent and correct there, so those epochs are skipped outright
+// rather than reported.
+const ReasonNoKoiosActiveStake = "koios reported no active_stake for the epoch"
+
+// ReasonKoiosEpochInfoUnavailable marks a total-stake comparison that could
+// not run because /epoch_info could not be fetched at all, as opposed to
+// answering without an active_stake. Like that case it carries KoiosFault,
+// which is what keeps the epoch unverified without discarding the per-pool
+// mismatches found alongside it -- returning an error instead would throw
+// those away and let an outage of this endpoint hide a real divergence.
+const ReasonKoiosEpochInfoUnavailable = "koios epoch_info fetch failed"
+
+// ReasonKoiosEpochNotPublished marks an epoch Koios has not computed
+// pool_history for yet. Every pool then looks absent, so without this the
+// per-pool loop reports one mismatch per pool -- 646 observed on preview --
+// for an epoch that simply does not exist on the reference side.
+const ReasonKoiosEpochNotPublished = "koios has not published this epoch yet"
+
+// koiosPublishGrace is how long after an epoch closes Koios may still be
+// computing its pool_history before a missing row counts as a real
+// divergence rather than reference lag.
+//
+// Measured on preview at epoch 1435: the epoch closed at 00:00 UTC and
+// /pool_history still returned an empty array at 02:37 UTC, 2h37m later and
+// unresolved at the time of measurement, so the true lag is a lower bound.
+// 12h is deliberately well clear of that single observation rather than
+// fitted to it -- the cost of being generous is only that a genuinely
+// missing pool is reported a few hours later, while being too tight
+// reinstates the per-pool flood this exists to prevent. Tighten it once
+// several boundaries have been measured.
+const koiosPublishGrace = 12 * time.Hour
+
+// koiosActiveStakeForEpoch returns Koios's epoch-wide active_stake as its
+// literal decimal string, cache first, "" when Koios has none for the epoch.
+//
+// It deliberately does not write a fetched value back to the cache, unlike
+// the pool and protocol-param paths. UpsertEpochInfo rewrites every
+// koios_epoch_info column on conflict, so a row built from active_stake alone
+// would blank EpochEndTime and the reward columns -- and internal/koiosparity
+// reads EpochEndTime to size the grace window that keeps a lagged, empty
+// account-reward result retryable. The cache is shared with Dingo's
+// in-process observer, which is what populates those columns, so a partial
+// write here would degrade a different check in another process. Re-fetching
+// costs one /epoch_info request per epoch, against the ~75 /pool_history
+// calls the per-pool comparison already makes.
+// It also returns the epoch's end time, zero when Koios does not report
+// one, because CheckStakeDistribution needs it to tell an epoch Koios has
+// not published yet from one it genuinely disagrees about.
+// Returned together so the whole check costs one /epoch_info request, not
+// two.
+func koiosActiveStakeForEpoch(
+	ctx context.Context,
+	koios *koiosparity.KoiosClient,
+	cache *koiosparity.Cache,
+	network string,
+	epoch uint64,
+) (activeStake string, endTime time.Time, err error) {
+	if cache != nil {
+		if cached, cerr := cache.GetEpochInfo(network, epoch); cerr == nil &&
+			cached != nil {
+			if s := strings.TrimSpace(cached.ActiveStake); s != "" {
+				return s, cached.EpochEndTime, nil
+			}
+		}
+	}
+	resp, err := koios.GetEpochInfo(ctx, epoch)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf(
+			"koios epoch_info for epoch %d: %w", epoch, err,
+		)
+	}
+	if resp == nil {
+		return "", time.Time{}, nil
+	}
+	if resp.EndTime > 0 {
+		endTime = time.Unix(resp.EndTime, 0).UTC()
+	}
+	if resp.ActiveStake == nil {
+		return "", endTime, nil
+	}
+	return strings.TrimSpace(*resp.ActiveStake), endTime, nil
+}
+
+// compareTotalActiveStake closes the blind spot in the per-pool loop above:
+// that loop iterates only the pools GetPoolDistr2 reports, so a
+// pool Dingo dropped entirely is never looked up and the epoch reports a
+// clean match. Summing what Dingo did report and comparing against Koios's
+// epoch-wide active_stake detects the omission without needing to know which
+// pool went missing -- a dropped pool carrying stake always moves the sum.
+//
+// A set comparison against Koios's registered pools was tried first and does
+// not work: at Preview epoch 995 it flagged 70 pools as missing, 69 of which
+// simply had no delegated stake and so are legitimately absent from a stake
+// distribution. Summing has no such ambiguity, because a stakeless pool
+// contributes zero.
+//
+// nil means the totals agree, or the epoch predates any stake snapshot and
+// there is nothing to compare. Every way the comparison can fail to run --
+// /epoch_info unfetchable, answered without an active_stake, or answered
+// with one that will not parse -- comes back as a KoiosFault mismatch
+// rather than an error. That is deliberate: CheckStakeDistribution has
+// already collected the per-pool mismatches by this point, and an error
+// return would discard them, so an outage of this one endpoint could hide a
+// pool divergence the per-pool half had found. A fault keeps the epoch
+// unverified and keeps those findings.
+func compareTotalActiveStake(
+	koiosTotal string,
+	fetchErr error,
+	epoch uint64,
+	pools []poolStake,
+) *StakeMismatch {
+	// Koios has no active_stake for these epochs permanently and
+	// correctly, because no valid "go" stake snapshot exists yet -- an
+	// epoch with nothing to compare, not a fault, and not worth a request.
+	// Reporting it as one would make the first two stake checks of every
+	// from-genesis replay look degraded.
+	if koiosparity.IsPreStakingEpoch(epoch) {
+		return nil
+	}
+
+	// No overflow guard on the sum: wrapping uint64 would take total stake
+	// some 400x Cardano's max supply, and every pool contributing a value
+	// that large would already have failed its own per-pool comparison.
+	var got uint64
+	for _, p := range pools {
+		got += p.stake
+	}
+
+	if err := fetchErr; err != nil {
+		return &StakeMismatch{
+			DingoStake: got,
+			Reason:     ReasonKoiosEpochInfoUnavailable + ": " + err.Error(),
+			KoiosFault: true,
+		}
+	}
+
+	if koiosTotal == "" {
+		return &StakeMismatch{
+			DingoStake: got,
+			Reason:     ReasonNoKoiosActiveStake,
+			KoiosFault: true,
+		}
+	}
+
+	diff, kind := stakeDiffLovelace(got, koiosTotal)
+	switch kind {
+	case stakeDiffOK:
+		// Falls through to the comparison below.
+	case stakeDiffUnparseableKoios:
+		return &StakeMismatch{
+			DingoStake: got,
+			KoiosStake: koiosTotal,
+			Reason:     "unparseable koios active_stake value",
+			KoiosFault: true,
+		}
+	case stakeDiffOverflow:
+		return &StakeMismatch{
+			DingoStake: got,
+			KoiosStake: koiosTotal,
+			Reason: "stake difference too large to represent -- " +
+				"dingo's reported stake is implausible",
+		}
+	}
+	// Strictly != 0, both directions. A Dingo surplus is as much a
+	// divergence as a shortfall: it means Dingo reports stake Koios's
+	// epoch total does not account for.
+	if diff == 0 {
+		return nil
+	}
+	return &StakeMismatch{
+		DingoStake:   got,
+		KoiosStake:   koiosTotal,
+		DiffLovelace: diff,
+		Reason:       ReasonTotalActiveStakeMismatch,
+	}
+}
+
 // fetchTxInfosCached is the cache-first counterpart to
 // koiosparity.KoiosClient.GetTxInfos, completing the set: protocol params
 // (CheckProtocolParams) and stake distribution (CheckStakeDistribution)
 // already consult the shared cache before Koios, and this makes the UTxO
-// half do the same (blinklabs-io/dingo#1900).
+// half do the same.
 //
 // Unlike those two, /tx_info is a BATCH endpoint, so an all-or-nothing cache
 // check would throw away almost all of the benefit: one uncached transaction

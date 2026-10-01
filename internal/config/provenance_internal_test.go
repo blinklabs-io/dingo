@@ -56,8 +56,8 @@ func TestLoadConfig_LeavesProvenanceEmpty(t *testing.T) {
 // returns — not just one hand-picked name — and asserts both that the
 // candidate actually changed the field's value AND that provenance
 // recorded SourceEnv for it. That "every candidate must genuinely apply"
-// invariant is what catches a wrong derived name: a review previously
-// found envVarCandidatesForField returning a name for
+// invariant is what catches a wrong derived name: envVarCandidatesForField once
+// returned a name for
 // HistoryExpiry.Enabled that envconfig never actually honours (see
 // TestHistoryExpiryEnabledEnv_FlatFormDoesNotApply for the regression
 // guard on that specific wrong name).
@@ -185,7 +185,7 @@ func TestGatedFieldEnvProvenance(t *testing.T) {
 }
 
 // TestHistoryExpiryEnabledEnv_FlatFormDoesNotApply is a regression guard
-// for the wrong candidate a review caught: envconfig prefixes a field
+// for a wrong candidate: envconfig prefixes a field
 // nested under a container with no envconfig tag of its own using that
 // CONTAINER's own derived key ("CARDANO_HISTORYEXPIRY") as the prefix, not
 // a flat "CARDANO_" + the leaf's envconfig tag directly.

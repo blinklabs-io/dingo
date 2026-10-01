@@ -205,6 +205,13 @@ func (bi *BlockIndexer) ComputeOffsets(
 				IsValid:        tx.IsValid(),
 			}
 		}
+		if err := bi.indexSubTransactionOffsets(txLoc, tx, result); err != nil {
+			return nil, fmt.Errorf(
+				"index sub-transactions for tx %s: %w",
+				txHash.String(),
+				err,
+			)
+		}
 
 		// Extract UTxO output offsets from transaction body
 		if err := bi.extractOutputOffsets(blockCbor, txLoc, tx, result); err != nil {
@@ -255,6 +262,68 @@ func (bi *BlockIndexer) ComputeOffsets(
 	return result, nil
 }
 
+func (bi *BlockIndexer) indexSubTransactionOffsets(
+	txLoc common.TransactionLocation,
+	tx common.Transaction,
+	result *BlockIngestionResult,
+) error {
+	bodies := common.SubTransactionBodiesFromTransaction(tx)
+	if len(bodies) == 0 {
+		return nil
+	}
+	if len(bodies) != len(txLoc.SubTransactions) {
+		return fmt.Errorf(
+			"transaction has %d sub-transaction bodies but %d offset records",
+			len(bodies),
+			len(txLoc.SubTransactions),
+		)
+	}
+	for idx, body := range bodies {
+		loc := txLoc.SubTransactions[idx]
+		hash := body.Id()
+		var hashArray [32]byte
+		copy(hashArray[:], hash.Bytes())
+		result.TxOffsets[hashArray] = CborOffset{
+			BlockSlot:  bi.blockSlot,
+			BlockHash:  bi.blockHash,
+			ByteOffset: loc.Body.Offset,
+			ByteLength: loc.Body.Length,
+		}
+		if !bi.includeWitnessOffsets {
+			continue
+		}
+		for datumHash, datumLoc := range loc.Datums {
+			var datumHashArray [32]byte
+			copy(datumHashArray[:], datumHash[:])
+			result.DatumOffsets[datumHashArray] = CborOffset{
+				BlockSlot:  bi.blockSlot,
+				BlockHash:  bi.blockHash,
+				ByteOffset: datumLoc.Offset,
+				ByteLength: datumLoc.Length,
+			}
+		}
+		for redeemerKey, redeemerLoc := range loc.Redeemers {
+			result.RedeemerOffsets[redeemerKey] = CborOffset{
+				BlockSlot:  bi.blockSlot,
+				BlockHash:  bi.blockHash,
+				ByteOffset: redeemerLoc.Offset,
+				ByteLength: redeemerLoc.Length,
+			}
+		}
+		for scriptHash, scriptLoc := range loc.Scripts {
+			var scriptHashArray [32]byte
+			copy(scriptHashArray[:], scriptHash[:])
+			result.ScriptOffsets[scriptHashArray] = CborOffset{
+				BlockSlot:  bi.blockSlot,
+				BlockHash:  bi.blockHash,
+				ByteOffset: scriptLoc.Offset,
+				ByteLength: scriptLoc.Length,
+			}
+		}
+	}
+	return nil
+}
+
 // extractOutputOffsets extracts byte offsets for each transaction output.
 // Uses pre-computed output offsets from gouroboros when available,
 // with fallback to byte searching for compatibility.
@@ -266,55 +335,21 @@ func (bi *BlockIndexer) extractOutputOffsets(
 	result *BlockIngestionResult,
 ) error {
 	txHash := tx.Hash()
-	var txHashArray [32]byte
-	copy(txHashArray[:], txHash.Bytes())
-
-	// Get produced UTxOs (includes both regular outputs and collateral return)
 	produced := tx.Produced()
 	if len(produced) == 0 {
 		return nil
 	}
-
-	// Use pre-computed output offsets from gouroboros if available
-	// This is much faster than byte searching
-	if len(txLoc.Outputs) > 0 {
-		allOffsetsFound := true
-		for _, utxo := range produced {
-			outputIdx := int(utxo.Id.Index())
-
-			// For valid transactions, output index maps directly to Outputs array
-			// For invalid transactions with collateral return, the index is len(Outputs)
-			// which means we need to handle this case specially
-			if outputIdx < len(txLoc.Outputs) {
-				loc := txLoc.Outputs[outputIdx]
-				ref := UtxoRef{
-					TxId:      txHashArray,
-					OutputIdx: utxo.Id.Index(),
-				}
-				result.UtxoOffsets[ref] = CborOffset{
-					BlockSlot:  bi.blockSlot,
-					BlockHash:  bi.blockHash,
-					ByteOffset: loc.Offset,
-					ByteLength: loc.Length,
-				}
-			} else {
-				// Output index not in pre-computed offsets
-				allOffsetsFound = false
-			}
-		}
-		// Only return early if ALL outputs had pre-computed offsets
-		if allOffsetsFound {
-			return nil
-		}
-		// Fall through to byte searching for missing outputs
-	}
+	subBodies := common.SubTransactionBodiesFromTransaction(tx)
 
 	// Fallback: structurally walk the transaction body and locate
 	// the exact produced output value. Do not use raw substring
 	// search; identical bytes can appear in non-output fields.
 	for _, utxo := range produced {
+		outputHash := utxo.Id.Id()
+		var outputHashArray [32]byte
+		copy(outputHashArray[:], outputHash.Bytes())
 		ref := UtxoRef{
-			TxId:      txHashArray,
+			TxId:      outputHashArray,
 			OutputIdx: utxo.Id.Index(),
 		}
 
@@ -322,9 +357,55 @@ func (bi *BlockIndexer) extractOutputOffsets(
 		if _, ok := result.UtxoOffsets[ref]; ok {
 			continue
 		}
+		outputLoc := txLoc
+		if outputHash != txHash {
+			found := false
+			for subIdx, body := range subBodies {
+				if body.Id() != outputHash {
+					continue
+				}
+				if subIdx >= len(txLoc.SubTransactions) {
+					return fmt.Errorf(
+						"sub-transaction %s has no offset record",
+						outputHash,
+					)
+				}
+				outputLoc = txLoc.SubTransactions[subIdx]
+				found = true
+				break
+			}
+			if !found {
+				return fmt.Errorf(
+					"produced output references unknown transaction body %s",
+					outputHash,
+				)
+			}
+		}
+		outputIdx := int(utxo.Id.Index())
+		if outputIdx < len(outputLoc.Outputs) {
+			loc := outputLoc.Outputs[outputIdx]
+			end := uint64(loc.Offset) + uint64(loc.Length)
+			if end > uint64(len(blockCbor)) {
+				return fmt.Errorf("output %d offset exceeds block size", utxo.Id.Index())
+			}
+			outputCbor := utxo.Output.Cbor()
+			if len(outputCbor) == 0 || !bytes.Equal(blockCbor[loc.Offset:end], outputCbor) {
+				return fmt.Errorf(
+					"output %d: indexed CBOR range does not match produced output",
+					utxo.Id.Index(),
+				)
+			}
+			result.UtxoOffsets[ref] = CborOffset{
+				BlockSlot:  bi.blockSlot,
+				BlockHash:  bi.blockHash,
+				ByteOffset: loc.Offset,
+				ByteLength: loc.Length,
+			}
+			continue
+		}
 
-		bodyStart := txLoc.Body.Offset
-		bodyEnd := txLoc.Body.Offset + txLoc.Body.Length
+		bodyStart := outputLoc.Body.Offset
+		bodyEnd := outputLoc.Body.Offset + outputLoc.Body.Length
 		if bodyEnd > safeIntToUint32(len(blockCbor)) {
 			return fmt.Errorf(
 				"output %d: body end (%d) exceeds block size (%d)",

@@ -33,7 +33,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	utxorpcCardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
@@ -258,7 +257,7 @@ func (s *queryServiceServer) ReadParams(
 
 	// GetCurrentPParamsForReporting omits any synthetic (not-yet-real)
 	// PlutusV2 cost model from this reporting reply, matching what a real
-	// cardano-node reports -- see blinklabs-io/dingo#3825.
+	// cardano-node reports.
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParamsForReporting()
 	if protoParams == nil {
 		// Byron carries no protocol-parameter CBOR, so a genuine Byron
@@ -792,7 +791,7 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	// Decode the block CBOR into a ledger block.
-	ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+	ledgerBlock, err := models.DecodeBlockCbor(block.Type, block.Cbor)
 	if err != nil {
 		return nil, fmt.Errorf("decode block: %w", err)
 	}

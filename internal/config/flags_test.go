@@ -29,6 +29,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func FuzzNormalizeRunMode(f *testing.F) {
+	f.Add("")
+	f.Add("serve")
+	f.Add("LOAD")
+	f.Add("dev")
+	f.Add("leios")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeRunMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
+		default:
+			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStorageMode(f *testing.F) {
+	f.Add("")
+	f.Add("core")
+	f.Add("API")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStorageMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case storageModeCore, storageModeAPI:
+		default:
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
+		}
+	})
+}
+
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	resetGlobalConfig()
 
@@ -138,8 +222,8 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 }
 
 // TestValidateForgedBlockDefaultsToTrue is a regression test for a
-// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
-// (issue #3528's fail-closed forging default) had no test on the actual
+// gap: DefaultConfig's ValidateForgedBlock: true literal
+// (the fail-closed forging default) had no test on the actual
 // operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
 // separate NewConfig literal covered by
 // TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting
@@ -177,15 +261,15 @@ func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
 
 // TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral
 // guards the same failure class as TestValidateForgedBlockDefaultsToTrue
-// above, for the forging knob added in issue #3973. Merging main's
-// newDefaultConfig() rewrite could have dropped this field's line from that
-// literal silently: ApplyDefaults fills a zero
-// ForgePrimaryChainTipToleranceSlots with the same constant, so every test
-// that reaches the value through LoadConfig+ApplyDefaults stays green with
-// the literal gone, and resetGlobalConfig's separate copy (config_test.go)
-// carries its own line. The gap only shows on the two paths that read the
-// production literal without defaulting: globalConfig as flag registration
-// sees it, and newDefaultConfig() itself.
+// above, for the forging knob that tolerates a lagging primary-chain tip.
+// Merging main's newDefaultConfig() rewrite could have dropped this field's
+// line from that literal silently: ApplyDefaults fills a zero
+// ForgePrimaryChainTipToleranceSlots with the same constant, so every test that
+// reaches the value through LoadConfig+ApplyDefaults stays green with the
+// literal gone, and resetGlobalConfig's separate copy (config_test.go) carries
+// its own line. The gap only shows on the two paths that read the production
+// literal without defaulting: globalConfig as flag registration sees it, and
+// newDefaultConfig() itself.
 func TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral(
 	t *testing.T,
 ) {

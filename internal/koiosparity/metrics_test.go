@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +23,90 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// The aggregate and account queues emit independent results for the same
+// epochs, and the account queue can lag arbitrarily far behind. A lagging
+// account-queue PASS must not overwrite the aggregate queue's latest verdict:
+// the mismatch-count stat would go green over an unresolved FAIL, and the
+// last-checked epoch would run backwards.
+func TestRecordResultQueuesDoNotClobberEachOther(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	m := newMetrics(reg)
+	require.NotNil(t, m)
+
+	m.recordResult(&EpochCompareResult{
+		Network:       "preview",
+		Epoch:         500,
+		Status:        StatusFail,
+		CheckedScopes: []string{ScopeAggregate},
+		Mismatches: []CheckMismatch{
+			{Category: CategoryValueMismatch},
+			{Category: CategoryValueMismatch},
+			{Category: CategoryValueMismatch},
+		},
+	})
+	m.recordResult(&EpochCompareResult{
+		Network:       "preview",
+		Epoch:         300,
+		Status:        StatusPass,
+		CheckedScopes: AllMismatchScopes,
+	})
+
+	expected := `
+# HELP dingo_koiosparity_epoch_mismatch_count mismatch row count for the most recently checked epoch, by network (a constant label from the node's shared registry) and queue (mirrors check_epoch_status.mismatch_count)
+# TYPE dingo_koiosparity_epoch_mismatch_count gauge
+dingo_koiosparity_epoch_mismatch_count{queue="account"} 0
+dingo_koiosparity_epoch_mismatch_count{queue="aggregate"} 3
+# HELP dingo_koiosparity_last_checked_epoch most recent epoch the koios-parity observer has completed a check for, by network (a constant label from the node's shared registry) and queue
+# TYPE dingo_koiosparity_last_checked_epoch gauge
+dingo_koiosparity_last_checked_epoch{queue="account"} 300
+dingo_koiosparity_last_checked_epoch{queue="aggregate"} 500
+`
+	assert.NoError(t, testutil.GatherAndCompare(
+		reg,
+		strings.NewReader(expected),
+		"dingo_koiosparity_epoch_mismatch_count",
+		"dingo_koiosparity_last_checked_epoch",
+	))
+}
+
+// startKoiosParityObserver runs again against the same node registry on a
+// live restore/truncate (node_lifecycle.go). A second registration must reuse
+// the first collectors rather than panic, and keep counting into them.
+func TestNewMetricsReusesCollectorsOnReregistration(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	first := newMetrics(reg)
+	require.NotNil(t, first)
+	first.recordResult(&EpochCompareResult{
+		Network: "preview",
+		Epoch:   10,
+		Status:  StatusPass,
+	})
+
+	var second *metrics
+	require.NotPanics(t, func() { second = newMetrics(reg) })
+	require.NotNil(t, second)
+	second.recordResult(&EpochCompareResult{
+		Network: "preview",
+		Epoch:   11,
+		Status:  StatusPass,
+	})
+
+	expected := `
+# HELP dingo_koiosparity_epoch_result_total koios-parity epoch validation results, by network (a constant label from the node's shared registry), queue and status (pass/fail/error)
+# TYPE dingo_koiosparity_epoch_result_total counter
+dingo_koiosparity_epoch_result_total{queue="aggregate",status="pass"} 2
+`
+	assert.NoError(t, testutil.GatherAndCompare(
+		reg,
+		strings.NewReader(expected),
+		"dingo_koiosparity_epoch_result_total",
+	))
+}
 
 // TestNewMetricsNilRegistererIsSafe confirms newMetrics(nil) -- the standalone
 // CLI path, and any Observer built without ObserverConfig.PromRegistry set --
@@ -50,7 +135,7 @@ func TestNewMetricsNilRegistererIsSafe(t *testing.T) {
 }
 
 // TestRecordResultPass drives one PASS result through a real registry and
-// checks every metric this change adds: the result counter, the
+// checks every metric it registers: the result counter, the
 // last-checked-epoch gauge, and the mismatch-count gauge (zero, since PASS
 // carries no mismatches). lastFailEpoch/lastErrorEpoch must stay at their
 // zero value -- a PASS is not "when did this last happen". The vecs
@@ -279,7 +364,7 @@ func TestRecordResultLastFailErrorEpochAreSticky(t *testing.T) {
 // declares "network" as one of its own variable labels conflicts with that
 // constant label, and registerCollector's fallback only recognizes
 // AlreadyRegisteredError, so any other registration error hits its
-// panic(err) branch (dingo#4723).
+// panic(err) branch.
 func TestNewMetricsWithNetworkConstantLabel(t *testing.T) {
 	t.Parallel()
 

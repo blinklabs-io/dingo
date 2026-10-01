@@ -30,10 +30,10 @@ import (
 //
 // DingoDB (dingo_db.go) implements this by opening its own read-only SQL
 // connection to a separate metadata.sqlite/postgres/mysql instance — the
-// shipped, standalone-CLI design (dingo #2684). DatabaseSource (this file)
+// shipped, standalone-CLI design. DatabaseSource (this file)
 // implements it by reading directly from a live, in-process
 // *database.Database via its existing typed MetadataStore accessors — the
-// dingo #3098 in-process observer's narrow "reward-parity source" adapter,
+// in-process observer's narrow "reward-parity source" adapter,
 // built entirely from already-committed reward-calculation state
 // (reward_pool_input, reward_pool_output, reward_stake_input,
 // reward_account_output, epoch_summary, reward_ada_pots) with no export, no
@@ -44,7 +44,7 @@ import (
 // implementation backs a given run.
 //
 // GetRewardAccountOutputs is included even though today's comparisons
-// (compare.go) are pool-level only — issue #3097 (per-account exact parity)
+// (compare.go) are pool-level only — the per-account exact-parity comparison
 // needs the full committed per-account view, and this interface is the
 // place that decision has to be made once, for both implementations, so a
 // later per-account comparison does not need a second, incompatible source
@@ -88,7 +88,7 @@ type RewardParitySource interface {
 	// proof GetPoolStakeSnapshotMembers provides: pool_stake_snapshot is
 	// pruned to currentEpoch-3, while pool_registration/pool_retirement are
 	// retained for the life of the database, so an observer trailing the
-	// node has only this one left (dingo #3925).
+	// node has only this one left.
 	//
 	// Membership in this set is positive per-pool evidence rather than
 	// absence from a set, so it needs no completeness argument. Both
@@ -105,7 +105,7 @@ type RewardParitySource interface {
 	// GetRewardSnapshot returns the mark reward_snapshot completeness fields
 	// for epoch, or nil, nil when no such row exists. checkEpoch uses it to
 	// prove the K+1 reward-input set is the network's complete
-	// positive-stake pool set (dingo #4691): reward_snapshot.TotalPoolCount
+	// positive-stake pool set: reward_snapshot.TotalPoolCount
 	// is written by ledger/snapshot/rotation.go's buildRewardStateInputs
 	// from exactly the set reward_pool_input holds rows for, unlike
 	// epoch_summary.TotalPoolCount (GetEpochData/DingoEpochData), which
@@ -130,8 +130,8 @@ type RewardParitySource interface {
 	) (*DingoProtocolParams, error)
 	// GetRewardAccountOutputs returns every per-account reward calculation
 	// output row Dingo committed for epoch. Not yet consumed by any
-	// comparison (that is #3097's scope); exposed now so the source
-	// abstraction does not have to be revisited to add it later.
+	// comparison (that belongs to the per-account comparison); exposed now so
+	// the source abstraction does not have to be revisited to add it later.
 	GetRewardAccountOutputs(
 		ctx context.Context,
 		epoch uint64,
@@ -139,7 +139,7 @@ type RewardParitySource interface {
 	// GetEarliestAvailableEpoch returns the earliest Koios reporting epoch
 	// this node could plausibly have genuine, locally computed
 	// reward-calculation state for, derived from its own Mithril bootstrap
-	// boundary (dingo #4172). A Mithril-bootstrapped node has no ledger
+	// boundary. A Mithril-bootstrapped node has no ledger
 	// history before that boundary by construction — epochs 0-1 are not the
 	// only ones that can never have local data; every epoch through the
 	// bootstrap boundary itself is in the same position, regardless of
@@ -168,7 +168,7 @@ var (
 	_ RewardParitySource = (*DatabaseSource)(nil)
 )
 
-// DatabaseSource is the dingo #3098 in-process reward-parity source: it reads
+// DatabaseSource is the in-process reward-parity source: it reads
 // Dingo's committed reward-calculation state directly from a live, running
 // *database.Database via read-only transactions against the existing
 // MetadataStore accessors (GetEpochSummary, GetRewardAdaPots,
@@ -181,7 +181,7 @@ var (
 // reward_account_output to the current epoch and the three that precede it
 // (a rolling 4-epoch window) only in core storage mode with the in-process
 // observer disabled. It is retained without bound in API storage mode
-// (dingo #1875) and whenever the observer is enabled (dingo #4188), because
+// and whenever the observer is enabled, because
 // the observer validates a closed epoch only after fetching and comparing
 // against Koios over the network and can fall arbitrarily far behind chain
 // progression during a from-genesis or catch-up sync — process-level timing
@@ -240,8 +240,8 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 // GetEarliestAvailableEpoch implements RewardParitySource by resolving this
 // node's own Mithril bootstrap boundary (the mithril_ledger_slot sync-state
 // key mithril/sync_import.go writes at import time, surfaced at the
-// database-package level as MithrilTrustBoundarySlotStrict/GetEpochBySlot —
-// see dingo #4172) into the first Koios reporting epoch this node could
+// database-package level as MithrilTrustBoundarySlotStrict/GetEpochBySlot)
+// into the first Koios reporting epoch this node could
 // plausibly have genuinely computed local reward state for: one past the
 // epoch that slot falls in, since the epoch containing (and every epoch
 // before) the boundary slot was inherited from the Mithril snapshot rather
@@ -251,7 +251,7 @@ func (s *DatabaseSource) GetLatestEpoch(ctx context.Context) (uint64, error) {
 // that exists but cannot be read or parsed — including one recorded with an
 // empty value — must surface as an error here rather than as ok = false,
 // which callers apply no bound for. Reading a malformed boundary as an
-// absent one would restore the unbounded pre-#4172 behavior on exactly the
+// absent one would restore the earlier unbounded behavior on exactly the
 // node whose boundary could not be confirmed.
 func (s *DatabaseSource) GetEarliestAvailableEpoch(
 	ctx context.Context,
@@ -659,8 +659,8 @@ func (s *DatabaseSource) GetProtocolParams(
 	if err != nil {
 		return nil, err
 	}
-	// See isSyntheticV2CostModel's doc comment (dingo #4127, following
-	// #3825's design): the durable cleared-epoch marker is the same one
+	// See isSyntheticV2CostModel's doc comment:
+	// the durable cleared-epoch marker is the same one
 	// ledger.queryShelleyCurrentProtocolParams reads for its own historical
 	// path, read here directly via the database package rather than
 	// DingoDB's duplicated raw-SQL copy since this source already holds a
@@ -682,7 +682,7 @@ func (s *DatabaseSource) GetProtocolParams(
 
 // GetRewardAccountOutputs returns every per-account reward calculation
 // output row Dingo committed for epoch, straight from reward_account_output
-// — the same committed state #3097's per-account comparison will consume.
+// — the same committed state the per-account comparison will consume.
 func (s *DatabaseSource) GetRewardAccountOutputs(
 	ctx context.Context,
 	epoch uint64,

@@ -610,6 +610,15 @@ FROM reward_stake_input
 WHERE epoch = ?
 ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
 
+-- name: GetRewardStakeInputsInPoolKeyHashRange :many
+SELECT pool_key_hash, staking_key, id, epoch, credential_tag, stake, owner,
+       registered, captured_slot, boundary_slot
+FROM reward_stake_input
+WHERE epoch = ?
+  AND pool_key_hash >= ?
+  AND pool_key_hash <= ?
+ORDER BY pool_key_hash ASC, credential_tag ASC, staking_key ASC;
+
 -- name: DeleteRewardPoolInputsForEpoch :exec
 DELETE FROM reward_pool_input WHERE epoch = ?;
 
@@ -700,12 +709,10 @@ DELETE FROM reward_stake_input
 WHERE captured_slot > ? OR boundary_slot > ?;
 
 -- name: DeleteRewardPoolOutputsAfterSlot :exec
-DELETE FROM reward_pool_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_pool_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardAccountOutputsAfterSlot :exec
-DELETE FROM reward_account_output
-WHERE captured_slot > ? OR boundary_slot > ?;
+DELETE FROM reward_account_output WHERE captured_slot > ?;
 
 -- name: DeleteRewardStakeInputsBeforeEpoch :exec
 DELETE FROM reward_stake_input WHERE epoch < ?;

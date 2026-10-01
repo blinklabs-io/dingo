@@ -204,7 +204,7 @@ type JSONEpochEntry struct {
 type JSONMismatch struct {
 	Pool  string `json:"pool,omitempty"`
 	Field string `json:"field"`
-	// StakeAddress is set for #3097's per-account mismatches (acct_only_dingo/
+	// StakeAddress is set for per-account mismatches (acct_only_dingo/
 	// acct_only_koios/acct_duplicate/account_reward_amount); empty for
 	// pool/epoch-level mismatches, which have no single associated address.
 	StakeAddress string `json:"stake_address,omitempty"`
@@ -334,7 +334,7 @@ func PrintExplain(
 		items := byCat[cat]
 		fmt.Fprintf(w, "  [%s] %d\n", cat, len(items))
 		for _, m := range items {
-			// #3097's per-account mismatches carry StakeAddress instead of
+			// Per-account mismatches carry StakeAddress instead of
 			// PoolBech32 — label the row accordingly so an account-level FAIL
 			// is identifiable (which stake address) rather than printing the
 			// same "(epoch)" placeholder a pool/epoch-level mismatch does.
