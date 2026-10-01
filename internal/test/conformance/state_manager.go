@@ -1687,12 +1687,12 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // threshold selection and bootstrap gate here, and the duplication itself
 // went untested and drifted.
 //
-// The one thing this cannot delegate to ShouldRatify is the tally itself:
-// production's DRep voting-power query does not yet add a proposal's own
-// deposit to its return account's DRep voting power (CIP-1694 counts an
+// The tally itself is still built here rather than by ledger/governance. It
+// was written when production's DRep voting power omitted a proposal's own
+// deposit from its return account's DRep voting power (CIP-1694 counts an
 // active proposal's deposit as part of the depositor's active voting stake).
-// That gap affects every
-// DRep-gated action type's real ratification, not just these two.
+// Production now includes it via ActiveProposalDepositDRepPower, so this
+// tally could be replaced by the production one.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
