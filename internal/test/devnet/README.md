@@ -266,6 +266,39 @@ the `cardano-node` sockets live on each node's `*-ipc` volume at
 bind mounts — see LocalStateQuery access below for how the host reaches a
 node's NtC endpoint.
 
+## Preview observability and Koios parity
+
+The `koios-parity` Compose profile runs a separate Dingo node syncing Preview
+with Prometheus and Grafana. It shares this DevNet Compose file and project
+layout, while keeping its database and monitoring data in separate volumes.
+The profile can run alongside either generated DevNet profile. It uses the
+node's embedded Preview configuration and does not use the local DevNet
+genesis network.
+
+From this directory, select only the Preview profile to start or stop it:
+
+```bash
+COMPOSE_PROFILES=koios-parity docker compose up -d
+COMPOSE_PROFILES=koios-parity docker compose down -v
+```
+
+Set `DEVNET_KOIOS_PARITY_ENABLED=true` before startup to enable reward parity
+checks against Preview Koios. It defaults to `false`. Grafana is available on
+`127.0.0.1:13930`, Prometheus on `127.0.0.1:13900`, and the node's metrics
+endpoint on `127.0.0.1:13798`. Override these ports with
+`DEVNET_KOIOS_PARITY_GRAFANA_PORT`,
+`DEVNET_KOIOS_PARITY_PROMETHEUS_PORT`,
+`DEVNET_KOIOS_PARITY_METRICS_PORT`, and
+`DEVNET_KOIOS_PARITY_RELAY_PORT` when they are already in use. The Grafana
+dashboards show Preview sync progress and Koios parity results. Grafana's
+default login is `admin` / `admin`; set `DEVNET_GRAFANA_ADMIN_USER` and
+`DEVNET_GRAFANA_ADMIN_PASSWORD` before startup, and change them before exposing
+Grafana beyond localhost.
+
+Reward parity is checked only at closed-epoch boundaries. Preview epochs last
+about five days, so a short sync can show the observer enabled without reaching
+its first parity check.
+
 ## Running the integration tests
 
 `run-tests.sh` is the entry point for a complete native-Linux DevNet run:
@@ -412,6 +445,9 @@ Run the complete scenario with:
 ```bash
 ./run-tests.sh --leios
 ```
+
+The `devnet-leios` workflow runs this scenario daily and on manual dispatch,
+and uploads the failure artifacts described below when it fails.
 
 For a manually started network, `./start.sh --leios` prints the environment
 and Go command for the matching producer-to-peer test. The test-only signing
@@ -691,7 +727,7 @@ harness and the compose port mappings always agree.
 
 | File                         | Purpose |
 |------------------------------|---------|
-| `docker-compose.yml`         | Service, volume, and network definitions for both the `dingo` and `conformance` profiles |
+| `docker-compose.yml`         | Service, volume, and network definitions for the `dingo`, `conformance`, and `koios-parity` profiles |
 | `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
 | `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
 | `testnet-dingo.yaml`         | Canonical network spec for dingo mode: 3 pools, `poolPledge: 0` |

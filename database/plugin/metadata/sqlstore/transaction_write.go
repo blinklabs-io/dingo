@@ -5,6 +5,12 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //nolint:gosec,rowserrcheck,sqlclosecheck // SQL INTEGER mappings preserve the unsigned domain API; cursors are explicitly closed before dependent queries.
 package sqlstore
@@ -465,7 +471,7 @@ func (s *Store) setTransactionWithAccumulator(
 			// because the row was already spent -- by an earlier certified
 			// endorser block on the Leios closure path, or by an earlier
 			// application of this same transaction. Those changed nothing in
-			// the utxo table, so they contribute no delta (dingo #4421); they
+			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
 			spentRefs := make([]models.UtxoId, 0, len(transaction.Consumed()))
@@ -587,7 +593,7 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// certificates, consumed inputs, and produced outputs -- into
 			// one incremental refresh pass instead of the full
 			// sumCredentialUtxoStake rescan refreshRewardLiveStakeRefs would
-			// run once per occurrence (dingo #4421): a transaction with
+			// run once per occurrence: a transaction with
 			// several outputs to the same staking credential (an ordinary
 			// change pattern), or one that both spends from and pays back to
 			// the credential a certificate in the same transaction just
@@ -1080,7 +1086,7 @@ WHERE id = ?`,
 	utxo.ID = uint(id)
 	// A pointer address names a certificate position rather than carrying a
 	// credential, so the position is recorded alongside the output and
-	// resolved when stake is computed (dingo #3854). This runs on the
+	// resolved when stake is computed. This runs on the
 	// conflict path too: an output a snapshot import created before its
 	// producing transaction was replayed has no pointer row yet.
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
@@ -1210,7 +1216,7 @@ func (s *Store) applyTransactionWithdrawals(
 			// paths read this table (see BatchedTxIngestOpts.
 			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
 			// insert rather than growing an unbounded, never-pruned table
-			// nothing reads (issue #2919).
+			// nothing reads.
 			if _, err := db.ExecContext(ctx, `
 INSERT INTO account_withdrawal_witness (
     staking_key, credential_tag, tx_hash, added_slot

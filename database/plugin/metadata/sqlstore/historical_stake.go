@@ -5,6 +5,12 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
@@ -44,26 +50,35 @@ type historicalWithdrawal struct {
 // historicalRewards evaluates future reward credits only for the selected
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
-func historicalRewards(
+func (s *Store) historicalRewards(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	return historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
+	return s.historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
 }
 
 // historicalRewardsAtBoundary reconstructs the reward balance observed at an
 // epoch SNAP boundary. Boundary credits marked PostSnapshot are still future
 // credits relative to SNAP and must be removed, while unmarked credits at the
-// boundary are already visible to the snapshot.
-func historicalRewardsAtBoundary(
+// boundary are already visible to the snapshot. A pending round applied at or
+// before that point contributes its credits that are not written yet.
+func (s *Store) historicalRewardsAtBoundary(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	visibleAt := slot
+	if boundarySlot > 0 {
+		visibleAt = boundarySlot
+	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -90,6 +105,20 @@ func historicalRewardsAtBoundary(
 		)
 		if err != nil {
 			return nil, err
+		}
+		if hasPending {
+			pending, err := s.pendingCreditsForCredentials(
+				ctx, db, visibleAt, batchSelected,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for ref, amount := range pending {
+				if ^uint64(0)-batch[ref] < amount {
+					return nil, errors.New("historical reward credit overflow")
+				}
+				batch[ref] += amount
+			}
 		}
 		maps.Copy(ret, batch)
 	}
@@ -484,7 +513,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -586,7 +615,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(ctx, db, slot, selected)
+		rewardsByCredential, err := s.historicalRewards(ctx, db, slot, selected)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -731,7 +760,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -1094,10 +1123,10 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // keyed on consensus chain state, not per-node config. That is a guarantee
 // about rows already written, not about whether a row is written at all:
 // account_withdrawal_witness inserts are separately elided when
-// DelegatorInactivityEnabled is off (issue #2919), which is the same
+// DelegatorInactivityEnabled is off, which is the same
 // network-wide setting this function's caller already requires to match, so
 // it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
-// (issue #2920) before adding any other deletion path for these tables.
+// before adding any other deletion path for these tables.
 func historicalExpirationSQL(
 	ctx context.Context,
 	db queryer,
@@ -1230,9 +1259,9 @@ func noHistorySQL(alias string, tables []string) string {
 // GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
 // boundary reconstruction attributes stake to at snapshotSlot, whether or not
 // that pool is still registered. It is the historical-path counterpart of
-// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator (dingo
-// #4660); see that function for why the denominator must not be enumerated
-// from the active pool set.
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator; see that
+// function for why the denominator must not be enumerated from the active pool
+// set.
 //
 // It reconstructs from the same CTE the stake fetch uses, with the pool
 // predicate relaxed to "has a delegation at all", and applies neither the

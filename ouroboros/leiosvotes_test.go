@@ -382,7 +382,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 // A peer must not be able to make us vote for the same EB hash under a
 // different slot by replaying the same EB bytes with a different point. An
 // authoritative source (unlike a peer) may still override a mismatched entry
-// -- covered separately in leios_eb_announced_point_test.go -- since the
+// -- covered separately in tests_test.go -- since the
 // manifest is content-addressed and the same hash can legitimately recur at
 // a different slot; this guards the peer-offered side of that distinction.
 // TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote
@@ -390,7 +390,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 // "...RejectsSlotMismatchBeforeVote" test: a peer-offered store for the same
 // hash at a different, unannounced slot is no longer rejected -- the
 // manifest is content-addressed, so that occurrence can be independently
-// legitimate (issue #3513 review) -- but it must stay unverified and must
+// legitimate -- but it must stay unverified and must
 // not trigger a second vote for a slot nothing has corroborated.
 func TestStoreLeiosEndorserBlockDifferentSlotOfSameHashStaysUnverifiedBeforeVote(
 	t *testing.T,

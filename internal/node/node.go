@@ -792,6 +792,10 @@ func buildDingoConfig(
 		),
 		dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 		dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
+		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
+		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,
@@ -862,7 +866,7 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
-		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(

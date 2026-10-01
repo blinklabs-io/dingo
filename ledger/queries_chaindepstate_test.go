@@ -68,7 +68,8 @@ func newChainDepStateLedger(
 	return ls
 }
 
-// TestQueryShelleyDebugChainDepState_Dispatches is the regression for #2997.
+// TestQueryShelleyDebugChainDepState_Dispatches is the regression for the
+// cardano-cli debug chain-dep-state failure.
 //
 // The query was absent from the dispatch table, so it fell through to the
 // "unsupported query type" default. That error aborts the LocalStateQuery
@@ -629,7 +630,7 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 //
 // In Praos the lab is prevHashToNonce(block.prevHash) for the last block
 // applied -- the PARENT hash of the tip, a deliberate one-block lag (see
-// epochLabNonce and #2734). The last-epoch-block nonce is the value that lag
+// epochLabNonce). The last-epoch-block nonce is the value that lag
 // had reached when the epoch opened. The two are equal only until the first
 // block of the epoch lands; after that, reporting the carried value in the lab
 // field is a stale answer for a field the chain has already moved on from.
@@ -724,12 +725,12 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 // TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex covers a tip
 // whose block is stored but has no entry in the block hash index.
 //
-// The index has only been written since #1915, and a lookup that misses it
-// reports ErrBlockNotFound rather than scanning -- a deliberate trade, since
+// The index has only been populated for newer blocks, and a lookup that misses
+// it reports ErrBlockNotFound rather than scanning -- a deliberate trade, since
 // the scan was a top CPU consumer during catch-up. Blocks predating the index
-// need an offline backfill, so a database carrying them answers "no such
-// block" for a block it holds. A node restarted on such a database has
-// precisely one of them as its tip.
+// need an offline backfill, so a database carrying them answers "no such block"
+// for a block it holds. A node restarted on such a database has precisely one
+// of them as its tip.
 //
 // Taking that answer at face value would quietly fall back to the epoch's
 // carried value and report a stale lab. The tip's slot and hash together

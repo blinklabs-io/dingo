@@ -25,7 +25,7 @@
 // imports database -- so this package resolves it from the live Chain and
 // LedgerState the node already holds, and hands it to the store from
 // outside. See that file's package comment for the full retention rule and
-// the correctness argument, and issue #4353 for the bug this closes.
+// the correctness argument (pruning is unsafe for sparse k-block rollbacks).
 package committeeauth
 
 import (

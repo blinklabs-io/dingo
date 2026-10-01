@@ -1,3 +1,5 @@
+//go:build windows
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build windows
 
 package mithril
 
@@ -38,7 +38,7 @@ import (
 // not resolved from a path — and the deletion is applied to that open handle
 // (openRelativeForDeletion, setDeleteDisposition; see
 // extract_handlerelative_windows.go), which is what closes the residual
-// window issue #3228 tracked: nothing here resolves any component's name a
+// window: nothing here resolves any component's name a
 // second time, so a reparse point substituted at the leaf after the walk
 // finishes is refused at the open rather than followed.
 func removeExtractedFile(root *os.Root, name, fullPath string) error {

@@ -23,7 +23,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/utxoref"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -33,7 +32,6 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -56,8 +54,8 @@ func distinctUtxoRefs(tx lcommon.Transaction) int {
 	return len(seen)
 }
 
-// TestUtxoByIdMemoReducesDbReads_ValidateTx checks issue #4226: validating
-// the Preprod fixture transaction through (*LedgerState).ValidateTx does one
+// TestUtxoByIdMemoReducesDbReads_ValidateTx pins: validating the Preprod
+// fixture transaction through (*LedgerState).ValidateTx does one
 // database.UtxoByRef read per distinct input ref, not one per UtxoById call.
 // Without the memo in LedgerView.UtxoById it reads 60 times for 4 refs.
 func TestUtxoByIdMemoReducesDbReads_ValidateTx(t *testing.T) {

@@ -49,7 +49,7 @@ var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 
 // ErrNoCostModelForPlutusV2 is returned when a transaction's PlutusV2
 // redeemer is evaluated against HardForkBabbage's fabricated cost model
-// rather than real governance/protocol-update data (blinklabs-io/dingo#3962).
+// rather than real governance/protocol-update data.
 // Real cardano-ledger rejects such a transaction outright, at the UTXOW
 // level, before any script evaluation runs: the formal rule "languages txw
 // ⊆ dom(costmdls pp)" (eras/alonzo/impl/src/Cardano/Ledger/Alonzo/Rules/Utxow.hs,
@@ -60,15 +60,14 @@ var ErrIncompatibleProtocolParams = errors.New("pparams are not expected type")
 // has no entry in the current protocol parameters' cost-models map at all.
 // On a real network during the pre-update gap, PlutusV2 genuinely has no
 // entry in that map, so this is not a hypothetical: a real
-// IntersectMBO/cardano-node bug report (cardano-node#4050) shows exactly
-// this rejection reachable in practice, and cardano-ledger's own Conway
-// conformance suite (Test.Cardano.Ledger.Conway.Imp.UtxosSpec) has the
-// identical-shaped test for PlutusV3 at the Conway boundary. Dingo's
-// HardForkBabbage instead fabricates a value specifically so CostModels[1]
-// is never genuinely absent (needed for eras.DefaultPlutusV2CostModel's own
-// internal-validation-continuity purpose), so a literal "is the language a
-// map key" check would never fire here -- the equivalent condition is
-// "is the entry still the fabricated one", tracked as
+// IntersectMBO/cardano-node bug report shows exactly this rejection reachable
+// in practice, and cardano-ledger's own Conway conformance suite
+// (Test.Cardano.Ledger.Conway.Imp.UtxosSpec) has the identical-shaped test for
+// PlutusV3 at the Conway boundary. Dingo's HardForkBabbage instead fabricates a
+// value specifically so CostModels[1] is never genuinely absent (needed for
+// eras.DefaultPlutusV2CostModel's own internal-validation-continuity purpose),
+// so a literal "is the language a map key" check would never fire here -- the
+// equivalent condition is "is the entry still the fabricated one", tracked as
 // LedgerState.syntheticV2CostModel and reachable from era-package validation
 // code via syntheticV2CostModelReporter.
 var ErrNoCostModelForPlutusV2 = errors.New(
@@ -122,7 +121,7 @@ type EraDesc struct {
 	// governance existed), and that path needs the same real-write
 	// provenance signal EnactProposal provides for Conway/Dijkstra --
 	// comparing the merged result's value before and after is unsound for
-	// the same reason it is there. See blinklabs-io/dingo#3825's PR review.
+	// the same reason it is there.
 	// nil for eras with no CostModels concept at all (Byron, Shelley,
 	// Allegra, Mary).
 	ParamUpdateHasPlutusV2CostModelFunc func(any) bool

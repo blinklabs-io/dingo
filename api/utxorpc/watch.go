@@ -49,7 +49,7 @@ func watchTxBuildForwardMessages(
 	blockHash []byte,
 	shouldSendTx func(ledger.Transaction) bool,
 ) (appliedTxs []*watch.AnyChainTx, out []*watch.WatchTxResponse, err error) {
-	block, err := ledger.NewBlockFromCbor(blockType, blockCbor)
+	block, err := models.DecodeBlockCbor(blockType, blockCbor)
 	if err != nil {
 		return nil, nil, err
 	}

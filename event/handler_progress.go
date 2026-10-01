@@ -38,7 +38,7 @@ var handlerProgressWarnInterval = 30 * time.Second
 // just after a sample has been stuck for a hair under one interval at the next
 // one, is skipped, and waits a whole further period. Sampling twice per
 // interval bounds the first report at 1.5 intervals, which is what event/doc.go
-// and ARCHITECTURE.md state (wolf31o2 review).
+// and ARCHITECTURE.md state.
 //
 // The repeat rate is unaffected: warnStuckHandler still suppresses a report
 // within one interval of the last one for the same invocation.
@@ -139,7 +139,7 @@ func (c *channelSubscriber) warnStuckHandler(
 // Exported so the node can surface the condition alongside its other health
 // signals: a required internal consumer that has stopped returning is a node
 // fault, and waiting for its buffer to fill turns a 30-second symptom into a
-// half-day one (blinklabs-io/dingo#3550).
+// half-day one.
 func (e *EventBus) StuckHandlerCount() int {
 	if e == nil {
 		return 0
@@ -196,7 +196,7 @@ func (e *EventBus) channelSubscriberSnapshot() []*channelSubscriber {
 // buffer capacity, so it can only fire once the buffer is already full. That
 // makes the time to first signal a function of the buffer size and the event
 // rate rather than of the fault: the chainselection.peer_activity handler in
-// blinklabs-io/dingo#3550 stopped returning 12h31m before its 1024-slot buffer
+// a Preview run stopped returning 12h31m before its 1024-slot buffer
 // filled and said so. This watchdog observes the handler itself, so the first
 // report arrives within one and a half intervals of the handler ceasing to
 // make progress -- see handlerProgressTick -- no matter how much headroom the

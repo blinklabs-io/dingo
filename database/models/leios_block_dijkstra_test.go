@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,8 +34,8 @@ import (
 // It is a real block from the Musashi prototype network rather than a
 // constructed one, and its shape matches what the live network serves: fetched
 // from leios-node.play.dev.cardano.org:3001 (network magic 164) while
-// diagnosing #3761, a tip block decoded to the same two top-level components
-// and twelve-field header body this fixture carries.
+// diagnosing a Musashi decode failure, a tip block decoded to the same two
+// top-level components and twelve-field header body this fixture carries.
 func musashiDijkstraBlock(t *testing.T) []byte {
 	t.Helper()
 	encoded, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
@@ -56,6 +58,19 @@ func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
 	block, err := models.DecodeConwayBlock(raw)
 	require.Error(t, err, "the pre-respin four-field block body is obsolete")
 	require.Nil(t, block)
+}
+
+func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
+	raw := musashiDijkstraBlock(t)
+
+	block, err := (models.Block{
+		Type: ledger.BlockTypeConway,
+		Cbor: raw,
+	}).Decode()
+	require.NoError(t, err)
+	_, ok := block.(*dijkstra.DijkstraBlock)
+	require.True(t, ok)
+	require.Equal(t, raw, block.Cbor())
 }
 
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a

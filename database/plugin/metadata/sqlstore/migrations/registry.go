@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -64,6 +65,8 @@ const (
 	leiosImportedKeyAgeSchemaRelease                    = "leios-imported-key-age-unknown"
 	leiosKeyRegistrationEpochSchemaRelease              = "leios-key-registration-epoch"
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
+	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
+	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -176,6 +179,16 @@ var schemaVersions = []struct {
 		Version: 29,
 		Name:    leiosSnapshotRegistrationEpochBackfillSchemaRelease,
 		Dir:     "v29",
+	},
+	{
+		Version: 30,
+		Name:    rewardOutputFoldedSchemaRelease,
+		Dir:     "v30",
+	},
+	{
+		Version: 31,
+		Name:    rewardCreditRoundTableSchemaRelease,
+		Dir:     "v31",
 	},
 }
 
@@ -297,9 +310,79 @@ func registryForDialect(dialect string) ([]Migration, error) {
 			migration.BackfillRevision = "1"
 			migration.Backfill = mithrilRewardRepairCoverageBackfill
 		}
+		if version.Name == rewardCreditRoundTableSchemaRelease {
+			migration.BackfillRevision = "1"
+			migration.Backfill = rewardCreditRoundBackfill
+		}
 		ret = append(ret, migration)
 	}
 	return ret, nil
+}
+
+// rewardCreditRoundBackfill moves the legacy JSON round list into its indexed
+// table before normal readers switch to the table. The list is small in usual
+// operation, but the cursor makes the copy resumable if a database already
+// accumulated many rounds.
+func rewardCreditRoundBackfill(
+	ctx context.Context,
+	batch Batch,
+) (BatchResult, error) {
+	var raw string
+	err := batch.Tx.QueryRowContext(
+		ctx,
+		batch.Rebind(`SELECT value FROM sync_state WHERE sync_key = ?`),
+		models.PendingRewardCreditRoundsKey,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BatchResult{Done: true}, nil
+	}
+	if err != nil {
+		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
+	}
+	var rounds []models.RewardCreditRound
+	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
+		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+	}
+	start := 0
+	if batch.Cursor != "" {
+		parsed, err := strconv.Atoi(batch.Cursor)
+		if err != nil || parsed < 0 || parsed > len(rounds) {
+			return BatchResult{}, fmt.Errorf(
+				"invalid reward credit round backfill cursor %q",
+				batch.Cursor,
+			)
+		}
+		start = parsed
+	}
+	end := min(start+batch.Limit, len(rounds))
+	for _, round := range rounds[start:end] {
+		if round.SnapshotEpoch > uint64(1<<63-1) || round.BoundarySlot > uint64(1<<63-1) {
+			return BatchResult{}, fmt.Errorf(
+				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
+				round.SnapshotEpoch,
+				round.BoundarySlot,
+			)
+		}
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(`INSERT INTO reward_credit_round (snapshot_epoch, boundary_slot) VALUES (?, ?)`),
+			int64(round.SnapshotEpoch),
+			int64(round.BoundarySlot),
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("copy legacy reward credit round: %w", err)
+		}
+	}
+	if end == len(rounds) {
+		if _, err := batch.Tx.ExecContext(
+			ctx,
+			batch.Rebind(`DELETE FROM sync_state WHERE sync_key = ?`),
+			models.PendingRewardCreditRoundsKey,
+		); err != nil {
+			return BatchResult{}, fmt.Errorf("remove legacy reward credit rounds: %w", err)
+		}
+		return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start), Done: true}, nil
+	}
+	return BatchResult{Cursor: strconv.Itoa(end), Rows: int64(end - start)}, nil
 }
 
 // importedRewardRepairBackfill marks legacy Mithril databases whose imported
@@ -1018,7 +1101,7 @@ const (
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
-// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+// rebootstrap for the epochs the version bump actually changed.
 //
 // pool_stake_snapshot's stored values never depended on calculation version
 // -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
