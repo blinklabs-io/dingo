@@ -283,13 +283,14 @@ type v2FixtureOptions struct {
 	// immutable location templates, the way cloud-storage locations carry
 	// their credentials. The mux routes on path only, so it changes nothing
 	// but what an error is at risk of quoting.
-	signedImmutableQuery    bool
-	missingAncillary        bool
-	validImmutable          bool
-	fallbackLedgerState     bool
-	fallbackLedgerStateSlot uint64
-	ancillaryLedgerState    []byte
-	ancillaryLedgerSlot     uint64
+	signedImmutableQuery       bool
+	missingAncillary           bool
+	validImmutable             bool
+	fallbackLedgerState        bool
+	fallbackLedgerStateSlot    uint64
+	fallbackLedgerStateUTxOMap cbor.RawMessage
+	ancillaryLedgerState       []byte
+	ancillaryLedgerSlot        uint64
 }
 
 type v2Fixture struct {
@@ -353,6 +354,12 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					files["ledger/100/state"] = minimalLedgerState(
 						t, stateSlot, stateHash,
 					)
+					if opts.fallbackLedgerStateUTxOMap != nil {
+						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+							t, stateSlot, stateHash,
+							opts.fallbackLedgerStateUTxOMap,
+						)
+					}
 				}
 				break
 			}

@@ -699,12 +699,20 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 		t, 1025, 99, bytes.Repeat([]byte{0xee}, 32),
 	)
 	txID := bytes.Repeat([]byte{0x62}, 32)
+	address := append([]byte{0x60}, bytes.Repeat([]byte{0x71}, 28)...)
+	txInCBOR, err := cbor.Encode([]any{txID, uint64(0)})
+	require.NoError(t, err)
+	txOutCBOR, err := cbor.Encode([]any{address, uint64(42)})
+	require.NoError(t, err)
+	utxoMap := append([]byte{0xa1}, txInCBOR...)
+	utxoMap = append(utxoMap, txOutCBOR...)
 	fixture := newV2Fixture(t, v2FixtureOptions{
-		immutableFileNumber:     0,
-		validImmutable:          true,
-		fallbackLedgerState:     true,
-		fallbackLedgerStateSlot: 999,
-		missingAncillary:        true,
+		immutableFileNumber:        0,
+		validImmutable:             true,
+		fallbackLedgerState:        true,
+		fallbackLedgerStateSlot:    999,
+		fallbackLedgerStateUTxOMap: utxoMap,
+		missingAncillary:           true,
 	})
 
 	dataDir := t.TempDir()
@@ -748,7 +756,7 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 	utxoTxn := db.Transaction(true)
 	t.Cleanup(utxoTxn.Release)
 	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
-		TxId: txID, AddedSlot: 900,
+		TxId: txID, AddedSlot: 900, Amount: 42,
 	}))
 	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
 		utxoTxn.Metadata(),
