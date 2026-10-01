@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -646,6 +647,12 @@ func LoadWithDB(
 	immutableDir string,
 	db *database.Database,
 ) error {
+	if isRemoteImmutableSource(immutableDir) && cfg.DatabasePath == "" {
+		return errors.New(
+			"loading from a remote ImmutableDB requires databasePath " +
+				"for its download cache",
+		)
+	}
 	// Derive default config path from cfg.Network when cfg.CardanoConfig is empty
 	cardanoConfigPath := cfg.CardanoConfig
 	network := cfg.Network
@@ -853,9 +860,21 @@ func LoadWithDB(
 		replayErrCh <- err
 	}()
 
-	blocksCopied, immutableTipSlot, err := copyBlocksDirect(
-		replayCtx, logger, immutableDir, c, replayBatches,
+	var (
+		blocksCopied     int
+		immutableTipSlot uint64
 	)
+	if isRemoteImmutableSource(immutableDir) {
+		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
+			replayCtx, logger, immutableDir,
+			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
+			c, replayBatches,
+		)
+	} else {
+		blocksCopied, immutableTipSlot, err = copyBlocksDirect(
+			replayCtx, logger, immutableDir, c, replayBatches,
+		)
+	}
 	close(replayBatches)
 	if err != nil {
 		cancelReplay()

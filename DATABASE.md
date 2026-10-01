@@ -733,6 +733,13 @@ flowchart LR
     Blob --> KV
 ```
 
+`dingo load` from an `http://` or `https://` ImmutableDB root keeps a download
+cache under `<databasePath>/immutable-download`. `staging/` holds chunk triads
+in flight, each file written as `<name>.part` and renamed when complete;
+`ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
+`ready/` once a later chunk holding a block is copied, so the cache keeps the
+chunk holding the chain tip, which the next run resumes from.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.
