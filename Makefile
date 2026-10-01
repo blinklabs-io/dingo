@@ -185,7 +185,7 @@ test-load-profile: build ## Run build, then load test data with CPU/memory profi
 	./dingo --cpuprofile=cpu.prof --memprofile=mem.prof load database/immutable/testdata
 	@echo "Profiling complete. Run 'go tool pprof cpu.prof' or 'go tool pprof mem.prof' to analyze"
 
-test-load-timing: build ## Time `dingo load` on a fresh data dir (DINGO_LOAD_IMMUTABLE_DIR, DINGO_LOAD_PROFILE)
+test-load-timing: build ## Run build, then time `dingo load` on a fresh data dir (DINGO_LOAD_IMMUTABLE_DIR, DINGO_LOAD_PROFILE)
 	./internal/test/load/timed-load.sh
 
 test-devnet: ## Run the default all-Dingo DevNet integration tests
