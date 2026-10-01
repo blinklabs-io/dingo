@@ -95,7 +95,7 @@ func TestLoadDRepVotingStateIncludesActiveProposalDeposit(t *testing.T) {
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
 		ProposedEpoch: 5,
-		ExpiresEpoch:  10,
+		ExpiresEpoch:  5,
 		Deposit:       50,
 		ReturnAddress: returnAddrBytes,
 		AnchorURL:     "https://example.invalid/deposit",
@@ -103,7 +103,7 @@ func TestLoadDRepVotingStateIncludesActiveProposalDeposit(t *testing.T) {
 		AddedSlot:     1,
 	}, nil))
 
-	state, err := LoadDRepVotingState(db, nil, 6, false)
+	state, err := loadDRepVotingState(db, nil, 6, 5, false)
 	require.NoError(t, err)
 	ref := models.StakeCredentialRef{Tag: 0, Key: drepCred}
 	assert.Equal(t, uint64(150), state.Powers[ref.MapKey()])
@@ -138,7 +138,7 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeUpdateCommittee),
 		ProposedEpoch: 5,
-		ExpiresEpoch:  10,
+		ExpiresEpoch:  5,
 		Deposit:       100,
 		ReturnAddress: returnAddrBytes,
 		AnchorURL:     "https://example.invalid/spo-deposit",
@@ -154,12 +154,14 @@ func TestSPOVotingPowerIncludesProposalDepositsWithoutChangingMarkStake(
 		DRepYesStake:   100,
 		DRepTotalStake: 100,
 	}
+	proposalEpoch := uint64(5)
 	require.NoError(t, tallySPOVotes(
 		&TallyContext{
-			DB:           db,
-			StakeEpoch:   6,
-			CurrentEpoch: 6,
-			SPOState:     state,
+			DB:                  db,
+			StakeEpoch:          6,
+			CurrentEpoch:        6,
+			ActiveProposalEpoch: &proposalEpoch,
+			SPOState:            state,
 		},
 		[]*models.GovernanceVote{{
 			VoterType:       models.VoterTypeSPO,

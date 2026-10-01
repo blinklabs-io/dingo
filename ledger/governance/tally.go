@@ -63,6 +63,10 @@ type TallyContext struct {
 	Txn          *database.Txn
 	StakeEpoch   uint64
 	CurrentEpoch uint64
+	// ActiveProposalEpoch selects the proposal set RATIFY tallies. At an
+	// epoch boundary this is PrevEpoch, while voting eligibility is checked
+	// against CurrentEpoch.
+	ActiveProposalEpoch *uint64
 	// MajorVersion is the current protocol major version after ENACT.
 	// SPO non-voter semantics use it to distinguish Conway bootstrap
 	// from post-bootstrap ratification.
@@ -257,6 +261,18 @@ func LoadDRepVotingState(
 	currentEpoch uint64,
 	delegatorInactivityOn bool,
 ) (*DRepVotingState, error) {
+	return loadDRepVotingState(
+		db, txn, currentEpoch, currentEpoch, delegatorInactivityOn,
+	)
+}
+
+func loadDRepVotingState(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+	activeProposalEpoch uint64,
+	delegatorInactivityOn bool,
+) (*DRepVotingState, error) {
 	if db == nil {
 		return nil, errors.New("nil database")
 	}
@@ -317,9 +333,9 @@ func LoadDRepVotingState(
 	// CIP-1694: an active governance proposal's own deposit still counts as
 	// part of the depositor's active voting stake, so it must be folded into
 	// its return account's delegated DRep voting power here (see
-	// ActiveProposalDepositDRepPower's doc comment / dingo#4355).
-	drepDepositPower, noConfidenceDepositPower, err := ActiveProposalDepositDRepPower(
-		db, txn, currentEpoch, expiryEpoch,
+	// ActiveProposalDepositDRepPower's doc comment).
+	drepDepositPower, noConfidenceDepositPower, err := activeProposalDepositDRepPowerAtEpochs(
+		db, txn, activeProposalEpoch, expiryEpoch,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("active proposal deposit voting power: %w", err)
@@ -385,8 +401,13 @@ func tallyDRepVotes(
 	state := ctx.DRepState
 	if state == nil {
 		var err error
-		state, err = LoadDRepVotingState(
-			ctx.DB, ctx.Txn, ctx.CurrentEpoch, ctx.DelegatorInactivityOn,
+		activeProposalEpoch := ctx.CurrentEpoch
+		if ctx.ActiveProposalEpoch != nil {
+			activeProposalEpoch = *ctx.ActiveProposalEpoch
+		}
+		state, err = loadDRepVotingState(
+			ctx.DB, ctx.Txn, ctx.CurrentEpoch, activeProposalEpoch,
+			ctx.DelegatorInactivityOn,
 		)
 		if err != nil {
 			return err
@@ -679,6 +700,10 @@ func tallySPOVotes(
 		ctx.SPOState = state
 	}
 	if ctx.DB != nil {
+		activeProposalEpoch := ctx.CurrentEpoch
+		if ctx.ActiveProposalEpoch != nil {
+			activeProposalEpoch = *ctx.ActiveProposalEpoch
+		}
 		expiryEpoch := uint64(0)
 		if ctx.DelegatorInactivityOn {
 			expiryEpoch = ctx.CurrentEpoch
@@ -686,7 +711,7 @@ func tallySPOVotes(
 		if err := includeActiveProposalDepositsInSPOVotingState(
 			ctx.DB,
 			ctx.Txn,
-			ctx.CurrentEpoch,
+			activeProposalEpoch,
 			expiryEpoch,
 			state,
 		); err != nil {

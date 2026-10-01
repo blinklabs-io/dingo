@@ -114,8 +114,19 @@ func ActiveProposalDepositDRepPower(
 	currentEpoch uint64,
 	expiryEpoch uint64,
 ) (map[string]uint64, uint64, error) {
+	return activeProposalDepositDRepPowerAtEpochs(
+		db, txn, currentEpoch, expiryEpoch,
+	)
+}
+
+func activeProposalDepositDRepPowerAtEpochs(
+	db *database.Database,
+	txn *database.Txn,
+	activeProposalEpoch uint64,
+	expiryEpoch uint64,
+) (map[string]uint64, uint64, error) {
 	deposits, err := activeProposalDepositsByReturnCredential(
-		db, txn, currentEpoch,
+		db, txn, activeProposalEpoch,
 	)
 	if err != nil {
 		return nil, 0, err
