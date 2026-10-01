@@ -113,21 +113,19 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 }
 
 // TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel and
-// TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel cover
-// blinklabs-io/dingo#3825's PR review: PlutusV2CostModelWritten must be
-// derived from whether the enacted ParamUpdate delta itself specified
-// CostModels[1], not from comparing the merged result's value before and
-// after. Here the written value is deliberately the exact
+// TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel pins that
+// PlutusV2CostModelWritten must be derived from whether the enacted ParamUpdate
+// delta itself specified CostModels[1], not from comparing the merged result's
+// value before and after. Here the written value is deliberately the exact
 // eras.DefaultPlutusV2CostModel vector -- the value HardForkBabbage's own
 // synthetic default uses -- to prove real governance re-affirming that
-// canonical value is still correctly reported as written, which a
-// before/after value-comparison could not distinguish from "unchanged."
-// TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel
-// covers the Conway negative case, previously exercised only by the
-// Dijkstra path (TestEnactProposal_DijkstraParameterChange): an enacted
-// update that changes an unrelated field must not report
-// PlutusV2CostModelWritten, even though the merged result still carries a
-// PlutusV2 cost model unchanged from before.
+// canonical value is still correctly reported as written, which a before/after
+// value-comparison could not distinguish from "unchanged."
+// TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel covers
+// the Conway negative case, previously exercised only by the Dijkstra path
+// (TestEnactProposal_DijkstraParameterChange): an enacted update that changes
+// an unrelated field must not report PlutusV2CostModelWritten, even though the
+// merged result still carries a PlutusV2 cost model unchanged from before.
 func TestEnactProposal_ConwayParameterChangeDoesNotWritePlutusV2CostModel(
 	t *testing.T,
 ) {
@@ -724,8 +722,8 @@ func mutateConwayPParams(
 // TestStakeEpochFor pins stakeEpochFor to the identity function: the
 // ratify decision taken at the boundary into newEpoch uses mark[newEpoch],
 // the mark snapshot captured by SNAP at that same boundary. See
-// stakeEpochFor's doc comment for the upstream derivation and dingo#4441
-// for the live incident (Preview Plomin hard fork) this fixed.
+// stakeEpochFor's doc comment for the upstream derivation and the live
+// incident (Preview Plomin hard fork) this fixed.
 func TestStakeEpochFor(t *testing.T) {
 	t.Parallel()
 
@@ -884,7 +882,8 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 }
 
 // TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewal
-// reproduces the blinklabs-io/dingo#4584 live Preview halt at its actual root
+// reproduces the live Preview halt from a committee term renewal at its actual
+// root
 // cause: applyUpdateCommittee previously stamped a fresh TermStartSlot onto
 // every credential in an enacted UpdateCommittee action's CredEpochs map,
 // including a continuing member whose term was simply being renewed. Because
@@ -971,9 +970,9 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	assert.False(t, resigned)
 
 	// GetResignedCommitteeMembers must agree with IsCommitteeMemberResigned
-	// for the identical credential and term (blinklabs-io/dingo#4584's
-	// review found these two disagree once one query is gated by term and
-	// the other is not).
+	// for the identical credential and term (the two disagreed once one query
+	// was gated by term and
+	// the other was not).
 	resignedSet, err := db.GetResignedCommitteeMembers(
 		[]models.CommitteeCredential{{
 			CredentialTag: uint8(coldCredential.CredType),

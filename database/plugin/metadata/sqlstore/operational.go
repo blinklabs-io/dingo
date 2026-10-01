@@ -181,7 +181,7 @@ func (s *Store) GetNetworkState(
 // GetNetworkStateAsOfSlot resolves the most recent network-state row with
 // Slot <= the supplied slot, rather than GetNetworkState's always-latest
 // row -- see ledger's totalCirculatingSupply for why a historical
-// GetStakeDistribution answer needs this instead (blinklabs-io/dingo#382).
+// GetStakeDistribution answer needs this instead.
 // A slot older than every row ever written (e.g. before the first recorded
 // treasury/reserves change) returns (nil, nil), the same "not found" shape
 // GetNetworkState already uses.
@@ -279,7 +279,7 @@ func (s *Store) DeleteSyncState(key string, txn types.Txn) error {
 // COLLATION, not byte order, so a case- or locale-insensitive collation could
 // include keys that lack the byte prefix (or exclude keys that have it), and a
 // synthesized range upper bound over a non-ASCII prefix can be invalid UTF-8.
-// The deferred-header retention markers this enumerates (issue #3727) must be
+// The deferred-header retention markers this enumerates must be
 // matched exactly or a restart could miss a marker and fail to pin a snapshot.
 func (s *Store) ListSyncStateKeysByPrefix(
 	prefix string,

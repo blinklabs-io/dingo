@@ -68,10 +68,10 @@ func stakeDistributionQuery() *olocalstatequery.BlockQuery {
 // seedLiveStakeFixture registers a pool with a known VRF hash and gives it
 // stake via a real delegated account and UTxO -- the data
 // GetStakeDistribution's live reconstruction (ledger/snapshot's Calculator)
-// actually reads after blinklabs-io/dingo#4152's fix, unlike
-// seedPoolDistr2Fixture (queries_pooldistr2_test.go), which only writes a
-// PoolStakeSnapshot row: the periodic mark/set/go snapshot GetPoolDistr2
-// reads, and GetStakeDistribution no longer does.
+// actually reads after the move to live stake, unlike seedPoolDistr2Fixture
+// (queries_pooldistr2_test.go), which only writes a PoolStakeSnapshot row: the
+// periodic mark/set/go snapshot GetPoolDistr2 reads, and GetStakeDistribution
+// no longer does.
 func seedLiveStakeFixture(
 	t *testing.T,
 	db *database.Database,
@@ -116,8 +116,8 @@ func seedLiveStakeFixture(
 // TestQueryShelleyStakeDistribution_ReportsFractionAndVrf covers
 // GetStakeDistribution's live reconstruction: unlike GetPoolDistr2
 // (queryShelleyPoolDistr2), which reads the periodic mark snapshot, this
-// query reads live stake (blinklabs-io/dingo#4152), so its fixture is real
-// delegated accounts and UTxOs rather than a PoolStakeSnapshot row.
+// query reads live stake, so its fixture is real delegated accounts and UTxOs
+// rather than a PoolStakeSnapshot row.
 func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 	t.Parallel()
 
@@ -150,7 +150,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 	// depending on totalCirculatingSupply's own fallback path, which
 	// answers from the mark-snapshot total-active-stake table -- a
 	// different, unrelated number now that this query's own numerator is
-	// live stake, not the mark snapshot (blinklabs-io/dingo#4152).
+	// live stake, not the mark snapshot.
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("11", 32),
 	}
@@ -280,20 +280,19 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 }
 
 // TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal
-// covers blinklabs-io/dingo#3824: a live devnet run against a real
-// cardano-node found GetStakeDistribution's reported fraction inflated 2x,
-// because it shared GetPoolDistr2's denominator (sum of delegated stake).
-// Confirmed with real cardano-node's own raw wire bytes (not just the
-// decoded fraction) that its GetStakeDistribution reply genuinely uses total
-// circulation instead -- a real, deliberate difference between the two
-// queries, not a bug in either one. GetPoolDistr2's own denominator is
-// correct as sum-of-delegated (matching real cardano-ledger's
-// calculatePoolDistr/SnapShot.ssTotalActiveStake) and must not change --
-// this test proves the two queries now correctly disagree on the same
+// pins: a live devnet run against a real cardano-node found
+// GetStakeDistribution's reported fraction inflated 2x, because it shared
+// GetPoolDistr2's denominator (sum of delegated stake). Confirmed with real
+// cardano-node's own raw wire bytes (not just the decoded fraction) that its
+// GetStakeDistribution reply genuinely uses total circulation instead -- a
+// real, deliberate difference between the two queries, not a bug in either one.
+// GetPoolDistr2's own denominator is correct as sum-of-delegated (matching real
+// cardano-ledger's calculatePoolDistr/SnapShot.ssTotalActiveStake) and must not
+// change -- this test proves the two queries now correctly disagree on the same
 // underlying data, rather than being kept artificially consistent.
 //
 // The two queries also now read from different sources for the numerator
-// itself (blinklabs-io/dingo#4152: GetPoolDistr2 from the mark snapshot,
+// itself (GetPoolDistr2 from the mark snapshot,
 // GetStakeDistribution from live stake), so this fixture seeds both a
 // PoolStakeSnapshot row (for GetPoolDistr2) and a live delegated
 // account/UTxO (for GetStakeDistribution) naming the same two pools with
@@ -374,7 +373,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 }
 
 // TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds covers
-// node-parity's own usage (blinklabs-io/dingo#1900): Check pins every
+// node-parity's own usage: Check pins every
 // query, including GetStakeDistribution, to whatever point the two nodes
 // just agreed was live -- so a pin naming exactly the current tip must
 // succeed rather than being rejected as an unsupported historical pin.
@@ -418,7 +417,7 @@ func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
 }
 
 // TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCirculatingSupply
-// covers the real #382 fix this handler no longer works around: a pin naming
+// covers the real pinning fix this handler no longer works around: a pin naming
 // a real, on-chain point behind the live tip is now answered, and with the
 // circulating supply that was actually true at that point
 // (GetNetworkStateAsOfSlot), not whatever reserves are live now. Reserves
@@ -625,7 +624,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 // TestQueryShelleyStakeDistribution_EmptySnapshot covers a chain with no
 // stake yet (and no epoch data synced at all -- a completely fresh
 // database): the query must return an empty, non-nil map rather than
-// failing (blinklabs-io/dingo#4152: the live reconstruction's
+// failing (the live reconstruction's
 // getActivePoolsAtSlot returns types.ErrNoEpochData in exactly this case,
 // which queryShelleyStakeDistribution must treat the same way
 // queryLedgerPeerSnapshot already does -- an empty result, not an error).

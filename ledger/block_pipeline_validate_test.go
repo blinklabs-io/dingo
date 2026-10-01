@@ -374,10 +374,10 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 		name   string
 		mutate func(*LedgerState, models.Block)
 		// wantOk records whether the block should still decode despite the
-		// wrong nonce configured below. Issue #3528: a coarse
-		// ValidateHistorical=false historical-sync toggle must not exempt
-		// header VRF/KES/OpCert crypto from validation -- only a slot a
-		// Mithril certificate already covers may skip it.
+		// wrong nonce configured below. A coarse ValidateHistorical=false
+		// historical-sync toggle must not exempt header VRF/KES/OpCert crypto
+		// from validation -- only a slot a Mithril certificate already covers
+		// may skip it.
 		wantOk bool
 	}{
 		{

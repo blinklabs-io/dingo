@@ -572,10 +572,9 @@ func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 }
 
 // TestContinuationAuditCapCountsOnlyNewProducers is the regression for the
-// review finding on the cap check: it compared the producer set's size plus
-// every id the block offered, so an id the set already held was charged against
-// the cap a second time and a window whose producer set never grew could
-// disarm itself.
+// cap check: it compared the producer set's size plus every id the block
+// offered, so an id the set already held was charged against the cap a second
+// time and a window whose producer set never grew could disarm itself.
 //
 // That is not hypothetical on the Leios path. The same transaction can appear
 // in more than one endorser block — applyEndorserBlock carries
@@ -646,7 +645,7 @@ func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
 }
 
 // TestContinuationAuditResolvesEachEndorserBlockOnce is the cost regression for
-// the review finding that the audit resolved a block's endorser block for every
+// the audit resolving a block's endorser block for every
 // referencing ranking block, inside auditContinuationBlock while
 // chainsyncBlockfetchMutex is held.
 //
@@ -974,7 +973,7 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 }
 
 // TestContinuationAuditRetriesUnresolvedCertifyingParent is the regression for
-// the review finding that a transient parent lookup failure was permanent.
+// a transient parent lookup failure being permanent.
 //
 // A certifying ranking block names its certified closure only through its
 // parent's announcement, so resolving it needs the parent out of the block
@@ -1119,8 +1118,8 @@ func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
 	assert.Len(t, window.pendingEndorserRefs, 1)
 }
 
-// TestContinuationAuditDedupesConvergingEndorserRefs is the regression for the
-// review finding that requeueing bypassed the dedupe.
+// TestContinuationAuditDedupesConvergingEndorserRefs is the regression for
+// requeueing bypassing the dedupe.
 //
 // Two certifying ranking blocks with *different* parents can certify the same
 // endorser block: the reference is (announced hash, announcing slot), so two
@@ -1210,9 +1209,9 @@ func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
 	)
 }
 
-// TestContinuationAuditBudgetStopIsCountedOncePerBody is the regression for the
-// review finding that `skipped_budget` counted per unresolved input rather than
-// per audited body, which is what its Help string promises.
+// TestContinuationAuditBudgetStopIsCountedOncePerBody is the regression for
+// `skipped_budget` counting per unresolved input rather than per audited body,
+// which is what its Help string promises.
 //
 // The budget is a per-body allowance shared by every drain that body triggers,
 // one per unresolved input. The exhaustion sentinel was reset at the end of

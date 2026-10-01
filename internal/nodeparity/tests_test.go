@@ -34,12 +34,12 @@ const totalTestEpoch = uint64(995)
 //
 // It now takes Koios's already-fetched total and fetch error rather than
 // doing its own lookup, so CheckStakeDistribution can read epoch_info once
-// and use it both for the not-published guard and for this (dingo#4820).
+// and use it both for the not-published guard and for this.
 // These cases are therefore pure arithmetic and need no server.
 
-// TestCompareTotalActiveStakeDetectsADroppedPool is the point of dingo#4321:
-// the per-pool loop iterates only the pools Dingo reports, so a pool Dingo
-// lost entirely is never looked up and the epoch reports a clean match.
+// TestCompareTotalActiveStakeDetectsADroppedPool is the point of the total
+// check: the per-pool loop iterates only the pools Dingo reports, so a pool
+// Dingo lost entirely is never looked up and the epoch reports a clean match.
 // Summing what Dingo did report and comparing against Koios's epoch-wide
 // active_stake catches the omission.
 func TestCompareTotalActiveStakeDetectsADroppedPool(t *testing.T) {
@@ -78,7 +78,7 @@ func TestCompareTotalActiveStakeQuietWhenTotalsAgree(t *testing.T) {
 }
 
 // TestCompareTotalActiveStakeReportsADingoSurplus pins the other direction.
-// Raised in review on #4781: changing the final guard to `diff >= 0` left
+// Changing the final guard to `diff >= 0` left
 // every test in this package green, so the total check could silently stop
 // reporting Dingo over-reporting. A surplus means Dingo reports stake Koios's
 // epoch total does not account for, which is what a duplicated or phantom
@@ -117,8 +117,8 @@ func TestCompareTotalActiveStakeFlagsAnUnusableKoiosValueAsAFault(t *testing.T) 
 // TestCompareTotalActiveStakeFlagsAFetchFailure pins that an epoch_info fetch
 // failure is reported, not swallowed into a clean result.
 //
-// It is a KoiosFault mismatch rather than an error on purpose. Reviewed on
-// #4781: an error return discards the per-pool mismatches
+// It is a KoiosFault mismatch rather than an error on purpose.
+// An error return discards the per-pool mismatches
 // CheckStakeDistribution has already collected, so an outage of this one
 // endpoint would hide a pool divergence the per-pool half had found.
 func TestCompareTotalActiveStakeFlagsAFetchFailure(t *testing.T) {

@@ -88,10 +88,10 @@ func PParamsUpdateDijkstra(
 		)
 	}
 	// ParameterChange must never change protocol version; only
-	// HardForkInitiation may (dingo#4439). Transaction validation already
-	// rejects a ParameterChange carrying key 14 before it can be persisted,
-	// so this only guards an already-stored malformed proposal that reaches
-	// enactment some other way (e.g. replay of pre-fix data).
+	// HardForkInitiation may. Transaction validation already rejects a
+	// ParameterChange carrying key 14 before it can be persisted, so this only
+	// guards an already-stored malformed proposal that reaches enactment some
+	// other way (e.g. replay of pre-fix data).
 	dijkstraPParamsUpdate.ProtocolVersion = nil
 	if err := dijkstraPParams.ApplyUpdate(&dijkstraPParamsUpdate); err != nil {
 		return nil, err

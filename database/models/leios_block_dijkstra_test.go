@@ -34,8 +34,8 @@ import (
 // It is a real block from the Musashi prototype network rather than a
 // constructed one, and its shape matches what the live network serves: fetched
 // from leios-node.play.dev.cardano.org:3001 (network magic 164) while
-// diagnosing #3761, a tip block decoded to the same two top-level components
-// and twelve-field header body this fixture carries.
+// diagnosing a Musashi decode failure, a tip block decoded to the same two
+// top-level components and twelve-field header body this fixture carries.
 func musashiDijkstraBlock(t *testing.T) []byte {
 	t.Helper()
 	encoded, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")

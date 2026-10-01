@@ -125,7 +125,9 @@ type BarkConfig struct {
 	// verified client certificate but do not require membership in this list.
 	OperatorCertificateFingerprints []string
 	Host                            string
-	Port                            uint
+	// Port is the TCP port to listen on. 0 selects a free port, which Addr
+	// reports once Start has bound it.
+	Port uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
@@ -243,9 +245,6 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
-	}
-	if cfg.Port == 0 {
-		cfg.Port = 9091
 	}
 	return &Bark{
 		config:               cfg,

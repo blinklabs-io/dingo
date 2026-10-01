@@ -115,7 +115,7 @@ func newBenchLedgerState(tb testing.TB, n int) *LedgerState {
 }
 
 // BenchmarkHardForkSummary_SmallCache measures HardForkSummary's per-call
-// cost against a ~10-epoch cache -- the size implied by issue #2093's
+// cost against a ~10-epoch cache -- the size implied by
 // original (incorrect) "O(eras) ~= 7" cost assumption.
 func BenchmarkHardForkSummary_SmallCache(b *testing.B) {
 	ls := newBenchLedgerState(b, 10)
@@ -642,7 +642,7 @@ func TestHardForkSummaryCache_ConcurrentAccessIsRaceFree(t *testing.T) {
 // the ledger suite all pass unchanged when the cache lookup is removed
 // entirely, because they only prove a *stale* result is never served. Without
 // this test a refactor that made the key never match would stay green while
-// silently restoring the per-call O(known epochs) rebuild that issue #2093 was
+// silently restoring the per-call O(known epochs) rebuild that was
 // filed for.
 //
 // Pointer identity is the assertion rather than value equality precisely
@@ -1652,18 +1652,18 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 }
 
 // TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
-// test for a node-side horizon-computation gap distinct from #3844: the
-// appended successor era used to measure its own safe zone only from the
-// announced boundary, never from how far the live tip has actually advanced
-// past it. A node that fails to apply the block crossing that boundary (for
-// any reason -- this is the exact class of bug this fixture reproduces, not
-// its cause) keeps reconstructing this same Summary on every retry with the
-// SAME transitionInfo and epoch cache, since neither changes without a
-// successful apply. Before this fix, the successor's horizon was pinned at
-// boundary+safeZone forever, so once the live tip passed that fixed point
-// every further block or transaction slot fell "past horizon" permanently --
-// a live, canonical chain rejected as though its own tip did not exist, even
-// though nothing about the transition or the chain's own history changed.
+// test for a node-side horizon-computation gap distinct from the horizon-anchor
+// gap: the appended successor era used to measure its own safe zone only from
+// the announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for any
+// reason -- this is the exact class of bug this fixture reproduces, not its
+// cause) keeps reconstructing this same Summary on every retry with the SAME
+// transitionInfo and epoch cache, since neither changes without a successful
+// apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point every
+// further block or transaction slot fell "past horizon" permanently -- a live,
+// canonical chain rejected as though its own tip did not exist, even though
+// nothing about the transition or the chain's own history changed.
 //
 // This reproduces the reported live-incident signature directly: the current
 // published tip's own slot judged past horizon, looping "block processing
@@ -1974,7 +1974,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 }
 
 // TestHardForkSummary_HorizonAnchoredAtAppliedParent is the summary half of the
-// dingo #3844 fix. HardForkSummary measures the safe zone from the published
+// horizon-anchor fix. HardForkSummary measures the safe zone from the published
 // tip, which only advances when a whole block batch commits; the reference
 // implementation measures it from the applied block's immediate predecessor.
 // Because applySafeZone snaps up to an epoch boundary, that difference is not
@@ -2223,7 +2223,7 @@ func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
 }
 
 // previewWedgeLedgerState reproduces the ledger state the from-genesis Preview
-// replay was in when it wedged on issue #3844: epoch 40 of the Babbage era, a
+// replay was in when it wedged on epoch 40 of the Babbage era, a
 // published tip at block 168143 (slot 3516450), and the next two blocks not yet
 // reflected in that tip because their batch had not committed. Preview's
 // genesis gives the 25920-slot safe zone (see newTestEraHistoryCfg).
@@ -2256,7 +2256,7 @@ func previewWedgeLedgerState(t testing.TB) *LedgerState {
 }
 
 // TestLedgerViewSlotToTimeUsesHorizonAnchor pins the routing at the call site
-// the #3844 fix changes. LedgerView.SlotToTime is the converter every Plutus
+// the fix changes. LedgerView.SlotToTime is the converter every Plutus
 // script context translates its validity interval through, so the anchor has to
 // reach the summary from there and the horizon has to survive the trip.
 func TestLedgerViewSlotToTimeUsesHorizonAnchor(t *testing.T) {

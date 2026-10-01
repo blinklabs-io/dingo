@@ -626,6 +626,74 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 	require.Nil(t, rootUtxo)
 }
 
+// Gap blocks are already reflected in the snapshot's ledger state, so a direct
+// deposit in a gap body must not credit the account a second time.
+func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	stakeKey := testGapHash28("dijkstra-gap-deposit")
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     1,
+		Reward:        5,
+		Active:        true,
+	}))
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{},
+		2: uint64(0),
+		25: map[cbor.ByteString]uint64{
+			cbor.NewByteString(append([]byte{0xe0}, stakeKey...)): 20,
+		},
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, true, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	point := ocommon.Point{
+		Slot: 1000,
+		Hash: testGapHash32("dijkstra-gap-deposit-block"),
+	}
+	var blockHash, txHash [32]byte
+	copy(blockHash[:], point.Hash)
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot: point.Slot, BlockHash: blockHash,
+				ByteOffset: 0, ByteLength: 1,
+			},
+		},
+	}
+	pparams := &dijkstra.DijkstraProtocolParameters{}
+	require.NoError(t, processGapBlockTransactions(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		point,
+		[]lcommon.Transaction{tx},
+		offsets,
+		100,
+		dijkstra.EraIdDijkstra,
+		pparams,
+		&pparams.ConwayProtocolParameters,
+	))
+	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), uint64(account.Reward))
+}
+
 func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 	t.Parallel()
 

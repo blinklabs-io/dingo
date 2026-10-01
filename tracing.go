@@ -58,7 +58,7 @@ func (n *Node) setupTracing(ctx context.Context) error {
 			stdouttrace.WithPrettyPrint(),
 		)
 	} else {
-		// TODO: make options configurable (#387)
+		// TODO: make options configurable
 		traceExporter, err = otlptracehttp.New(ctx)
 	}
 	if err != nil {
