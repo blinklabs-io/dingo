@@ -84,7 +84,7 @@ func dijkstraRefFeeParams() *gdijkstra.DijkstraProtocolParameters {
 
 type dijkstraRefFeeFixture struct {
 	inputs   []lcommon.Utxo
-	tx       func(fee uint64) *gdijkstra.DijkstraTransaction
+	tx       func(t *testing.T, fee uint64) *gdijkstra.DijkstraTransaction
 	minFee   uint64
 	refSize  uint64
 	spendIn  shelley.ShelleyTransactionInput
@@ -137,7 +137,8 @@ func newDijkstraRefFeeFixture(t *testing.T) *dijkstraRefFeeFixture {
 				Output: gdijkstra.DijkstraTransactionOutput{Output: refOutput},
 			},
 		},
-		tx: func(fee uint64) *gdijkstra.DijkstraTransaction {
+		tx: func(t *testing.T, fee uint64) *gdijkstra.DijkstraTransaction {
+			t.Helper()
 			tx := &gdijkstra.DijkstraTransaction{
 				Body: gdijkstra.DijkstraTransactionBody{
 					TxInputs: conway.NewConwayTransactionInputSet(
@@ -233,17 +234,17 @@ func TestLedgerStateValidateTxDijkstraTieredRefScriptFee(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(fx.minFee), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee), nil, created),
 		"exactly paid fee must be accepted",
 	)
 	requireDijkstraFeeTooSmall(
 		t,
-		ls.ValidateTxWithOverlay(fx.tx(fx.minFee-1), nil, created),
+		ls.ValidateTxWithOverlay(fx.tx(t, fx.minFee-1), nil, created),
 	)
 	requireDijkstraFeeTooSmall(
 		t,
 		ls.ValidateTxWithOverlay(
-			fx.tx(uint64(dijkstraRefFeeBase)+fx.refSize), nil, created,
+			fx.tx(t, uint64(dijkstraRefFeeBase)+fx.refSize), nil, created,
 		),
 	)
 }
@@ -288,7 +289,7 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 				}
 				return nil
 			}))
-			tx := fx.tx(tc.fee)
+			tx := fx.tx(t, tc.fee)
 			var txHash [32]byte
 			copy(txHash[:], tx.Hash().Bytes())
 			offsets := &database.BlockIngestionResult{
