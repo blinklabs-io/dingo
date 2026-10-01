@@ -14965,6 +14965,21 @@ uncached `cek.NewEvalContext` call (identical to this cache's absence) for
 any implementation — including most unit-test stand-ins — that doesn't
 provide one.
 
+The cached context is also what lets evaluation reuse CEK machines.
+gouroboros's `Plutus*Script.Evaluate` keeps a `sync.Pool` of `cek.Machine`
+instances per `(language version, *cek.EvalContext)` pair and takes a machine
+from it for each redeemer, so every redeemer that resolves the same cached
+context shares one pool. A context built per call, as in the uncached
+fallback, gets a new pool each time, so its redeemers never reuse a machine.
+The pool holds its context only weakly, and its entry is removed once the
+context becomes unreachable. Evicting a cache entry therefore frees that
+entry's machines after the last evaluation holding the context returns, so
+the cache bound also bounds the retained machines. Dijkstra phase-2
+validation runs inside gouroboros's own rule and uses gouroboros's
+process-wide `common.PooledEvalContext`, not this cache. That function keys
+on language version, protocol major version and cost model only, with no
+synthetic-V2 flag, so the Alonzo, Babbage and Conway paths keep this cache.
+
 ### Live Restore/Truncate LedgerStateConfig Parity
 
 The `ledger.LedgerStateConfig` both construction paths use is
