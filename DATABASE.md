@@ -668,6 +668,9 @@ which serves the per-round probes (`HasPendingRewardCreditRounds`,
 `HasUnfoldedRewardCreditsThroughEpoch`, which tests the rounds through a given
 epoch). `GetPendingRewardCreditRounds` and
 `SetPendingRewardCreditRounds` read and replace the table rows.
+`ClaimUnfoldedRewardCredits` selects the ids on the pending index first and
+then reads the rows by primary key, so a claim, including an empty one, does not
+visit every spendable, unguarded row.
 `DeleteRewardStateAfterSlot` drops every round whose `boundary_slot` is after
 the rollback slot and clears `folded` on its surviving outputs.
 `DeleteRewardStateBeforeEpoch` keeps applied rounds' unfolded rows. Migration
