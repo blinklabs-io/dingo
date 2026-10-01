@@ -548,8 +548,8 @@ func ImportLedgerState(
 	// added_slot > slot outright, so the ordinary replay that follows this
 	// import re-creates it at its real slot with insertUtxoModelChecked's
 	// inserted=true, contributing its live-stake delta exactly when replay
-	// reaches it. Patching deleted_slot in place at import time was tried and
-	// rejected: ComputeEpochBoundarySnapshot's mark-snapshot read
+	// reaches it. Patching deleted_slot in place at import time instead would
+	// be wrong: ComputeEpochBoundarySnapshot's mark-snapshot read
 	// (GetLiveStakeInputsForPools) has no tip gate and no slot argument, so a
 	// row made live at import time would count toward every mark snapshot
 	// crossed between the anchor and the slot replay actually re-creates it

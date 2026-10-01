@@ -959,8 +959,8 @@ cascading to its `asset` and `utxo_pointer` rows, so the ordinary block
 replay that follows the import re-creates it fresh at its real slot --
 `insertUtxoModelChecked` sees no existing row, inserts with `inserted=true`,
 and its live-stake delta lands at the slot replay actually reaches it.
-Patching the row's `deleted_slot` in place at import time (rather than
-deleting it for replay to re-create) was tried and rejected: a mark-snapshot
+The row must be deleted, not made live by patching its `deleted_slot` in
+place at import time: a mark-snapshot
 read for an epoch boundary between the anchor and the row's real creation
 slot (`ComputeEpochBoundarySnapshot` -> `GetLiveStakeInputsForPools`) has no
 tip gate and takes no slot argument, so a row made live at import time would
@@ -971,10 +971,9 @@ the anchor could have judged (created at or before it) is left exactly as
 the snapshot and reconcile leave it, whether live or already correctly
 spent, even if its `deleted_slot` is well after the anchor. This runs on
 every import, not only `Reconcile: true`, since the legacy reward-repair
-shape hits the identical gap; it also now rolls back an unspent post-anchor
-row the same way, where it was previously left alone under `Reconcile:
-false` (and silently miscounted by any mark snapshot taken before the
-repair ran) -- a deliberate widening, not merely coverage of the spent case.
+shape hits the identical gap. An unspent post-anchor row is rolled back the
+same way as a spent one: left live, it would be counted toward any mark
+snapshot taken before replay reaches its creation slot.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
