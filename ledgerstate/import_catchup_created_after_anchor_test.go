@@ -491,6 +491,131 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorLiveUnspentUtxo(
 	require.Nil(t, spentAfterRealSpend, "P must be spent")
 }
 
+// TestImportLedgerStateCatchUpExcludesPostAnchorUtxosFromRewardLiveStake
+// asserts the property the roll-back exists to protect: reward_live_stake,
+// which ComputeEpochBoundarySnapshot reads through GetLiveStakeInputsForPools
+// with no slot argument, must hold only stake that was live at the anchor
+// once the re-import finishes. P (created after the anchor, spent) and Q
+// (created after the anchor, still live) both pay the same credential K.
+// Clearing P's spend in place instead of deleting it would leave both P and
+// Q counted against K at the anchor; leaving Q alone would count Q. Only the
+// roll-back leaves K at zero until replay re-creates Q at its real slot.
+func TestImportLedgerStateCatchUpExcludesPostAnchorUtxosFromRewardLiveStake(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	addr := buildShelleyAddr(
+		0, 1,
+		bytes.Repeat([]byte{0x5f}, 28),
+		bytes.Repeat([]byte{0x70}, 28),
+	)
+	xTxID := bytes.Repeat([]byte{0x40}, 32)
+
+	newImportConfig := func(tipSlot uint64) ImportConfig {
+		nonce := make([]byte, 32)
+		eraBounds := make([]EraBound, EraConway+1)
+		return ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{5_000_000},
+				),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      tipSlot,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		}
+	}
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	utxoStake := func(tag uint8, key []byte) string {
+		t.Helper()
+		var stake string
+		err := raw.QueryRow(
+			"SELECT COALESCE(SUM(CAST(utxo_stake AS INTEGER)), 0) "+
+				"FROM reward_live_stake "+
+				"WHERE credential_tag = ? AND staking_key = ?",
+			tag, key,
+		).Scan(&stake)
+		require.NoError(t, err)
+		return stake
+	}
+
+	// 1. Bootstrap: X live at anchor slot 1000.
+	const anchorSlot = 1_000
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	// 2. Post-anchor blocks: A spends X and creates P; B spends P and
+	// creates Q, which stays live. Both outputs pay the same credential.
+	const txSeedA, txSeedB = 0x79, 0x7a
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	pTxID := bytes.Repeat([]byte{txSeedA}, 32)
+	p, err := db.Metadata().GetUtxo(pTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, p, "precondition: P live after being created")
+	require.NotEmpty(t, p.StakingKey, "precondition: P carries a credential")
+	tag, key := p.CredentialTag, p.StakingKey
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, pTxID, 0, 1_300,
+	))
+	qTxID := bytes.Repeat([]byte{txSeedB}, 32)
+	require.Equal(
+		t, "1000000", utxoStake(tag, key),
+		"precondition: block apply counts live Q against the credential",
+	)
+
+	// 3. Re-import the same anchor.
+	require.NoError(t, ImportLedgerState(
+		context.Background(), newImportConfig(anchorSlot),
+	))
+
+	require.Equal(
+		t, "0", utxoStake(tag, key),
+		"no output paying this credential existed at the anchor; the "+
+			"aggregate an epoch-boundary snapshot reads must not count P or Q "+
+			"before replay re-creates them",
+	)
+
+	// 4. Replay A and B: Q is re-created at its real slot and counted then.
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedA, xTxID, 0, 1_200,
+	))
+	require.NoError(t, applySpendingTransaction(
+		t, db, txSeedB, pTxID, 0, 1_300,
+	))
+	q, err := db.Metadata().GetUtxo(qTxID, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, q, "Q must be live after replay")
+	require.Equal(
+		t, "1000000", utxoStake(tag, key),
+		"after replay only Q is live for this credential",
+	)
+}
+
 // TestImportLedgerStateCatchUpDoesNotRollBackPreAnchorSnapshotDeadUtxo
 // guards UtxosDeleteRolledback's scoping: it must remove only a UTxO created
 // after the anchor, never one the snapshot could have judged. Y is live at
