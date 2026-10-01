@@ -74,16 +74,10 @@ func utxoDeletedAndSpender(
 	return deletedSlot, spentAtTxID
 }
 
-// TestImportUtxosClearsPostAnchorSpendOnLiveReimport is the dingo#4770
-// regression: a Mithril catch-up/reward-repair import re-inserts the
-// snapshot's live UTxO set through ON CONFLICT (tx_id, output_idx) DO
-// NOTHING. Before the fix, hydrateImportedUtxo updated transaction_id,
-// collateral_return_for_tx_id, and added_slot on conflict but left
-// deleted_slot/spent_at_tx_id untouched, so an output the certified snapshot
-// declares live at its anchor stayed marked spent if the local database had
-// already recorded a spend for it after the anchor. The first later block
-// that actually spends the output then fails with "utxo not found" and the
-// ledger pipeline halts.
+// TestImportUtxosClearsPostAnchorSpendOnLiveReimport re-imports a live row
+// over a local row spent after the anchor. The ON CONFLICT path must clear
+// deleted_slot and spent_at_tx_id, or replaying the spending block fails with
+// "utxo not found".
 func TestImportUtxosClearsPostAnchorSpendOnLiveReimport(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)

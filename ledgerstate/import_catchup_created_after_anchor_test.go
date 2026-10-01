@@ -27,21 +27,11 @@ import (
 )
 
 // TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo covers
-// dingo#4770's uncovered majority class: a UTxO both *created* and spent
-// after the snapshot's anchor. Unlike TestImportLedgerStateCatchUpRestores-
-// PostAnchorSpentUtxo's output (live at the anchor, spent afterward), this
-// output never appears in the snapshot's live set at all -- the anchor
-// predates its creation -- so it never reaches hydrateImportedUtxo's ON
-// CONFLICT clear. It is created and spent purely by local block replay, so a
-// catch-up/reward-repair re-import of the same anchor leaves it exactly as
-// it found it unless the import path itself repairs it.
-//
-// The repair rolls the row back entirely (deletes it) rather than clearing
-// its deleted_slot in place: see UtxosDeleteRolledback's call site in
-// ImportLedgerState for why patching the row live at import time would
-// corrupt an epoch-boundary mark-snapshot crossed before replay actually
-// re-creates it. The discriminating assertion is therefore that the row is
-// *entirely absent* immediately after re-import, not merely unspent.
+// an output created and spent after the anchor. It is absent from the
+// snapshot, so the import's conflict path never sees it. The discriminating
+// assertion is that the row is absent after re-import: it must be deleted for
+// replay to re-create, not revived in place (see the UtxosDeleteRolledback
+// call in ImportLedgerState).
 func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 	t *testing.T,
 ) {
@@ -90,17 +80,13 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 		}
 	}
 
-	// 1. Original bootstrap import: X is live at anchor slot 1000. Nothing
-	// else exists yet -- the anchor predates the output under test.
+	// 1. Bootstrap: X is live at anchor slot 1000.
 	const anchorSlot = 1_000
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot),
 	))
 
-	// 2. A real post-anchor block spends X and creates a brand-new output O,
-	// through the ordinary block-apply path -- exactly what a node synced
-	// past its bootstrap anchor does. O did not exist at the anchor, so no
-	// snapshot could ever have declared it live.
+	// 2. A post-anchor block spends X and creates O.
 	const txSeedA = 0x71
 	require.NoError(t, applySpendingTransaction(
 		t, db, txSeedA, xTxID, 0, 1_200,
@@ -119,19 +105,11 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 	require.NoError(t, err)
 	require.Nil(t, spentO, "precondition: O spent for real after creation")
 
-	// 4. Catch-up / reward-repair re-import of the same anchor. The
-	// snapshot's live UTxO set only knows about slot-1000 state (X); it says
-	// nothing about O at all, since O was created thereafter. This is the
-	// dingo#4770 gap hydrateImportedUtxo's ON CONFLICT clear cannot reach.
+	// 4. Re-import the same anchor; the snapshot does not contain O.
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot),
 	))
 
-	// This is the discriminating assertion: O's row must be gone entirely,
-	// not merely unspent -- see UtxosDeleteRolledback's call site for why
-	// clearing deleted_slot in place at import time (rather than deleting
-	// the row for replay to re-create) would corrupt a mark-snapshot read
-	// between the anchor and O's real creation slot.
 	oAfterCatchUp, err := db.Metadata().GetUtxoIncludingSpent(oTxID, 0, nil)
 	require.NoError(t, err)
 	require.Nil(
@@ -140,10 +118,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 			"must roll it back so replay re-creates it fresh",
 	)
 
-	// 5. Real replay of the block that created O re-creates the row from
-	// scratch (insertUtxoModelChecked's conflict-tolerant insert now finds
-	// no existing row, so inserted=true and the live-stake delta lands at
-	// this slot).
+	// 5. Replaying the creating block re-creates O.
 	require.NoError(t, applySpendingTransaction(
 		t, db, txSeedA, xTxID, 0, 1_200,
 	))
@@ -154,10 +129,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 		"O must be live again after replaying the block that created it",
 	)
 
-	// 6. Real replay of the block that spent O, reusing the same
-	// transaction hash a real chain replay would. This must apply cleanly:
-	// a live-stake underflow, or a spend rejected against a missing row,
-	// would error here.
+	// 6. Replaying the spending block applies against the re-created row.
 	require.NoError(t, applySpendingTransaction(
 		t, db, txSeedB, oTxID, 0, 1_500,
 	), "replaying the real block that spent O must apply after the repair")
@@ -167,12 +139,7 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 }
 
 // TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorCreatedAndSpentUtxo
-// is the sibling test's second import run with Reconcile: true. O is already
-// spent (not live) by the time reconcile's own tombstoning scan runs, so
-// that scan does not additionally touch it; the roll-back below still
-// removes it regardless of reconcile, proving the fix holds under the
-// literal catch-up flag too, alongside the legacy reward-repair shape
-// (Reconcile: false) the first test covers.
+// is the same case with the second import run as Reconcile: true.
 func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorCreatedAndSpentUtxo(
 	t *testing.T,
 ) {
@@ -277,17 +244,10 @@ func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorCreatedAndSpentUtxo
 	require.Nil(t, spentOAfterReplayB, "O must be spent again")
 }
 
-// TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo covers a
-// UTxO created after the anchor and never spent (an ordinary unspent change
-// output), under Reconcile: false. This is a deliberate widening versus the
-// behavior before this fix: previously such a row was simply left alone (it
-// is live, so nothing patched its deleted_slot, and Reconcile: false never
-// runs reconcileStaleLedgerState's tombstoning pass at all), which also means
-// it would have been silently over-counted in any mark-snapshot crossed
-// before the repair ran. UtxosDeleteRolledback does not distinguish "created
-// after the anchor" from "created and spent after the anchor" -- it rolls
-// back every post-anchor row -- so this one is now removed and re-created by
-// replay exactly like the create-and-spend case.
+// TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo covers an
+// output created after the anchor and never spent. It is rolled back like a
+// spent one: left live, it would count toward mark snapshots taken before
+// replay reaches its creation slot.
 func TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo(
 	t *testing.T,
 ) {
@@ -390,13 +350,9 @@ func TestImportLedgerStateCatchUpRollsBackPostAnchorLiveUnspentUtxo(
 }
 
 // TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorLiveUnspentUtxo is
-// the sibling live-unspent test under the literal Reconcile: true catch-up
-// flag. Before this fix, reconcile's own tombstoning pass would have marked
-// P inactive at the anchor slot (it is absent from the reconcile key set,
-// indistinguishable there from a row genuinely spent before the anchor);
-// UtxosDeleteRolledback runs before reconcile, so P is removed outright
-// before reconcile's live-row scan ever considers it, and reconcile never
-// has to reason about it at all.
+// the same case under Reconcile: true. The roll-back runs before reconcile,
+// which would otherwise tombstone the row at the anchor slot because it is
+// absent from the snapshot.
 func TestImportLedgerStateReconcileCatchUpRollsBackPostAnchorLiveUnspentUtxo(
 	t *testing.T,
 ) {
@@ -617,15 +573,9 @@ func TestImportLedgerStateCatchUpExcludesPostAnchorUtxosFromRewardLiveStake(
 }
 
 // TestImportLedgerStateCatchUpDoesNotRollBackPreAnchorSnapshotDeadUtxo
-// guards UtxosDeleteRolledback's scoping: it must remove only a UTxO created
-// after the anchor, never one the snapshot could have judged. Y is live at
-// the (only) bootstrap anchor, so its added_slot is at or before that
-// anchor; it is then spent for real, and re-imported with a snapshot that
-// (synthetically, for this test only -- a real snapshot at the same anchor
-// would still include Y) omits it. A predicate keyed on deleted_slot alone
-// would incorrectly delete or revive Y; UtxosDeleteRolledback's
-// added_slot > anchorSlot predicate correctly leaves it alone -- still
-// present, still spent.
+// guards the added_slot scope: Y was created at the anchor and spent after
+// it, and a synthetic re-import omits it. A predicate keyed on deleted_slot
+// would delete or revive Y; added_slot > anchor leaves it present and spent.
 func TestImportLedgerStateCatchUpDoesNotRollBackPreAnchorSnapshotDeadUtxo(
 	t *testing.T,
 ) {

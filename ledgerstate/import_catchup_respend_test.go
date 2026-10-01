@@ -57,27 +57,10 @@ func minimalCertStateData(t *testing.T) cbor.RawMessage {
 	return certState
 }
 
-// TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo is the
-// mithril-import-level regression for dingo#4770, exercised through the same
-// orchestrator (ledgerstate.ImportLedgerState) mithril's catch-up/reward-repair
-// path calls (mithril/sync_import.go). It reproduces the full defect shape:
-//
-//  1. A first import (the original bootstrap) declares an output live at the
-//     anchor slot.
-//  2. A real block, applied through the ordinary database.SetTransaction
-//     path, spends that output at a later slot -- exactly what a node
-//     synced past its bootstrap anchor does.
-//  3. A second import (a catch-up or legacy reward-repair re-import of a
-//     certified snapshot covering the same anchor) declares the same output
-//     live again. This is where the defect lived: the conflict-tolerant
-//     insert left deleted_slot/spent_at_tx_id untouched, so the output
-//     stayed spent forever. The GetUtxo check immediately after this step is
-//     what discriminates the fix -- see its own comment for why.
-//  4. The same real block from step 2 is replayed, reusing its exact
-//     transaction hash: what a real chain replay does. This step cannot
-//     discriminate the fix on its own (see its comment), but confirms the
-//     ordinary replay path still applies cleanly once the output is
-//     genuinely live again.
+// TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo re-imports an
+// anchor after a local block spent one of its live outputs. The
+// liveAfterCatchUp assertion is the discriminating one; the replay in step 4
+// cannot fail either way (see its comment).
 func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 	t.Parallel()
 
@@ -133,8 +116,7 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, liveBefore, "precondition: output live after bootstrap")
 
-	// 2. A real post-anchor block spends the output at slot 1500, through
-	// the ordinary block-apply path (not a raw SQL edit).
+	// 2. A post-anchor block spends the output.
 	require.NoError(t, applySpendingTransaction(
 		t, db, 0x51, utxoTxID, 0, 1_500,
 	))
@@ -145,10 +127,8 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 		"precondition: output not live after the real post-anchor spend",
 	)
 
-	// 3. Catch-up / reward-repair re-import of a certified snapshot covering
-	// the same anchor: the output is declared live again. This is the
-	// dingo#4770 conflict path (ON CONFLICT (tx_id, output_idx) via
-	// hydrateImportedUtxo).
+	// 3. Re-import the same anchor; the output conflicts on (tx_id,
+	// output_idx) and is declared live.
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot),
 	))
@@ -160,17 +140,10 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. Replay the same real block that spent this output the first time
-	// (step 2), reusing its exact transaction hash and slot -- what a real
-	// chain replay actually does, rather than a different, hypothetical
-	// spender. This is deliberately not a second proof of the fix: a
-	// consumed input already marked spent *by this same hash* is treated as
-	// an idempotent no-op by setTransactionWithAccumulator
-	// (bytes.Equal(spentBy, hash) => continue) regardless of whether the row
-	// was ever actually restored, so this call would return nil either way.
-	// The liveAfterCatchUp assertion above is what discriminates the fix;
-	// this only confirms the ordinary replay path does not additionally
-	// error (e.g. a live-stake underflow) once the row is genuinely live.
+	// 4. Replay the step-2 block with the same transaction hash. This passes
+	// with or without the fix: setTransactionWithAccumulator skips an input
+	// already spent by the same hash. It only checks that replay applies
+	// cleanly once the row is live.
 	require.NoError(t, applySpendingTransaction(
 		t, db, 0x51, utxoTxID, 0, 1_500,
 	), "replaying the real block that spent this output originally must "+
@@ -181,16 +154,11 @@ func TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo(t *testing.T) {
 	require.Nil(t, spentAfterReplayedSpend, "output must be spent again")
 }
 
-// TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo is
-// TestImportLedgerStateCatchUpRestoresPostAnchorSpentUtxo's second import run
-// with Reconcile: true -- this codebase's own definition of a Mithril v2
-// "catch-up" (see DATABASE.md, "Mithril v2 catch-up reconcile", and
-// ImportConfig.Reconcile's doc comment). Reconcile only adds a post-import
-// pass that tombstones live rows *absent* from the new snapshot's live set;
-// it does not change how the UTxO import phase handles a conflicting row
-// still present in that live set, which is the dingo#4770 path under test.
-// This proves the fix holds under the literal catch-up flag, not only under
-// the legacy reward-repair shape (Reconcile: false) the first test covers.
+// TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo runs the
+// second import with Reconcile: true. Reconcile only tombstones live rows
+// absent from the snapshot; it does not change how the import handles a
+// conflicting row that is present, so the result must match the
+// Reconcile: false test.
 func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 	t *testing.T,
 ) {
@@ -241,8 +209,7 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 		}
 	}
 
-	// 1. Bootstrap (Reconcile: false -- a fresh database has nothing to
-	// reconcile against).
+	// 1. Bootstrap (Reconcile: false).
 	const anchorSlot = 1_000
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot, false),
@@ -262,8 +229,7 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 		"precondition: output not live after the real post-anchor spend",
 	)
 
-	// 3. A literal catch-up import: Reconcile: true, same live UTxO set
-	// (nothing else exists locally for reconcile to tombstone).
+	// 3. Re-import the same anchor with Reconcile: true.
 	require.NoError(t, ImportLedgerState(
 		context.Background(), newImportConfig(anchorSlot, true),
 	))
@@ -275,14 +241,7 @@ func TestImportLedgerStateReconcileCatchUpRestoresPostAnchorSpentUtxo(
 			"the post-anchor spend must not survive re-import",
 	)
 
-	// 4. Replay the same real block that spent this output the first time
-	// (step 2), reusing its exact transaction hash and slot. As in the
-	// non-reconcile test above, this does not discriminate the fix on its
-	// own -- setTransactionWithAccumulator treats a consumed input already
-	// spent by this same hash as an idempotent no-op regardless of whether
-	// the row was actually restored. liveAfterCatchUp above is the
-	// discriminating assertion; this only confirms the replay path applies
-	// cleanly once the row is genuinely live.
+	// 4. Replay the step-2 block; non-discriminating, as in the test above.
 	require.NoError(t, applySpendingTransaction(
 		t, db, 0x53, utxoTxID, 0, 1_500,
 	), "replaying the real block that spent this output originally must "+
