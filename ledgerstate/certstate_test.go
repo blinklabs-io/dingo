@@ -1137,9 +1137,6 @@ func TestParseDRepMapPreservesReverseDelegators(t *testing.T) {
 	}, dreps[0].Delegators)
 }
 
-// TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
-// flattened Mithril CertState layout where the dormant count follows the
-// nested committee state after the DRep map.
 func TestParseDRepMapRejectsMalformedStateFields(t *testing.T) {
 	t.Parallel()
 	credential, err := cbor.Encode([]any{
@@ -1147,9 +1144,10 @@ func TestParseDRepMapRejectsMalformedStateFields(t *testing.T) {
 	})
 	require.NoError(t, err)
 	for name, state := range map[string][]any{
-		"expiry":  {"10", nil, uint64(500)},
-		"anchor":  {uint64(10), "invalid", uint64(500)},
-		"deposit": {uint64(10), nil, "500"},
+		"expiry":                {"10", nil, uint64(500)},
+		"anchor":                {uint64(10), "invalid", uint64(500)},
+		"anchor hash too short": {uint64(10), []any{"url", bytes.Repeat([]byte{0x55}, 31)}, uint64(500)},
+		"deposit":               {uint64(10), nil, "500"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			rawState, encodeErr := cbor.Encode(state)
@@ -1162,6 +1160,9 @@ func TestParseDRepMapRejectsMalformedStateFields(t *testing.T) {
 	}
 }
 
+// TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry pins the
+// flattened Mithril CertState layout where the dormant count follows the
+// nested committee state after the DRep map.
 func TestParseCertStateConwayAddsFlattenedDormancyToDRepExpiry(t *testing.T) {
 	t.Parallel()
 

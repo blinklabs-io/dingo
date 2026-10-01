@@ -47,7 +47,7 @@ type mockGapGovernanceTransaction struct {
 	isValid            bool
 }
 
-func TestProcessGapBlocksBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
+func TestProcessGapBlocksDoesNotDoubleCountImportedDormancy(t *testing.T) {
 	t.Parallel()
 	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: t.TempDir(),
@@ -59,9 +59,10 @@ func TestProcessGapBlocksBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
 	require.NoError(t, db.CreateDrep(nil, &models.Drep{
 		CredentialTag: 0,
 		Credential:    credential,
-		ExpiryEpoch:   20,
+		ExpiryEpoch:   21,
 		Active:        true,
 	}))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(1, nil))
 	for epoch, slot := range []uint64{0, 1} {
 		require.NoError(t, db.SetEpoch(
 			slot,
@@ -96,6 +97,10 @@ func TestProcessGapBlocksBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
 	drep, err := db.GetDrepByCredential(0, credential, true, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), dormantEpochs,
+		"gap replay must preserve dormancy already incorporated into the imported state")
 }
 
 func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {

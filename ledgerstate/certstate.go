@@ -2092,6 +2092,13 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 			if _, err := cbor.Decode(anchor[1], &drep.AnchorHash); err != nil {
 				return nil, fmt.Errorf("decoding DRep anchor hash for %x: %w", cred.Hash, err)
 			}
+			if len(drep.AnchorHash) != 32 {
+				return nil, fmt.Errorf(
+					"decoding DRep anchor hash for %x: expected 32 bytes, got %d",
+					cred.Hash,
+					len(drep.AnchorHash),
+				)
+			}
 		}
 		if _, err := cbor.Decode(state[2], &drep.Deposit); err != nil {
 			return nil, fmt.Errorf("decoding DRep deposit for %x: %w", cred.Hash, err)

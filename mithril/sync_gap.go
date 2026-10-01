@@ -526,8 +526,6 @@ func processGapBlocks(
 	// needs the Conway-typed record, and certificate deposits are derived
 	// from them for every era that has a CertDepositFunc.
 	pparamsCache := make(map[uint64]lcommon.ProtocolParameters)
-	var previousEpoch uint64
-	hasPreviousEpoch := false
 	for _, block := range blocks {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("cancelled: %w", err)
@@ -556,23 +554,9 @@ func processGapBlocks(
 				err,
 			)
 		}
-		epochBoundary := hasPreviousEpoch && previousEpoch != epoch.EpochId
-		previousEpoch = epoch.EpochId
-		hasPreviousEpoch = true
 		if len(txs) == 0 {
-			if epochBoundary {
-				if err := bumpGapBlockDRepDormancy(
-					db,
-					epoch.EpochId,
-					block.Slot,
-				); err != nil {
-					return fmt.Errorf(
-						"processing DRep dormancy at gap epoch %d: %w",
-						epoch.EpochId,
-						err,
-					)
-				}
-			}
+			// The imported state already includes epoch dormancy through its
+			// tip, so gap metadata replay must not advance DRep expiry again.
 			continue
 		}
 		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
@@ -637,7 +621,6 @@ func processGapBlocks(
 			epoch.EraId,
 			blockPParams,
 			blockConwayPParams,
-			epochBoundary,
 		); err != nil {
 			return fmt.Errorf(
 				"processing gap block at slot %d: %w",
@@ -654,27 +637,6 @@ func processGapBlocks(
 	return nil
 }
 
-func bumpGapBlockDRepDormancy(
-	db *database.Database,
-	epoch uint64,
-	slot uint64,
-) error {
-	txn := db.Transaction(true)
-	defer txn.Release()
-	if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
-		db,
-		epoch,
-		slot,
-		txn,
-	); err != nil {
-		return err
-	}
-	if err := txn.Commit(); err != nil {
-		return fmt.Errorf("commit DRep dormancy epoch boundary: %w", err)
-	}
-	return nil
-}
-
 func processGapBlockTransactions(
 	db *database.Database,
 	logger *slog.Logger,
@@ -685,20 +647,9 @@ func processGapBlockTransactions(
 	eraId uint,
 	pparams lcommon.ProtocolParameters,
 	conwayPParams *conway.ConwayProtocolParameters,
-	epochBoundary ...bool,
 ) error {
 	txn := db.Transaction(true)
 	defer txn.Release()
-	if len(epochBoundary) > 0 && epochBoundary[0] {
-		if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
-			db,
-			epochId,
-			point.Slot,
-			txn,
-		); err != nil {
-			return fmt.Errorf("gap block DRep dormancy boundary: %w", err)
-		}
-	}
 	var storageIndexOffset uint64
 	for i, tx := range txs {
 		// Gap blocks are already reflected in the Mithril snapshot's

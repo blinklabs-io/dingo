@@ -288,11 +288,7 @@ func BumpDormantDRepExpiryAtEpochBoundary(
 	slot uint64,
 	txn *database.Txn,
 ) error {
-	activeEpoch := epoch
-	if activeEpoch > 0 {
-		activeEpoch--
-	}
-	proposals, err := db.GetActiveGovernanceProposals(activeEpoch, txn)
+	proposals, err := db.GetActiveGovernanceProposals(epoch, txn)
 	if err != nil {
 		return fmt.Errorf("get active proposals for DRep dormancy: %w", err)
 	}

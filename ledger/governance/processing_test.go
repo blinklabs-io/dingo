@@ -54,6 +54,53 @@ func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
 	return &pparams
 }
 
+func TestDormantDRepBoundaryUsesNewEpochProposalSet(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCredential := testHash28("dormant-boundary-drep")
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        testHash32("expires-at-boundary"),
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ProposedEpoch: 1,
+			ExpiresEpoch:  4,
+			AnchorURL:     "https://example.invalid/expired",
+			AnchorHash:    testHash32("dormant-boundary-anchor"),
+		},
+		nil,
+	))
+
+	previous, err := db.GetActiveGovernanceProposals(4, nil)
+	require.NoError(t, err)
+	require.Len(t, previous, 1)
+	current, err := db.GetActiveGovernanceProposals(5, nil)
+	require.NoError(t, err)
+	require.Empty(t, current)
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	require.NoError(t, BumpDormantDRepExpiryAtEpochBoundary(
+		db, 5, 500, txn,
+	))
+	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestEpochContainsSlot(t *testing.T) {
 	t.Parallel()
 

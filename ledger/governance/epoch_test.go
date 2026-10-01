@@ -127,7 +127,6 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
-
 	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
 		Deposit:       7,
 		ReturnAddress: rewardAddrBytes,
@@ -253,6 +252,12 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
+	drepCredential := testBytes(28, 0x52)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
 	txHash := testBytes(32, 3)
 	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
 		TxHash:        txHash,
@@ -285,6 +290,11 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch,
+		"a proposal expiring in the previous epoch must not suppress the dormancy bump")
 
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 0, out.DroppedCount)

@@ -1010,13 +1010,13 @@ func applyRatification(
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
 	}
-	if decision.ActiveProposalCount == 0 {
-		if _, err := in.DB.BumpDormantDRepExpiries(
-			in.BoundarySlot,
-			in.Txn,
-		); err != nil {
-			return 0, fmt.Errorf("extend dormant DRep expiries: %w", err)
-		}
+	if err := BumpDormantDRepExpiryAtEpochBoundary(
+		in.DB,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	); err != nil {
+		return 0, fmt.Errorf("extend dormant DRep expiries: %w", err)
 	}
 	return expiredOrphanCount, nil
 }
