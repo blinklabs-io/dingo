@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -95,6 +95,21 @@ func newByronPBFTCache(lsConfig LedgerStateConfig) (byronPBFTCache, error) {
 			"build Byron PBFT config from genesis: %w",
 			err,
 		)
+	}
+	limit, configured, err := lsConfig.CardanoNodeConfig.PBFTSignatureLimit(
+		config.SecurityParam,
+	)
+	if err != nil {
+		return byronPBFTCache{}, fmt.Errorf(
+			"read Byron PBFT signature threshold: %w",
+			err,
+		)
+	}
+	if configured {
+		// gouroboros charges floor(k * numerator / denominator), so limit/k
+		// reproduces the reference's Double-computed limit exactly.
+		config.PBFTSignatureThresholdNumerator = limit
+		config.PBFTSignatureThresholdDenominator = config.SecurityParam
 	}
 	return byronPBFTCache{config: &config}, nil
 }
@@ -212,7 +227,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 		return err
 	}
 	if isEbb {
-		if ls.atByronChainOrigin() {
+		if ls.isFirstByronHeader(block) {
 			// An EBB's block number (Difficulty.Value) and slot (derived from
 			// ConsensusData.Epoch) are independent fields: chain.firstBlockNumberValid
 			// only constrains the former, and validateByronPBFTCurrentSlot only
@@ -256,7 +271,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// the crypto verification below, which validates the signature but not
 	// that this is the right kind of block to open the chain
 	// (blinklabs-io/dingo#4399).
-	if ls.atByronChainOrigin() {
+	if ls.isFirstByronHeader(block) {
 		return fmt.Errorf(
 			"byron block at slot %d: only an epoch-boundary block may be "+
 				"the first block of a from-genesis chain",
@@ -288,26 +303,37 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	return nil
 }
 
-// atByronChainOrigin reports whether the primary chain currently sits at
-// origin -- no blocks yet -- either because this is a genuine from-genesis
-// start or because a rollback emptied the chain back to origin
-// (chain.Chain.atOriginAfterMutation covers the same two cases at the chain
-// layer, for the block-number half of this same anchor).
+// isFirstByronHeader reports whether block is the first header of a
+// from-genesis (or post-rollback-to-origin) Byron chain: the primary chain has
+// no applied block and no queued header precedes it. Chainsync verifies
+// headers ahead of blockfetch applying any block, so the primary tip alone
+// would call every header of the first batch a first block; the queued header
+// chain is the anchor, as it is for chain.addBlockHeader's prev-hash check.
+// Blockfetch re-verifies the queued first header itself, which stays first.
 //
 // A nil chain reports false rather than true. Production wiring always sets
 // a chain before any header reaches this validation; a nil chain only occurs
 // in a bare LedgerState built directly in a test, and treating that as
 // "at origin" would force every such test to configure a Byron genesis hash
 // it has no reason to care about.
-func (ls *LedgerState) atByronChainOrigin() bool {
+//
+// A peer-relative header (see headerOnlyBlock) is verified before it reaches
+// the queue -- the EBB's own queueing event is delivered asynchronously, so the
+// next header can be verified first -- and is never first here. The rule is
+// enforced where headers enter the queue, and by blockfetch for a queued
+// header not yet verified. Ledger apply does not enforce it: the block is
+// already on the primary chain by then, so the tip is not origin.
+func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
+	if hb, ok := block.(headerOnlyBlock); ok && hb.peerRelative {
+		return false
+	}
 	ls.RLock()
 	c := ls.chain
 	ls.RUnlock()
 	if c == nil {
 		return false
 	}
-	tip := c.Tip()
-	return tip.Point.Slot == 0 && len(tip.Point.Hash) == 0
+	return c.IsFirstOnHeaderChain(block.Hash().Bytes())
 }
 
 // validateByronGenesisAnchor requires the first epoch-boundary block of a
@@ -322,7 +348,7 @@ func (ls *LedgerState) atByronChainOrigin() bool {
 //
 // A ledger started from a snapshot or bulk import at a trusted non-origin
 // point never reaches this function with an unanchored EBB: its primary
-// chain tip is that trusted point, not origin, so atByronChainOrigin already
+// chain tip is that trusted point, not origin, so isFirstByronHeader already
 // reports false and this check does not run.
 func (ls *LedgerState) validateByronGenesisAnchor(
 	header *ledgerbyron.ByronEpochBoundaryBlockHeader,
@@ -363,6 +389,18 @@ func (ls *LedgerState) validateByronPBFTCurrentSlot(block ledger.Block) error {
 		)
 	}
 	slotTime, err := ls.slotClock.SlotToTime(block.SlotNumber())
+	if err != nil && errors.Is(err, hardfork.ErrPastHorizon) {
+		// The applied ledger has not reached this header's epoch yet, which
+		// is a local lag, not a peer fault. Defer as the Praos path does, so
+		// chainsync does not recycle the peer at every epoch boundary.
+		return fmt.Errorf(
+			"%w for header at slot %d: %w: %w",
+			errByronPBFTCurrentSlotUnavailable,
+			block.SlotNumber(),
+			errHeaderVerificationDeferred,
+			err,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf(
 			"%w for header at slot %d: %w",
@@ -544,10 +582,7 @@ func newByronPBFTState(
 	config byronconsensus.ByronConfig,
 	genesisParams *eras.ByronProtocolParameters,
 ) (byronPBFTState, error) {
-	issuerState, err := byronconsensus.NewPBFTState(
-		nil,
-		config.SecurityParam,
-	)
+	issuerState, err := byronconsensus.NewPBFTStateFromConfig(nil, config)
 	if err != nil {
 		return byronPBFTState{}, err
 	}

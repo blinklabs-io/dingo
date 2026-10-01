@@ -267,6 +267,11 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// one, or a distribution belonging to an epoch other than the one this
 	// query resolved.
 	if txn == nil {
+		// A read opened before the boundary job writes mark[epoch] never
+		// sees it.
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			return nil, err
+		}
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
