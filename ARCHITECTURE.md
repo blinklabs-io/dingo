@@ -3301,6 +3301,18 @@ replayed from before that CertRB (a clean metadata resync is the supported
 recovery); weakening registered-VRF or stake-distribution checks is not a safe
 repair.
 
+**Startup replay:** the node starts the ledger, and the ledger replays any stored
+blocks it has not applied, before it creates Ouroboros networking
+(`ledgerState.Start`, then `ouroborosRef.Store` in `Run`). The endorser-block
+callbacks in `ledgerStateConfig` (provider, by-point fetcher, blockfetch range
+request, decode-cache reject) therefore run while `n.ouroboros()` is nil. The
+provider answers "not available", the fetcher and range request return
+`errOuroborosNotStarted`, and the reject is a no-op, so a certified closure takes
+the pipeline's normal unavailable/retry path above and is never reported present.
+The retries back off and the pipeline stops as stuck after 50 consecutive
+no-progress restarts, so networking has to come up within a few minutes of the
+replay starting.
+
 The two paths differ in how endorser transactions are validated on apply, not
 whether they are applied. The Musashi prototype's ledger applies a certified
 endorser block's transactions to the ledger state when the certifying ranking
