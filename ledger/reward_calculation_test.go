@@ -113,8 +113,8 @@ func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
 	}, nil))
 }
 
-// TestApplyStakeRewardsSkipsPrunedStakeInputs covers the retention interaction
-// tracked in dingo #4578. reward_ada_pots, reward_snapshot,
+// TestApplyStakeRewardsSkipsPrunedStakeInputs covers a retention interaction:
+// reward_ada_pots, reward_snapshot,
 // reward_pool_input and reward_pool_output are retained for the life of the
 // database while reward_stake_input is pruned to the rotation window, so an
 // aged-out epoch presents complete-looking pots and snapshot rows over an empty
@@ -288,12 +288,12 @@ func seedPrunedStakeInputSnapshot(
 }
 
 // TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly proves the
-// retention skip tracked in dingo #4578 is reported the same way its three
+// retention skip tracked in is reported the same way its three
 // sibling skips in calculateStakeRewardApplication are, through
 // reportSkippedStakeRewards: counted, and logged with the permanent-shortfall
 // consequence spelled out. Before this fix the retention skip was the one
 // silent-by-comparison exception to what this file otherwise guards against
-// (see TestSkippedStakeRewardsIsReportedLoudly and issue #3165) -- it logged
+// -- it logged
 // inline at Warn with a bare reason and no metric increment, so monitoring
 // built on the shared skippedStakeRewardRounds counter never saw this
 // specific permanent-reward-loss condition.
@@ -672,7 +672,7 @@ func TestReconstructedRewardStakeTieBreaksAreDeterministic(t *testing.T) {
 }
 
 // TestApplyStakeRewardsReconstructsRetentionPrunedInputs is the positive
-// control for dingo #4578's retention-vs-resume gap: reward_stake_input is
+// control for retention-vs-resume gap: reward_stake_input is
 // aged out of retention (as it is for the other tests in this file), but this
 // time the underlying certificate/UTxO/reward-delta history the historical
 // CTE reconstructs from is real, matching the shape
@@ -1288,8 +1288,7 @@ func applyGuardExpiredLeaderScenario(
 // prefix affects, and therefore has no persisted pparams.
 //
 // This covers the helper contract only. The end-to-end rollover failure was
-// reproduced by the reviewer against real database rows and has no unit-level
-// fixture here.
+// reproduced against real database rows and has no unit-level fixture here.
 func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	t.Parallel()
 
@@ -1394,7 +1393,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 }
 
 // TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
-// negative case for the 0->1 bootstrap round added for dingo #3381. A network
+// negative case for the 0->1 bootstrap round. A network
 // with a Byron prefix has no Shelley reward round at that boundary, so the
 // Byron performance-epoch guard must suppress it and leave the slot-0 pots
 // untouched -- even though the epoch 0 ADA pots row now exists.
@@ -5565,7 +5564,7 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 // derives d, rho, tau and the pool-level parameters it passes to
 // mkPoolRewardInfo from that. Reading tau or d from the calculation epoch
 // instead silently changes reward amounts on any network where the parameters
-// move across the boundary (dingo #3481).
+// move across the boundary.
 func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	t *testing.T,
 ) {
@@ -6997,7 +6996,8 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 	require.False(t, match)
 }
 
-// TestRewardCalculatorInputsExactWithTrackedExcludedStake covers dingo #4025:
+// TestRewardCalculatorInputsExactWithTrackedExcludedStake pins the exact bound
+// when the excluded stake is tracked:
 // TestRewardCalculatorInputsAllowExcludedPoolStake's non-exceeding bound
 // tolerates one legitimately excluded pool's stake going missing, but it
 // tolerates just as well a row set proportionally shrunk by some other bug --
@@ -7067,7 +7067,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 	// The same 40 tracked as excluded, but the row set is proportionally
 	// shrunk to 50 instead of 100 -- as if every pool's stake had been halved.
 	// 50+40=90 != 140, so this must now be rejected even though 50 <= 140
-	// would have passed the old non-exceeding bound silently (dingo #4025).
+	// would have passed the old non-exceeding bound silently.
 	err = validateRewardCalculatorInputs(
 		snapshot(140, 40),
 		poolInputsWithStake(50),
@@ -9025,7 +9025,7 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 // The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
 // With d=0 this gives eta=0; the same 180 blocks enter the next update,
 // giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
-// too. These are the reference devnet inputs and pots from issue #4502.
+// too. These are the reference devnet inputs and pots.
 func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)
@@ -9154,11 +9154,11 @@ INSERT INTO "transaction" (
 // RewardAdaPots row with ImportedEpochFees (the fees collected up to and
 // including the anchor block) and a CapturedSlot at the anchor. The node's
 // locally stored transactions for that epoch only cover slots after the
-// anchor -- plus, once the historical backfill (#4061) has run, slots at or
+// anchor -- plus, once the historical backfill has run, slots at or
 // before it too. saveRewardAdaPotsForEpoch must sum the local fees strictly
 // after the anchor and add the imported amount, not sum the whole epoch:
-// summing the whole epoch either silently drops the pre-anchor fees (the
-// defect in dingo #3975) or double-counts them once backfill has stored
+// summing the whole epoch either silently drops the pre-anchor fees or
+// double-counts them once backfill has stored
 // pre-anchor transactions locally.
 func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
 	t.Parallel()
@@ -10040,7 +10040,7 @@ func newPreviewRewardPotsTestLedger(
 // applies monetary expansion and the treasury tax at the first boundary of a
 // network whose epoch 0 is already Shelley-era, with an empty fee pot and no
 // distribution. Skipping that round leaves the treasury at 0 and the reserves
-// at their genesis value, which is what dingo #3381 observed on Preview.
+// at their genesis value, which is what observed on Preview.
 func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 	t.Parallel()
 
@@ -10107,7 +10107,7 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 // carries exactly two transactions, at slots 60 and 320, whose fees (200000 and
 // 237793) are the 437793 the 1->2 boundary folds into the reward pot.
 //
-// This is the unit-level counterpart of dingo #3381's reproduction: the
+// This is the unit-level counterpart of reproduction: the
 // epoch-2 treasury and reserves must equal the Koios Preview reference values.
 func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
 	t.Parallel()
@@ -10185,7 +10185,7 @@ INSERT INTO "transaction" (
 // the d >= 0.8 short circuit. Reading d from the calculation epoch instead
 // gives d = 0, no short circuit, and an eta of zero against an empty epoch-0
 // mark snapshot, which drops the monetary expansion entirely and moves only
-// the fee pot (dingo #3481).
+// the fee pot.
 func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 	t.Parallel()
 
@@ -10226,7 +10226,7 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 // That shortfall is what rejects canonical blocks: leader eligibility
 // compares a VRF value against a stake-derived threshold, so a sigma
 // shortfall of eps flips a decision with probability about eps per block.
-// Measured on preview for issue #3165, the shortfall was ~3 epochs of reward
+// On Preview, the shortfall was ~3 epochs of reward
 // accrual, sigma was 0.042% short, and the rejected block's leader value sat
 // between this node's threshold and the reference's.
 //

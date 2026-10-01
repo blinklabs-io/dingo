@@ -100,7 +100,7 @@ const (
 	// BLOCK DENSITY, and the two ends of that behave very differently:
 	//
 	//   - On a dense chain -- blocks every slot or two, as on the Leios devnet
-	//     in #3973 -- five slots can span several unapplied blocks. That is a
+	//     -- five slots can span several unapplied blocks. That is a
 	//     bounded amount of exactly the incoherence this gate exists to
 	//     prevent, which is why the default is not smaller.
 	//   - On a sparse chain -- mainnet's active slot coefficient puts
@@ -118,7 +118,7 @@ const (
 	// top of -- roughly blocks_tolerated * slots_per_block -- rather than from
 	// the dense-chain "a slot or two" steady state above. Expressing the bound
 	// in blocks, or as an ancestry predicate over the unapplied span, is
-	// tracked in #4143.
+	// is not yet done.
 	//
 	// Five slots is a few pipeline batches' worth of headroom on a dense chain
 	// while still being far below the tens-of-slots staleness measured on
@@ -796,10 +796,10 @@ type ForgerConfig struct {
 	// BlockValidator runs its implementation's checks before AddBlock.
 	// A failure prevents adoption and diffusion. The node always supplies
 	// aggregate reference-script validation and, unless an operator
-	// explicitly opts out via ValidateForgedBlock=false (issue #3528: fail
-	// closed by default), full VRF/KES header crypto, body-hash, and
-	// per-tx ledger rule validation too. Nil disables validation for
-	// callers embedding this package directly.
+	// explicitly opts out via ValidateForgedBlock=false (fail closed by
+	// default), full VRF/KES header crypto, body-hash, and per-tx ledger rule
+	// validation too. Nil disables validation for callers embedding this
+	// package directly.
 	BlockValidator BlockValidator
 
 	// Prometheus metrics registry (optional)
@@ -1212,7 +1212,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// The comparison is strict so an EQUAL slot survives to the two cases
 	// below, which distinguish a competing block at the applied tip from one
 	// only on the primary chain tip. Dropping equal slots here would also
-	// collide with the contested-slot handling in #3955, which needs them.
+	// collide with the contested-slot handling above, which needs them.
 	//
 	// No counter moves on this refusal. It runs before checkLeaderSafe, so
 	// the slot may never have been this node's to forge -- on a node whose
@@ -1311,7 +1311,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			// equivocation, and losing a battle is not a licence to
 			// equivocate. But this is a slot battle we lost, not
 			// "the tip block is ours", and dropping it at Debug is
-			// exactly the silent loss this change exists to remove.
+			// exactly the silent loss the Info-level log avoids.
 			//
 			// slotBattlesTotal is deliberately NOT incremented here.
 			// Reaching this case means a block other than ours was
@@ -2461,9 +2461,9 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	// between an active-connection switch and the new peer's first admitted
 	// trusted header.
 	//
-	// That state REACHES this gate. Before #4013 the sync gate refused every
-	// slot with upstreamActive && upstreamTip == 0, so it could not; #4013
-	// bounded that branch by the local tip's lag instead, precisely so a
+	// That state REACHES this gate. The sync gate once refused every
+	// slot with upstreamActive && upstreamTip == 0, so it could not; it now
+	// bounds that branch by the local tip's lag instead, precisely so a
 	// node at tip forges and its header ends the window. A node at tip
 	// therefore arrives here with a live upstream and a zero target, and
 	// what keeps this bound quiet is the upstreamTarget > newestKnown term
@@ -2474,8 +2474,8 @@ func (f *BlockForger) evaluateTipGates(r forgeTipReading) forgeTipGates {
 	// unreachable then and is actively wrong now, because it would compare
 	// a HEADER-stage value against newestKnown's BLOCK-stage one -- the same
 	// mismatch that makes this bound opt-in -- and would refuse leader slots
-	// in exactly the window #4013 opened them up for, re-creating the #4010
-	// wedge on any operator who enabled the knob. See
+	// in exactly the window the lag bound opened them up for, re-creating the
+	// self-sealing wedge on any operator who enabled the knob. See
 	// TestUpstreamSyncStatusReachableStates for the reachable pairs and
 	// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget for this case.
 	//
@@ -3444,7 +3444,7 @@ func (f *BlockForger) checkOpCertSequence(
 // anywhere, so none is admitted, so nothing lifts the target off zero, so no
 // node forges. Forging is the only source of new headers there, so the state
 // that suppressed forging prevented its own exit, and every node reported
-// healthy and connected throughout. That is issue #4010.
+// healthy and connected throughout.
 //
 // The only evidence available in that window is our own tip's lag behind the
 // wall clock, so the same tolerance is applied to it. A node whose tip is
@@ -3464,7 +3464,7 @@ func (f *BlockForger) upstreamSyncSkipsForge(
 		// An unpublished target is not evidence that a peer is ahead. The
 		// wall-clock slot can be arbitrarily far past our tip during an
 		// ordinary network gap, so comparing it with tipSlot would reject
-		// valid leader slots on an otherwise current node (issue #4201).
+		// valid leader slots on an otherwise current node.
 		return false
 	}
 	return upstreamTip > tipSlot &&
@@ -4204,7 +4204,7 @@ func buildLeiosEB(
 		// Cardano tx-id / body hash. This matches the fetch-side validator
 		// (validateLeiosEndorserBlockTxs) and Haskell reference nodes, so a
 		// peer fetching a locally forged EB validates it instead of rejecting
-		// every tx (blinklabs-io/dingo#3641).
+		// every tx.
 		if !validLeiosTransactionHash(tx.Hash) ||
 			len(tx.Cbor) == 0 || len(tx.Cbor) > math.MaxUint16 {
 			continue

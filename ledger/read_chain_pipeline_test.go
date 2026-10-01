@@ -418,43 +418,41 @@ func buildTaggedRawBlocks(
 }
 
 // TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts is a regression
-// test for a confirmed cross-attempt race in the block-decode pipeline
-// (blinklabs-io/dingo#3178 review, human reviewer arepala-uml): the retry
-// loop in ledgerProcessBlocks -- exercised here through
-// runLedgerReadChainAttempt, the exact goroutine-lifecycle primitive that
-// loop uses -- previously started a new attempt's reader goroutine without
-// waiting for the previous attempt's reader goroutine to fully exit. Since
-// every attempt submits to and drains from the SAME shared,
+// test for a confirmed cross-attempt race in the block-decode pipeline:
+// the retry loop in ledgerProcessBlocks -- exercised here through
+// runLedgerReadChainAttempt, the exact goroutine-lifecycle primitive that loop
+// uses -- previously started a new attempt's reader goroutine without waiting
+// for the previous attempt's reader goroutine to fully exit. Since every
+// attempt submits to and drains from the SAME shared,
 // whole-LedgerState-lifetime blockPipeline, and the pipeline's apply stage
-// reorders decoded results purely by a global sequence number with no
-// notion of "whose submission is whose", two attempts' reader goroutines
-// submitting concurrently can -- and, per the reviewer's own stress test,
-// reliably do -- get each other's decoded blocks back from Results().
+// reorders decoded results purely by a global sequence number with no notion of
+// "whose submission is whose", two attempts' reader goroutines submitting
+// concurrently can -- and, in stress runs, reliably do -- get each other's
+// decoded blocks back from Results().
 //
-// This reproduces the exact race the reviewer identified: a restart racing
+// This reproduces the exact race: a restart racing
 // a rollback wakes the OLD attempt's reader goroutine (via
 // completeReadResult(), in ledgerProcessBlocksFromSource) before the retry
 // loop's cancel() takes effect, and that goroutine's gather loop had no
 // cancellation check, so it could keep submitting more blocks to the shared
 // pipeline. Attempt 1's fake reader below reproduces this directly: after
-// delivering its first (legitimate) batch and being told to restart, it
-// submits a second, disjoint "straggler" batch using a background context
-// (bypassing any cancellation check entirely, exactly like the pre-fix
-// gather loop). Attempt 2's fake reader submits its own, disjoint,
-// uniquely-identifiable batch. Every block is tagged with a distinct slot
-// range (attempt1 / straggler / attempt2), so any cross-attempt
-// misattribution shows up directly as an out-of-range slot in attempt 2's
-// own result.
+// delivering its first (legitimate) batch and being told to restart, it submits
+// a second, disjoint "straggler" batch using a background context (bypassing
+// any cancellation check entirely, exactly like the pre-fix gather loop).
+// Attempt 2's fake reader submits its own, disjoint, uniquely-identifiable
+// batch. Every block is tagged with a distinct slot range (attempt1 / straggler
+// / attempt2), so any cross-attempt misattribution shows up directly as an
+// out-of-range slot in attempt 2's own result.
 //
 // With the fix, runLedgerReadChainAttempt does not return from attempt 1
 // until its reader goroutine (including the straggler submission) has fully
 // exited, so attempt 2 can never start submitting while attempt 1's
 // straggler submission is still in flight -- this is deterministic, not
 // probabilistic, given the fix. The iteration count and batch sizes here
-// exist for the *pre-fix* validation described in the fix's PR: with
+// exist for the *pre-fix* validation: with
 // runLedgerReadChainAttempt's final wait removed, these two attempts' reader
 // goroutines really do run concurrently, and this loop reproduces
-// misattribution reliably (matching the reviewer's own 200-iteration stress
+// misattribution reliably (matching a 200-iteration stress
 // test methodology) rather than depending on a single lucky (or unlucky)
 // scheduling outcome.
 func TestLedgerProcessBlocksRetryDoesNotMixBlocksAcrossAttempts(t *testing.T) {
@@ -769,11 +767,11 @@ func TestLedgerReadChainIteratorRollbackTrimMatchesValidateEnabled(
 	)
 }
 
-// TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp verifies issue #1894
-// phase 5's rollback-coordination helper is a true no-op -- returns
+// TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp verifies the
+// rollback-coordination helper is a true no-op -- returns
 // immediately, does not panic -- when ls.blockPipeline is nil (pipeline
-// disabled or ManualBlockProcessing), matching every other
-// pipeline-conditional code path in this file.
+// disabled or ManualBlockProcessing), matching every other pipeline-conditional
+// code path in this file.
 func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -791,7 +789,7 @@ func TestDrainBlockPipelineBeforeRollbackNilPipelineNoOp(t *testing.T) {
 }
 
 // TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork is a regression
-// test for issue #1894 phase 5's rollback-coordination helper: it must
+// test for the rollback-coordination helper: it must
 // actually wait for ls.blockPipeline's in-flight decode/validate work to
 // finish, not merely check PendingCount() once and return. Uses the
 // validate stage with real VRF/KES crypto and a single worker per stage so
@@ -888,7 +886,7 @@ func TestDrainBlockPipelineBeforeRollbackWaitsForPendingWork(t *testing.T) {
 }
 
 // TestProcessChainIteratorRollbackMatchesWithAndWithoutBlockPipeline proves
-// issue #1894 phase 5's drainBlockPipelineBeforeRollback call inside
+// the drainBlockPipelineBeforeRollback call inside
 // processChainIteratorRollback does not change that function's rollback
 // decision or resulting state: an idle, started block-pipeline attached to
 // the fixture must produce byte-for-byte identical outcomes (error, chain

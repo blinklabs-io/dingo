@@ -1412,8 +1412,8 @@ func newHandleConnManagerClosedOwnerConn(
 	return peer.conn
 }
 
-// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
-// issue #3508: NtC connections never received any close notification (the
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces a
+// leak: NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed
@@ -1485,7 +1485,7 @@ func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedOwnerFunc is
+// half of the wiring. The connection manager's ConnClosedOwnerFunc is
 // the only close notification an NtC connection gets, and it is what wakes a
 // chainsync server callback parked waiting for a certified endorser closure --
 // the protocol's own done channel cannot close while that callback is running.
@@ -1585,7 +1585,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
-// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// the NtC-close half of point-pinning: a client
 // that pins a point and then disconnects without a clean Release must not
 // leak its map entry, since NtC closes never reach
 // Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
@@ -2067,7 +2067,7 @@ func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
 // connection and then keeps its own "already asked" flag set -- the leios-fetch
 // backfill's markProtocolDead is the clearest case, where a dropped request
 // leaves a connection whose leios-fetch protocol can never answer again in the
-// pool for the rest of its life (dingo #3552). Detaching either subscriber
+// pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
@@ -2327,7 +2327,7 @@ func nodeFuncBodyForSnapshotWiring(
 // package defaults instead of the operator's configuration -- which is
 // exactly what happened to SetDelegatorInactivity (see
 // TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
-// and is the same gap dingo #4188's retention setter would leave.
+// and is the same gap retention setter would leave.
 func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	t.Parallel()
 
@@ -2365,7 +2365,7 @@ func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	}
 }
 
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins dingo #4188's
+// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
 // wiring itself: both node startup paths must widen reward_account_output
 // retention from the operator's koios-parity enablement. Without the call the
 // node keeps CORE mode's 4-epoch window, and the observer -- whose network
@@ -3299,7 +3299,7 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 }
 
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// dingo#4599 regression coverage: it proves that a Config built through the
+// pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --
 // carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
 // into the ledger.LedgerStateConfig that ledgerStateConfig() hands to

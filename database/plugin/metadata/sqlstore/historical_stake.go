@@ -1123,10 +1123,10 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // keyed on consensus chain state, not per-node config. That is a guarantee
 // about rows already written, not about whether a row is written at all:
 // account_withdrawal_witness inserts are separately elided when
-// DelegatorInactivityEnabled is off (issue #2919), which is the same
+// DelegatorInactivityEnabled is off, which is the same
 // network-wide setting this function's caller already requires to match, so
 // it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
-// (issue #2920) before adding any other deletion path for these tables.
+// before adding any other deletion path for these tables.
 func historicalExpirationSQL(
 	ctx context.Context,
 	db queryer,
@@ -1259,9 +1259,9 @@ func noHistorySQL(alias string, tables []string) string {
 // GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
 // boundary reconstruction attributes stake to at snapshotSlot, whether or not
 // that pool is still registered. It is the historical-path counterpart of
-// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator (dingo
-// #4660); see that function for why the denominator must not be enumerated
-// from the active pool set.
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator; see that
+// function for why the denominator must not be enumerated from the active pool
+// set.
 //
 // It reconstructs from the same CTE the stake fetch uses, with the pool
 // predicate relaxed to "has a delegation at all", and applies neither the

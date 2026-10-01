@@ -339,7 +339,7 @@ func TestIsRetryableDingoConnErr(t *testing.T) {
 // against a real gouroboros LocalStateQuery server that kills the connection
 // the moment CheckStakeDistribution's GetPoolDistr2 call arrives -- exactly
 // the failure shape confirmed live on preview's from-genesis run starting at
-// epoch 4 (dingo#1900): the connection shared between CheckProtocolParams
+// epoch 4: the connection shared between CheckProtocolParams
 // and CheckStakeDistribution dies in the gap between the two calls.
 //
 // Reverting runProtocolParamsAndStake back to a single attempt (no retry --
@@ -441,7 +441,7 @@ func TestRunProtocolParamsAndStake_RecoversFromMidSequenceConnDeath(t *testing.T
 // return path collapsed both ppErr and stakeErr into one conflated
 // "lastErr" value, so a successful protocol-params result was silently
 // replaced with the stake check's own error once retries ran out. Confirmed
-// live on the from-genesis run this fix targets (dingo#1900): epochs 4
+// live on the from-genesis run this fix targets: epochs 4
 // onward logged "protocol params check did not run" with the *stake*
 // check's exact error text ("dingo stake distribution query: protocol is
 // shutting down"), even though protocol params was never actually failing.
@@ -497,7 +497,7 @@ func TestRunProtocolParamsAndStake_ExhaustedRetriesReportsOwnErrorsSeparately(t 
 }
 
 // TestResolveStartPoint pins from-genesis's resume-from-point behavior
-// (dingo#1900 follow-up): a killed or restarted process has no on-disk
+// A killed or restarted process has no on-disk
 // checkpoint of its own, so from-genesis --at-slot/--at-hash lets a caller
 // that already trusts a prior run's epochs resume from that point instead
 // of Origin. Reverting resolveStartPoint to always return
@@ -1056,7 +1056,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // genuine RollBackward and three epoch boundaries, proving
 // utxoTaintedThisEpoch's real lifecycle inside RunFromGenesis's own
 // closures -- not just utxoVerdict/applyTxInfoResults in isolation (see
-// this file's own doc comment, and dingo#4365).
+// this file's own doc comment).
 //
 // Every session gets one forced initial RollBackward before any real block
 // (NeedsInitialRollback -- see genesisFakeServer.requestNext), to the same
@@ -1066,7 +1066,7 @@ func (s *genesisFakeServer) serve(t *testing.T, listener net.Listener, magic uin
 // this test's first real reported epoch (clean). The deliberate rollback
 // then fires once block 1 has been delivered (rollbackAfterCursor),
 // re-baselining utxoRefs from Dingo's own (fake) current answer -- which
-// this PR's fix must taint, or block 2's report would trivially compare the
+// the fix must taint, or block 2's report would trivially compare the
 // re-baselined set against itself and falsely read "clean". Block 3's
 // report must NOT still be tainted, proving the post-report reset ran too,
 // not just that the rollback's own assignment did.
@@ -1271,7 +1271,7 @@ func TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch(t *testing.T) {
 // re-baseline and TestRunFromGenesis_TxInfoChunkFailureTaintsEpoch's
 // tx_info-chunk-triggered re-baseline, both of which already re-baseline
 // successfully. This test fails the underlying GetUTxOWhole call itself
-// (server.failUtxoWholeCount), simulating dingo#1900's live "can't assign
+// (server.failUtxoWholeCount), simulating the live "can't assign
 // requested address" transient dial error during a re-baseline attempt.
 //
 // Confirmed by reverting from_genesis.go's fix in place (deleting the
