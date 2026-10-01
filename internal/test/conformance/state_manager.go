@@ -1569,7 +1569,7 @@ func (m *DingoStateManager) ratifyProposals(
 			// tally: a vector can carry the same yes-voter shape (one DRep,
 			// one SPO) as another vector that must NOT ratify once active
 			// proposal deposits are counted as part of the depositor's
-			// active voting stake (CIP-1694). See issue #4007.
+			// active voting stake (CIP-1694).
 			//
 			// This must run before the zero-explicit-vote guard below: a
 			// DRep or silent pool delegated AlwaysNoConfidence casts an
@@ -1668,13 +1668,13 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // committeeTermsWithinLimit under production's own tests instead of a second,
 // hand-maintained copy of each -- an earlier revision duplicated the
 // threshold selection and bootstrap gate here, and the duplication itself
-// went untested and drifted (see PR #4333 review history).
+// went untested and drifted.
 //
 // The one thing this cannot delegate to ShouldRatify is the tally itself:
 // production's DRep voting-power query does not yet add a proposal's own
 // deposit to its return account's DRep voting power (CIP-1694 counts an
 // active proposal's deposit as part of the depositor's active voting stake).
-// That gap is tracked separately as issue #4355 -- it affects every
+// That gap affects every
 // DRep-gated action type's real ratification, not just these two.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
@@ -1906,8 +1906,8 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
 // ShouldRatify itself refuses both action types outright during bootstrap
 // before ever reading this tally, so a bootstrap-specific adjustment to the
-// tally would never run (an earlier revision carried one that PR #4333
-// review found was already dead code for exactly this reason).
+// tally would never run (an earlier revision carried one that
+// was found to be dead code for exactly this reason).
 //
 // Active-proposal deposits are deliberately excluded from this tally: a
 // deposit raises the return account's DRep voting power, not the delegated

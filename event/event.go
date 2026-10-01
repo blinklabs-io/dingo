@@ -31,9 +31,9 @@ const (
 	// EventQueueSize is the high-burst buffer used by subscribers that may
 	// receive bulk-sync bursts (e.g. chainsync/blockfetch ingest in the
 	// ledger). Subscribers opt in to this size via the *WithBuffer
-	// variants. Sized to absorb the worst case from #1556 / #1914. Buffer
+	// variants. Sized to absorb the worst case of bulk-sync bursts. Buffer
 	// size no longer decides whether events survive — a full buffer
-	// backpressures the publisher rather than dropping (#2932) — it decides
+	// backpressures the publisher rather than dropping — it decides
 	// how large a burst passes through without slowing ingestion.
 	EventQueueSize = 100000
 	// DefaultSubscriberBuffer is the per-subscriber channel buffer used by
@@ -42,7 +42,7 @@ const (
 	// receive sparse traffic and do not need 100k slots; sizing the
 	// default down keeps idle steady-state heap small while leaving the
 	// burst headroom available to opt-in callers via SubscribeWithBuffer
-	// / SubscribeFuncWithBuffer. See blinklabs-io/dingo#2106.
+	// / SubscribeFuncWithBuffer.
 	DefaultSubscriberBuffer = 1024
 	AsyncQueueSize          = 1000
 	AsyncWorkerPoolSize     = 4
@@ -261,7 +261,7 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// instead of silently losing events. Terminal event
 // bus shutdown may discard queued events before closing the channel so
 // SubscribeFunc goroutines exit without replaying a potentially large backlog
 // into components that are closing; ordinary unsubscribe preserves them.
@@ -1139,7 +1139,7 @@ func (e *EventBus) unsubscribe(
 // goroutine can be outstanding per timed-out subscriber.
 //
 // True cancellation would require adding context support to the
-// Subscriber interface, which is out of scope for this change.
+// Subscriber interface, which is out of scope here.
 func (e *EventBus) deliverWithTimeout(
 	sub Subscriber,
 	evt Event,

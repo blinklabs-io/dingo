@@ -40,7 +40,7 @@ import (
 // already-open handle refers to, naming the destination by its verified
 // parent's own handle and a single component rather than a path the kernel
 // resolves again — see extract_handlerelative_windows.go. That closes the gap
-// an earlier version of this comment described and issue #3228 tracked: this
+// an earlier version of this comment described: this
 // no longer resolves either parent's name a second time, so a directory
 // renamed or deleted out from under a held parent handle no longer redirects
 // the move.

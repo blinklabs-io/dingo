@@ -112,7 +112,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		// and surfaces it the moment the same pool re-registers: the stale
 		// rows rejoin the pool distribution, the node's total active stake
 		// exceeds the network's, and every other pool's VRF leader threshold
-		// comes out too small (dingo #3794).
+		// comes out too small.
 		if err := ls.db.Metadata().ClearDelegationsToRetiredPool(
 			refund.PoolKeyHash,
 			boundarySlot,

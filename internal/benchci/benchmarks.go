@@ -15,7 +15,7 @@
 package benchci
 
 // CuratedBenchmarks lists the fixed-GOMAXPROCS benchmarks tracked across
-// issue #1895's four dimensions: block validation throughput, sync speed,
+// the four tracked dimensions: block validation throughput, sync speed,
 // network throughput, and resource usage. Keep this in sync with the
 // Makefile bench-ci target's first `go test -bench` regex.
 var CuratedBenchmarks = []string{
@@ -65,13 +65,13 @@ var CuratedBenchmarks = []string{
 // second `go test -bench` invocation. BenchmarkBlockLRUParallel* is the
 // literal LRU-cache incident (a single mutex made the cache ~8x slower at 16
 // cores before sharding). BenchmarkTipSnapshotReadOnly and
-// BenchmarkTipSnapshotReadUnderWriter are the dedicated #2601 sentinel: they
+// BenchmarkTipSnapshotReadUnderWriter are the dedicated sentinel: they
 // exercise the exact atomic.Pointer[consensusSnapshot]/[tipSnapshot]
-// read-under-concurrent-writer pattern that #2601 fixed (a plain RWMutex on
-// that path scaled backwards -- ~591ns at 16 cores with a concurrent writer
-// vs ~133ns read-only). BenchmarkConcurrentQueries is kept alongside them as
-// a broader database-query-under-concurrency check, not a substitute. Keep
-// this list in sync with that invocation's -bench regex.
+// read-under-concurrent-writer pattern that the copy-on-write snapshots fixed
+// (a plain RWMutex on that path scaled backwards -- ~591ns at 16 cores with a
+// concurrent writer vs ~133ns read-only). BenchmarkConcurrentQueries is kept
+// alongside them as a broader database-query-under-concurrency check, not a
+// substitute. Keep this list in sync with that invocation's -bench regex.
 var LockContentionBenchmarks = []string{
 	"BenchmarkBlockLRUParallelReadHeavy",     // database/block_lru_cache_test.go
 	"BenchmarkBlockLRUParallelBalanced",      // database/block_lru_cache_test.go

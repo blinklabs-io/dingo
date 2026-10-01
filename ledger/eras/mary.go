@@ -121,7 +121,7 @@ func CalculateEtaVMary(
 	// See CalculateEtaVShelley for the rationale: TPraos folds bnonce ∈
 	// Seed into the rolling nonce, where bnonce is BLAKE2b-256 of the
 	// raw VRF certificate output. Folding the raw certificate bytes
-	// directly produces nonces that disagree with peers (#2125).
+	// directly produces nonces that disagree with peers.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,

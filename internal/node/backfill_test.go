@@ -1222,6 +1222,86 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
 }
 
+// Backfill replays history that the imported snapshot's account balances
+// already include, so a direct deposit in a replayed body must not credit the
+// account a second time.
+func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
+	t *testing.T,
+) {
+	t.Parallel()
+	db := newTestDB(t)
+	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	stakeKey := bytes.Repeat([]byte{0x42}, 28)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     1,
+		Reward:        5,
+		Active:        true,
+	}))
+	body, err := cbor.Encode(map[uint]any{
+		0: []any{},
+		1: []any{},
+		2: uint64(0),
+		25: map[cbor.ByteString]uint64{
+			cbor.NewByteString(append([]byte{0xe0}, stakeKey...)): 20,
+		},
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(body), map[uint]any{}, true, nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	dijkstraTx := tx.(*dijkstra.DijkstraTransaction)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  1,
+					Slot:         1000,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*dijkstraTx},
+		},
+	}
+	blockBodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(blockBodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	point := ocommon.Point{Slot: 1000, Hash: bytes.Repeat([]byte{0x26}, 32)}
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: point.Slot, Hash: point.Hash, Number: 1, Cbor: blockCbor,
+		Type: uint(block.Type()),
+	}, nil))
+	offsets, err := database.NewBlockIndexer(point.Slot, point.Hash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := backfill.processBlockTxsBatched(
+			[]lcommon.Transaction{tx}, point, 12, dijkstra.EraIdDijkstra,
+			&dijkstra.DijkstraProtocolParameters{}, offsets, acc, txn, nil, true,
+		); err != nil {
+			return err
+		}
+		return db.FlushBatch(acc, txn)
+	}))
+	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(5), uint64(account.Reward))
+}
+
 func closeTestDB(db *database.Database) error {
 	return dbtest.CloseDatabase(db)
 }

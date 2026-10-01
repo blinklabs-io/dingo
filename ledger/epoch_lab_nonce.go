@@ -35,7 +35,7 @@ import (
 // Using the last block's own hash shifts the carried lab by one block and
 // diverges the computed epoch nonce from the network at every self-computed
 // boundary, so every leader-VRF check in the following epoch fails with "issue
-// verifying proof" (#2734, eta_1349 wedge). koios preview proof:
+// verifying proof" (eta_1349 wedge). koios preview proof:
 //
 //	eta_1348 lab = prevHash(04f75b4e, last block of 1346) = 43edf2  (imported, correct)
 //	eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12

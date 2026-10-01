@@ -2574,7 +2574,7 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 }
 
 // TestListSyncStateKeysByPrefix covers the byte-prefix scan used to repopulate
-// the deferred-header retention set after a restart (issue #3727). The match
+// the deferred-header retention set after a restart. The match
 // must be an exact BYTE prefix on every backend, so this asserts cases a
 // collation-sensitive SQL range or LIKE could get wrong: uppercase/mixed-case
 // variants a case-insensitive column collation would fold in, a sibling prefix
@@ -2776,7 +2776,7 @@ func closeTestDatabase(db *Database) error {
 //
 // This is the harness that turns this test file into an integration test
 // of the three real wrap sites, rather than a same-file duplication of
-// the format strings (per PR #2982 review).
+// the format strings.
 type erroringMetadata struct {
 	metadata.MetadataStore
 	injectErr error
@@ -2841,7 +2841,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	t.Parallel()
 
-	// Inner error mimics the real #2976 failure that motivated the wrap.
+	// Inner error mimics the real failure that motivated the wrap.
 	inner := errors.New(
 		"pool reward account: pool cert reward_account: got 2 bytes, want 29",
 	)
@@ -3025,7 +3025,7 @@ func assertProductionWrap(
 // collateral-return fixtures only need a decodable one.
 const collateralReturnAddress = "addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd"
 
-// noOutputsTx is the legal zero-output shape from issue #3932: a valid
+// noOutputsTx is the legal zero-output transaction shape: a valid
 // transaction that declares no outputs, so Produced() is empty too. On chain
 // this is e.g. a stake registration that spends its whole input on the deposit
 // plus the fee and returns no change.

@@ -291,7 +291,8 @@ func foldEndSlotForTip(tipSlot uint64) uint64 {
 // applied block's parent hash -- the PARENT, not the block's own hash, a
 // deliberate one-block lag that keeps the final block of an epoch out of the
 // nonce it seeds. See epochLabNonce, which computes the same value at a
-// boundary, and #2734 for what a shift by one costs.
+// boundary; a shift by one block makes every leader-VRF check in the next
+// epoch fail.
 //
 // Serving the epoch's carried last-epoch-block nonce instead is right only
 // until the epoch's first block lands, since that carried value is what the
@@ -310,11 +311,12 @@ func (ls *LedgerState) chainDepStateLabNonce(
 		return nonceFromBytes(carriedLabNonce), nil
 	}
 	// By point, not by hash. A hash lookup goes through the block hash index,
-	// which has only been written since #1915 and reports a miss rather than
-	// scanning for a block predating it -- so a database still carrying those
-	// blocks answers "no such block" for one it holds, and a node restarted on
-	// such a database has exactly one of them as its tip. The tip's slot and
-	// hash address the block's blob directly, which needs no index.
+	// which has only been populated for newer blocks and reports a miss rather
+	// than scanning for a block predating it -- so a database still carrying
+	// those blocks answers "no such block" for one it holds, and a node
+	// restarted on such a database has exactly one of them as its tip. The
+	// tip's slot and hash address the block's blob directly, which needs no
+	// index.
 	block, err := database.BlockByPointTxn(txn, tip.Point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {

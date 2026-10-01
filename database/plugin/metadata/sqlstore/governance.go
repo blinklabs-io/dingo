@@ -134,7 +134,7 @@ func (s *Store) GetExpiredAwaitingDropGovernanceProposals(
 	// guard on the caller's step ordering: a boundary that is reprocessed
 	// after a commit crash reruns this query against rows the first pass
 	// already marked expired at that same epoch, and an unbounded predicate
-	// would refund them in the epoch they expired (dingo#4411).
+	// would refund them in the epoch they expired.
 	return s.queryGovernanceProposals(
 		txn,
 		"expired_epoch < ? AND dropped_epoch IS NULL "+
@@ -526,7 +526,7 @@ RETURNING id`,
 			// effective vote (including the first cast, where no previous
 			// row exists), so a later rollback that lands between two
 			// replacements can restore the value that was actually current
-			// at the target slot instead of losing it (dingo#4463).
+			// at the target slot instead of losing it.
 			unchanged := previousErr == nil &&
 				previousVote.Valid &&
 				previousVote.Byte == vote.Vote &&
@@ -719,7 +719,7 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 				{
 					// Restore the vote value that was current at the
 					// rollback point from the latest surviving history
-					// entry (dingo#4463). This is a no-op for a vote whose
+					// entry. This is a no-op for a vote whose
 					// vote_updated_slot was already at or before slot, since
 					// that entry is still the latest remaining one. Scoped to
 					// rows with surviving history: every other row was just

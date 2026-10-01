@@ -240,7 +240,7 @@ const (
 // delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so EvaluateAndSwitch
+// EventBus.PublishOrdered, so EvaluateAndSwitch
 // returns before the lane worker has handed them to subscribers. A lane is a
 // FIFO drained by exactly one worker, so a sentinel enqueued after those
 // switches is delivered after them: receiving it back is proof that every
@@ -701,7 +701,7 @@ func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
 // their own announcements. Rejecting the second occurrence just because a
 // live announcement already exists for the hash at a different slot would
 // drop that occurrence's offer/fetch and endorser data for whichever ranking
-// block referenced it (wolf31o2 review; issue #3513).
+// block referenced it.
 func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	t *testing.T,
 ) {
@@ -1017,7 +1017,7 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 }
 
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
-// core issue #3513 attack in its store-first ordering: a peer offers an
+// core attack in its store-first ordering: a peer offers an
 // authentic, correctly-hashed manifest under a slot of its choosing before
 // the genuine announcement arrives. The fabricated slot must never be voted
 // on or reach the ledger. Unlike the pre-composite-key design, the genuine
@@ -1411,7 +1411,7 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 // other. A peer-offered store matching its own live announcement must
 // succeed and coexist with the authoritative entry, not be rejected as if
 // the authoritative source's slot were the hash's only valid one (issue
-// #3513 review; wolf31o2 review).
+// review; wolf31o2 review).
 func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	t *testing.T,
 ) {
@@ -1506,7 +1506,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 // registered on it must stay parked until bindLeiosEndorserBlockSlot
 // corroborates the slot -- otherwise the node-to-client merge path (which
 // waits on this same closure) could consume an unverified slot the same way
-// EndorserBlockTxsByHash could before issue #3513.
+// EndorserBlockTxsByHash could before.
 func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	t.Parallel()
 
@@ -2003,7 +2003,7 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 	h.observed++
 }
 
-// Investigation for dingo #2729.
+// Investigation.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
 // region: a ranking block references an endorser block whose manifest is
@@ -2034,7 +2034,7 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     decoding), a peer that serves an empty manifest for a valid endorser-block
 //     point is diagnosed as a "point hash mismatch" (a fetch/serving error the
 //     backfill can retry against other peers) rather than the misleading decode
-//     invariant failure that made #2729 look like a consensus/decode defect.
+// invariant failure that made look like a consensus/decode defect.
 
 // bareRefMapFromArrayWrapped strips the single-element array wrapper produced by
 // LeiosEndorserBlock.MarshalCBOR (0x81 || refMap) to yield the bare {hash=>size}
@@ -2056,7 +2056,7 @@ func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
 // TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
 // every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
 // length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
-// parsing dropped or mis-counted refs for large maps (the #2729 "decode to zero"
+// parsing dropped or mis-counted refs for large maps (the "decode to zero"
 // hypothesis), these would fail.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 	t.Parallel()
@@ -2108,7 +2108,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
 	require.ErrorContains(t, err, zeroRefsMsg)
 
-	// A large, non-empty manifest of the size reported in #2729 (~1000 refs is
+	// A large, non-empty manifest of the size reported in (~1000 refs is
 	// ~35 KB) does NOT produce the zero-refs error in either wire shape.
 	_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
 	require.Greater(t, len(arrayWrapped), 30000, "manifest should be ~35 KB")
@@ -2122,7 +2122,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the #2729
+// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the
 // field scenario at the dingo store boundary: a peer returns an empty manifest
 // (0xa0) in response to a by-point fetch for a valid, non-empty endorser block.
 //
@@ -2650,7 +2650,7 @@ func (p *haskellBlockTxsPeer) BlockTxsRequest(
 }
 
 // TestLeiosFetchHaskellEncodedBlockTxsIsConsumed is an interoperability
-// regression for the Haskell reference node's leios-fetch encoding (#3623).
+// regression for the Haskell reference node's leios-fetch encoding.
 // The endorser block has 70 transactions, so the fetch spans two 64-tx bitmap
 // windows. Its manifest, point hash and MsgLeiosBlockTxs response are encoded
 // the way the reference node encodes them. Dingo must send a request the
@@ -2729,7 +2729,7 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 // A fetch that runs out of diffused transactions must retain what it already
 // holds against the cached endorser block instead of discarding it. Before
 // this, the partial prefix was dropped on the floor and the next offer
-// re-fetched the whole block from scratch (issue #2629).
+// re-fetched the whole block from scratch.
 func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	t.Parallel()
 
@@ -3093,7 +3093,7 @@ func waitForLeiosServeWaiter(t *testing.T, f *chainsyncServerFixture) {
 	)
 }
 
-// TestLeiosServeWaitReleasedByRealPeerDisconnect is the issue #3514 regression
+// TestLeiosServeWaitReleasedByRealPeerDisconnect is the regression
 // test. It runs against the real NtC chainsync server connection the shared
 // ouroboros-mock harness builds, and tears that connection down the way a peer
 // actually does (Harness.Disconnect closes the driver end of the bearer)
@@ -3504,7 +3504,7 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 // is the most-significant bit (bit 63). Encoding it LSB-first round-tripped
 // fine against a dingo peer but made the relay serve only the high-index
 // transactions of a partial window -- and nothing at all for a final window of
-// <=32 txs -- so from-genesis catch-up stalled mid-epoch (issue #2656). This
+// <=32 txs -- so from-genesis catch-up stalled mid-epoch. This
 // guards the request encode, the decode, and the server serve/validate paths
 // against silently reverting to LSB (which a self-consistent mock would miss).
 func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
@@ -3619,7 +3619,6 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 // endorser block but echoes a response bitmap that also references a window
 // far beyond txCount, simulating a relay (malicious or buggy) that declares a
 // tiny transaction count yet returns a disproportionately large bitmap
-// (issue #3523).
 type oversizedBitmapRequester struct {
 	// extraWindow, when non-zero, is set to extraMask in the response bitmap
 	// in addition to the legitimately served windows. extraMask has no effect
@@ -3649,7 +3648,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 // window (1000, all 64 bits). A response bitmap that claims transactions the
 // block cannot possibly have must be rejected outright (with an error
 // mentioning "leios-fetch response bitmap"), not silently expanded into a
-// huge index list (issue #3523).
+// huge index list.
 func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 	t.Parallel()
 
@@ -4013,7 +4012,7 @@ func (l *listenerWithAddress) Close() error { return nil }
 
 func (l *listenerWithAddress) Addr() net.Addr { return l.addr }
 
-// TestIsTrustedNtCListener is the blinklabs-io/dingo#4183 review regression:
+// TestIsTrustedNtCListener is the review regression:
 // ConfigureListeners used to grant every UseNtC listener gouroboros' relaxed
 // mux/query timeouts and 2GiB reassembly buffer unconditionally, on the
 // premise that "NtC is a trusted local channel" -- true for a Unix socket,
@@ -4202,7 +4201,7 @@ func TestConfigureListenersClassifiesSuppliedListenerByBoundAddress(t *testing.T
 }
 
 // TestConfigureListeners_NormalizesTCPListenAddressToNumeric is the
-// blinklabs-io/dingo#4183 review regression for a TOCTOU in
+// review regression for a TOCTOU in
 // isTrustedNtCListener: it resolved l.ListenAddress to classify the
 // listener, but connmanager's startListener later binds the same
 // listener's ListenAddress by calling net.Listen on the original,
