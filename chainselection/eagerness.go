@@ -331,7 +331,7 @@ func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.peerTips[connId]
-	return ok && peerTip.eagernessPaused > 0
+	return ok && peerTip != nil && peerTip.eagernessPaused > 0
 }
 
 func (cs *ChainSelector) withinEagernessLimit(
