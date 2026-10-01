@@ -17,6 +17,7 @@ package database
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
@@ -63,4 +64,44 @@ func TestRebuildRewardLiveStakeRejectsInvalidTransaction(t *testing.T) {
 
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})
+}
+
+type batchRewardLiveStakeMetadataStore struct {
+	metadata.MetadataStore
+	batchSlot     uint64
+	batchCalls    int
+	transactional int
+	runTxnSet     bool
+}
+
+func (s *batchRewardLiveStakeMetadataStore) RebuildRewardLiveStakeFromRunningTotals(
+	uint64,
+	types.Txn,
+) error {
+	s.transactional++
+	return nil
+}
+
+func (s *batchRewardLiveStakeMetadataStore) RebuildRewardLiveStakeFromRunningTotalsInBatches(
+	slot uint64,
+	runTxn func(func(types.Txn) error) error,
+) error {
+	s.batchCalls++
+	s.batchSlot = slot
+	s.runTxnSet = runTxn != nil
+	return nil
+}
+
+func TestRebuildRewardLiveStakeFromRunningTotalsUsesBatchFinalizer(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := &batchRewardLiveStakeMetadataStore{}
+	db := &Database{metadata: store}
+
+	require.NoError(t, db.RebuildRewardLiveStakeFromRunningTotals(123, nil))
+	require.Equal(t, 1, store.batchCalls)
+	require.Equal(t, uint64(123), store.batchSlot)
+	require.True(t, store.runTxnSet)
+	require.Zero(t, store.transactional)
 }

@@ -15,6 +15,8 @@
 package sqlstore
 
 import (
+	"errors"
+	"sort"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -135,4 +137,54 @@ func testRewardLiveStakeBatchBoundaries(t *testing.T, store *Store) {
 func TestRebuildRewardLiveStakeBatchBoundaries(t *testing.T) {
 	t.Parallel()
 	testRewardLiveStakeBatchBoundaries(t, newMigratedSQLiteStore(t))
+}
+
+func TestRebuildRewardLiveStakeFromRunningTotalsCommitsAndRetriesBatches(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.rewardLiveStakeBatchSize = 1
+	populateRewardLiveStakeBatchFixture(t, store)
+	require.NoError(t, store.RebuildRewardLiveStake(500, nil))
+	expected := readRewardLiveStakeSnapshot(t, store)
+	keys := make([]string, 0, len(expected))
+	for key := range expected {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	require.Greater(t, len(keys), 1)
+
+	_, err := store.writeDB.Exec(`
+UPDATE reward_live_stake
+SET pool_key_hash = NULL,
+    reward_stake = '999',
+    total_stake = '999',
+    registered = FALSE,
+    pool_delegation_slot = 0,
+    pool_delegation_block_index = 0,
+    pool_delegation_cert_index = 0`)
+	require.NoError(t, err)
+	stopAfterFirstBatch := errors.New("stop after first committed range")
+	runTxn := func(runBatch func(types.Txn) error) error {
+		return runBatch(nil)
+	}
+	err = store.rebuildRewardLiveStakeInBatches(
+		500,
+		runTxn,
+		func(processed int64) error {
+			require.Equal(t, int64(1), processed)
+			current := readRewardLiveStakeSnapshot(t, store)
+			require.Equal(t, expected[keys[0]], current[keys[0]])
+			require.Equal(t, "999", current[keys[1]].rewardStake)
+			return stopAfterFirstBatch
+		},
+	)
+	require.ErrorIs(t, err, stopAfterFirstBatch)
+
+	require.NoError(
+		t,
+		store.RebuildRewardLiveStakeFromRunningTotalsInBatches(500, runTxn),
+	)
+	require.Equal(t, expected, readRewardLiveStakeSnapshot(t, store))
 }
