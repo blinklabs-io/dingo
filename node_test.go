@@ -3336,9 +3336,9 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 // The ledger is started, and replays any stored blocks it has not applied,
 // before the node creates Ouroboros networking. ledgerStateConfig therefore
 // hands the ledger callbacks that run while n.ouroboros() is still nil, and
-// each of them must report "unavailable" instead of dereferencing it
-// A Musashi restart panicked in EndorserBlockTxsByHash when these callbacks
-// dereferenced the missing network client.
+// each of them must report "unavailable" instead of dereferencing it. A
+// restart after a Musashi shutdown exposed this ordering when
+// EndorserBlockTxsByHash panicked before networking was initialized.
 func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 	t.Parallel()
 
