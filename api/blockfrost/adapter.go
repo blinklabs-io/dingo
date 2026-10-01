@@ -1420,8 +1420,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 	currentEpoch := a.ledgerState.CurrentEpoch()
 	// Fold in any active governance proposal's deposit escrowed to a return
 	// account delegating to this DRep, matching the deposit-inclusive tally
-	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694;
-	// blinklabs-io/dingo#4355).
+	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
 		db, nil, currentEpoch, 0,
 	)
@@ -1698,7 +1697,7 @@ func (a *NodeAdapter) DReps(
 		// return account delegating to a listed DRep (or AlwaysNoConfidence),
 		// matching the deposit-inclusive tally
 		// ledger/governance.LoadDRepVotingState uses for ratification
-		// (CIP-1694; blinklabs-io/dingo#4355). AlwaysAbstain never gains
+		// (CIP-1694). AlwaysAbstain never gains
 		// deposit power, so typePowers' AlwaysAbstain entry is untouched.
 		depositRefPower, depositNoConfidencePower, depositErr := governance.
 			ActiveProposalDepositDRepPower(db, txn, currentEpoch, 0)

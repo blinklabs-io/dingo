@@ -162,7 +162,7 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 // (ledger/governance/epoch.go) and the SQL expiry sweep, whose predicate is
 // `expiry_epoch > 0 AND expiry_epoch <= ?` -- so imported DReps stayed in
 // countActiveDReps permanently and inflated the ratification quorum denominator
-// for the life of the database (issue #4492).
+// for the life of the database.
 //
 // The two DReps carry distinct non-zero expiries, so dropping the field fails
 // both assertions and a fix that stamped one shared constant would fail too.
@@ -1665,7 +1665,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // TestPersistImportedSnapshotMissingPoolsNotResolved verifies that when no
 // pool rows exist in the DB (e.g. the fallback pool import has not yet run),
 // the current-epoch snapshot is NOT falsely marked Resolved=true. This is the
-// main correctness invariant from issue #2440: a missing pool row must not
+// main correctness invariant: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	t.Parallel()
@@ -1720,7 +1720,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 }
 
 // TestPersistImportedSnapshotPoolPresentAccountStates exercises the
-// current-epoch resolver's three account outcomes for issue #2440:
+// current-epoch resolver's three account outcomes:
 //   - reward account row absent entirely → Resolved=false (data may not be
 //     imported yet; must not be persisted as a false confirmed None);
 //   - reward account present but inactive (deregistered) → Resolved=true,
@@ -2027,7 +2027,7 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 }
 
 // TestImportSnapShotsFallbackPoolsResolveCurrentEpoch verifies the end-to-end
-// fix from issue #2440: when pools come from the snapshot-pool fallback path
+// fix: when pools come from the snapshot-pool fallback path
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {

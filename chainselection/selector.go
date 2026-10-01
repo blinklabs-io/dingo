@@ -267,7 +267,7 @@ type ChainSelector struct {
 	// LedgerState.recordPeerHeaderHistory), which each hold their own lock
 	// while calling it. Deriving the pair from cs.mode/cs.securityParam under
 	// cs.mutex.RLock() on every call created a lock-order inversion with
-	// chainsync.State.clientConnIdMutex: see #4070. This atomic lets
+	// chainsync.State.clientConnIdMutex. This atomic lets
 	// GenesisSelectionState answer without cs.mutex at all. It is refreshed
 	// under cs.mutex (refreshGenesisSelectionSnapshotLocked) at every point
 	// that can change cs.mode or the derived Genesis window -- construction,
@@ -792,8 +792,7 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			// tip has no upper bound, so a fixed ceiling anchored to
 			// localTip makes an honestly-delivered frontier permanently
 			// unreachable. A rejected frontier is never recorded, so it can
-			// never itself become a fresher reference -- a one-way ratchet
-			// (dingo #3624).
+			// never itself become a fresher reference -- a one-way ratchet.
 			//
 			// Every reference the selector holds is stale here (that is
 			// what put us in this branch), and this frontier's own leader
@@ -1181,7 +1180,7 @@ func (cs *ChainSelector) GenesisWindowSlots() uint64 {
 // call. Taking cs.mutex.RLock() here previously created a lock-order
 // inversion against a separate path that holds cs.mutex (write) and calls
 // back into chainsync.State.BlockfetchLatency (clientConnIdMutex.RLock),
-// which deadlocked chain sync under real peer traffic: see #4070. The
+// which deadlocked chain sync under real peer traffic. The
 // snapshot below is kept current by refreshGenesisSelectionSnapshotLocked,
 // called under cs.mutex at every point that can change it.
 func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
@@ -1764,7 +1763,7 @@ func (cs *ChainSelector) triggerEvaluation() {
 // subscriber channel inline and waits for buffer capacity, so a subscriber
 // that stops draining stops its producer too.
 //
-// blinklabs-io/dingo#3550 is that chain end to end: a
+// A Preview run showed that chain end to end: a
 // chainselection.chain_switch consumer stopped draining, TouchPeerActivity
 // parked inside publishSelectionEvents -> EventBus.Publish, the internal
 // chainselection.peer_activity subscriber therefore stopped draining, and
@@ -1784,8 +1783,7 @@ func (cs *ChainSelector) triggerEvaluation() {
 // do -- so two goroutines can decide A then B and still enqueue B then A, and
 // a subscriber sees B before A. That window is unchanged from the inline
 // Publish this replaced, and closing it would mean publishing while holding
-// cs.mutex, which is the deadlock shape #3550 is about avoiding (wolf31o2
-// review).
+// cs.mutex, which is the deadlock shape this avoids.
 func (cs *ChainSelector) publishSelection(
 	eventType event.EventType,
 	evt event.Event,

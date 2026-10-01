@@ -21,8 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEraDescWiresProtocolVersionProtection is the dingo#4439 "protect
-// replay, import, and backfill paths" regression. ConwayEraDesc and
+// TestEraDescWiresProtocolVersionProtection is the protocol-version
+// protection regression. ConwayEraDesc and
 // DijkstraEraDesc.{ValidateTxFunc,PParamsUpdateFunc} are the single
 // implementation every caller shares -- live block application
 // (ledger/delta.go), Mithril bootstrap (mithril/sync_gap.go), backfill

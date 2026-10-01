@@ -29,8 +29,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The fixture below is the ledger state of the node reported in
-// blinklabs-io/dingo#4326, read out of its own metadata.sqlite: 21600-slot
+// The fixture below is the ledger state of a node from a field
+// report, read out of its own metadata.sqlite: 21600-slot
 // epochs from slot 0, a pool registered four times on one VRF key and
 // re-registered on another at slot 639855 (inside epoch 29), the mark
 // snapshot that elects epoch 31 captured at 647999, and the block that
@@ -41,7 +41,7 @@ const (
 	musashiMark30Capture = 647_999 // last slot of epoch 29
 	musashiFailingSlot   = 678_720 // epoch 31
 	musashiFailingEpoch  = 31
-	// The cutoff the pre-#4326 code derives: the last slot of epoch 28.
+	// The cutoff the code derives: the last slot of epoch 28.
 	musashiLaggedCutoff = 626_399
 )
 
@@ -62,7 +62,7 @@ func musashiEpochs(from, to uint64, eraId uint, nonce []byte) []models.Epoch {
 	return epochs
 }
 
-// seedMusashiRotation writes the #4326 registration history: four
+// seedMusashiRotation writes the registration history: four
 // registrations on oldKey, then the rotation to newKey inside the epoch the
 // electing snapshot is captured in.
 func seedMusashiRotation(
@@ -81,7 +81,7 @@ func seedMusashiRotation(
 		musashiMark30Capture)
 }
 
-// TestElectingVrfKeyHashUsesTheCaptureSlotInDijkstra is the dingo #4326
+// TestElectingVrfKeyHashUsesTheCaptureSlotInDijkstra is the
 // regression.
 //
 // Dijkstra's EPOCH rule runs POOLREAP -- which merges psFutureStakePoolParams
@@ -176,10 +176,10 @@ func TestVerifyRegisteredVrfKeyAcceptsARotationInsideTheCapturedEpochInDijkstra(
 }
 
 // TestElectingVrfKeyHashStillLagsPoolParamsBeforeDijkstra pins the half of the
-// rule the #4326 fix must not erase. On the identical fixture, with the
+// rule the fix must not erase. On the identical fixture, with the
 // captured epoch in Conway, SNAP runs before POOLREAP, so the snapshot does
 // not carry a re-registration from its own epoch and the cutoff still lags by
-// one epoch. Resolving at the capture slot here is the #3842 wedge.
+// one epoch. Resolving at the capture slot here is the wedge.
 func TestElectingVrfKeyHashStillLagsPoolParamsBeforeDijkstra(t *testing.T) {
 	t.Parallel()
 
@@ -303,8 +303,8 @@ func previewEpochs(from, to uint64, nonce []byte) []models.Epoch {
 	return epochs
 }
 
-// TestElectingVrfKeyHashLagsPoolParamsByOneEpoch is the dingo #3842 regression,
-// built from the rotation that wedged a Preview replay twice.
+// TestElectingVrfKeyHashLagsPoolParamsByOneEpoch is the pre-rotation-key
+// regression, built from the rotation that wedged a Preview replay twice.
 //
 // The pool ran on oldKey, rotated to newKey at slot 3279920 (epoch 37), and
 // rotated back at slot 3366753 (epoch 38). The chain elected it on oldKey in
@@ -619,11 +619,11 @@ func TestLeaderEligibilityStakeSkipDecisionUsesTheSuppliedEpochCache(
 		"not skipping means the threshold's denominator is actually read")
 }
 
-// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the dingo #4047
-// regression: a Mithril-bootstrapped node wedges at its first epoch boundary
-// because the pool's only registration row is stamped at the bootstrap
-// anchor slot, which is later than the parameter cutoff and stake-snapshot
-// capture slots the electing snapshot resolves against.
+// TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor is the
+// Mithril-anchor regression: a Mithril-bootstrapped node wedges at its first
+// epoch boundary because the pool's only registration row is stamped at the
+// bootstrap anchor slot, which is later than the parameter cutoff and
+// stake-snapshot capture slots the electing snapshot resolves against.
 //
 // A Mithril snapshot import writes the pool's live-at-anchor registration
 // (ImportPool) -- it never replays the certificate history that produced it
@@ -684,13 +684,13 @@ func TestElectingVrfKeyHashResolvesBelowMithrilBootstrapAnchor(t *testing.T) {
 }
 
 // TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll pins the
-// boundary the #4047 fix must not erase: on a Mithril-bootstrapped node, a
+// boundary the Mithril-anchor fix must not erase: on a Mithril-bootstrapped
+// node, a
 // pool with no registration row at all still raises
-// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving.
-// The fallback reads the pool's live registration; a pool nothing was ever
-// imported or registered for has none, so GetPool finds nothing and the
-// fallback yields ok == false, falling through to the same error as before
-// the fix.
+// errVrfKeyRegistrationHistoryUnavailable rather than silently resolving. The
+// fallback reads the pool's live registration; a pool nothing was ever imported
+// or registered for has none, so GetPool finds nothing and the fallback yields
+// ok == false, falling through to the same error as before the fix.
 func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 	t *testing.T,
 ) {
@@ -722,7 +722,7 @@ func TestElectingVrfKeyHashStillRejectsAPoolWithNoRegistrationAtAll(
 // half of the boundary: on a node with no Mithril bootstrap
 // (mithrilLedgerSlot == 0, e.g. a genesis sync), a missing-history gap must
 // still hard-reject even though the pool has a resolvable live registration.
-// This is the #3842 guarantee the fix must not erase: falling back to the
+// This is the guarantee the fix must not erase: falling back to the
 // live registration whenever history merely looks incomplete reintroduces
 // the VRF-rotation wedge that issue fixed. The fallback here fires only when
 // mithrilLedgerSlot pins a bootstrap boundary that explains the gap.

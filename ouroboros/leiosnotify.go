@@ -790,7 +790,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// bandwidth once per connected peer. Mirrors the same guard on the
 		// txs offer below. The lookup is keyed by point, not hash alone: the
 		// same hash can be a live, independently required occurrence at
-		// another slot at the same time (issue #3513), and that other
+		// another slot at the same time, and that other
 		// occurrence being cached must not suppress fetching this one.
 		if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
 			return nil
@@ -917,7 +917,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// empty) at this offer's point. Skip without spawning a fetch. The
 		// lookup is keyed by point, not hash alone, for the same reason as
 		// MsgBlockOffer above: a different, unrelated occurrence of this hash
-		// being complete must not satisfy this offer's point (issue #3513).
+		// being complete must not satisfy this offer's point.
 		if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok &&
 			(data.txCount == 0 || data.completeTxCache()) {
 			return nil
@@ -1118,8 +1118,7 @@ type leiosBlockRequester interface {
 // by a MsgBlockOffer and binds the fetched body to the offer's declared size
 // before the caller stores it. A peer that offers one size and serves another
 // is a fetch/serving mismatch, not a cacheable result, so it is rejected here
-// rather than admitted under a byte budget the offer misrepresented (issue
-// #3512).
+// rather than admitted under a byte budget the offer misrepresented.
 func fetchAndValidateLeiosEbManifest(
 	ctx context.Context,
 	client leiosBlockRequester,
@@ -1214,7 +1213,7 @@ type leiosFetchGuard struct {
 	// protocol shutdown) can drain it, so every later request on the same bearer
 	// returns ErrRequestSlotAbandoned after its grace period. A cooldown cannot
 	// repair that -- the connection has to be replaced -- so a dead connection is
-	// ordered last and recycled (dingo #3552).
+	// ordered last and recycled.
 	protocolDead atomic.Bool
 	// recycleRequested records that a recycle has already been published for this
 	// connection, so a burst of failing fetches raises one request rather than one
@@ -1401,7 +1400,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // deliberately has none for Block/BlockTxs) — so an attempt overshoots the
 // deadline by at most one round;
 // this lets the by-point backfill fail over to another connection rather than
-// parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
+// parking the whole ledger apply loop on one peer. A zero deadline
 // disables the bound, preserving the tip-path behavior.
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	ctx context.Context,
@@ -1461,7 +1460,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	// often ends before the block is whole; the prefix it gathered is retained
 	// against the cached block (below) and seeded back here, so a re-offer
 	// requests only the still-missing tail instead of re-fetching transactions
-	// dingo already has (issue #2629).
+	// dingo already has.
 	o.seedLeiosPartialTxs(point.Slot, point.Hash, result, validate)
 	// Retain whatever this attempt ends up holding, so an attempt that stops
 	// short (tail budget, per-attempt deadline, protocol error) leaves the
@@ -1529,7 +1528,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 			// A relay-declared bitmap referencing an index beyond this
 			// endorser block's txCount is rejected before it is expanded: a
 			// small txCount must not license decoding a disproportionately
-			// large index list (issue #3523).
+			// large index list.
 			return leiosCollectTxs(result), fmt.Errorf(
 				"leios-fetch response bitmap: %w",
 				err,
@@ -1618,7 +1617,7 @@ func leiosNeededBitmap(
 // LSB-first mask only round-trips for full (all-64-bit) windows; for a partial
 // window of k<64 txs it made the relay serve just max(0, 2k-64) of them (the
 // relay read the high bits), so a final window of <=32 txs was never served
-// and from-genesis catch-up stalled mid-epoch (issue #2656).
+// and from-genesis catch-up stalled mid-epoch.
 func leiosWindowNeededMask(result []cbor.RawMessage, w, txCount int) uint64 {
 	var mask uint64
 	base := w * 64
@@ -1947,7 +1946,7 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 // endorser block's slot, so it also reconciles any endorser block cached before
 // it arrived: the relay (and dingo's own forge path) offer the block before
 // announcing it, so the cached entry routinely carries an as-yet-unverified
-// peer-supplied slot (issue #3513).
+// peer-supplied slot.
 func (o *Ouroboros) recordLeiosAnnouncement(
 	raw []byte,
 	ebHash lcommon.Blake2b256,
@@ -1965,7 +1964,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	// the resulting entry would never be verified by anything. Holding the
 	// lock across both closes that window; storeLeiosEndorserBlock takes the
 	// same lock (announcementsMu before leiosMu) across its own check and
-	// insertion for the same reason (issue #3513 review).
+	// insertion for the same reason.
 	o.leiosAnnouncementsMu.Lock()
 	err := o.recordLeiosAnnouncementLocked(
 		raw,
@@ -2084,11 +2083,11 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 // still-live ranking-block announcement vouches for ebHash at exactly slot.
 // It lets a leios-fetch offer or store be bound to a point its own
 // announcement actually vouched for, rather than trusting whatever point the
-// offering connection supplies (issue #3513). It is a membership check, not
+// offering connection supplies. It is a membership check, not
 // a single-scalar comparison, because the manifest is content-addressed: the
 // same hash can be a live, independently required occurrence at more than
 // one slot at once, so the presence of a *different* live slot for this hash
-// says nothing about whether this one is bound (issue #3513 review). The
+// says nothing about whether this one is bound. The
 // caller must hold leiosAnnouncementsMu: every caller already needs it held
 // across a wider check-then-act sequence (storeLeiosEndorserBlock's
 // announcement check through its cache insertion; recordLeiosAnnouncement's
@@ -2109,7 +2108,7 @@ func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
 	// elsewhere. Treating an expired binding as still authoritative would
 	// reject a later offer or announcement for the same hash as a conflict
 	// forever, instead of just leaving it unverified like a hash with no
-	// binding at all (issue #3513 review). Entries recorded without a ledger
+	// binding at all. Entries recorded without a ledger
 	// wired (unit tests) never expire, matching pruneLeiosAnnouncements' own
 	// no-op when the ledger is absent.
 	if !isNilInterface(o.leiosAnnouncementLedger) {

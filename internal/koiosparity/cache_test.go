@@ -33,14 +33,14 @@ import (
 // busyTimeoutMargin exceeds OpenCache's hardcoded 5s busy_timeout pragma,
 // so a connection that only frees the WAL writer slot after this long
 // forces any contending connection's own busy-retry loop to exhaust before
-// the slot is released — the specific condition dingo #4091 hits, as
+// the slot is released — the specific condition this test covers, as
 // opposed to ordinary contention a shorter hold resolves on its own well
 // within busy_timeout: a 100ms hold fails neither before nor after the fix,
 // because busy_timeout's retry genuinely covers short waits.
 const busyTimeoutMargin = 5500 * time.Millisecond
 
 // TestSaveAccountFetchChunkProgressWaitsOutSlowConcurrentWriter is dingo
-// #4091's minimal, deterministic reproduction.
+// minimal, deterministic reproduction.
 //
 // SaveAccountFetchChunkProgress's transaction (cache.go) always opens with
 // two DELETEs targeting a brand-new chunk_hash nothing has written before.
@@ -321,7 +321,7 @@ const sqliteBusySnapshot = 517
 // The assertion is on SQLITE_BUSY_SNAPSHOT specifically rather than on any
 // error, because only that code is structurally impossible once a write runs
 // first. A plain SQLITE_BUSY stays reachable — it is ordinary writer-slot
-// contention against busy_timeout, the dingo #4091 class — and a starved
+// contention against busy_timeout, the class — and a starved
 // machine can produce one without the ordering having regressed: measured
 // under six concurrent copies of this package's suite, the fixed order
 // produced 1 plain SQLITE_BUSY in 3000 on three runs and zero
@@ -884,14 +884,14 @@ func TestCommitAccountRewardsForEpochAllowsLiteralDuplicateKey(t *testing.T) {
 
 // TestAccountRewardsAdditiveColumnMigration proves OpenCache migrates an
 // older koios_account_rewards table (missing reward_type/spendable_epoch/
-// pool_id_bech32 — the #1875 schema-only shape) forward without errors or
+// pool_id_bech32 — the schema-only shape) forward without errors or
 // data loss, and that the widened unique index is in place afterward.
 func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "cache.db")
 
-	// Build the pre-#3097 shape directly, bypassing createCacheSchema.
+	// Build the pre-account-parity shape directly, bypassing createCacheSchema.
 	db, err := sql.Open("sqlite", path+"?"+legacySeedPragmas)
 	require.NoError(t, err)
 	_, err = db.Exec(`CREATE TABLE koios_account_rewards (
@@ -951,7 +951,7 @@ func TestAccountRewardsAdditiveColumnMigration(t *testing.T) {
 	require.Len(t, got, 2)
 }
 
-// TestCommitEpochMismatchesRollsBackOnFailedInsert proves #3410's fix:
+// TestCommitEpochMismatchesRollsBackOnFailedInsert proves atomicity:
 // CommitEpochMismatches deletes and (re)inserts an epoch's mismatch rows in a
 // single transaction, so a write failure partway through the insert rolls
 // the delete back with it instead of leaving the epoch with zero evidence. A

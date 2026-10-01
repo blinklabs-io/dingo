@@ -62,7 +62,7 @@ func TestReleaseLocalStateQueryAcquiredPointOwnerKeepsReplacement(
 }
 
 // TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure is the
-// blinklabs-io/dingo#4156 regression. Before this fix, localstatequeryServerAcquire
+// ahead-of-tip Acquire regression. Before the fix, localstatequeryServerAcquire
 // unconditionally accepted any AcquireSpecificPoint, deferring the actual
 // tip-validity check to the first Query -- and a rejection surfacing there
 // has no graceful wire-level reply (unlike a rejection at Acquire time), so
@@ -123,7 +123,7 @@ func TestLocalstatequeryServerAcquire_PointAheadOfTip_GracefulFailure(
 // TestLocalstatequeryServerAcquire_PointOnChain_Succeeds is the companion
 // positive case: a specific point genuinely matching this node's chain at
 // that slot must still be accepted and recorded, unchanged from before the
-// #4156 fix.
+// fix.
 func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	o := &Ouroboros{
 		localstatequeryAcquiredPoints: make(
@@ -305,8 +305,8 @@ func TestLocalstatequeryServerAcquire_PastRetentionFloor_MappedToPointTooOld(
 }
 
 // TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint covers the
-// AcquireVolatileTip branch, unchanged by the #4156 fix: it must clear any
-// previously-recorded pinned point rather than being validated as a
+// AcquireVolatileTip branch, unchanged by the ahead-of-tip fix: it must clear
+// any previously-recorded pinned point rather than being validated as a
 // specific point.
 func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
 	o := &Ouroboros{
@@ -334,8 +334,8 @@ func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
 }
 
 // TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsable
-// is the blinklabs-io/dingo#4156 regression at the actual protocol level a
-// bot reviewer asked for: the three tests above drive
+// is the ahead-of-tip regression at the actual protocol level a
+// the three tests above drive
 // localstatequeryServerAcquire's callback directly, which proves the
 // callback's return value is right, but not that gouroboros' server
 // actually turns that into a graceful wire reply rather than tearing the
@@ -347,10 +347,10 @@ func TestLocalstatequeryServerAcquire_VolatileTip_ClearsPoint(t *testing.T) {
 // needed), the same way connmanager/listener.go wires a live NtC listener.
 //
 // It Acquires a point ahead of this node's tip (reproducing the exact race
-// blinklabs-io/dingo#4156 was filed for) and asserts two things a direct
+// the fix addresses) and asserts two things a direct
 // callback test cannot: the client's Acquire call itself returns
 // ErrAcquireFailurePointNotOnChain (not a connection-closed/EOF error), and
-// -- the part that actually matters, since #4156's bug was the whole
+// -- the part that actually matters, since the bug was the whole
 // connection dying -- a second, valid Acquire on the very same connection
 // immediately afterward still succeeds.
 func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsable(
@@ -430,7 +430,7 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 		acquireErr,
 	)
 
-	// The actual #4156 bug: before the fix, the ahead-of-tip Acquire above
+	// The actual bug: before the fix, the ahead-of-tip Acquire above
 	// didn't just fail -- it took the whole connection down with it, so any
 	// subsequent call would see a connection-closed error instead of a
 	// normal protocol response. Prove the connection is still alive and

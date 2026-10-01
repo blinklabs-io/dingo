@@ -125,8 +125,7 @@ func TestComparePraosTipsDijkstraVRFTiebreak(t *testing.T) {
 // TestGetPraosTiebreakerView_Byron pins that a Byron header of either kind
 // yields (view, false): no Praos select view (Byron has no opcert/VRF), but
 // the view's Byron field still identifies the header's kind so
-// ComparePraosTips can apply the era-aware EBB tiebreak
-// (blinklabs-io/dingo#4413).
+// ComparePraosTips can apply the era-aware EBB tiebreak.
 func TestGetPraosTiebreakerView_Byron(t *testing.T) {
 	mainHeader := &byron.ByronMainBlockHeader{}
 	mainHeader.ConsensusData.Difficulty.Value = 50
