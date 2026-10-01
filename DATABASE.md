@@ -442,6 +442,14 @@ statement is naturally idempotent on replay, so the runner gained matching
 duplicate-column/duplicate-index guards for `ADD COLUMN`, confirming absence
 against the live schema before swallowing the error.
 
+An `ADD COLUMN` duplicate-column error is accepted as an already-applied
+statement only when the existing column matches the declared type,
+nullability and default. The lookup is bound to the migration's own schema
+(PostgreSQL resolves the table through the connection's `search_path`, MySQL
+through `DATABASE()`). A definition carrying any other constraint (`UNIQUE`,
+`CHECK`, `REFERENCES`, ...) cannot be read back from the catalog and is never
+accepted.
+
 Migration `v21` (`asset-amount-fingerprint-index-drop`, integer version 21)
 drops `idx_asset_amount` and `idx_asset_fingerprint`, carrying no column drop:
 `asset.amount` and `asset.fingerprint` are genuinely read and returned via the

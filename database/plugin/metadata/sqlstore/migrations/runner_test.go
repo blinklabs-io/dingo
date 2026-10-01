@@ -497,6 +497,55 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 	require.Zero(t, count)
 }
 
+// An already-present column is accepted as the result of an interrupted
+// ADD COLUMN only when it matches the whole declared definition: type,
+// nullability and default. A definition carrying a constraint the guard
+// cannot read back from the catalog is never accepted.
+func TestRunnerAddColumnReplayVerifiesDefinition(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		existing string
+		declared string
+		wantErr  bool
+	}{
+		{"identical", "integer NOT NULL DEFAULT 0", "integer NOT NULL DEFAULT 0", false},
+		{"boolean spelling", "boolean NOT NULL DEFAULT false", "boolean NOT NULL DEFAULT FALSE", false},
+		{"nullable no default", "text", "text", false},
+		{"declared not null, existing nullable", "integer DEFAULT 0", "integer NOT NULL DEFAULT 0", true},
+		{"declared nullable, existing not null", "integer NOT NULL DEFAULT 0", "integer DEFAULT 0", true},
+		{"declared default, existing none", "integer NOT NULL", "integer NOT NULL DEFAULT 0", true},
+		{"declared none, existing default", "integer NOT NULL DEFAULT 0", "integer NOT NULL", true},
+		{"different default", "integer NOT NULL DEFAULT 1", "integer NOT NULL DEFAULT 0", true},
+		{"unverifiable constraint", "integer UNIQUE", "integer UNIQUE", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTestDB(t)
+			migration := Migration{
+				Version:          1,
+				Name:             "add_column_definition",
+				BackfillRevision: "1",
+				SQL: map[string]SQL{
+					"sqlite": {
+						Expand: []string{
+							"CREATE TABLE item (id INTEGER PRIMARY KEY, n " + tc.existing + ")",
+							"ALTER TABLE item ADD COLUMN n " + tc.declared,
+						},
+					},
+				},
+			}
+			err := testRunner(db, migration).Run(context.Background())
+			if tc.wantErr {
+				require.ErrorContains(t, err, "statement 2")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be
 // recognizable to the replay guard in each dialect's quoting, or an upgrade
 // interrupted between the committed DDL and its phase advance would still fail
