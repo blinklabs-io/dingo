@@ -29,7 +29,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// preprod tip and shape from issue #2756: 648,758 auth_committee_hot rows for
+// preprod tip and shape observed live: 648,758 auth_committee_hot rows for
 // 35 distinct cold credentials at slot ~79.48M.
 const (
 	preprodTipSlot         = uint64(79_480_000)
@@ -388,7 +388,7 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 }
 
 // TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the
-// dataset shape from issue #2756 -- 35 cold credentials each with a long run
+// dataset shape observed live -- 35 cold credentials each with a long run
 // of authorizations -- and proves GetActiveCommitteeMembers returns exactly
 // the same tally after pruning as before it. See preprodAuthsPerMember for
 // the full-size measurement.
@@ -630,7 +630,7 @@ func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(
 }
 
 // TestAuthCommitteeHotPruningRespectsLiveImmutableSlotOnSparseChain is the
-// regression case for issue #4353: the slot-window assumption
+// regression case for sparse-block chains: the slot-window assumption
 // (tipSlot - DefaultCommitteeAuthRetentionSlots) approximates the rollback
 // bound by assuming typical block density, but Ouroboros's actual rollback
 // limit is k blocks, not a slot count. A sparse chain can have a legal

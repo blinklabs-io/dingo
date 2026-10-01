@@ -22,7 +22,7 @@ import (
 )
 
 // TestVotingPowerByTypeSQLDialectShapes asserts the account-first shape
-// (blinklabs-io/dingo#4364) holds for every dialect this file supports, not
+// holds for every dialect this file supports, not
 // just sqlite, since only sqlite's shape gets an execution test: the inner
 // subquery joins outward from account instead of running a correlated
 // EXISTS against it, and no dialect leaks another dialect's join hint or

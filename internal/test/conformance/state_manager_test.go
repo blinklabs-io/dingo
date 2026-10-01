@@ -940,14 +940,14 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 // the gap a PR review found in the two tests above: both call
 // committeeActionRatified directly, so neither one proves ratifyProposals
 // actually routes UpdateCommittee/NoConfidence proposals to it. Reverting
-// just that routing (back to the pre-#4007 hasCC-requiring heuristic) while
+// just that routing while
 // keeping committeeActionRatified and both direct-call tests left the whole
 // package green, including those two tests -- nothing exercised the
 // decision of *which* ratification path a real proposal takes.
 //
 // This test drives the real entry point, ProcessEpochBoundary, the way the
 // harness calls it for every vector: a DRep and an SPO each cast an
-// explicit yes vote (the exact shape issue #4007's "CC re-election" vector
+// explicit yes vote (the exact shape "CC re-election" vector
 // carries) and no committee vote is ever recorded. It only ratifies if
 // ProcessEpochBoundary's call into ratifyProposals actually reaches
 // committeeActionRatified for this action type; the old heuristic requires
@@ -1034,7 +1034,7 @@ func TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote(
 // TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote's
 // NoConfidence twin. A PR review found that the UpdateCommittee test alone
 // only pins that half of ratifyProposals's routing: reverting just the
-// NoConfidence arm back to the pre-#4007 hasCC-requiring heuristic (leaving
+// NoConfidence arm back to the hasCC-requiring heuristic (leaving
 // UpdateCommittee routed through committeeActionRatified) left every test,
 // including both routing tests and both direct-call tests, green.
 func TestProcessEpochBoundaryRatifiesNoConfidenceWithoutCommitteeVote(
@@ -1416,7 +1416,7 @@ func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
 }
 
 // TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake pins a PR
-// #4333 review finding: an active proposal deposit raises the return
+// review finding: an active proposal deposit raises the return
 // account's DRep voting power, but it is not delegated stake behind a pool
 // and must not enter the SPO tally. Production reads SPO stake straight from
 // the stake distribution snapshot (tallySPOVotes over LoadSPOVotingState's

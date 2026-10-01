@@ -36,7 +36,7 @@ var (
 	trackerURL = regexp.MustCompile(
 		`github\.com/[^\s)>\]]+/(?:issues|pulls?)/[0-9]+`,
 	)
-	// trackerWord is a spelled-out reference such as "issue 3377".
+	// trackerWord is a spelled-out reference such as "".
 	trackerWord = regexp.MustCompile(
 		`(?i)\b(?:issues?|prs?|pull requests?)\s+[0-9]+\b`,
 	)

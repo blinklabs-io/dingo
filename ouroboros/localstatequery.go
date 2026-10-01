@@ -34,7 +34,7 @@ import (
 // against an untrusted remote peer, and relaxing them for every NtC
 // connection regardless of reachability would let any client that can reach
 // that address hold a connection open indefinitely and grow its reassembly
-// buffer to MaxReadBufferSize (blinklabs-io/dingo#4183 review).
+// buffer to MaxReadBufferSize.
 func (o *Ouroboros) localstatequeryServerConnOpts(
 	trusted bool,
 ) []olocalstatequery.LocalStateQueryOptionFunc {
@@ -62,8 +62,7 @@ func (o *Ouroboros) localstatequeryServerConnOpts(
 		// for the same reason as the mux timeout: LocalStateQuery has no
 		// protocol-level timeout at all (Ouroboros Network Specification
 		// section 3.13.4), and a verified-local-only NtC channel is one
-		// where a slow-but-legitimate reply must not be killed either
-		// (blinklabs-io/dingo#4082).
+		// where a slow-but-legitimate reply must not be killed either.
 		//
 		// MaxReadBufferSize likewise overrides gouroboros' default 16MB
 		// cap on a reassembled multi-segment reply: confirmed live that a
@@ -118,7 +117,7 @@ func (o *Ouroboros) instrumentLocalstatequeryRelease(
 }
 
 // localstatequeryServerAcquire records the point the client asked to pin
-// this connection's LocalStateQuery session to (blinklabs-io/dingo#382).
+// this connection's LocalStateQuery session to.
 // AcquireSpecificPoint's slot AND hash are both recorded -- hash matters
 // because identifying a point by slot alone is ambiguous across a rollback
 // (a fork switch can leave a different block at the same slot than the one
@@ -165,8 +164,8 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// AcquireFailure reply (gouroboros' handleAcquire/handleReAcquire
 		// both translate ErrAcquireFailurePointNotOnChain/PointTooOld into
 		// one), but a rejection surfacing later, from the Query callback,
-		// has no such path and tears down the whole connection instead
-		// (blinklabs-io/dingo#4156). This point is deliberately not yet
+		// has no such path and tears down the whole connection instead.
+		// This point is deliberately not yet
 		// recorded in localstatequeryAcquiredPoints when validation
 		// fails, so a client that ignores the failure and queries anyway
 		// keeps whatever point (or lack of one) it had before this call.
@@ -176,10 +175,10 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// already unanswerable by a specific query type with its own,
 		// stricter retention floor (UTxO whole/by-ref, stake/pool
 		// distribution, current protocol parameters at a historical
-		// epoch) -- this hits the exact same connection-killing gap #4156
-		// fixed for the on-chain check alone, just for a different,
+		// epoch) -- this hits the exact same connection-killing gap the
+		// on-chain check alone already closes, just for a different,
 		// retention-based rejection reason
-		// (blinklabs-io/dingo#382 protocol-compliance finding).
+		// (a protocol-compliance requirement).
 		// VerifyPointQueryable's own doc comment covers verifyPointOnChain
 		// too, so this subsumes VerifyPointOnChain rather than needing
 		// both checks run separately.

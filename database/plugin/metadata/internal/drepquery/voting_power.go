@@ -171,8 +171,8 @@ func VotingPowerBatchSQL(dialectName string, expiryEpoch uint64) string {
 // inner subquery starts from the small, indexed set of accounts delegated to
 // the requested drep_type(s) and joins outward to utxo (the account-first
 // shape VotingPowerBatchSQL already uses), instead of scanning every live
-// utxo row and probing account with a correlated EXISTS per row. See
-// blinklabs-io/dingo#4364: on a live preview node with 2.86M live utxo rows
+// utxo row and probing account with a correlated EXISTS per row. On a live
+// preview node with 2.86M live utxo rows
 // and ~4,610 drep-delegated accounts, the correlated-EXISTS shape cost
 // 620-650ms per call versus 16-35ms for this shape, with byte-identical
 // results.

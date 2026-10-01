@@ -953,7 +953,7 @@ func parseMySQLDropIndexStatement(statement string) (string, string, bool) {
 // isSQLiteDDLAlreadyAppliedOnConn's ADD COLUMN handling: it reports whether
 // an ALTER TABLE ... DROP COLUMN expand statement failed only because a
 // previous run of the same expand phase already dropped it. Needed once a
-// migration removes rather than adds a column (dingo#4464 asset.name_hex was
+// migration removes rather than adds a column (asset.name_hex was
 // the first).
 func isSQLiteDropColumnAlreadyAppliedOnConn(
 	ctx context.Context,
