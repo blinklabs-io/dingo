@@ -5003,10 +5003,23 @@ blockfetch latency, and connection ID break the tie in place of the Praos
 comparison. `ChainSelector.SelectedTip` returns the selected
 peer's tip truncated at the limit.
 
-The limit constrains which candidate chain selection prefers. It is not an
-ingress gate: `ShouldApplyIngress` does not consult it, so headers a peer
-delivers past the limit are still handed to the ledger. The limit is exported as
-the `dingo_chainselection_loe_block_number` and
+The limit also gates ledger ingress. After a header's tip is observed and
+before it is handed to the ledger, the ChainSync roll-forward callback calls
+`ChainSelector.AwaitEagernessLimit` (wired as
+`OuroborosConfig.ChainsyncAwaitEagerness`). A header numbered past the limit
+blocks that peer's callback, which pauses only its header stream: nothing is
+dropped and the peer's cursor does not move, so the header is delivered once
+the limit admits it. The wait re-evaluates every 100ms because the fallback
+limit follows the applied ledger tip, which has no change notification, and it
+returns when the connection's ChainSync client stops. The header's sender
+always counts as a candidate, even when stale, and a header from an untracked
+peer is admitted, so a lone peer is never held back. The limit does not hold
+back a rollback. Two candidates that both run more than `k` past their fork
+point each pause at the limit; the pause ends when either candidate is
+dropped or goes stale. The pause is not charged against the Limit on
+Patience.
+
+The limit is exported as the `dingo_chainselection_loe_block_number` and
 `dingo_chainselection_loe_intersection_slot` gauges (0 while inactive).
 
 #### Anti-flap incumbent pin

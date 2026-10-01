@@ -15,8 +15,11 @@
 package chainselection
 
 import (
+	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -224,4 +227,162 @@ func TestLimitOnEagernessIndependentOfCandidateOrder(t *testing.T) {
 	assert.False(t, first.Intersected,
 		"C retains no point A holds, so no point is common to every fragment")
 	assert.Equal(t, uint64(5+loeTestK), first.BlockNumber)
+}
+
+// awaitAsync runs AwaitEagernessLimit on its own goroutine and reports its
+// result on the returned channel.
+func awaitAsync(
+	ctx context.Context,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	block uint64,
+) <-chan error {
+	return awaitAsyncApplied(ctx, cs, connId, block, nil)
+}
+
+func awaitAsyncApplied(
+	ctx context.Context,
+	cs *ChainSelector,
+	connId ouroboros.ConnectionId,
+	block uint64,
+	applied func() ochainsync.Tip,
+) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		done <- cs.AwaitEagernessLimit(ctx, connId, block, applied)
+	}()
+	return done
+}
+
+func requireStillBlocked(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		t.Fatalf("header past the limit was admitted (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func requireAdmitted(t *testing.T, done <-chan error) {
+	t.Helper()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("header within the limit was not admitted")
+	}
+}
+
+// A and B share one chain, A far ahead. The intersection is B's head, so a
+// header of A's more than k past it waits until B catches up.
+func TestAwaitEagernessLimitHoldsHeaderPastLimitUntilLimitAdvances(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 20)
+	feedLoEChain(cs, b, "c", 1, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	require.Equal(t, uint64(12+loeTestK), cs.EagernessLimit().BlockNumber)
+
+	requireAdmitted(t, awaitAsync(t.Context(), cs, a, 12+loeTestK))
+
+	done := awaitAsync(t.Context(), cs, a, 12+loeTestK+1)
+	requireStillBlocked(t, done)
+
+	feedLoEChain(cs, b, "c", 13, 13)
+	requireAdmitted(t, done)
+}
+
+func TestAwaitEagernessLimitAdmitsLoneCandidate(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	feedLoEChain(cs, a, "c", 1, 40)
+	cs.SetLocalTip(loeTip("c", 10))
+	requireAdmitted(t, awaitAsync(t.Context(), cs, a, 40))
+}
+
+// The requester must count as a candidate even when staleness would drop it,
+// or a lone peer whose last header lies past localTip+k waits forever.
+func TestAwaitEagernessLimitAdmitsLoneStaleRequester(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:       true,
+		SecurityParam:     loeTestK,
+		StaleTipThreshold: time.Nanosecond,
+	})
+	a := newTestConnectionId(1)
+	feedLoEChain(cs, a, "c", 1, 40)
+	cs.SetLocalTip(loeTip("c", 10))
+	requireAdmitted(t, awaitAsync(t.Context(), cs, a, 40))
+}
+
+func TestAwaitEagernessLimitAdmitsOutsideGenesisMode(t *testing.T) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   false,
+		SecurityParam: loeTestK,
+	})
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 40)
+	feedLoEChain(cs, b, "c", 1, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	requireAdmitted(t, awaitAsync(t.Context(), cs, a, 40))
+}
+
+func TestAwaitEagernessLimitReturnsOnContextCancel(t *testing.T) {
+	t.Parallel()
+	cs, a, _ := newLoEScenario(true, 20, 12)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := awaitAsync(ctx, cs, a, 20)
+	requireStillBlocked(t, done)
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(10 * time.Second):
+		t.Fatal("wait did not return after cancellation")
+	}
+}
+
+// With no common point the limit is the applied tip plus k. The selector's own
+// local tip is refreshed only periodically, so the wait must follow the live
+// applied tip it is given or a paused peer would wait out that interval.
+func TestAwaitEagernessLimitFollowsLiveLocalTip(t *testing.T) {
+	t.Parallel()
+	var applied atomic.Uint64
+	applied.Store(10)
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: loeTestK,
+	})
+	appliedTip := func() ochainsync.Tip {
+		return loeTip("c", applied.Load())
+	}
+	a := newTestConnectionId(1)
+	b := newTestConnectionId(2)
+	feedLoEChain(cs, a, "c", 1, 10)
+	feedLoEChain(cs, b, "c", 1, 10)
+	feedLoEChain(cs, a, "a", 11, 40)
+	feedLoEChain(cs, b, "b", 11, 12)
+	cs.SetLocalTip(loeTip("c", 10))
+	require.False(t, cs.EagernessLimit().Intersected)
+	require.Equal(t, uint64(10+loeTestK), cs.EagernessLimit().BlockNumber)
+
+	done := awaitAsyncApplied(t.Context(), cs, a, 40, appliedTip)
+	requireStillBlocked(t, done)
+
+	applied.Store(40 - loeTestK)
+	requireAdmitted(t, done)
 }

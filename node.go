@@ -1280,6 +1280,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
 		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
 		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:      n.chainsyncAwaitEagerness,
 		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
 		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,

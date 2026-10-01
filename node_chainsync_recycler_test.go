@@ -15,6 +15,8 @@
 package dingo
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -26,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,4 +291,55 @@ func TestWaitChainsyncStallRecyclerIsSafeWithoutRecycler(t *testing.T) {
 	}
 	// A node that failed before wiring the recycler must still shut down.
 	n.waitChainsyncStallRecycler()
+}
+
+func TestChainsyncAwaitEagernessDelegatesToChainSelector(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	require.NoError(
+		t,
+		n.chainsyncAwaitEagerness(t.Context(), newNodeTestConnId(1), 99, nil),
+		"without a chain selector no limit applies",
+	)
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:   true,
+			SecurityParam: 5,
+		},
+	)
+	tipAt := func(prefix string, block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				block*100,
+				[]byte(fmt.Sprintf("%s%d", prefix, block)),
+			),
+			BlockNumber: block,
+		}
+	}
+	a := newNodeTestConnId(1)
+	b := newNodeTestConnId(2)
+	for block := uint64(1); block <= 20; block++ {
+		n.chainSelector.UpdatePeerTip(a, tipAt("c", block), nil)
+	}
+	for block := uint64(1); block <= 12; block++ {
+		n.chainSelector.UpdatePeerTip(b, tipAt("c", block), nil)
+	}
+	n.chainSelector.SetLocalTip(tipAt("c", 10))
+
+	require.NoError(
+		t,
+		n.chainsyncAwaitEagerness(t.Context(), a, 17, nil),
+		"a header within k of the shared point is admitted",
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(
+		t,
+		n.chainsyncAwaitEagerness(ctx, a, 18, nil),
+		context.Canceled,
+		"a header past the limit waits and honors cancellation",
+	)
 }

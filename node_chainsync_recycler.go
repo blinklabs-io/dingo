@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 const (
@@ -99,6 +100,25 @@ func (n *Node) chainsyncApplyEligible(
 		return true
 	}
 	return n.chainSelector.ShouldApplyIngress(connId)
+}
+
+// chainsyncAwaitEagerness pauses a peer's header stream while its next header
+// is past the Limit on Eagerness. With no chain selector wired it never waits.
+func (n *Node) chainsyncAwaitEagerness(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) error {
+	if n.chainSelector == nil {
+		return nil
+	}
+	return n.chainSelector.AwaitEagernessLimit(
+		ctx,
+		connId,
+		blockNumber,
+		appliedTip,
+	)
 }
 
 func (n *Node) isChainsyncIngressEligible(

@@ -368,6 +368,19 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncAwaitEagerness blocks until a header numbered blockNumber from
+	// connId is within the Limit on Eagerness, and returns an error if ctx is
+	// cancelled first. The roll-forward callback blocks on it after the header's
+	// tip has been observed and before the header is handed to the ledger, so a
+	// peer running past the limit is paused rather than having headers dropped.
+	// appliedTip, when non-nil, reads the live applied ledger tip. When the
+	// hook is nil, no limit applies.
+	ChainsyncAwaitEagerness func(
+		ctx context.Context,
+		connId ouroboros.ConnectionId,
+		blockNumber uint64,
+		appliedTip func() ochainsync.Tip,
+	) error
 	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
 	// handled the observation synchronously, in which case the caller MUST NOT
 	// also publish the async PeerTipUpdateEvent (avoids a double update). This

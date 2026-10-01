@@ -16,8 +16,11 @@ package chainselection
 
 import (
 	"bytes"
+	"context"
 	"slices"
+	"time"
 
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -45,7 +48,7 @@ type EagernessLimit struct {
 func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
-	return cs.computeEagernessLimitLocked()
+	return cs.computeEagernessLimitLocked(nil, cs.localTip)
 }
 
 // computeEagernessLimitLocked derives the limit from the candidate fragments of
@@ -62,18 +65,32 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 // candidates can share no retained point; the limit then also falls back to
 // the local tip, which keeps it conservative without needing history older
 // than the fragments hold.
-func (cs *ChainSelector) computeEagernessLimitLocked() EagernessLimit {
+//
+// localTip is the applied tip the fallback limit is measured from. include
+// names a peer that counts as a candidate even when it is stale or
+// ineligible, so a header's own sender is never held back by a candidate set
+// that has dropped it. Pass nil for the selection view.
+func (cs *ChainSelector) computeEagernessLimitLocked(
+	include *ouroboros.ConnectionId,
+	localTip ochainsync.Tip,
+) EagernessLimit {
 	if cs.mode != SelectionModeGenesis || cs.securityParam == 0 {
 		return EagernessLimit{}
 	}
 	limit := EagernessLimit{
-		Active:      true,
-		BlockNumber: safeAddUint64(cs.localTip.BlockNumber, cs.securityParam),
+		Active: true,
+		BlockNumber: safeAddUint64(
+			localTip.BlockNumber,
+			cs.securityParam,
+		),
 	}
 	var fragments []CandidateFragment
 	for connId, peerTip := range cs.peerTips {
 		if peerTip.awaitingFirstHeader ||
-			len(peerTip.observedTipHistory) == 0 ||
+			len(peerTip.observedTipHistory) == 0 {
+			continue
+		}
+		if (include == nil || *include != connId) &&
 			!cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
 			continue
 		}
@@ -139,7 +156,7 @@ func (cs *ChainSelector) SelectedTip() (ochainsync.Tip, bool) {
 		return ochainsync.Tip{}, false
 	}
 	tip := peerTip.SelectionTip()
-	limit := cs.computeEagernessLimitLocked()
+	limit := cs.computeEagernessLimitLocked(nil, cs.localTip)
 	if !limit.Active || tip.BlockNumber <= limit.BlockNumber {
 		return cloneObservedTip(tip), true
 	}
@@ -158,7 +175,7 @@ func (cs *ChainSelector) beginEagernessLocked() bool {
 	if cs.eagerness != nil {
 		return false
 	}
-	limit := cs.computeEagernessLimitLocked()
+	limit := cs.computeEagernessLimitLocked(nil, cs.localTip)
 	cs.eagerness = &limit
 	return true
 }
@@ -195,4 +212,72 @@ func (cs *ChainSelector) candidateFragmentCapacityLocked() uint64 {
 		capacity = safeAddUint64(cs.securityParam, capacity)
 	}
 	return capacity
+}
+
+// eagernessPollInterval is how often AwaitEagernessLimit re-evaluates the
+// limit. The limit also moves with the applied ledger tip, which has no change
+// notification, so waiting on selector events alone would miss it.
+const eagernessPollInterval = 100 * time.Millisecond
+
+// AwaitEagernessLimit blocks until a header numbered blockNumber, delivered by
+// connId, is within the Limit on Eagerness, and returns the context's error if
+// it is cancelled first. It returns immediately when the cap is inactive, when
+// connId is not a tracked peer, or when the header is within the limit.
+//
+// appliedTip, when non-nil, supplies the applied ledger tip that the fallback
+// limit is measured from and is re-read on every check. A running node gives
+// the selector its local tip only at startup and then on the stall recycler's
+// tick, which would hold a paused peer for the length of that interval; nil
+// uses the selector's own local tip. The
+// sender counts as a candidate even when stale, so a lone peer is never held
+// back by the limit that its own fragment defines.
+//
+// The caller's chainsync callback blocks here, which stops that peer's header
+// stream without discarding a header: the peer's cursor stays put and the
+// header is delivered once the limit allows it.
+func (cs *ChainSelector) AwaitEagernessLimit(
+	ctx context.Context,
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) error {
+	if cs.withinEagernessLimit(connId, blockNumber, appliedTip) {
+		return nil
+	}
+	ticker := time.NewTicker(eagernessPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if cs.withinEagernessLimit(
+				connId, blockNumber, appliedTip,
+			) {
+				return nil
+			}
+		}
+	}
+}
+
+func (cs *ChainSelector) withinEagernessLimit(
+	connId ouroboros.ConnectionId,
+	blockNumber uint64,
+	appliedTip func() ochainsync.Tip,
+) bool {
+	// Read outside the lock: the ledger tip is the ledger's to guard.
+	var applied ochainsync.Tip
+	if appliedTip != nil {
+		applied = appliedTip()
+	}
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	if _, tracked := cs.peerTips[connId]; !tracked {
+		return true
+	}
+	if appliedTip == nil {
+		applied = cs.localTip
+	}
+	limit := cs.computeEagernessLimitLocked(&connId, applied)
+	return !limit.Active || blockNumber <= limit.BlockNumber
 }
