@@ -23,6 +23,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/dijkstrabatchfixture"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -388,6 +390,126 @@ func TestDijkstraBatchChildProposalParentChain(t *testing.T) {
 	require.Equal(t, child1ID.Bytes(), got.ParentTxHash)
 	require.NotNil(t, got.ParentActionIdx)
 	require.Equal(t, uint32(0), *got.ParentActionIdx)
+}
+
+func TestDijkstraBatchSharedGovernanceFixture(t *testing.T) {
+	t.Parallel()
+	fixture, err := dijkstrabatchfixture.New()
+	require.NoError(t, err)
+	liveLedger, liveDB := newSubGovLedger(t)
+	require.NoError(t, applySubGovBlock(t, liveLedger, 1, fixture.Transaction))
+	liveState := requireSharedSubGovState(t, liveDB, fixture)
+
+	replayLedger, replayDB := newSubGovLedger(t)
+	require.NoError(t, replaySubGovBlock(t, replayLedger, 1, fixture.Transaction))
+	replayState := requireSharedSubGovState(t, replayDB, fixture)
+	require.Equal(t, liveState, replayState)
+}
+
+type sharedSubGovState struct {
+	Root      models.GovernanceProposal
+	Child     models.GovernanceProposal
+	RootVotes []*models.GovernanceVote
+}
+
+func requireSharedSubGovState(
+	t *testing.T,
+	db *database.Database,
+	fixture dijkstrabatchfixture.Fixture,
+) sharedSubGovState {
+	t.Helper()
+	root := requireSubGovProposal(t, db, fixture.ProposalIDs[0])
+	child := requireSubGovProposal(t, db, fixture.ProposalIDs[1])
+	require.Equal(t, uint8(common.GovActionTypeNoConfidence), root.ActionType)
+	require.Equal(t, uint8(common.GovActionTypeNoConfidence), child.ActionType)
+	require.Equal(t, uint64(12), root.ProposedEpoch)
+	require.Equal(t, uint64(12), child.ProposedEpoch)
+	require.Empty(t, root.ParentTxHash)
+	require.Equal(t, fixture.RootID.Bytes(), child.ParentTxHash)
+	require.NotNil(t, child.ParentActionIdx)
+	require.Zero(t, *child.ParentActionIdx)
+	votes, err := db.GetGovernanceVotes(root.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 2)
+	voters := make(map[byte]bool, len(votes))
+	var credentials [][]byte
+	for _, vote := range votes {
+		require.Equal(t, uint8(models.VoterTypeDRep), vote.VoterType)
+		require.Zero(t, vote.VoterCredentialTag)
+		require.Equal(t, uint8(models.VoteYes), vote.Vote)
+		require.Nil(t, vote.DeletedSlot)
+		voters[vote.VoterCredential[0]] = true
+		require.Equal(t, bytes.Repeat([]byte{vote.VoterCredential[0]}, 28), vote.VoterCredential)
+		credentials = append(credentials, vote.VoterCredential)
+	}
+	require.Equal(t, map[byte]bool{0x41: true, 0x42: true}, voters)
+	require.ElementsMatch(t, [][]byte{
+		bytes.Repeat([]byte{0x41}, 28),
+		bytes.Repeat([]byte{0x42}, 28),
+	}, credentials)
+	return sharedSubGovState{Root: *root, Child: *child, RootVotes: votes}
+}
+
+func replaySubGovBlock(
+	t *testing.T,
+	ls *LedgerState,
+	slot uint64,
+	tx *dijkstra.DijkstraTransaction,
+) error {
+	t.Helper()
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber:  slot,
+					Slot:         slot,
+					ProtoVersion: babbage.BabbageProtoVersion{Major: 12},
+				},
+			},
+		},
+		BlockBody: dijkstra.DijkstraBlockBody{
+			Transactions: []dijkstra.DijkstraTransaction{*tx},
+		},
+	}
+	bodyCbor, err := block.BlockBody.MarshalCBOR()
+	require.NoError(t, err)
+	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+	blockHash := bytes.Repeat([]byte{byte(slot)}, 32)
+	offsets, err := database.NewBlockIndexer(slot, blockHash).ComputeOffsets(
+		blockCbor,
+		block,
+	)
+	require.NoError(t, err)
+	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		delta, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: slot, Hash: blockHash},
+			block,
+			false,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.DijkstraEraDesc,
+			ls.currentPParams,
+			nil,
+			0,
+			0,
+			false,
+		)
+		if err != nil {
+			return err
+		}
+		if delta == nil {
+			return nil
+		}
+		defer delta.Release()
+		return delta.apply(ls, txn)
+	})
 }
 
 // A child DRep registration and a sibling child's vote both apply. The stored
