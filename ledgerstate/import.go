@@ -501,6 +501,91 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	// Local replay before this catch-up/repair import ran applied blocks in
+	// (anchor, localTip] and, if that range crossed an epoch boundary, ran
+	// that boundary's rollover: it wrote not just the epoch row but the
+	// reward-credit round, reward outputs, block nonces, and network state
+	// the rollover produced. Delete all of that residue above the anchor
+	// before any import phase below writes its own trusted state, so a
+	// re-triggered rollover after import does not collide with it
+	// (dingo#4876).
+	//
+	// epoch: the ledger's current-epoch pointer is set to the last row in the
+	// epoch table (LedgerState.setEpochCache), not to the epoch containing
+	// the import's own tip. A surviving later-epoch row written by local
+	// replay makes that pointer read as already past an epoch boundary
+	// inside the gap, so the boundary's rollover (reward distribution,
+	// POOLREAP refunds, MIR, governance enactment, nonce bookkeeping) is
+	// never re-triggered after the import.
+	//
+	// reward state: a prior rollover's reward-credit round
+	// (reward_credit_round, unfolded reward_pool_output/
+	// reward_account_output rows) survives alongside it. Without clearing
+	// it, a re-triggered rollover for the same boundary hits
+	// saveStakeRewardOutputs's "reward outputs for epoch N are a credited
+	// round" guard and halts the ledger pipeline.
+	// DeleteRewardStateAfterSlot unfolds (not reverses) any already-folded
+	// output before dropping the round marker, the same non-arithmetic
+	// primitive ordinary chain rollback uses, so it carries none of
+	// DeleteAccountRewardsAfterSlot's underflow hazard against a
+	// previously-imported balance.
+	//
+	// block nonces / network state / network donations: a rollover computes
+	// and persists the new epoch's nonce and can move accumulated donations
+	// into network_state.treasury at the boundary. Surviving rows there are
+	// stale once the epoch row above is swept, for the same reason.
+	//
+	// Scoped to these tables rather than running TruncateAfterSlot's full
+	// rollback sweep: the import writes no certificate, pool, or
+	// protocol-parameter row above the anchor for that sweep's other
+	// deletes to interact with, and UTxO rollback is handled separately
+	// (dingo#4770). DeleteAccountRewardsAfterSlot and the
+	// account_reward_delta/account_withdrawal_witness journal it reverses by
+	// subtracting a stored amount are deliberately excluded: on a database
+	// that already went through one pre-fix import, the stored balance may
+	// not include the post-anchor credit at all, so subtracting it
+	// underflows. This sweep leaves that journal in place; see DATABASE.md's
+	// epoch row for the case that leaves uncorrected.
+	//
+	// Run unconditionally -- on both the plain catch-up path
+	// (Reconcile: true) and the legacy reward-repair path -- and ahead of
+	// the resume-checkpoint phase guards below, so a resumed import
+	// re-applies it. Every row the import itself writes below is stamped at
+	// or before the anchor slot (reward ADA pots, imported pool block
+	// counts, the tip's own block-nonce checkpoint, network state), so this
+	// sweep cannot delete the import's own trusted state regardless of where
+	// in the import it runs or how many times a resumed import repeats it.
+	if err := cfg.Database.DeleteEpochsAfterSlot(slot, nil); err != nil {
+		return fmt.Errorf(
+			"deleting post-anchor epoch rows: %w", err,
+		)
+	}
+	if err := cfg.Database.DeleteRewardStateAfterSlot(slot, nil); err != nil {
+		return fmt.Errorf(
+			"deleting post-anchor reward state: %w", err,
+		)
+	}
+	if err := cfg.Database.DeleteBlockNoncesAfterPoint(
+		ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+		nil,
+	); err != nil {
+		return fmt.Errorf(
+			"deleting post-anchor block nonces: %w", err,
+		)
+	}
+	if err := cfg.Database.DeleteNetworkStateAfterSlot(slot, nil); err != nil {
+		return fmt.Errorf(
+			"deleting post-anchor network state: %w", err,
+		)
+	}
+	if err := cfg.Database.DeleteNetworkDonationsAfterSlot(
+		slot, nil,
+	); err != nil {
+		return fmt.Errorf(
+			"deleting post-anchor network donations: %w", err,
+		)
+	}
+
 	// Import UTxOs (from UTxO table file or inline data)
 	if !models.IsPhaseCompleted(
 		completedPhase,
