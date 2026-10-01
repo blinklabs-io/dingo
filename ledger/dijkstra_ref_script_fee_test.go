@@ -83,12 +83,11 @@ func dijkstraRefFeeParams() *gdijkstra.DijkstraProtocolParameters {
 }
 
 type dijkstraRefFeeFixture struct {
-	inputs   []lcommon.Utxo
-	tx       func(t *testing.T, fee uint64) *gdijkstra.DijkstraTransaction
-	minFee   uint64
-	refSize  uint64
-	spendIn  shelley.ShelleyTransactionInput
-	refInput shelley.ShelleyTransactionInput
+	inputs  []lcommon.Utxo
+	tx      func(t *testing.T, fee uint64) *gdijkstra.DijkstraTransaction
+	minFee  uint64
+	refSize uint64
+	spendIn shelley.ShelleyTransactionInput
 }
 
 func newDijkstraRefFeeFixture(t *testing.T) *dijkstraRefFeeFixture {
@@ -170,9 +169,8 @@ func newDijkstraRefFeeFixture(t *testing.T) *dijkstraRefFeeFixture {
 		},
 		minFee: dijkstraRefFeeBase +
 			dijkstraTieredRefScriptFee(dijkstraRefFeeScript),
-		refSize:  dijkstraRefFeeScript,
-		spendIn:  spendIn,
-		refInput: refInput,
+		refSize: dijkstraRefFeeScript,
+		spendIn: spendIn,
 	}
 }
 
@@ -210,7 +208,6 @@ func newDijkstraRefFeeLedgerState(
 
 func requireDijkstraFeeTooSmall(t *testing.T, err error) {
 	t.Helper()
-	require.Error(t, err)
 	var feeErr shelley.FeeTooSmallUtxoError
 	require.ErrorAs(t, err, &feeErr)
 }
