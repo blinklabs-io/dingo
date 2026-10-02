@@ -17,6 +17,8 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 )
 
@@ -208,4 +210,14 @@ func (b *rowBatch) flush(
 		}
 	}
 	return nil
+}
+
+// clone retains the queue at a transaction or savepoint boundary. Mutation
+// replaces row slices but never changes individual SQL argument values.
+func (b *rowBatch) clone() rowBatch {
+	ret := rowBatch{queued: maps.Clone(b.queued), entries: slices.Clone(b.entries)}
+	for i := range ret.entries {
+		ret.entries[i].rows = slices.Clone(ret.entries[i].rows)
+	}
+	return ret
 }

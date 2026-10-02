@@ -2931,6 +2931,13 @@ Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `le
 
 ### Database Models
 
+SQLStore batch accumulators stage API detail rows until `FlushBatch`. The SQL
+transaction owns queue checkpoints for each attached accumulator: rollback or a
+failed commit restores its initial queue, and savepoint rollback restores the
+queue at that savepoint. Transaction-scoped insert statements close when their
+SQL transaction finishes, including the implicit transaction path.
+
+
 Key models in `database/models/`:
 
 | Model | Purpose |

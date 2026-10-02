@@ -1055,8 +1055,10 @@ bind-parameter limit, inside the caller's transaction. Until then a re-applied
 transaction's flushed rows are cleared but its replacement rows are not yet
 visible; nothing reads these tables inside a batch window, and the window
 commits only after the flush. A write that fails queues nothing, and
-re-applying a transaction inside a window replaces its queued rows. A caller
-that rolls back its transaction must `Reset` the accumulator. `SetTransaction`
+re-applying a transaction inside a window replaces its queued rows. Caller-owned transaction rollback automatically restores the accumulator
+queue to its pre-transaction checkpoint; rollback to a savepoint restores
+that savepoint's queue. Rows queued by earlier committed transactions remain
+available. A failed SQL commit also restores the initial queue. `SetTransaction`
 builds the same rows and writes them before it returns. UTxO spends and
 certificate rows stay per statement: a later transaction in the same window
 reads them for double-spend detection, live-stake deltas, and certificate

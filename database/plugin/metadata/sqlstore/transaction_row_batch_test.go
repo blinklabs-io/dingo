@@ -531,3 +531,51 @@ func TestMetadataLabelRowsKeepLastValueOfRepeatedLabel(t *testing.T) {
 	require.Equal(t, []byte{0x02}, got[0][3])
 	require.Equal(t, []byte{0x03}, got[1][3])
 }
+
+func TestBatchedRowsRestoreQueueOnCallerRollback(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+	retained, point := witnessTx(t, 7, 2)
+	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, nil))
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	discarded, point := witnessTx(t, 9, 3)
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, txn.Rollback())
+	require.NoError(t, store.FlushBatch(acc, nil))
+	require.Equal(t, 2, keyWitnessCount(t, store, nil))
+}
+
+func TestBatchedRowsRestoreQueueOnSavepointRollback(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	retained, point := witnessTx(t, 7, 2)
+	require.NoError(t, store.SetTransactionBatchedHistorical(retained, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, txn.(*sqlTxn).SavePoint("retained"))
+	discarded, point := witnessTx(t, 9, 3)
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, txn.(*sqlTxn).RollbackTo("retained"))
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.Equal(t, 2, keyWitnessCount(t, store, txn))
+}
+
+func TestBatchedRowsResetOnRollbackBeforeFirstSavepointBinding(t *testing.T) {
+	t.Parallel()
+	store := newAPIModeSQLiteStore(t, nil)
+	acc := store.NewBatchAccumulator()
+	defer acc.Reset()
+	txn := store.Transaction(context.Background())
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, txn.(*sqlTxn).SavePoint("empty"))
+	discarded, point := witnessTx(t, 9, 3)
+	require.NoError(t, store.SetTransactionBatchedHistorical(discarded, point, 0, nil, true, true, acc, txn))
+	require.NoError(t, txn.(*sqlTxn).RollbackTo("empty"))
+	require.NoError(t, store.FlushBatch(acc, txn))
+	require.Zero(t, keyWitnessCount(t, store, txn))
+}

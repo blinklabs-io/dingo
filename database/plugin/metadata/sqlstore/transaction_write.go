@@ -122,11 +122,15 @@ func (a *transactionBatchAccumulator) insertTransaction(
 	return uint(id), nil
 }
 
-func (a *transactionBatchAccumulator) Reset() {
+func (a *transactionBatchAccumulator) resetStatement() {
 	if a.transactionInsert != nil {
 		_ = a.transactionInsert.Close()
 		a.transactionInsert = nil
 	}
+}
+
+func (a *transactionBatchAccumulator) Reset() {
+	a.resetStatement()
 	a.rows.reset()
 }
 
@@ -144,6 +148,11 @@ func (s *Store) FlushBatch(
 			"sqlstore FlushBatch: wrong accumulator type %T",
 			accumulator,
 		)
+	}
+	if transaction, ok := txn.(*sqlTxn); ok {
+		if err := transaction.bindBatch(batched); err != nil {
+			return err
+		}
 	}
 	if !batched.rows.empty() {
 		if err := s.withWriteTransaction(
@@ -329,6 +338,14 @@ func (s *Store) setTransactionWithAccumulator(
 		}
 	}
 	batchedAccumulator, _ := accumulator.(*transactionBatchAccumulator)
+	if batchedAccumulator != nil && txn == nil {
+		defer batchedAccumulator.resetStatement()
+	}
+	if transaction, ok := txn.(*sqlTxn); ok && batchedAccumulator != nil {
+		if err := transaction.bindBatch(batchedAccumulator); err != nil {
+			return err
+		}
+	}
 	// Detail rows are staged here and reach the accumulator only once the
 	// write succeeds, so a failed write cannot leave rows queued for a
 	// transaction that was rolled back, nor drop the rows an earlier
