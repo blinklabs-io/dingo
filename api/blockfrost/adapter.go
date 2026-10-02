@@ -2256,9 +2256,11 @@ func (a *NodeAdapter) PoolsExtended() (
 	// blocks_minted (lifetime): one query across every active pool,
 	// keyed by pool, exactly like CountPoolBlocksInSlotRange is already
 	// used for pool detail (adapter_pool_detail.go) -- not a per-pool
-	// query. Undercounts on a Mithril-bootstrapped node; see DATABASE.md.
-	blocksMintedByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
-		poolHashes, 0, noSlotUpperBound, txn.Metadata(),
+	// query. On a Mithril-bootstrapped node it is a lower bound: it adds the
+	// snapshot's counts for the anchor's epoch and the one before, and epochs
+	// older than those were never held; see DATABASE.md.
+	blocksMintedByPool, err := database.CountPoolBlocksLifetime(
+		db.Metadata(), txn.Metadata(), poolHashes, noSlotUpperBound,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("count lifetime blocks for pools: %w", err)

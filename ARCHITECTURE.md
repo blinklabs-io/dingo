@@ -8580,8 +8580,8 @@ correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
-one query per pool: `CountPoolBlocksInSlotRange` returns every active pool's
-`blocks_minted` keyed by pool, and `GetOffchainMetadataBatch` returns every
+one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's
+`blocks_minted` keyed by pool (observed blocks plus a Mithril snapshot's imported counts), and `GetOffchainMetadataBatch` returns every
 pool's cached off-chain document keyed by URL, supplying the nullable
 `metadata` object. See the Off-chain Metadata Worker section above for the
 metadata half and DATABASE.md for both queries' index usage.
