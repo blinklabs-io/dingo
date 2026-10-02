@@ -15,28 +15,749 @@
 package ledger
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
+	"os"
+	"path/filepath"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const (
+	retentionNewEpoch            = uint64(4)
+	retentionRewardSnapshotEpoch = uint64(1)
+	retentionPerformanceEpoch    = uint64(2)
+	retentionPotsEpoch           = uint64(3)
+	retentionBoundarySlot        = uint64(400)
+)
+
+// seedRetentionRewardEpochs seeds the epoch rows, protocol parameters, and ADA
+// pots that reward application reads before it reaches the retention skip, so a
+// test that removes the skip fails inside the reward calculation rather than
+// earlier on missing epoch metadata.
+func seedRetentionRewardEpochs(t *testing.T, db *database.Database) {
+	t.Helper()
+	meta := db.Metadata()
+	pparams := &shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(0, 1),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+		ProtocolMinor:    0,
+	}
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+	for _, epoch := range []struct {
+		startSlot uint64
+		id        uint64
+	}{
+		{0, retentionRewardSnapshotEpoch},
+		{100, retentionPerformanceEpoch},
+		{200, retentionPotsEpoch},
+	} {
+		require.NoError(t, meta.SetEpoch(
+			epoch.startSlot, epoch.id, nil, nil, nil, nil,
+			eras.ShelleyEraDesc.Id, 1, 100, nil,
+		), "set epoch %d", epoch.id)
+	}
+	require.NoError(t, db.SetPParams(
+		pparamsCbor,
+		100,
+		retentionPerformanceEpoch,
+		eras.ShelleyEraDesc.Id,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        retentionPotsEpoch,
+		Reserves:     100_000_000,
+		CapturedSlot: 300,
+	}, nil))
+}
+
+// TestApplyStakeRewardsSkipsPrunedStakeInputs covers a retention interaction:
+// reward_ada_pots, reward_snapshot,
+// reward_pool_input and reward_pool_output are retained for the life of the
+// database while reward_stake_input is pruned to the rotation window, so an
+// aged-out epoch presents complete-looking pots and snapshot rows over an empty
+// credential set. Reward application must skip that epoch rather than hand
+// validateRewardCalculatorInputs an unreconcilable snapshot, whose error would
+// fail the whole epoch rollover.
+func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	poolKey := rewardCalcHash(0x11)
+	rewardAccount := rewardCalcHash(0x22)
+
+	seedRetentionRewardEpochs(t, db)
+
+	// Snapshot and pool input survive retention, and the snapshot still claims
+	// two delegators whose credential rows have aged out.
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            retentionRewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      retentionRewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
+	// reward_stake_input is deliberately absent: those rows aged out of the
+	// retention window.
+
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: rewardAccount,
+		Pool:       poolKey,
+		Active:     true,
+	}))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "aged-out stake inputs must skip reward application, not error")
+
+	// Nothing was credited and no outputs were persisted for the skipped epoch.
+	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Zero(
+		t,
+		uint64(account.Reward),
+		"skipped epoch must not credit rewards",
+	)
+
+	poolOutputs, err := meta.GetRewardPoolOutputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, poolOutputs, "skipped epoch must not persist pool outputs")
+
+	accountOutputs, err := meta.GetRewardAccountOutputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		accountOutputs,
+		"skipped epoch must not persist account outputs",
+	)
+
+	var deltas int64
+	require.NoError(t, rewardCalcSQLDB(t, db).QueryRow(
+		"SELECT COUNT(*) FROM account_reward_delta WHERE added_slot = ?",
+		retentionBoundarySlot,
+	).Scan(&deltas))
+	require.Zero(t, deltas, "skipped epoch must not record reward deltas")
+}
+
+// TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot guards the skip predicate
+// itself: an epoch that legitimately captured no delegators has an empty
+// credential set too, and must still reconcile as a normal (non-pruned)
+// snapshot rather than tripping the retention skip.
+func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	seedRetentionRewardEpochs(t, db)
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            retentionRewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 0,
+		TotalPoolCount:   0,
+		TotalDelegators:  0,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "an empty snapshot must reconcile normally, not error")
+}
+
+// seedPrunedStakeInputSnapshot seeds a mark snapshot and pool input that
+// survive retention over an empty reward_stake_input credential set -- the
+// same aged-out-epoch shape TestApplyStakeRewardsSkipsPrunedStakeInputs
+// seeds -- so a test can drive the retention skip without duplicating the
+// pool/account wiring at every call site.
+func seedPrunedStakeInputSnapshot(
+	t *testing.T,
+	db *database.Database,
+	poolKey, rewardAccount []byte,
+) {
+	t.Helper()
+	meta := db.Metadata()
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            retentionRewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      retentionRewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: rewardAccount,
+		Pool:       poolKey,
+		Active:     true,
+	}))
+	// reward_stake_input is deliberately absent: those rows aged out of the
+	// retention window.
+}
+
+// TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly proves the
+// retention skip tracked in is reported the same way its three
+// sibling skips in calculateStakeRewardApplication are, through
+// reportSkippedStakeRewards: counted, and logged with the permanent-shortfall
+// consequence spelled out. Before this fix the retention skip was the one
+// silent-by-comparison exception to what this file otherwise guards against
+// -- it logged
+// inline at Warn with a bare reason and no metric increment, so monitoring
+// built on the shared skippedStakeRewardRounds counter never saw this
+// specific permanent-reward-loss condition.
+func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedRetentionRewardEpochs(t, db)
+	seedPrunedStakeInputSnapshot(
+		t, db, rewardCalcHash(0x33), rewardCalcHash(0x44),
+	)
+
+	var logs bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "aged-out stake inputs must still skip, not error")
+
+	out := logs.String()
+	require.NotEmpty(t, out,
+		"the retention skip must be visible at the default log level, "+
+			"the same as its three sibling skips")
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(
+		t,
+		out,
+		"reward stake inputs for the snapshot epoch are no longer retained",
+	)
+	assert.Contains(t, out, "reward_snapshot_epoch=1")
+	assert.Contains(t, out, "snapshot_delegators=2")
+	// The consequence, not just the event -- see reportSkippedStakeRewards.
+	assert.Contains(t, out, "permanently")
+	assert.Contains(t, out, "basis was never persisted")
+}
+
+// TestSkippedPrunedStakeInputsSuppressedDuringPrecompute proves the retention
+// skip honors reportSkips like its three siblings in
+// calculateStakeRewardApplication. The opportunistic precompute pass reads the
+// same possibly-not-yet-retained inputs ahead of the real boundary and can
+// miss while the round is still unapplied -- reportSkips exists precisely so
+// that miss is not logged or counted as a skipped round the authoritative
+// call goes on to apply moments later.
+func TestSkippedPrunedStakeInputsSuppressedDuringPrecompute(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedRetentionRewardEpochs(t, db)
+	seedPrunedStakeInputSnapshot(
+		t, db, rewardCalcHash(0x55), rewardCalcHash(0x66),
+	)
+
+	var logs bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.calculateStakeRewardApplication(
+		txn,
+		retentionNewEpoch,
+		retentionBoundarySlot,
+		retentionBoundarySlot,
+		false,
+	)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, app)
+
+	assert.Empty(t, logs.String(),
+		"an opportunistic precompute miss must stay silent, like its three "+
+			"sibling skips, since the authoritative call still gets to apply "+
+			"the round")
+}
+
+type retentionReconstructionFixture struct {
+	ls                  *LedgerState
+	db                  *database.Database
+	ownerKey            []byte
+	delegatorKey        []byte
+	capturedStakeInputs []*models.RewardStakeInput
+}
+
+func seedRetentionReconstructionFixture(
+	t *testing.T,
+) retentionReconstructionFixture {
+	t.Helper()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+	poolHash := bytes.Repeat([]byte{0xd1}, 28)
+	ownerKey := bytes.Repeat([]byte{0x71}, 28)
+	delegatorKey := bytes.Repeat([]byte{0x72}, 28)
+
+	pool := &models.Pool{
+		PoolKeyHash:   poolHash,
+		VrfKeyHash:    make([]byte, 32),
+		Pledge:        5_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		RewardAccount: ownerKey,
+	}
+	reg := &models.PoolRegistration{
+		PoolKeyHash:   poolHash,
+		AddedSlot:     0,
+		Pledge:        5_000_000,
+		Cost:          340_000_000,
+		Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		VrfKeyHash:    make([]byte, 32),
+		RewardAccount: ownerKey,
+		Owners: []models.PoolRegistrationOwner{
+			{KeyHash: append([]byte(nil), ownerKey...)},
+		},
+	}
+	require.NoError(t, db.ImportPool(nil, pool, reg), "import pool")
+	for i, key := range [][]byte{ownerKey, delegatorKey} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: key,
+			Pool:       poolHash,
+			AddedSlot:  0,
+			Active:     true,
+		}), "create account %d", i)
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TxId:       bytes.Repeat([]byte{byte(0x10 + i)}, 32),
+			OutputIdx:  0,
+			StakingKey: key,
+			Amount:     types.Uint64(20_000_000),
+			AddedSlot:  0,
+		}), "create utxo %d", i)
+	}
+	require.NoError(t, db.AddAccountRewardByCredential(
+		0, ownerKey, 2_000_000, 10, bytes.Repeat([]byte{0xa1}, 32), nil,
+	))
+	require.NoError(t, db.AddAccountRewardByCredential(
+		0, delegatorKey, 3_000_000, 10, bytes.Repeat([]byte{0xa2}, 32), nil,
+	))
+
+	require.NoError(t, meta.SetEpoch(
+		0, 0, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	mgr := snapshot.NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        retentionRewardSnapshotEpoch,
+		BoundarySlot:    100,
+		EpochNonce:      []byte{0x0a, 0x0b},
+		ProtocolVersion: 7,
+		SnapshotSlot:    99,
+	}
+	captureTxn := db.Transaction(true)
+	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, meta.SetEpoch(
+		100, retentionRewardSnapshotEpoch, nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 100, captureTxn.Metadata(),
+	))
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(), captureTxn, evt,
+	))
+	require.NoError(t, captureTxn.Commit())
+
+	capturedStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(
+		t, capturedStakeInputs,
+		"the legitimate capture must have produced real per-credential rows",
+	)
+	require.NoError(t, meta.DeleteRewardStakeInputBeforeEpoch(
+		retentionRewardSnapshotEpoch+1, nil,
+	))
+	prunedStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(
+		t, prunedStakeInputs,
+		"reward_stake_input must actually be pruned for this test to be a "+
+			"real reconstruction",
+	)
+
+	seedRetentionRewardEpochs(t, db)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolHash)
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			poolID, i+1, 140+i, nil,
+		))
+	}
+
+	return retentionReconstructionFixture{
+		ls:                  ls,
+		db:                  db,
+		ownerKey:            ownerKey,
+		delegatorKey:        delegatorKey,
+		capturedStakeInputs: capturedStakeInputs,
+	}
+}
+
+func TestAsyncPrecomputeReconstructsPrunedInputsInWritePhase(t *testing.T) {
+	t.Parallel()
+
+	fixture := seedRetentionReconstructionFixture(t)
+	meta := fixture.db.Metadata()
+	err := fixture.ls.precomputeStakeRewardsAfterEpochTransition(
+		event.EpochTransitionEvent{
+			PreviousEpoch: retentionPerformanceEpoch,
+			NewEpoch:      retentionPotsEpoch,
+			BoundarySlot:  200,
+		},
+	)
+	require.NoError(t, err)
+
+	rebuilt, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rebuilt, len(fixture.capturedStakeInputs))
+	poolOutputs, err := meta.GetRewardPoolOutputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, 1)
+}
+
+func TestRewardPrecomputeCalculationCarriesReconstructedInputsWithoutWriting(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := seedRetentionReconstructionFixture(t)
+	meta := fixture.db.Metadata()
+	readTxn := fixture.db.Transaction(false)
+	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
+		app, ok, err := fixture.ls.precomputeStakeRewardsCalculate(
+			txn,
+			retentionNewEpoch,
+			200,
+			300,
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.NotNil(t, app)
+		require.Len(
+			t,
+			app.reconstructedStakeInputs,
+			len(fixture.capturedStakeInputs),
+		)
+		persisted, err := meta.GetRewardStakeInputs(
+			retentionRewardSnapshotEpoch,
+			txn.Metadata(),
+		)
+		require.NoError(t, err)
+		require.Empty(t, persisted)
+		return nil
+	}))
+
+	persisted, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, persisted)
+}
+
+func TestReconstructedRewardStakeTieBreaksAreDeterministic(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newRewardCalculationTestLedger(t)
+	poolA := []byte{0x10}
+	poolB := []byte{0x20}
+	poolC := []byte{0x30}
+	basePools := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:    poolA,
+			DelegatedStake: 2_000_001,
+			DelegatorCount: 2,
+		},
+		{
+			PoolKeyHash:    poolB,
+			DelegatedStake: 4_000_000,
+			OwnerStake:     2_000_001,
+			DelegatorCount: 4,
+		},
+		{
+			PoolKeyHash:    poolC,
+			DelegatedStake: 2_000_002,
+			DelegatorCount: 3,
+		},
+	}
+	baseRows := []*models.RewardStakeInput{
+		{PoolKeyHash: poolA, CredentialTag: 0, StakingKey: []byte{0x01}, Stake: 1_000_000},
+		{PoolKeyHash: poolA, CredentialTag: 0, StakingKey: []byte{0x02}, Stake: 1_000_000},
+		{PoolKeyHash: poolB, CredentialTag: 0, StakingKey: []byte{0x11}, Stake: 1_000_000, Owner: true},
+		{PoolKeyHash: poolB, CredentialTag: 0, StakingKey: []byte{0x12}, Stake: 1_000_000, Owner: true},
+		{PoolKeyHash: poolB, CredentialTag: 1, StakingKey: []byte{0x21}, Stake: 1_000_000},
+		{PoolKeyHash: poolB, CredentialTag: 1, StakingKey: []byte{0x22}, Stake: 1_000_000},
+		{PoolKeyHash: poolC, CredentialTag: 0, StakingKey: []byte{0x31}, Stake: 1},
+		{PoolKeyHash: poolC, CredentialTag: 0, StakingKey: []byte{0x32}, Stake: 1},
+		{PoolKeyHash: poolC, CredentialTag: 0, StakingKey: []byte{0x41}, Stake: 1_000_000},
+		{PoolKeyHash: poolC, CredentialTag: 0, StakingKey: []byte{0x42}, Stake: 1_000_000},
+	}
+	rowOrders := [][]int{
+		{0, 1, 2, 3, 4, 5, 6, 7, 8, 9},
+		{9, 8, 7, 6, 5, 4, 3, 2, 1, 0},
+		{1, 0, 3, 2, 5, 4, 7, 6, 9, 8},
+		{6, 8, 2, 4, 0, 9, 7, 5, 3, 1},
+	}
+	poolOrders := [][]int{{0, 1, 2}, {2, 1, 0}, {1, 2, 0}, {2, 0, 1}}
+
+	type normalizedRow struct {
+		pool  byte
+		tag   uint8
+		key   byte
+		stake uint64
+		owner bool
+	}
+	var expected []normalizedRow
+	for permutation := range rowOrders {
+		rows := make([]*models.RewardStakeInput, 0, len(baseRows))
+		for _, index := range rowOrders[permutation] {
+			row := *baseRows[index]
+			row.PoolKeyHash = bytes.Clone(row.PoolKeyHash)
+			row.StakingKey = bytes.Clone(row.StakingKey)
+			rows = append(rows, &row)
+		}
+		pools := make([]*models.RewardPoolInput, 0, len(basePools))
+		for _, index := range poolOrders[permutation] {
+			pool := *basePools[index]
+			pool.PoolKeyHash = bytes.Clone(pool.PoolKeyHash)
+			pools = append(pools, &pool)
+		}
+
+		got := ls.reconcileRebuiltRewardStakeInputs(
+			rows,
+			pools,
+			retentionRewardSnapshotEpoch,
+		)
+		normalized := make([]normalizedRow, 0, len(got))
+		for _, row := range got {
+			normalized = append(normalized, normalizedRow{
+				pool:  row.PoolKeyHash[0],
+				tag:   row.CredentialTag,
+				key:   row.StakingKey[0],
+				stake: uint64(row.Stake),
+				owner: row.Owner,
+			})
+		}
+		if permutation == 0 {
+			expected = normalized
+			continue
+		}
+		require.Equal(t, expected, normalized)
+	}
+
+	require.Equal(t, []normalizedRow{
+		{pool: 0x10, tag: 0, key: 0x01, stake: 1_000_000},
+		{pool: 0x10, tag: 0, key: 0x02, stake: 1_000_001},
+		{pool: 0x20, tag: 0, key: 0x11, stake: 1_000_000, owner: true},
+		{pool: 0x20, tag: 0, key: 0x12, stake: 1_000_001, owner: true},
+		{pool: 0x20, tag: 1, key: 0x21, stake: 1_000_000},
+		{pool: 0x20, tag: 1, key: 0x22, stake: 999_999},
+		{pool: 0x30, tag: 0, key: 0x32, stake: 1},
+		{pool: 0x30, tag: 0, key: 0x41, stake: 1_000_000},
+		{pool: 0x30, tag: 0, key: 0x42, stake: 1_000_001},
+	}, expected)
+}
+
+// TestApplyStakeRewardsReconstructsRetentionPrunedInputs is the positive
+// control for retention-vs-resume gap: reward_stake_input is
+// aged out of retention (as it is for the other tests in this file), but this
+// time the underlying certificate/UTxO/reward-delta history the historical
+// CTE reconstructs from is real, matching the shape
+// `dingo database truncate` + replay produces (the reward_snapshot/
+// reward_pool_input rows a prior run captured survive the rollback, but the
+// per-credential reward_stake_input rows they depended on had already aged
+// out of the live run's retention window before the rollback ever happened).
+// Unlike TestApplyStakeRewardsSkipsPrunedStakeInputs, the round here must
+// actually apply -- crediting the owner and the delegator their share of the
+// epoch's rewards -- rather than skip.
+func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
+	t.Parallel()
+
+	fixture := seedRetentionReconstructionFixture(t)
+	ls := fixture.ls
+	db := fixture.db
+	meta := db.Metadata()
+	ownerKey := fixture.ownerKey
+	delegatorKey := fixture.delegatorKey
+
+	beforeOwner, err := db.GetAccountByCredential(0, ownerKey, false, nil)
+	require.NoError(t, err)
+	beforeDelegator, err := db.GetAccountByCredential(
+		0, delegatorKey, false, nil,
+	)
+	require.NoError(t, err)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(
+			txn, retentionNewEpoch, retentionBoundarySlot,
+		)
+	}), "a retention-pruned epoch with real underlying data must "+
+		"reconstruct and apply, not skip")
+	settleRewardCredits(t, ls)
+
+	afterOwner, err := db.GetAccountByCredential(0, ownerKey, false, nil)
+	require.NoError(t, err)
+	afterDelegator, err := db.GetAccountByCredential(
+		0, delegatorKey, false, nil,
+	)
+	require.NoError(t, err)
+	poolOutputs, err := meta.GetRewardPoolOutputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	require.Len(
+		t, poolOutputs, 1,
+		"the round must persist a pool output, proving it applied instead "+
+			"of skipping",
+	)
+	assert.Positive(
+		t, uint64(poolOutputs[0].TotalReward),
+		"the reconstructed pool's block production must earn a nonzero "+
+			"reward this round",
+	)
+	assert.Greater(
+		t, uint64(afterOwner.Reward), uint64(beforeOwner.Reward),
+		"the owner must be credited a share of this epoch's reward, not "+
+			"skipped",
+	)
+	// The fixture's pool cost (340_000_000) exceeds the whole round's
+	// reward pot, so cardano-ledger's formula correctly gives the entire
+	// reward to the leader and nothing to members -- this is expected pool
+	// economics, not evidence the delegator's credential was skipped.
+	assert.Equal(
+		t, uint64(beforeDelegator.Reward), uint64(afterDelegator.Reward),
+		"the fixture's pool cost consumes the whole reward pot, so the "+
+			"member share is legitimately zero this round",
+	)
+	// A zero-share member legitimately gets no account_reward_output row (only
+	// spendable, nonzero credits are persisted there) -- reward_stake_input's
+	// re-population, asserted below, is what proves the reconstruction
+	// considered the delegator rather than dropping it.
+
+	rebuiltStakeInputs, err := meta.GetRewardStakeInputs(
+		retentionRewardSnapshotEpoch, nil,
+	)
+	require.NoError(t, err)
+	assert.Len(
+		t, rebuiltStakeInputs, len(fixture.capturedStakeInputs),
+		"the reconstruction should persist the same credential set the "+
+			"original live capture held, self-healing the pruned rows",
+	)
+}
 
 func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	t.Parallel()
@@ -567,8 +1288,7 @@ func applyGuardExpiredLeaderScenario(
 // prefix affects, and therefore has no persisted pparams.
 //
 // This covers the helper contract only. The end-to-end rollover failure was
-// reproduced by the reviewer against real database rows and has no unit-level
-// fixture here.
+// reproduced against real database rows and has no unit-level fixture here.
 func TestStakeRewardEpochHelpersDivergeAtBootstrapRound(t *testing.T) {
 	t.Parallel()
 
@@ -673,7 +1393,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 }
 
 // TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch is the
-// negative case for the 0->1 bootstrap round added for dingo #3381. A network
+// negative case for the 0->1 bootstrap round. A network
 // with a Byron prefix has no Shelley reward round at that boundary, so the
 // Byron performance-epoch guard must suppress it and leave the slot-0 pots
 // untouched -- even though the epoch 0 ADA pots row now exists.
@@ -4844,7 +5564,7 @@ func TestStakeRewardEpochsForNewEpochMatchDelayedUpdate(t *testing.T) {
 // derives d, rho, tau and the pool-level parameters it passes to
 // mkPoolRewardInfo from that. Reading tau or d from the calculation epoch
 // instead silently changes reward amounts on any network where the parameters
-// move across the boundary (dingo #3481).
+// move across the boundary.
 func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	t *testing.T,
 ) {
@@ -6276,7 +6996,8 @@ func TestRewardCalculatorInputsAllowExcludedPoolStake(t *testing.T) {
 	require.False(t, match)
 }
 
-// TestRewardCalculatorInputsExactWithTrackedExcludedStake covers dingo #4025:
+// TestRewardCalculatorInputsExactWithTrackedExcludedStake pins the exact bound
+// when the excluded stake is tracked:
 // TestRewardCalculatorInputsAllowExcludedPoolStake's non-exceeding bound
 // tolerates one legitimately excluded pool's stake going missing, but it
 // tolerates just as well a row set proportionally shrunk by some other bug --
@@ -6346,7 +7067,7 @@ func TestRewardCalculatorInputsExactWithTrackedExcludedStake(t *testing.T) {
 	// The same 40 tracked as excluded, but the row set is proportionally
 	// shrunk to 50 instead of 100 -- as if every pool's stake had been halved.
 	// 50+40=90 != 140, so this must now be rejected even though 50 <= 140
-	// would have passed the old non-exceeding bound silently (dingo #4025).
+	// would have passed the old non-exceeding bound silently.
 	err = validateRewardCalculatorInputs(
 		snapshot(140, 40),
 		poolInputsWithStake(50),
@@ -6507,4 +7228,3130 @@ func settleRewardCredits(t *testing.T, ls *LedgerState) {
 		}
 		return nil
 	}))
+}
+
+func epochBoundaryBenchPartialPrecomputeT(
+	b testing.TB,
+	f *epochBoundaryBenchFixture,
+) {
+	b.Helper()
+	evt := epochBoundaryBenchPrecomputeEvent()
+	round, ok, err := f.ls.resolveStakeRewardPrecomputeRound(
+		evt.NewEpoch+1,
+		evt.BoundarySlot,
+		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1),
+	)
+	require.NoError(b, err)
+	require.True(b, ok)
+	chunks := (len(round.poolInputs) + f.ls.rewardPrecomputeChunkSize() - 1) /
+		f.ls.rewardPrecomputeChunkSize()
+	for range chunks / 2 {
+		done, err := f.ls.stakeRewardPrecomputeChunkStep(round)
+		require.NoError(b, err)
+		require.False(b, done)
+	}
+}
+
+func (ls *LedgerState) waitEpochBoundaryBenchBackground() {
+	_ = ls.WaitEpochBoundaryJob(context.Background())
+	ls.ratificationWG.Wait()
+	ls.deferredStakeInputsWG.Wait()
+	ls.rewardCreditCompactionWG.Wait()
+}
+
+// wireDeferredBoundarySnapshot mirrors node.go's deferred mark snapshot
+// wiring.
+func wireDeferredBoundarySnapshot(ls *LedgerState, mgr *snapshot.Manager) {
+	ls.SetDeferredEpochBoundarySnapshotHooks(
+		mgr.DeferEpochBoundaryCapture,
+		mgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (DeferredBoundarySnapshot, error) {
+			return mgr.PrepareEpochBoundarySnapshot(
+				context.Background(), txn, evt,
+			)
+		},
+	)
+}
+
+// epochBoundaryBenchWireDeferred mirrors node.go's
+// wireDeferredRewardStakeInputs.
+func epochBoundaryBenchWireDeferred(ls *LedgerState, mgr *snapshot.Manager) {
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(
+			txn *database.Txn,
+		) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
+			if !ok {
+				return 0, 0, nil, false
+			}
+			return deferred.Epoch, deferred.BoundarySlot, deferred.Inputs, true
+		},
+	)
+	mgr.SetDeferRewardStakeInputs(true)
+}
+
+const (
+	epochBoundaryBenchEpochLength = uint64(432_000)
+	// The rollover under measurement ends this epoch, so it applies the
+	// reward round whose snapshot, performance and pots epochs are 8, 9 and
+	// 10.
+	epochBoundaryBenchEndedEpoch = uint64(10)
+	epochBoundaryBenchMaxSupply  = uint64(45_000_000_000_000_000)
+	epochBoundaryBenchReserves   = uint64(7_600_000_000_000_000)
+	epochBoundaryBenchTreasury   = uint64(1_600_000_000_000_000)
+	epochBoundaryBenchFees       = uint64(31_000_000_000)
+	epochBoundaryBenchBlocks     = 21_600
+)
+
+func epochBoundaryBenchNodeConfig(tb testing.TB) *cardano.CardanoNodeConfig {
+	tb.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("5a", 32),
+	}
+	require.NoError(tb, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.05,
+		"epochLength": 432000,
+		"maxLovelaceSupply": 45000000000000000,
+		"securityParam": 2160,
+		"slotLength": 1,
+		"updateQuorum": 5,
+		"systemStart": "2017-09-23T21:44:51Z"
+	}`)))
+	return cfg
+}
+
+func epochBoundaryBenchPParams() *conway.ConwayProtocolParameters {
+	rat := func(n, d int64) *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(n, d)} }
+	p := donationTestConwayPParams(10)
+	p.MinFeeA = 44
+	p.MinFeeB = 155_381
+	p.MaxBlockBodySize = 90_112
+	p.MaxTxSize = 16_384
+	p.MaxBlockHeaderSize = 1_100
+	p.KeyDeposit = 2_000_000
+	p.PoolDeposit = 500_000_000
+	p.MaxEpoch = 18
+	p.NOpt = 500
+	p.A0 = rat(3, 10)
+	p.Rho = rat(3, 1000)
+	p.Tau = rat(1, 5)
+	p.MinPoolCost = 170_000_000
+	p.AdaPerUtxoByte = 4_310
+	p.MinCommitteeSize = 7
+	p.CommitteeTermLimit = 146
+	p.GovActionValidityPeriod = 6
+	p.GovActionDeposit = 100_000_000_000
+	p.DRepDeposit = 500_000_000
+	p.DRepInactivityPeriod = 20
+	p.MinFeeRefScriptCostPerByte = rat(15, 1)
+	return p
+}
+
+// epochBoundaryBenchHash returns a deterministic 28-byte hash in its own
+// domain, so credentials, pools and DReps never collide.
+func epochBoundaryBenchHash(domain byte, index uint64) []byte {
+	h := make([]byte, 28)
+	h[0] = domain
+	binary.BigEndian.PutUint64(h[20:], index)
+	return h
+}
+
+// splitmix64 gives the fixture a heavy-tailed but reproducible stake
+// distribution without seeding math/rand.
+func splitmix64(x uint64) uint64 {
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return x ^ (x >> 31)
+}
+
+// epochBoundaryBenchStake is log-uniform between 1 ADA and 100,000 ADA,
+// which puts 1.3M delegators at roughly 11B ADA of active stake.
+func epochBoundaryBenchStake(index uint64) uint64 {
+	u := float64(splitmix64(index)>>11) / float64(1<<53)
+	return uint64(math.Pow(10, 6+5*u))
+}
+
+type epochBoundaryBenchFixture struct {
+	ls      *LedgerState
+	db      *database.Database
+	shape   epochBoundaryBenchShape
+	pparams *conway.ConwayProtocolParameters
+	epochs  map[uint64]models.Epoch
+	phases  *epochBoundaryPhaseRecorder
+}
+
+// epochBoundaryPhaseRecorder collects the "epoch rollover phase" Debug records
+// timeRolloverPhase emits, so the benchmark reports the same per-phase
+// durations an operator reads from the log.
+type epochBoundaryPhaseRecorder struct {
+	mu     sync.Mutex
+	phases []epochBoundaryPhase
+}
+
+type epochBoundaryPhase struct {
+	name     string
+	duration time.Duration
+}
+
+func (r *epochBoundaryPhaseRecorder) reset() {
+	r.mu.Lock()
+	r.phases = nil
+	r.mu.Unlock()
+}
+
+func (r *epochBoundaryPhaseRecorder) snapshot() []epochBoundaryPhase {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]epochBoundaryPhase(nil), r.phases...)
+}
+
+// newEpochBoundaryBenchFixture seeds a fresh database, or copies the seeded
+// template in templateDir when one is named.
+func newEpochBoundaryBenchFixture(
+	tb testing.TB,
+	shape epochBoundaryBenchShape,
+	templateDir string,
+) *epochBoundaryBenchFixture {
+	tb.Helper()
+	dataDir := tb.TempDir()
+	if template := templateDir; template != "" {
+		epochBoundaryBenchTemplate(tb, template, shape)
+		require.NoError(tb, os.CopyFS(
+			dataDir, os.DirFS(filepath.Join(template, "data")),
+		))
+	}
+	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
+	f := &epochBoundaryBenchFixture{
+		db:      db,
+		shape:   shape,
+		pparams: epochBoundaryBenchPParams(),
+		epochs:  epochBoundaryBenchEpochs(),
+		phases:  &epochBoundaryPhaseRecorder{},
+	}
+	if templateDir == "" {
+		f.seed(tb)
+	}
+	f.wire(tb)
+	return f
+}
+
+// epochBoundaryBenchTemplate seeds the shared template once, so repeated
+// runs -- and runs of two different trees -- measure the same database.
+func epochBoundaryBenchTemplate(
+	tb testing.TB,
+	dir string,
+	shape epochBoundaryBenchShape,
+) {
+	tb.Helper()
+	ready := filepath.Join(dir, "ready")
+	want := fmt.Sprintf("%+v", shape)
+	if raw, err := os.ReadFile(ready); err == nil {
+		require.Equal(tb, want, string(raw), "template shape mismatch")
+		return
+	}
+	dataDir := filepath.Join(dir, "data")
+	require.NoError(tb, os.RemoveAll(dataDir))
+	require.NoError(tb, os.MkdirAll(dataDir, 0o755))
+	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: dataDir})
+	require.NoError(tb, err)
+	f := &epochBoundaryBenchFixture{
+		db:      db,
+		shape:   shape,
+		pparams: epochBoundaryBenchPParams(),
+		epochs:  epochBoundaryBenchEpochs(),
+	}
+	f.seed(tb)
+	require.NoError(tb, dbtest.CloseDatabase(db))
+	require.NoError(tb, os.WriteFile(ready, []byte(want), 0o644))
+}
+
+func (f *epochBoundaryBenchFixture) seed(tb testing.TB) {
+	tb.Helper()
+	start := time.Now()
+	f.seedEpochs(tb)
+	f.seedBulk(tb)
+	bulk := time.Now()
+	f.seedGovernance(tb)
+	tb.Logf(
+		"seeded: bulk %.1fs, governance %.1fs",
+		bulk.Sub(start).Seconds(), time.Since(bulk).Seconds(),
+	)
+}
+
+func (f *epochBoundaryBenchFixture) wire(tb testing.TB) {
+	tb.Helper()
+	db := f.db
+	f.ls = &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		currentEpoch:   f.epochs[epochBoundaryBenchEndedEpoch],
+		currentPParams: f.pparams,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: epochBoundaryBenchNodeConfig(tb),
+			Logger:            slog.New(f.phases),
+		},
+	}
+	mgr := snapshot.NewManager(db, nil, slog.New(slog.NewTextHandler(
+		io.Discard, nil,
+	)))
+	f.ls.SetEpochBoundarySnapshotStakeHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return mgr.ComputeEpochBoundarySnapshot(
+				context.Background(),
+				txn,
+				evt,
+			)
+		},
+	)
+	f.ls.SetEpochBoundarySnapshotHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return mgr.CaptureEpochBoundarySnapshot(
+				context.Background(),
+				txn,
+				evt,
+			)
+		},
+	)
+	epochBoundaryBenchWireDeferred(f.ls, mgr)
+	wireDeferredBoundarySnapshot(f.ls, mgr)
+	f.ls.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return mgr.CurrentBoundarySPOStakeRows(
+				context.Background(),
+				txn,
+				evt,
+			)
+		},
+	)
+}
+
+func epochBoundaryBenchNonce(epoch uint64) []byte {
+	nonce := make([]byte, 32)
+	binary.BigEndian.PutUint64(nonce[24:], epoch+1)
+	return nonce
+}
+
+func epochBoundaryBenchEpochs() map[uint64]models.Epoch {
+	epochs := make(map[uint64]models.Epoch)
+	for epoch := uint64(0); epoch <= epochBoundaryBenchEndedEpoch; epoch++ {
+		nonce := epochBoundaryBenchNonce(epoch)
+		epochs[epoch] = models.Epoch{
+			EpochId:             epoch,
+			StartSlot:           epochBoundaryBenchStart(epoch),
+			Nonce:               nonce,
+			EvolvingNonce:       nonce,
+			CandidateNonce:      nonce,
+			LastEpochBlockNonce: nonce,
+			EraId:               eras.ConwayEraDesc.Id,
+			SlotLength:          1_000,
+			LengthInSlots:       uint(epochBoundaryBenchEpochLength),
+		}
+	}
+	return epochs
+}
+
+func (f *epochBoundaryBenchFixture) seedEpochs(tb testing.TB) {
+	tb.Helper()
+	pparamsCbor, err := cbor.Encode(f.pparams)
+	require.NoError(tb, err)
+	for epoch := uint64(0); epoch <= epochBoundaryBenchEndedEpoch; epoch++ {
+		e := f.epochs[epoch]
+		require.NoError(tb, f.db.SetEpoch(
+			e.StartSlot, epoch, e.Nonce, e.EvolvingNonce, e.CandidateNonce,
+			e.LastEpochBlockNonce, e.EraId, e.SlotLength, e.LengthInSlots,
+			nil,
+		))
+		require.NoError(tb, f.db.SetPParams(
+			pparamsCbor, e.StartSlot, epoch, eras.ConwayEraDesc.Id, nil,
+		))
+	}
+	require.NoError(tb, f.db.Metadata().SetNetworkState(
+		epochBoundaryBenchTreasury,
+		epochBoundaryBenchReserves,
+		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
+		nil,
+	))
+}
+
+type epochBoundaryBenchPool struct {
+	key           []byte
+	rewardAccount []byte
+	margin        string
+	cost          uint64
+	pledge        uint64
+	stake         uint64
+	delegators    int
+}
+
+// seedBulk writes the delegator-scaled tables directly through SQL: at 1.3M
+// rows, the model writers' per-row bookkeeping would dominate setup.
+func (f *epochBoundaryBenchFixture) seedBulk(tb testing.TB) {
+	tb.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(tb, f.db)
+	require.NoError(tb, err)
+	defer raw.Close()
+	tx, err := raw.Begin()
+	require.NoError(tb, err)
+	defer func() { _ = tx.Rollback() }()
+	prepare := func(query string) *sql.Stmt {
+		stmt, err := tx.Prepare(query)
+		require.NoError(tb, err)
+		return stmt
+	}
+	poolStmt := prepare(`
+INSERT INTO pool (id, pool_key_hash, vrf_key_hash, reward_account,
+    reward_account_credential_tag, margin, pledge, cost)
+VALUES (?, ?, ?, ?, 0, ?, ?, ?)`)
+	poolRegStmt := prepare(`
+INSERT INTO pool_registration (id, pool_id, pool_key_hash, vrf_key_hash,
+    reward_account, reward_account_credential_tag, margin, pledge, cost,
+    added_slot, deposit_amount, deposit_held)
+VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 1, '500000000', '500000000')`)
+	ownerStmt := prepare(`
+INSERT INTO pool_registration_owner (key_hash, pool_registration_id, pool_id)
+VALUES (?, ?, ?)`)
+	accountStmt := prepare(`
+INSERT INTO account (staking_key, credential_tag, pool, drep, drep_type,
+    added_slot, created_slot, reward, active, expiration_epoch)
+VALUES (?, 0, ?, ?, ?, 1, 1, ?, 1, 0)`)
+	liveStmt := prepare(`
+INSERT INTO reward_live_stake (pool_key_hash, staking_key, credential_tag,
+    utxo_stake, reward_stake, total_stake, registered, pool_delegation_slot,
+    updated_slot, calculation_version)
+VALUES (?, ?, 0, ?, ?, ?, 1, 1, 1, ?)`)
+	utxoStmt := prepare(`
+INSERT INTO utxo (tx_id, output_idx, payment_key, staking_key, credential_tag,
+    added_slot, deleted_slot, amount, payment_script)
+VALUES (?, ?, ?, ?, 0, 1, 0, ?, 0)`)
+	stakeInputStmt := prepare(`
+INSERT INTO reward_stake_input (pool_key_hash, staking_key, epoch,
+    credential_tag, stake, owner, registered, captured_slot, boundary_slot)
+VALUES (?, ?, ?, 0, ?, ?, 1, ?, ?)`)
+	poolInputStmt := prepare(`
+INSERT INTO reward_pool_input (margin, pool_key_hash, reward_account, epoch,
+    pledge, delegated_stake, owner_stake, cost, delegator_count,
+    reward_account_credential_tag, captured_slot, boundary_slot)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
+	poolSnapStmt := prepare(`
+INSERT INTO pool_stake_snapshot (epoch, snapshot_type, pool_key_hash,
+    total_stake, delegator_count, captured_slot, calculation_version)
+VALUES (?, 'mark', ?, ?, ?, ?, ?)`)
+	blockStmt := prepare(`
+INSERT INTO pool_opcert_sequence (pool_key_hash, slot, sequence)
+VALUES (?, ?, 0)`)
+
+	shape := f.shape
+	pools := make([]epochBoundaryBenchPool, shape.pools)
+	for p := range pools {
+		pool := &pools[p]
+		pool.key = epochBoundaryBenchHash(0x10, uint64(p)+1)
+		pool.rewardAccount = epochBoundaryBenchHash(0x20, uint64(p)+1)
+		// Margins span the reference's rounding extremes: 0, 1 and
+		// ordinary fractions.
+		switch p % 7 {
+		case 0:
+			pool.margin = "0/1"
+		case 1:
+			pool.margin = "1/1"
+		default:
+			pool.margin = fmt.Sprintf("%d/1000", 5+(p%40))
+		}
+		pool.cost = 170_000_000 + uint64(p%5)*85_000_000
+		pool.pledge = 1_000_000_000 * (1 + uint64(p%50))
+	}
+	// Every pool's own reward account delegates its pledge to the pool, so
+	// the pledge check passes and owners are exercised.
+	calcVersion := models.RewardStakeCalculationVersion
+	var nextUtxo uint64
+	delegatorPool := func(d int) int {
+		// A skewed assignment: low-numbered pools attract more delegators,
+		// and the last pool attracts none, so a zero-stake pool is present.
+		u := float64(splitmix64(uint64(d)^0xabcdef)>>11) / float64(1<<53)
+		p := int(float64(shape.pools-1) * u * u)
+		if p >= shape.pools-1 {
+			p = shape.pools - 2
+		}
+		return p
+	}
+	type stakeRow struct {
+		pool  int
+		key   []byte
+		stake uint64
+		owner bool
+	}
+	rows := make([]stakeRow, 0, shape.delegators+shape.pools)
+	writeAccount := func(
+		key []byte, pool []byte, stake uint64, reward uint64, d uint64,
+	) {
+		var drep any
+		drepType := models.DrepTypeAddrKeyHash
+		switch r := splitmix64(d^0x77) % 20; {
+		case r < 11 && shape.dreps > 0:
+			drep = epochBoundaryBenchHash(
+				0x40,
+				splitmix64(d)%uint64(shape.dreps)+1,
+			)
+		case r < 14:
+			drepType = models.DrepTypeAlwaysAbstain
+		case r < 15:
+			drepType = models.DrepTypeAlwaysNoConfidence
+		default:
+			drepType = 0
+		}
+		_, err := accountStmt.Exec(
+			key, pool, drep, drepType, strconv.FormatUint(reward, 10),
+		)
+		require.NoError(tb, err)
+		utxoStake := stake - reward
+		_, err = liveStmt.Exec(
+			pool, key,
+			strconv.FormatUint(utxoStake, 10),
+			strconv.FormatUint(reward, 10),
+			strconv.FormatUint(stake, 10),
+			calcVersion,
+		)
+		require.NoError(tb, err)
+		n := max(shape.utxosPerDelegator, 1)
+		remaining := utxoStake
+		for i := range n {
+			amount := remaining / uint64(n-i)
+			remaining -= amount
+			nextUtxo++
+			txID := make([]byte, 32)
+			binary.BigEndian.PutUint64(txID[24:], nextUtxo)
+			_, err := utxoStmt.Exec(
+				txID, 0, epochBoundaryBenchHash(0x50, nextUtxo), key,
+				strconv.FormatUint(amount, 10),
+			)
+			require.NoError(tb, err)
+		}
+	}
+	for p := range pools {
+		pool := &pools[p]
+		_, err := poolStmt.Exec(
+			p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			pool.rewardAccount, pool.margin,
+			strconv.FormatUint(pool.pledge, 10),
+			strconv.FormatUint(pool.cost, 10),
+		)
+		require.NoError(tb, err)
+		_, err = poolRegStmt.Exec(
+			p+1, p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			pool.rewardAccount, pool.margin,
+			strconv.FormatUint(pool.pledge, 10),
+			strconv.FormatUint(pool.cost, 10),
+		)
+		require.NoError(tb, err)
+		_, err = ownerStmt.Exec(pool.rewardAccount, p+1, p+1)
+		require.NoError(tb, err)
+		if p == shape.pools-1 {
+			// The zero-stake pool: registered, no delegators, not even its
+			// owner.
+			continue
+		}
+		ownerStake := pool.pledge
+		writeAccount(
+			pool.rewardAccount, pool.key, ownerStake, 0,
+			uint64(p)+0x1_0000_0000,
+		)
+		rows = append(rows, stakeRow{
+			pool: p, key: pool.rewardAccount, stake: ownerStake, owner: true,
+		})
+		pool.stake += ownerStake
+		pool.delegators++
+	}
+	for d := range shape.delegators {
+		p := delegatorPool(d)
+		key := epochBoundaryBenchHash(0x30, uint64(d)+1)
+		stake := epochBoundaryBenchStake(uint64(d))
+		reward := stake / 200
+		writeAccount(key, pools[p].key, stake, reward, uint64(d))
+		rows = append(rows, stakeRow{pool: p, key: key, stake: stake})
+		pools[p].stake += stake
+		pools[p].delegators++
+	}
+	var totalStake uint64
+	for _, pool := range pools {
+		totalStake += pool.stake
+	}
+	// The go, set and mark reward bases (snapshot epochs 8, 9, 10) and
+	// their leader-election rows. Stake inputs are identical across the
+	// three epochs: only the row count matters to the boundary's cost.
+	for _, epoch := range []uint64{8, 9, 10} {
+		boundary := epochBoundaryBenchStart(epoch)
+		captured := boundary - 1
+		for _, row := range rows {
+			_, err := stakeInputStmt.Exec(
+				pools[row.pool].key, row.key, epoch,
+				strconv.FormatUint(row.stake, 10), row.owner,
+				captured, boundary,
+			)
+			require.NoError(tb, err)
+		}
+		var poolCount, delegatorCount int
+		for p := range pools {
+			pool := &pools[p]
+			if pool.delegators == 0 {
+				continue
+			}
+			poolCount++
+			delegatorCount += pool.delegators
+			_, err := poolInputStmt.Exec(
+				pool.margin, pool.key, pool.rewardAccount, epoch,
+				strconv.FormatUint(pool.pledge, 10),
+				strconv.FormatUint(pool.stake, 10),
+				strconv.FormatUint(pool.pledge, 10),
+				strconv.FormatUint(pool.cost, 10),
+				pool.delegators, captured, boundary,
+			)
+			require.NoError(tb, err)
+			_, err = poolSnapStmt.Exec(
+				epoch, pool.key, strconv.FormatUint(pool.stake, 10),
+				pool.delegators, captured, calcVersion,
+			)
+			require.NoError(tb, err)
+		}
+		_, err := tx.Exec(`
+INSERT INTO reward_snapshot (epoch, snapshot_type, total_active_stake,
+    total_pool_count, total_delegators, captured_slot, boundary_slot,
+    epoch_nonce, protocol_version, authoritative, calculation_version,
+    excluded_active_stake)
+VALUES (?, 'mark', ?, ?, ?, ?, ?, ?, 10, 1, ?, '0')`,
+			epoch, strconv.FormatUint(totalStake, 10), poolCount,
+			delegatorCount, captured, boundary,
+			f.epochs[epoch].Nonce, calcVersion,
+		)
+		require.NoError(tb, err)
+		_, err = tx.Exec(`
+INSERT INTO epoch_summary (epoch, total_active_stake, total_pool_count,
+    total_delegators, epoch_nonce, boundary_slot, snapshot_ready)
+VALUES (?, ?, ?, ?, ?, ?, 1)`,
+			epoch, strconv.FormatUint(totalStake, 10), poolCount,
+			delegatorCount, f.epochs[epoch].Nonce, boundary,
+		)
+		require.NoError(tb, err)
+	}
+	// Performance epoch 9: blocks in proportion to stake.
+	perfStart := epochBoundaryBenchStart(9)
+	slot := perfStart
+	for p := range pools {
+		share := uint64(
+			float64(epochBoundaryBenchBlocks) *
+				float64(pools[p].stake) / float64(totalStake),
+		)
+		for range share {
+			_, err := blockStmt.Exec(pools[p].key, slot)
+			require.NoError(tb, err)
+			slot += 20
+		}
+	}
+	_, err = tx.Exec(`
+INSERT INTO reward_ada_pots (epoch, treasury, reserves, fees, rewards,
+    captured_slot)
+VALUES (?, ?, ?, ?, '0', ?)`,
+		epochBoundaryBenchEndedEpoch,
+		strconv.FormatUint(epochBoundaryBenchTreasury, 10),
+		strconv.FormatUint(epochBoundaryBenchReserves, 10),
+		strconv.FormatUint(epochBoundaryBenchFees, 10),
+		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
+	)
+	require.NoError(tb, err)
+	_, err = tx.Exec(
+		`INSERT INTO tip (hash, slot, block_number) VALUES (?, ?, ?)`,
+		make([]byte, 32),
+		epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch+1)-1,
+		10_000_000,
+	)
+	require.NoError(tb, err)
+	require.NoError(tb, tx.Commit())
+}
+
+func (f *epochBoundaryBenchFixture) seedGovernance(tb testing.TB) {
+	tb.Helper()
+	shape := f.shape
+	raw, err := dbtest.RawSQLiteMetadata(tb, f.db)
+	require.NoError(tb, err)
+	defer raw.Close()
+	tx, err := raw.Begin()
+	require.NoError(tb, err)
+	defer func() { _ = tx.Rollback() }()
+	drepStmt, err := tx.Prepare(`
+INSERT INTO drep (credential, credential_tag, added_slot, last_activity_epoch,
+    expiry_epoch, active)
+VALUES (?, 0, 1, ?, ?, 1)`)
+	require.NoError(tb, err)
+	drepRegStmt, err := tx.Prepare(`
+INSERT INTO registration_drep (drep_credential, credential_tag, added_slot,
+    deposit_amount)
+VALUES (?, 0, 1, '500000000')`)
+	require.NoError(tb, err)
+	for r := range shape.dreps {
+		cred := epochBoundaryBenchHash(0x40, uint64(r)+1)
+		_, err := drepStmt.Exec(cred, epochBoundaryBenchEndedEpoch, 40)
+		require.NoError(tb, err)
+		_, err = drepRegStmt.Exec(cred)
+		require.NoError(tb, err)
+	}
+	for c := range shape.ccMembers {
+		_, err := tx.Exec(`
+INSERT INTO auth_committee_hot (cold_credential, host_credential,
+    certificate_id, added_slot)
+VALUES (?, ?, ?, 1)`,
+			epochBoundaryBenchHash(0x60, uint64(c)+1),
+			epochBoundaryBenchHash(0x61, uint64(c)+1),
+			c+1,
+		)
+		require.NoError(tb, err)
+	}
+	require.NoError(tb, tx.Commit())
+
+	members := make([]*models.CommitteeMember, 0, shape.ccMembers)
+	for c := range shape.ccMembers {
+		members = append(members, &models.CommitteeMember{
+			ColdCredHash: epochBoundaryBenchHash(0x60, uint64(c)+1),
+			ExpiresEpoch: 100,
+			AddedSlot:    1,
+		})
+	}
+	require.NoError(tb, f.db.SetCommitteeMembers(members, nil))
+	require.NoError(tb, f.db.SetCommitteeQuorum(big.NewRat(2, 3), 1, nil))
+
+	for i := range shape.proposals {
+		returnKey := epochBoundaryBenchHash(0x30, uint64(i)*997+1)
+		returnAddr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeNoneKey, lcommon.AddressNetworkMainnet,
+			nil, returnKey,
+		)
+		require.NoError(tb, err)
+		returnAddrBytes, err := returnAddr.Bytes()
+		require.NoError(tb, err)
+		var actionType lcommon.GovActionType
+		var actionCbor []byte
+		if i%4 == 0 {
+			actionType = lcommon.GovActionTypeTreasuryWithdrawal
+			actionCbor, err = cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+				Type: uint(lcommon.GovActionTypeTreasuryWithdrawal),
+				Withdrawals: map[*lcommon.Address]uint64{
+					&returnAddr: 1_000_000_000_000,
+				},
+			})
+		} else {
+			actionType = lcommon.GovActionTypeInfo
+			actionCbor, err = cbor.Encode(&lcommon.InfoGovAction{
+				Type: uint(lcommon.GovActionTypeInfo),
+			})
+		}
+		require.NoError(tb, err)
+		txHash := make([]byte, 32)
+		binary.BigEndian.PutUint64(txHash[24:], uint64(i)+1)
+		txHash[0] = 0x70
+		proposal := &models.GovernanceProposal{
+			TxHash:        txHash,
+			ActionIndex:   0,
+			ActionType:    uint8(actionType),
+			ProposedEpoch: epochBoundaryBenchEndedEpoch - uint64(i%3),
+			ExpiresEpoch:  epochBoundaryBenchEndedEpoch + 6,
+			AnchorURL:     "https://example.invalid/proposal",
+			AnchorHash:    txHash,
+			Deposit:       f.pparams.GovActionDeposit,
+			ReturnAddress: returnAddrBytes,
+			GovActionCbor: actionCbor,
+			AddedSlot: epochBoundaryBenchStart(
+				epochBoundaryBenchEndedEpoch,
+			) + 100,
+		}
+		require.NoError(tb, f.db.SetGovernanceProposal(proposal, nil))
+		vote := func(voterType uint8, cred []byte, choice uint8) {
+			require.NoError(tb, f.db.SetGovernanceVote(&models.GovernanceVote{
+				ProposalID:      proposal.ID,
+				VoterType:       voterType,
+				VoterCredential: cred,
+				Vote:            choice,
+				AddedSlot:       proposal.AddedSlot + 1,
+			}, nil))
+		}
+		for v := range min(shape.drepVotes, shape.dreps) {
+			r := (uint64(i)*131 + uint64(v)) % uint64(shape.dreps)
+			vote(
+				models.VoterTypeDRep,
+				epochBoundaryBenchHash(0x40, r+1),
+				uint8(splitmix64(r^uint64(i))%3),
+			)
+		}
+		for v := range min(shape.spoVotes, shape.pools) {
+			p := (uint64(i)*17 + uint64(v)) % uint64(shape.pools)
+			vote(
+				models.VoterTypeSPO,
+				epochBoundaryBenchHash(0x10, p+1),
+				uint8(splitmix64(p^uint64(i))%3),
+			)
+		}
+		for c := range shape.ccMembers {
+			vote(
+				models.VoterTypeCC,
+				epochBoundaryBenchHash(0x61, uint64(c)+1),
+				models.VoteYes,
+			)
+		}
+	}
+}
+
+// rollover runs the real boundary in one write transaction, exactly as the
+// block pipeline does, and returns the time spent inside the transaction body
+// and in its commit.
+func (f *epochBoundaryBenchFixture) rollover(
+	tb testing.TB,
+) (time.Duration, time.Duration, []epochBoundaryPhase) {
+	tb.Helper()
+	f.phases.reset()
+	start := time.Now()
+	f.ls.fenceRewardPrecompute()
+	var bodyDone time.Time
+	txn := f.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		_, err := f.ls.processEpochRollover(
+			txn,
+			f.epochs[epochBoundaryBenchEndedEpoch],
+			eras.ConwayEraDesc,
+			f.pparams,
+			false,
+		)
+		bodyDone = time.Now()
+		return err
+	})
+	require.NoError(tb, err)
+	end := time.Now()
+	return bodyDone.Sub(start), end.Sub(bodyDone), f.phases.snapshot()
+}
+
+// precomputeEvent is the epoch transition into the ended epoch: the event
+// the reward precompute for the measured boundary is queued from.
+func epochBoundaryBenchPrecomputeEvent() event.EpochTransitionEvent {
+	return event.EpochTransitionEvent{
+		PreviousEpoch: epochBoundaryBenchEndedEpoch - 1,
+		NewEpoch:      epochBoundaryBenchEndedEpoch,
+		BoundarySlot:  epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch),
+		SnapshotSlot: epochBoundaryBenchStart(
+			epochBoundaryBenchEndedEpoch,
+		) - 1,
+	}
+}
+
+// epochBoundaryDumpShape is small enough to seed in seconds and still covers
+// the rounding and eligibility edges: margins 0 and 1, a zero-stake pool,
+// owners, DRep, always-abstain and no-confidence delegators.
+func epochBoundaryDumpShape() epochBoundaryBenchShape {
+	shape := epochBoundaryBenchShape{
+		pools:             23,
+		delegators:        1_500,
+		dreps:             17,
+		utxosPerDelegator: 2,
+		proposals:         6,
+		drepVotes:         12,
+		spoVotes:          9,
+		ccMembers:         3,
+	}
+	if raw := os.Getenv("DINGO_BOUNDARY_DUMP_DELEGATORS"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			shape.delegators = n
+			shape.pools = max(shape.pools, n/400)
+		}
+	}
+	return shape
+}
+
+// dumpEpochBoundaryState renders every table an epoch boundary writes, in a
+// stable order and without surrogate keys, so the same boundary on two code
+// versions can be compared byte for byte.
+func dumpEpochBoundaryState(t *testing.T, raw *sql.DB) string {
+	t.Helper()
+	queries := []struct{ name, query string }{
+		{"account", `SELECT credential_tag, hex(staking_key), reward, active,
+    hex(pool), hex(drep), drep_type FROM account
+ORDER BY credential_tag, staking_key`},
+		{"account_reward_delta", `SELECT credential_tag, hex(staking_key),
+    hex(tx_hash), amount, previous_reward, added_slot, withdrawal,
+    post_snapshot FROM account_reward_delta
+ORDER BY credential_tag, staking_key, tx_hash, added_slot, withdrawal`},
+		{"reward_live_stake", `SELECT credential_tag, hex(staking_key),
+    hex(pool_key_hash), utxo_stake, reward_stake, total_stake, registered,
+    pool_delegation_slot, updated_slot, calculation_version
+FROM reward_live_stake ORDER BY credential_tag, staking_key`},
+		{"network_state", `SELECT slot, treasury, reserves FROM network_state
+ORDER BY slot`},
+		{"reward_ada_pots", `SELECT epoch, treasury, reserves, fees, rewards,
+    captured_slot FROM reward_ada_pots ORDER BY epoch`},
+		{"reward_pool_output", `SELECT epoch, hex(pool_key_hash),
+    apparent_performance, optimal_reward, total_reward, leader_reward,
+    member_reward_total, owner_stake, undistributed, unspendable,
+    boundary_slot FROM reward_pool_output ORDER BY epoch, pool_key_hash`},
+		{"reward_account_output", `SELECT epoch, credential_tag,
+    hex(staking_key), hex(pool_key_hash), reward_type, amount, spendable,
+    guarded, boundary_slot FROM reward_account_output
+ORDER BY epoch, credential_tag, staking_key, pool_key_hash, reward_type`},
+		{
+			"pool_stake_snapshot",
+			`SELECT epoch, snapshot_type, hex(pool_key_hash),
+    total_stake, delegator_count, captured_slot, calculation_version,
+    reward_account_auto_vote, reward_account_auto_vote_resolved
+FROM pool_stake_snapshot ORDER BY epoch, snapshot_type, pool_key_hash`,
+		},
+		{"reward_snapshot", `SELECT epoch, snapshot_type, total_active_stake,
+    total_pool_count, total_delegators, captured_slot, boundary_slot,
+    hex(epoch_nonce), protocol_version, authoritative, calculation_version,
+    excluded_active_stake FROM reward_snapshot
+ORDER BY epoch, snapshot_type`},
+		{"reward_pool_input", `SELECT epoch, hex(pool_key_hash), margin,
+    hex(reward_account), pledge, delegated_stake, owner_stake, cost,
+    delegator_count, captured_slot, boundary_slot FROM reward_pool_input
+ORDER BY epoch, pool_key_hash`},
+		{
+			"reward_stake_input",
+			`SELECT epoch, hex(pool_key_hash), credential_tag,
+    hex(staking_key), stake, owner, registered, captured_slot, boundary_slot
+FROM reward_stake_input
+ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
+		},
+		{"epoch_summary", `SELECT epoch, total_active_stake, total_pool_count,
+    total_delegators, hex(epoch_nonce), boundary_slot, snapshot_ready
+FROM epoch_summary ORDER BY epoch`},
+		{"governance_proposal", `SELECT hex(tx_hash), action_index,
+    enacted_epoch, enacted_slot, ratified_epoch, ratified_slot, expired_epoch,
+    expired_slot FROM governance_proposal ORDER BY tx_hash, action_index`},
+		{"drep", `SELECT credential_tag, hex(credential), active,
+    last_activity_epoch, expiry_epoch FROM drep
+ORDER BY credential_tag, credential`},
+		{"epoch", `SELECT epoch_id, start_slot, hex(nonce), hex(evolving_nonce),
+    hex(candidate_nonce), era_id FROM epoch ORDER BY epoch_id`},
+	}
+	var sb strings.Builder
+	for _, q := range queries {
+		rows, err := raw.Query(q.query)
+		require.NoError(t, err, q.name)
+		cols, err := rows.Columns()
+		require.NoError(t, err)
+		fmt.Fprintf(&sb, "== %s\n", q.name)
+		for rows.Next() {
+			values := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range values {
+				ptrs[i] = &values[i]
+			}
+			require.NoError(t, rows.Scan(ptrs...))
+			for i, v := range values {
+				if b, ok := v.([]byte); ok {
+					v = string(b)
+				}
+				if i > 0 {
+					sb.WriteString("|")
+				}
+				fmt.Fprintf(&sb, "%v", v)
+			}
+			sb.WriteString("\n")
+		}
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
+	}
+	return sb.String()
+}
+
+// dumpDRepVotingPower renders every DRep's voting power as governance reads it
+// at the end of the boundary.
+func dumpDRepVotingPower(t *testing.T, f *epochBoundaryBenchFixture) string {
+	t.Helper()
+	dreps, err := f.db.GetActiveDreps(nil)
+	require.NoError(t, err)
+	refs := make([]models.StakeCredentialRef, 0, len(dreps))
+	for _, drep := range dreps {
+		refs = append(refs, models.NewStakeCredentialRef(
+			drep.CredentialTag, drep.Credential,
+		))
+	}
+	powers, err := f.db.GetDRepVotingPowerBatch(refs, 0, nil)
+	require.NoError(t, err)
+	byType, err := f.db.GetDRepVotingPowerByType(
+		[]uint64{
+			models.DrepTypeAlwaysAbstain, models.DrepTypeAlwaysNoConfidence,
+		}, 0, nil,
+	)
+	require.NoError(t, err)
+	lines := make([]string, 0, len(powers)+2)
+	for key, power := range powers {
+		lines = append(lines, fmt.Sprintf("%x=%d", key, power))
+	}
+	sort.Strings(lines)
+	lines = append(lines, fmt.Sprintf(
+		"abstain=%d no_confidence=%d",
+		byType[models.DrepTypeAlwaysAbstain],
+		byType[models.DrepTypeAlwaysNoConfidence],
+	))
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// deregisterEpochBoundaryDumpDelegators deregisters every 97th delegator
+// during the ended epoch, after any precompute ran, the way a deregistration
+// certificate does: the account, its live stake row and the certificate row.
+// Their rewards become unspendable at the boundary.
+func deregisterEpochBoundaryDumpDelegators(t *testing.T, raw *sql.DB) {
+	t.Helper()
+	shape := epochBoundaryDumpShape()
+	for d := 0; d < shape.delegators; d += 97 {
+		key := epochBoundaryBenchHash(0x30, uint64(d)+1)
+		slot := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch) + 1_000 +
+			uint64(d)
+		for _, stmt := range []string{
+			`UPDATE account SET active = 0, pool = NULL, added_slot = ?
+WHERE credential_tag = 0 AND staking_key = ?`,
+			`UPDATE reward_live_stake SET registered = 0, pool_key_hash = NULL,
+    updated_slot = ? WHERE credential_tag = 0 AND staking_key = ?`,
+			`INSERT INTO deregistration (added_slot, staking_key, credential_tag,
+    amount) VALUES (?, ?, 0, '2000000')`,
+		} {
+			_, err := raw.Exec(stmt, slot, key)
+			require.NoError(t, err)
+		}
+	}
+}
+
+// TestEpochBoundaryDumpForDifferential runs one boundary on the dump fixture
+// for each precompute state and writes the resulting state to
+// $DINGO_BOUNDARY_DUMP_DIR, so the same test on two code versions produces
+// files to diff. It is skipped unless that directory is set.
+func TestEpochBoundaryDumpForDifferential(t *testing.T) {
+	t.Parallel()
+	dir := os.Getenv("DINGO_BOUNDARY_DUMP_DIR")
+	if dir == "" {
+		t.Skip("set DINGO_BOUNDARY_DUMP_DIR to write boundary dumps")
+	}
+	for _, state := range []string{"complete", "partial", "missing"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
+			f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+			switch state {
+			case "complete":
+				require.NoError(
+					t,
+					f.ls.precomputeStakeRewardsAfterEpochTransition(
+						epochBoundaryBenchPrecomputeEvent(),
+					),
+				)
+			case "partial":
+				epochBoundaryBenchPartialPrecomputeT(t, f)
+			}
+			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+			require.NoError(t, err)
+			defer raw.Close()
+			deregisterEpochBoundaryDumpDelegators(t, raw)
+			f.rollover(t)
+			f.ls.waitEpochBoundaryBenchBackground()
+			// DRep power is read from the derived balances; the tables are
+			// dumped with every credit folded into its account, the shape an
+			// eager boundary writes.
+			power := dumpDRepVotingPower(t, f)
+			settleRewardCredits(t, f.ls)
+			dump := dumpEpochBoundaryState(t, raw) + "== drep_power\n" +
+				power
+			require.NoError(t, os.WriteFile(
+				filepath.Join(dir, "boundary-"+state+".txt"),
+				[]byte(dump), 0o644,
+			))
+		})
+	}
+}
+
+func smallEpochBoundaryBenchShape() epochBoundaryBenchShape {
+	return epochBoundaryBenchShape{
+		pools:             6,
+		delegators:        60,
+		dreps:             4,
+		utxosPerDelegator: 1,
+		proposals:         2,
+		drepVotes:         4,
+		spoVotes:          3,
+		ccMembers:         3,
+	}
+}
+
+// TestEpochRolloverMarkSnapshotIncludesSameBoundaryRewards pins the SNAP
+// ordering contract: the mark snapshot captured at a boundary includes the
+// reward round that boundary applies, so every credited delegator's frozen
+// stake is its pre-boundary stake plus its reward.
+func TestEpochRolloverMarkSnapshotIncludesSameBoundaryRewards(t *testing.T) {
+	t.Parallel()
+	f := newEpochBoundaryBenchFixture(t, smallEpochBoundaryBenchShape(), "")
+	require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+		epochBoundaryBenchPrecomputeEvent(),
+	))
+	before, err := f.db.Metadata().GetRewardStakeInputs(
+		epochBoundaryBenchEndedEpoch, nil,
+	)
+	require.NoError(t, err)
+	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, outputs)
+
+	f.rollover(t)
+	f.ls.waitEpochBoundaryBenchBackground()
+
+	after, err := f.db.Metadata().GetRewardStakeInputs(
+		epochBoundaryBenchEndedEpoch+1, nil,
+	)
+	require.NoError(t, err)
+	credit := make(map[string]uint64)
+	for _, output := range outputs {
+		if output.Spendable && !output.Guarded {
+			credit[string(output.StakingKey)] += uint64(output.Amount)
+		}
+	}
+	require.NotEmpty(t, credit)
+	stakeAfter := make(map[string]uint64, len(after))
+	for _, input := range after {
+		stakeAfter[string(input.StakingKey)] = uint64(input.Stake)
+	}
+	for _, input := range before {
+		key := string(input.StakingKey)
+		require.Equal(
+			t, uint64(input.Stake)+credit[key], stakeAfter[key],
+			"mark stake of %x must include the reward credited at the"+
+				" same boundary", input.StakingKey,
+		)
+	}
+}
+
+// TestBoundaryRechecksRegistrationChangedAfterPrecompute pins the boundary's
+// eligibility recheck: a delegator deregistered after the precompute ran is
+// not credited, and exactly its reward moves to the treasury, although the
+// precompute recorded its output as spendable.
+func TestBoundaryRechecksRegistrationChangedAfterPrecompute(t *testing.T) {
+	t.Parallel()
+	run := func(deregister bool) (*epochBoundaryBenchFixture, uint64) {
+		f := newEpochBoundaryBenchFixture(t, epochBoundaryDumpShape(), "")
+		require.NoError(t, f.ls.precomputeStakeRewardsAfterEpochTransition(
+			epochBoundaryBenchPrecomputeEvent(),
+		))
+		if deregister {
+			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+			require.NoError(t, err)
+			deregisterEpochBoundaryDumpDelegators(t, raw)
+			require.NoError(t, raw.Close())
+		}
+		f.rollover(t)
+		f.ls.waitEpochBoundaryBenchBackground()
+		state, err := f.db.Metadata().GetNetworkState(nil)
+		require.NoError(t, err)
+		return f, uint64(state.Treasury)
+	}
+	_, treasuryKept := run(false)
+	f, treasuryDeregistered := run(true)
+
+	deregistered := make(map[string]bool)
+	for d := 0; d < epochBoundaryDumpShape().delegators; d += 97 {
+		deregistered[string(epochBoundaryBenchHash(0x30, uint64(d)+1))] = true
+	}
+	outputs, err := f.db.Metadata().GetRewardAccountOutputs(8, nil)
+	require.NoError(t, err)
+	var moved uint64
+	for _, output := range outputs {
+		if !deregistered[string(output.StakingKey)] {
+			continue
+		}
+		require.False(
+			t, output.Spendable,
+			"a delegator deregistered before the boundary is unspendable",
+		)
+		moved += uint64(output.Amount)
+	}
+	require.NotZero(t, moved, "fixture must deregister a rewarded delegator")
+	for key := range deregistered {
+		account, err := f.db.GetAccountByCredential(0, []byte(key), true, nil)
+		require.NoError(t, err)
+		require.Equal(
+			t, stakeRewardSeedReward(key), uint64(account.Reward),
+			"a deregistered delegator is not credited",
+		)
+	}
+	require.Equal(
+		t, treasuryKept+moved, treasuryDeregistered,
+		"exactly the deregistered delegators' rewards move to the treasury",
+	)
+}
+
+// stakeRewardSeedReward is the reward balance the fixture seeds for a
+// delegator key.
+func stakeRewardSeedReward(key string) uint64 {
+	index := binary.BigEndian.Uint64([]byte(key)[20:]) - 1
+	return epochBoundaryBenchStake(index) / 200
+}
+
+func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	seedEligiblePreviewGoRewardBasis(t, db)
+
+	currentParams := mithrilRewardConwayPParams()
+	previousParams := *currentParams
+	previousParams.MinFeeA++
+	currentData, err := cbor.Encode(currentParams)
+	require.NoError(t, err)
+	previousData, err := cbor.Encode(&previousParams)
+	require.NoError(t, err)
+
+	eraBounds := make([]ledgerstate.EraBound, ledgerstate.EraConway+1)
+	nonce := make([]byte, 32)
+	require.NoError(t, ledgerstate.ImportLedgerState(
+		context.Background(),
+		ledgerstate.ImportConfig{
+			Database: db,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+			State: &ledgerstate.RawLedgerState{
+				PParamsData:         currentData,
+				PrevPParamsData:     previousData,
+				Epoch:               1397,
+				EraIndex:            ledgerstate.EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Reserves:            100_000_000,
+				Tip: &ledgerstate.SnapshotTip{
+					Slot:      1_397_799,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		},
+	))
+	require.NoError(t, db.Metadata().SaveRewardAdaPots(
+		&models.RewardAdaPots{
+			Epoch:        1397,
+			Reserves:     100_000_000,
+			CapturedSlot: 1_397_799,
+		},
+		nil,
+	))
+	prefilterSlot, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 1397)
+	require.NoError(t, err)
+	require.LessOrEqual(t, prefilterSlot, uint64(1_397_799))
+
+	epochs, ok := stakeRewardEpochsForNewEpoch(1398)
+	require.True(t, ok)
+	require.Equal(t, uint64(1395), epochs.snapshot)
+	require.Equal(t, uint64(1396), epochs.performance)
+	require.Equal(t, uint64(1397), epochs.pots)
+
+	currentEpoch, err := db.Metadata().GetEpoch(1397, nil)
+	require.NoError(t, err)
+	require.NotNil(t, currentEpoch)
+	ls.currentEpoch = *currentEpoch
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = currentParams
+
+	var rollover *EpochRolloverResult
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		rollover, rolloverErr = ls.processEpochRollover(
+			txn,
+			*currentEpoch,
+			eras.ConwayEraDesc,
+			currentParams,
+			false,
+		)
+		return rolloverErr
+	}))
+	require.NotNil(t, rollover)
+	require.Equal(t, uint64(1398), rollover.NewCurrentEpoch.EpochId)
+	poolOutputs, err := db.Metadata().GetRewardPoolOutputs(1395, nil)
+	require.NoError(t, err)
+	require.Len(t, poolOutputs, 1)
+	require.Positive(t, uint64(poolOutputs[0].TotalReward))
+	accountOutputs, err := db.Metadata().GetRewardAccountOutputs(1395, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, accountOutputs)
+	var credited uint64
+	for _, output := range accountOutputs {
+		credited += uint64(output.Amount)
+	}
+	require.Positive(t, credited)
+}
+
+func seedEligiblePreviewGoRewardBasis(
+	t *testing.T,
+	db *database.Database,
+) {
+	t.Helper()
+	const (
+		rewardSnapshotEpoch = uint64(1395)
+		capturedSlot        = uint64(1_397_799)
+		boundarySlot        = uint64(1_395_000)
+	)
+	poolKey := rewardCalcHash(0x71)
+	rewardAccount := rewardCalcHash(0x72)
+	member := rewardCalcHash(0x73)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			poolID,
+			i+1,
+			1_396_640+i,
+			nil,
+		))
+	}
+	meta := db.Metadata()
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            rewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     capturedSlot,
+		BoundarySlot:     boundarySlot,
+		ProtocolVersion:  10,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs(
+		[]*models.RewardPoolInput{{
+			Epoch:                      rewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               capturedSlot,
+			BoundarySlot:               boundarySlot,
+		}},
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardStakeInputs(
+		[]*models.RewardStakeInput{
+			{
+				Epoch:         rewardSnapshotEpoch,
+				PoolKeyHash:   poolKey,
+				CredentialTag: 0,
+				StakingKey:    rewardAccount,
+				Stake:         500,
+				Owner:         true,
+				Registered:    true,
+				CapturedSlot:  capturedSlot,
+				BoundarySlot:  boundarySlot,
+			},
+			{
+				Epoch:         rewardSnapshotEpoch,
+				PoolKeyHash:   poolKey,
+				CredentialTag: 0,
+				StakingKey:    member,
+				Stake:         500,
+				Registered:    true,
+				CapturedSlot:  capturedSlot,
+				BoundarySlot:  boundarySlot,
+			},
+		},
+		nil,
+	))
+
+	pool := models.Pool{PoolKeyHash: poolKey}
+	require.NoError(t, db.ImportPool(nil, &pool, &models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolKey,
+		AddedSlot:   boundarySlot,
+	}))
+	for _, account := range [][]byte{rewardAccount, member} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: account,
+			Pool:       poolKey,
+			Active:     true,
+		}))
+	}
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		1,
+		rewardAccount,
+		0,
+		boundarySlot,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		2,
+		member,
+		0,
+		boundarySlot,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+}
+
+func mithrilRewardConwayPParams() *conway.ConwayProtocolParameters {
+	params := donationTestConwayPParams(10)
+	params.MinFeeA = 44
+	params.NOpt = 500
+	params.A0 = &cbor.Rat{Rat: big.NewRat(3, 10)}
+	params.Rho = &cbor.Rat{Rat: big.NewRat(3, 1000)}
+	params.Tau = &cbor.Rat{Rat: big.NewRat(1, 5)}
+	return params
+}
+
+// A bootstrapped node applies no block at or below its trust anchor, so every
+// slot of an epoch that ended below the anchor is uncountable. The blocks were
+// nonetheless minted, and the reference credits their rewards, so the counts
+// have to come from the snapshot's own BlocksMade rather than from a floor of
+// zero.
+func TestRewardBlockCountsMergesImportedCountsAcrossTheAnchor(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	const (
+		performanceEpoch = uint64(2)
+		epochStartSlot   = uint64(100)
+		epochLength      = 100
+		anchorSlot       = uint64(150)
+	)
+	poolKey := rewardCalcHash(0x81)
+	otherPoolKey := rewardCalcHash(0x82)
+	retiredPoolKey := rewardCalcHash(0x83)
+	var poolID, otherPoolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+	copy(otherPoolID[:], otherPoolKey)
+
+	require.NoError(t, meta.SetEpoch(
+		epochStartSlot,
+		performanceEpoch,
+		nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id,
+		1,
+		epochLength,
+		nil,
+	))
+	require.NoError(t, meta.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(anchorSlot, 10),
+		nil,
+	))
+	// Blocks this node applied itself, all strictly above the anchor.
+	for _, slot := range []uint64{160, 170} {
+		require.NoError(t, db.UpdatePoolOpCertSequence(poolID, slot, slot, nil))
+	}
+	require.NoError(t, db.UpdatePoolOpCertSequence(otherPoolID, 180, 180, nil))
+	// Blocks the snapshot reports for the same epoch, minted at or below the
+	// anchor. retiredPoolKey is not one of the pools asked about, but its
+	// blocks still belong to the epoch total that every pool's beta divides by.
+	require.NoError(t, meta.SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount{
+			{
+				Epoch:          performanceEpoch,
+				PoolKeyHash:    poolKey,
+				BlocksProduced: 5,
+				CapturedSlot:   anchorSlot,
+			},
+			{
+				Epoch:          performanceEpoch,
+				PoolKeyHash:    otherPoolKey,
+				BlocksProduced: 3,
+				CapturedSlot:   anchorSlot,
+			},
+			{
+				Epoch:          performanceEpoch,
+				PoolKeyHash:    retiredPoolKey,
+				BlocksProduced: 2,
+				CapturedSlot:   anchorSlot,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, meta.SaveImportedEpochBlockTotal(
+		performanceEpoch,
+		5+3+2,
+		anchorSlot,
+		nil,
+	))
+
+	counts, total, known, err := ls.rewardBlockCounts(
+		meta,
+		nil,
+		performanceEpoch,
+		[]*models.RewardPoolInput{
+			{PoolKeyHash: poolKey},
+			{PoolKeyHash: otherPoolKey},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, known)
+	assert.Equal(t, uint64(2+5), counts[string(poolKey)])
+	assert.Equal(t, uint64(1+3), counts[string(otherPoolKey)])
+	assert.Equal(t, uint64(3+10), total)
+}
+
+// Zero blocks and no block history are different answers. The first is a real
+// epoch outcome; the second is an epoch this node cannot count, and reading it
+// as zero gives every pool zero performance and credits every delegator
+// nothing while reporting a completed round.
+func TestRewardBlockCountsUnknownWhenAnchorHidesTheEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	const (
+		performanceEpoch = uint64(2)
+		epochStartSlot   = uint64(100)
+		epochLength      = 100
+	)
+	poolKey := rewardCalcHash(0x84)
+
+	require.NoError(t, meta.SetEpoch(
+		epochStartSlot,
+		performanceEpoch,
+		nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id,
+		1,
+		epochLength,
+		nil,
+	))
+	// The anchor sits past the end of the epoch, so none of it is observable.
+	require.NoError(t, meta.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(epochStartSlot+epochLength, 10),
+		nil,
+	))
+
+	_, _, known, err := ls.rewardBlockCounts(
+		meta,
+		nil,
+		performanceEpoch,
+		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(
+		t,
+		known,
+		"an epoch that ended below the anchor with no imported counts has "+
+			"unknown block counts, not zero",
+	)
+}
+
+// The imported counts are consulted only for an epoch the anchor actually
+// covers. A node that never bootstrapped counts its own blocks exactly as it
+// did before.
+func TestRewardBlockCountsIgnoresImportedCountsAboveTheAnchor(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	const (
+		performanceEpoch = uint64(2)
+		epochStartSlot   = uint64(100)
+		epochLength      = 100
+	)
+	poolKey := rewardCalcHash(0x85)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+
+	require.NoError(t, meta.SetEpoch(
+		epochStartSlot,
+		performanceEpoch,
+		nil, nil, nil, nil,
+		eras.ShelleyEraDesc.Id,
+		1,
+		epochLength,
+		nil,
+	))
+	require.NoError(t, meta.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		strconv.FormatUint(epochStartSlot-1, 10),
+		nil,
+	))
+	require.NoError(t, db.UpdatePoolOpCertSequence(poolID, 1, 120, nil))
+	require.NoError(t, meta.SaveImportedPoolBlockCounts(
+		[]models.ImportedPoolBlockCount{
+			{
+				Epoch:          performanceEpoch,
+				PoolKeyHash:    poolKey,
+				BlocksProduced: 7,
+				CapturedSlot:   epochStartSlot - 1,
+			},
+		},
+		nil,
+	))
+	require.NoError(t, meta.SaveImportedEpochBlockTotal(
+		performanceEpoch,
+		7,
+		epochStartSlot-1,
+		nil,
+	))
+
+	counts, total, known, err := ls.rewardBlockCounts(
+		meta,
+		nil,
+		performanceEpoch,
+		[]*models.RewardPoolInput{{PoolKeyHash: poolKey}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, known)
+	assert.Equal(t, uint64(1), counts[string(poolKey)])
+	assert.Equal(t, uint64(1), total)
+}
+
+// The round-level consequence. seedRewardPrecomputeTimingState places ten
+// blocks for the single pool inside performance epoch 2; putting the anchor
+// past that epoch removes every one of them from the node's reach.
+func TestStakeRewardRoundDeclinedWhenAnchorHidesTheBlockCounts(t *testing.T) {
+	t.Parallel()
+
+	ls, db := seedRewardPrecomputeTimingState(t, 7)
+	var logs bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	require.NoError(t, db.Metadata().SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"199",
+		nil,
+	))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.calculateStakeRewardApplication(
+		txn,
+		4,
+		1_200,
+		1_200,
+		true,
+	)
+	require.NoError(t, err)
+	require.False(
+		t,
+		ok,
+		"a round whose performance epoch cannot be counted must be declined, "+
+			"not distributed as zero",
+	)
+	require.Nil(t, app)
+	assert.Contains(
+		t,
+		logs.String(),
+		"no block counts for the performance epoch",
+	)
+}
+
+// A recorded anchor sits at or above slot 0 and so covers epoch 0, the
+// performance epoch of both bootstrap rounds. Those rounds must still run:
+// they distribute no pool or account rewards but do move the ADA pots, and
+// declining one would leave treasury and reserves at their genesis values for
+// the life of the chain. They are safe because epoch 0's mark snapshot holds
+// no pools, and an empty pool set is answered before the anchor is consulted;
+// the reference agrees that zero rather than unknown is the answer there,
+// since NEWEPOCH's initialRules construct the genesis state with BlocksMade
+// Map.empty. This pins that, rather than proving a fix.
+func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetEpoch(
+		0, 0, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	pparamsCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(0, 1),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		pparamsCbor, 0, 0, eras.ShelleyEraDesc.Id, nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Reserves:     100_000_000,
+		CapturedSlot: 0,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:           0,
+		SnapshotType:    "mark",
+		CapturedSlot:    0,
+		BoundarySlot:    0,
+		ProtocolVersion: 7,
+	}, nil))
+	require.NoError(t, meta.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"50",
+		nil,
+	))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.calculateStakeRewardApplication(txn, 1, 100, 100, true)
+	require.NoError(t, err)
+	require.True(
+		t,
+		ok,
+		"an anchor covers epoch 0 by construction; the bootstrap round still "+
+			"has to move the pots",
+	)
+	require.NotNil(t, app)
+	assert.True(t, app.epochs.bootstrap)
+	assert.Empty(t, app.poolOutputs)
+	assert.Empty(t, app.accountOutputs)
+}
+
+// TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
+// The round into epoch 1 reads genesis pots and empty previous block counts;
+// the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
+// empty Go distributions. Byron-prefix networks are suppressed by
+// applyStakeRewards' Byron performance-epoch guard, not by this helper.
+func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
+	t.Parallel()
+
+	_, ok := stakeRewardEpochsForApplication(0)
+	require.False(t, ok, "epoch 0 is not a boundary and applies no rewards")
+
+	epochs, ok := stakeRewardEpochsForApplication(1)
+	require.True(t, ok)
+	require.Equal(t, stakeRewardEpochs{
+		snapshot:    0,
+		performance: 0,
+		pots:        0,
+		bootstrap:   true,
+	}, epochs)
+
+	epochs, ok = stakeRewardEpochsForApplication(2)
+	require.True(t, ok)
+	require.Equal(t, stakeRewardEpochs{
+		snapshot:    0,
+		performance: 0,
+		pots:        1,
+		bootstrap:   true,
+	}, epochs)
+
+	epochs, ok = stakeRewardEpochsForApplication(3)
+	require.True(t, ok)
+	require.Equal(t, stakeRewardEpochs{
+		snapshot:    0,
+		performance: 1,
+		pots:        2,
+	}, epochs)
+}
+
+func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	result := &rewards.Result{
+		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
+		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
+		TotalRewardPot:   1_000,
+		AvailableRewards: 800,
+		EffectiveRewards: 600,
+		Unspendable:      50,
+		Undistributed:    150,
+	}
+	suppressBootstrapStakeRewards(result)
+
+	require.Empty(t, result.PoolRewards)
+	require.Empty(t, result.AccountRewards)
+	require.Zero(t, result.EffectiveRewards)
+	require.Zero(t, result.Unspendable)
+	require.Equal(t, uint64(800), result.Undistributed)
+
+	app := &stakeRewardApplication{
+		params: rewards.Parameters{
+			TreasuryExpansion: big.NewRat(1, 5),
+		},
+		pots: &models.RewardAdaPots{
+			Reserves: types.Uint64(10_000),
+			Treasury: types.Uint64(10),
+		},
+		totalRewardPot:   result.TotalRewardPot,
+		availableRewards: result.AvailableRewards,
+		undistributed:    result.Undistributed,
+	}
+	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9_800), reserves)
+	require.Equal(t, uint64(210), treasury)
+}
+
+func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	require.NoError(t, db.Metadata().SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:   1,
+		Rewards: types.Uint64(1_000),
+	}, nil))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.precomputedStakeRewardApplication(txn, 2, 200)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, app)
+
+	app, ok, err = ls.precomputeStakeRewardsCalculate(txn, 2, 100, 200)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, app)
+}
+
+// The first RUPD reads an empty nesBprev, not epoch 0's nesBcur.
+// With d=0 this gives eta=0; the same 180 blocks enter the next update,
+// giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
+// too. These are the reference devnet inputs and pots.
+func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.ConwayEraDesc
+	require.NoError(t, ls.config.CardanoNodeConfig.
+		LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 500,
+		"maxLovelaceSupply": 6000000000000,
+		"securityParam": 40,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	pp := mockledger.NewMockConwayProtocolParams()
+	pp.NOpt = 150
+	pp.A0 = rewardCalcRat(3, 10)
+	pp.Rho = rewardCalcRat(3, 1_000)
+	pp.Tau = rewardCalcRat(1, 5)
+	pp.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 10}
+	encoded, err := cbor.Encode(&pp)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	for epoch := range uint64(3) {
+		require.NoError(t, meta.SetEpoch(
+			epoch*500, epoch, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, 1, 500, nil,
+		))
+		require.NoError(t, db.SetPParams(
+			encoded, epoch*500, epoch, eras.ConwayEraDesc.Id, nil,
+		))
+	}
+	require.NoError(t, meta.SetNetworkState(0, 2_000_000_000_000, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: 0, Reserves: 2_000_000_000_000,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch: 0, SnapshotType: "mark", ProtocolVersion: 10,
+		TotalActiveStake: 2_000_000_000_000,
+		TotalPoolCount:   2, TotalDelegators: 2,
+	}, nil))
+	for _, key := range []byte{0x11, 0x22} {
+		poolKey := rewardCalcHash(key)
+		poolID := seedLiveStakeFixture(
+			t, db, poolKey, bytes.Repeat([]byte{key}, 32),
+			1_000_000_000_000, 0,
+		)
+		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+			Epoch: 0, PoolKeyHash: poolKey, RewardAccount: poolKey,
+			Margin:         &types.Rat{Rat: big.NewRat(0, 1)},
+			DelegatedStake: 1_000_000_000_000, DelegatorCount: 1,
+		}}, nil))
+		require.NoError(
+			t,
+			meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
+				Epoch: 0, PoolKeyHash: poolKey, StakingKey: poolKey,
+				Stake: 1_000_000_000_000, Registered: true,
+			}}, nil),
+		)
+		for i := range uint64(90) {
+			require.NoError(t, db.UpdatePoolOpCertSequence(
+				poolID, i+1, 1+2*i+uint64(key), nil,
+			))
+		}
+	}
+	_, err = rewardCalcSQLDB(t, db).Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		epoch    uint64
+		treasury uint64
+		reserves uint64
+		fraction *big.Rat
+	}{
+		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
+		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+	} {
+		boundary := tc.epoch * 500
+		ended, err := meta.GetEpoch(tc.epoch-1, nil)
+		require.NoError(t, err)
+		require.NotNil(t, ended)
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if err := ls.applyStakeRewards(txn, tc.epoch, boundary); err != nil {
+				return err
+			}
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
+		}))
+		state, err := meta.GetNetworkState(nil)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		require.Equal(t, tc.treasury, uint64(state.Treasury),
+			"treasury at boundary into epoch %d", tc.epoch)
+		require.Equal(t, tc.reserves, uint64(state.Reserves),
+			"reserves at boundary into epoch %d", tc.epoch)
+		pots, err := meta.GetRewardAdaPots(tc.epoch, nil)
+		require.NoError(t, err)
+		require.NotNil(t, pots)
+		require.Equal(t, state.Treasury, pots.Treasury)
+		require.Equal(t, state.Reserves, pots.Reserves)
+		if tc.epoch == 1 {
+			require.Equal(t, uint64(400_000), uint64(pots.Fees))
+		}
+
+		hash := bytes.Repeat([]byte{byte(tc.epoch)}, 32)
+		seedBlockAtSlot(t, ls, boundary, hash)
+		require.NoError(t, db.SetTip(ochainsync.Tip{
+			Point: ocommon.NewPoint(boundary, hash),
+		}, nil))
+		result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+		require.NoError(t, err)
+		dist := decodeStakeDistributionResult(t, result)
+		require.Len(t, dist.Results, 2)
+		for _, entry := range dist.Results {
+			require.Equal(t, tc.fraction, entry.StakeFraction.Rat,
+				"stake fraction at boundary into epoch %d", tc.epoch)
+		}
+	}
+}
+
+// A Mithril bootstrap anchored mid-epoch seeds the imported epoch's own
+// RewardAdaPots row with ImportedEpochFees (the fees collected up to and
+// including the anchor block) and a CapturedSlot at the anchor. The node's
+// locally stored transactions for that epoch only cover slots after the
+// anchor -- plus, once the historical backfill has run, slots at or
+// before it too. saveRewardAdaPotsForEpoch must sum the local fees strictly
+// after the anchor and add the imported amount, not sum the whole epoch:
+// summing the whole epoch either silently drops the pre-anchor fees or
+// double-counts them once backfill has stored
+// pre-anchor transactions locally.
+func TestSaveRewardAdaPotsForEpochUsesImportedPreAnchorFees(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	meta := db.Metadata()
+
+	const (
+		endedEpoch           = uint64(5)
+		epochStartSlot       = uint64(1000)
+		epochLengthInSlots   = uint(100) // slots [1000, 1099]
+		anchorSlot           = uint64(1050)
+		importedPreAnchor    = uint64(1_000_000)
+		postAnchorFee        = uint64(500_000)
+		preAnchorBackfillFee = uint64(300_000)
+		newEpochBoundarySlot = uint64(1100)
+	)
+
+	// Simulates seedImportedRewardBasis's write for the anchor epoch: the
+	// pots row this epoch's own boundary would have produced, had the node
+	// been running, carrying the pre-anchor fee pot the import derived from
+	// State.Fees - snapshots.Fee.
+	importedFees := types.Uint64(importedPreAnchor)
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:             endedEpoch,
+		CapturedSlot:      anchorSlot,
+		ImportedEpochFees: &importedFees,
+	}, nil))
+
+	// A transaction at the anchor slot itself: excluded, because the
+	// imported amount already accounts for fees up to and including the
+	// anchor block. Sum range is (CapturedSlot, epochEnd].
+	rewardCalcExecRows(t, db, `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
+		[]byte("pre-anchor-backfill-tx"), []byte("pre-anchor-block"),
+		anchorSlot, strconv.FormatUint(preAnchorBackfillFee, 10),
+	)
+	// A transaction after the anchor: included.
+	rewardCalcExecRows(t, db, `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
+		[]byte("post-anchor-tx"), []byte("post-anchor-block"),
+		anchorSlot+30, strconv.FormatUint(postAnchorFee, 10),
+	)
+
+	ended := models.Epoch{
+		EpochId:       endedEpoch,
+		StartSlot:     epochStartSlot,
+		LengthInSlots: epochLengthInSlots,
+	}
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.saveRewardAdaPotsForEpoch(
+			txn, endedEpoch+1, ended, newEpochBoundarySlot,
+		)
+	}))
+
+	pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots)
+	require.Equal(
+		t,
+		importedPreAnchor+postAnchorFee,
+		uint64(pots.Fees),
+		"fees for the epoch after an imported anchor epoch must be the "+
+			"imported pre-anchor amount plus only the post-anchor local sum",
+	)
+}
+
+// The imported pots row's CapturedSlot is the anchor block's slot, which can
+// be any slot of its epoch, including the first and the last. The anchor
+// block's own fees are part of ImportedEpochFees at both ends, so the local
+// sum must exclude the anchor slot and still add the imported amount.
+func TestSaveRewardAdaPotsForEpochImportedAnchorAtEpochEdges(t *testing.T) {
+	t.Parallel()
+	const (
+		endedEpoch         = uint64(5)
+		epochStartSlot     = uint64(1000)
+		epochLengthInSlots = uint(100) // slots [1000, 1099]
+		epochEndSlot       = uint64(1099)
+		importedPreAnchor  = uint64(1_000_000)
+		anchorBlockFee     = uint64(300_000)
+		laterFee           = uint64(500_000)
+	)
+	tests := []struct {
+		name       string
+		anchorSlot uint64
+		laterSlot  uint64
+		want       uint64
+	}{
+		{
+			name:       "anchor at first slot",
+			anchorSlot: epochStartSlot,
+			laterSlot:  epochStartSlot + 1,
+			want:       importedPreAnchor + laterFee,
+		},
+		{
+			name:       "anchor at last slot",
+			anchorSlot: epochEndSlot,
+			want:       importedPreAnchor,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := newRewardCalculationTestLedger(t)
+			meta := db.Metadata()
+			importedFees := types.Uint64(importedPreAnchor)
+			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+				Epoch:             endedEpoch,
+				CapturedSlot:      tc.anchorSlot,
+				ImportedEpochFees: &importedFees,
+			}, nil))
+			// A backfilled copy of the anchor block's transaction, already
+			// counted in ImportedEpochFees.
+			rewardCalcExecRows(t, db, `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (1, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
+				[]byte("anchor-tx"), []byte("anchor-block"),
+				tc.anchorSlot, strconv.FormatUint(anchorBlockFee, 10),
+			)
+			if tc.laterSlot != 0 {
+				rewardCalcExecRows(t, db, `
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (2, ?, ?, ?, 7, ?, '0', '0', 0, TRUE)`,
+					[]byte("later-tx"), []byte("later-block"),
+					tc.laterSlot, strconv.FormatUint(laterFee, 10),
+				)
+			}
+			ended := models.Epoch{
+				EpochId:       endedEpoch,
+				StartSlot:     epochStartSlot,
+				LengthInSlots: epochLengthInSlots,
+			}
+			txn := db.Transaction(true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				return ls.saveRewardAdaPotsForEpoch(
+					txn, endedEpoch+1, ended, epochEndSlot+1,
+				)
+			}))
+			pots, err := meta.GetRewardAdaPots(endedEpoch+1, nil)
+			require.NoError(t, err)
+			require.NotNil(t, pots)
+			require.Equal(t, tc.want, uint64(pots.Fees))
+		})
+	}
+}
+
+// TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage pins the
+// d that startStep reads across the Alonzo to Babbage boundary. The reward
+// update runs in the epoch after the performance epoch, in that epoch's era.
+// Babbage's PParams has no d field (ppDG = to (const minBound)), and the
+// translated prevPParams read back as 0, so the round for the last Alonzo
+// epoch uses d = 0 even though the Alonzo parameters held d = 7/10. Reading
+// d from the performance epoch's Alonzo parameters overstates eta's
+// expectedBlocks denominator reduction and inflates every reward of the
+// round (Prime Mainnet performance epoch 39).
+//
+// Block counts are the exception: BBODY accumulated the performance epoch's
+// BlocksMade under that epoch's curPParams, so incrBlocks skipped overlay
+// slots with the Alonzo d. The d returned for block counting must stay the
+// performance epoch's.
+func TestRewardParametersDecentralizationIsZeroWhenCalculatedInBabbage(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		performanceEpoch = uint64(2)
+		potsEpoch        = uint64(3)
+	)
+	tests := []struct {
+		name         string
+		calcEra      uint
+		expectedDRat *big.Rat
+	}{
+		{
+			name:         "alonzo calculation keeps the performance epoch d",
+			calcEra:      eras.AlonzoEraDesc.Id,
+			expectedDRat: big.NewRat(7, 10),
+		},
+		{
+			name:         "babbage calculation reads d as zero",
+			calcEra:      eras.BabbageEraDesc.Id,
+			expectedDRat: big.NewRat(0, 1),
+		},
+		{
+			name:         "conway calculation reads d as zero",
+			calcEra:      eras.ConwayEraDesc.Id,
+			expectedDRat: big.NewRat(0, 1),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls, db := newRewardCalculationTestLedger(t)
+			meta := db.Metadata()
+			pparams := &alonzo.AlonzoProtocolParameters{
+				NOpt:             10,
+				A0:               rewardCalcRat(0, 1),
+				Rho:              rewardCalcRat(1, 100),
+				Tau:              rewardCalcRat(1, 5),
+				Decentralization: rewardCalcRat(7, 10),
+				ProtocolMajor:    6,
+			}
+			pparamsCbor, err := cbor.Encode(pparams)
+			require.NoError(t, err)
+			require.NoError(t, meta.SetEpoch(
+				100, performanceEpoch, nil, nil, nil, nil,
+				eras.AlonzoEraDesc.Id, 1, 100, nil,
+			))
+			require.NoError(t, meta.SetEpoch(
+				200, potsEpoch, nil, nil, nil, nil,
+				tc.calcEra, 1, 1_000, nil,
+			))
+			require.NoError(t, db.SetPParams(
+				pparamsCbor, 100, performanceEpoch,
+				eras.AlonzoEraDesc.Id, nil,
+			))
+
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Rollback() }()
+			_, params, performanceD, err := ls.rewardParameters(
+				txn,
+				performanceEpoch,
+				potsEpoch,
+				&models.RewardAdaPots{Reserves: 100_000_000},
+			)
+			require.NoError(t, err)
+			require.Zero(t, tc.expectedDRat.Cmp(params.Decentralization),
+				"d = %s, want %s", params.Decentralization, tc.expectedDRat)
+			require.Zero(t, big.NewRat(7, 10).Cmp(performanceD),
+				"block-count d = %s, want 7/10", performanceD)
+			require.Equal(t, big.NewRat(1, 5), params.TreasuryExpansion,
+				"tau still comes from the performance epoch")
+		})
+	}
+}
+
+func TestRewardPrecomputeCoalescesEpochTransitionBurst(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	enqueued := make(chan uint64)
+	var (
+		processedMu sync.Mutex
+		processed   []uint64
+	)
+	precompute := func(evt event.EpochTransitionEvent) error {
+		if evt.NewEpoch == 1 {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		processedMu.Lock()
+		processed = append(processed, evt.NewEpoch)
+		processedMu.Unlock()
+		return nil
+	}
+	eventBus.SubscribeFunc(
+		event.EpochTransitionEventType,
+		func(evt event.Event) {
+			ls.handleRewardPrecomputeEpochTransitionWith(evt, precompute)
+			epochEvt := evt.Data.(event.EpochTransitionEvent)
+			enqueued <- epochEvt.NewEpoch
+		},
+	)
+
+	eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(
+			event.EpochTransitionEventType,
+			event.EpochTransitionEvent{NewEpoch: 1, EpochNonce: []byte{1}},
+		),
+	)
+	require.Equal(
+		t,
+		uint64(1),
+		testutil.RequireReceive(
+			t,
+			enqueued,
+			testutil.AsyncWait,
+			"reward precompute callback did not enqueue first epoch",
+		),
+	)
+	testutil.RequireReceive(
+		t,
+		firstStarted,
+		testutil.AsyncWait,
+		"first reward precompute did not start",
+	)
+
+	// Deliver a sequence longer than the EventBus default buffer's total capacity
+	// while the first simulated calculation remains blocked. Waiting for each
+	// callback isolates the behavior under test: callback delivery stays
+	// independent of reward calculation, and the ledger retains only the newest
+	// pending epoch.
+	latestEpoch := uint64(event.DefaultSubscriberBuffer + 100)
+	for epoch := uint64(2); epoch <= latestEpoch; epoch++ {
+		eventBus.Publish(
+			event.EpochTransitionEventType,
+			event.NewEvent(
+				event.EpochTransitionEventType,
+				event.EpochTransitionEvent{
+					NewEpoch:   epoch,
+					EpochNonce: []byte{byte(epoch)},
+				},
+			),
+		)
+		require.Equal(
+			t,
+			epoch,
+			testutil.RequireReceive(
+				t,
+				enqueued,
+				testutil.AsyncWait,
+				"reward precompute callback did not enqueue epoch",
+			),
+		)
+	}
+	close(releaseFirst)
+
+	done := make(chan struct{})
+	go func() {
+		ls.rewardPrecomputeWG.Wait()
+		close(done)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"coalesced reward precompute did not finish",
+	)
+
+	processedMu.Lock()
+	defer processedMu.Unlock()
+	require.Equal(t, []uint64{1, latestEpoch}, processed)
+}
+
+func TestRewardPrecomputeContinuesAfterPanic(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var processed []uint64
+	precompute := func(evt event.EpochTransitionEvent) error {
+		if evt.NewEpoch == 1 {
+			close(firstStarted)
+			<-releaseFirst
+			panic("broken reward input")
+		}
+		processed = append(processed, evt.NewEpoch)
+		return nil
+	}
+
+	ls.queueRewardPrecompute(
+		event.EpochTransitionEvent{NewEpoch: 1, EpochNonce: []byte{1}},
+		precompute,
+	)
+	testutil.RequireReceive(
+		t,
+		firstStarted,
+		testutil.AsyncWait,
+		"panicking reward precompute did not start",
+	)
+	ls.queueRewardPrecompute(
+		event.EpochTransitionEvent{NewEpoch: 2, EpochNonce: []byte{2}},
+		precompute,
+	)
+	ls.queueRewardPrecompute(
+		event.EpochTransitionEvent{NewEpoch: 3, EpochNonce: []byte{3}},
+		precompute,
+	)
+	close(releaseFirst)
+
+	done := make(chan struct{})
+	go func() {
+		ls.rewardPrecomputeWG.Wait()
+		close(done)
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"reward precompute worker stopped after panic",
+	)
+	require.Equal(t, []uint64{3}, processed)
+}
+
+func TestRewardPrecomputeRetryRejectsAbandonedGeneration(t *testing.T) {
+	t.Parallel()
+
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rollback active %t", active), func(t *testing.T) {
+			t.Parallel()
+			ls := &LedgerState{rewardPrecomputeRunning: true}
+			if active {
+				ls.rewardInputRollbackActive.Add(1)
+			} else {
+				ls.rewardInputGeneration.Add(2)
+			}
+			ls.deferStakeRewardPrecompute(4, 100, 0)
+			require.Nil(t, ls.rewardPrecomputeRetry,
+				"an old calculation must not reinstall an abandoned retry")
+
+			ls.rewardPrecomputeRetry = &stakeRewardPrecomputeRetry{
+				epochEvent: event.EpochTransitionEvent{NewEpoch: 3},
+				cutoffSlot: 100,
+			}
+			ls.maybeQueueStakeRewardPrecomputeRetry(100)
+			require.Nil(t, ls.rewardPrecomputePending,
+				"an abandoned retry must not replace the current pending epoch")
+			require.Nil(t, ls.rewardPrecomputeRetry)
+		})
+	}
+}
+
+// The pre-Babbage prefilter reads account registration at the RUPD slot, so a
+// rollback across that slot can change which delegators are paid. The
+// replacement must be derived from the surviving certificate history and match
+// the authoritative boundary calculation exactly.
+func TestRollbackRewardPrecomputeDropsAbandonedPrefilterHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	seed, db := seedRewardPrecomputeTimingState(t, 6)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	nonce := testHashBytes("reward-epoch")
+	require.NoError(t, db.SetEpoch(
+		200, 3, nonce, nil, nil, nil,
+		eras.ShelleyEraDesc.Id, 1, 1_000, nil,
+	))
+	cfg := seed.config
+	cfg.Database = db
+	cfg.ChainManager = cm
+	ls, err := NewLedgerState(cfg)
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	epoch, err := db.Metadata().GetEpoch(3, nil)
+	require.NoError(t, err)
+	ls.currentEpoch = *epoch
+	ls.currentEra = eras.ShelleyEraDesc
+	cutoff, err := ls.rewardPrefilterSlot(db.Metadata(), nil, 3)
+	require.NoError(t, err)
+	member := rewardCalcHash(0x6a)
+	// member is registered before the epoch; the abandoned chain deregisters
+	// it after the rollback point and before the RUPD slot.
+	rewardCalcSeedStakeCert(
+		t, db, 21, member, 0, 150,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+	rewardCalcSeedStakeCert(
+		t, db, 22, member, 0, cutoff-5,
+		uint(lcommon.CertificateTypeStakeDeregistration),
+	)
+	ancestor := chain.RawBlock{
+		Slot: cutoff - 10, Hash: testHashBytes("prefilter-ancestor"),
+		BlockNumber: 1, Type: 1, Cbor: []byte{0x80},
+	}
+	abandoned := chain.RawBlock{
+		Slot: cutoff + 1, Hash: testHashBytes("prefilter-abandoned"),
+		PrevHash:    ancestor.Hash,
+		BlockNumber: 2, Type: 1, Cbor: []byte{0x80},
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		[]chain.RawBlock{ancestor, abandoned},
+	))
+	for _, block := range []chain.RawBlock{ancestor, abandoned} {
+		require.NoError(t, db.SetBlockNonce(
+			block.Hash, block.Slot, nonce, true, nil,
+		))
+	}
+	ls.currentTip = ochainsync.Tip{
+		Point:       ocommon.NewPoint(abandoned.Slot, abandoned.Hash),
+		BlockNumber: abandoned.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ls.currentTip, nil))
+
+	require.NoError(t, ls.precomputeStakeRewardsAfterEpochTransition(
+		event.EpochTransitionEvent{
+			NewEpoch:     3,
+			BoundarySlot: abandoned.Slot,
+			EpochNonce:   nonce,
+		},
+	))
+	require.False(t, rewardOutputsPayKey(t, db, member),
+		"control: the abandoned chain's prefilter excludes member")
+
+	require.NoError(t, ls.rollbackWithBlocks(
+		ocommon.NewPoint(ancestor.Slot, ancestor.Hash), nil, false,
+	))
+	ls.rewardPrecomputeWG.Wait()
+
+	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	require.NoError(t, err)
+	require.Empty(t, outputs,
+		"no output computed from the abandoned history may survive")
+	ls.rewardPrecomputeMu.Lock()
+	retry := ls.rewardPrecomputeRetry
+	ls.rewardPrecomputeMu.Unlock()
+	require.NotNil(t, retry,
+		"the replacement must wait for the RUPD slot on the surviving chain")
+	require.Equal(t, uint64(3), retry.epochEvent.NewEpoch)
+	require.Equal(t, cutoff, retry.cutoffSlot)
+
+	replacement := ocommon.NewPoint(
+		cutoff+1, testHashBytes("prefilter-replacement"),
+	)
+	ls.Lock()
+	ls.currentTip = ochainsync.Tip{Point: replacement, BlockNumber: 2}
+	ls.Unlock()
+	ls.maybeQueueStakeRewardPrecomputeRetry(replacement.Slot)
+	ls.rewardPrecomputeWG.Wait()
+
+	require.True(t, rewardOutputsPayKey(t, db, member),
+		"the replacement must use the surviving registration history")
+	txn := db.Transaction(false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		want, ok, err := ls.calculateStakeRewardApplication(
+			txn, 4, replacement.Slot, 1_200, false,
+		)
+		require.NoError(t, err)
+		require.True(t, ok)
+		poolOutputs, err := db.Metadata().GetRewardPoolOutputs(
+			1, txn.Metadata(),
+		)
+		require.NoError(t, err)
+		accountOutputs, err := db.Metadata().GetRewardAccountOutputs(
+			1, txn.Metadata(),
+		)
+		require.NoError(t, err)
+		require.Equal(t,
+			rewardPoolOutputAmounts(want.poolOutputs),
+			rewardPoolOutputAmounts(poolOutputs),
+		)
+		require.Equal(t,
+			rewardAccountOutputAmounts(want.accountOutputs),
+			rewardAccountOutputAmounts(accountOutputs),
+		)
+		pots, err := db.Metadata().GetRewardAdaPots(3, txn.Metadata())
+		require.NoError(t, err)
+		require.Equal(t, want.totalRewardPot, uint64(pots.Rewards))
+		_, reusable, err := ls.precomputedStakeRewardApplication(
+			txn, 4, 1_200,
+		)
+		require.NoError(t, err)
+		require.True(
+			t,
+			reusable,
+			"the next boundary must reuse the replacement",
+		)
+		return nil
+	}))
+	account, err := db.GetAccountByCredential(0, member, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Zero(t, uint64(account.Reward),
+		"precomputation must not credit rewards before the boundary")
+}
+
+func rewardOutputsPayKey(
+	t *testing.T,
+	db *database.Database,
+	stakingKey []byte,
+) bool {
+	t.Helper()
+	outputs, err := db.Metadata().GetRewardAccountOutputs(1, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, outputs)
+	for _, output := range outputs {
+		if bytes.Equal(output.StakingKey, stakingKey) && output.Amount > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func rewardPoolOutputAmounts(outputs []*models.RewardPoolOutput) []string {
+	ret := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		ret = append(ret, fmt.Sprintf(
+			"%x total=%d leader=%d members=%d undistributed=%d unspendable=%d",
+			output.PoolKeyHash,
+			output.TotalReward,
+			output.LeaderReward,
+			output.MemberRewardTotal,
+			output.Undistributed,
+			output.Unspendable,
+		))
+	}
+	slices.Sort(ret)
+	return ret
+}
+
+func rewardAccountOutputAmounts(
+	outputs []*models.RewardAccountOutput,
+) []string {
+	ret := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		ret = append(ret, fmt.Sprintf(
+			"%d:%x %s pool=%x amount=%d spendable=%t",
+			output.CredentialTag,
+			output.StakingKey,
+			output.RewardType,
+			output.PoolKeyHash,
+			output.Amount,
+			output.Spendable,
+		))
+	}
+	slices.Sort(ret)
+	return ret
+}
+
+// The EventBus subscription that drives the reward precompute only fires at an
+// epoch boundary, so an epoch already in progress when the process starts has
+// no event to carry it. Startup must queue that round itself, or the next
+// boundary calculates it inline inside the rollover write transaction.
+func TestQueueStartupRewardPrecomputeQueuesInProgressEpoch(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       655,
+		StartSlot:     197596800,
+		LengthInSlots: 432000,
+		Nonce:         []byte{0x30, 0x93, 0x65, 0x6a},
+	}
+
+	queued := make(chan event.EpochTransitionEvent, 1)
+	ls.queueStartupRewardPrecomputeWith(
+		func(evt event.EpochTransitionEvent) error {
+			queued <- evt
+			return nil
+		},
+	)
+
+	evt := testutil.RequireReceive(
+		t, queued, 2*time.Second, "startup precompute queued",
+	)
+	// precomputeStakeRewardsAfterEpochTransition derives the application epoch
+	// as NewEpoch+1 and uses BoundarySlot as the capture slot, so these two
+	// fields are what decide which round gets precomputed.
+	require.Equal(t, uint64(655), evt.NewEpoch)
+	require.Equal(t, uint64(197596800), evt.BoundarySlot)
+	require.Equal(t, uint64(654), evt.PreviousEpoch)
+	require.Equal(t, uint64(197596799), evt.SnapshotSlot)
+	require.Equal(t, ls.currentEpoch.Nonce, evt.EpochNonce)
+}
+
+// A nonce-less or zero-length epoch is one that was never established, so there
+// is no round to catch up and nothing should be queued. queueRewardPrecompute
+// also drops an event without a nonce, so queueing one would spawn a worker
+// that immediately does nothing.
+func TestQueueStartupRewardPrecomputeSkipsUnestablishedEpoch(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		epoch models.Epoch
+	}{
+		{
+			name: "no length",
+			epoch: models.Epoch{
+				EpochId: 655,
+				Nonce:   []byte{0x01},
+			},
+		},
+		{
+			name: "no nonce",
+			epoch: models.Epoch{
+				EpochId:       655,
+				LengthInSlots: 432000,
+			},
+		},
+		{
+			name:  "zero value",
+			epoch: models.Epoch{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ls := &LedgerState{}
+			ls.currentEpoch = tc.epoch
+
+			queued := make(chan event.EpochTransitionEvent, 1)
+			ls.queueStartupRewardPrecomputeWith(
+				func(evt event.EpochTransitionEvent) error {
+					queued <- evt
+					return nil
+				},
+			)
+
+			testutil.RequireNoReceive(
+				t, queued, 100*time.Millisecond,
+				"unestablished epoch must not queue a precompute",
+			)
+		})
+	}
+}
+
+// Epoch 0 has no predecessor and starts at slot 0; neither derived field may
+// underflow into a bogus epoch or slot.
+func TestQueueStartupRewardPrecomputeHandlesEpochZero(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 432000,
+		Nonce:         []byte{0x01},
+	}
+
+	queued := make(chan event.EpochTransitionEvent, 1)
+	ls.queueStartupRewardPrecomputeWith(
+		func(evt event.EpochTransitionEvent) error {
+			queued <- evt
+			return nil
+		},
+	)
+
+	evt := testutil.RequireReceive(
+		t, queued, 2*time.Second, "startup precompute queued",
+	)
+	require.Equal(t, uint64(0), evt.NewEpoch)
+	require.Equal(t, uint64(0), evt.PreviousEpoch)
+	require.Equal(t, uint64(0), evt.SnapshotSlot)
+	require.Equal(t, uint64(0), evt.BoundarySlot)
+}
+
+// Preview's on-chain ADA pots, as reported by Koios
+// (https://preview.koios.rest/api/v1/totals). Preview declares
+// TestShelleyHardForkAtEpoch: 0, so epoch 0 is already Alonzo and every epoch
+// boundary from 0->1 onward runs cardano-ledger's NEWEPOCH monetary expansion.
+// Preview's genesis decentralisationParam is 1, so eta is 1 by definition and
+// no stake rewards are distributed in these epochs: the whole reward pot is
+// split between the treasury tax and the reserves refund.
+const (
+	previewGenesisReserves = uint64(15_000_000_000_000_000)
+	previewMaxSupply       = uint64(45_000_000_000_000_000)
+
+	// Epoch 0's fee pot is empty: nothing was collected before epoch 0.
+	previewEpoch1Treasury = uint64(9_000_000_000_000)
+	previewEpoch1Reserves = uint64(14_991_000_000_000_000)
+
+	// Epoch 0 collected 437793 lovelace in fees, which the 1->2 boundary
+	// folds into the reward pot.
+	previewEpoch1Fees     = uint64(437_793)
+	previewEpoch2Treasury = uint64(17_994_600_087_558)
+	previewEpoch2Reserves = uint64(14_982_005_400_350_235)
+
+	// Epoch 1 collected 206597 lovelace in fees, which the 2->3 boundary
+	// folds into the reward pot. Preview's decentralisation is 1 at epochs 0
+	// and 1 and 0 from epoch 2 onward, so the 2->3 round -- whose parameters
+	// come from performance epoch 1 -- still takes the d >= 0.8 short circuit
+	// and expands by the full rho * reserves.
+	previewEpoch2Fees     = uint64(206_597)
+	previewEpoch3Treasury = uint64(26_983_803_369_087)
+	previewEpoch3Reserves = uint64(14_973_016_197_275_303)
+
+	previewEpochLength = uint64(86_400)
+)
+
+// newPreviewRewardPotsTestLedger builds a LedgerState configured with
+// Preview's Shelley genesis and seeds the epoch rows, protocol parameters and
+// empty mark snapshots that the delayed reward calculation reads for the first
+// two boundaries.
+func newPreviewRewardPotsTestLedger(
+	t *testing.T,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.05,
+		"epochLength": 86400,
+		"maxLovelaceSupply": 45000000000000000,
+		"securityParam": 432,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.AlonzoEraDesc,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	// Preview's genesis protocol parameters: rho 0.003, tau 0.2, d 1.
+	pparams := &alonzo.AlonzoProtocolParameters{
+		NOpt:             150,
+		A0:               rewardCalcRat(3, 10),
+		Rho:              rewardCalcRat(3, 1_000),
+		Tau:              rewardCalcRat(1, 5),
+		Decentralization: rewardCalcRat(1, 1),
+		ProtocolMajor:    6,
+		ProtocolMinor:    0,
+	}
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+
+	// Preview's decentralisation drops from 1 to 0 at epoch 2, so each epoch
+	// is seeded with its own protocol parameters.
+	decentralizedPParams := *pparams
+	decentralizedPParams.Decentralization = rewardCalcRat(0, 1)
+	decentralizedCbor, err := cbor.Encode(&decentralizedPParams)
+	require.NoError(t, err)
+
+	meta := db.Metadata()
+	for _, epoch := range []uint64{0, 1, 2} {
+		epochPParamsCbor := pparamsCbor
+		if epoch >= 2 {
+			epochPParamsCbor = decentralizedCbor
+		}
+		startSlot := epoch * previewEpochLength
+		require.NoError(t, meta.SetEpoch(
+			startSlot,
+			epoch,
+			nil,
+			nil,
+			nil,
+			nil,
+			eras.AlonzoEraDesc.Id,
+			1,
+			uint(previewEpochLength),
+			nil,
+		))
+		require.NoError(t, db.SetPParams(
+			epochPParamsCbor,
+			startSlot,
+			epoch,
+			eras.AlonzoEraDesc.Id,
+			nil,
+		))
+		// Preview has no stake delegated to non-overlay pools in these
+		// epochs, so the mark snapshot is empty. Epoch 0's is seeded at
+		// startup by snapshot.Manager.CaptureGenesisSnapshot.
+		require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+			Epoch:           epoch,
+			SnapshotType:    "mark",
+			CapturedSlot:    startSlot,
+			BoundarySlot:    startSlot,
+			ProtocolVersion: 6,
+		}, nil))
+	}
+	return ls, db
+}
+
+// TestApplyStakeRewardsPreviewEpoch1Pots pins the 0->1 boundary. cardano-ledger
+// applies monetary expansion and the treasury tax at the first boundary of a
+// network whose epoch 0 is already Shelley-era, with an empty fee pot and no
+// distribution. Skipping that round leaves the treasury at 0 and the reserves
+// at their genesis value, which is what observed on Preview.
+func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newPreviewRewardPotsTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetNetworkState(0, previewGenesisReserves, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Treasury:     0,
+		Reserves:     types.Uint64(previewGenesisReserves),
+		Fees:         0,
+		CapturedSlot: 0,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 1, previewEpochLength)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, previewEpoch1Treasury, uint64(state.Treasury))
+	require.Equal(t, previewEpoch1Reserves, uint64(state.Reserves))
+}
+
+// TestApplyStakeRewardsPreviewEpoch2Pots pins the 1->2 boundary against the
+// same Koios reference. It is seeded with the epoch-1 pots the previous
+// boundary must produce, so it isolates the epoch-2 arithmetic from the
+// epoch-1 seeding defect.
+func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newPreviewRewardPotsTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetNetworkState(
+		previewEpoch1Treasury, previewEpoch1Reserves, previewEpochLength, nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        1,
+		Treasury:     types.Uint64(previewEpoch1Treasury),
+		Reserves:     types.Uint64(previewEpoch1Reserves),
+		Fees:         types.Uint64(previewEpoch1Fees),
+		CapturedSlot: previewEpochLength,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 2, 2*previewEpochLength)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, previewEpoch2Treasury, uint64(state.Treasury))
+	require.Equal(t, previewEpoch2Reserves, uint64(state.Reserves))
+}
+
+// TestApplyStakeRewardsPreviewGenesisToEpoch2 chains both boundaries the way a
+// genesis replay does: the 0->1 round, the epoch-1 ADA pots capture that
+// records its result, then the 1->2 round that reads it back. Preview's epoch 0
+// carries exactly two transactions, at slots 60 and 320, whose fees (200000 and
+// 237793) are the 437793 the 1->2 boundary folds into the reward pot.
+//
+// This is the unit-level counterpart of reproduction: the
+// epoch-2 treasury and reserves must equal the Koios Preview reference values.
+func TestApplyStakeRewardsPreviewGenesisToEpoch2(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newPreviewRewardPotsTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetNetworkState(0, previewGenesisReserves, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        0,
+		Treasury:     0,
+		Reserves:     types.Uint64(previewGenesisReserves),
+		Fees:         0,
+		CapturedSlot: 0,
+	}, nil))
+
+	// Preview's two epoch-0 transactions.
+	_, err := rewardCalcSQLDB(t, db).Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES
+    (1, ?, ?, 60, 5, '200000', '0', '0', 0, TRUE),
+    (2, ?, ?, 320, 5, '237793', '0', '0', 0, TRUE)`,
+		[]byte("preview-tx-0"), []byte("preview-block-0"),
+		[]byte("preview-tx-1"), []byte("preview-block-1"),
+	)
+	require.NoError(t, err)
+
+	epoch0, err := meta.GetEpoch(0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, epoch0)
+
+	// Boundary into epoch 1: apply the reward round, then capture the epoch-1
+	// ADA pots the way processEpochRollover does.
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := ls.applyStakeRewards(
+			txn, 1, previewEpochLength,
+		); err != nil {
+			return err
+		}
+		return ls.saveRewardAdaPotsForEpoch(
+			txn, 1, *epoch0, previewEpochLength,
+		)
+	}))
+
+	pots1, err := meta.GetRewardAdaPots(1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pots1)
+	require.Equal(t, previewEpoch1Treasury, uint64(pots1.Treasury))
+	require.Equal(t, previewEpoch1Reserves, uint64(pots1.Reserves))
+	require.Equal(t, previewEpoch1Fees, uint64(pots1.Fees))
+
+	// Boundary into epoch 2, reading the row the previous boundary wrote.
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 2, 2*previewEpochLength)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, previewEpoch2Treasury, uint64(state.Treasury))
+	require.Equal(t, previewEpoch2Reserves, uint64(state.Reserves))
+}
+
+// TestApplyStakeRewardsPreviewEpoch3Pots pins the 2->3 boundary, where
+// preview's decentralisation differs between the round's performance epoch (1,
+// d = 1) and its calculation epoch (2, d = 0).
+//
+// cardano-ledger's startStep builds the whole reward update from
+// prevPParams -- the parameters in force during the epoch whose blocks are
+// counted, which is dingo's performance epoch -- so d is 1 here and eta takes
+// the d >= 0.8 short circuit. Reading d from the calculation epoch instead
+// gives d = 0, no short circuit, and an eta of zero against an empty epoch-0
+// mark snapshot, which drops the monetary expansion entirely and moves only
+// the fee pot.
+func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newPreviewRewardPotsTestLedger(t)
+	meta := db.Metadata()
+
+	require.NoError(t, meta.SetNetworkState(
+		previewEpoch2Treasury,
+		previewEpoch2Reserves,
+		2*previewEpochLength,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        2,
+		Treasury:     types.Uint64(previewEpoch2Treasury),
+		Reserves:     types.Uint64(previewEpoch2Reserves),
+		Fees:         types.Uint64(previewEpoch2Fees),
+		CapturedSlot: 2 * previewEpochLength,
+	}, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 3, 3*previewEpochLength)
+	}))
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, previewEpoch3Treasury, uint64(state.Treasury))
+	require.Equal(t, previewEpoch3Reserves, uint64(state.Reserves))
+}
+
+// A skipped reward round is not a benign no-op. The reference node credits
+// the round regardless, so every skip leaves this node's reward balances --
+// and the leadership stake distribution derived from them -- permanently
+// short by that epoch's rewards, with nothing to backfill it later.
+//
+// That shortfall is what rejects canonical blocks: leader eligibility
+// compares a VRF value against a stake-derived threshold, so a sigma
+// shortfall of eps flips a decision with probability about eps per block.
+// On Preview, the shortfall was ~3 epochs of reward
+// accrual, sigma was 0.042% short, and the rejected block's leader value sat
+// between this node's threshold and the reference's.
+//
+// Both skip paths logged at Debug before this, invisible at the default
+// level, which is why three separate field reports were investigated without
+// anyone seeing the cause. The level is the fix: a node quietly diverging
+// from the network has to say so before it wedges, not after.
+func TestSkippedStakeRewardsIsReportedLoudly(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+				// Deliberately Warn: the point of the change is that this
+				// survives the default level. A Debug-level report would
+				// produce no output here.
+				Level: slog.LevelWarn,
+			})),
+		},
+	}
+
+	ls.reportSkippedStakeRewards(1386, "missing ADA pots", "pots_epoch", 1385)
+
+	logs := buf.String()
+	require.NotEmpty(t, logs,
+		"a skipped reward round must be visible at the default log level; "+
+			"at Debug it stays hidden until the node rejects a block")
+	assert.Contains(t, logs, "level=WARN")
+	assert.Contains(t, logs, "missing ADA pots")
+	assert.Contains(t, logs, "new_epoch=1386")
+	assert.Contains(t, logs, "pots_epoch=1385")
+	// The consequence, not just the event: whoever reads this needs to know
+	// the balances stay short rather than catching up on their own.
+	assert.Contains(t, logs, "permanently")
+	assert.Contains(t, logs, "basis was never persisted")
+	assert.Contains(t, logs, "ledgerstate import warnings")
+	assert.NotContains(t, logs, "expected after a Mithril bootstrap",
+		"a failed imported-basis seed must not be misreported as an "+
+			"inherent bootstrap limitation")
+}
+
+// The reporting path must tolerate a LedgerState with no logger and no
+// metrics, since it runs on the epoch-boundary hot path where a nil
+// dereference would take down block application.
+func TestSkippedStakeRewardsSurvivesNilDependencies(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	require.NotPanics(t, func() {
+		ls.reportSkippedStakeRewards(
+			1386,
+			"missing reward snapshot",
+			"reward_snapshot_epoch",
+			1383,
+		)
+	})
+}
+
+func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
+	t.Parallel()
+
+	const (
+		newEpoch            = uint64(4)
+		rewardSnapshotEpoch = uint64(1)
+		potsEpoch           = uint64(3)
+		failureReason       = "historical protocol parameters are unavailable"
+	)
+
+	for _, tc := range []struct {
+		name        string
+		seedFailure bool
+		wantReason  string
+		notReason   string
+	}{
+		{
+			name:        "durable import failure",
+			seedFailure: true,
+			wantReason: "imported reward basis seeding failed: " +
+				failureReason,
+			notReason: "skipping stake rewards: missing reward snapshot;",
+		},
+		{
+			name:       "genuinely missing import",
+			wantReason: "skipping stake rewards: missing reward snapshot;",
+			notReason:  "imported reward basis seeding failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ls, db := newRewardCalculationTestLedger(t)
+			var logs bytes.Buffer
+			ls.config.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+			meta := db.Metadata()
+			require.NoError(t, meta.SaveRewardAdaPots(
+				&models.RewardAdaPots{
+					Epoch:        potsEpoch,
+					CapturedSlot: 300,
+				},
+				nil,
+			))
+			if tc.seedFailure {
+				require.NoError(t, meta.SaveRewardSeedFailure(
+					rewardSnapshotEpoch,
+					"mark",
+					failureReason,
+					100,
+					nil,
+				))
+			}
+
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Rollback() }()
+			app, ok, err := ls.calculateStakeRewardApplication(
+				txn,
+				newEpoch,
+				400,
+				400,
+				true,
+			)
+			require.NoError(t, err)
+			require.False(t, ok)
+			require.Nil(t, app)
+			assert.Contains(t, logs.String(), tc.wantReason)
+			assert.NotContains(t, logs.String(), tc.notReason)
+		})
+	}
 }

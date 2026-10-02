@@ -126,7 +126,7 @@ type BlobStore interface {
 // that same blob transaction. Staging an unbounded set therefore does not
 // cost the caller only the tail of that set -- it costs the caller the whole
 // commit, which on the startup rollback path leaves a node that fails
-// identically on every start (blinklabs-io/dingo#4657). Callers that stage a
+// identically on every start. Callers that stage a
 // set they did not size themselves ask how much room is left and stop short
 // of it.
 //

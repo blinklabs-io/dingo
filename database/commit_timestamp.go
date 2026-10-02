@@ -188,7 +188,7 @@ func (d *Database) phase1GateValues() (nodesettings.Values, error) {
 // reflects the current value; a database created before
 // node_settings_gate existed simply has no rows there yet, and the legacy
 // row is all this function has for storage_mode/network until the first
-// write after this change records them into the gate table too.
+// write after upgrade records them into the gate table too.
 // Reversing this order (copying the legacy row on top of the gate table)
 // would let that stale legacy column shadow a correctly-latched gate
 // value forever, which is exactly the bug this ordering fixes.

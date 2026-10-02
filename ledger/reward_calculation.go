@@ -396,12 +396,12 @@ type stakeRewardApplication struct {
 	// totalCirculation, totalBlocks and rewardEfficiency record the global
 	// reward-round inputs that scale every pool's reward by the same factor,
 	// so a uniform network-wide shortfall can be attributed to the input that
-	// caused it (dingo #4660). Each pool's reward is
-	// (beta/sigmaA) * optimalPoolReward(R, sigma), so totalActiveStake moves it
-	// 1:1, reserves move it through both R and sigma, and totalBlocks cancels
-	// between R's efficiency term and beta -- which is why a block-count
-	// undercount cannot produce a uniform shortfall and the pots and snapshot
-	// totals must be logged to tell the remaining candidates apart.
+	// caused it. Each pool's reward is (beta/sigmaA) * optimalPoolReward(R,
+	// sigma), so totalActiveStake moves it 1:1, reserves move it through both R
+	// and sigma, and totalBlocks cancels between R's efficiency term and beta
+	// -- which is why a block-count undercount cannot produce a uniform
+	// shortfall and the pots and snapshot totals must be logged to tell the
+	// remaining candidates apart.
 	totalCirculation uint64
 	totalBlocks      uint64
 	rewardEfficiency *big.Rat
@@ -414,9 +414,9 @@ type stakeRewardApplication struct {
 	// neither credited (applyStakeRewardApplication) nor counted toward
 	// effective/unspendable (deriveStakeRewardApplicationTotals), so its amount
 	// falls through to undistributed and is refunded to reserves.
-	// applyGuardedFlagToAccountOutputs (dingo #3021) persists this same
-	// membership test onto each output's Guarded column before it is saved, so
-	// a reader of reward_account_output does not need to reconstruct this set.
+	// applyGuardedFlagToAccountOutputs persists this same membership test onto
+	// each output's Guarded column before it is saved, so a reader of
+	// reward_account_output does not need to reconstruct this set.
 	guardedRewardCredentials map[string]struct{}
 	// snapshotCapturedSlot and snapshotBoundarySlot record the reward_snapshot
 	// row's own captured/boundary slots as observed by
@@ -648,7 +648,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	// unknown for every pool. Distributing the zero that an uncounted epoch
 	// yields would credit nothing and report a completed round; decline it
 	// instead, so the shortfall is visible here rather than at the first
-	// withdrawal the node then rejects (issue #3767).
+	// withdrawal the node then rejects.
 	if !blockCountsKnown {
 		if reportSkips {
 			ls.reportSkippedStakeRewards(
@@ -782,18 +782,17 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	// reserves rather than being counted effective. Gate off leaves the set nil
 	// (no load, byte-identical to pre-CIP behavior).
 	//
-	// This must run BEFORE saveStakeRewardOutputs below (dingo #3021): the
-	// guard decision is persisted onto each output's Guarded column, the same
-	// way Spendable already is, so a later reader (the Blockfrost account
-	// reward-history endpoint) can tell an uncredited row from a credited one
-	// without re-deriving activation state and inactivity windows at read
-	// time. applyGuardedFlagToAccountOutputs reconciles Guarded fresh against
-	// the current guard set on every application -- including a reused
-	// precomputed application, whose rows may have been persisted before this
-	// guard was known -- rather than trusting whatever a prior run wrote, so
-	// it also self-corrects a stale guarded=true from a credential that was
-	// later renewed, or from the gate being disabled since the row was last
-	// written.
+	// This must run BEFORE saveStakeRewardOutputs below: the guard decision is
+	// persisted onto each output's Guarded column, the same way Spendable
+	// already is, so a later reader (the Blockfrost account reward-history
+	// endpoint) can tell an uncredited row from a credited one without
+	// re-deriving activation state and inactivity windows at read time.
+	// applyGuardedFlagToAccountOutputs reconciles Guarded fresh against the
+	// current guard set on every application -- including a reused precomputed
+	// application, whose rows may have been persisted before this guard was
+	// known -- rather than trusting whatever a prior run wrote, so it also
+	// self-corrects a stale guarded=true from a credential that was later
+	// renewed, or from the gate being disabled since the row was last written.
 	if ls.config.DelegatorInactivityEnabled {
 		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
 		if err != nil {
@@ -908,6 +907,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 	if err := registerAppliedRewardCreditRound(meta, metaTxn, round); err != nil {
 		return fmt.Errorf("register pending reward credits: %w", err)
 	}
+	txn.AfterCommit(ls.queueRewardCreditCompaction)
 	ls.config.Logger.Info(
 		"applied stake rewards",
 		"component", "ledger",
@@ -940,7 +940,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 // is only exact if two from-genesis nodes retain the same witness history --
 // see historicalExpirationSQL's doc comment
 // (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
-// CIP-0163 section (issue #2920) for why that holds today.
+// CIP-0163 section for why that holds today.
 func (ls *LedgerState) guardedExpiredRewardCredentials(
 	txn *database.Txn,
 	app *stakeRewardApplication,
@@ -1066,7 +1066,7 @@ func rewardOutputGuarded(
 
 // applyGuardedFlagToAccountOutputs reconciles each account output's
 // persisted Guarded column against rewardOutputGuarded for the current
-// application (dingo #3021). It mirrors finalizePrecomputedRewardOutputs'
+// application. It mirrors finalizePrecomputedRewardOutputs'
 // Spendable reconciliation: the flag is always recomputed fresh rather than
 // trusted from a prior run, so a stale guarded=true left by an earlier
 // precompute or application -- e.g. the credential was since renewed, or the
@@ -2942,7 +2942,7 @@ func addRewardUint64(a, b uint64) (uint64, bool) {
 
 // rewardStakeSumMatchesSnapshot reports whether summed -- a reward-input row
 // set's total pool/delegated stake -- is consistent with snapshot's
-// TotalActiveStake. A tracked ExcludedActiveStake (dingo #4025) makes the
+// TotalActiveStake. A tracked ExcludedActiveStake makes the
 // check exact: summed plus the tracked exclusion must equal the total
 // precisely, catching a row set reduced by any amount rather than only one
 // missing pool's worth. A nil ExcludedActiveStake means snapshot predates
@@ -3006,7 +3006,7 @@ func stakeRewardEpochsForApplication(
 // compares a VRF value against a threshold derived from relative stake, so a
 // stake shortfall of eps flips a decision with probability about eps per
 // block, and the flipped decision rejects a canonical block. That was
-// diagnosed on preview (issue #3165): a node whose stake was 0.042% short in
+// diagnosed on preview: a node whose stake was 0.042% short in
 // sigma rejected a block whose leader value sat between its own threshold and
 // the reference's, and wedged.
 //
@@ -3234,7 +3234,7 @@ func (ls *LedgerState) reconcileRebuiltRewardStakeInputs(
 	// would otherwise surface there as a hard error instead of the softer
 	// outcome a merely-unavailable epoch gets.
 	//
-	// Observed live (dingo #4578): every disagreement seen so far
+	// Observed live: every disagreement seen so far
 	// is retained-pool-total minus reconstructed, a few to a few hundred
 	// thousand lovelace out of a multi-trillion-lovelace pool (roughly 1e-11
 	// to 6e-9 relative) -- consistent with the two computation paths
@@ -3768,7 +3768,7 @@ func (ls *LedgerState) rewardParameters(
 	// They diverge on preview at the 2->3 round: d is 1 at the performance
 	// epoch (1) and 0 at the calculation epoch (2), and taking 0 dropped the
 	// d >= 0.8 short circuit, leaving eta at 0 and suppressing that epoch's
-	// entire monetary expansion (dingo #3481).
+	// entire monetary expansion.
 	params, err := rewardParametersFromPParams(
 		performancePParams,
 		ls.config.CardanoNodeConfig,
@@ -4316,10 +4316,10 @@ func validateRewardCalculatorInputs(
 	// every delegating credential observed at the boundary, including those
 	// whose pool was excluded from reward_pool_input for degraded registration
 	// data (see snapshot.buildRewardStateInputs). A tracked
-	// excluded_active_stake (dingo #4025) makes the rows' sum plus that
-	// exclusion match the total exactly; without it (a pre-#4025 row), only
-	// the legacy non-exceeding bound can still be enforced, since the
-	// exclusion's size is unknown.
+	// excluded_active_stake makes the rows' sum plus that
+	// exclusion match the total exactly; without it (a row written before the
+	// exclusion was recorded), only the legacy non-exceeding bound can still be
+	// enforced, since the exclusion's size is unknown.
 	matches, err := rewardStakeSumMatchesSnapshot(totalPoolStake, snapshot)
 	if err != nil {
 		return err
@@ -4848,8 +4848,8 @@ func rewardParametersFromPParams(
 // SnapShots.ssFee), and CapturedSlot at the anchor. When that row exists,
 // sum stored fees only after the anchor and add the imported amount instead
 // of summing from the epoch start -- summing the whole range would either
-// miss the pre-anchor fees entirely (dingo #3975) or double-count them once
-// the historical backfill (#4061) has stored pre-anchor transactions locally.
+// miss the pre-anchor fees entirely or double-count them once
+// the historical backfill has stored pre-anchor transactions locally.
 // The two ranges are disjoint by construction, the same way
 // mergeImportedBlockCounts's imported and observed block counts are.
 //

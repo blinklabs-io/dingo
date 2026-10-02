@@ -802,7 +802,7 @@ func (s *Store) refreshRewardLiveStakeDeltas(
 // conflicting output contributes 0: its amount is already inside the running
 // total that the row it collided with was counted into. Counting it again
 // would inflate the credential's live stake permanently, since the
-// incremental path has no scan to correct it (dingo #4421).
+// incremental path has no scan to correct it.
 //
 // amount is already bounded within int64 by CheckedUint64FromBigInt
 // (UtxoLedgerToModel's caller), well inside a real lovelace value's range
@@ -833,7 +833,7 @@ func producedStakeCredentialDelta(
 // tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
 // planner stays on the unique tx_id_output_idx index instead of falling back
 // to a full idx_utxo_staking_deleted_amount scan once the batch has more than
-// a handful of terms (dingo #4067).
+// a handful of terms.
 func utxoStakeConsumedDeltaQuery(n int) string {
 	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
 		"FROM utxo WHERE tx_id IN (" +
@@ -854,7 +854,7 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // nothing in the utxo table, so subtracting its amount would drive the
 // credential's running total permanently below its real live stake, or fail
 // the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
-// belong in the caller's zero-delta touch set instead (dingo #4421).
+// belong in the caller's zero-delta touch set instead.
 //
 // deleted_slot is not filtered on: ids names exactly the inputs this
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
@@ -988,7 +988,7 @@ func distinctUtxoTxIDs(
 // in the batch. The OR-of-pairs form defeats that index past a handful of
 // terms and falls back to a full scan of idx_utxo_deleted_staking_amount
 // once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
-// measured on an 11M-row live UTxO table in issue #4067, which starves block
+// measured on an 11M-row live UTxO table which starves block
 // application for minutes at a time. The caller filters the extra rows this
 // query can return (other outputs of the same transaction, and, for liveOnly,
 // already-deleted ones) down to the exact requested (tx_id, output_idx)
@@ -1218,7 +1218,7 @@ func utxoDeletionRowsByTxIDQuery(
 // plans the statement as SEARCH utxo USING INDEX
 // idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
 // whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
-// evaluated per row, which is the whole-table pass issue #4067 reports, moved
+// evaluated per row, which is the whole-table pass, moved
 // from the lookup to the update. Populated statistics change the plan, but a
 // long-running node's utxo statistics are stale or absent, so the plan has to
 // hold without them. Liveness is filtered in queryUtxoDeletionRows instead,
@@ -1430,7 +1430,7 @@ func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
 
 // utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
 // refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
-// uses (see its doc comment and issue #4067) -- and returns them alongside
+// uses (see its doc comment) -- and returns them alongside
 // the (tx_id, output_idx) index refs asked for, so the caller can filter the
 // extra rows (other outputs of the same transaction) down to exactly the
 // requested references in Go.

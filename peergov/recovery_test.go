@@ -129,6 +129,16 @@ func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(
 			PerformanceScore: 0.9,
 			Connection:       &PeerConnection{IsClient: true},
 		},
+		// A warm replacement so the demotion below is not also blocked by
+		// the "no promotable replacement" guard: this test
+		// is specifically about the last-eligible-upstream protection.
+		{
+			Address:          "ledger1:3001",
+			Source:           PeerSourceP2PLedger,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.5,
+			Connection:       &PeerConnection{IsClient: true},
+		},
 	}
 
 	pg.gossipChurn()
@@ -167,6 +177,17 @@ func TestPeerGovernor_GossipChurn_ChurnsGossipWhenTopologyUpstreamExists(
 			Source:           PeerSourceTopologyLocalRoot,
 			State:            PeerStateHot,
 			PerformanceScore: 0.9,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		// A warm replacement so the demotion below is not also blocked by
+		// the "no promotable replacement" guard: this test
+		// is specifically about churn still operating with a topology
+		// upstream present.
+		{
+			Address:          "gossip2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.5,
 			Connection:       &PeerConnection{IsClient: true},
 		},
 	}
@@ -338,8 +359,12 @@ func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 		"gossip/ledger peers must be redialed when the node has no upstream left",
 	)
 
-	// With a healthy upstream present, churned gossip/ledger peers
-	// must stay cold so churn keeps working as designed.
+	// With a healthy upstream present but the hot set still far below
+	// MinHotPeers and no warm candidates to close that gap, cold
+	// gossip/ledger peers must still become redial candidates:
+	// a single eligible upstream is not "healthy" when the
+	// configured hot-peer target is 10 and nothing else is in flight to
+	// reach it.
 	pg.mu.Lock()
 	pg.peers = append(pg.peers, &Peer{
 		Address:           "root1:3001",
@@ -350,10 +375,27 @@ func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 	})
 	candidates = pg.redialCandidatesLocked()
 	pg.mu.Unlock()
+	addrs = make([]string, 0, len(candidates))
+	for _, peer := range candidates {
+		addrs = append(addrs, peer.Address)
+	}
+	assert.ElementsMatch(
+		t,
+		[]string{"gossip1:3001", "ledger1:3001"},
+		addrs,
+		"gossip/ledger peers must still be redialed when the hot set sits below MinHotPeers with no warm replacements available",
+	)
+
+	// Once the hot set reaches MinHotPeers, the deficit-driven trigger no
+	// longer applies and gossip/ledger peers stay cold as before.
+	pg.mu.Lock()
+	pg.config.MinHotPeers = 1
+	candidates = pg.redialCandidatesLocked()
+	pg.mu.Unlock()
 	assert.Empty(
 		t,
 		candidates,
-		"gossip/ledger peers must not be redialed while an eligible upstream exists",
+		"gossip/ledger peers must not be redialed once an eligible upstream satisfies MinHotPeers",
 	)
 }
 
@@ -507,5 +549,354 @@ func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
 		5*time.Second,
 		10*time.Millisecond,
 		"reconcile must redial a known gossip peer when the node has no upstream left",
+	)
+}
+
+// TestPeerGovernor_Reconcile_RedialsColdGossipPeerBelowMinHotPeers is the
+// regression for the redial side: before this fix, gossip/ledger
+// peers were only ever redialed in the zero-eligible-upstream emergency.
+// A node with one eligible upstream but a hot set well below MinHotPeers,
+// and no warm candidates to close that gap, never dialed any of its
+// remaining cold known peers at all -- it just sat there until the single
+// upstream also dropped. Reconcile must now dial cold known peers whenever
+// the hot set is short of MinHotPeers and the warm pool cannot cover the
+// deficit, not only when the node has zero upstreams left.
+func TestPeerGovernor_Reconcile_RedialsColdGossipPeerBelowMinHotPeers(
+	t *testing.T,
+) {
+	t.Parallel()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      logger,
+		EventBus:    newMockEventBus(),
+		ConnManager: connManager,
+		MinHotPeers: 3,
+	})
+	pg.mu.Lock()
+	pg.ctx = t.Context()
+	pg.stopCh = make(chan struct{})
+	pg.peers = []*Peer{
+		// One eligible upstream: the zero-upstream emergency trigger does
+		// not apply here.
+		{
+			Address:           "root1:3001",
+			NormalizedAddress: "root1:3001",
+			Source:            PeerSourceTopologyLocalRoot,
+			State:             PeerStateHot,
+			Connection:        &PeerConnection{IsClient: true},
+		},
+		// A cold known gossip peer with nothing warm available to
+		// promote instead.
+		{
+			// Nothing listens here; the dial fails fast and the
+			// reconnect loop records the attempt.
+			Address:           "127.0.0.1:1",
+			NormalizedAddress: "127.0.0.1:1",
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateCold,
+		},
+	}
+	pg.mu.Unlock()
+	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
+
+	pg.reconcile(t.Context())
+
+	// With an eligible upstream present, a never-connected gossip peer
+	// whose dial fails is dropped and deny-listed, which can happen before
+	// the first poll. The deny-list entry is only written by a failed dial,
+	// so it counts as evidence of the redial.
+	require.Eventually(
+		t,
+		func() bool {
+			pg.mu.Lock()
+			defer pg.mu.Unlock()
+			if idx := pg.peerIndexByAddress("127.0.0.1:1"); idx != -1 {
+				peer := pg.peers[idx]
+				return peer.Reconnecting || peer.ReconnectCount > 0
+			}
+			_, denied := pg.denyList["127.0.0.1:1"]
+			return denied
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"reconcile must redial a cold known gossip peer when the hot set is below MinHotPeers, even with an eligible upstream present",
+	)
+
+	pg.mu.Lock()
+	rootStillHot := pg.peers[0].State == PeerStateHot
+	rootStillConnected := pg.peers[0].Connection != nil
+	pg.mu.Unlock()
+	assert.True(
+		t,
+		rootStillHot,
+		"the existing eligible upstream must be undisturbed",
+	)
+	assert.True(
+		t,
+		rootStillConnected,
+		"the existing eligible upstream must keep its connection",
+	)
+}
+
+// A warm gossip peer holding only a responder-side inbound connection
+// cannot be promoted by reconcile's refill (it requires a client
+// connection) and would be demoted by reconcile's inactivity check if
+// promoted. It must therefore not count as covering a hot-set deficit.
+func TestPeerGovernor_RedialCandidates_ResponderOnlyWarmPeerDoesNotCoverDeficit(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:      slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:    newMockEventBus(),
+		MinHotPeers: 3,
+	})
+	pg.peers = []*Peer{
+		{
+			Address:           "root1:3001",
+			NormalizedAddress: "root1:3001",
+			Source:            PeerSourceTopologyLocalRoot,
+			State:             PeerStateHot,
+			Connection:        &PeerConnection{IsClient: true},
+		},
+		{
+			Address:           "inbound1:3001",
+			NormalizedAddress: "inbound1:3001",
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateWarm,
+			PerformanceScore:  0.9,
+			Connection:        &PeerConnection{IsClient: false},
+		},
+		{
+			Address:           "inbound2:3001",
+			NormalizedAddress: "inbound2:3001",
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateWarm,
+			PerformanceScore:  0.9,
+			Connection:        &PeerConnection{IsClient: false},
+		},
+		{
+			Address:           "gossip1:3001",
+			NormalizedAddress: "gossip1:3001",
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateCold,
+		},
+	}
+
+	pg.mu.Lock()
+	candidates := pg.redialCandidatesLocked()
+	pg.mu.Unlock()
+	addrs := make([]string, 0, len(candidates))
+	for _, peer := range candidates {
+		addrs = append(addrs, peer.Address)
+	}
+	assert.Equal(
+		t,
+		[]string{"gossip1:3001"},
+		addrs,
+		"responder-only warm peers must not suppress the hot_deficit redial",
+	)
+}
+
+// Churn must not demote a hot client upstream when the only warm
+// "replacement" holds a responder-side connection that cannot serve as
+// an upstream once promoted.
+func TestPeerGovernor_GossipChurn_ResponderOnlyWarmPeerIsNotAReplacement(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		GossipChurnPercent: 1.0,
+		MinScoreThreshold:  0.3,
+	})
+	pg.peers = []*Peer{
+		{
+			Address:    "root1:3001",
+			Source:     PeerSourceTopologyLocalRoot,
+			State:      PeerStateHot,
+			Connection: &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "gossip1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.8,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+		{
+			Address:          "inbound1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateWarm,
+			PerformanceScore: 0.9,
+			Connection:       &PeerConnection{IsClient: false},
+		},
+	}
+
+	pg.gossipChurn()
+
+	states := make(map[string]PeerState, len(pg.peers))
+	for _, peer := range pg.peers {
+		states[peer.Address] = peer.State
+	}
+	assert.Equal(
+		t,
+		PeerStateHot,
+		states["gossip1:3001"],
+		"the hot client upstream must not be churned out for a responder-only peer",
+	)
+	assert.Equal(
+		t,
+		PeerStateWarm,
+		states["inbound1:3001"],
+		"a responder-only warm peer must not be promoted to hot",
+	)
+}
+
+// Peers churn just dropped for scoring below MinScoreThreshold must not
+// take the hot_deficit redial budget ahead of better cold peers, or a
+// failing peer cycles cold, warm, hot on every churn interval.
+func TestPeerGovernor_RedialCandidates_HotDeficitSkipsChurnedLowScorers(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		GossipChurnPercent: 1.0,
+		MinScoreThreshold:  0.3,
+		MinHotPeers:        3,
+	})
+	pg.peers = []*Peer{
+		{
+			Address:           "root1:3001",
+			NormalizedAddress: "root1:3001",
+			Source:            PeerSourceTopologyLocalRoot,
+			State:             PeerStateHot,
+			Connection:        &PeerConnection{IsClient: true},
+		},
+		observedScorePeer(
+			"bad1:3001",
+			PeerSourceP2PGossip,
+			PeerStateHot,
+			false,
+		),
+		observedScorePeer(
+			"bad2:3001",
+			PeerSourceP2PGossip,
+			PeerStateHot,
+			false,
+		),
+		{
+			Address:           "fresh1:3001",
+			NormalizedAddress: "fresh1:3001",
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateCold,
+		},
+		observedScorePeer(
+			"good1:3001",
+			PeerSourceP2PLedger,
+			PeerStateCold,
+			true,
+		),
+	}
+
+	pg.gossipChurn()
+	pg.mu.Lock()
+	require.Less(t, pg.peers[1].PerformanceScore, pg.config.MinScoreThreshold)
+	require.Equal(t, PeerStateCold, pg.peers[1].State)
+	require.Equal(t, PeerStateCold, pg.peers[2].State)
+	candidates := pg.redialCandidatesLocked()
+	pg.mu.Unlock()
+
+	addrs := make([]string, 0, len(candidates))
+	for _, peer := range candidates {
+		addrs = append(addrs, peer.Address)
+	}
+	assert.Equal(
+		t,
+		[]string{"good1:3001", "fresh1:3001"},
+		addrs,
+		"hot_deficit redial must skip observed below-threshold peers and prefer higher scores",
+	)
+}
+
+// observedScorePeer returns a peer whose score comes from real
+// observations, so agePeerScoresLocked recomputes rather than resets it.
+func observedScorePeer(
+	addr string,
+	source PeerSource,
+	state PeerState,
+	good bool,
+) *Peer {
+	peer := &Peer{
+		Address:                 addr,
+		NormalizedAddress:       addr,
+		Source:                  source,
+		State:                   state,
+		ScoreLastUpdate:         time.Now(),
+		BlockFetchLatencyInit:   true,
+		BlockFetchSuccessInit:   true,
+		ConnectionStabilityInit: true,
+		HeaderArrivalRateInit:   true,
+		TipSlotDeltaInit:        true,
+		BlockFetchLatencyMs:     10_000,
+		TipSlotDelta:            1_000_000,
+	}
+	if good {
+		peer.BlockFetchLatencyMs = 10
+		peer.BlockFetchSuccessRate = 1
+		peer.ConnectionStability = 1
+		peer.HeaderArrivalRate = 100
+		peer.TipSlotDelta = 0
+	}
+	if state != PeerStateCold {
+		peer.Connection = &PeerConnection{IsClient: true}
+	}
+	peer.UpdatePeerScore()
+	return peer
+}
+
+// When no eligible upstream remains any peer is better than none, so
+// below-threshold peers stay redial candidates, ranked after the rest.
+func TestPeerGovernor_RedialCandidates_ZeroUpstreamRanksLowScorersLast(
+	t *testing.T,
+) {
+	t.Parallel()
+	observed := time.Now()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:          newMockEventBus(),
+		MinScoreThreshold: 0.3,
+	})
+	for _, peer := range []*Peer{
+		{Address: "bad1:3001", PerformanceScore: 0.1, ScoreLastUpdate: observed},
+		{Address: "bad2:3001", PerformanceScore: 0.2, ScoreLastUpdate: observed},
+		{Address: "fresh1:3001"},
+		{Address: "good1:3001", PerformanceScore: 0.9, ScoreLastUpdate: observed},
+	} {
+		peer.NormalizedAddress = peer.Address
+		peer.Source = PeerSourceP2PGossip
+		peer.State = PeerStateCold
+		pg.peers = append(pg.peers, peer)
+	}
+
+	pg.mu.Lock()
+	candidates := pg.redialCandidatesLocked()
+	pg.mu.Unlock()
+
+	addrs := make([]string, 0, len(candidates))
+	for _, peer := range candidates {
+		addrs = append(addrs, peer.Address)
+	}
+	assert.Equal(
+		t,
+		[]string{"good1:3001", "fresh1:3001", "bad2:3001"},
+		addrs,
+		"zero_upstream redial must still use below-threshold peers, after the rest",
 	)
 }

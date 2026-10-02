@@ -16,12 +16,15 @@ package chainsync
 
 import (
 	"encoding/binary"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/connection"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -117,4 +120,29 @@ func TestHeaderAlternativeBound(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestUpdateClientRollbackRefreshesActivityAndOwnsHashes(t *testing.T) {
+	connID := connection.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 3001},
+	}
+	oldActivity := time.Unix(1, 0)
+	state := NewState(nil, nil)
+	state.trackedClients[connID] = &TrackedClient{
+		ConnId:       connID,
+		LastActivity: oldActivity,
+		Status:       ClientStatusStalled,
+	}
+	point := ocommon.NewPoint(90, []byte("rollback"))
+	tip := ochainsync.Tip{Point: ocommon.NewPoint(110, []byte("tip"))}
+	require.True(t, state.UpdateClientRollback(connID, point, tip))
+	current := state.GetTrackedClient(connID)
+	require.True(t, current.LastActivity.After(oldActivity))
+	require.Equal(t, ClientStatusSyncing, current.Status)
+	point.Hash[0] = 'X'
+	tip.Point.Hash[0] = 'X'
+	current = state.GetTrackedClient(connID)
+	require.Equal(t, []byte("rollback"), current.Cursor.Hash)
+	require.Equal(t, []byte("tip"), current.Tip.Point.Hash)
 }

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -27,10 +28,133 @@ import (
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
+
+// seedCip163Certificate records a certificate through the public database
+// ingestion boundary, mirroring ledger's own account_expiry_rollback_test.go
+// seedRollbackCertificate helper (a different package, so not directly
+// reusable) -- this keeps the test independent of a concrete metadata
+// plugin and its SQL schema.
+func seedCip163Certificate(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	cert lcommon.Certificate,
+) {
+	t.Helper()
+	txID := make([]byte, 32)
+	binary.BigEndian.PutUint64(txID[len(txID)-8:], slot)
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(txID)
+	tx.WithCertificates(cert)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(slot, txID),
+		0,
+		map[int]uint64{0: 0},
+		nil,
+	))
+}
+
+// TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint
+// guards the actual bug behind this fix: database/lifecycle.Truncate
+// (the offline and live CIP-0135 disaster-recovery truncate path) used to
+// call database.TruncateAfterSlot directly, bypassing the CIP-0163
+// pre/post hooks ledger.LedgerState.rollback applies for a normal
+// (security-parameter-bounded) rollback -- so a delegation witness in a
+// truncated-away block could leave expiration_epoch renewed past what the
+// surviving chain actually witnessed, producing incorrect stake/reward/
+// DRep calculations after any offline or live truncate on a CIP-0163-
+// enabled network.
+func TestTruncateRecomputesCip163ExpirationForWitnessAfterTruncatePoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		inactivity = uint64(90)
+		// 100 slots per epoch: epoch 0 = [0,100), epoch 1 = [100,200), ...
+		epochLength = uint64(100)
+	)
+	db := newTestDB(t)
+	for epoch := range uint64(3) {
+		require.NoError(t, db.SetEpoch(
+			epoch*epochLength, epoch,
+			nil, nil, nil, nil,
+			1, 1000, uint(epochLength),
+			nil,
+		))
+	}
+
+	cred := bytes.Repeat([]byte{0x07}, 28)
+
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:      cred,
+		CredentialTag:   0,
+		Active:          true,
+		AddedSlot:       50,
+		CreatedSlot:     50,
+		ExpirationEpoch: 1 + inactivity, // as block application would stamp it
+	}))
+
+	// Surviving registration witness at slot 50 (epoch 0).
+	survivingBlock := testBlock(1, 0xA1)
+	survivingBlock.Slot = 50
+	require.NoError(t, db.BlockCreate(survivingBlock, nil))
+	seedCip163Certificate(t, db, 50, &lcommon.StakeRegistrationCertificate{
+		StakeCredential: lcommon.Credential{
+			CredType:   0,
+			Credential: lcommon.NewBlake2b224(cred),
+		},
+	})
+
+	// To-be-truncated-away delegation witness at slot 150 (epoch 1), which
+	// renews the expiration to a value the surviving chain never actually
+	// witnessed.
+	truncatedBlock := testBlock(2, 0xA2)
+	truncatedBlock.Slot = 150
+	truncatedBlock.PrevHash = survivingBlock.Hash
+	require.NoError(t, db.BlockCreate(truncatedBlock, nil))
+	seedCip163Certificate(t, db, 150, &lcommon.StakeDelegationCertificate{
+		StakeCredential: &lcommon.Credential{
+			CredType:   0,
+			Credential: lcommon.NewBlake2b224(cred),
+		},
+		PoolKeyHash: lcommon.NewBlake2b224(bytes.Repeat([]byte{0x0A}, 28)),
+	})
+
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{
+			Slot: truncatedBlock.Slot,
+			Hash: truncatedBlock.Hash,
+		},
+		BlockNumber: truncatedBlock.Number,
+	}, nil))
+
+	// Truncate to the surviving block, discarding the slot-150 witness --
+	// with delegatorInactivityEnabled=true, matching a CIP-0163-enabled
+	// network.
+	_, err := lifecycle.Truncate(
+		context.Background(), db, survivingBlock, 0, true, inactivity,
+	)
+	require.NoError(t, err)
+
+	acct, err := db.GetAccountByCredential(0, cred, true, nil)
+	require.NoError(t, err)
+	require.Equal(
+		t, uint64(0)+inactivity, acct.ExpirationEpoch,
+		"expiration must be recomputed from the surviving epoch-0 witness "+
+			"(0+inactivity), not left at the truncated-away epoch-1 "+
+			"witness's stamp (1+inactivity) or the CIP-0163 hooks being "+
+			"skipped entirely (leaving it unchanged)",
+	)
+}
 
 // buildTestChain creates n blocks (IDs and Numbers 1..n) and sets the tip
 // to the last one.
@@ -904,7 +1028,7 @@ func TestTruncateRejectsPreCancelledContextWithoutRecordingMarker(
 }
 
 // TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget covers the interaction
-// between CIP-0135 truncate and the consumed-UTxO prune floor (issue #3766).
+// between CIP-0135 truncate and the consumed-UTxO prune floor.
 //
 // The floor records how deep the consumed-UTxO sweep hard-deleted spent rows,
 // and ledger.LedgerState.rollback refuses any target below it. Truncate is
@@ -986,4 +1110,116 @@ func TestTruncateRejectsConsumedUtxoPruneFloorAboveTarget(t *testing.T) {
 		)
 		requireSweptUtxoAbsent(t, f)
 	})
+}
+
+// TestTruncateRejectsTargetBeforeConsumedUtxoRetentionFloor reproduces the
+// same defect class fixed for block_nonce retention
+// (TestTruncateAfterSlotRejectsTargetWithPrunedNonce), found by auditing
+// TruncateAfterSlot's other retention-window interactions.
+//
+// During normal operation, ledger.LedgerState's cleanupConsumedUtxos
+// periodically hard-deletes spent UTxO rows once their DeletedSlot falls
+// at-or-behind a floor it durably records in sync_state
+// (database.ConsumedUtxoPruneFloorSyncKey). TruncateAfterSlot's doc comment
+// promises that "UTxOs spent after point.Slot are restored as unspent" --
+// but a spent UTxO whose row has already been hard-deleted by that cleanup
+// cannot be restored: UtxosUnspend's bulk UPDATE simply matches zero rows
+// for it, and TruncateAfterSlot returns success anyway. A disaster-recovery
+// truncate (database/lifecycle.Truncate, which unlike the security-
+// parameter-bounded live ledger rollback may target a point far older than
+// the retention window) can hit this silently, permanently losing UTxOs
+// the surviving chain still needs and corrupting balances/validation with
+// no error at truncate time to explain why.
+//
+// This test does not need real cleanup to run: it writes the durable
+// marker directly (exactly as persistConsumedUtxoPruneFloor would) to
+// simulate "cleanup already pruned everything at or below this slot," then
+// shows Truncate must refuse a target older than that marker.
+func TestTruncateRejectsTargetBeforeConsumedUtxoRetentionFloor(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	floorSlot := f.blocks[3].Slot
+	require.NoError(t, f.db.SetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		strconv.FormatUint(floorSlot, 10),
+		nil,
+	))
+
+	// blocks[2] is strictly before the floor: a UTxO consumed between its
+	// slot and the floor may already be physically gone. Before the fix,
+	// this silently succeeded (returning a Tip whose live UTxO set was
+	// missing whatever cleanup had already deleted); it must now be
+	// refused before any mutation happens.
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(),
+		f.db,
+		f.blocks[2],
+		0,
+		false,
+		0,
+	)
+	require.Error(t, err,
+		"Truncate must reject a target older than the consumed-UTxO "+
+			"retention floor instead of silently proceeding -- routine "+
+			"cleanup may have already hard-deleted UTxOs TruncateAfterSlot "+
+			"promises to restore as unspent")
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.Contains(t, err.Error(), "consumed-UTxO retention floor")
+	require.Equal(t, uint64(0), blocksRemoved)
+
+	// Nothing was mutated: the tip and every block must be untouched.
+	tip, tipErr := f.db.GetTip(nil)
+	require.NoError(t, tipErr)
+	require.Equal(t, f.blocks[4].Slot, tip.Point.Slot)
+
+	// blocks[3] is exactly at the floor and must be allowed (mirrors
+	// TestTruncateRejectsTargetBeforeMithrilBoundary's boundary case).
+	blocksRemoved, err = lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[3], 0, false, 0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), blocksRemoved)
+}
+
+// TestTruncateAllowsDeepTargetInApiStorageMode verifies the consumed-UTxO
+// retention floor check does not apply in API storage mode, where
+// cleanupConsumedUtxos never hard-deletes spent rows at all (they are
+// retained indefinitely for historical queries) -- so a floor marker
+// existing at all in that mode would be surprising, but even if present it
+// must not block an otherwise-valid deep truncate.
+func TestTruncateAllowsDeepTargetInApiStorageMode(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		StorageMode: types.StorageModeAPI,
+	})
+	require.NoError(t, err)
+
+	blocks := make([]models.Block, 0, 5)
+	for id := uint64(1); id <= 5; id++ {
+		block := testBlock(id, byte(id))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	last := blocks[len(blocks)-1]
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: last.Slot, Hash: last.Hash},
+		BlockNumber: last.Number,
+	}, nil))
+
+	// A floor deeper than every block in the chain: if the check applied
+	// here, every target below it (all of them) would be refused.
+	require.NoError(t, db.SetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		strconv.FormatUint(last.Slot+1000, 10),
+		nil,
+	))
+
+	blocksRemoved, err := lifecycle.Truncate(
+		context.Background(), db, blocks[2], 0, false, 0,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), blocksRemoved)
 }

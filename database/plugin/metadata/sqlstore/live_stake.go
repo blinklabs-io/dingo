@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -167,7 +168,7 @@ func applyUtxoStakeDelta(
 // refreshRewardLiveStakeAggregateDelta is refreshRewardLiveStakeAggregate's
 // incremental counterpart: instead of recomputing a credential's entire
 // live-UTxO total from scratch (sumCredentialUtxoStake's O(live UTxOs for
-// this credential) scan, dingo #4421), it reads the running total already
+// this credential) scan), it reads the running total already
 // stored in reward_live_stake and adjusts it by delta -- the exact signed
 // change this one write's UTxO mutations made to the credential's total, an
 // O(1) indexed point lookup plus an in-memory add.
@@ -430,7 +431,7 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 // finalizer's own SELECT. The per-credential form made the finalizer's cost
 // grow with the credential population twice over, and it is a large part of
 // why that SELECT could hold its write transaction -- and so the WAL snapshot
-// -- far longer than the work required (#4610).
+// -- far longer than the work required.
 func (s *Store) verifyRewardLiveStakeRunningTotals(
 	ctx context.Context,
 	db queryer,
@@ -474,7 +475,7 @@ LIMIT 1`)
 // until it finishes. Batching bounds both the Go-side rows and SQLite's
 // per-statement temp b-trees to one batch, and gives the rebuild a place to
 // report progress, while each batch reads only its own index ranges so the
-// total work stays linear in the key count (#4610).
+// total work stays linear in the key count.
 const rewardLiveStakeRebuildBatch = 20_000
 
 func (s *Store) rewardLiveStakeBatch() int {
@@ -668,6 +669,43 @@ LEFT JOIN latest_delegation
  AND latest_delegation.pool_key_hash = account.pool` + runningTotalJoin, args
 }
 
+// sqliteRewardLiveStakeAccountFirstQuery keeps SQLite's loop order on the
+// bounded account-key range. The active/pool index orders pool before the
+// credential columns, so its non-NULL pool range hides the batch key bound.
+func sqliteRewardLiveStakeAccountFirstQuery(query string) (string, error) {
+	fromAccount := "FROM account a\n"
+	if count := strings.Count(query, fromAccount); count != 4 {
+		return "", fmt.Errorf(
+			"reward live stake query has %d account assignment sources, want 4",
+			count,
+		)
+	}
+	query = strings.ReplaceAll(
+		query,
+		fromAccount,
+		"FROM account a INDEXED BY idx_account_credential\n",
+	)
+	for _, assignment := range []struct {
+		table string
+		alias string
+	}{
+		{table: "stake_delegation", alias: "sd"},
+		{table: "stake_registration_delegation", alias: "srd"},
+		{table: "stake_vote_delegation", alias: "svd"},
+		{table: "stake_vote_registration_delegation", alias: "svrd"},
+	} {
+		join := "JOIN " + assignment.table + " " + assignment.alias + "\n"
+		if !strings.Contains(query, join) {
+			return "", fmt.Errorf(
+				"reward live stake query has no %s assignment source",
+				assignment.table,
+			)
+		}
+		query = strings.Replace(query, join, "CROSS "+join, 1)
+	}
+	return query, nil
+}
+
 func (s *Store) rebuildRewardLiveStake(
 	slot uint64,
 	txn types.Txn,
@@ -808,14 +846,20 @@ func (s *Store) rebuildRewardLiveStakeRange(
 	slotValue int64,
 ) (int, error) {
 	var utxoStakes map[string]uint64
+	var err error
 	if !fromRunningTotals {
-		var err error
 		utxoStakes, err = sumRewardLiveStakeUtxos(ctx, db, keys)
 		if err != nil {
 			return 0, err
 		}
 	}
 	query, args := rewardLiveStakeCredentialQuery(fromRunningTotals, keys)
+	if s.dialect.Name() == "sqlite" {
+		query, err = sqliteRewardLiveStakeAccountFirstQuery(query)
+		if err != nil {
+			return 0, err
+		}
+	}
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("load reward live stake credentials: %w", err)
@@ -1261,8 +1305,7 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 	// captureMarkSnapshot) is a real source for reward calculation whenever
 	// no authoritative row has been captured yet, so it must fail this gate
 	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
-	// separately rejecting a version mismatch when the fallback is consulted
-	// (dingo #4026).
+	// separately rejecting a version mismatch when the fallback is consulted.
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -1327,6 +1370,73 @@ ORDER BY epoch`,
 		return nil, err
 	}
 	return epochs, nil
+}
+
+func (s *Store) GetPostSnapshotRewardCredits(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.AccountRewardDelta, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetPostSnapshotRewardCredits: resolve db: %w", err,
+		)
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT credential_tag, staking_key, amount
+FROM account_reward_delta
+WHERE added_slot = ? AND post_snapshot = TRUE AND withdrawal = FALSE
+ORDER BY credential_tag, staking_key, id`, slotValue)
+	if err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	defer rows.Close()
+	var (
+		ret  []*models.AccountRewardDelta
+		last *models.AccountRewardDelta
+	)
+	for rows.Next() {
+		var tag uint8
+		var key []byte
+		var raw sql.NullString
+		if err := rows.Scan(&tag, &key, &raw); err != nil {
+			return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+		}
+		if !raw.Valid || raw.String == "" {
+			continue
+		}
+		amount, err := parseUint64("post-snapshot reward credit", raw.String)
+		if err != nil {
+			return nil, err
+		}
+		if last != nil && last.CredentialTag == tag &&
+			bytes.Equal(last.StakingKey, key) {
+			total := uint64(last.Amount)
+			if ^uint64(0)-total < amount {
+				return nil, errors.New(
+					"GetPostSnapshotRewardCredits: credit total overflows",
+				)
+			}
+			last.Amount = types.Uint64(total + amount)
+			continue
+		}
+		last = &models.AccountRewardDelta{
+			CredentialTag: tag,
+			StakingKey:    key,
+			Amount:        types.Uint64(amount),
+			AddedSlot:     slot,
+			PostSnapshot:  true,
+		}
+		ret = append(ret, last)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("GetPostSnapshotRewardCredits: %w", err)
+	}
+	return ret, nil
 }
 
 func (s *Store) GetLiveStakeInputsForPools(
@@ -1466,10 +1576,10 @@ func dedupeByteSlices(values [][]byte) [][]byte {
 // resolveInstantStake), so a snapshot whose stake is enumerated from the
 // active pool set alone silently drops the stake of any credential whose pool
 // is absent from it -- which raises sigma_a for every surviving pool and
-// under-credits every reward on the node by that stake's share (dingo #4660,
-// the same failure #3969 and #4025 fixed on the exclusion side). Unioning this
-// set into the one the distribution is fetched for restores the ledger's
-// credential-first denominator while leaving which pools earn rewards alone.
+// under-credits every reward on the node by that stake's share (the same
+// failure as on the exclusion side). Unioning this set into the one the
+// distribution is fetched for restores the ledger's credential-first
+// denominator while leaving which pools earn rewards alone.
 //
 // The result is deliberately a superset: it applies no registration or expiry
 // predicate, because those are applied by the stake fetch this feeds, and a
