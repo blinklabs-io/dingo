@@ -24,6 +24,13 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// HistoryExpiryCursorSyncKey is the sync_state key holding the slot below
+// which every block has already been expired. The history-expiry pruner
+// resumes its scan there, so a round costs the newly eligible blocks rather
+// than every tombstone left by earlier rounds. Lifecycle truncate deletes it
+// because it may remove blocks below the cursor.
+const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
+
 // PruneBlock expires the given block's local CBOR in the blob store after
 // materializing any active UTxOs that still reference it. The block's CBOR
 // is replaced with a small expired-history marker; index pointers (bi, bh)
