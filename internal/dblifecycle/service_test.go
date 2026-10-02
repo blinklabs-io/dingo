@@ -107,7 +107,9 @@ func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
 	}
 	srcDir := filepath.Join(t.TempDir(), "src")
 	srcCfg := testConfig(srcDir)
-	srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey("operator-trust-root-0123456789ab")
+	srcCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"operator-trust-root-0123456789ab",
+	)
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
 	require.NoError(t, err)
 	require.NoError(t, dbtest.CloseDatabase(db))
@@ -120,7 +122,9 @@ func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
 	require.NotEmpty(t, m.Authentication)
 
 	wrongCfg := testConfig(filepath.Join(t.TempDir(), "restored-wrong"))
-	wrongCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey("some-other-trust-root-0123456789")
+	wrongCfg.DatabaseLifecycle.SnapshotTrustKeyFile = writeKey(
+		"some-other-trust-root-0123456789",
+	)
 	_, err = dblifecycle.NewService(wrongCfg, nil, nil).Restore(
 		context.Background(), snapDir,
 	)

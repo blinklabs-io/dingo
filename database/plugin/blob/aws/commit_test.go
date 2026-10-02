@@ -36,7 +36,10 @@ const fakeBucket = "test-bucket"
 func storeOnFakeCloud(t *testing.T) (*BlobStoreS3, *fakecloud.Store) {
 	t.Helper()
 	fc := fakecloud.New()
-	store, err := NewWithOptions(WithBucket(fakeBucket), WithRegion("us-east-1"))
+	store, err := NewWithOptions(
+		WithBucket(fakeBucket),
+		WithRegion("us-east-1"),
+	)
 	require.NoError(t, err)
 	store.client = s3.New(s3.Options{
 		BaseEndpoint:               aws.String("https://s3.fake.test"),
@@ -46,7 +49,11 @@ func storeOnFakeCloud(t *testing.T) (*BlobStoreS3, *fakecloud.Store) {
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
 		HTTPClient:                 &http.Client{Transport: fc},
-		Credentials:                credentials.NewStaticCredentialsProvider("test", "test", ""),
+		Credentials: credentials.NewStaticCredentialsProvider(
+			"test",
+			"test",
+			"",
+		),
 	})
 	return store, fc
 }

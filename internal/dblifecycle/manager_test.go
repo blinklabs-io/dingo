@@ -652,7 +652,11 @@ func (failingCloudDestination) UploadDir(context.Context, string) error {
 	return errors.New("simulated cloud upload failure")
 }
 
-func (failingCloudDestination) DownloadFiles(context.Context, string, []lifecycle.DownloadFile) error {
+func (failingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -687,7 +691,11 @@ func (d panickingCloudDestination) UploadDir(
 	return nil
 }
 
-func (panickingCloudDestination) DownloadFiles(context.Context, string, []lifecycle.DownloadFile) error {
+func (panickingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -857,7 +865,11 @@ func (d *blockingCloudDestination) UploadDir(context.Context, string) error {
 	return nil
 }
 
-func (d *blockingCloudDestination) DownloadFiles(context.Context, string, []lifecycle.DownloadFile) error {
+func (d *blockingCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 
@@ -1026,7 +1038,11 @@ func (d flakyCloudDestination) UploadDir(
 	return nil
 }
 
-func (flakyCloudDestination) DownloadFiles(context.Context, string, []lifecycle.DownloadFile) error {
+func (flakyCloudDestination) DownloadFiles(
+	context.Context,
+	string,
+	[]lifecycle.DownloadFile,
+) error {
 	return errors.New("not implemented")
 }
 

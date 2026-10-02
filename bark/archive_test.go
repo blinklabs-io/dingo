@@ -565,7 +565,9 @@ func TestArchiveFetchBlockResolvesHeightBoundOncePerBatch(t *testing.T) {
 // unauthenticated ArchiveService does a bounded amount of work at once: a
 // request that arrives while the configured number are in flight is refused
 // at once rather than queued, and a finished request frees its slot.
-func TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit(t *testing.T) {
+func TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	entered := make(chan struct{}, 1)
@@ -574,15 +576,19 @@ func TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit(t *testing.T)
 	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
 	defer release()
 	var first atomic.Bool
-	handler, blocks := newArchiveTestHandlerWithOptions(t, 2, archiveTestOptions{
-		maxConcurrentFetches: 1,
-		onGetBlockURL: func() {
-			if first.CompareAndSwap(false, true) {
-				entered <- struct{}{}
-				<-releaseCh
-			}
+	handler, blocks := newArchiveTestHandlerWithOptions(
+		t,
+		2,
+		archiveTestOptions{
+			maxConcurrentFetches: 1,
+			onGetBlockURL: func() {
+				if first.CompareAndSwap(false, true) {
+					entered <- struct{}{}
+					<-releaseCh
+				}
+			},
 		},
-	})
+	)
 	ref := &archive.BlockRef{
 		Hash: new(hex.EncodeToString(blocks[0].Hash)),
 		Slot: new(blocks[0].Slot),
@@ -592,21 +598,38 @@ func TestArchiveFetchBlockRefusesRequestsBeyondTheConcurrencyLimit(t *testing.T)
 	go func() {
 		_, err := handler.FetchBlock(
 			context.Background(),
-			connect.NewRequest(&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}}),
+			connect.NewRequest(
+				&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}},
+			),
 		)
 		done <- err
 	}()
-	testutil.RequireReceive(t, entered, 5*time.Second, "first request never reached the handler")
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"first request never reached the handler",
+	)
 
 	_, err := handler.FetchBlock(
 		t.Context(),
-		connect.NewRequest(&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}}),
+		connect.NewRequest(
+			&archive.FetchBlockRequest{Blocks: []*archive.BlockRef{ref}},
+		),
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 
 	release()
-	require.NoError(t, testutil.RequireReceive(t, done, 5*time.Second, "first request never finished"))
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			done,
+			5*time.Second,
+			"first request never finished",
+		),
+	)
 
 	msg := fetchBlocks(t, handler, ref)
 	require.Len(t, msg.GetBlocks(), 1)

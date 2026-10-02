@@ -90,12 +90,20 @@ func (d *fakeCloudDestination) DownloadFiles(
 		data, err := os.ReadFile(filepath.Join(d.dir, file.Name))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%s: %w", file.Name, lifecycle.ErrCloudSnapshotNotFound)
+				return fmt.Errorf(
+					"%s: %w",
+					file.Name,
+					lifecycle.ErrCloudSnapshotNotFound,
+				)
 			}
 			return err
 		}
 		if int64(len(data)) > file.MaxBytes {
-			return fmt.Errorf("%s: %w", file.Name, lifecycle.ErrDownloadTooLarge)
+			return fmt.Errorf(
+				"%s: %w",
+				file.Name,
+				lifecycle.ErrDownloadTooLarge,
+			)
 		}
 		if err := os.WriteFile(filepath.Join(localDir, file.Name), data, 0o600); err != nil {
 			return err

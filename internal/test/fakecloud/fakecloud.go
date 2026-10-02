@@ -168,8 +168,12 @@ func (s *Store) RoundTrip(req *http.Request) (*http.Response, error) {
 		_ = req.Body.Close()
 	}
 	return &http.Response{
-		StatusCode:    rec.code,
-		Status:        fmt.Sprintf("%d %s", rec.code, http.StatusText(rec.code)),
+		StatusCode: rec.code,
+		Status: fmt.Sprintf(
+			"%d %s",
+			rec.code,
+			http.StatusText(rec.code),
+		),
 		Header:        rec.header,
 		Body:          io.NopCloser(bytes.NewReader(rec.body.Bytes())),
 		ContentLength: int64(rec.body.Len()),
@@ -249,9 +253,12 @@ type s3ListItem struct {
 func s3Error(rec *recorder, code int, name string) {
 	rec.status(code)
 	rec.header.Set("Content-Type", "application/xml")
-	rec.write(fmt.Appendf(nil,
+	rec.write(fmt.Appendf(
+		nil,
 		`<?xml version="1.0" encoding="UTF-8"?><Error><Code>%s</Code><Message>%s</Message></Error>`,
-		name, name))
+		name,
+		name,
+	))
 }
 
 func (s *Store) serveS3(rec *recorder, req *http.Request) {
@@ -417,10 +424,17 @@ func (s *Store) deleteManyS3(rec *recorder, req *http.Request, bucket string) {
 		return
 	}
 	var out strings.Builder
-	out.WriteString(`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	out.WriteString(
+		`<DeleteResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`,
+	)
 	for _, o := range in.Objects {
 		s.count("DELETE object")
-		op := Op{Method: http.MethodDelete, Bucket: bucket, Key: o.Key, Mutates: true}
+		op := Op{
+			Method:  http.MethodDelete,
+			Bucket:  bucket,
+			Key:     o.Key,
+			Mutates: true,
+		}
 		if err := s.apply(op, func() { s.Delete(bucket, o.Key) }); err != nil {
 			internalError(rec, err)
 			return
@@ -455,15 +469,36 @@ func gcsResource(bucket, key string, size int) gcsObject {
 func gcsError(rec *recorder, code int, msg string) {
 	rec.status(code)
 	rec.header.Set("Content-Type", "application/json")
-	body, _ := json.Marshal(map[string]any{
-		"error": map[string]any{"code": code, "message": msg},
-	})
+	body, err := json.Marshal(
+		gcsErrorBody{Error: gcsErrorDetail{Code: code, Message: msg}},
+	)
+	if err != nil {
+		panic(err)
+	}
 	rec.write(body)
 }
 
-func gcsJSON(rec *recorder, v any) {
+type gcsErrorBody struct {
+	Error gcsErrorDetail `json:"error"`
+}
+
+type gcsErrorDetail struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type gcsList struct {
+	Kind          string      `json:"kind"`
+	Items         []gcsObject `json:"items"`
+	NextPageToken string      `json:"nextPageToken"`
+}
+
+func gcsJSON[T any](rec *recorder, v T) {
 	rec.header.Set("Content-Type", "application/json")
-	body, _ := json.Marshal(v)
+	body, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
 	rec.write(body)
 }
 
@@ -577,11 +612,10 @@ func (s *Store) listGCS(rec *recorder, bucket string, q url.Values) {
 	}
 	s.listed += len(items)
 	s.mu.Unlock()
-	gcsJSON(rec, map[string]any{
-		"kind":          "storage#objects",
-		"items":         items,
-		"nextPageToken": next,
-	})
+	gcsJSON(
+		rec,
+		gcsList{Kind: "storage#objects", Items: items, NextPageToken: next},
+	)
 }
 
 func (s *Store) uploadGCS(rec *recorder, req *http.Request, rest string) {

@@ -233,7 +233,11 @@ func (d *barkFakeCloudDestinationNoDelete) DownloadFiles(
 	localDir string,
 	files []lifecycle.DownloadFile,
 ) error {
-	return (&barkFakeCloudDestination{dir: d.dir}).DownloadFiles(ctx, localDir, files)
+	return (&barkFakeCloudDestination{dir: d.dir}).DownloadFiles(
+		ctx,
+		localDir,
+		files,
+	)
 }
 
 func (d *barkFakeCloudDestinationNoDelete) FetchManifest(

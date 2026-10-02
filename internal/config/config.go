@@ -632,7 +632,7 @@ type Config struct {
 	// refused rather than queued. ArchiveService takes no client credentials,
 	// so this is what bounds the storage work an anonymous caller can cause.
 	// Zero selects Bark's default (16); a negative value is rejected.
-	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches" envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
+	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
 	// for destructive DatabaseService RPCs. Every DatabaseService caller must
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate

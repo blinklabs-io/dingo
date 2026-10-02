@@ -104,7 +104,9 @@ func TestSnapshotRecordsPayloadDigests(t *testing.T) {
 
 	blob, err := os.ReadFile(filepath.Join(dir, lifecycle.BlobBackupFileName))
 	require.NoError(t, err)
-	metadata, err := os.ReadFile(filepath.Join(dir, lifecycle.MetadataBackupFileName))
+	metadata, err := os.ReadFile(
+		filepath.Join(dir, lifecycle.MetadataBackupFileName),
+	)
 	require.NoError(t, err)
 	require.Equal(t, sha256Hex(blob), m.BlobSHA256)
 	require.Equal(t, sha256Hex(metadata), m.MetadataSHA256)

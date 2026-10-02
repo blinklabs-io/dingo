@@ -82,7 +82,11 @@ type CloudDestination interface {
 	// listed or read, and a named object that is larger than its MaxBytes is
 	// rejected during transfer rather than written out in full. A missing
 	// object wraps ErrCloudSnapshotNotFound.
-	DownloadFiles(ctx context.Context, localDir string, files []DownloadFile) error
+	DownloadFiles(
+		ctx context.Context,
+		localDir string,
+		files []DownloadFile,
+	) error
 }
 
 // DownloadFile names one object of a snapshot and the most bytes it may carry.
@@ -97,7 +101,12 @@ var ErrDownloadTooLarge = errors.New("cloud object exceeds its declared size")
 
 // copyBounded copies src to dst and fails once src yields more than maxBytes,
 // having written at most maxBytes. name only labels the error.
-func copyBounded(dst io.Writer, src io.Reader, maxBytes int64, name string) error {
+func copyBounded(
+	dst io.Writer,
+	src io.Reader,
+	maxBytes int64,
+	name string,
+) error {
 	n, err := io.Copy(dst, io.LimitReader(src, maxBytes))
 	if err != nil {
 		return err
@@ -107,7 +116,12 @@ func copyBounded(dst io.Writer, src io.Reader, maxBytes int64, name string) erro
 	}
 	var probe [1]byte
 	if m, _ := io.ReadFull(src, probe[:]); m > 0 {
-		return fmt.Errorf("%q exceeds %d bytes: %w", name, maxBytes, ErrDownloadTooLarge)
+		return fmt.Errorf(
+			"%q exceeds %d bytes: %w",
+			name,
+			maxBytes,
+			ErrDownloadTooLarge,
+		)
 	}
 	return nil
 }

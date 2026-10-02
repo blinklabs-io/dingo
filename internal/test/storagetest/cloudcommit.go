@@ -35,16 +35,16 @@ import (
 // which includes the commit's own compensation, is rejected unapplied.
 func failMutation(
 	fc *fakecloud.Store,
-	n int32,
+	n int,
 	afterApply, rejectRest bool,
 ) {
-	var seen atomic.Int32
+	var seen atomic.Int64
 	fc.SetHooks(fakecloud.Hooks{
 		Before: func(op fakecloud.Op) error {
 			if !op.Mutates {
 				return nil
 			}
-			idx := seen.Add(1) - 1
+			idx := int(seen.Add(1) - 1)
 			if (!afterApply && idx == n) || (rejectRest && idx > n) {
 				return fakecloud.ErrInjected
 			}
@@ -52,7 +52,7 @@ func failMutation(
 		},
 		After: func(op fakecloud.Op) error {
 			// seen already counted this mutation in Before.
-			if afterApply && seen.Load()-1 == n {
+			if afterApply && int(seen.Load())-1 == n {
 				return fakecloud.ErrInjected
 			}
 			return nil
@@ -103,22 +103,30 @@ func RunCloudCommitUncertainOutcome(
 		require.Equal(t, []byte("old"), got, "overwritten object not restored")
 		for _, k := range keys[1:] {
 			_, ok := readKey(t, store, k)
-			require.False(t, ok, "object %q written by the failed commit remains", k)
+			require.False(
+				t,
+				ok,
+				"object %q written by the failed commit remains",
+				k,
+			)
 		}
 	}
 	t.Cleanup(func() { fc.SetHooks(fakecloud.Hooks{}) })
 
-	for n := range int32(len(keys)) {
-		t.Run(fmt.Sprintf("applied-then-error-mutation-%d", n), func(t *testing.T) {
-			failMutation(fc, n, true, false)
-			err := commit()
-			require.Error(t, err)
-			require.NotErrorIs(t, err, types.ErrPartialCommit)
-			fc.SetHooks(fakecloud.Hooks{})
-			requireRestored(t)
-		})
+	for n := range len(keys) {
+		t.Run(
+			fmt.Sprintf("applied-then-error-mutation-%d", n),
+			func(t *testing.T) {
+				failMutation(fc, n, true, false)
+				err := commit()
+				require.Error(t, err)
+				require.NotErrorIs(t, err, types.ErrPartialCommit)
+				fc.SetHooks(fakecloud.Hooks{})
+				requireRestored(t)
+			},
+		)
 	}
-	for _, n := range []int32{0, int32(len(keys)) - 1} {
+	for _, n := range []int{0, len(keys) - 1} {
 		t.Run(fmt.Sprintf("uncompensable-mutation-%d", n), func(t *testing.T) {
 			// The failed mutation took effect and compensation is rejected,
 			// so the remote state is unknown.
@@ -165,8 +173,13 @@ func RunCloudPruneCommitVisibility(
 	hash[0] = 0x01
 	blockKey := types.BlockBlobKey(slot, hash)
 	offsetForm, materialized := []byte("offset-ref"), []byte("raw-cbor")
+	// #nosec G115 -- i is below utxoRefs, a small test constant.
+	utxoTxID := func(i int) []byte { return []byte{byte(i), 0x0a} }
 	utxoKey := func(i int) []byte {
-		return types.UtxoBlobKey([]byte{byte(i), 0x0a}, uint32(i))
+		return types.UtxoBlobKey(
+			utxoTxID(i),
+			uint32(i),
+		) // #nosec G115 -- as above
 	}
 
 	// requireConsistent fails when the block reads as expired while any UTxO
@@ -195,10 +208,22 @@ func RunCloudPruneCommitVisibility(
 		for i := range utxoRefs {
 			got, ok := readKey(t, store, utxoKey(i))
 			require.True(t, ok)
-			require.Equalf(t, materialized, got,
-				"%s: block is expired but UTxO %d still references it (point read)", when, i)
-			require.Equalf(t, materialized, snapshot[string(utxoKey(i))],
-				"%s: block is expired but UTxO %d still references it (snapshot)", when, i)
+			require.Equalf(
+				t,
+				materialized,
+				got,
+				"%s: block is expired but UTxO %d still references it (point read)",
+				when,
+				i,
+			)
+			require.Equalf(
+				t,
+				materialized,
+				snapshot[string(utxoKey(i))],
+				"%s: block is expired but UTxO %d still references it (snapshot)",
+				when,
+				i,
+			)
 		}
 	}
 
@@ -206,16 +231,22 @@ func RunCloudPruneCommitVisibility(
 		t.Helper()
 		fc.SetHooks(fakecloud.Hooks{})
 		txn := store.NewTransaction(true)
-		require.NoError(t, store.SetBlock(txn, slot, hash, []byte("block"), 1, 1, 1, nil))
+		require.NoError(
+			t,
+			store.SetBlock(txn, slot, hash, []byte("block"), 1, 1, 1, nil),
+		)
 		for i := range utxoRefs {
-			require.NoError(t, store.SetUtxo(txn, []byte{byte(i), 0x0a}, uint32(i), offsetForm))
+			require.NoError(
+				t,
+				store.SetUtxo(txn, utxoTxID(i), uint32(i), offsetForm),
+			)
 		}
 		require.NoError(t, txn.Commit())
 	}
 	prune := func() error {
 		txn := store.NewTransaction(true)
 		for i := range utxoRefs {
-			if err := store.SetUtxo(txn, []byte{byte(i), 0x0a}, uint32(i), materialized); err != nil {
+			if err := store.SetUtxo(txn, utxoTxID(i), uint32(i), materialized); err != nil {
 				return err
 			}
 		}
@@ -241,16 +272,23 @@ func RunCloudPruneCommitVisibility(
 	})
 
 	// utxoRefs UTxO writes plus the tombstone.
-	for n := range int32(utxoRefs + 1) {
+	for n := range utxoRefs + 1 {
 		for _, rejectRest := range []bool{false, true} {
-			t.Run(fmt.Sprintf("failure-at-%d-compensation-rejected=%t", n, rejectRest), func(t *testing.T) {
-				seed(t)
-				failMutation(fc, n, true, rejectRest)
-				err := prune()
-				fc.SetHooks(fakecloud.Hooks{})
-				require.Error(t, err)
-				requireConsistent(t, "after failed commit")
-			})
+			t.Run(
+				fmt.Sprintf(
+					"failure-at-%d-compensation-rejected=%t",
+					n,
+					rejectRest,
+				),
+				func(t *testing.T) {
+					seed(t)
+					failMutation(fc, n, true, rejectRest)
+					err := prune()
+					fc.SetHooks(fakecloud.Hooks{})
+					require.Error(t, err)
+					requireConsistent(t, "after failed commit")
+				},
+			)
 		}
 	}
 }
@@ -289,7 +327,10 @@ func RunCloudPopulatedRestore(
 		if overlap {
 			for i := range 100 {
 				key := fmt.Sprintf("a/%05d", i)
-				require.NoError(t, store.Set(txn, []byte(key), []byte("overwritten-"+key)))
+				require.NoError(
+					t,
+					store.Set(txn, []byte(key), []byte("overwritten-"+key)),
+				)
 			}
 		}
 		require.NoError(t, txn.Commit())
@@ -328,7 +369,11 @@ func RunCloudPopulatedRestore(
 	// The target is populated with A and is replaced by B.
 	reset()
 	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupB)))
-	require.True(t, maps.Equal(wantB, contents()), "nothing of A may survive a restore of B")
+	require.True(
+		t,
+		maps.Equal(wantB, contents()),
+		"nothing of A may survive a restore of B",
+	)
 
 	// A restore that fails after committing some batches is undone by
 	// resetting and restoring the rollback backup of what was there.
@@ -345,8 +390,17 @@ func RunCloudPopulatedRestore(
 	err := restorer.Restore(ctx, bytes.NewReader(backupA))
 	fc.SetHooks(fakecloud.Hooks{})
 	require.Error(t, err)
-	require.NotEqual(t, wantB, contents(), "the failed restore must have left partial data")
+	require.NotEqual(
+		t,
+		wantB,
+		contents(),
+		"the failed restore must have left partial data",
+	)
 	reset()
 	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupB)))
-	require.True(t, maps.Equal(wantB, contents()), "rollback must restore B exactly")
+	require.True(
+		t,
+		maps.Equal(wantB, contents()),
+		"rollback must restore B exactly",
+	)
 }

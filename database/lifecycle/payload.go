@@ -53,7 +53,10 @@ func (m Manifest) payloadDownloads() []DownloadFile {
 	files := m.payloadFiles()
 	downloads := make([]DownloadFile, 0, len(files))
 	for _, f := range files {
-		downloads = append(downloads, DownloadFile{Name: f.name, MaxBytes: f.size})
+		downloads = append(
+			downloads,
+			DownloadFile{Name: f.name, MaxBytes: f.size},
+		)
 	}
 	return downloads
 }

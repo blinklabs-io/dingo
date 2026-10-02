@@ -31,14 +31,22 @@ func TestMaxBlockSizeFollowsCurrentProtocolParameters(t *testing.T) {
 		},
 	}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(90112+1100+blockFramingAllowance), ls.MaxBlockSize())
+	require.Equal(
+		t,
+		uint64(90112+1100+blockFramingAllowance),
+		ls.MaxBlockSize(),
+	)
 
 	ls.currentPParams = &conway.ConwayProtocolParameters{
 		MaxBlockBodySize:   180000,
 		MaxBlockHeaderSize: 1100,
 	}
 	ls.publishSnapshotsLocked()
-	require.Equal(t, uint64(180000+1100+blockFramingAllowance), ls.MaxBlockSize())
+	require.Equal(
+		t,
+		uint64(180000+1100+blockFramingAllowance),
+		ls.MaxBlockSize(),
+	)
 }
 
 func TestMaxBlockSizeUnknownWithoutProtocolParameters(t *testing.T) {

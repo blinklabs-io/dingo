@@ -38,7 +38,9 @@ const downloadTestBucket = "test-bucket"
 // downloadDestinations returns the S3 and GCS destinations at prefix "snap" of
 // a fresh in-memory bucket, over the SDKs' HTTP transports. Production GCS
 // uses gRPC; this does not claim gRPC framing coverage.
-func downloadDestinations(t *testing.T) (*fakecloud.Store, map[string]CloudDestination) {
+func downloadDestinations(
+	t *testing.T,
+) (*fakecloud.Store, map[string]CloudDestination) {
 	t.Helper()
 	fc := fakecloud.New()
 	s3Client := s3.New(s3.Options{
@@ -49,7 +51,11 @@ func downloadDestinations(t *testing.T) (*fakecloud.Store, map[string]CloudDesti
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,
 		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenRequired,
 		HTTPClient:                 &http.Client{Transport: fc},
-		Credentials:                credentials.NewStaticCredentialsProvider("test", "test", ""),
+		Credentials: credentials.NewStaticCredentialsProvider(
+			"test",
+			"test",
+			"",
+		),
 	})
 	gcsClient, err := storage.NewClient(
 		context.Background(),
@@ -81,15 +87,22 @@ func TestDownloadFilesFetchesOnlyTheNamedObjects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			gets := fc.Requests("GET object")
-			require.NoError(t, dest.DownloadFiles(context.Background(), dir, []DownloadFile{
-				{Name: "blob.bak", MaxBytes: 4},
-				{Name: "metadata.sqlite", MaxBytes: 8},
-			}))
+			require.NoError(
+				t,
+				dest.DownloadFiles(context.Background(), dir, []DownloadFile{
+					{Name: "blob.bak", MaxBytes: 4},
+					{Name: "metadata.sqlite", MaxBytes: 8},
+				}),
+			)
 			entries, err := os.ReadDir(dir)
 			require.NoError(t, err)
 			require.Len(t, entries, 2)
 			require.Equal(t, 2, fc.Requests("GET object")-gets)
-			require.Zero(t, fc.Requests("LIST"), "the prefix must not be listed")
+			require.Zero(
+				t,
+				fc.Requests("LIST"),
+				"the prefix must not be listed",
+			)
 			got, err := os.ReadFile(filepath.Join(dir, "blob.bak"))
 			require.NoError(t, err)
 			require.Equal(t, []byte("blob"), got)
@@ -119,9 +132,13 @@ func TestDownloadFilesReportsMissingObjectAsSnapshotNotFound(t *testing.T) {
 	_, dests := downloadDestinations(t)
 	for name, dest := range dests {
 		t.Run(name, func(t *testing.T) {
-			err := dest.DownloadFiles(context.Background(), t.TempDir(), []DownloadFile{
-				{Name: "blob.bak", MaxBytes: 1},
-			})
+			err := dest.DownloadFiles(
+				context.Background(),
+				t.TempDir(),
+				[]DownloadFile{
+					{Name: "blob.bak", MaxBytes: 1},
+				},
+			)
 			require.ErrorIs(t, err, ErrCloudSnapshotNotFound)
 		})
 	}

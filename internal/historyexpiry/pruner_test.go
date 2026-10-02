@@ -235,7 +235,12 @@ func newTestPruner(db *database.Database, current, window uint64) *Pruner {
 	})
 }
 
-func blockIsExpired(t *testing.T, db *database.Database, slot uint64, hash []byte) bool {
+func blockIsExpired(
+	t *testing.T,
+	db *database.Database,
+	slot uint64,
+	hash []byte,
+) bool {
 	t.Helper()
 	txn := db.BlobTxn(false)
 	defer txn.Release()

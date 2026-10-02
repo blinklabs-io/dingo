@@ -269,7 +269,10 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 	return &Bark{
 		config:               cfg,
 		operatorFingerprints: operatorFingerprints,
-		archiveSlots:         make(chan struct{}, cfg.ArchiveMaxConcurrentFetches),
+		archiveSlots: make(
+			chan struct{},
+			cfg.ArchiveMaxConcurrentFetches,
+		),
 	}, nil
 }
 

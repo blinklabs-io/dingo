@@ -36,14 +36,20 @@ func TestManifestOptionsReadsTrustKeyFile(t *testing.T) {
 	t.Run("key authenticates a manifest", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "trust.key")
-		require.NoError(t, os.WriteFile(path, []byte("0123456789abcdef0123\n"), 0o600))
+		require.NoError(
+			t,
+			os.WriteFile(path, []byte("0123456789abcdef0123\n"), 0o600),
+		)
 		opts, err := ManifestOptions(config.DatabaseLifecycleConfig{
 			SnapshotTrustKeyFile: path,
 		})
 		require.NoError(t, err)
 
 		dir := t.TempDir()
-		require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{}, opts...))
+		require.NoError(
+			t,
+			lifecycle.WriteManifest(dir, lifecycle.Manifest{}, opts...),
+		)
 		m, err := lifecycle.ReadManifest(dir)
 		require.NoError(t, err)
 		require.NoError(t, m.Authenticate(opts...))

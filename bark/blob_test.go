@@ -372,8 +372,12 @@ func TestGetBlock_BoundedByConfiguredBlockSize(t *testing.T) {
 	block := archiveBlockFixtures(t, 2)[1]
 	hash := block.Hash()
 	size := uint64(len(block.Cbor()))
-	require.Less(t, size, uint64(defaultMaxArchiveBlockSize),
-		"the fixture must fit the default so only the configured limit can refuse it")
+	require.Less(
+		t,
+		size,
+		uint64(defaultMaxArchiveBlockSize),
+		"the fixture must fit the default so only the configured limit can refuse it",
+	)
 
 	for _, tc := range []struct {
 		name    string

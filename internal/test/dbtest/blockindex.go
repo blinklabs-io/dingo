@@ -15,7 +15,7 @@
 package dbtest
 
 import (
-	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -47,11 +47,17 @@ func RunCloudBlockNumberBoundWork(
 	seeded := uint64(0)
 	seedTo := func(n uint64) {
 		for id := seeded + 1; id <= n; id++ {
-			blockKey := types.BlockBlobKey(id*20, bytes.Repeat([]byte{byte(id)}, 32))
+			hash := make([]byte, 32)
+			binary.BigEndian.PutUint64(hash, id)
+			blockKey := types.BlockBlobKey(id*20, hash)
 			meta, err := cbor.Encode(types.BlockMetadata{ID: id, Height: id})
 			require.NoError(t, err)
 			fc.Put(bucket, objectName(types.BlockBlobIndexKey(id)), blockKey)
-			fc.Put(bucket, objectName(types.BlockBlobMetadataKey(blockKey)), meta)
+			fc.Put(
+				bucket,
+				objectName(types.BlockBlobMetadataKey(blockKey)),
+				meta,
+			)
 		}
 		seeded = n
 	}
@@ -70,8 +76,14 @@ func RunCloudBlockNumberBoundWork(
 		require.True(t, bound.Resolved)
 		require.Equal(t, n, bound.HighestID)
 		require.Equal(t, n, bound.HighestNumber)
-		require.LessOrEqualf(t, lists, maxLists,
-			"%d indexed blocks: bound resolution issued %d list requests", n, lists)
+		require.LessOrEqualf(
+			t,
+			lists,
+			maxLists,
+			"%d indexed blocks: bound resolution issued %d list requests",
+			n,
+			lists,
+		)
 		require.LessOrEqualf(t, listed, maxLists*1000,
 			"%d indexed blocks: bound resolution listed %d keys", n, listed)
 	}

@@ -523,7 +523,12 @@ func TestSingleEntryChunkLookupsAtZeroAndNonzeroSlot(t *testing.T) {
 			if err != nil || !found || start != slot || end != slot {
 				t.Fatalf(
 					"chunkSlotRange = (%d, %d, %v, %v), want (%d, %d, true, nil)",
-					start, end, found, err, slot, slot,
+					start,
+					end,
+					found,
+					err,
+					slot,
+					slot,
 				)
 			}
 			got, err := imm.GetBlock(want)
@@ -537,21 +542,32 @@ func TestSingleEntryChunkLookupsAtZeroAndNonzeroSlot(t *testing.T) {
 			// Same slot, different hash: located but not a match.
 			got, err = imm.GetBlock(pointLookupPoint(slot, 0xFF))
 			if err != nil || got != nil {
-				t.Fatalf("wrong-hash lookup = (%#v, %v), want (nil, nil)", got, err)
+				t.Fatalf(
+					"wrong-hash lookup = (%#v, %v), want (nil, nil)",
+					got,
+					err,
+				)
 			}
 			// The slot just after the only block is past the last chunk.
 			_, err = imm.getChunkNamesFromPoint(
 				ocommon.NewPoint(slot+1, nil),
 			)
 			if !errors.Is(err, ErrPointBeyondLastChunk) {
-				t.Fatalf("adjacent-after error = %v, want ErrPointBeyondLastChunk", err)
+				t.Fatalf(
+					"adjacent-after error = %v, want ErrPointBeyondLastChunk",
+					err,
+				)
 			}
 			if slot > 0 {
 				// The slot just before is not in the chunk, but the chunk is
 				// still the first candidate.
 				got, err = imm.GetBlock(pointLookupPoint(slot-1, 0x77))
 				if err != nil || got != nil {
-					t.Fatalf("adjacent-before lookup = (%#v, %v), want (nil, nil)", got, err)
+					t.Fatalf(
+						"adjacent-before lookup = (%#v, %v), want (nil, nil)",
+						got,
+						err,
+					)
 				}
 			}
 		})
