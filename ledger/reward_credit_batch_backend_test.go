@@ -17,6 +17,7 @@
 package ledger
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
@@ -142,7 +143,10 @@ func TestDRepVotingPowerFromLiveStakeMatchesDefinition(t *testing.T) {
 					account.DrepType = models.DrepTypeAddrKeyHash
 					account.Drep = drepKey(i)
 				}
-				require.NoError(t, db.CreateAccount(nil, account))
+				require.NoError(
+					t,
+					db.CreateAccount(context.Background(), nil, account),
+				)
 				for u := range 3 {
 					txID := make([]byte, 32)
 					binary.BigEndian.PutUint32(
@@ -166,7 +170,7 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 			// Refresh the live stake aggregate of the active accounts the
 			// way block application does, then leave some rows missing and
 			// some stale, which the live read must not trust.
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				var credits []models.AccountRewardCredit
 				for i := range accounts {
@@ -180,7 +184,11 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 						SourceHash: rewardBatchKey(0x61, i),
 					})
 				}
-				return db.AddAccountRewardsByCredential(credits, txn)
+				return db.AddAccountRewardsByCredential(
+					context.Background(),
+					credits,
+					txn,
+				)
 			}))
 			require.NoError(t, db.Metadata().RebuildRewardLiveStake(100, nil))
 			fastPathTypes := []uint64{
@@ -190,6 +198,7 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 			for _, expiryEpoch := range []uint64{0, 3} {
 				_, wantByType := drepPowerOracle(t, raw, expiryEpoch)
 				gotByType, err := db.GetDRepVotingPowerByType(
+					context.Background(),
 					fastPathTypes,
 					expiryEpoch,
 					nil,
@@ -228,7 +237,12 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 			}
 			for _, expiryEpoch := range []uint64{0, 3} {
 				wantCredential, wantType := drepPowerOracle(t, raw, expiryEpoch)
-				got, err := db.GetDRepVotingPowerBatch(refs, expiryEpoch, nil)
+				got, err := db.GetDRepVotingPowerBatch(
+					context.Background(),
+					refs,
+					expiryEpoch,
+					nil,
+				)
 				require.NoError(t, err)
 				want := make(map[string]uint64)
 				for _, ref := range refs {
@@ -241,6 +255,7 @@ VALUES (?, 0, ?, ?, 0, 1, ?, ?, FALSE)`),
 					models.DrepTypeAlwaysAbstain, models.DrepTypeAlwaysNoConfidence,
 				}
 				gotType, err := db.GetDRepVotingPowerByType(
+					context.Background(),
 					types,
 					expiryEpoch,
 					nil,
@@ -340,13 +355,16 @@ ORDER BY epoch, pool_key_hash, credential_tag, staking_key`,
 func seedRewardBatchAccounts(t *testing.T, db *database.Database, n int) {
 	t.Helper()
 	for i := range n {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: rewardBatchKey(0x31, i),
-			Pool:       rewardBatchKey(0x41, i%7),
-			Reward:     types.Uint64(1_000 + i),
-			Active:     true,
-			AddedSlot:  10,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey: rewardBatchKey(0x31, i),
+				Pool:       rewardBatchKey(0x41, i%7),
+				Reward:     types.Uint64(1_000 + i),
+				Active:     true,
+				AddedSlot:  10,
+			}),
+		)
 	}
 }
 
@@ -416,13 +434,22 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 			credits := rewardBatchCredits(accounts)
 			for replay := range 2 {
 				for _, credit := range credits {
-					require.NoError(t, oneDB.AddAccountRewardByCredential(
-						credit.CredentialTag, credit.StakingKey,
-						credit.Amount, credit.Slot, credit.SourceHash, nil,
-					))
+					require.NoError(
+						t,
+						oneDB.AddAccountRewardByCredential(
+							context.Background(),
+							credit.CredentialTag, credit.StakingKey,
+							credit.Amount, credit.Slot, credit.SourceHash, nil,
+						),
+					)
 				}
 				require.NoError(
-					t, batchDB.AddAccountRewardsByCredential(credits, nil),
+					t,
+					batchDB.AddAccountRewardsByCredential(
+						context.Background(),
+						credits,
+						nil,
+					),
 				)
 				require.Equal(
 					t, dumpRewardBatchTables(t, oneRaw),
@@ -433,6 +460,7 @@ func TestAddAccountRewardsByCredentialMatchesOneAtATime(t *testing.T) {
 			// A credit to a deregistered account fails before writing.
 			before := dumpRewardBatchTables(t, batchRaw)
 			err := batchDB.AddAccountRewardsByCredential(
+				context.Background(),
 				[]models.AccountRewardCredit{
 					{
 						StakingKey: rewardBatchKey(0x31, 0), Amount: 5,
@@ -548,15 +576,18 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			drep := rewardBatchKey(0x42, 1)
 			const n = 40
 			for i := range n {
-				require.NoError(t, db.CreateAccount(nil, &models.Account{
-					StakingKey: rewardBatchKey(0xf1, i),
-					Pool:       pool,
-					Drep:       drep,
-					DrepType:   models.DrepTypeAddrKeyHash,
-					Reward:     types.Uint64(100),
-					Active:     true,
-					AddedSlot:  10,
-				}))
+				require.NoError(
+					t,
+					db.CreateAccount(context.Background(), nil, &models.Account{
+						StakingKey: rewardBatchKey(0xf1, i),
+						Pool:       pool,
+						Drep:       drep,
+						DrepType:   models.DrepTypeAddrKeyHash,
+						Reward:     types.Uint64(100),
+						Active:     true,
+						AddedSlot:  10,
+					}),
+				)
 			}
 			var credits []models.AccountRewardCredit
 			for i := range n {
@@ -567,7 +598,14 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 					SourceHash: rewardBatchKey(0x61, i),
 				})
 			}
-			require.NoError(t, db.AddAccountRewardsByCredential(credits, nil))
+			require.NoError(
+				t,
+				db.AddAccountRewardsByCredential(
+					context.Background(),
+					credits,
+					nil,
+				),
+			)
 			var outputs []*models.RewardAccountOutput
 			var want uint64
 			for i := range n {
@@ -603,6 +641,7 @@ func TestPendingRewardCreditStoreAcrossBackends(t *testing.T) {
 			}
 			powerTotal := func() uint64 {
 				power, err := db.GetDRepVotingPowerBatch(
+					context.Background(),
 					[]models.StakeCredentialRef{
 						models.NewStakeCredentialRef(0, drep),
 					}, 0, nil,
@@ -712,7 +751,7 @@ func TestBoundaryRewardApplicationMatchesEagerPathAcrossBackends(t *testing.T) {
 				ls.runChunkedStakeRewardPrecompute(4, 200, 1_200),
 			)
 		} else {
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			require.NoError(t, txn.Do(func(txn *database.Txn) error {
 				return ls.precomputeStakeRewards(txn, 4, 200, 1_200)
 			}))
@@ -729,7 +768,7 @@ INSERT INTO deregistration (added_slot, staking_key, credential_tag, amount)
 VALUES (?, ?, 0, '2000000')`), 300+index, ref.Key)
 			require.NoError(t, err)
 		}
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			return ls.applyStakeRewards(txn, 4, 1_200)
 		}))
@@ -919,7 +958,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	dialect string,
 ) {
 	seedRewardPrecomputeTimingInputs(t, db, 6)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
 	nonce := testHashBytes("reward-epoch")
@@ -963,6 +1002,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		BlockNumber: 2, Type: 1, Cbor: []byte{0x80},
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{ancestor, abandoned},
 	))
 	for _, block := range []chain.RawBlock{ancestor, abandoned} {
@@ -984,6 +1024,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		}
 		go func() {
 			rollbackDone <- ls.rollbackWithBlocks(
+				context.Background(),
 				ocommon.NewPoint(ancestor.Slot, ancestor.Hash), nil, false,
 			)
 		}()
@@ -1024,7 +1065,7 @@ func testRewardPrecomputeWriteRacesRollback(
 	ls.rewardPrecomputeWG.Wait()
 
 	var wantMember uint64
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
 		want, ok, err := ls.calculateStakeRewardApplication(
 			txn, 4, replacement.Slot, 1_200, false,
@@ -1040,12 +1081,18 @@ func testRewardPrecomputeWriteRacesRollback(
 	}))
 	require.NotZero(t, wantMember,
 		"control: the surviving chain pays member")
-	writeTxn := db.Transaction(true)
+	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(txn, 4, 1_200)
 	}))
 	settleRewardCredits(t, ls)
-	account, err := db.GetAccountByCredential(0, member, true, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		member,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	require.Equal(t, wantMember, uint64(account.Reward),

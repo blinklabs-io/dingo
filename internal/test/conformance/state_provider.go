@@ -15,6 +15,7 @@
 package conformance
 
 import (
+	"context"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -118,7 +119,12 @@ func (p *DingoStateProvider) UtxoById(
 	inputIdx := id.Index()
 
 	utxo, err := withBadConnRetry(func() (*models.Utxo, error) {
-		return p.manager.db.UtxoByRef(inputId.Bytes(), inputIdx, nil)
+		return p.manager.db.UtxoByRef(
+			context.Background(),
+			inputId.Bytes(),
+			inputIdx,
+			nil,
+		)
 	})
 	if err != nil {
 		if errors.Is(err, database.ErrUtxoNotFound) {
@@ -178,6 +184,7 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 	credentialTag := conformanceCredentialTag(cred)
 	account, err := withBadConnRetry(func() (*models.Account, error) {
 		return p.manager.db.GetAccountByCredential(
+			context.Background(),
 			credentialTag, cred.Credential[:], false, nil,
 		)
 	})
@@ -214,6 +221,7 @@ func (p *DingoStateProvider) StakeCredentialDeposit(
 	}
 	account, err := withBadConnRetry(func() (*models.Account, error) {
 		return p.manager.db.GetAccountByCredential(
+			context.Background(),
 			credentialTag, cred.Credential[:], false, nil,
 		)
 	})
@@ -229,7 +237,13 @@ func (p *DingoStateProvider) StakeCredentialDeposit(
 	history, err := withBadConnRetry(
 		func() ([]models.AccountRegistrationHistoryRow, error) {
 			return p.manager.db.GetAccountRegistrationHistoryByCredential(
-				credentialTag, cred.Credential[:], 1, 0, "desc", nil,
+				context.Background(),
+				credentialTag,
+				cred.Credential[:],
+				1,
+				0,
+				"desc",
+				nil,
 			)
 		},
 	)
@@ -239,7 +253,10 @@ func (p *DingoStateProvider) StakeCredentialDeposit(
 	importRegistration, err := withBadConnRetry(
 		func() (*models.AccountImportRegistration, error) {
 			return p.manager.db.GetAccountImportRegistrationByCredential(
-				credentialTag, cred.Credential[:], nil,
+				context.Background(),
+				credentialTag,
+				cred.Credential[:],
+				nil,
 			)
 		},
 	)
@@ -291,7 +308,12 @@ func (p *DingoStateProvider) PoolCurrentState(
 	poolKeyHash common.PoolKeyHash,
 ) (*common.PoolRegistrationCertificate, *uint64, error) {
 	pool, err := withBadConnRetry(func() (*models.Pool, error) {
-		return p.manager.db.GetPool(poolKeyHash, true, nil)
+		return p.manager.db.GetPool(
+			context.Background(),
+			poolKeyHash,
+			true,
+			nil,
+		)
 	})
 	if errors.Is(err, models.ErrPoolNotFound) {
 		return nil, nil, nil
@@ -313,7 +335,12 @@ func (p *DingoStateProvider) IsPoolRegistered(
 	poolKeyHash common.PoolKeyHash,
 ) bool {
 	pool, err := withBadConnRetry(func() (*models.Pool, error) {
-		return p.manager.db.GetPool(poolKeyHash, true, nil)
+		return p.manager.db.GetPool(
+			context.Background(),
+			poolKeyHash,
+			true,
+			nil,
+		)
 	})
 	if err != nil {
 		return false
@@ -557,6 +584,7 @@ func (p *DingoStateProvider) proposedCommitteeMember(
 	proposals, err := withBadConnRetry(
 		func() ([]*models.GovernanceProposal, error) {
 			return p.manager.db.GetActiveGovernanceProposals(
+				context.Background(),
 				p.manager.currentEpoch,
 				nil,
 			)
@@ -569,10 +597,12 @@ func (p *DingoStateProvider) proposedCommitteeMember(
 	// UpdateCommittee share the committee root, so the root is the latest
 	// enacted member of the pair.
 	root, err := p.manager.db.GetLastEnactedGovernanceProposal(
+		context.Background(),
 		[]uint8{
 			uint8(common.GovActionTypeNoConfidence),
 			uint8(common.GovActionTypeUpdateCommittee),
-		}, nil,
+		},
+		nil,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee proposal root: %w", err)
@@ -608,7 +638,7 @@ func (p *DingoStateProvider) legacyCommitteeMember(
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
 	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
-		return p.manager.db.GetCommitteeMembers(nil)
+		return p.manager.db.GetCommitteeMembers(context.Background(), nil)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee members: %w", err)
@@ -647,7 +677,7 @@ func (p *DingoStateProvider) realCommitteeMember(
 		return nil, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
 	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
-		return p.manager.db.GetCommitteeMembers(nil)
+		return p.manager.db.GetCommitteeMembers(context.Background(), nil)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee members: %w", err)
@@ -706,6 +736,7 @@ func (p *DingoStateProvider) populateCommitteeMemberStatus(
 	}
 	resigned, err := withBadConnRetry(func() (bool, error) {
 		return p.manager.db.IsCommitteeMemberResigned(
+			context.Background(),
 			coldTag,
 			coldCredential.Credential[:],
 			windowStartSlot,
@@ -721,6 +752,7 @@ func (p *DingoStateProvider) populateCommitteeMemberStatus(
 	}
 	auth, err := withBadConnRetry(func() (*models.AuthCommitteeHot, error) {
 		return p.manager.db.GetCommitteeMember(
+			context.Background(),
 			coldTag,
 			coldCredential.Credential[:],
 			windowStartSlot,
@@ -754,7 +786,7 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 
 	realMembers, err := withBadConnRetry(
 		func() ([]*models.CommitteeMember, error) {
-			return p.manager.db.GetCommitteeMembers(nil)
+			return p.manager.db.GetCommitteeMembers(context.Background(), nil)
 		},
 	)
 	if err != nil {
@@ -880,7 +912,10 @@ func (p *DingoStateProvider) committeeHotAuthorizations(
 	seen := make(map[coldKey]struct{})
 	seatedAuthorizations, err := withBadConnRetry(
 		func() ([]*models.AuthCommitteeHot, error) {
-			return p.manager.db.GetActiveCommitteeMembers(nil)
+			return p.manager.db.GetActiveCommitteeMembers(
+				context.Background(),
+				nil,
+			)
 		},
 	)
 	if err != nil {
@@ -934,7 +969,7 @@ func (p *DingoStateProvider) committeeHotAuthorizations(
 		}
 	}
 	seated, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
-		return p.manager.db.GetCommitteeMembers(nil)
+		return p.manager.db.GetCommitteeMembers(context.Background(), nil)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lookup committee members: %w", err)
@@ -959,6 +994,7 @@ func (p *DingoStateProvider) committeeHotAuthorizations(
 	latest, err := withBadConnRetry(
 		func() ([]*models.AuthCommitteeHot, error) {
 			return p.manager.db.GetCommitteeHotAuthorizationsSince(
+				context.Background(),
 				p.manager.committeeEpochStartSlot,
 				nil,
 			)
@@ -995,6 +1031,7 @@ func (p *DingoStateProvider) committeeHotAuthorizations(
 		}
 		resigned, err := withBadConnRetry(func() (bool, error) {
 			return p.manager.db.IsCommitteeMemberResigned(
+				context.Background(),
 				authorization.ColdCredentialTag,
 				authorization.ColdCredential,
 				authorization.AddedSlot,
@@ -1034,7 +1071,7 @@ func (p *DingoStateProvider) CommitteeCredentialIsElected(
 		return false, fmt.Errorf("invalid committee cold credential: %w", err)
 	}
 	members, err := withBadConnRetry(func() ([]*models.CommitteeMember, error) {
-		return p.manager.db.GetCommitteeMembers(nil)
+		return p.manager.db.GetCommitteeMembers(context.Background(), nil)
 	})
 	if err != nil {
 		return false, fmt.Errorf("lookup elected committee members: %w", err)
@@ -1105,6 +1142,7 @@ func (p *DingoStateProvider) DRepRegistration(
 	}
 	drep, err := withBadConnRetry(func() (*models.Drep, error) {
 		return p.manager.db.GetDrepByCredential(
+			context.Background(),
 			tag, credential.Credential[:], false, nil,
 		)
 	})
@@ -1119,6 +1157,7 @@ func (p *DingoStateProvider) DRepRegistration(
 	}
 	deposit, err := withBadConnRetry(func() (*uint64, error) {
 		return p.manager.db.GetDrepLastRegistrationDeposit(
+			context.Background(),
 			tag, credential.Credential[:], nil,
 		)
 	})
@@ -1150,6 +1189,7 @@ func (p *DingoStateProvider) DRepDelegation(
 	credentialTag := conformanceCredentialTag(cred)
 	account, err := withBadConnRetry(func() (*models.Account, error) {
 		return p.manager.db.GetAccountByCredential(
+			context.Background(),
 			credentialTag, cred.Credential[:], false, nil,
 		)
 	})
@@ -1183,7 +1223,7 @@ func (p *DingoStateProvider) DRepDelegation(
 // DRepRegistrations returns all DRep registrations
 func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, error) {
 	dreps, err := withBadConnRetry(func() ([]*models.Drep, error) {
-		return p.manager.db.GetActiveDreps(nil)
+		return p.manager.db.GetActiveDreps(context.Background(), nil)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("lookup active dreps: %w", err)
@@ -1197,7 +1237,10 @@ func (p *DingoStateProvider) DRepRegistrations() ([]common.DRepRegistration, err
 	// every vector, and the single-row form makes a list of N active DReps
 	// cost N+1 round trips.
 	deposits, err := withBadConnRetry(func() (map[string]uint64, error) {
-		return p.manager.db.GetDrepLastRegistrationDeposits(nil)
+		return p.manager.db.GetDrepLastRegistrationDeposits(
+			context.Background(),
+			nil,
+		)
 	})
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1285,6 +1328,7 @@ func (p *DingoStateProvider) GovActionById(
 	proposal, err := withBadConnRetry(
 		func() (*models.GovernanceProposal, error) {
 			return p.manager.db.GetGovernanceProposal(
+				context.Background(),
 				id.TransactionId[:], id.GovActionIdx, nil,
 			)
 		},

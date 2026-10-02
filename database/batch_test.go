@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,7 +55,7 @@ func stagedProducer(
 	copy(txHashArray[:], candidate.producerTx.Hash().Bytes())
 
 	sentinels := make(map[UtxoRef][]byte)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
 		blob := txn.DB().Blob()
 		for _, utxo := range candidate.producerTx.Produced() {
@@ -86,7 +87,7 @@ func stagedProducer(
 func stageTxSentinel(t *testing.T, db *Database, txHash []byte) []byte {
 	t.Helper()
 	s := txSentinel()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *Txn) error {
 		return txn.DB().Blob().SetTx(txn.Blob(), txHash, s)
 	}))
@@ -129,11 +130,12 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 	require.NotEmpty(t, sentinels, "producer tx must have at least one output")
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -150,7 +152,7 @@ func TestSetTransactionBatchedWithOpts_SkipsAllProducedUtxoWrites(
 
 	// Every produced ref must still hold its sentinel. This is the
 	// direct proof that no blob.SetUtxo call landed on any produced key.
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	defer readTxn.Release()
 	for ref, want := range sentinels {
 		// db.Blob() is non-nil: database.New rejects a nil or typed-nil blob
@@ -196,7 +198,7 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	// look like a valid offset. Without this, a no-op implementation
 	// would still pass the post-condition.
 	{
-		readTxn := db.Transaction(false)
+		readTxn := db.Transaction(context.Background(), false)
 		got, err := readTxn.DB().Blob().GetTx(readTxn.Blob(), txHash)
 		readTxn.Release()
 		require.NoError(t, err)
@@ -208,11 +210,12 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	}
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -227,7 +230,7 @@ func TestSetTransactionBatchedWithOpts_TxOffsetStillWritten(t *testing.T) {
 	require.NoError(t, db.FlushBatch(acc, txn))
 	require.NoError(t, txn.Commit())
 
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	defer readTxn.Release()
 	got, err := readTxn.DB().Blob().GetTx(readTxn.Blob(), txHash)
 	require.NoError(t, err)
@@ -255,11 +258,12 @@ func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
 	require.NotEmpty(t, sentinels)
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -274,7 +278,7 @@ func TestSetTransactionBatchedWithOpts_DefaultBehaviorOverwrites(t *testing.T) {
 	require.NoError(t, db.FlushBatch(acc, txn))
 	require.NoError(t, txn.Commit())
 
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	defer readTxn.Release()
 	for ref, sentinel := range sentinels {
 		got, err := readTxn.DB().Blob().GetUtxo(
@@ -322,11 +326,12 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 	delete(complete.UtxoOffsets, missingRef)
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	err := db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -362,8 +367,9 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 	// Store producer block first so consumed inputs exist in metadata
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -383,11 +389,12 @@ func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
 	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
 	var stats types.BackfillHotPathStats
 	acc2 := db.NewBatchAccumulator()
-	txn2 := db.Transaction(true)
+	txn2 := db.Transaction(context.Background(), true)
 	defer txn2.Release()
 	defer txn2.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,
@@ -436,8 +443,9 @@ func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 	// Store producer block first
 	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -457,11 +465,12 @@ func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
 	var stats types.BackfillHotPathStats
 	acc2 := db.NewBatchAccumulator()
-	txn2 := db.Transaction(true)
+	txn2 := db.Transaction(context.Background(), true)
 	defer txn2.Release()
 	defer txn2.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,

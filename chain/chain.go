@@ -175,7 +175,7 @@ func (c *Chain) TipRelation(
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(context.Background()); err != nil {
 		return ochainsync.Tip{}, 0, false, err
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
@@ -187,7 +187,7 @@ func (c *Chain) TipRelation(
 		}
 		return tip, 0, true, nil
 	}
-	block, err := c.manager.blockByPoint(point, nil)
+	block, err := c.manager.blockByPoint(context.Background(), point, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil
@@ -197,7 +197,7 @@ func (c *Chain) TipRelation(
 	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
 		return tip, 0, false, nil
 	}
-	activeBlock, err := c.blockByIndexLocked(block.ID)
+	activeBlock, err := c.blockByIndexLocked(context.Background(), block.ID)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return tip, 0, false, nil
@@ -249,7 +249,7 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 // back to the live tip: binding the tip itself as parent produces a block whose
 // parent slot equals its own, which envelope validation and every Praos peer
 // reject.
-func (c *Chain) TipPredecessor() (
+func (c *Chain) TipPredecessor(ctx context.Context) (
 	parent ocommon.Point,
 	tip ochainsync.Tip,
 	ok bool,
@@ -273,11 +273,11 @@ func (c *Chain) TipPredecessor() (
 	if c.tipBlockIndex <= initialBlockIndex {
 		return ocommon.Point{}, ochainsync.Tip{}, false
 	}
-	tipBlock, err := c.blockByIndexLocked(c.tipBlockIndex)
+	tipBlock, err := c.blockByIndexLocked(ctx, c.tipBlockIndex)
 	if err != nil {
 		return ocommon.Point{}, ochainsync.Tip{}, false
 	}
-	parentBlock, err := c.blockByIndexLocked(c.tipBlockIndex - 1)
+	parentBlock, err := c.blockByIndexLocked(ctx, c.tipBlockIndex-1)
 	if err != nil {
 		return ocommon.Point{}, ochainsync.Tip{}, false
 	}
@@ -448,15 +448,22 @@ func (c *Chain) MaxQueuedHeaders() int {
 	return DefaultMaxQueuedHeaders
 }
 
-func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
-	return c.addBlockHeader(header, false)
+func (c *Chain) AddBlockHeader(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) error {
+	return c.addBlockHeader(ctx, header, false)
 }
 
-func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
-	return c.addBlockHeader(header, true)
+func (c *Chain) AddVerifiedBlockHeader(
+	ctx context.Context,
+	header ledger.BlockHeader,
+) error {
+	return c.addBlockHeader(ctx, header, true)
 }
 
 func (c *Chain) addBlockHeader(
+	ctx context.Context,
 	header ledger.BlockHeader,
 	cryptoVerified bool,
 ) error {
@@ -515,7 +522,7 @@ func (c *Chain) addBlockHeader(
 		// parent. A Byron epoch-boundary header passes the block-number rule
 		// with its parent's number and carries no signature, so this is the
 		// only check that keeps one from extending a post-Byron block.
-		parentEra, found, err := c.parentEraLocked(queued.prevHash)
+		parentEra, found, err := c.parentEraLocked(ctx, queued.prevHash)
 		if err != nil {
 			return fmt.Errorf(
 				"resolve parent era of header %s: %w",
@@ -677,10 +684,19 @@ func (c *Chain) nextHeaderSeqLocked() uint64 {
 }
 
 func (c *Chain) AddBlock(
+	ctx context.Context,
 	block ledger.Block,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, ocommon.Point{}, txn, true, false, nil)
+	evt, err := c.addBlockInternal(
+		ctx,
+		block,
+		ocommon.Point{},
+		txn,
+		true,
+		false,
+		nil,
+	)
 	if err != nil {
 		return err
 	}
@@ -709,8 +725,9 @@ func (c *Chain) AddBlock(
 // AddLocalBlock adds a locally forged block without comparing it to queued
 // peer headers. A successful local block invalidates those pending headers;
 // the actual chain-tip and block-number checks remain mandatory.
-func (c *Chain) AddLocalBlock(block ledger.Block) error {
+func (c *Chain) AddLocalBlock(ctx context.Context, block ledger.Block) error {
 	evt, err := c.addBlockInternal(
+		ctx,
 		block,
 		ocommon.Point{},
 		nil,
@@ -744,9 +761,11 @@ func (c *Chain) AddLocalBlock(block ledger.Block) error {
 // ordered behind the rollback that preceded it. A returned event with an empty
 // Type means there is nothing to publish.
 func (c *Chain) AddLocalBlockDeferred(
+	ctx context.Context,
 	block ledger.Block,
 ) (event.Event, error) {
 	return c.addBlockInternal(
+		ctx,
 		block,
 		ocommon.Point{},
 		nil,
@@ -760,11 +779,12 @@ func (c *Chain) AddLocalBlockDeferred(
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.
 func (c *Chain) AddBlockWithPoint(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	evt, err := c.addBlockInternal(block, point, txn, true, false, nil)
+	evt, err := c.addBlockInternal(ctx, block, point, txn, true, false, nil)
 	if err != nil {
 		return err
 	}
@@ -794,11 +814,12 @@ func (c *Chain) AddBlockWithPoint(
 // pendingUpdates field and PublishPendingChainUpdates. A returned event with an
 // empty Type means there is nothing to publish.
 func (c *Chain) AddBlockWithPointDeferred(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true, nil)
+	return c.addBlockInternal(ctx, block, point, txn, true, true, nil)
 }
 
 // AddBlockWithPointDeferredIf is AddBlockWithPointDeferred with a caller
@@ -819,12 +840,13 @@ func (c *Chain) AddBlockWithPointDeferred(
 // admit must not acquire the chain or manager mutex, and must not block: it
 // runs on the chain's own write path.
 func (c *Chain) AddBlockWithPointDeferredIf(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
 	admit func() bool,
 ) (event.Event, error) {
-	return c.addBlockInternal(block, point, txn, true, true, admit)
+	return c.addBlockInternal(ctx, block, point, txn, true, true, admit)
 }
 
 // pendingChainUpdate holds an event at its mutation-order position. A non-nil
@@ -920,6 +942,7 @@ func (c *Chain) PublishPendingChainUpdates() {
 // publication until the entire batch transaction has committed, preventing
 // subscribers from observing data that may be rolled back.
 func (c *Chain) addBlockInternal(
+	ctx context.Context,
 	block ledger.Block,
 	point ocommon.Point,
 	txn *database.Txn,
@@ -963,7 +986,7 @@ func (c *Chain) addBlockInternal(
 		return event.Event{}, ErrBlockAddNotAdmitted
 	}
 	// Verify chain integrity
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return event.Event{}, fmt.Errorf("reconcile chain: %w", err)
 	}
 	c.recordCallerTxnAdd(txn)
@@ -1136,7 +1159,7 @@ func (c *Chain) addBlockLocked(
 	return evt, nil
 }
 
-func (c *Chain) AddBlocks(blocks []ledger.Block) error {
+func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -1181,7 +1204,7 @@ func (c *Chain) AddBlocks(blocks []ledger.Block) error {
 				defer c.mutex.Unlock()
 				c.manager.mutex.Lock()
 				defer c.manager.mutex.Unlock()
-				if err := c.reconcile(); err != nil {
+				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile chain: %w", err)
 				}
 				savedTip = c.currentTip
@@ -1386,8 +1409,8 @@ func (c *Chain) addRawBlockLocked(
 }
 
 // AddRawBlocks adds a batch of pre-extracted blocks to the chain.
-func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
-	return c.addRawBlocks(blocks, nil)
+func (c *Chain) AddRawBlocks(ctx context.Context, blocks []RawBlock) error {
+	return c.addRawBlocks(ctx, blocks, nil)
 }
 
 // AddRawBlocksWithCallback adds a batch of pre-extracted blocks to the chain
@@ -1410,10 +1433,11 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 // non-nil. Callers should make per-batch decisions idempotent so a retry on a
 // later batch does not duplicate effects from a partial earlier attempt.
 func (c *Chain) AddRawBlocksWithCallback(
+	ctx context.Context,
 	blocks []RawBlock,
 	callback func(RawBlock, *database.Txn) error,
 ) error {
-	return c.addRawBlocks(blocks, callback)
+	return c.addRawBlocks(ctx, blocks, callback)
 }
 
 // batchRestoreIsSafeLocked reports whether a failed add batch may write its
@@ -1442,6 +1466,7 @@ func (c *Chain) batchRestoreIsSafeLocked(
 }
 
 func (c *Chain) addRawBlocks(
+	ctx context.Context,
 	blocks []RawBlock,
 	callback func(RawBlock, *database.Txn) error,
 ) error {
@@ -1493,7 +1518,7 @@ func (c *Chain) addRawBlocks(
 				defer c.mutex.Unlock()
 				c.manager.mutex.Lock()
 				defer c.manager.mutex.Unlock()
-				if err := c.reconcile(); err != nil {
+				if err := c.reconcile(ctx); err != nil {
 					return fmt.Errorf("reconcile: %w", err)
 				}
 				savedTip = c.currentTip
@@ -1624,8 +1649,8 @@ func (c *Chain) notifyWaitingIterators() {
 	}
 }
 
-func (c *Chain) Rollback(point ocommon.Point) error {
-	return c.rollback(point, false)
+func (c *Chain) Rollback(ctx context.Context, point ocommon.Point) error {
+	return c.rollback(ctx, point, false)
 }
 
 // RollbackUnbounded behaves like Rollback, but does not require the security
@@ -1637,15 +1662,22 @@ func (c *Chain) Rollback(point ocommon.Point) error {
 // peer-supplied point subject to the same-security-guarantee K exists to
 // enforce. Follow-on rollbacks initiated by an untrusted peer must always use
 // Rollback, never this.
-func (c *Chain) RollbackUnbounded(point ocommon.Point) error {
-	return c.rollback(point, true)
+func (c *Chain) RollbackUnbounded(
+	ctx context.Context,
+	point ocommon.Point,
+) error {
+	return c.rollback(ctx, point, true)
 }
 
-func (c *Chain) rollback(point ocommon.Point, unbounded bool) error {
+func (c *Chain) rollback(
+	ctx context.Context,
+	point ocommon.Point,
+	unbounded bool,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
-	if _, err := c.rollbackLocked(point, unbounded); err != nil {
+	if _, err := c.rollbackLocked(ctx, point, unbounded); err != nil {
 		return err
 	}
 	// rollbackLocked queued this rollback's events on the chain-level
@@ -1675,12 +1707,13 @@ func (c *Chain) rollback(point ocommon.Point, unbounded bool) error {
 // The shared sequencer preserves true chain-mutation order across both. See the
 // pendingUpdates field and PublishPendingChainUpdates.
 func (c *Chain) RollbackDeferred(
+	ctx context.Context,
 	point ocommon.Point,
 ) ([]event.Event, error) {
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
-	return c.rollbackLocked(point, false)
+	return c.rollbackLocked(ctx, point, false)
 }
 
 // rollbackForkDepth returns the number of blocks a rollback to
@@ -1777,17 +1810,18 @@ func (c *Chain) checkEphemeralBufferSpan() error {
 }
 
 func (c *Chain) rollbackPointBlock(
+	ctx context.Context,
 	point ocommon.Point,
 ) (models.Block, error) {
-	tmpBlock, err := c.manager.blockByPoint(point, nil)
+	tmpBlock, err := c.manager.blockByPoint(ctx, point, nil)
 	if err != nil {
 		return models.Block{}, fmt.Errorf("lookup rollback point: %w", err)
 	}
-	if c.holdsBlockAtIndexLocked(tmpBlock.ID, tmpBlock.Hash) {
+	if c.holdsBlockAtIndexLocked(ctx, tmpBlock.ID, tmpBlock.Hash) {
 		return tmpBlock, nil
 	}
 	occupantHash := []byte(nil)
-	if occupant, occErr := c.blockByIndexLocked(tmpBlock.ID); occErr == nil {
+	if occupant, occErr := c.blockByIndexLocked(ctx, tmpBlock.ID); occErr == nil {
 		occupantHash = occupant.Hash
 	}
 	c.manager.recordRollbackPointNotOnChain()
@@ -1843,7 +1877,10 @@ func (c *Chain) findQueuedHeader(point ocommon.Point) (int, error) {
 // ValidateRollback verifies that Rollback(point) would be accepted without
 // mutating chain state. Callers can use this to avoid applying external
 // side effects before the chain's rollback pre-checks have run.
-func (c *Chain) ValidateRollback(point ocommon.Point) error {
+func (c *Chain) ValidateRollback(
+	ctx context.Context,
+	point ocommon.Point,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -1852,7 +1889,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return fmt.Errorf("reconcile chain: %w", err)
 	}
 	if c.persistent && c.manager.securityParam <= 0 {
@@ -1874,7 +1911,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	// membership validation and resolve against block index zero.
 	var rollbackBlockIndex uint64
 	if point.Slot > 0 || len(point.Hash) > 0 {
-		tmpBlock, err := c.rollbackPointBlock(point)
+		tmpBlock, err := c.rollbackPointBlock(ctx, point)
 		if err != nil {
 			return err
 		}
@@ -1914,6 +1951,7 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 // differ only in who drains it -- RollbackDeferred's caller once it releases
 // its outer ledger mutex, or Rollback itself before it returns.
 func (c *Chain) rollbackLocked(
+	ctx context.Context,
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
@@ -1941,7 +1979,7 @@ func (c *Chain) rollbackLocked(
 	c.mutex.Lock()
 	if len(c.headers) > 0 && c.pendingAdds.heldCount() == 0 {
 		c.manager.mutex.Lock()
-		if err := c.reconcile(); err != nil {
+		if err := c.reconcile(ctx); err != nil {
 			c.manager.mutex.Unlock()
 			c.mutex.Unlock()
 			return nil, fmt.Errorf("reconcile chain: %w", err)
@@ -1992,7 +2030,7 @@ func (c *Chain) rollbackLocked(
 	c.manager.mutex.Lock()
 	defer c.manager.mutex.Unlock()
 	// Verify chain integrity
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return nil, fmt.Errorf("reconcile chain: %w", err)
 	}
 	if c.persistent && c.manager.securityParam <= 0 && !unbounded {
@@ -2037,7 +2075,7 @@ func (c *Chain) rollbackLocked(
 	var tmpBlock models.Block
 	if point.Slot > 0 || len(point.Hash) > 0 {
 		var err error
-		tmpBlock, err = c.rollbackPointBlock(point)
+		tmpBlock, err = c.rollbackPointBlock(ctx, point)
 		if err != nil {
 			return nil, err
 		}
@@ -2077,7 +2115,7 @@ func (c *Chain) rollbackLocked(
 	// the chain shortened with an incomplete rollback event.
 	if !c.persistent {
 		for i := c.tipBlockIndex; i > rollbackBlockIndex; i-- {
-			block, err := c.blockByIndexLocked(i)
+			block, err := c.blockByIndexLocked(ctx, i)
 			if err != nil {
 				return nil, fmt.Errorf(
 					"preflight rollback block at index %d: %w",
@@ -2291,7 +2329,7 @@ func (c *Chain) ClearHeaders() {
 // This method is useful for building intersection point lists that
 // remain accurate even when the blob store has not yet been fully
 // flushed, since the chain's in-memory tip is always up-to-date.
-func (c *Chain) RecentPoints(count int) []ocommon.Point {
+func (c *Chain) RecentPoints(ctx context.Context, count int) []ocommon.Point {
 	if c == nil || count <= 0 {
 		return nil
 	}
@@ -2314,7 +2352,7 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 	}
 	// Walk backwards through block indices to gather more points
 	for idx := c.tipBlockIndex - 1; idx >= initialBlockIndex && len(points) < count; idx-- {
-		blk, err := c.blockByIndexLocked(idx)
+		blk, err := c.blockByIndexLocked(ctx, idx)
 		if err != nil {
 			break
 		}
@@ -2333,6 +2371,7 @@ func (c *Chain) RecentPoints(count int) []ocommon.Point {
 // Unlike RecentPoints, this performs one indexed lookup regardless of depth,
 // which is important for consensus reads at the security-parameter boundary.
 func (c *Chain) PointAtDepth(
+	ctx context.Context,
 	depth uint64,
 ) (point ocommon.Point, found bool, err error) {
 	if c == nil {
@@ -2351,7 +2390,7 @@ func (c *Chain) PointAtDepth(
 	}
 	unlocks := c.lockBlockIndexReadLocks()
 	defer unlocks()
-	block, err := c.blockByIndexLocked(c.tipBlockIndex - depth)
+	block, err := c.blockByIndexLocked(ctx, c.tipBlockIndex-depth)
 	if err != nil {
 		return ocommon.Point{}, false, err
 	}
@@ -2362,7 +2401,10 @@ func (c *Chain) PointAtDepth(
 // chainsync FindIntersect. It keeps a dense window near the tip and
 // then samples exponentially older blocks so lagging peers can still
 // find a recent common point without falling all the way back to origin.
-func (c *Chain) IntersectPoints(count int) []ocommon.Point {
+func (c *Chain) IntersectPoints(
+	ctx context.Context,
+	count int,
+) []ocommon.Point {
 	if c == nil || count <= 0 {
 		return nil
 	}
@@ -2397,7 +2439,7 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 		if len(points) >= count {
 			return
 		}
-		blk, err := c.blockByIndexLocked(blockIndex)
+		blk, err := c.blockByIndexLocked(ctx, blockIndex)
 		if err != nil {
 			return
 		}
@@ -2596,6 +2638,7 @@ func (c *Chain) FromPointContext(
 	defer c.mutex.Unlock()
 	iter, err := newChainIteratorWithContext(
 		ctx,
+		ctx,
 		c,
 		point,
 		inclusive,
@@ -2634,6 +2677,7 @@ func (c *Chain) FromPointReverseContext(
 	defer c.mutex.Unlock()
 	iter, err := newChainIteratorWithContext(
 		ctx,
+		ctx,
 		c,
 		point,
 		inclusive,
@@ -2661,16 +2705,20 @@ func (c *Chain) removeIterator(iter *ChainIterator) {
 }
 
 func (c *Chain) BlockByPoint(
+	ctx context.Context,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
-	return c.manager.BlockByPoint(point, txn)
+	return c.manager.BlockByPoint(ctx, point, txn)
 }
 
 // BlockBeforeSlot returns the highest-slot block before slotNumber on this
 // chain. It walks the chain index instead of scanning blob keys so retained
 // fork or synthetic blobs cannot be returned as canonical blocks.
-func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
+func (c *Chain) BlockBeforeSlot(
+	ctx context.Context,
+	slotNumber uint64,
+) (models.Block, error) {
 	if c == nil {
 		return models.Block{}, errors.New("chain is nil")
 	}
@@ -2678,7 +2726,7 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	defer c.mutex.Unlock()
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
 	defer unlockBlockIndexReadLocks()
-	if err := c.reconcile(); err != nil {
+	if err := c.reconcile(ctx); err != nil {
 		return models.Block{}, err
 	}
 	if c.tipBlockIndex < initialBlockIndex {
@@ -2700,7 +2748,7 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	)
 	for lo <= hi {
 		mid := lo + (hi-lo)/2
-		block, err := c.blockByIndexLocked(mid)
+		block, err := c.blockByIndexLocked(ctx, mid)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -2724,17 +2772,17 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 // HoldsPoint reports whether point is currently part of this chain. A block
 // that remains resolvable only through the manager's retained-block cache
 // after a rollback, or that lives on a fork, is not held.
-func (c *Chain) HoldsPoint(point ocommon.Point) bool {
+func (c *Chain) HoldsPoint(ctx context.Context, point ocommon.Point) bool {
 	if c == nil || c.manager == nil {
 		return false
 	}
-	blk, err := c.BlockByPoint(point, nil)
+	blk, err := c.BlockByPoint(ctx, point, nil)
 	if err != nil {
 		return false
 	}
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-	return c.holdsBlockAtIndex(blk.ID, point.Hash)
+	return c.holdsBlockAtIndex(ctx, blk.ID, point.Hash)
 }
 
 // holdsBlockAtIndex reports whether this chain currently has the block with
@@ -2742,7 +2790,11 @@ func (c *Chain) HoldsPoint(point ocommon.Point) bool {
 // part of the chain from one that merely remains resolvable through the
 // manager's retained-block cache after a rollback, since blockByPoint answers
 // from that cache. Callers must hold c.mutex.
-func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
+func (c *Chain) holdsBlockAtIndex(
+	ctx context.Context,
+	blockIndex uint64,
+	blockHash []byte,
+) bool {
 	if blockIndex < initialBlockIndex || blockIndex > c.tipBlockIndex {
 		return false
 	}
@@ -2751,12 +2803,13 @@ func (c *Chain) holdsBlockAtIndex(blockIndex uint64, blockHash []byte) bool {
 	}
 	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
 	defer unlockBlockIndexReadLocks()
-	return c.holdsBlockAtIndexLocked(blockIndex, blockHash)
+	return c.holdsBlockAtIndexLocked(ctx, blockIndex, blockHash)
 }
 
 // holdsBlockAtIndexLocked is the lock-preserving form used by rollback paths
 // that already hold c.mutex and c.manager.mutex.
 func (c *Chain) holdsBlockAtIndexLocked(
+	ctx context.Context,
 	blockIndex uint64,
 	blockHash []byte,
 ) bool {
@@ -2777,7 +2830,7 @@ func (c *Chain) holdsBlockAtIndexLocked(
 			return false
 		}
 	}
-	tmpBlock, err := lookupChain.blockByIndexLocked(blockIndex)
+	tmpBlock, err := lookupChain.blockByIndexLocked(ctx, blockIndex)
 	if err != nil {
 		return false
 	}
@@ -2811,11 +2864,12 @@ func (c *Chain) lockBlockIndexReadLocks() func() {
 // caller must hold c.mutex and c.manager.mutex; in-memory common-prefix reads
 // additionally hold the primary-chain read lock when c is a fork.
 func (c *Chain) blockByIndexLocked(
+	ctx context.Context,
 	blockIndex uint64,
 ) (models.Block, error) {
 	if c.persistent || blockIndex <= c.lastCommonBlockIndex {
 		// Query via manager for common blocks
-		tmpBlock, err := c.manager.blockByIndexLocked(blockIndex, nil)
+		tmpBlock, err := c.manager.blockByIndexLocked(ctx, blockIndex, nil)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -2830,7 +2884,7 @@ func (c *Chain) blockByIndexLocked(
 		return models.Block{}, models.ErrBlockNotFound
 	}
 	memBlockPoint := c.blocks[memBlockIndex]
-	tmpBlock, err := c.manager.blockByPoint(memBlockPoint, nil)
+	tmpBlock, err := c.manager.blockByPoint(ctx, memBlockPoint, nil)
 	if err != nil {
 		return models.Block{}, err
 	}
@@ -2888,6 +2942,7 @@ func (c *Chain) nextPersistentBlockAfterSparseIndex(
 }
 
 func (c *Chain) iterNext(
+	ctx context.Context,
 	iter *ChainIterator,
 	blocking bool,
 ) (*ChainIteratorResult, error) {
@@ -2896,7 +2951,7 @@ func (c *Chain) iterNext(
 		// We get a read lock on the manager for the integrity check and initial block lookup
 		c.manager.mutex.RLock()
 		// Verify chain integrity
-		if err := c.reconcile(); err != nil {
+		if err := c.reconcile(ctx); err != nil {
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
 			return nil, err
@@ -2915,6 +2970,7 @@ func (c *Chain) iterNext(
 				len(iter.rollbackPoint.Hash) > 0 {
 				// Lookup block index for rollback point
 				tmpBlock, err := c.manager.blockByPoint(
+					ctx,
 					iter.rollbackPoint,
 					nil,
 				)
@@ -2944,7 +3000,7 @@ func (c *Chain) iterNext(
 		}
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
-		tmpBlock, err := c.blockByIndexLocked(iter.nextBlockIndex)
+		tmpBlock, err := c.blockByIndexLocked(ctx, iter.nextBlockIndex)
 		if errors.Is(err, models.ErrBlockNotFound) && !iter.reverse {
 			recoveredBlock, recovered, recoverErr := c.nextPersistentBlockAfterSparseIndex(
 				iter,
@@ -3027,7 +3083,7 @@ func (c *Chain) NotifyIterators() {
 	c.notifyWaitingIterators()
 }
 
-func (c *Chain) reconcile() error {
+func (c *Chain) reconcile(ctx context.Context) error {
 	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
 	if c.persistent {
 		return nil
@@ -3047,7 +3103,7 @@ func (c *Chain) reconcile() error {
 	}
 	blockIndex := c.tipBlockIndex
 	for i, v := range slices.Backward(c.blocks) {
-		tmpBlock, err := primaryChain.blockByIndexLocked(blockIndex)
+		tmpBlock, err := primaryChain.blockByIndexLocked(ctx, blockIndex)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
@@ -3079,7 +3135,7 @@ func (c *Chain) reconcile() error {
 		// would silently truncate at it.
 		newBlocks = append(newBlocks, knownPoint)
 	}
-	knownBlock, err := c.manager.blockByPoint(knownPoint, nil)
+	knownBlock, err := c.manager.blockByPoint(ctx, knownPoint, nil)
 	if err != nil {
 		return err
 	}
@@ -3094,7 +3150,7 @@ func (c *Chain) reconcile() error {
 			return models.ErrBlockNotFound
 		}
 		iterationCount++
-		tmpBlock, err := c.manager.blockByHash(lastPrevHash)
+		tmpBlock, err := c.manager.blockByHash(ctx, lastPrevHash)
 		if err != nil {
 			return err
 		}
@@ -3102,7 +3158,7 @@ func (c *Chain) reconcile() error {
 		// has rolled back past tmpBlock's old index the lookup misses;
 		// treat tmpBlock as non-common and keep walking back via its
 		// PrevHash rather than aborting reconcile.
-		primaryBlock, err := primaryChain.blockByIndexLocked(tmpBlock.ID)
+		primaryBlock, err := primaryChain.blockByIndexLocked(ctx, tmpBlock.ID)
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}

@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -76,7 +77,11 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 		return nil
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
-	stamped, err := ls.db.StampAllActiveAccountExpirations(expiration, txn)
+	stamped, err := ls.db.StampAllActiveAccountExpirations(
+		context.Background(),
+		expiration,
+		txn,
+	)
 	if err != nil {
 		return err
 	}

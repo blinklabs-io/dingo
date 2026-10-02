@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"io"
@@ -141,34 +142,37 @@ func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
 		MaxTxSize:          16_384,
 	}
 
-	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			ocommon.Point{
-				Slot: blockSlot,
-				Hash: []byte("late-mir-certificate"),
-			},
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{},
-			offsets,
-			eras.BabbageEraDesc,
-			pparams,
-			nil,
-			epoch.EpochId,
-			epoch.StartSlot,
-			false,
-		)
-		return err
-	})
+	err = db.Transaction(context.Background(), true).
+		Do(func(txn *database.Txn) error {
+			_, err := ls.ledgerProcessBlock(
+				context.Background(),
+				txn,
+				ocommon.Point{
+					Slot: blockSlot,
+					Hash: []byte("late-mir-certificate"),
+				},
+				block,
+				true,
+				false,
+				false,
+				nil,
+				envelopeParent{},
+				offsets,
+				eras.BabbageEraDesc,
+				pparams,
+				nil,
+				epoch.EpochId,
+				epoch.StartSlot,
+				false,
+			)
+			return err
+		})
 	var tooLate eras.MIRCertificateTooLateError
 	require.ErrorAs(t, err, &tooLate)
 	require.Equal(t, uint64(974_080), tooLate.Cutoff)
 
 	effects, err := db.GetMIRCertsInSlotRange(
+		context.Background(),
 		epoch.StartSlot, epoch.StartSlot+uint64(epoch.LengthInSlots), nil,
 	)
 	require.NoError(t, err)
@@ -271,7 +275,7 @@ func runApplyMIRCertsEra(
 	epochEraID uint,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyMIRCerts(txn, epochStartSlot, boundarySlot, epochEraID)
 	}))
@@ -293,7 +297,7 @@ func applyMIRCertsErrEra(
 	epochStartSlot, boundarySlot uint64,
 	epochEraID uint,
 ) error {
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
 		return ls.applyMIRCerts(txn, epochStartSlot, boundarySlot, epochEraID)
 	})
@@ -320,15 +324,24 @@ func TestApplyMIRCerts_UnknownPotDiscardsBoundary(t *testing.T) {
 		},
 	)
 	seedMIRDistribution(t, gdb, 2, 500, nil)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	assert.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -365,16 +378,25 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
@@ -426,16 +448,25 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(secondAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, firstAmount+secondAmount, uint64(account.Reward))
@@ -490,18 +521,27 @@ func TestApplyMIRCerts_PreAlonzoSameCredentialReplaces(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(secondAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	runApplyMIRCertsEra(
 		t, ls, db, epochStartSlot, boundarySlot, shelley.EraIdShelley,
 	)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, secondAmount, uint64(account.Reward),
@@ -548,16 +588,25 @@ func TestApplyMIRCerts_ReservesAndTreasuryStayDistinct(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(treasuryAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, reservesAmount+treasuryAmount, uint64(account.Reward))
@@ -623,23 +672,41 @@ func TestApplyMIRCerts_DistributionTotalBeyondEveryPotIsNoOp(t *testing.T) {
 			{Credential: credB, Amount: new(big.Int).SetUint64(1)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: credA,
-		Active:     true,
-	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: credB,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: credA,
+			Active:     true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: credB,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
 		"a total larger than every pot must not fail the epoch boundary")
 
-	accountA, err := db.GetAccountByCredential(0, credA, false, nil)
+	accountA, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		credA,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), uint64(accountA.Reward))
-	accountB, err := db.GetAccountByCredential(0, credB, false, nil)
+	accountB, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		credB,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), uint64(accountB.Reward))
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -672,16 +739,25 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(5_000, 8_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
@@ -860,16 +936,25 @@ func TestApplyMIRCerts_UnknownSourcePotIsNoOp(t *testing.T) {
 		},
 	)
 	seedMIRPotTransfer(t, gdb, 2, 500, 500)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
 		"unknown source pot must not fail the epoch boundary")
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -945,17 +1030,26 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(300)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 10, nil))
 
 	// epoch range: [100, 1000)
 	runApplyMIRCerts(t, ls, db, 100, 1_000)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -990,16 +1084,25 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(mirAmount)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Reward:     0,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Reward:     0,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 8_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, mirAmount, uint64(account.Reward), "MIR reward applied")
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -1008,10 +1111,26 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 		"reserves debited after apply")
 
 	// Roll back past the boundary: drop the reward credit and treasury row.
-	require.NoError(t, db.DeleteAccountRewardsAfterSlot(preBoundary, nil))
-	require.NoError(t, db.DeleteNetworkStateAfterSlot(preBoundary, nil))
+	require.NoError(
+		t,
+		db.DeleteAccountRewardsAfterSlot(
+			context.Background(),
+			preBoundary,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.DeleteNetworkStateAfterSlot(context.Background(), preBoundary, nil),
+	)
 
-	account, err = db.GetAccountByCredential(0, cred, false, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"reward credit reverted on rollback")
@@ -1022,7 +1141,13 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 
 	// Re-apply must be deterministic.
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
-	account, err = db.GetAccountByCredential(0, cred, false, nil)
+	account, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
 		"re-applied MIR reward is deterministic")
@@ -1071,16 +1196,25 @@ func TestApplyMIRCerts_OverBudgetReservesIsNoOp(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(750)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 500, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
 		"over-budget MIR must not fail the epoch boundary")
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"no credit applied for an over-budget distribution")
@@ -1111,15 +1245,24 @@ func TestApplyMIRCerts_ExactBudgetApplies(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(750)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 750, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(750), uint64(account.Reward),
 		"exact-budget distribution is applied")
@@ -1167,10 +1310,13 @@ func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
 		},
 	)
 	for _, cred := range [][]byte{credA, credB} {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: cred,
-			Active:     true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey: cred,
+				Active:     true,
+			}),
+		)
 	}
 	// Either cert alone fits in 1000; together they do not.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 50, nil))
@@ -1178,7 +1324,13 @@ func TestApplyMIRCerts_OverBudgetIsAggregateAcrossCerts(t *testing.T) {
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
 
 	for _, cred := range [][]byte{credA, credB} {
-		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		account, err := db.GetAccountByCredential(
+			context.Background(),
+			0,
+			cred,
+			false,
+			nil,
+		)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(0), uint64(account.Reward),
 			"no cert applied when the epoch total exceeds the pot")
@@ -1211,15 +1363,24 @@ func TestApplyMIRCerts_BudgetExcludesUnregisteredCredentials(t *testing.T) {
 			{Credential: unregistered, Amount: new(big.Int).SetUint64(5_000)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: registered,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: registered,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
 
-	account, err := db.GetAccountByCredential(0, registered, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		registered,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(400), uint64(account.Reward),
 		"registered credit applied; unregistered amount is not budgeted")
@@ -1262,17 +1423,26 @@ func TestApplyMIRCerts_OverBudgetTreasuryBlocksReservesDistribution(
 		},
 	)
 	for _, cred := range [][]byte{reservesCred, treasuryCred} {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: cred,
-			Active:     true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey: cred,
+				Active:     true,
+			}),
+		)
 	}
 	require.NoError(t, db.Metadata().SetNetworkState(500, 1_000, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
 
 	for _, cred := range [][]byte{reservesCred, treasuryCred} {
-		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		account, err := db.GetAccountByCredential(
+			context.Background(),
+			0,
+			cred,
+			false,
+			nil,
+		)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(0), uint64(account.Reward),
 			"neither pot is distributed when one is over budget")
@@ -1305,15 +1475,24 @@ func TestApplyMIRCerts_PotTransferCountsTowardAvailablePot(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(900)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(600, 2_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(900), uint64(account.Reward),
 		"distribution fits once the pot transfer is applied")
@@ -1345,15 +1524,24 @@ func TestApplyMIRCerts_OverBudgetDropsPotTransfer(t *testing.T) {
 			{Credential: cred, Amount: new(big.Int).SetUint64(5_000)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(0, 1_000, 50, nil))
 
 	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000))
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward))
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -1423,10 +1611,13 @@ func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
 			{Credential: cred, Amount: big.NewInt(-400)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SetNetworkState(1_000, reserves, 50, nil),
@@ -1434,7 +1625,13 @@ func TestApplyMIRCerts_NegativeDeltaReducesEarlierCredit(t *testing.T) {
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(600), uint64(account.Reward),
@@ -1483,15 +1680,24 @@ func TestApplyMIRCerts_NegativeDeltaCancellingCreditWritesNothing(
 			{Credential: cred, Amount: big.NewInt(-500)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward))
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -1530,16 +1736,25 @@ func TestApplyMIRCerts_NegativeDeltaExcludedFromBudget(t *testing.T) {
 			{Credential: cred, Amount: big.NewInt(-400)},
 		},
 	)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: cred,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}),
+	)
 	// 500 fits; the 900 of the first certificate on its own does not.
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 500, 50, nil))
 
 	runApplyMIRCerts(t, ls, db, 0, 1_000)
 
-	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	account, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(500), uint64(account.Reward))
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -1572,10 +1787,13 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	)
 	seedMIRPotTransfer(t, gdb, mirPotTreasury, 250, 300)
 	for _, cred := range [][]byte{negativeCred, otherCred} {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey: cred,
-			Active:     true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey: cred,
+				Active:     true,
+			}),
+		)
 	}
 	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
 
@@ -1583,7 +1801,13 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 		"an uncreditable MIR fold must not fail the epoch boundary")
 
 	for _, cred := range [][]byte{negativeCred, otherCred} {
-		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		account, err := db.GetAccountByCredential(
+			context.Background(),
+			0,
+			cred,
+			false,
+			nil,
+		)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(0), uint64(account.Reward),
 			"the whole boundary is discarded, not just the negative entry")
@@ -1625,7 +1849,7 @@ func mirDelegState(
 ) eras.MIRDelegState {
 	t.Helper()
 	var state eras.MIRDelegState
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: epochStartSlot}
 		var err error
@@ -1666,7 +1890,7 @@ func TestLedgerView_MIRDelegState_CutoffRequiresGenesis(t *testing.T) {
 	ls.epochCache = []models.Epoch{epoch}
 	ls.publishSnapshotsLocked()
 	ls.Unlock()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn}
 		_, err := lv.MIRDelegState(100, true)
@@ -1775,7 +1999,7 @@ func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
 			{Credential: cred, Amount: big.NewInt(10)},
 		})
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		pinned := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 

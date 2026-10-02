@@ -66,6 +66,7 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 // merely learns of it later, as the chain-update handler does -- loses that
 // race and lets a subscriber apply an undo after the redo that followed it.
 func (ls *LedgerState) emitRollbackTransactionEvents(
+	ctx context.Context,
 	blocks []models.Block,
 ) {
 	if ls.config.EventBus == nil {
@@ -115,7 +116,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 			continue
 		}
 		for i, tx := range slices.Backward(txs) {
-			ls.publishTransactionEvent(TransactionEvent{
+			ls.publishTransactionEvent(ctx, TransactionEvent{
 				Transaction: tx,
 				Point:       blockPoint,
 				BlockNumber: block.Number,
@@ -137,7 +138,10 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // publishBlockEvent: the forward path calls it from a database AfterCommit
 // callback. Enqueueing here keeps subscriber work out of Commit while still
 // ensuring the transaction is durable before any Apply becomes visible.
-func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
+func (ls *LedgerState) publishTransactionEvent(
+	ctx context.Context,
+	evt TransactionEvent,
+) {
 	if ls.config.EventBus == nil {
 		return
 	}
@@ -146,12 +150,12 @@ func (ls *LedgerState) publishTransactionEvent(evt TransactionEvent) {
 	// restore/truncate closes the LedgerState while deliberately keeping
 	// the bus running -- so Close would wait unbounded on a subscriber that
 	// stopped draining.
-	ctx := ls.publishCtx
-	if ctx == nil {
-		ctx = context.Background()
+	publishCtx := ls.publishCtx //nolint:contextcheck // the ledger lifecycle context bounds the publish
+	if publishCtx == nil {
+		publishCtx = ctx
 	}
 	ls.config.EventBus.PublishOrderedContext(
-		ctx,
+		publishCtx,
 		TransactionEventType,
 		event.NewEvent(TransactionEventType, evt),
 	)
@@ -251,18 +255,25 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	existing, _, pending, loadErr := loadRollbackIntent(ls.db)
 	if loadErr != nil || (pending && !pointMatches(existing, point) &&
 		point.Slot >= existing.Slot) {
-		if err := ls.recoverRollbackIntentLocked(); err != nil {
-			return false, fmt.Errorf("complete previous rollback intent: %w", err)
+		if err := ls.recoverRollbackIntentLocked(context.Background()); err != nil {
+			return false, fmt.Errorf(
+				"complete previous rollback intent: %w",
+				err,
+			)
 		}
 	}
-	if err := ls.chain.ValidateRollback(point); err != nil {
+	if err := ls.chain.ValidateRollback(context.Background(), point); err != nil {
 		return false, err
 	}
 	ls.RLock()
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
-	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	resolved, err := ls.resolveRollbackTarget(
+		context.Background(),
+		point,
+		currentTip,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -293,14 +304,14 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	if point.Slot > durableTip.Point.Slot {
 		return false, nil
 	}
-	blocks, err := ls.readBlocksAboveSlot(point.Slot)
+	blocks, err := ls.readBlocksAboveSlot(context.Background(), point.Slot)
 	if err != nil {
 		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
 	if len(blocks) == 0 {
 		return false, nil
 	}
-	if err := ls.ensureRollbackIntent(point, blocks); err != nil {
+	if err := ls.ensureRollbackIntent(context.Background(), point, blocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return false, err
 		}
@@ -310,7 +321,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 			"error", err,
 		)
 	}
-	ls.emitRollbackTransactionEvents(blocks)
+	ls.emitRollbackTransactionEvents(context.Background(), blocks)
 	return len(blocks) > 0, nil
 }
 
@@ -318,7 +329,10 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 // newest first. It returns storage errors rather than degrading to a partial
 // read, so a caller can fail before mutating the chain without having captured
 // a durable undo payload.
-func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) {
+func (ls *LedgerState) readBlocksAboveSlot(
+	ctx context.Context,
+	slot uint64,
+) ([]models.Block, error) {
 	if ls.config.EventBus == nil || ls.db == nil {
 		return nil, nil
 	}
@@ -339,7 +353,7 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 		return nil, nil
 	}
 	var blocks []models.Block
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(ctx, false)
 	err := txn.Do(func(txn *database.Txn) error {
 		var err error
 		blocks, err = database.BlocksAfterSlotTxn(txn, slot)
@@ -418,6 +432,7 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // it existing". Skipped when ancestor's own block cannot be resolved (e.g.,
 // after a restart) rather than reporting a false gap from a missing baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
+	ctx context.Context,
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,
 	ledgerTipBlockNumber uint64,
@@ -461,6 +476,7 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 		}
 		accountedRows++
 		block, err := ls.config.ChainManager.BlockByPoint(
+			ctx,
 			ocommon.NewPoint(row.Slot, row.Hash),
 			nil,
 		)
@@ -483,7 +499,7 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 		}
 		blocks = append(blocks, block)
 	}
-	if ancestorBlock, err := ls.config.ChainManager.BlockByPoint(ancestor, nil); err == nil &&
+	if ancestorBlock, err := ls.config.ChainManager.BlockByPoint(ctx, ancestor, nil); err == nil &&
 		ledgerTipBlockNumber > ancestorBlock.Number {
 		expectedRows := ledgerTipBlockNumber - ancestorBlock.Number
 		if expectedRows > uint64(accountedRows) {

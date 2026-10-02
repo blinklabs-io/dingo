@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"fmt"
 	"slices"
 
@@ -62,10 +63,13 @@ func (a *NodeAdapter) PoolsList(
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
-	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(txn)
+	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(
+		context.Background(),
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get active pool key hashes ordered: %w",

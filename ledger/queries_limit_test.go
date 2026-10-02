@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -69,7 +70,7 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 	)
 	poolKey := bytes.Repeat([]byte{0xAB}, 28)
 	drepKey := bytes.Repeat([]byte{0xCD}, 28)
-	transaction := db.MetadataTxn(true)
+	transaction := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(func() { _ = transaction.Rollback() })
 	for index := range credentials {
 		binary.BigEndian.PutUint64(
@@ -81,15 +82,18 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 			Tag:   uint64(credentials[index].CredType),
 			Bytes: credentials[index].Credential,
 		}
-		require.NoError(t, db.CreateAccount(transaction, &models.Account{
-			StakingKey:    credentials[index].Credential[:],
-			CredentialTag: uint8(credentials[index].CredType),
-			Pool:          poolKey,
-			Reward:        types.Uint64(index + 1),
-			Drep:          drepKey,
-			DrepType:      models.DrepTypeAddrKeyHash,
-			Active:        true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), transaction, &models.Account{
+				StakingKey:    credentials[index].Credential[:],
+				CredentialTag: uint8(credentials[index].CredType),
+				Pool:          poolKey,
+				Reward:        types.Uint64(index + 1),
+				Drep:          drepKey,
+				DrepType:      models.DrepTypeAddrKeyHash,
+				Active:        true,
+			}),
+		)
 	}
 	require.NoError(t, transaction.Commit())
 	for _, count := range []int{0, MaxLocalStateQueryItems - 1, MaxLocalStateQueryItems, MaxLocalStateQueryItems + 1} {
@@ -221,17 +225,20 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
 	itemCount := MaxLocalStateQueryItems + 1
 	for i := range itemCount {
 		credential := make([]byte, 28)
 		binary.BigEndian.PutUint64(credential[20:], uint64(i))
-		require.NoError(t, db.CreateDrep(txn, &models.Drep{
-			Credential: credential,
-			Active:     true,
-			AddedSlot:  1,
-		}))
+		require.NoError(
+			t,
+			db.CreateDrep(context.Background(), txn, &models.Drep{
+				Credential: credential,
+				Active:     true,
+				AddedSlot:  1,
+			}),
+		)
 	}
 	require.NoError(t, txn.Commit())
 
@@ -258,7 +265,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(func() { txn.Rollback() }) //nolint:errcheck
 
 	const numDreps = 5
@@ -268,11 +275,14 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 		credential := make([]byte, 28)
 		binary.BigEndian.PutUint64(credential[20:], uint64(d))
 		drepCredentials[d] = credential
-		require.NoError(t, db.CreateDrep(txn, &models.Drep{
-			Credential: credential,
-			Active:     true,
-			AddedSlot:  1,
-		}))
+		require.NoError(
+			t,
+			db.CreateDrep(context.Background(), txn, &models.Drep{
+				Credential: credential,
+				Active:     true,
+				AddedSlot:  1,
+			}),
+		)
 	}
 	require.NoError(t, txn.Commit())
 
@@ -281,13 +291,16 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 			stakingKey := make([]byte, 28)
 			binary.BigEndian.PutUint32(stakingKey[16:], uint32(d))
 			binary.BigEndian.PutUint32(stakingKey[24:], uint32(k))
-			require.NoError(t, db.CreateAccount(nil, &models.Account{
-				StakingKey:    stakingKey,
-				CredentialTag: 0,
-				Drep:          drepCredentials[d],
-				DrepType:      models.DrepTypeAddrKeyHash,
-				Active:        true,
-			}))
+			require.NoError(
+				t,
+				db.CreateAccount(context.Background(), nil, &models.Account{
+					StakingKey:    stakingKey,
+					CredentialTag: 0,
+					Drep:          drepCredentials[d],
+					DrepType:      models.DrepTypeAddrKeyHash,
+					Active:        true,
+				}),
+			)
 		}
 	}
 
@@ -302,7 +315,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	require.True(t, ok)
 	require.Len(t, emptyForm, numDreps)
 
-	dreps, err := db.GetActiveDreps(nil)
+	dreps, err := db.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, dreps, numDreps)
 	for _, drep := range dreps {
@@ -332,10 +345,10 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 
 	drepCredential := bytes.Repeat([]byte{0xCD}, 28)
-	require.NoError(t, db.CreateDrep(txn, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), txn, &models.Drep{
 		Credential: drepCredential,
 		Active:     true,
 		AddedSlot:  1,
@@ -345,13 +358,16 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 	for i := range accountCount {
 		stakingKey := make([]byte, 28)
 		binary.BigEndian.PutUint32(stakingKey[24:], uint32(i))
-		require.NoError(t, db.CreateAccount(txn, &models.Account{
-			StakingKey:    stakingKey,
-			CredentialTag: 0,
-			Drep:          drepCredential,
-			DrepType:      models.DrepTypeAddrKeyHash,
-			Active:        true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), txn, &models.Account{
+				StakingKey:    stakingKey,
+				CredentialTag: 0,
+				Drep:          drepCredential,
+				DrepType:      models.DrepTypeAddrKeyHash,
+				Active:        true,
+			}),
+		)
 	}
 	require.NoError(t, txn.Commit())
 
@@ -400,13 +416,16 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	delegatedIdx := []int{0, 996, 997, 998, len(credentials) - 1}
 	drepCredential := bytes.Repeat([]byte{0xAB}, 28)
 	for _, idx := range delegatedIdx {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
-			StakingKey:    credentials[idx].Credential[:],
-			CredentialTag: 0,
-			Drep:          drepCredential,
-			DrepType:      models.DrepTypeAddrKeyHash,
-			Active:        true,
-		}))
+		require.NoError(
+			t,
+			db.CreateAccount(context.Background(), nil, &models.Account{
+				StakingKey:    credentials[idx].Credential[:],
+				CredentialTag: 0,
+				Drep:          drepCredential,
+				DrepType:      models.DrepTypeAddrKeyHash,
+				Active:        true,
+			}),
+		)
 	}
 	result, err := (&LedgerState{db: db}).
 		queryShelleyFilteredVoteDelegatees(credentials)

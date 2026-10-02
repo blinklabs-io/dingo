@@ -173,15 +173,17 @@ Two gaps in that propagation are deliberate:
   `midnight/indexer/indexer.go`), which reaches outside `sqlstore`'s own
   package boundary.
 
-`database/txn.go`'s `NewTxn`/`NewMetadataOnlyTxn` are, today, where that
-propagation stops short of `database.Database`'s own callers: both still pass
-`context.Background()` into `Transaction`/`ReadTransaction` rather than a
-caller-supplied `ctx`, so a `ctx` cancellation reaching `database.Database`'s
-facade methods does not yet cancel the metadata-store transaction underneath
-them. Threading a `ctx` through `database.Database`'s own public API and its
-~100 call sites is not yet done; `golangci-lint`'s
-`contextcheck` is disabled repo-wide until then, since it reports at each of
-those callers, not at this boundary itself.
+`database.Database`'s own API carries the caller's `ctx` the rest of the way:
+`Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
+`NewMetadataOnlyTxn` pass it into the metadata store's `Transaction`/
+`ReadTransaction`, and every facade method that can open its own transaction
+(the block lookups such as `BlockByPoint` and `BlocksRecent`, and the domain
+methods that open one when called with a nil `txn`) takes `ctx` as its first
+parameter. A cancelled caller therefore cancels the metadata-store transaction
+underneath it. `golangci-lint`'s `contextcheck` is enabled for the whole
+module; a function that holds a `ctx` and must still detach from it (a loop
+bound to the node lifecycle, a literal-nil `ctx` fallback) says why in a
+`//nolint:contextcheck` comment.
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 

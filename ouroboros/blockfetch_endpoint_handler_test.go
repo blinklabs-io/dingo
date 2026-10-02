@@ -67,16 +67,24 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 			blocks, err := testfixtures.GenerateConwayChain(3)
 			require.NoError(t, err)
 			for _, block := range blocks {
-				require.NoError(t, ledgerState.Chain().AddBlock(block, nil))
+				require.NoError(
+					t,
+					ledgerState.Chain().
+						AddBlock(context.Background(), block, nil),
+				)
 			}
 			// Keep block 1 as an actual rolled-back point. Chain.FromPoint
 			// rejects this point through its membership check even though
 			// BlockByPoint can still resolve the historical block from the
 			// manager cache.
-			require.NoError(t, ledgerState.Chain().Rollback(ocommon.NewPoint(
-				blocks[0].SlotNumber(),
-				blocks[0].Hash().Bytes(),
-			)))
+			require.NoError(
+				t,
+				ledgerState.Chain().
+					Rollback(context.Background(), ocommon.NewPoint(
+						blocks[0].SlotNumber(),
+						blocks[0].Hash().Bytes(),
+					)),
+			)
 
 			point := func(index int) ocommon.Point {
 				return ocommon.NewPoint(

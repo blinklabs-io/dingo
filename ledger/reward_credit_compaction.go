@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -42,7 +43,7 @@ const (
 // rewardCreditRoundsKeptUnfolded into account rows in the background, which
 // keeps the derived-balance sums to the last few rounds. A request while the
 // job runs makes it look again once it finishes.
-func (ls *LedgerState) queueRewardCreditCompaction() {
+func (ls *LedgerState) queueRewardCreditCompaction(ctx context.Context) {
 	ls.rewardPrecomputeMu.Lock()
 	defer ls.rewardPrecomputeMu.Unlock()
 	if ls.closed.Load() {
@@ -54,11 +55,13 @@ func (ls *LedgerState) queueRewardCreditCompaction() {
 	}
 	ls.rewardCreditCompacting = true
 	ls.rewardCreditCompactionWG.Add(1)
+	// The job outlives the request that queued it and stops on ls.closed.
+	jobCtx := context.WithoutCancel(ctx)
 	go func() {
 		defer ls.rewardCreditCompactionWG.Done()
 		retryDelay := rewardCreditCompactionRetryInitial
 		for {
-			err := ls.compactRewardCreditRounds()
+			err := ls.compactRewardCreditRounds(jobCtx)
 			if err != nil {
 				ls.config.Logger.Warn(
 					"failed to compact credited reward rounds",
@@ -114,12 +117,15 @@ func (ls *LedgerState) queueRewardCreditCompaction() {
 // credited round older than the newest rewardCreditRoundsKeptUnfolded. The
 // folded flag is the progress record: each transaction claims and writes the
 // next unfolded credits, so a stopped job resumes where it left off.
-func (ls *LedgerState) compactRewardCreditRounds() error {
+func (ls *LedgerState) compactRewardCreditRounds(ctx context.Context) error {
 	for {
 		if ls.closed.Load() {
 			return nil
 		}
-		done, err := ls.compactRewardCreditChunk(rewardCreditCompactionChunk)
+		done, err := ls.compactRewardCreditChunk(
+			ctx,
+			rewardCreditCompactionChunk,
+		)
 		if err != nil || done {
 			return err
 		}
@@ -128,7 +134,10 @@ func (ls *LedgerState) compactRewardCreditRounds() error {
 
 // compactRewardCreditChunk folds up to limit credits of the oldest round that
 // is due and reports whether no round is due.
-func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
+func (ls *LedgerState) compactRewardCreditChunk(
+	ctx context.Context,
+	limit int,
+) (bool, error) {
 	ls.rewardPrecomputeWriteMu.Lock()
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 	if ls.rewardInputRollbackActive.Load() != 0 {
@@ -137,12 +146,12 @@ func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
 	// Every write commit restamps the commit timestamps, and this job runs
 	// at start and after each credited round, so it opens a write
 	// transaction only when a round is due.
-	due, err := ls.rewardCreditRoundDue()
+	due, err := ls.rewardCreditRoundDue(ctx)
 	if err != nil || !due {
 		return true, err
 	}
 	done := true
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		meta := ls.db.Metadata()
 		metaTxn := txn.Metadata()
@@ -164,7 +173,7 @@ func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
 				continue
 			}
 			done = false
-			if err := ls.writeClaimedRewardCredits(txn, outputs); err != nil {
+			if err := ls.writeClaimedRewardCredits(ctx, txn, outputs); err != nil {
 				return fmt.Errorf(
 					"compact reward round %d: %w", round.SnapshotEpoch, err,
 				)
@@ -176,8 +185,8 @@ func (ls *LedgerState) compactRewardCreditChunk(limit int) (bool, error) {
 	return done, err
 }
 
-func (ls *LedgerState) rewardCreditRoundDue() (bool, error) {
-	txn := ls.db.Transaction(false)
+func (ls *LedgerState) rewardCreditRoundDue(ctx context.Context) (bool, error) {
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 	rounds, err := ls.db.Metadata().GetPendingRewardCreditRounds(
 		txn.Metadata(),

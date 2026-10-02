@@ -1748,6 +1748,7 @@ func leiosAnnouncementFromBlockCbor(
 // leios_announcement. In w29 the CertRB may independently announce a new EB;
 // that current announcement is not the certified closure resolved here.
 func (o *Ouroboros) certifiedEndorserBlockHash(
+	ctx context.Context,
 	blockCbor []byte,
 ) (ebHash lcommon.Blake2b256, ebSlot uint64, certified bool, resolved bool) {
 	top, err := safedecode.Guard(func() ([]cbor.RawMessage, error) {
@@ -1775,7 +1776,7 @@ func (o *Ouroboros) certifiedEndorserBlockHash(
 		return lcommon.Blake2b256{}, 0, true, false
 	}
 	prevHash := header.PrevHash()
-	parent, err := o.ledgerState.BlockByHash(prevHash.Bytes())
+	parent, err := o.ledgerState.BlockByHash(ctx, prevHash.Bytes())
 	if err != nil {
 		return lcommon.Blake2b256{}, 0, true, false
 	}
@@ -1794,9 +1795,10 @@ func (o *Ouroboros) certifiedEndorserBlockHash(
 // certifying ranking block (CertRB) inlines over node-to-client, or ok=false
 // when the block is not a CertRB or its endorser block is not fully available.
 func (o *Ouroboros) resolveCertifiedEndorserTxs(
+	ctx context.Context,
 	blockCbor []byte,
 ) ([]cbor.RawMessage, bool) {
-	ebHash, ebSlot, _, resolved := o.certifiedEndorserBlockHash(blockCbor)
+	ebHash, ebSlot, _, resolved := o.certifiedEndorserBlockHash(ctx, blockCbor)
 	if !resolved {
 		return nil, false
 	}
@@ -1891,7 +1893,7 @@ func (o *Ouroboros) awaitMergedLeiosRankingBlock(
 	if !o.waitForLeiosEndorserClosure(ctx, ebSlot, ebHash.Bytes()) {
 		return nil, false
 	}
-	merged, ok, err := o.mergedLeiosRankingBlockCbor(blockCbor)
+	merged, ok, err := o.mergedLeiosRankingBlockCbor(ctx, blockCbor)
 	if err != nil || !ok {
 		return nil, false
 	}
@@ -2047,9 +2049,10 @@ func dijkstraBlockTransactionCbor(
 // but its bytes could not be spliced, in which case the caller serves the raw
 // block.
 func (o *Ouroboros) mergedLeiosRankingBlockCbor(
+	ctx context.Context,
 	blockCbor []byte,
 ) ([]byte, bool, error) {
-	ebTxsRaw, ok := o.resolveCertifiedEndorserTxs(blockCbor)
+	ebTxsRaw, ok := o.resolveCertifiedEndorserTxs(ctx, blockCbor)
 	if !ok {
 		return blockCbor, false, nil
 	}
@@ -2101,7 +2104,10 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	connId ouroboros.ConnectionId,
 	owner *ochainsync.Server,
 ) ([]byte, error) {
-	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
+	merged, ok, err := o.mergedLeiosRankingBlockCbor(
+		context.Background(),
+		block.Cbor,
+	)
 	if err != nil {
 		// A CertRB was identified but its bytes could not be spliced (malformed
 		// shape). This is a structural fault, not a missing closure; serve the
@@ -2123,6 +2129,7 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		return merged, nil
 	}
 	ebHash, ebSlot, certified, resolved := o.certifiedEndorserBlockHash(
+		context.Background(),
 		block.Cbor,
 	)
 	if !certified {

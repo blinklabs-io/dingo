@@ -124,7 +124,7 @@ func (ls *LedgerState) deferBoundaryJob(
 	// The callback runs in the committing goroutine before it returns, so no
 	// later block has committed yet; the first read below fixes the snapshot.
 	txn.AfterCommit(func() {
-		snapshot := ls.db.Transaction(false)
+		snapshot := ls.db.Transaction(context.Background(), false)
 		pinned, err := loadPendingRatification(ls.db, snapshot)
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
@@ -192,12 +192,15 @@ func (ls *LedgerState) runRatificationJob(
 	if ls.ratificationApplyHook != nil {
 		ls.ratificationApplyHook(job.record.Epoch)
 	}
-	ls.applyRatificationJob(job)
+	ls.applyRatificationJob(context.Background(), job)
 }
 
 // applyRatificationJob writes a decided job's marks in its own transaction
 // unless the next boundary or a rollback already consumed the record.
-func (ls *LedgerState) applyRatificationJob(job *ratificationJob) {
+func (ls *LedgerState) applyRatificationJob(
+	ctx context.Context,
+	job *ratificationJob,
+) {
 	ls.ratificationMu.Lock()
 	if job.applying || ls.ratificationJob != job || ls.closed.Load() {
 		ls.ratificationMu.Unlock()
@@ -217,9 +220,9 @@ func (ls *LedgerState) applyRatificationJob(job *ratificationJob) {
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return
 	}
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.writeRatificationDecision(txn, job)
+		return ls.writeRatificationDecision(ctx, txn, job)
 	})
 	if err != nil {
 		ls.config.Logger.Warn(
@@ -235,6 +238,7 @@ func (ls *LedgerState) applyRatificationJob(job *ratificationJob) {
 // writeRatificationDecision writes job's decided marks and deletes its record
 // in txn, doing nothing when the record in txn is not job's.
 func (ls *LedgerState) writeRatificationDecision(
+	ctx context.Context,
 	txn *database.Txn,
 	job *ratificationJob,
 ) error {
@@ -251,14 +255,14 @@ func (ls *LedgerState) writeRatificationDecision(
 				"write mark snapshot for epoch %d: %w", rec.Epoch, err,
 			)
 		}
-		if err := ls.takeDeferredRewardStakeInputs(txn); err != nil {
+		if err := ls.takeDeferredRewardStakeInputs(ctx, txn); err != nil {
 			return fmt.Errorf(
 				"stage reward stake inputs for epoch %d: %w", rec.Epoch, err,
 			)
 		}
 	}
 	if job.plan != nil {
-		if _, err := job.plan.Apply(job.decision, txn); err != nil {
+		if _, err := job.plan.Apply(ctx, job.decision, txn); err != nil {
 			return fmt.Errorf(
 				"apply ratification for epoch %d: %w", rec.Epoch, err,
 			)
@@ -300,7 +304,7 @@ func (ls *LedgerState) consumePendingRatification(txn *database.Txn) error {
 			"ratification for epoch %d failed: %w", rec.Epoch, job.err,
 		)
 	}
-	return ls.writeRatificationDecision(txn, job)
+	return ls.writeRatificationDecision(context.Background(), txn, job)
 }
 
 func (ls *LedgerState) closeCh() <-chan struct{} {
@@ -375,7 +379,7 @@ func (ls *LedgerState) discardPendingRatificationAfterSlot(
 }
 
 // retryRatificationApply writes a decided job a rollback kept from writing.
-func (ls *LedgerState) retryRatificationApply() {
+func (ls *LedgerState) retryRatificationApply(ctx context.Context) {
 	ls.ratificationMu.Lock()
 	job := ls.ratificationJob
 	ls.ratificationMu.Unlock()
@@ -390,7 +394,7 @@ func (ls *LedgerState) retryRatificationApply() {
 	if job.err != nil {
 		return
 	}
-	go ls.applyRatificationJob(job)
+	go ls.applyRatificationJob(ctx, job)
 }
 
 // resumePendingRatification rewinds below a boundary whose RATIFY decision a
@@ -399,19 +403,21 @@ func (ls *LedgerState) retryRatificationApply() {
 // boundary. It records the rewind as a rollback intent, which start-up then
 // recovers; the intent's block and byte limits bound how far back it can
 // reach, and beyond them start-up fails rather than decide on the wrong state.
-func (ls *LedgerState) resumePendingRatification() error {
-	if err := ls.resumePendingRatificationIntent(); err != nil {
+func (ls *LedgerState) resumePendingRatification(ctx context.Context) error {
+	if err := ls.resumePendingRatificationIntent(ctx); err != nil {
 		return err
 	}
-	return ls.recoverRollbackIntent()
+	return ls.recoverRollbackIntent(ctx)
 }
 
-func (ls *LedgerState) resumePendingRatificationIntent() error {
+func (ls *LedgerState) resumePendingRatificationIntent(
+	ctx context.Context,
+) error {
 	rec, err := loadPendingRatification(ls.db, nil)
 	if err != nil || rec == nil {
 		return err
 	}
-	block, err := database.BlockBeforeSlot(ls.db, rec.BoundarySlot)
+	block, err := database.BlockBeforeSlot(ctx, ls.db, rec.BoundarySlot)
 	if err != nil {
 		return fmt.Errorf(
 			"find block before pending ratification boundary at slot %d: %w",
@@ -420,7 +426,7 @@ func (ls *LedgerState) resumePendingRatificationIntent() error {
 	}
 	point := ocommon.NewPoint(block.Slot, block.Hash)
 	var blocks []models.Block
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(ctx, false)
 	if err := txn.Do(func(txn *database.Txn) error {
 		var err error
 		blocks, err = database.BlocksAfterSlotTxn(txn, point.Slot)

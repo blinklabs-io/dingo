@@ -180,7 +180,7 @@ func testGetPoolDoesNotCorruptConnection(
 
 	// database.Database.GetPool never passes a nil txn down to the
 	// sqlstore Store: when its own caller passes nil, it opens a real
-	// read-only *sql.Tx (Database.Transaction(false) -> Store.
+	// read-only *sql.Tx (Database.Transaction(context.Background(), false) -> Store.
 	// ReadTransaction) and passes that transaction's Metadata() handle
 	// through instead (see database/pool.go's GetPool). That single
 	// *sql.Tx is exactly what turns the unclosed outer cursor in

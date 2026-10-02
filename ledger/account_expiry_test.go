@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"testing"
 
@@ -137,20 +138,31 @@ func runDelegatorInactivityLifecycleScenario(
 	copy(poolID[:], poolKey)
 
 	pool := models.Pool{PoolKeyHash: poolKey}
-	require.NoError(t, db.ImportPool(nil, &pool, &models.PoolRegistration{
-		PoolID:      pool.ID,
-		PoolKeyHash: poolKey,
-		AddedSlot:   0,
-	}))
+	require.NoError(
+		t,
+		db.ImportPool(
+			context.Background(),
+			nil,
+			&pool,
+			&models.PoolRegistration{
+				PoolID:      pool.ID,
+				PoolKeyHash: poolKey,
+				AddedSlot:   0,
+			},
+		),
+	)
 
 	// ---- Stage 1: register + delegate (witness) ----
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred,
-		CredentialTag: 0,
-		Pool:          poolKey,
-		Active:        true,
-	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred,
+			CredentialTag: 0,
+			Pool:          poolKey,
+			Active:        true,
+		}),
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{0x71}, 32),
 		OutputIdx:  0,
 		StakingKey: cred,
@@ -170,7 +182,13 @@ func runDelegatorInactivityLifecycleScenario(
 	})
 	runRenew(t, ls, db, delegatorInactivityE2ERegisterEpoch, regDelegTx)
 
-	acct, err := db.GetAccountByCredential(0, cred, false, nil)
+	acct, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	res.expirationAfterRegister = acct.ExpirationEpoch
 
@@ -215,13 +233,16 @@ func runDelegatorInactivityLifecycleScenario(
 	// snapshot row, and the pool/stake reward inputs the precompute step
 	// reads.
 	leaderCred := rewardCalcHash(0x94)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:      leaderCred,
-		CredentialTag:   0,
-		Pool:            poolKey,
-		Active:          true,
-		ExpirationEpoch: res.expirationAfterRegister,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:      leaderCred,
+			CredentialTag:   0,
+			Pool:            poolKey,
+			Active:          true,
+			ExpirationEpoch: res.expirationAfterRegister,
+		}),
+	)
 
 	pparams := &shelley.ShelleyProtocolParameters{
 		NOpt:             10,
@@ -244,6 +265,7 @@ func runDelegatorInactivityLifecycleScenario(
 	))
 	for i := range uint64(10) {
 		require.NoError(t, db.UpdatePoolOpCertSequence(
+			context.Background(),
 			poolID, i+1, 140+i, nil,
 		))
 	}
@@ -305,12 +327,15 @@ func runDelegatorInactivityLifecycleScenario(
 			BoundarySlot:  100,
 		},
 	}, nil))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey:    member,
-		CredentialTag: 0,
-		Pool:          poolKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    member,
+			CredentialTag: 0,
+			Pool:          poolKey,
+			Active:        true,
+		}),
+	)
 	rewardCalcSeedStakeCert(
 		t,
 		db,
@@ -330,7 +355,7 @@ func runDelegatorInactivityLifecycleScenario(
 		uint(lcommon.CertificateTypeStakeRegistration),
 	)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.applyStakeRewards(
 			txn,
@@ -340,10 +365,22 @@ func runDelegatorInactivityLifecycleScenario(
 	}))
 	settleRewardCredits(t, ls)
 
-	rewardOwner, err := db.GetAccountByCredential(0, leaderCred, true, nil)
+	rewardOwner, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		leaderCred,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	res.leaderRewardAfterGuard = uint64(rewardOwner.Reward)
-	rewardMember, err := db.GetAccountByCredential(0, member, true, nil)
+	rewardMember, err := db.GetAccountByCredential(
+		context.Background(),
+		0,
+		member,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	res.memberRewardAfterGuard = uint64(rewardMember.Reward)
 
@@ -358,7 +395,13 @@ func runDelegatorInactivityLifecycleScenario(
 	withdrawTx.WithWithdrawals(map[*lcommon.Address]uint64{rewardAddr: 1})
 	runRenew(t, ls, db, delegatorInactivityE2ERewitnessEpoch, withdrawTx)
 
-	acct, err = db.GetAccountByCredential(0, cred, false, nil)
+	acct, err = db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred,
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	res.expirationAfterRewitness = acct.ExpirationEpoch
 

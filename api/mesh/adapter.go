@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -39,7 +40,7 @@ func NewMeshDatabase(db *database.Database) MeshDatabase {
 func (a *meshDatabaseAdapter) BlockByHash(
 	hash []byte,
 ) (models.Block, error) {
-	return database.BlockByHash(a.db, hash)
+	return database.BlockByHash(context.Background(), a.db, hash)
 }
 
 // BlockByIndex resolves a Cardano block height, which is what the Mesh
@@ -71,11 +72,11 @@ func (a *meshDatabaseAdapter) BlockByIndex(
 func (a *meshDatabaseAdapter) GetTransactionByHash(
 	hash []byte,
 ) (*models.Transaction, error) {
-	return a.db.GetTransactionByHash(hash, nil)
+	return a.db.GetTransactionByHash(context.Background(), hash, nil)
 }
 
 func (a *meshDatabaseAdapter) GetTransactionsByBlockHash(
 	hash []byte,
 ) ([]models.Transaction, error) {
-	return a.db.GetTransactionsByBlockHash(hash, nil)
+	return a.db.GetTransactionsByBlockHash(context.Background(), hash, nil)
 }

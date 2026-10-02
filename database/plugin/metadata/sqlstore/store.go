@@ -495,7 +495,12 @@ func (s *Store) ReadTransaction(ctx context.Context) types.Txn {
 // transaction begins a transaction bound to ctx. The context.Background()
 // fallback below is for a caller passing a literal nil, not a dropped
 // caller ctx -- there is nothing above to derive from in that case.
-func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
+//
+//nolint:contextcheck // literal-nil fallback, no caller ctx exists
+func (s *Store) transaction(
+	ctx context.Context,
+	readOnly bool,
+) types.Txn {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -897,6 +902,7 @@ func (s *Store) withWriteTransactionContext(
 		if err != nil {
 			return err
 		}
+		//nolint:contextcheck // txnCtx is the caller transaction's own context
 		return fn(db, txnCtx)
 	}
 	sqlTransaction, release, err := s.beginWriteTx(ctx)

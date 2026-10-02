@@ -91,10 +91,11 @@ func (m *Manager) saveSnapshot(
 	checkAuthoritativeMark bool,
 ) (bool, error) {
 	_ = ctx
-	txn := m.db.Transaction(true) // read-write transaction
+	txn := m.db.Transaction(ctx, true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
 
 	if err := m.saveSnapshotInTxn(
+		ctx,
 		epoch,
 		snapshotType,
 		distribution,
@@ -127,6 +128,7 @@ func (m *Manager) saveSnapshot(
 }
 
 func (m *Manager) saveSnapshotInTxn(
+	ctx context.Context,
 	epoch uint64,
 	snapshotType string,
 	distribution *StakeDistribution,
@@ -137,6 +139,7 @@ func (m *Manager) saveSnapshotInTxn(
 	txn *database.Txn,
 ) error {
 	return m.saveSnapshotInTxnDeferring(
+		ctx,
 		epoch, snapshotType, distribution, evt, resolveAutoVote,
 		persistRewardInputs, checkAuthoritativeMark, false, txn,
 	)
@@ -146,6 +149,7 @@ func (m *Manager) saveSnapshotInTxn(
 // deferStakeInputs, stages the reward_stake_input rows for
 // TakeDeferredRewardStakeInputs instead of writing them.
 func (m *Manager) saveSnapshotInTxnDeferring(
+	ctx context.Context,
 	epoch uint64,
 	snapshotType string,
 	distribution *StakeDistribution,
@@ -157,6 +161,7 @@ func (m *Manager) saveSnapshotInTxnDeferring(
 	txn *database.Txn,
 ) error {
 	prepared, err := m.prepareSnapshot(
+		ctx,
 		epoch, snapshotType, distribution, evt, resolveAutoVote,
 		persistRewardInputs, txn,
 	)
@@ -182,6 +187,7 @@ type preparedSnapshot struct {
 
 // prepareSnapshot does every read saving a snapshot needs, through txn.
 func (m *Manager) prepareSnapshot(
+	ctx context.Context,
 	epoch uint64,
 	snapshotType string,
 	distribution *StakeDistribution,
@@ -247,6 +253,7 @@ func (m *Manager) prepareSnapshot(
 	}
 	if resolveAutoVote {
 		if err := m.db.ResolvePoolRewardAccountAutoVotes(
+			ctx,
 			snapshots, txn,
 		); err != nil {
 			return nil, fmt.Errorf(
@@ -1296,7 +1303,7 @@ func (m *Manager) cleanupOldSnapshots(
 					before,
 				)
 			}
-			poolTxn := m.db.Transaction(true)
+			poolTxn := m.db.Transaction(ctx, true)
 			defer func() { _ = poolTxn.Rollback() }()
 			if err := m.db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
 				before,
@@ -1334,7 +1341,7 @@ func (m *Manager) cleanupOldSnapshots(
 
 	// Reward-state pruning: unchanged currentEpoch-3 window, separate
 	// transaction (not under the retention guard).
-	txn := m.db.Transaction(true) // read-write transaction
+	txn := m.db.Transaction(ctx, true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
 
 	meta := m.db.Metadata()

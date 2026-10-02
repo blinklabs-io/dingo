@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
@@ -62,10 +63,14 @@ func seedStakeCredentialUtxos(
 		stakeKey,
 	)
 	require.NoError(t, err)
-	require.NoError(t, adapter.ledgerState.Database().CreateAccount(
-		nil,
-		&models.Account{StakingKey: stakeKey, Active: true},
-	))
+	require.NoError(
+		t,
+		adapter.ledgerState.Database().CreateAccount(
+			context.Background(),
+			nil,
+			&models.Account{StakingKey: stakeKey, Active: true},
+		),
+	)
 
 	for i := range numUtxos {
 		payment := make([]byte, lcommon.AddressHashSize)
@@ -339,7 +344,7 @@ func newDBBackedAdapter(
 	})
 	require.NoError(t, err)
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	lsConfig := ledger.LedgerStateConfig{
@@ -892,11 +897,14 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x07}, 28)
 	poolKey := bytes.Repeat([]byte{0xff}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{
@@ -937,11 +945,14 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	stakingKey := bytes.Repeat([]byte{0x08}, 28)
 	poolKey := bytes.Repeat([]byte{0xfe}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		CredentialTag: 0,
-		StakingKey:    stakingKey,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			CredentialTag: 0,
+			StakingKey:    stakingKey,
+			Active:        true,
+		}),
+	)
 	require.NoError(
 		t,
 		db.Metadata().SaveRewardAccountOutputs([]*models.RewardAccountOutput{

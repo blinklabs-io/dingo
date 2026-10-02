@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -108,8 +109,8 @@ func additionalReferenceAdmission(
 	ls.publishSnapshotsLocked()
 	for path, run := range map[string]func() error{
 		"imported": func() error {
-			return db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
+			return db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
+				_, err := ls.ledgerProcessBlock(context.Background(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
 				return err
 			})
 		},
@@ -168,12 +169,13 @@ func TestDijkstraBlockReferenceScriptCustomLimitAdmission(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(
 					t,
-					db.Transaction(true).Do(func(txn *database.Txn) error {
-						if err := db.CreateUtxo(txn, &models.Utxo{TxId: id}); err != nil {
-							return err
-						}
-						return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-					}),
+					db.Transaction(context.Background(), true).
+						Do(func(txn *database.Txn) error {
+							if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{TxId: id}); err != nil {
+								return err
+							}
+							return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
+						}),
 				)
 				block.BlockBody.Transactions = append(
 					block.BlockBody.Transactions,

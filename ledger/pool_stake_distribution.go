@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -271,7 +272,7 @@ func (ls *LedgerState) PoolStakeDistribution(
 		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
 			return nil, err
 		}
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 	metaTxn := txn.Metadata()

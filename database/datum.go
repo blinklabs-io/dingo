@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -40,6 +41,7 @@ func (d *Database) SetDatum(
 
 // GetDatum retrieves a datum by its hash.
 func (d *Database) GetDatum(
+	ctx context.Context,
 	hash []byte,
 	txn *Txn,
 ) (*models.Datum, error) {
@@ -47,7 +49,7 @@ func (d *Database) GetDatum(
 		return nil, ErrDatumNotFound
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	tmpHash := lcommon.NewBlake2b256(hash)

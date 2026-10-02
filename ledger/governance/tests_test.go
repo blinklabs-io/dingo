@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"database/sql"
 	"math/big"
 	"testing"
@@ -110,11 +111,17 @@ func TestBoundaryCreditVisibility_ProposalRefundIsExcludedFromSnapshot(
 
 	require.NoError(
 		t,
-		refundProposalDeposit(db, nil, &models.GovernanceProposal{
-			TxHash:        testBytes(32, 0x64),
-			Deposit:       7,
-			ReturnAddress: rewardAddrBytes,
-		}, 200),
+		refundProposalDeposit(
+			context.Background(),
+			db,
+			nil,
+			&models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x64),
+				Deposit:       7,
+				ReturnAddress: rewardAddrBytes,
+			},
+			200,
+		),
 	)
 
 	requireSoleCreditPostSnapshot(
@@ -143,22 +150,30 @@ func TestMithrilSeededRootUnblocksChainedProposal(t *testing.T) {
 	// ledgerstate.seedPrevGovActionIds writes.
 	enactedEpoch := uint64(500)
 	enactedSlot := uint64(123_456)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        rootHash,
-		ActionIndex:   parentIdx,
-		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  0,
-		EnactedEpoch:  &enactedEpoch,
-		EnactedSlot:   &enactedSlot,
-		Deposit:       0,
-		ReturnAddress: make([]byte, 29),
-		AnchorURL:     "",
-		AnchorHash:    make([]byte, 32),
-		AddedSlot:     0,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        rootHash,
+				ActionIndex:   parentIdx,
+				ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  0,
+				EnactedEpoch:  &enactedEpoch,
+				EnactedSlot:   &enactedSlot,
+				Deposit:       0,
+				ReturnAddress: make([]byte, 29),
+				AnchorURL:     "",
+				AnchorHash:    make([]byte, 32),
+				AddedSlot:     0,
+			},
+			nil,
+		),
+	)
 
 	root, err := db.GetLastEnactedGovernanceProposal(
+		context.Background(),
 		[]uint8{uint8(lcommon.GovActionTypeHardForkInitiation)},
 		nil,
 	)
@@ -250,8 +265,16 @@ func seedNoConfidenceProposal(
 		GovActionCbor: actionCbor,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
+	loaded, err := db.GetGovernanceProposal(
+		context.Background(),
+		proposal.TxHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	return loaded
@@ -299,15 +322,22 @@ func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
 				t, store, silentPool, testBytes(29, 0x73),
 				10_000-tt.yesStake, newEpoch,
 			)
-			require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-				ProposalID:      proposal.ID,
-				VoterType:       models.VoterTypeSPO,
-				VoterCredential: yesPool,
-				Vote:            models.VoteYes,
-				AddedSlot:       2,
-			}, nil))
+			require.NoError(
+				t,
+				db.SetGovernanceVote(
+					context.Background(),
+					&models.GovernanceVote{
+						ProposalID:      proposal.ID,
+						VoterType:       models.VoterTypeSPO,
+						VoterCredential: yesPool,
+						Vote:            models.VoteYes,
+						AddedSlot:       2,
+					},
+					nil,
+				),
+			)
 
-			txn := db.MetadataTxn(true)
+			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
 			out, err := ProcessEpoch(&EpochInput{
 				DB:           db,
@@ -327,6 +357,7 @@ func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
 			require.NoError(t, txn.Commit())
 
 			reloaded, err := db.GetGovernanceProposal(
+				context.Background(),
 				proposal.TxHash, proposal.ActionIndex, nil,
 			)
 			require.NoError(t, err)
@@ -370,26 +401,35 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	// Ratification is what this test measures, so give it a decodable reward
 	// account (header 0xE0, key-hash credential).
 	proposal.ReturnAddress = append([]byte{0xE0}, testBytes(28, 0x97)...)
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	coldCred := testBytes(28, 0x91)
 	hotCred := testBytes(28, 0x92)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
-		{ColdCredHash: coldCred, ExpiresEpoch: newEpoch + 10},
-	}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{ColdCredHash: coldCred, ExpiresEpoch: newEpoch + 10},
+		}, nil),
+	)
 	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: coldCred,
 		HotCredential:  hotCred,
 		CertificateID:  1,
 		AddedSlot:      1,
 	})
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-		ProposalID:      proposal.ID,
-		VoterType:       models.VoterTypeCC,
-		VoterCredential: hotCred,
-		Vote:            models.VoteYes,
-		AddedSlot:       2,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeCC,
+			VoterCredential: hotCred,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil),
+	)
 
 	yesPool := testBytes(28, 0x93)
 	silentPool := testBytes(28, 0x94)
@@ -405,21 +445,27 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 	seedPoolWithStake(
 		t, store, silentPool, testBytes(29, 0x96), 3_717, newEpoch,
 	)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-		ProposalID:      proposal.ID,
-		VoterType:       models.VoterTypeSPO,
-		VoterCredential: yesPool,
-		Vote:            models.VoteYes,
-		AddedSlot:       2,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeSPO,
+			VoterCredential: yesPool,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil),
+	)
 
-	got, err := EvaluateRatifiableHardForkInitiation(NewStabilityCheckInputs(
-		db, nil, currentEpoch, false, stabilityConwayPParams(9), nil, nil,
-	))
+	got, err := EvaluateRatifiableHardForkInitiation(
+		context.Background(),
+		NewStabilityCheckInputs(
+			db, nil, currentEpoch, false, stabilityConwayPParams(9), nil, nil,
+		),
+	)
 	require.NoError(t, err)
 	require.Nil(t, got, "mid-epoch check must read mark[currentEpoch]")
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(&EpochInput{
 		DB:           db,
@@ -463,15 +509,18 @@ func TestProcessEpoch_MissingSameBoundarySPOState_Errors(t *testing.T) {
 	seedPoolWithStake(
 		t, store, yesPool, testBytes(29, 0x81), 10_000, newEpoch-1,
 	)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-		ProposalID:      proposal.ID,
-		VoterType:       models.VoterTypeSPO,
-		VoterCredential: yesPool,
-		Vote:            models.VoteYes,
-		AddedSlot:       2,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeSPO,
+			VoterCredential: yesPool,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil),
+	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	_, err := ProcessEpoch(&EpochInput{
 		DB:           db,
@@ -490,6 +539,7 @@ func TestProcessEpoch_MissingSameBoundarySPOState_Errors(t *testing.T) {
 	require.ErrorIs(t, err, ErrMissingCurrentBoundarySPOState)
 
 	reloaded, err := db.GetGovernanceProposal(
+		context.Background(),
 		proposal.TxHash, proposal.ActionIndex, nil,
 	)
 	require.NoError(t, err)
@@ -513,15 +563,18 @@ func TestProcessEpoch_SuppliedSameBoundarySPOState_Ratifies(t *testing.T) {
 	seedPoolWithStake(
 		t, store, yesPool, testBytes(29, 0x83), 10_000, newEpoch-1,
 	)
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-		ProposalID:      proposal.ID,
-		VoterType:       models.VoterTypeSPO,
-		VoterCredential: yesPool,
-		Vote:            models.VoteYes,
-		AddedSlot:       2,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+			ProposalID:      proposal.ID,
+			VoterType:       models.VoterTypeSPO,
+			VoterCredential: yesPool,
+			Vote:            models.VoteYes,
+			AddedSlot:       2,
+		}, nil),
+	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(&EpochInput{
 		DB:           db,
@@ -553,6 +606,7 @@ func TestProcessEpoch_SuppliedSameBoundarySPOState_Ratifies(t *testing.T) {
 	require.Equal(t, 1, out.RatifiedCount)
 
 	reloaded, err := db.GetGovernanceProposal(
+		context.Background(),
 		proposal.TxHash, proposal.ActionIndex, nil,
 	)
 	require.NoError(t, err)
@@ -714,11 +768,14 @@ func runSPONonVoterRatification(
 
 	coldCredential := testBytes(28, 0xE1)
 	hotCredential := testBytes(28, 0xE2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredHash: coldCredential,
-		ExpiresEpoch: stabilityTestEpoch + 10,
-		AddedSlot:    1,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredHash: coldCredential,
+			ExpiresEpoch: stabilityTestEpoch + 10,
+			AddedSlot:    1,
+		}}, nil),
+	)
 	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
 		ColdCredential: coldCredential,
 		HotCredential:  hotCredential,
@@ -758,16 +815,22 @@ func runSPONonVoterRatification(
 			AddedSlot:       2,
 		},
 	} {
-		require.NoError(t, db.SetGovernanceVote(vote, nil))
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), vote, nil),
+		)
 	}
 	if testCase.silentVote != nil {
-		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-			ProposalID:      proposal.ID,
-			VoterType:       models.VoterTypeSPO,
-			VoterCredential: silentPool,
-			Vote:            *testCase.silentVote,
-			AddedSlot:       2,
-		}, nil))
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:      proposal.ID,
+				VoterType:       models.VoterTypeSPO,
+				VoterCredential: silentPool,
+				Vote:            *testCase.silentVote,
+				AddedSlot:       2,
+			}, nil),
+		)
 	}
 
 	pparams := conwayPParamsFixture(bootstrapProtocolVersion)
@@ -784,7 +847,7 @@ func runSPONonVoterRatification(
 		t.Fatalf("unsupported governance action type %d", testCase.actionType)
 	}
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := ProcessEpoch(&EpochInput{
 		DB:           db,
@@ -804,6 +867,7 @@ func runSPONonVoterRatification(
 	require.NoError(t, txn.Commit())
 
 	stored, err := db.GetGovernanceProposal(
+		context.Background(),
 		proposal.TxHash,
 		proposal.ActionIndex,
 		nil,
@@ -865,8 +929,12 @@ func seedSPONonVoterProposal(
 		GovActionCbor: actionCBOR,
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 	stored, err := db.GetGovernanceProposal(
+		context.Background(),
 		proposal.TxHash,
 		proposal.ActionIndex,
 		nil,
@@ -921,7 +989,10 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 		ReturnAddress: testBytes(29, 208),
 		AddedSlot:     1,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	const (
 		castSlot     = uint64(100)
@@ -930,14 +1001,17 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	)
 	cast := func(voterType uint8, cred []byte, vote uint8, updatedSlot uint64) {
 		slot := updatedSlot
-		require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
-			ProposalID:      proposal.ID,
-			VoterType:       voterType,
-			VoterCredential: cred,
-			Vote:            vote,
-			AddedSlot:       castSlot,
-			VoteUpdatedSlot: &slot,
-		}, nil))
+		require.NoError(
+			t,
+			db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
+				ProposalID:      proposal.ID,
+				VoterType:       voterType,
+				VoterCredential: cred,
+				Vote:            vote,
+				AddedSlot:       castSlot,
+				VoteUpdatedSlot: &slot,
+			}, nil),
+		)
 	}
 
 	pparams := &conway.ConwayProtocolParameters{}
@@ -947,7 +1021,7 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 
 	tallyCtx := &TallyContext{DB: db, StakeEpoch: 5, CurrentEpoch: 10}
 	ratify := func() RatifyDecision {
-		tally, err := TallyProposal(tallyCtx, proposal)
+		tally, err := TallyProposal(context.Background(), tallyCtx, proposal)
 		require.NoError(t, err)
 		return ShouldRatify(RatifyInputs{
 			Tally:           tally,
@@ -988,7 +1062,14 @@ func TestRatifyLevelForkRestoresVoteAcrossAllVoterTypes(t *testing.T) {
 	)
 
 	// Roll back to a slot between the original cast and the replacement.
-	require.NoError(t, db.DeleteGovernanceVotesAfterSlot(rollbackSlot, nil))
+	require.NoError(
+		t,
+		db.DeleteGovernanceVotesAfterSlot(
+			context.Background(),
+			rollbackSlot,
+			nil,
+		),
+	)
 
 	restored := ratify()
 	require.True(

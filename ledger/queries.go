@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -209,7 +210,7 @@ func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
 	if !at.pinned() {
 		return nil
 	}
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
 	return ls.verifyPointOnChain(txn, at)
 }
@@ -301,7 +302,7 @@ func (ls *LedgerState) queryShelleyEpochNo(
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -378,7 +379,7 @@ func (ls *LedgerState) VerifyPointQueryable(
 		return nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 	if err := ls.verifyPointOnChain(txn, at); err != nil {
@@ -467,7 +468,7 @@ func (ls *LedgerState) query(
 	// the canonical chain.
 	var txn *database.Txn
 	if at.pinned() {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 		if err := ls.verifyPointOnChain(txn, at); err != nil {
 			return nil, err
@@ -581,7 +582,7 @@ func (ls *LedgerState) queryHardFork(
 			return ls.loadConsensusSnapshot().currentEra.Id, nil
 		}
 		if txn == nil {
-			txn = ls.db.Transaction(false)
+			txn = ls.db.Transaction(context.Background(), false)
 			defer txn.Release()
 		}
 		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -1184,7 +1185,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// Read the mark/set/go snapshots under a single read transaction so all
 	// three epochs come from one consistent view even if an epoch boundary
 	// fires mid-query.
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -1642,7 +1643,7 @@ func genesisConfigResult(
 // build`), so leaving it unhandled tears down the local-state-query
 // connection.
 func (ls *LedgerState) queryShelleyStakePools() (any, error) {
-	keyHashes, err := ls.db.GetActivePoolKeyHashes(nil)
+	keyHashes, err := ls.db.GetActivePoolKeyHashes(context.Background(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1672,7 +1673,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// below, bounded by the query item limit checked above.
 	var allDeposits map[string]uint64
 	if len(creds) == 0 {
-		all, err := ls.db.GetActiveDreps(nil)
+		all, err := ls.db.GetActiveDreps(context.Background(), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -1680,7 +1681,10 @@ func (ls *LedgerState) queryShelleyDRepState(
 		if err != nil {
 			return nil, err
 		}
-		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(nil)
+		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(
+			context.Background(),
+			nil,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -1692,6 +1696,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 			drep, err := ls.db.GetDrepByCredential(
+				context.Background(),
 				credentialTag,
 				cred.Credential[:],
 				false,
@@ -1779,6 +1784,7 @@ func (ls *LedgerState) drepRecordedDeposit(
 		)], nil
 	}
 	recorded, err := ls.db.GetDrepLastRegistrationDeposit(
+		context.Background(),
 		drep.CredentialTag,
 		drep.Credential,
 		nil,
@@ -1815,7 +1821,12 @@ func (ls *LedgerState) allDRepDelegators() (
 	for start := 0; start < len(refs); start += allDRepDelegatorsBatchSize {
 		end := min(start+allDRepDelegatorsBatchSize, len(refs))
 		batch := refs[start:end]
-		accounts, err := ls.db.GetAccountsByCredential(batch, false, nil)
+		accounts, err := ls.db.GetAccountsByCredential(
+			context.Background(),
+			batch,
+			false,
+			nil,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -1908,6 +1919,7 @@ func (ls *LedgerState) drepDelegators(
 	drep *models.Drep,
 ) ([]olocalstatequery.StakeCredential, error) {
 	refs, err := ls.db.GetDRepDelegators(
+		context.Background(),
 		drep.CredentialTag,
 		drep.Credential,
 		nil,
@@ -1964,6 +1976,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		return []any{ret}, nil
 	}
 	utxos, err := ls.db.UtxosByAddress(
+		context.Background(),
 		addrs,
 		database.MaxUtxosByAddressResults,
 		nil,
@@ -2035,10 +2048,10 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	}
 	var accounts map[string]*models.Account
 	pending := make(map[string]uint64)
-	readTxn := ls.db.Transaction(false)
+	readTxn := ls.db.Transaction(context.Background(), false)
 	if err := readTxn.Do(func(txn *database.Txn) error {
 		var err error
-		accounts, err = ls.db.GetAccountsByCredential(stakeCreds, false, txn)
+		accounts, err = ls.db.GetAccountsByCredential(context.Background(), stakeCreds, false, txn)
 		if err != nil {
 			return err
 		}
@@ -2102,6 +2115,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 			return nil, err
 		}
 		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
+			context.Background(),
 			credentialTag,
 			cred.Bytes[:],
 			1,
@@ -2164,7 +2178,12 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 		seen[key] = struct{}{}
 		refs = append(refs, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, nil)
+	accounts, err := ls.db.GetAccountsByCredential(
+		context.Background(),
+		refs,
+		false,
+		nil,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -2217,7 +2236,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 ) (any, error) {
 	// GetProposals returns the Conway proposals set, which keeps an action
 	// RATIFY classified expired until the boundary that drops it.
-	proposals, err := ls.db.GetGovernanceProposalSet(nil)
+	proposals, err := ls.db.GetGovernanceProposalSet(context.Background(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2289,7 +2308,11 @@ func (ls *LedgerState) governanceProposalState(
 		ProposedIn:        proposal.ProposedEpoch,
 		ExpiresAfter:      proposal.ExpiresEpoch,
 	}
-	votes, err := ls.db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := ls.db.GetGovernanceVotes(
+		context.Background(),
+		proposal.ID,
+		nil,
+	)
 	if err != nil {
 		return olocalstatequery.GovActionState{}, err
 	}
@@ -2370,15 +2393,20 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	var err error
 	if at.pinned() {
 		if txn == nil {
-			txn = ls.db.Transaction(false)
+			txn = ls.db.Transaction(context.Background(), false)
 			defer txn.Release()
 		}
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		utxos, err = ls.db.UtxosByRefsAsOf(refs, at.Slot, txn)
+		utxos, err = ls.db.UtxosByRefsAsOf(
+			context.Background(),
+			refs,
+			at.Slot,
+			txn,
+		)
 	} else {
-		utxos, err = ls.db.UtxosByRefs(refs, txn)
+		utxos, err = ls.db.UtxosByRefs(context.Background(), refs, txn)
 	}
 	if err != nil {
 		return nil, err

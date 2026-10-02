@@ -124,7 +124,7 @@ func (c *Calculator) CalculateStakeDistribution(
 ) (dist *StakeDistribution, err error) {
 	// Read-only transaction so the entire calculation observes a
 	// consistent database snapshot.
-	txn := c.db.Transaction(false)
+	txn := c.db.Transaction(ctx, false)
 	defer func() {
 		if commitErr := txn.Commit(); commitErr != nil {
 			if err != nil {

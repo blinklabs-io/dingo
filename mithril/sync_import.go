@@ -116,6 +116,7 @@ func resetMithrilBackfillCheckpoint(db *database.Database) error {
 }
 
 func updateMithrilReadyState(
+	ctx context.Context,
 	db *database.Database,
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
@@ -149,7 +150,7 @@ func updateMithrilReadyState(
 		"blocks_loaded", blocksCopied,
 	)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
 			// ClearSyncState is an unqualified DELETE FROM sync_state, so

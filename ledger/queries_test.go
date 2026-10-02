@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1258,6 +1259,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_LiveBetweenCreationAndSpend(
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
 	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -1293,6 +1295,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_BeforeCreation_Absent(t *testing.T) {
 	require.NoError(t, err)
 	txId := seedBabbageUtxo(t, db, 0xC2, 0, addr, 1_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -1325,6 +1328,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_SpentAtExactSlot_Absent(t *testing.T) {
 	require.NoError(t, err)
 	txId := seedBabbageUtxo(t, db, 0xC3, 0, addr, 1_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -1355,6 +1359,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent(t *testing.T) {
 	require.NoError(t, err)
 	txId := seedBabbageUtxo(t, db, 0xC4, 0, addr, 1_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -1616,6 +1621,7 @@ func TestQuery_UtxoByTxIn_WiredThroughDispatch(t *testing.T) {
 	require.NoError(t, err)
 	txId := seedBabbageUtxo(t, db, 0xC6, 0, addr, 1_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,
@@ -1883,7 +1889,7 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 		txId []byte,
 		amount uint64,
 	) {
-		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 			TxId:       txId,
 			OutputIdx:  0,
 			PaymentKey: addr.PaymentKeyHash().Bytes(),
@@ -1983,7 +1989,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 	var live []models.UtxoId
 	for len(live) < 2 {
 		block, blockCbor := nextProducingBlock(t, db, iter)
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		var produced lcommon.Utxo
 		err := txn.Do(func(txn *database.Txn) error {
 			tx := storeBlockFirstTx(t, db, txn, block, blockCbor)
@@ -1996,7 +2002,7 @@ func TestQueryShelleyUtxoByTxIn_MultipleInputs(t *testing.T) {
 			Idx:  produced.Id.Index(),
 		})
 
-		results, err := db.UtxosByRefs(candidates, nil)
+		results, err := db.UtxosByRefs(context.Background(), candidates, nil)
 		require.NoError(t, err)
 		liveSet := make(map[string]struct{}, len(results))
 		for _, u := range results {
@@ -2182,7 +2188,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 	db := newTestDB(t)
 	drepCred := stakeCred28(0xC1)
 	delegKey := stakeCred28(0xD2)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential:    drepCred,
 		CredentialTag: 0,
 		ExpiryEpoch:   22,
@@ -2560,7 +2566,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	})
 	tx, err := txBuilder.Build()
 	require.NoError(t, err)
-	require.NoError(t, db.SetTransactionMetadataOnly(
+	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
 		tx,
 		ocommon.NewPoint(100, bytes.Repeat([]byte{0x53}, 32)),
 		0,
@@ -2603,7 +2609,7 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0x61)
 	drepKey := stakeCred28(0x62)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		Drep:          drepKey,
@@ -2665,8 +2671,8 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 		GovActionCbor: govAction,
 		AddedSlot:     100,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
-	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), proposal, nil))
+	require.NoError(t, db.SetGovernanceVote(context.Background(), &models.GovernanceVote{
 		ProposalID:         proposal.ID,
 		VoterType:          models.VoterTypeDRep,
 		VoterCredentialTag: 0,

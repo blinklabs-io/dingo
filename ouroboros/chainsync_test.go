@@ -1016,7 +1016,10 @@ func TestBuildDefaultChainsyncIntersectPointsSurvivesAnchorStorageFaultWhenPoint
 	})
 
 	// Sanity: with the database up, the start builds real points.
-	healthy, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	healthy, err := o.buildDefaultChainsyncIntersectPoints(
+		context.Background(),
+		connId,
+	)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -1026,14 +1029,17 @@ func TestBuildDefaultChainsyncIntersectPointsSurvivesAnchorStorageFaultWhenPoint
 
 	// The anchor lookup reads the database; the healthy path does not.
 	require.NoError(t, dbtest.CloseDatabase(db))
-	_, _, anchorErr := ls.RollbackWindowIntersectAnchor()
+	_, _, anchorErr := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.Error(
 		t,
 		anchorErr,
 		"fixture must make the anchor lookup fail",
 	)
 
-	points, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	points, err := o.buildDefaultChainsyncIntersectPoints(
+		context.Background(),
+		connId,
+	)
 	require.NoError(
 		t,
 		err,
@@ -1263,7 +1269,7 @@ func newTestLedgerStateWithChain(
 		prevHash = hash
 	}
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -1305,10 +1311,15 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 		BlockNumber: 112915,
 	})
 
-	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
+	points, err := o.ledgerState.IntersectPoints(
+		context.Background(),
+		chainsyncIntersectPointCount,
+	)
 	require.NoError(t, err)
 
-	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor()
+	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor(
+		context.Background(),
+	)
 	require.NoError(t, err)
 	got, _ := finalizeChainsyncIntersectPoints(
 		normalizeIntersectPoints(points),
@@ -1405,7 +1416,10 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 		"fixture requires the primary chain to be ahead of the ledger tip",
 	)
 
-	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
+	points, err := o.ledgerState.IntersectPoints(
+		context.Background(),
+		chainsyncIntersectPointCount,
+	)
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -1413,7 +1427,9 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 		"unapplied ahead-fork state must not be advertised (#2309)",
 	)
 
-	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor()
+	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor(
+		context.Background(),
+	)
 	require.NoError(t, err)
 	require.False(
 		t,
@@ -1458,12 +1474,17 @@ func TestIntersectPointsChainAheadWithLedgerTipRowPresentAdvertisesChainPoints(
 	_, err := o.ledgerState.GetBlock(ledgerTipPoint)
 	require.NoError(t, err, "fixture requires the ledger tip row to be present")
 
-	points, err := o.ledgerState.IntersectPoints(chainsyncIntersectPointCount)
+	points, err := o.ledgerState.IntersectPoints(
+		context.Background(),
+		chainsyncIntersectPointCount,
+	)
 	require.NoError(t, err)
 	require.Len(t, points, 5, "the chain's real points must be advertised")
 	assert.Equal(t, uint64(5), points[0].Slot, "newest chain point leads")
 
-	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor()
+	anchor, hasAnchor, err := o.ledgerState.RollbackWindowIntersectAnchor(
+		context.Background(),
+	)
 	require.NoError(t, err)
 	assert.False(
 		t,
@@ -1502,12 +1523,12 @@ func TestRollbackWindowIntersectAnchorPropagatesStorageError(t *testing.T) {
 	})
 
 	// Sanity: healthy database answers without error.
-	_, _, err := ls.RollbackWindowIntersectAnchor()
+	_, _, err := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.NoError(t, err)
 
 	require.NoError(t, dbtest.CloseDatabase(db))
 
-	_, hasAnchor, err := ls.RollbackWindowIntersectAnchor()
+	_, hasAnchor, err := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.Error(t, err, "storage failure must not be reported as no anchor")
 	assert.False(t, hasAnchor)
 }
@@ -1546,7 +1567,10 @@ func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
 	_, err := ls.GetBlock(ocommon.NewPoint(9, ledgerTipHashAbsentFromChain))
 	require.Error(t, err, "fixture requires the ledger tip row to be absent")
 
-	points, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	points, err := o.buildDefaultChainsyncIntersectPoints(
+		context.Background(),
+		connId,
+	)
 	require.NoError(t, err)
 
 	// What actually matters on the wire: we must not ask the peer to replay
@@ -1595,7 +1619,10 @@ func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
 	})
 	require.Greater(t, ls.PrimaryChainTip().Point.Slot, uint64(2))
 
-	points, err := o.buildDefaultChainsyncIntersectPoints(connId)
+	points, err := o.buildDefaultChainsyncIntersectPoints(
+		context.Background(),
+		connId,
+	)
 	require.NoError(t, err)
 
 	require.Len(t, points, 1)
@@ -1726,7 +1753,7 @@ func TestOutboundChainsyncStartFailureClosesConnection(t *testing.T) {
 		BlockNumber: 2,
 	})
 	require.NoError(t, dbtest.CloseDatabase(db))
-	_, _, anchorErr := ls.RollbackWindowIntersectAnchor()
+	_, _, anchorErr := ls.RollbackWindowIntersectAnchor(context.Background())
 	require.Error(t, anchorErr, "fixture must produce an anchor lookup error")
 
 	o.HandleOutboundConnEvent(event.NewEvent(
@@ -2175,7 +2202,8 @@ func newChainsyncServerFixtureWithConfig(
 	// The harness assigns the connection ID, so observe it as the production
 	// callbacks run. These shims only record the ID and delegate; the real
 	// callbacks (and their instrumentation wrappers) still do all the work.
-	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts(limiter)...)
+	serverCfg := ochainsync.NewConfig(
+		o.chainsyncServerConnOpts(context.Background(), limiter)...)
 	findIntersect := serverCfg.FindIntersectFunc
 	serverCfg.FindIntersectFunc = func(
 		ctx ochainsync.CallbackContext,
@@ -2252,7 +2280,10 @@ func (f *chainsyncServerFixture) appendBlock(
 		blockType:       1,
 		cbor:            []byte{0x80},
 	}
-	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
+	require.NoError(
+		t,
+		f.o.ledgerState.Chain().AddBlock(context.Background(), block, nil),
+	)
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
 }
 
@@ -2670,7 +2701,8 @@ func TestChainsyncServerRequestNextEmitsRollBackwardOnChainRollback(
 
 	require.NoError(
 		t,
-		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().
+			Rollback(context.Background(), ocommon.NewPointOrigin()),
 	)
 
 	require.NoError(t, f.h.RequestNext())
@@ -2756,7 +2788,8 @@ func TestChainsyncServerRequestNextEmitsAsyncRollBackward(t *testing.T) {
 
 	require.NoError(
 		t,
-		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().
+			Rollback(context.Background(), ocommon.NewPointOrigin()),
 	)
 
 	msg := f.observe(t)
@@ -2815,7 +2848,8 @@ func TestChainsyncServerRequestNextAsyncRollBackwardFailureClosesConnection(
 	f.h.Server().Stop()
 	require.NoError(
 		t,
-		f.o.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()),
+		f.o.ledgerState.Chain().
+			Rollback(context.Background(), ocommon.NewPointOrigin()),
 	)
 
 	f.requireConnectionClosed(
@@ -2891,6 +2925,39 @@ func TestChainsyncServerRequestNextAwaitReplyErrorPropagates(t *testing.T) {
 	f.h.Server().Stop()
 
 	require.Error(t, f.o.chainsyncServerRequestNext(f.callbackContext()))
+}
+
+// TestChainsyncServerRequestNextErrorsNameTheFailedStep verifies the callback
+// errors carry the step that failed while keeping the underlying error
+// matchable, so a torn-down connection can be diagnosed from its log line.
+func TestChainsyncServerRequestNextErrorsNameTheFailedStep(t *testing.T) {
+	t.Parallel()
+
+	t.Run("iterator", func(t *testing.T) {
+		t.Parallel()
+
+		f := newChainsyncServerFixture(t, csmock.ModeNtC)
+		f.registerClientAtOrigin(t)
+		require.NoError(t, dbtest.CloseDatabase(f.o.ledgerState.Database()))
+
+		err := f.o.chainsyncServerRequestNext(f.callbackContext())
+
+		require.ErrorContains(t, err, "chainsync server: next chain event")
+		require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
+	})
+
+	t.Run("await reply", func(t *testing.T) {
+		t.Parallel()
+
+		f := newChainsyncServerFixture(t, csmock.ModeNtC)
+		f.registerClientAtOrigin(t)
+		f.h.Server().Stop()
+
+		err := f.o.chainsyncServerRequestNext(f.callbackContext())
+
+		require.ErrorContains(t, err, "chainsync server: send AwaitReply")
+		require.Error(t, errors.Unwrap(err), "the send error must stay wrapped")
+	})
 }
 
 // TestChainsyncServerRequestNextMissingConnectionAfterAwaitReply verifies the
@@ -3413,7 +3480,7 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -3489,9 +3556,11 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 	})
 
 	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
-	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts(
-		newChainsyncFindIntersectRateLimiter(200, 1000),
-	)...)
+	serverCfg := ochainsync.NewConfig(
+		o.chainsyncServerConnOpts(
+			context.Background(),
+			newChainsyncFindIntersectRateLimiter(200, 1000),
+		)...)
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
 	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
@@ -3507,7 +3576,7 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 	t.Parallel()
 
 	o := newFindIntersectTestOuroboros(t)
-	option := o.chainsyncConnectionConfigOption(false)
+	option := o.chainsyncConnectionConfigOption(context.Background(), false)
 	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
 
 	for range 2 {
@@ -3648,7 +3717,10 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 		blockType: 1,
 		cbor:      []byte{0x80},
 	}
-	require.NoError(t, o.ledgerState.Chain().AddBlock(block, nil))
+	require.NoError(
+		t,
+		o.ledgerState.Chain().AddBlock(context.Background(), block, nil),
+	)
 	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			block.SlotNumber(),
@@ -3661,6 +3733,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	// while resolving the candidate block.
 	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		context.Background(),
 		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPoint(10, []byte{0xff})},
@@ -3689,6 +3762,7 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	// operation after a successful intersection.
 	limiter := newChainsyncFindIntersectRateLimiter(200, 1000)
 	_, _, err := o.chainsyncServerFindIntersect(
+		context.Background(),
 		limiter,
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPointOrigin()},

@@ -188,7 +188,10 @@ func storeCommitteeUpdateProposalInTxn(
 		ReturnAddress: make([]byte, 29),
 		GovActionCbor: encoded,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, txn))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, txn),
+	)
 }
 
 func seedCommitteeAuthorization(
@@ -418,10 +421,13 @@ func TestLedgerViewCommitteeCredentialsDoNotAliasByHash(t *testing.T) {
 		CredType:   lcommon.CredentialTypeScriptHash,
 		Credential: hotHash,
 	}
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
-		{ColdCredentialTag: 0, ColdCredHash: hash[:], ExpiresEpoch: 41},
-		{ColdCredentialTag: 1, ColdCredHash: hash[:], ExpiresEpoch: 42},
-	}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{ColdCredentialTag: 0, ColdCredHash: hash[:], ExpiresEpoch: 41},
+			{ColdCredentialTag: 1, ColdCredHash: hash[:], ExpiresEpoch: 42},
+		}, nil),
+	)
 	seedCommitteeCredentialAuthorization(t, db, keyCold, keyHot, 1, 1)
 	seedCommitteeCredentialAuthorization(t, db, scriptCold, scriptHot, 2, 1)
 
@@ -557,7 +563,10 @@ func TestLedgerViewCommitteeHotCredentialSelection(t *testing.T) {
 						)
 					}
 				}
-				require.NoError(t, db.SetCommitteeMembers(members, nil))
+				require.NoError(
+					t,
+					db.SetCommitteeMembers(context.Background(), members, nil),
+				)
 
 				member, err := lv.CommitteeHotCredentialMember(hot)
 				require.NoError(t, err)
@@ -618,12 +627,20 @@ func TestLedgerViewCommitteeProposalFollowsProposalSet(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, member, "expired proposal left the set before its drop")
 
-	proposal, err := db.GetGovernanceProposal(governanceTestHash(0x92), 0, nil)
+	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		governanceTestHash(0x92),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	expired, dropped := uint64(101), uint64(102)
 	proposal.ExpiredEpoch = &expired
 	proposal.DroppedEpoch = &dropped
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 	member, err = lv.ls.NewView(nil).CommitteeCredentialMember(cold)
 	require.NoError(t, err)
 	require.Nil(t, member, "dropped proposal still authorizes")
@@ -648,17 +665,24 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 			AddedSlot:         10,
 		},
 	}
-	txn := db.MetadataTxn(true)
-	require.NoError(t, db.SetCommitteeMembers(members, txn))
+	txn := db.MetadataTxn(context.Background(), true)
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), members, txn),
+	)
 	require.NoError(t, txn.Rollback())
 	txn.Release()
 
-	stored, err := db.GetCommitteeMembers(nil)
+	stored, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, stored)
 
-	require.NoError(t, db.SetCommitteeMembers(members, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), members, nil),
+	)
 	require.NoError(t, db.SoftDeleteCommitteeMembers(
+		context.Background(),
 		[]models.CommitteeCredential{{
 			CredentialTag: 1,
 			Credential:    hash[:],
@@ -666,13 +690,16 @@ func TestCommitteeCredentialStorageRollbackPreservesTags(t *testing.T) {
 		50,
 		nil,
 	))
-	stored, err = db.GetCommitteeMembers(nil)
+	stored, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 1)
 	require.Equal(t, uint8(0), stored[0].ColdCredentialTag)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(49, nil))
-	stored, err = db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 49, nil),
+	)
+	stored, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, stored, 2)
 }
@@ -683,6 +710,7 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 	_, db := committeeTestView(t, &conway.ConwayProtocolParameters{})
 	cold := committeeTestCredential(0xa2)
 	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: uint8(cold.CredType),
 			ColdCredHash:      cold.Credential[:],
@@ -696,7 +724,7 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 
 	assertTermStart := func(wantStart uint64) {
 		t.Helper()
-		members, err := db.GetCommitteeMembers(nil)
+		members, err := db.GetCommitteeMembers(context.Background(), nil)
 		require.NoError(t, err)
 		require.Len(t, members, 1)
 		require.Equal(t, wantStart, members[0].TermStartSlot)
@@ -705,6 +733,7 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 	assertTermStart(0)
 
 	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: uint8(cold.CredType),
 			ColdCredHash:      cold.Credential[:],
@@ -717,7 +746,10 @@ func TestCommitteeTermStartPresenceSurvivesStorageRollback(t *testing.T) {
 	))
 	assertTermStart(15)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(15, nil))
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 15, nil),
+	)
 	assertTermStart(0)
 }
 
@@ -732,6 +764,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 		cold := committeeTestCredential(0x11).Credential
 		hot := committeeTestCredential(0x12).Credential
 		require.NoError(t, db.SetCommitteeMembers(
+			context.Background(),
 			[]*models.CommitteeMember{{
 				ColdCredHash: cold[:],
 				ExpiresEpoch: 42,
@@ -776,6 +809,7 @@ func TestLedgerViewCommitteeMember(t *testing.T) {
 			credential := committeeTestCredential(0x31)
 			hot := committeeTestCredential(0x32).Credential
 			require.NoError(t, db.SetCommitteeMembers(
+				context.Background(),
 				[]*models.CommitteeMember{{
 					ColdCredHash: credential.Credential[:],
 					ExpiresEpoch: 50,
@@ -852,6 +886,7 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 	initialView, db := committeeTestView(t, pparams)
 	seated := committeeTestCredential(0x61)
 	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredHash: seated.Credential[:],
 			ExpiresEpoch: 60,
@@ -859,7 +894,7 @@ func TestLedgerViewPendingCommitteeCertificateValidationSameTransaction(
 		nil,
 	))
 	proposed := committeeTestCredential(0x62)
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	t.Cleanup(func() {
 		require.NoError(t, txn.Rollback())
 		txn.Release()
@@ -1117,6 +1152,7 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 
 	seated := committeeTestCredential(0x91)
 	require.NoError(t, db.SetCommitteeMembers(
+		context.Background(),
 		[]*models.CommitteeMember{{
 			ColdCredentialTag: uint8(seated.CredType),
 			ColdCredHash:      seated.Credential[:],
@@ -1135,8 +1171,11 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 
 	// NoConfidence soft-deletes every member. The committee is now
 	// authoritatively empty, not unknown, so authority must survive.
-	require.NoError(t, db.SoftDeleteAllCommitteeMembers(10, nil))
-	seatedNow, err := db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.SoftDeleteAllCommitteeMembers(context.Background(), 10, nil),
+	)
+	seatedNow, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, seatedNow, "no member may remain seated")
 
@@ -1179,7 +1218,10 @@ func enactTestUpdateCommittee(
 		GovActionCbor: encoded,
 		AddedSlot:     slot,
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 	_, err = governance.EnactProposal(&governance.EnactmentContext{
 		DB:      db,
 		Epoch:   0,
@@ -1273,11 +1315,14 @@ func TestValidateTxConwayRejectsUnelectedCommitteeVoterAtPV11(t *testing.T) {
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
 	storeCommitteeUpdateProposal(t, db, 0xd4, cold, 10)
 	elected := committeeTestCredential(0xd3)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredentialTag: uint8(elected.CredType),
-		ColdCredHash:      elected.Credential[:],
-		ExpiresEpoch:      10,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredentialTag: uint8(elected.CredType),
+			ColdCredHash:      elected.Credential[:],
+			ExpiresEpoch:      10,
+		}}, nil),
+	)
 	voter := &lcommon.Voter{
 		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
 		Hash: [28]byte(hot.Credential),
@@ -1303,11 +1348,14 @@ func TestValidateTxDijkstraAcceptsElectedCommitteeVoter(t *testing.T) {
 	cold := committeeTestCredential(0xe1)
 	hot, votingKey := committeeTestVotingKey(0xe2)
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredentialTag: uint8(cold.CredType),
-		ColdCredHash:      cold.Credential[:],
-		ExpiresEpoch:      10,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      10,
+		}}, nil),
+	)
 	voter := &lcommon.Voter{
 		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
 		Hash: [28]byte(hot.Credential),
@@ -1345,11 +1393,14 @@ func TestValidateTxConwayAcceptsElectedCommitteeVoterAtPV11(t *testing.T) {
 	cold := committeeTestCredential(0xd1)
 	hot, votingKey := committeeTestVotingKey(0xd2)
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredentialTag: uint8(cold.CredType),
-		ColdCredHash:      cold.Credential[:],
-		ExpiresEpoch:      10,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      10,
+		}}, nil),
+	)
 	voter := &lcommon.Voter{
 		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
 		Hash: [28]byte(hot.Credential),
@@ -1395,11 +1446,14 @@ func TestValidateTxConwayAcceptsAuthorizedPendingCommitteeVoterAtPV10(
 	hot, votingKey := committeeTestVotingKey(0xd9)
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
 	elected := committeeTestCredential(0xda)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredentialTag: uint8(elected.CredType),
-		ColdCredHash:      elected.Credential[:],
-		ExpiresEpoch:      10,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredentialTag: uint8(elected.CredType),
+			ColdCredHash:      elected.Credential[:],
+			ExpiresEpoch:      10,
+		}}, nil),
+	)
 	storeCommitteeUpdateProposal(t, db, 0xdb, cold, 10)
 	voter := &lcommon.Voter{
 		Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
@@ -1486,11 +1540,15 @@ func TestValidateTxCommitteeCertsAffectSameTransactionVoterElection(
 				seedCommitteeCredentialAuthorization(t, db, cold, oldHot, 1, 1)
 				require.NoError(
 					t,
-					db.SetCommitteeMembers([]*models.CommitteeMember{{
-						ColdCredentialTag: uint8(cold.CredType),
-						ColdCredHash:      cold.Credential[:],
-						ExpiresEpoch:      10,
-					}}, nil),
+					db.SetCommitteeMembers(
+						context.Background(),
+						[]*models.CommitteeMember{{
+							ColdCredentialTag: uint8(cold.CredType),
+							ColdCredHash:      cold.Credential[:],
+							ExpiresEpoch:      10,
+						}},
+						nil,
+					),
 				)
 				cert := test.certificate(cold, oldHot, newHot)
 				voter := &lcommon.Voter{
@@ -1558,11 +1616,14 @@ func validateCommitteeUpdateVoteRejectedAtVersion(t *testing.T, version uint) {
 	cold := committeeTestCredential(0xd5)
 	hot := committeeTestCredential(0xd6)
 	seedCommitteeCredentialAuthorization(t, db, cold, hot, 1, 1)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
-		ColdCredentialTag: uint8(cold.CredType),
-		ColdCredHash:      cold.Credential[:],
-		ExpiresEpoch:      10,
-	}}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
+			ColdCredentialTag: uint8(cold.CredType),
+			ColdCredHash:      cold.Credential[:],
+			ExpiresEpoch:      10,
+		}}, nil),
+	)
 	storeCommitteeUpdateProposal(t, db, 0xd7, cold, 10)
 	require.NoError(t, db.SetEpoch(0, 0, nil, nil, nil, nil, 0, 1, 100, nil))
 	var actionTxID [32]byte
@@ -1680,18 +1741,21 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 	hot := committeeTestCredential(0xc0)
 	coldA := committeeTestCredential(0xc1)
 	coldB := committeeTestCredential(0xc2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
-		{
-			ColdCredentialTag: uint8(coldA.CredType),
-			ColdCredHash:      coldA.Credential[:],
-			ExpiresEpoch:      10,
-		},
-		{
-			ColdCredentialTag: uint8(coldB.CredType),
-			ColdCredHash:      coldB.Credential[:],
-			ExpiresEpoch:      10,
-		},
-	}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{
+				ColdCredentialTag: uint8(coldA.CredType),
+				ColdCredHash:      coldA.Credential[:],
+				ExpiresEpoch:      10,
+			},
+			{
+				ColdCredentialTag: uint8(coldB.CredType),
+				ColdCredHash:      coldB.Credential[:],
+				ExpiresEpoch:      10,
+			},
+		}, nil),
+	)
 	seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
 	seedCommitteeCredentialAuthorization(t, db, coldB, hot, 2, 1)
 
@@ -1767,18 +1831,21 @@ func TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx(
 	hot := committeeTestCredential(0xd0)
 	coldA := committeeTestCredential(0xd1)
 	coldB := committeeTestCredential(0xd2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
-		{
-			ColdCredentialTag: uint8(coldA.CredType),
-			ColdCredHash:      coldA.Credential[:],
-			ExpiresEpoch:      10,
-		},
-		{
-			ColdCredentialTag: uint8(coldB.CredType),
-			ColdCredHash:      coldB.Credential[:],
-			ExpiresEpoch:      10,
-		},
-	}, nil))
+	require.NoError(
+		t,
+		db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
+			{
+				ColdCredentialTag: uint8(coldA.CredType),
+				ColdCredHash:      coldA.Credential[:],
+				ExpiresEpoch:      10,
+			},
+			{
+				ColdCredentialTag: uint8(coldB.CredType),
+				ColdCredHash:      coldB.Credential[:],
+				ExpiresEpoch:      10,
+			},
+		}, nil),
+	)
 	seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
 	seedCommitteeCredentialAuthorization(t, db, coldB, hot, 2, 1)
 
@@ -1878,7 +1945,10 @@ func TestConwayKnownVoterRuleResolvesEveryAuthorizerOfSharedHotCredential(
 						ExpiresEpoch:      10,
 					})
 				}
-				require.NoError(t, db.SetCommitteeMembers(seated, nil))
+				require.NoError(
+					t,
+					db.SetCommitteeMembers(context.Background(), seated, nil),
+				)
 				seedCommitteeCredentialAuthorization(t, db, coldA, hot, 1, 1)
 				if tc.sharer == sharerSeated {
 					seedCommitteeCredentialAuthorization(
@@ -2177,7 +2247,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
@@ -2192,18 +2262,21 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	drepStakeCred := bytes.Repeat([]byte{0x22}, 28)
 	returnStakeCred := bytes.Repeat([]byte{0x33}, 28)
 
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: drepStakeCred,
-		Drep:       drepCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: drepStakeCred,
+			Drep:       drepCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{0x44}, 32),
 		OutputIdx:  0,
 		StakingKey: drepStakeCred,
@@ -2211,13 +2284,16 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 		Amount:     100,
 	}))
 
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: returnStakeCred,
-		Drep:       drepCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		AddedSlot:  1,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: returnStakeCred,
+			Drep:       drepCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
 	returnAddr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeNoneKey,
 		lcommon.AddressNetworkTestnet,
@@ -2227,18 +2303,25 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 	require.NoError(t, err)
 	returnAddrBytes, err := returnAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        bytes.Repeat([]byte{0x55}, 32),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		Deposit:       50,
-		ReturnAddress: returnAddrBytes,
-		AnchorURL:     "https://example.invalid/deposit",
-		AnchorHash:    bytes.Repeat([]byte{0x66}, 32),
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        bytes.Repeat([]byte{0x55}, 32),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				Deposit:       50,
+				ReturnAddress: returnAddrBytes,
+				AnchorURL:     "https://example.invalid/deposit",
+				AnchorHash:    bytes.Repeat([]byte{0x66}, 32),
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	lv := &LedgerView{ls: ls}
 	power, err := lv.GetDRepVotingPower(0, drepCred)
@@ -2345,7 +2428,10 @@ func storeGovernanceTestProposal(
 		require.NoError(t, err)
 		proposal.GovActionCbor = encoded
 	}
-	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 }
 
 func hardForkGovernanceTestAction(
@@ -3579,26 +3665,28 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 				txs:    []lcommon.Transaction{tx},
 			}
 
-			err := db.Transaction(true).Do(func(txn *database.Txn) error {
-				_, err := ls.ledgerProcessBlock(
-					txn,
-					ocommon.NewPoint(1, block.Hash().Bytes()),
-					block,
-					true,
-					false,
-					false,
-					nil,
-					envelopeParent{origin: true},
-					nil,
-					testEra,
-					nil,
-					nil,
-					0,
-					0,
-					false,
-				)
-				return err
-			})
+			err := db.Transaction(context.Background(), true).
+				Do(func(txn *database.Txn) error {
+					_, err := ls.ledgerProcessBlock(
+						context.Background(),
+						txn,
+						ocommon.NewPoint(1, block.Hash().Bytes()),
+						block,
+						true,
+						false,
+						false,
+						nil,
+						envelopeParent{origin: true},
+						nil,
+						testEra,
+						nil,
+						nil,
+						0,
+						0,
+						false,
+					)
+					return err
+				})
 
 			require.True(t, called, "block validation must run the rule")
 			require.ErrorIs(t, err, stubErr)
@@ -3645,7 +3733,7 @@ func TestLedgerViewTreasuryValueReadsValidationTransaction(t *testing.T) {
 	requireTreasuryValue(t, ls, nil, 100)
 
 	rollbackErr := errors.New("test rollback")
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		require.NoError(t, db.Metadata().SetNetworkState(
 			250,
@@ -3668,9 +3756,9 @@ func TestLedgerViewTreasuryValueTracksChainRollback(t *testing.T) {
 	require.NoError(t, db.Metadata().SetNetworkState(60, 900, 20, nil))
 	requireTreasuryValue(t, ls, nil, 60)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := db.DeleteNetworkStateAfterSlot(10, txn); err != nil {
+		if err := db.DeleteNetworkStateAfterSlot(context.Background(), 10, txn); err != nil {
 			return err
 		}
 		value, err := ls.NewView(txn).TreasuryValue()
@@ -3806,7 +3894,7 @@ func runProposalSetBoundary(
 	boundarySlot uint64,
 ) *governance.EpochOutput {
 	t.Helper()
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
 	out, err := governance.ProcessEpoch(&governance.EpochInput{
 		DB:           db,
@@ -3945,6 +4033,7 @@ func TestProposalSetKeepsExpiredActionUntilItIsDropped(t *testing.T) {
 		require.Nil(t, state, "dropped subtree still resolvable")
 		require.False(t, lv.GovActionExists(id))
 		proposal, err := db.GetGovernanceProposal(
+			context.Background(),
 			id.TransactionId[:], id.GovActionIdx, nil,
 		)
 		require.NoError(t, err)
@@ -4118,7 +4207,7 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 	require.NoError(t, err)
 	key := bytes.Repeat([]byte{0xa1}, lcommon.AddressHashSize)
 	for _, tag := range []uint8{0, 1} {
-		require.NoError(t, db.CreateAccount(nil, &models.Account{
+		require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 			StakingKey:    key,
 			CredentialTag: tag,
 			Reward:        types.Uint64(100 + uint64(tag)),
@@ -4126,7 +4215,7 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 		}))
 	}
 	inactive := bytes.Repeat([]byte{0xa2}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: inactive,
 		Reward:     55,
 		Active:     false,
@@ -4167,7 +4256,7 @@ func TestLedgerViewRewardAccountBalance(t *testing.T) {
 		})
 	}
 	zero := bytes.Repeat([]byte{0xa4}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: zero,
 		Reward:     0,
 		Active:     true,
@@ -4258,7 +4347,7 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 	)
 
 	inactiveHash := bytes.Repeat([]byte{0xb4}, lcommon.AddressHashSize)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    inactiveHash,
 		CredentialTag: 0,
 		Active:        false,
@@ -4319,7 +4408,7 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 		})
 	}
 
-	importHistory, err := db.GetAccountRegistrationHistoryByCredential(
+	importHistory, err := db.GetAccountRegistrationHistoryByCredential(context.Background(),
 		1,
 		importedScriptCredential.Credential[:],
 		10,
@@ -4330,8 +4419,8 @@ func TestLedgerViewStakeCredentialDeposit(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, importHistory)
 
-	require.NoError(t, db.DeleteCertificatesAfterSlot(105, nil))
-	require.NoError(t, db.RestoreAccountStateAtSlot(105, nil))
+	require.NoError(t, db.DeleteCertificatesAfterSlot(context.Background(), 105, nil))
+	require.NoError(t, db.RestoreAccountStateAtSlot(context.Background(), 105, nil))
 	depositAfterRollback, err := lv.StakeCredentialDeposit(
 		importedThenRegisteredCredential,
 	)
@@ -4398,7 +4487,7 @@ func persistViewStakeRegistration(
 	})
 	tx, err := builder.Build()
 	require.NoError(t, err)
-	require.NoError(t, db.SetTransactionMetadataOnly(
+	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
 		tx,
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,
@@ -4460,7 +4549,7 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -4586,7 +4675,7 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -4700,7 +4789,7 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -4821,7 +4910,7 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -4937,7 +5026,7 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -5002,7 +5091,7 @@ func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 		}
 		require.NoError(
 			t,
-			db.SetTransactionMetadataOnly(
+			db.SetTransactionMetadataOnly(context.Background(),
 				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
 			),
 		)
@@ -5492,7 +5581,7 @@ func TestEpochRolloverSeatsMemberWithOnlyItsClosingEpochAuthorization(
 				RatifiedEpoch: &ratifiedEpoch,
 				RatifiedSlot:  &ratifiedSlot,
 			}
-			require.NoError(t, f.db.SetGovernanceProposal(update, nil))
+			require.NoError(t, f.db.SetGovernanceProposal(context.Background(), update, nil))
 			raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 			require.NoError(t, err)
 			_, err = raw.Exec(`
@@ -5515,7 +5604,7 @@ INSERT INTO auth_committee_hot (
 			enacted := f.proposal(t, update)
 			require.NotNil(t, enacted.EnactedSlot)
 
-			state, err := governance.LoadCommitteeVotingState(
+			state, err := governance.LoadCommitteeVotingState(context.Background(),
 				f.db, nil, result.NewCurrentEpoch.EpochId,
 			)
 			require.NoError(t, err)
@@ -5542,7 +5631,7 @@ INSERT INTO auth_committee_hot (
 			require.NoError(t, err)
 			require.Equal(t, tc.hasHot, member != nil)
 
-			members, err := f.db.GetCommitteeMembers(nil)
+			members, err := f.db.GetCommitteeMembers(context.Background(), nil)
 			require.NoError(t, err)
 			var seated *models.CommitteeMember
 			for _, member := range members {
@@ -5597,7 +5686,7 @@ func TestCommitteeEnactmentRollbackRestoresPendingAuthorization(t *testing.T) {
 		RatifiedEpoch: &ratifiedEpoch,
 		RatifiedSlot:  &ratifiedSlot,
 	}
-	require.NoError(t, f.db.SetGovernanceProposal(update, nil))
+	require.NoError(t, f.db.SetGovernanceProposal(context.Background(), update, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -5649,8 +5738,8 @@ INSERT INTO auth_committee_hot (
 	))
 
 	boundary := result.NewCurrentEpoch.StartSlot
-	require.NoError(t, f.db.DeleteCommitteeMembersAfterSlot(boundary-1, nil))
-	require.NoError(t, f.db.DeleteGovernanceProposalsAfterSlot(boundary-1, nil))
+	require.NoError(t, f.db.DeleteCommitteeMembersAfterSlot(context.Background(), boundary-1, nil))
+	require.NoError(t, f.db.DeleteGovernanceProposalsAfterSlot(context.Background(), boundary-1, nil))
 	require.Equal(
 		t,
 		before,
@@ -5672,7 +5761,7 @@ func seatExpiredCommitteeMember(
 	cold lcommon.Credential,
 ) {
 	t.Helper()
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredentialTag: uint8(cold.CredType),
 		ColdCredHash:      cold.Credential[:],
 		ExpiresEpoch:      1,
@@ -5921,7 +6010,7 @@ func TestLedgerViewCommitteeHotAuthorizationRejectsMalformedSeatedColdHash(
 			hot, hotKey := committeeTestVotingKey(0x92)
 			malformed := make([]byte, length)
 			copy(malformed, pending.Credential[:])
-			require.NoError(t, db.SetCommitteeMembers(
+			require.NoError(t, db.SetCommitteeMembers(context.Background(),
 				[]*models.CommitteeMember{{
 					ColdCredentialTag: uint8(pending.CredType),
 					ColdCredHash:      malformed,
@@ -6153,7 +6242,7 @@ func TestDRepRegistrationReportsNilForUnregisteredCredential(t *testing.T) {
 	cred := drepRefundTestCredential(0xd4)
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag: tag,
 		Credential:    append([]byte(nil), cred.Credential[:]...),
 		AddedSlot:     100,
@@ -6209,7 +6298,7 @@ func seedActiveDrepWithoutRegistration(
 	t.Helper()
 	tag, err := models.CredentialTagFromUint(uint(cred.CredType))
 	require.NoError(t, err)
-	require.NoError(t, db.InsertDrepIfAbsent(
+	require.NoError(t, db.InsertDrepIfAbsent(context.Background(),
 		tag,
 		cred.Credential[:],
 		slot,
@@ -6220,7 +6309,7 @@ func seedActiveDrepWithoutRegistration(
 	))
 	// The recovery path really does leave no registration row behind; if it
 	// ever starts writing one this test is measuring the wrong thing.
-	recorded, err := db.GetDrepLastRegistrationDeposit(
+	recorded, err := db.GetDrepLastRegistrationDeposit(context.Background(),
 		tag,
 		cred.Credential[:],
 		nil,
@@ -6545,7 +6634,7 @@ VALUES (?, 0, ?, ?)`, key, pool, registerSlot)
 
 		f.rollover(t)
 		f.ls.waitEpochBoundaryBenchBackground()
-		account, err := f.db.GetAccountByCredential(0, key, true, nil)
+		account, err := f.db.GetAccountByCredential(context.Background(), 0, key, true, nil)
 		require.NoError(t, err)
 		var balance *uint64
 		if account.Active {
@@ -6636,7 +6725,7 @@ func TestEmptyGenesisCommitteeStateAvailable(t *testing.T) {
 			ls, db := genesisConstitutionTestState(t)
 			ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members = members
 			for range 2 {
-				require.NoError(t, ls.createGenesisBlock())
+				require.NoError(t, ls.createGenesisBlock(context.Background()))
 				require.Zero(t, committeeMemberRowCount(t, db))
 				available, err := ls.NewView(nil).CommitteeStateAvailable()
 				require.NoError(t, err)
@@ -6661,7 +6750,7 @@ func TestCreateGenesisBlockSeedsCommittee(t *testing.T) {
 	t.Parallel()
 
 	ls, _ := genesisConstitutionTestState(t)
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	lv := &LedgerView{ls: ls}
 	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys {
@@ -6696,11 +6785,11 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 	t.Parallel()
 
 	ls, db := genesisConstitutionTestState(t)
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	coldKey, err := hex.DecodeString(musashiGenesisCommitteeColdKeys[0])
 	require.NoError(t, err)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{
 		{
 			ColdCredentialTag: 0,
 			ColdCredHash:      coldKey,
@@ -6712,7 +6801,7 @@ func TestCreateGenesisBlockCommitteeEnactmentWins(t *testing.T) {
 	}, nil))
 
 	ls.currentTip.Point = ocommon.Point{Slot: 200}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	lv := &LedgerView{ls: ls}
 	member, err := lv.CommitteeCredentialMember(lcommon.Credential{
@@ -6749,7 +6838,7 @@ func TestCreateGenesisBlockConstitutionEnactmentWins(t *testing.T) {
 	t.Parallel()
 
 	ls, db := genesisConstitutionTestState(t)
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	enactedAnchor := bytes.Repeat([]byte{0xe1}, lcommon.Blake2b256Size)
 	enactedScript := bytes.Repeat([]byte{0xe2}, lcommon.Blake2b224Size)
@@ -6761,7 +6850,7 @@ func TestCreateGenesisBlockConstitutionEnactmentWins(t *testing.T) {
 	}, nil))
 
 	ls.currentTip.Point = ocommon.Point{Slot: 200}
-	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock(context.Background()))
 
 	lv := &LedgerView{ls: ls}
 	got, err := lv.Constitution()
@@ -6820,12 +6909,12 @@ func newTreasuryRolloverFixture(
 
 	coldCredential := repeatByte(28, 0xc1)
 	hotCredential := repeatByte(28, 0xc2)
-	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{{
+	require.NoError(t, db.SetCommitteeMembers(context.Background(), []*models.CommitteeMember{{
 		ColdCredHash: coldCredential,
 		ExpiresEpoch: currentEpoch.EpochId + 20,
 		AddedSlot:    1,
 	}}, nil))
-	require.NoError(t, db.SetCommitteeQuorum(big.NewRat(1, 1), 1, nil))
+	require.NoError(t, db.SetCommitteeQuorum(context.Background(), big.NewRat(1, 1), 1, nil))
 	raw, err := dbtest.RawSQLiteMetadata(t, db)
 	require.NoError(t, err)
 	_, err = raw.Exec(`
@@ -6863,7 +6952,7 @@ func (f *treasuryRolloverFixture) rollover(
 ) *EpochRolloverResult {
 	t.Helper()
 	var result *EpochRolloverResult
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		result, rolloverErr = f.ls.processEpochRollover(
@@ -6885,7 +6974,7 @@ func (f *treasuryRolloverFixture) proposal(
 	proposal *models.GovernanceProposal,
 ) *models.GovernanceProposal {
 	t.Helper()
-	loaded, err := f.db.GetGovernanceProposal(
+	loaded, err := f.db.GetGovernanceProposal(context.Background(),
 		proposal.TxHash,
 		proposal.ActionIndex,
 		nil,
@@ -6959,7 +7048,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.NoError(t, err)
 	withdrawAddrBytes, err := withdrawAddr.Bytes()
 	require.NoError(t, err)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey: stakeCred,
 		Reward:     types.Uint64(0),
 		Active:     true,
@@ -6973,7 +7062,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.NoError(t, err)
 	ratifiedEpoch := endedEpoch
 	ratifiedSlot := uint64(400)
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+	require.NoError(t, db.SetGovernanceProposal(context.Background(), &models.GovernanceProposal{
 		TxHash:        make([]byte, 32),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -7000,7 +7089,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	runBoundary := func() uint64 {
 		t.Helper()
 		var providerTreasury uint64
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			if _, err := governance.ProcessEpoch(&governance.EpochInput{
 				DB:           db,
@@ -7041,7 +7130,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	assert.Equal(t, initialReserves, reserves)
 
 	// The withdrawal credited the registered reward account.
-	account, err := db.GetAccountByCredential(0, stakeCred, false, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),
@@ -7060,7 +7149,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	require.Equal(t, uint64(900), runBoundary())
 	requireTreasuryValue(t, ls, nil, 900)
 
-	account, err = db.GetAccountByCredential(0, stakeCred, false, nil)
+	account, err = db.GetAccountByCredential(context.Background(), 0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),
@@ -7069,8 +7158,8 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	// Rewinding before both the donation block and boundary restores the
 	// earlier pot row. These are the same slot-keyed deletes used by the
 	// database rollback path.
-	require.NoError(t, db.DeleteNetworkStateAfterSlot(1, nil))
-	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(1, nil))
+	require.NoError(t, db.DeleteNetworkStateAfterSlot(context.Background(), 1, nil))
+	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(context.Background(), 1, nil))
 	requireTreasuryValue(t, ls, nil, initialTreasury)
 }
 
@@ -7147,9 +7236,9 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 				MaxBlockBodySize:   100_000,
 				MaxBlockHeaderSize: 100_000,
 			}
-			processErr := db.Transaction(true).
+			processErr := db.Transaction(context.Background(), true).
 				Do(func(txn *database.Txn) error {
-					_, err := ls.ledgerProcessBlock(
+					_, err := ls.ledgerProcessBlock(context.Background(),
 						txn,
 						ocommon.NewPoint(
 							previewBlockSlot,
@@ -7379,7 +7468,7 @@ func seedStakeRegistration(
 	if deposit != nil {
 		certDeposits[0] = *deposit
 	}
-	require.NoError(t, db.SetTransactionMetadataOnly(
+	require.NoError(t, db.SetTransactionMetadataOnly(context.Background(),
 		tx,
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,

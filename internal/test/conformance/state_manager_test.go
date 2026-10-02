@@ -61,14 +61,27 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 		},
 	}, pp))
 
-	keyDRep, err := m.db.GetDrepByCredential(0, hash[:], false, nil)
+	keyDRep, err := m.db.GetDrepByCredential(
+		context.Background(),
+		0,
+		hash[:],
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(0), keyDRep.CredentialTag)
-	scriptDRep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
+	scriptDRep, err := m.db.GetDrepByCredential(
+		context.Background(),
+		1,
+		hash[:],
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), scriptDRep.CredentialTag)
 	for _, credentialTag := range []uint8{0, 1} {
 		deposit, err := m.db.GetDrepLastRegistrationDeposit(
+			context.Background(),
 			credentialTag,
 			hash[:],
 			nil,
@@ -82,7 +95,7 @@ func TestLoadInitialStatePreservesTypedDRepRegistrations(t *testing.T) {
 		require.Equal(t, want, *deposit)
 	}
 
-	dreps, err := m.db.GetActiveDreps(nil)
+	dreps, err := m.db.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, dreps, 2)
 }
@@ -106,10 +119,21 @@ func TestLoadInitialStateLegacyDRepUsesRecordedCredential(t *testing.T) {
 		},
 	}, pp))
 
-	drep, err := m.db.GetDrepByCredential(1, hash[:], false, nil)
+	drep, err := m.db.GetDrepByCredential(
+		context.Background(),
+		1,
+		hash[:],
+		false,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, drep)
-	deposit, err := m.db.GetDrepLastRegistrationDeposit(1, hash[:], nil)
+	deposit, err := m.db.GetDrepLastRegistrationDeposit(
+		context.Background(),
+		1,
+		hash[:],
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, deposit)
 	require.Equal(t, recordedDeposit, *deposit)
@@ -131,7 +155,7 @@ func TestLoadInitialStateSkipsInactiveDRepsWithoutDeposit(t *testing.T) {
 		},
 	}, &babbage.BabbageProtocolParameters{}))
 
-	dreps, err := m.db.GetActiveDreps(nil)
+	dreps, err := m.db.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(t, dreps)
 }
@@ -178,13 +202,16 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 		GovActionCbor: []byte{0x80},
 		AddedSlot:     1,
 	}
-	require.NoError(t, m.db.SetGovernanceProposal(proposal, nil))
+	require.NoError(
+		t,
+		m.db.SetGovernanceProposal(context.Background(), proposal, nil),
+	)
 
 	const (
 		ratifiedEpoch = uint64(4)
 		boundarySlot  = uint64(400)
 	)
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, m.persistRatification(
 		txn,
@@ -194,7 +221,12 @@ func TestPersistRatificationStoresEpochAndBoundarySlot(t *testing.T) {
 	))
 	require.NoError(t, txn.Commit())
 
-	stored, err := m.db.GetGovernanceProposal(txHash, 0, nil)
+	stored, err := m.db.GetGovernanceProposal(
+		context.Background(),
+		txHash,
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, stored.RatifiedEpoch)
 	require.NotNil(t, stored.RatifiedSlot)
@@ -298,17 +330,23 @@ func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 
 	cred := testHash28(0xbb)
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 	account := &models.Account{
 		StakingKey:    cred[:],
 		CredentialTag: 0,
 		Active:        true,
 	}
-	require.NoError(t, m.db.CreateAccount(txn, account))
+	require.NoError(t, m.db.CreateAccount(context.Background(), txn, account))
 	require.NoError(t, txn.Rollback())
 
-	got, err := m.db.GetAccountByCredential(0, cred[:], false, nil)
+	got, err := m.db.GetAccountByCredential(
+		context.Background(),
+		0,
+		cred[:],
+		false,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrAccountNotFound)
 	require.Nil(t, got)
 }
@@ -341,12 +379,15 @@ func TestDRepDelegationReadsRealBackendNotGovStateMirror(t *testing.T) {
 
 	// Backend-only delegation: always-abstain, written directly to
 	// account.drep_type/account.drep, disagreeing with the mirror above.
-	require.NoError(t, m.db.CreateAccount(nil, &models.Account{
-		StakingKey:    cred.Credential[:],
-		CredentialTag: 0,
-		DrepType:      models.DrepTypeAlwaysAbstain,
-		Active:        true,
-	}))
+	require.NoError(
+		t,
+		m.db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey:    cred.Credential[:],
+			CredentialTag: 0,
+			DrepType:      models.DrepTypeAlwaysAbstain,
+			Active:        true,
+		}),
+	)
 
 	provider := NewDingoStateProvider(m)
 	delegation, err := provider.DRepDelegation(cred)
@@ -429,6 +470,7 @@ func TestCommitteeMemberReadsPendingUpdateCommitteeProposal(t *testing.T) {
 	require.NoError(t, err)
 	m.protocolParams = &conway.ConwayProtocolParameters{}
 	require.NoError(t, m.db.SetGovernanceProposal(
+		context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        testHash32(0x50),
 			ActionType:    uint8(common.GovActionTypeUpdateCommittee),
@@ -712,6 +754,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	poolHash := testHash28(0xcc)
 	stakingKey := testHash28(0xdd)
 	require.NoError(t, m.db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolHash[:], VrfKeyHash: make([]byte, 32)},
 		&models.PoolRegistration{
@@ -720,12 +763,15 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 			AddedSlot:   0,
 		},
 	))
-	require.NoError(t, m.db.CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey[:],
-		Pool:       poolHash[:],
-		Active:     true,
-	}))
-	require.NoError(t, m.db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		m.db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakingKey[:],
+			Pool:       poolHash[:],
+			Active:     true,
+		}),
+	)
+	require.NoError(t, m.db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       testHash32(0xee),
 		OutputIdx:  0,
 		StakingKey: stakingKey[:],
@@ -738,7 +784,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	m.currentEpoch = 0
 	boundarySlot := conformanceSlotsPerEpoch
 
-	txn := m.db.Transaction(true)
+	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
 	_, err = governance.ProcessEpoch(&governance.EpochInput{
@@ -860,7 +906,7 @@ func TestCommitteeActionRatifiedNoConfidenceUsesMotionThresholdAndImplicitYes(
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -920,7 +966,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -965,7 +1011,7 @@ func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
@@ -1241,7 +1287,7 @@ func TestCommitteeActionRatifiedRefusesDuringConwayBootstrap(t *testing.T) {
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	m.protocolParams = pparamsAt(9)
@@ -1361,7 +1407,7 @@ func TestCommitteeActionRatifiedRefusesUpdateCommitteeOverTermLimit(
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, currentEpoch)
@@ -1431,7 +1477,7 @@ func TestCommitteeActionRatifiedUsesPassedEpochNotManagerField(t *testing.T) {
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
@@ -1545,7 +1591,7 @@ func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 		},
 	}
 
-	txn := m.db.Transaction(false)
+	txn := m.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	// The assertion deliberately goes through committeeActionRatified rather
@@ -1595,7 +1641,7 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 	persist := func(seed string, slot uint64, certs ...common.Certificate) {
 		tx, err := syntheticTransaction(seed, certs)
 		require.NoError(t, err)
-		require.NoError(t, m.db.SetTransactionMetadataOnly(
+		require.NoError(t, m.db.SetTransactionMetadataOnly(context.Background(),
 			tx,
 			ocommon.Point{Slot: slot, Hash: syntheticBlockHash(slot)},
 			0,
@@ -1685,7 +1731,7 @@ func TestCommitteeHotCredentialMemberDropsUnseatedAuthorizationAtBoundary(
 	require.NoError(t, err)
 	encoded, err := cbor.Encode(action)
 	require.NoError(t, err)
-	require.NoError(t, m.db.SetGovernanceProposal(
+	require.NoError(t, m.db.SetGovernanceProposal(context.Background(),
 		&models.GovernanceProposal{
 			TxHash:        testHash32(0xa4),
 			ActionType:    uint8(common.GovActionTypeUpdateCommittee),

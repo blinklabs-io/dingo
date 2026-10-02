@@ -14,17 +14,22 @@
 
 package database
 
-import "github.com/blinklabs-io/dingo/database/models"
+import (
+	"context"
+
+	"github.com/blinklabs-io/dingo/database/models"
+)
 
 // GetMIRCertsInSlotRange returns the processed effects of all MIR certificates
 // whose added_slot is >= startSlot and < endSlot. Used to apply the Shelley-era
 // INSTANT rule at each epoch boundary.
 func (d *Database) GetMIRCertsInSlotRange(
+	ctx context.Context,
 	startSlot, endSlot uint64,
 	txn *Txn,
 ) ([]models.MIREffect, error) {
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	return d.certificateStore().GetMIRCertsInSlotRange(

@@ -16,6 +16,7 @@ package database_test
 
 import (
 	"bytes"
+	"context"
 	"math"
 	"testing"
 
@@ -46,11 +47,15 @@ func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			credential := bytes.Repeat([]byte{byte(i + 1)}, 28)
-			require.NoError(t, db.CreateDrep(nil, &models.Drep{
-				CredentialTag: 1, Credential: credential, Active: true,
-				LastActivityEpoch: 10, ExpiryEpoch: 20,
-			}))
+			require.NoError(
+				t,
+				db.CreateDrep(context.Background(), nil, &models.Drep{
+					CredentialTag: 1, Credential: credential, Active: true,
+					LastActivityEpoch: 10, ExpiryEpoch: 20,
+				}),
+			)
 			err := db.UpdateDRepActivity(
+				context.Background(),
 				1,
 				credential,
 				tc.activity,
@@ -62,7 +67,13 @@ func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 			} else {
 				require.Error(t, err, "out-of-range DRep expiry was persisted")
 			}
-			got, err := db.GetDrepByCredential(1, credential, true, nil)
+			got, err := db.GetDrepByCredential(
+				context.Background(),
+				1,
+				credential,
+				true,
+				nil,
+			)
 			require.NoError(t, err)
 			if tc.valid {
 				require.Equal(t, tc.activity, got.LastActivityEpoch)

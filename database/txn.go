@@ -178,7 +178,7 @@ func (t *Txn) releaseBlobPinLocked() {
 	pin.release()
 }
 
-func NewTxn(db *Database, readWrite bool) *Txn {
+func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	pinBlobStoreForTxn(t, db)
@@ -190,20 +190,10 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// avoid contending with the SQLite write connection. This
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
-		//
-		// context.Background(): NewTxn itself takes no ctx, and none of
-		// its own callers (Database.Transaction and its ~100 call sites
-		// across ledger/api/mempool) have one to offer yet either -- this
-		// is the current propagation boundary between the metadata
-		// store's own ctx-aware Transaction/ReadTransaction and the rest
-		// of the node, not a gap within the metadata store itself.
-		// Threading a real ctx from callers into this boundary is a
-		// separate, distinctly larger change than this metadata-store
-		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(ctx)
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -224,7 +214,11 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	return t
 }
 
-func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
+func NewMetadataOnlyTxn(
+	ctx context.Context,
+	db *Database,
+	readWrite bool,
+) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	// A metadata-only transaction opens no blob transaction, but it still
@@ -234,12 +228,10 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	// hold.
 	pinBlobStoreForTxn(t, db)
 	if ms := db.Metadata(); ms != nil {
-		// See NewTxn's matching comment: context.Background() here is the
-		// current propagation boundary, not a metadata-store-internal gap.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(ctx)
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -287,7 +279,7 @@ func (t *Txn) DB() *Database {
 // opened here, not the borrowed blob handle -- t (or whatever constructed
 // it) still owns that and keeps using it afterward. Only valid for a
 // read-only t; the only current caller's t is always BlobTxn(false).
-func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
+func (t *Txn) withMetadataForRecovery(ctx context.Context) (*Txn, func()) {
 	aug := &Txn{
 		db: t.db,
 		// readWrite carried over from t, not defaulted to false: it is
@@ -312,9 +304,9 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 			// internally), matching NewMetadataOnlyTxn's identical call.
 			acquireCommitBarrier(aug, true)
 			if aug.readWrite {
-				aug.metadataTxn = ms.Transaction(context.Background())
+				aug.metadataTxn = ms.Transaction(ctx)
 			} else {
-				aug.metadataTxn = ms.ReadTransaction(context.Background())
+				aug.metadataTxn = ms.ReadTransaction(ctx)
 			}
 		}
 	}

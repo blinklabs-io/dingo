@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -116,7 +117,7 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 	p.cacheMu.RUnlock()
 
 	// Cache miss or expired - fetch from database
-	relays, err := p.db.GetActivePoolRelays(nil)
+	relays, err := p.db.GetActivePoolRelays(context.Background(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolRelays: fetch relays: %w", err)
 	}

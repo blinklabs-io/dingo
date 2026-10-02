@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -109,7 +110,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
-	parent, incumbentTip, ok := ls.chain.TipPredecessor()
+	parent, incumbentTip, ok := ls.chain.TipPredecessor(context.Background())
 	if !ok {
 		return false, fmt.Errorf(
 			"%w: chain tip has no resolvable predecessor",
@@ -187,7 +188,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 			err,
 		)
 	}
-	if _, err := ls.chain.AddLocalBlockDeferred(block); err != nil {
+	if _, err := ls.chain.AddLocalBlockDeferred(context.Background(), block); err != nil {
 		// The chain is now at the fork point with neither candidate on it.
 		// That is recoverable -- chainsync re-offers the rival's header,
 		// which no longer conflicts with our tip -- but it is not a state

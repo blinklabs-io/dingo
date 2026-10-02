@@ -207,8 +207,7 @@ func (n *Node) validateBlockProducerCredentialMaterial(
 ) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if n.config.shelleyKESAgentSocket != "" {
-		if err := n.loadBlockProducerCredentialsFromAgent(
-			creds,
+		if err := n.loadBlockProducerCredentialsFromAgent(creds,
 			currentSlot,
 		); err != nil {
 			return nil, fmt.Errorf(
@@ -717,6 +716,7 @@ func (n *Node) startBlockProducer(
 	ctx context.Context,
 	started []func(),
 ) ([]func(), error) {
+	//nolint:contextcheck // the KES agent loop is bound to the node lifecycle context, not this call
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		return started, fmt.Errorf(
@@ -1071,7 +1071,7 @@ func (b *blockBroadcaster) AddBlock(
 	if b.chain == nil {
 		return errors.New("chain unavailable")
 	}
-	if err := b.chain.AddLocalBlock(block); err != nil {
+	if err := b.chain.AddLocalBlock(context.Background(), block); err != nil {
 		return fmt.Errorf("chain rejected proposed block: %w", err)
 	}
 
@@ -1105,7 +1105,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 	if db == nil {
 		return nil, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return nil, errors.New("metadata transaction unavailable")
 	}
@@ -1161,7 +1161,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 	if db == nil {
 		return 0, 0, errors.New("database unavailable")
 	}
-	txn := db.MetadataTxn(false)
+	txn := db.MetadataTxn(context.Background(), false)
 	if txn == nil {
 		return 0, 0, errors.New("metadata transaction unavailable")
 	}
@@ -1227,7 +1227,7 @@ func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 }
 
 func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(epoch)
+	return a.ledgerState.EpochNonce(context.Background(), epoch)
 }
 
 func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
@@ -1389,7 +1389,11 @@ type leiosPipelineAdapter struct {
 
 type leiosParentChain interface {
 	Tip() ochainsync.Tip
-	BlockByPoint(ocommon.Point, *database.Txn) (models.Block, error)
+	BlockByPoint(
+		context.Context,
+		ocommon.Point,
+		*database.Txn,
+	) (models.Block, error)
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
@@ -1448,7 +1452,7 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 	if len(tip.Point.Hash) == 0 {
 		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, nil
 	}
-	block, err := a.chain.BlockByPoint(tip.Point, nil)
+	block, err := a.chain.BlockByPoint(context.Background(), tip.Point, nil)
 	if err != nil {
 		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
 			"resolve parent block: %w",
@@ -1518,5 +1522,5 @@ func (a *epochNonceAdapter) EpochForSlot(slot uint64) (uint64, error) {
 }
 
 func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(epoch)
+	return a.ledgerState.EpochNonce(context.Background(), epoch)
 }

@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
@@ -36,18 +37,18 @@ func TestRebuildRewardLiveStakeRejectsInvalidTransaction(t *testing.T) {
 			require.NoError(t, txn.Rollback())
 		})
 
-		err := db.RebuildRewardLiveStake(1, txn)
+		err := db.RebuildRewardLiveStake(context.Background(), 1, txn)
 
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})
 
 	t.Run("read-only metadata transaction", func(t *testing.T) {
-		txn := db.MetadataTxn(false)
+		txn := db.MetadataTxn(context.Background(), false)
 		t.Cleanup(func() {
 			require.NoError(t, txn.Rollback())
 		})
 
-		err := db.RebuildRewardLiveStake(1, txn)
+		err := db.RebuildRewardLiveStake(context.Background(), 1, txn)
 
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})
@@ -56,10 +57,10 @@ func TestRebuildRewardLiveStakeRejectsInvalidTransaction(t *testing.T) {
 		other, err := newTestDatabase(t, &Config{DataDir: ""})
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, other.Close()) })
-		txn := other.MetadataTxn(true)
+		txn := other.MetadataTxn(context.Background(), true)
 		t.Cleanup(func() { require.NoError(t, txn.Rollback()) })
 
-		err = db.RebuildRewardLiveStake(1, txn)
+		err = db.RebuildRewardLiveStake(context.Background(), 1, txn)
 
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})

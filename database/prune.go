@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -50,7 +51,11 @@ import (
 // expired block without requiring a wrapping archive proxy.
 //
 // Returns the number of UTxOs that were materialized.
-func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
+func (d *Database) PruneBlock(
+	ctx context.Context,
+	slot uint64,
+	hash []byte,
+) (int, error) {
 	// Read UTxO refs for this slot from metadata. This is a separate
 	// transaction so the blob write txn below has a single, simple commit
 	// scope. A UTxO consumed between this read and the blob write is
@@ -58,7 +63,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	// is skipped. Release the read txn as soon as the refs are
 	// materialized so the connection is freed before the blob write txn
 	// and block operations run.
-	mdTxn := d.MetadataTxn(false)
+	mdTxn := d.MetadataTxn(ctx, false)
 	var (
 		utxoRefs []models.UtxoId
 		err      error

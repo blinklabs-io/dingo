@@ -69,7 +69,7 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 		SnapshotSlot:    431_999,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	// SNAP point: stake read before any post-SNAP boundary rule runs.
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), txn, evt,
@@ -78,14 +78,18 @@ func TestCaptureEpochBoundaryUsesSnapPointStake(t *testing.T) {
 	// proposal refund), applied inside the same rollover transaction. It raises
 	// the live reward aggregate at the boundary slot, which is what the capture
 	// used to absorb.
-	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		0,
-		stakingKey,
-		1_000_000,
-		evt.BoundarySlot,
-		bytes.Repeat([]byte{0xc1}, 32),
-		txn,
-	))
+	require.NoError(
+		t,
+		db.AddPostSnapshotAccountRewardByCredential(
+			context.Background(),
+			0,
+			stakingKey,
+			1_000_000,
+			evt.BoundarySlot,
+			bytes.Repeat([]byte{0xc1}, 32),
+			txn,
+		),
+	)
 	// End of rollover: persist, now that the new epoch row would exist.
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), txn, evt,
@@ -152,15 +156,19 @@ func TestCaptureEpochBoundaryMissingSnapHookUsesHistoricalStake(t *testing.T) {
 		SnapshotSlot:    431_999,
 	}
 
-	txn := db.Transaction(true)
-	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		0,
-		stakingKey,
-		1_000_000,
-		evt.BoundarySlot,
-		bytes.Repeat([]byte{0xc3}, 32),
-		txn,
-	))
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(
+		t,
+		db.AddPostSnapshotAccountRewardByCredential(
+			context.Background(),
+			0,
+			stakingKey,
+			1_000_000,
+			evt.BoundarySlot,
+			bytes.Repeat([]byte{0xc3}, 32),
+			txn,
+		),
+	)
 	// Do not call ComputeEpochBoundarySnapshot: this simulates a missing or
 	// failed SNAP read. The fallback runs after the credit in this transaction.
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
@@ -206,15 +214,19 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	// Commit a post-SNAP credit before the abandoned transaction. The live
 	// aggregate is now 55M, while boundary-aware reconstruction must subtract
 	// the credit and recover the 40M SNAP value.
-	creditTxn := db.Transaction(true)
-	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		0,
-		stakingKey,
-		15_000_000,
-		432_000,
-		bytes.Repeat([]byte{0xc2}, 32),
-		creditTxn,
-	))
+	creditTxn := db.Transaction(context.Background(), true)
+	require.NoError(
+		t,
+		db.AddPostSnapshotAccountRewardByCredential(
+			context.Background(),
+			0,
+			stakingKey,
+			15_000_000,
+			432_000,
+			bytes.Repeat([]byte{0xc2}, 32),
+			creditTxn,
+		),
+	)
 	require.NoError(t, creditTxn.Commit())
 
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
@@ -224,7 +236,7 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 		BoundarySlot:  432_000,
 		SnapshotSlot:  431_999,
 	}
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), txn, abandoned,
 	))
@@ -233,7 +245,7 @@ func TestCaptureEpochBoundaryIgnoresStaleSnapPointStake(t *testing.T) {
 	// Retry the exact same boundary. Matching only the event fields would
 	// incorrectly reuse the abandoned 55M live read here.
 	next := abandoned
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), txn, next,
 	))
@@ -300,7 +312,7 @@ func TestCalculateStakeDistributionDedupesCredentialAcrossPools(t *testing.T) {
 	require.Equal(t, 2, rows, "fixture must hold the duplicate rows")
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
 		context.Background(), txn, 100, 0, 0,
@@ -387,7 +399,7 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 			}, nil))
 
 			calc := NewCalculator(db)
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer func() { _ = txn.Commit() }()
 			dist, err := calc.calculateBoundaryStakeDistributionInTxn(
 				context.Background(),
@@ -457,18 +469,22 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 		ProtocolVersion: 8,
 		SnapshotSlot:    431_999,
 	}
-	txn1 := db.Transaction(true)
+	txn1 := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), txn1, evt1,
 	))
-	require.NoError(t, db.AddPostSnapshotAccountRewardByCredential(
-		0,
-		stakingKey,
-		1_000_000,
-		evt1.BoundarySlot,
-		bytes.Repeat([]byte{0xc1}, 32),
-		txn1,
-	))
+	require.NoError(
+		t,
+		db.AddPostSnapshotAccountRewardByCredential(
+			context.Background(),
+			0,
+			stakingKey,
+			1_000_000,
+			evt1.BoundarySlot,
+			bytes.Repeat([]byte{0xc1}, 32),
+			txn1,
+		),
+	)
 	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
 		context.Background(), txn1, evt1,
 	))
@@ -491,7 +507,7 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 		ProtocolVersion: 8,
 		SnapshotSlot:    863_999,
 	}
-	txn2 := db.Transaction(true)
+	txn2 := db.Transaction(context.Background(), true)
 	require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 		context.Background(), txn2, evt2,
 	))
@@ -541,7 +557,7 @@ func TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction(
 		SnapshotSlot:  431999,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	rows, err := mgr.CurrentBoundarySPOStakeRows(
 		context.Background(), txn, evt,
 	)
@@ -607,7 +623,7 @@ func TestCurrentBoundarySPOStakeRows_PeeksWithoutConsumingComputedStash(
 		SnapshotSlot:    431999,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	// Step 3 of the real rollover sequence: stash the SNAP-point read.
 	require.NoError(
@@ -686,7 +702,7 @@ func TestCaptureEpochBoundarySnapshotMarksAuthoritative(t *testing.T) {
 		SnapshotSlot:    431999,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(
 		t,
 		mgr.CaptureEpochBoundarySnapshot(context.Background(), txn, evt),
@@ -888,7 +904,7 @@ func TestFallbackRewardSnapshotGuardTemporaryRow(t *testing.T) {
 
 	db := setupTestDB(t)
 	meta := db.Metadata()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
 		7,
@@ -929,7 +945,7 @@ func TestFallbackRewardSnapshotGuardRefusesAuthoritative(t *testing.T) {
 		Authoritative: true,
 	}, nil))
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
 		8,
 		"mark",
@@ -978,7 +994,7 @@ func seedPointerStakeFixture(
 	poolHash []byte,
 ) []byte {
 	t.Helper()
-	require.NoError(t, db.ImportPool(nil, &models.Pool{
+	require.NoError(t, db.ImportPool(context.Background(), nil, &models.Pool{
 		PoolKeyHash: poolHash,
 		VrfKeyHash:  make([]byte, 32),
 		Pledge:      1_000_000,
@@ -1018,13 +1034,17 @@ func seedPointerStakeFixture(
 	// table as it stands at call time, so the account row (which carries
 	// registered=true and the delegated pool) must exist before the UTxOs are
 	// written for the final refresh to see the correct registration state.
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakeKey,
-		Pool:       poolHash,
-		AddedSlot:  100,
-		Active:     true,
-	}), "create account")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakeKey,
+			Pool:       poolHash,
+			AddedSlot:  100,
+			Active:     true,
+		}),
+		"create account",
+	)
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       bytes.Repeat([]byte{0x01}, 32),
 		OutputIdx:  0,
 		StakingKey: stakeKey,
@@ -1034,7 +1054,7 @@ func seedPointerStakeFixture(
 	// The pointer-address utxo names the registration's own position
 	// (100, 0, 0). Its StakingKey stays empty by design (see
 	// database/models/utxo.go); only utxo_pointer records the position.
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:      bytes.Repeat([]byte{0x02}, 32),
 		OutputIdx: 0,
 		Amount:    600,
@@ -1087,7 +1107,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStake(t *testing.T) {
 				SnapshotSlot:    431_999,
 			}
 
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			if tc.computeSnap {
 				// Authoritative path: SNAP-point read, then persist reuses
 				// the stashed distribution.
@@ -1140,7 +1160,10 @@ func TestRewardLiveStakeRebuildAgreesWithIncrementalOnPointerAddresses(
 	raw := snapshotSQLDB(t, db)
 	incremental := rewardLiveStakeTotalStake(t, raw, stakeKey)
 
-	require.NoError(t, db.RebuildRewardLiveStake(1_000, nil))
+	require.NoError(
+		t,
+		db.RebuildRewardLiveStake(context.Background(), 1_000, nil),
+	)
 
 	rebuilt := rewardLiveStakeTotalStake(t, raw, stakeKey)
 
@@ -1258,7 +1281,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 				SnapshotSlot:    299,
 			}
 
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			if tc.computeSnap {
 				require.NoError(t, mgr.ComputeEpochBoundarySnapshot(
 					context.Background(), txn, evt,
@@ -1396,7 +1419,7 @@ func TestStakeDistributionKeepsRetiredPoolStakeInDenominator(t *testing.T) {
 	})
 
 	calc := NewCalculator(db)
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Commit() }()
 	dist, err := calc.calculateStakeDistributionInTxn(
 		context.Background(), txn, 1000, 0, 0,
@@ -1473,6 +1496,7 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 	goodStakeKey := bytes.Repeat([]byte{0x21}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x41}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: goodPoolHash},
 		&models.PoolRegistration{
@@ -1575,6 +1599,7 @@ func TestRewardSnapshotActiveStakeTracksNoExclusion(t *testing.T) {
 	goodStakeKey := bytes.Repeat([]byte{0x25}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x45}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: goodPoolHash},
 		&models.PoolRegistration{
@@ -1649,6 +1674,7 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 	goodStakeKey := bytes.Repeat([]byte{0x23}, 28)
 	rewardAccount := bytes.Repeat([]byte{0x43}, 28)
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: goodPoolHash},
 		&models.PoolRegistration{

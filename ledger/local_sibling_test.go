@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -268,6 +269,7 @@ func TestStaleBlockfetchBatchIsDiscardedAfterLocalSiblingAdoption(
 			f.ls.chain.Tip().Point.Hash,
 		)
 		_, err := f.ls.chain.AddBlockWithPointDeferredIf(
+			context.Background(),
 			continuation,
 			point,
 			nil,
@@ -404,7 +406,7 @@ const (
 func newSiblingFixture(t *testing.T) *siblingFixture {
 	t.Helper()
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	require.NoError(
 		t,
@@ -417,8 +419,14 @@ func newSiblingFixture(t *testing.T) *siblingFixture {
 	rival := newSiblingTestBlock(
 		t, 2, siblingSlot, parent.Hash(), 0x22, siblingRivalVrfSeed, 1,
 	)
-	require.NoError(t, cm.PrimaryChain().AddBlock(parent, nil))
-	require.NoError(t, cm.PrimaryChain().AddBlock(rival, nil))
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddBlock(context.Background(), parent, nil),
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddBlock(context.Background(), rival, nil),
+	)
 
 	ls, err := NewLedgerState(LedgerStateConfig{
 		Database:          db,
@@ -499,7 +507,7 @@ func TestAdoptLocalForgedSiblingAdoptsTheWinnerOfChainSelection(
 		assert.Equal(t, f.rival.SlotNumber(), tip.Point.Slot)
 		// The rollback was exactly one block deep: the fork point is still
 		// on the chain and is our block's parent.
-		parent, _, ok := f.ls.chain.TipPredecessor()
+		parent, _, ok := f.ls.chain.TipPredecessor(context.Background())
 		require.True(t, ok)
 		assert.Equal(t, f.parent.Hash().Bytes(), parent.Hash)
 	})

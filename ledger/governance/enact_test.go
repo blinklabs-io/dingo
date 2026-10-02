@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -764,7 +765,7 @@ func TestApplyUpdateCommittee_PersistsEnactedQuorum(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 0, got.Cmp(big.NewRat(3, 5)))
@@ -782,7 +783,7 @@ func TestApplyUpdateCommittee_PersistsZeroQuorum(t *testing.T) {
 	require.NoError(t, applyUpdateCommittee(
 		&EnactmentContext{DB: db, Slot: 4242}, action, 4000,
 	))
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, 0, got.Cmp(big.NewRat(0, 1)))
@@ -848,33 +849,42 @@ func TestApplyUpdateCommittee_ReelectionStartsFreshCredentialTerm(
 		50,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(50), members[0].TermStartSlot)
 	assert.Equal(t, uint64(70), members[0].AddedSlot)
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 50, nil,
 	)
 	require.NoError(t, err)
 	assert.False(t, resigned)
 	authorization, err := db.GetCommitteeMember(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 50, nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, newHotHash, authorization.HotCredential)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(65, nil))
-	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 65, nil),
+	)
+	members, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, members)
 
-	require.NoError(t, db.DeleteCommitteeMembersAfterSlot(35, nil))
-	members, err = db.GetCommitteeMembers(nil)
+	require.NoError(
+		t,
+		db.DeleteCommitteeMembersAfterSlot(context.Background(), 35, nil),
+	)
+	members, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(10), members[0].TermStartSlot)
 	resigned, err = db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType), coldHash, 10, nil,
 	)
 	require.NoError(t, err)
@@ -939,7 +949,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 		40,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(
@@ -950,7 +960,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	)
 	assert.Equal(t, uint64(80), members[0].ExpiresEpoch)
 
-	active, err := db.GetActiveCommitteeMembers(nil)
+	active, err := db.GetActiveCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -961,6 +971,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	assert.Equal(t, hotHash, active[0].HotCredential)
 
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -974,6 +985,7 @@ func TestApplyUpdateCommittee_ContinuingMemberKeepsAuthorizationAcrossTermRenewa
 	// was gated by term and
 	// the other was not).
 	resignedSet, err := db.GetResignedCommitteeMembers(
+		context.Background(),
 		[]models.CommitteeCredential{{
 			CredentialTag: uint8(coldCredential.CredType),
 			Credential:    coldHash,
@@ -1033,7 +1045,10 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		},
 		40,
 	))
-	membersAfterRemoval, err := db.GetCommitteeMembers(nil)
+	membersAfterRemoval, err := db.GetCommitteeMembers(
+		context.Background(),
+		nil,
+	)
 	require.NoError(t, err)
 	require.Empty(t, membersAfterRemoval)
 
@@ -1050,7 +1065,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		90,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(
@@ -1060,7 +1075,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 		"a credential rejoining after removal must get a fresh term start",
 	)
 
-	active, err := db.GetActiveCommitteeMembers(nil)
+	active, err := db.GetActiveCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -1069,6 +1084,7 @@ func TestApplyUpdateCommittee_ReelectionAfterRemovalExcludesStaleAuthorization(
 	)
 
 	_, err = db.GetCommitteeMember(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -1112,7 +1128,11 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 	})
 
 	resignedBeforeRemoval, err := db.IsCommitteeMemberResigned(
-		uint8(coldCredential.CredType), coldHash, 10, nil,
+		context.Background(),
+		uint8(coldCredential.CredType),
+		coldHash,
+		10,
+		nil,
 	)
 	require.NoError(t, err)
 	require.True(t, resignedBeforeRemoval)
@@ -1138,12 +1158,13 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 		90,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, uint64(90), members[0].TermStartSlot)
 
 	resigned, err := db.IsCommitteeMemberResigned(
+		context.Background(),
 		uint8(coldCredential.CredType),
 		coldHash,
 		members[0].TermStartSlot,
@@ -1158,6 +1179,7 @@ func TestApplyUpdateCommittee_ReelectionAfterResignationClearsResignedFlag(
 
 	// GetResignedCommitteeMembers must agree.
 	resignedSet, err := db.GetResignedCommitteeMembers(
+		context.Background(),
 		[]models.CommitteeCredential{{
 			CredentialTag: uint8(coldCredential.CredType),
 			Credential:    coldHash,
@@ -1183,7 +1205,12 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	// Seed an enacted quorum from a prior UpdateCommittee.
 	require.NoError(
 		t,
-		db.SetCommitteeQuorum(big.NewRat(3, 5), 1000, nil),
+		db.SetCommitteeQuorum(
+			context.Background(),
+			big.NewRat(3, 5),
+			1000,
+			nil,
+		),
 	)
 
 	// Build a NoConfidence proposal with a zero deposit so the
@@ -1214,7 +1241,7 @@ func TestEnactProposal_NoConfidence_ClearsCommitteeQuorum(
 	)
 	require.NoError(t, err)
 
-	got, err := db.GetCommitteeQuorum(nil)
+	got, err := db.GetCommitteeQuorum(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Nil(t, got, "NoConfidence should clear the enacted quorum")
 }
@@ -1236,7 +1263,7 @@ func TestApplyUpdateCommitteePreservesZeroTermStartSlot(t *testing.T) {
 		0,
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	require.Zero(

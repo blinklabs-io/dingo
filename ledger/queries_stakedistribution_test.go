@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"strings"
 	"testing"
@@ -83,6 +84,7 @@ func seedLiveStakeFixture(
 	t.Helper()
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: pkh.Bytes(), VrfKeyHash: vrfKeyHash},
 		&models.PoolRegistration{
@@ -95,15 +97,18 @@ func seedLiveStakeFixture(
 	))
 	stakingKey := make([]byte, 28)
 	copy(stakingKey, poolKeyHash)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: stakingKey,
-		Pool:       pkh.Bytes(),
-		AddedSlot:  slot,
-		Active:     true,
-	}))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: stakingKey,
+			Pool:       pkh.Bytes(),
+			AddedSlot:  slot,
+			Active:     true,
+		}),
+	)
 	txId := make([]byte, 32)
 	copy(txId, poolKeyHash)
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId:       txId,
 		OutputIdx:  0,
 		StakingKey: stakingKey,
@@ -575,6 +580,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	// Re-registers the same pool with a new VRF key at slot 150 -- after the
 	// slot-100 pin below, but before the live tip.
 	require.NoError(t, db.ImportPool(
+		context.Background(),
 		nil,
 		&models.Pool{PoolKeyHash: poolAHash, VrfKeyHash: vrfNew},
 		&models.PoolRegistration{

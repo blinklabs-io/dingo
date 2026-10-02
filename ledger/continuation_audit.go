@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strconv"
@@ -551,7 +552,7 @@ func (ls *LedgerState) continuationAuditOnPrimaryChain(
 	if ls.continuationAuditContainsPoint != nil {
 		return ls.continuationAuditContainsPoint(point)
 	}
-	return ls.primaryChainContainsPoint(point)
+	return ls.primaryChainContainsPoint(context.Background(), point)
 }
 
 // carryForwardWindow moves what prior knows about blocks this rollback did not
@@ -923,14 +924,23 @@ func (ls *LedgerState) continuationInputHasProducer(
 	if window.hasProducer(string(producerId)) {
 		return true, nil
 	}
-	utxo, err := ls.db.UtxoByRef(producerId, input.Index(), nil)
+	utxo, err := ls.db.UtxoByRef(
+		context.Background(),
+		producerId,
+		input.Index(),
+		nil,
+	)
 	if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
 		return false, err
 	}
 	if utxo != nil {
 		return true, nil
 	}
-	producerTx, err := ls.db.GetTransactionByHash(producerId, nil)
+	producerTx, err := ls.db.GetTransactionByHash(
+		context.Background(),
+		producerId,
+		nil,
+	)
 	if err != nil {
 		return false, err
 	}
@@ -1168,6 +1178,7 @@ func (ls *LedgerState) drainContinuationAuditEndorserRefs(
 		window.endorserResolutions++
 		if !ref.resolved {
 			ebHash, ebSlot, _, announced, err := ls.leiosCertifiedAnnouncementFromParent(
+				context.Background(),
 				ref.certParentHash,
 			)
 			switch {

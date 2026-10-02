@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -183,30 +184,34 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 
 	db, err := dbtest.NewDatabase(tb, &database.Config{DataDir: ""})
 	require.NoError(tb, err)
-	require.NoError(tb, db.Transaction(true).Do(func(txn *database.Txn) error {
-		for _, fu := range funding {
-			if err := db.CreateUtxo(txn, &models.Utxo{
-				TxId:      fu.txIdBytes,
-				OutputIdx: uint32(fu.idx), // #nosec G115 -- small fixture index
-				AddedSlot: 0,
-			}); err != nil {
-				return err
-			}
-			encoded, err := cbor.Encode(fu.output)
-			if err != nil {
-				return err
-			}
-			if err := db.Blob().SetUtxo(
-				txn.Blob(),
-				fu.txIdBytes,
-				uint32(fu.idx), // #nosec G115 -- small fixture index
-				encoded,
-			); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	require.NoError(
+		tb,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				for _, fu := range funding {
+					if err := db.CreateUtxo(context.Background(), txn, &models.Utxo{
+						TxId:      fu.txIdBytes,
+						OutputIdx: uint32(fu.idx), // #nosec G115 -- small fixture index
+						AddedSlot: 0,
+					}); err != nil {
+						return err
+					}
+					encoded, err := cbor.Encode(fu.output)
+					if err != nil {
+						return err
+					}
+					if err := db.Blob().SetUtxo(
+						txn.Blob(),
+						fu.txIdBytes,
+						uint32(fu.idx), // #nosec G115 -- small fixture index
+						encoded,
+					); err != nil {
+						return err
+					}
+				}
+				return nil
+			}),
+	)
 
 	era := eras.ConwayEraDesc
 	nodeConfig := newTestShelleyGenesisCfg(tb)
@@ -272,7 +277,7 @@ func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 		// the first iteration, every further call hits the per-view memo
 		// instead of the database.
 		b.ReportAllocs()
-		txn := fx.db.Transaction(false)
+		txn := fx.db.Transaction(context.Background(), false)
 		defer txn.Release()
 		view := fx.dingoLS.NewView(txn)
 		input := fx.tx.Inputs()[0]
@@ -310,7 +315,7 @@ func TestUtxoMemoBenchmarkNegativeControls(t *testing.T) {
 
 	t.Run("UtxoInputResolution_MissingInput", func(t *testing.T) {
 		t.Parallel()
-		txn := fx.db.Transaction(false)
+		txn := fx.db.Transaction(context.Background(), false)
 		defer txn.Release()
 		view := fx.dingoLS.NewView(txn)
 		missing := shelley.NewShelleyTransactionInput(

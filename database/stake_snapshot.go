@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -80,6 +81,7 @@ func (d *Database) GetPoolStakeSnapshotsByEpoch(
 //     cert-state accounts were loaded). Persisting Resolved=true here would
 //     conflate "account input unavailable" with "confirmed none".
 func (d *Database) ResolvePoolRewardAccountAutoVotes(
+	ctx context.Context,
 	snapshots []*models.PoolStakeSnapshot,
 	txn *Txn,
 ) error {
@@ -87,7 +89,7 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		return nil
 	}
 	if txn == nil {
-		txn = d.Transaction(false)
+		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
 
@@ -111,7 +113,7 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		snapshotsByPool[key] = append(snapshotsByPool[key], s)
 	}
 
-	pools, err := d.GetPools(pkhs, txn)
+	pools, err := d.GetPools(ctx, pkhs, txn)
 	if err != nil {
 		return fmt.Errorf("get pools: %w", err)
 	}
@@ -153,6 +155,7 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	// Deregistered accounts are a confirmed None; absent rows stay
 	// unresolved (see the doc comment).
 	accounts, err := d.GetAccountsByCredential(
+		ctx,
 		rewardAccountRefs,
 		true,
 		txn,

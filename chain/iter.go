@@ -49,6 +49,7 @@ type ChainIteratorResult struct {
 }
 
 func newChainIteratorWithContext(
+	ctx context.Context,
 	parentCtx context.Context,
 	chain *Chain,
 	startPoint ocommon.Point,
@@ -69,7 +70,7 @@ func newChainIteratorWithContext(
 	}
 	// Lookup start block in metadata DB if not origin
 	if startPoint.Slot > 0 || len(startPoint.Hash) > 0 {
-		tmpBlock, err := chain.BlockByPoint(startPoint, nil)
+		tmpBlock, err := chain.BlockByPoint(ctx, startPoint, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -84,7 +85,7 @@ func newChainIteratorWithContext(
 		// so it re-requests the same range instead of asking another peer.
 		// Reject the point here so callers get "not found" and can fail
 		// over (blockfetch answers NoBlocks).
-		if !chain.holdsBlockAtIndex(tmpBlock.ID, startPoint.Hash) {
+		if !chain.holdsBlockAtIndex(ctx, tmpBlock.ID, startPoint.Hash) {
 			return nil, models.ErrBlockNotFound
 		}
 		ci.nextBlockIndex = tmpBlock.ID
@@ -118,7 +119,7 @@ func (ci *ChainIterator) startCancelWatcher() {
 }
 
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
-	ret, err := ci.chain.iterNext(ci, blocking)
+	ret, err := ci.chain.iterNext(ci.ctx, ci, blocking)
 	if ret == nil && err == nil {
 		return nil, ErrIteratorChainTip
 	}

@@ -717,6 +717,7 @@ func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
 }
 
 func (o *Ouroboros) ConfigureListeners(
+	ctx context.Context,
 	listeners []connmanager.ListenerConfig,
 ) []connmanager.ListenerConfig {
 	tmpListeners := make([]connmanager.ListenerConfig, len(listeners))
@@ -756,7 +757,7 @@ func (o *Ouroboros) ConfigureListeners(
 			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
-				o.chainsyncConnectionConfigOption(false),
+				o.chainsyncConnectionConfigOption(ctx, false),
 				ouroboros.WithLocalStateQueryConfig(
 					olocalstatequery.NewConfig(
 						o.localstatequeryServerConnOpts(trusted)...,
@@ -817,7 +818,7 @@ func (o *Ouroboros) ConfigureListeners(
 						)...,
 					),
 				),
-				o.chainsyncConnectionConfigOption(true),
+				o.chainsyncConnectionConfigOption(ctx, true),
 				ouroboros.WithBlockFetchConfig(
 					blockfetchConfig(
 						slices.Concat(
@@ -862,7 +863,9 @@ func (o *Ouroboros) ConfigureListeners(
 	return tmpListeners
 }
 
-func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
+func (o *Ouroboros) OutboundConnOpts(
+	ctx context.Context,
+) []ouroboros.ConnectionOptionFunc {
 	opts := []ouroboros.ConnectionOptionFunc{
 		ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 		ouroboros.WithNodeToNode(true),
@@ -883,7 +886,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 				)...,
 			),
 		),
-		o.chainsyncConnectionConfigOption(true),
+		o.chainsyncConnectionConfigOption(ctx, true),
 		ouroboros.WithBlockFetchConfig(
 			blockfetchConfig(
 				slices.Concat(

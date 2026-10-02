@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -65,7 +66,7 @@ func (ls *LedgerState) removeAvvmUtxos(
 		refs          []types.UtxoKey
 		totalLovelace uint64
 	)
-	if err := ls.db.IterateLiveUtxos(txn, func(u *models.Utxo) error {
+	if err := ls.db.IterateLiveUtxos(context.Background(), txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf(
@@ -104,6 +105,7 @@ func (ls *LedgerState) removeAvvmUtxos(
 		return 0, 0, fmt.Errorf("scan live utxos: %w", err)
 	}
 	if err := ls.db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		txn, refs, boundarySlot,
 	); err != nil {
 		return 0, 0, fmt.Errorf("mark avvm utxos deleted: %w", err)

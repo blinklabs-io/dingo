@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -115,6 +116,7 @@ func RegisterTruncateMetrics(reg prometheus.Registerer) error {
 // If txn is nil, a new read-write transaction is opened and committed
 // internally; otherwise the caller is responsible for committing txn.
 func (d *Database) TruncateAfterSlot(
+	ctx context.Context,
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
@@ -169,7 +171,7 @@ func (d *Database) TruncateAfterSlot(
 	}()
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if owned {
@@ -191,6 +193,7 @@ func (d *Database) TruncateAfterSlot(
 	// nothing, silently keeping every re-registered pool's stale,
 	// discarded values.
 	if err := d.RestorePoolStateAtSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -201,6 +204,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete certificates (they reference transactions)
 	if err := d.DeleteCertificatesAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -212,6 +216,7 @@ func (d *Database) TruncateAfterSlot(
 	// Revert reward-account changes before account restoration can delete
 	// accounts registered after the rollback slot.
 	if err := d.DeleteAccountRewardsAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -222,6 +227,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Restore account delegation state
 	if err := d.RestoreAccountStateAtSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -232,6 +238,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Restore DRep state
 	if err := d.RestoreDrepStateAtSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -242,6 +249,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back protocol parameters
 	if err := d.DeletePParamsAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -252,6 +260,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back protocol parameter updates
 	if err := d.DeletePParamUpdatesAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -262,6 +271,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back governance proposals
 	if err := d.DeleteGovernanceProposalsAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -272,6 +282,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back governance votes
 	if err := d.DeleteGovernanceVotesAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -282,6 +293,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back constitutions
 	if err := d.DeleteConstitutionsAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -292,6 +304,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back committee state
 	if err := d.DeleteCommitteeMembersAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -338,6 +351,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back network state records
 	if err := d.DeleteNetworkStateAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -348,6 +362,7 @@ func (d *Database) TruncateAfterSlot(
 	}
 	// Delete rolled-back treasury donation records
 	if err := d.DeleteNetworkDonationsAfterSlot(
+		ctx,
 		point.Slot,
 		txn,
 	); err != nil {
@@ -369,14 +384,14 @@ func (d *Database) TruncateAfterSlot(
 	// rewind below it — so the authoritative deletion slot is the
 	// rollback target or the Mithril boundary, whichever is later.
 	deleteSlot := max(mithrilFloor, point.Slot)
-	if err := d.UtxosDeleteRolledback(deleteSlot, txn); err != nil {
+	if err := d.UtxosDeleteRolledback(ctx, deleteSlot, txn); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
 			"remove rolled-back UTxOs: %w",
 			err,
 		)
 	}
 	// Delete rolled-back transaction offsets and metadata
-	if err := d.TransactionsDeleteRolledback(deleteSlot, txn); err != nil {
+	if err := d.TransactionsDeleteRolledback(ctx, deleteSlot, txn); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
 			"remove rolled-back transactions: %w",
 			err,
@@ -387,7 +402,7 @@ func (d *Database) TruncateAfterSlot(
 	// in sync: preserving a tx at slot S while restoring its consumed
 	// UTxO at deleted_slot=S would leave the tx pointing at a live UTxO
 	// it claims to have spent.
-	if err := d.UtxosUnspend(deleteSlot, txn); err != nil {
+	if err := d.UtxosUnspend(ctx, deleteSlot, txn); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
 			"restore spent UTxOs after rollback: %w",
 			err,

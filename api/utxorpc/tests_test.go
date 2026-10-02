@@ -843,7 +843,7 @@ func newUtxorpcConnectHarness(
 	apiBus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { apiBus.Stop() })
 
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
@@ -935,6 +935,7 @@ func indexFixtureTransactionsForReadTx(
 				continue
 			}
 			err := db.SetTransaction(
+				context.Background(),
 				tx,
 				point,
 				uint32(j),
@@ -1741,7 +1742,10 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	require.Len(t, blocks, n)
 	inter := blocks[5]
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
-	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
+	require.NoError(
+		t,
+		h.LS.Chain().ValidateRollback(context.Background(), roll),
+	)
 
 	cli := syncconnect.NewSyncServiceClient(
 		h.Client,
@@ -1777,7 +1781,7 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 		require.NotNil(t, stream.Msg().GetTip())
 	}
 
-	require.NoError(t, h.LS.Chain().Rollback(roll))
+	require.NoError(t, h.LS.Chain().Rollback(context.Background(), roll))
 
 	require.True(
 		t,
@@ -2402,6 +2406,7 @@ func (s *tipHeightLedgerStub) GetBlock(
 }
 
 func (s *tipHeightLedgerStub) BlockByHash(
+	context.Context,
 	[]byte,
 ) (models.Block, error) {
 	s.blockLookups++

@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -68,6 +69,7 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -142,6 +144,7 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 		Point: ocommon.NewPoint(30, ledgerStateHash),
 	}, nil))
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db, logger, nil, 30, ledgerStateHash, "", true,
 	))
 
@@ -305,6 +308,7 @@ func TestUpdateMithrilReadyStateKeepsTrustBoundaryAtStableLedgerTip(
 	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -344,6 +348,7 @@ func TestSetStableMithrilLedgerTipUsesCertifiedBlockNumber(t *testing.T) {
 	}, nil))
 
 	require.NoError(t, setStableMithrilLedgerTip(
+		context.Background(),
 		db,
 		30,
 		ledgerStateHash,
@@ -373,6 +378,7 @@ func TestSetStableMithrilLedgerTipRejectsPointOutsideCertifiedChain(
 	}, nil))
 
 	err := setStableMithrilLedgerTip(
+		context.Background(),
 		db,
 		30,
 		bytes.Repeat([]byte{0x25}, 32),
@@ -392,6 +398,7 @@ func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
 	}, nil))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,
@@ -425,6 +432,7 @@ func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
 	))
 
 	require.NoError(t, updateMithrilReadyState(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		nil,

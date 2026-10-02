@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -56,6 +57,7 @@ func failLedgerRollbackAfterChainTruncation(
 	t.Helper()
 	base := ls.db
 	failing, newErr := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),
@@ -191,6 +193,7 @@ func TestRollbackChainAndStateDeferredKeepsOrdinaryErrorWhenLedgerReachedPoint(
 	floorErr := models.ErrBlockNotFound
 	base := ls.db
 	failing, err := database.New(
+		context.Background(),
 		base.Config(),
 		database.Stores{
 			Blob: base.Blob(),

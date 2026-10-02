@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"log/slog"
 	"strconv"
@@ -131,6 +132,7 @@ type leiosAuditFixture struct {
 func (f *leiosAuditFixture) addAnnouncingBlock(t *testing.T) {
 	t.Helper()
 	require.NoError(t, f.ls.chain.AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{f.announceRaw},
 	))
 }
@@ -186,7 +188,10 @@ func newLeiosAuditFixtureOpts(
 	if insertAnnouncingBlock {
 		require.NoError(
 			t,
-			ls.chain.AddRawBlocks([]chain.RawBlock{announceRaw}),
+			ls.chain.AddRawBlocks(
+				context.Background(),
+				[]chain.RawBlock{announceRaw},
+			),
 		)
 	}
 
