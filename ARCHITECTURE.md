@@ -3713,7 +3713,7 @@ The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A
 `GenesisKeyDelegationCertificate` rewrites a genesis key's active delegate/VRF
 hash; `Store.GetGenesisDelegationForSlot` returns the latest
-`genesis_delegation` row with `added_slot < blockSlot`, and that row is written
+`genesis_delegation` row with `added_slot + stabilityWindow <= blockSlot`, and that row is written
 only when the block carrying the certificate is *applied*
 (`transaction_certificates.go`). During catch-up the header chain runs ahead of
 the applied tip, so at header-verification time the reassignment row can be
@@ -13361,7 +13361,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    caught up as of the currently validating slot. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
-   with withdrawals drained first. It also rejects delegation from a
+   with withdrawals drained first. For genesis key delegation certificates it
+   enforces `GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG` and
+   `DuplicateGenesisVRFDELEG` against the delegations in force and the pending
+   ones from `*LedgerView.GenesisDelegState`, and a certified delegation takes
+   effect only at its slot plus the stability window. It also rejects
+   delegation from a
    credential deregistered earlier in the transaction. Upstream value
    conservation counts a deposit for every registration and a refund for
    every deregistration, and those amounts match real accounts only because

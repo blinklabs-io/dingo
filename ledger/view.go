@@ -326,6 +326,11 @@ func (lv *LedgerView) MIRDelegState(
 // of a silent runtime no-op for every MIR DELEG predicate that reads it.
 var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 
+// The genesis key delegation predicates discover this capability with a
+// runtime type assertion and skip when it misses, so signature drift would
+// silently disable them rather than fail to build.
+var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
+
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
 // drift would silently reject every transaction whose validation performs a
@@ -759,6 +764,13 @@ func (lv *LedgerView) GenesisDelegateKeyHashes(
 	slot uint64,
 ) ([]lcommon.Blake2b224, error) {
 	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
+}
+
+// GenesisDelegState implements eras.GenesisDelegStateProvider.
+func (lv *LedgerView) GenesisDelegState(
+	slot uint64,
+) (eras.GenesisDelegState, error) {
+	return lv.ls.genesisDelegState(slot, lv.metadataTxn())
 }
 
 func (lv *LedgerView) GenesisDelegateForGenesisKey(

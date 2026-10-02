@@ -251,6 +251,7 @@ var certificateStoreMethods = []string{
 	"DeleteCertificatesAfterSlot",
 	"GetMIRCertsInSlotRange",
 	"GetGenesisDelegationForSlot",
+	"GetGenesisDelegationsInSlotRange",
 	"GetStakeRegistrationsByCredential",
 	"GetAccountDelegationHistoryByCredential",
 	"CountAccountDelegationHistoryByCredential",
