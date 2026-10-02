@@ -97,6 +97,37 @@ func TestParseCardanoNode_AddedToCurrentChain(t *testing.T) {
 	require.Equal(t, uint64(600), ev.Slot)
 }
 
+func TestParseCardanoNode_LegacyForgedBlock(t *testing.T) {
+	line := `{"app":[],"at":"2026-10-01T23:39:12.005Z","data":{"credentials":"Cardano","val":{"block":"496e694d","blockNo":5,"blockPrev":"2cf35611","kind":"TraceForgedBlock","slot":22}},"env":"11.0.1:97036","host":"p2","loc":null,"msg":"","ns":["cardano.node.Forge"],"pid":"7","sev":"Info","thread":"46"}`
+	ev := ParseLogLine(line)
+	require.NotNil(t, ev)
+	require.Equal(t, EventForgedBlock, ev.Type)
+	require.Equal(t, uint64(22), ev.Slot)
+	require.Equal(t, "496e694d", ev.BlockHash)
+	require.False(t, ev.Timestamp.IsZero())
+}
+
+func TestParseCardanoNode_LegacyAddedToCurrentChain(t *testing.T) {
+	line := `{"app":[],"at":"2026-10-01T23:38:54.024Z","data":{"chainLengthDelta":1,"kind":"TraceAddBlockEvent.AddedToCurrentChain","newtip":"b184b416@4"},"env":"11.0.1:97036","host":"p2","loc":null,"msg":"","ns":["cardano.node.ChainDB"],"pid":"7","sev":"Notice","thread":"21"}`
+	ev := ParseLogLine(line)
+	require.NotNil(t, ev)
+	require.Equal(t, EventChainExtended, ev.Type)
+	require.Equal(t, uint64(4), ev.Slot)
+	require.Equal(t, "b184b416", ev.BlockHash)
+}
+
+func TestParseCardanoNode_LegacyMempoolAddedTx(t *testing.T) {
+	line := `{"app":[],"at":"2026-10-01T23:41:02.798Z","data":{"kind":"TraceMempoolAddedTx","tx":{"txid":"a55324a2"}},"env":"11.0.1:97036","host":"p2","loc":null,"msg":"","ns":["cardano.node.Mempool"],"pid":"7","sev":"Info","thread":"125"}`
+	ev := ParseLogLine(line)
+	require.NotNil(t, ev)
+	require.Equal(t, EventMempoolAdd, ev.Type)
+}
+
+func TestParseCardanoNode_LegacyIgnoresForgeMetrics(t *testing.T) {
+	line := `{"app":[],"at":"2026-10-01T23:38:23.924Z","data":{"kind":"LogValue","name":"forge-about-to-lead","value":{"contents":1,"tag":"PureI"}},"env":"11.0.1:97036","host":"p2","loc":null,"msg":"","ns":["cardano.node.metrics.Forge"],"pid":"7","sev":"Info","thread":"5"}`
+	require.Nil(t, ParseLogLine(line))
+}
+
 func TestParseCardanoNode_CompletedBlockFetch(t *testing.T) {
 	line := `{"ns":"Cardano.BlockFetch.CompletedBlockFetch","at":"2026-01-01T00:00:08Z"}`
 	ev := ParseLogLine(line)

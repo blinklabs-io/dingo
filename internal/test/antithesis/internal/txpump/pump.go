@@ -16,7 +16,6 @@ package txpump
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +34,11 @@ type Pump struct {
 	txlog        *TxLogger
 	genesisTime  time.Time
 	plutusLocked []UTxO
+	// Credentials (hex key hashes) txpump has registered as stake keys and
+	// DReps, mapped to when the registration is expected on chain, so later
+	// certificates skip the registration deposit.
+	stakeRegistered map[string]time.Time
+	drepRegistered  map[string]time.Time
 	// Hooks keep Run orchestration tests independent of a live node.
 	dialPrimaryFn func() (*NodeClient, error)
 	runBatchFn    func(context.Context, *NodeClient, int) int
@@ -56,6 +60,9 @@ func NewPump(
 		logger:      logger,
 		txlog:       txlog,
 		genesisTime: genesisTime,
+
+		stakeRegistered: make(map[string]time.Time),
+		drepRegistered:  make(map[string]time.Time),
 	}
 }
 
@@ -367,6 +374,12 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 		)
 		return false
 	}
+	// Change below the minimum output would make the node reject the whole
+	// transaction, so send it to the recipient instead.
+	if change > 0 && change < minSendAmount {
+		sendAmount += change
+		change = 0
+	}
 
 	// Collect a witness key for every distinct signing key among the inputs.
 	// SelectCoins may return UTxOs from different genesis keys; each one needs
@@ -462,17 +475,10 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	return submitErr == nil
 }
 
-// submitDelegation builds and submits a single stake-delegation transaction.
+// submitDelegation builds and submits a single signed stake-delegation
+// transaction. The first delegation for a credential also registers it.
 func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	if !p.cfg.delegationEnabled() {
-		return false
-	}
-	stakeKeyHash, err := decodeConfiguredHash(
-		"TXPUMP_DELEGATION_STAKE_KEY_HASH",
-		p.cfg.DelegationStakeKeyHash,
-	)
-	if err != nil {
-		p.logger.Error("invalid delegation stake key hash", "err", err)
 		return false
 	}
 	poolKeyHash, err := decodeConfiguredHash(
@@ -483,122 +489,79 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		p.logger.Error("invalid delegation pool key hash", "err", err)
 		return false
 	}
-
-	required := MinFee
-	inputs, change, err := p.wallet.SelectCoins(required)
-	if err != nil {
-		p.logger.Warn(
-			"coin selection failed for delegation",
-			"required_lovelace", required,
-			"err", err,
-		)
-		return false
-	}
-
-	changeAddr := controlledChangeAddr(inputs)
-
-	txBytes, err := BuildDelegationTx(
-		inputs,
-		stakeKeyHash,
-		poolKeyHash,
-		MinFee,
-		changeAddr,
+	return p.submitCertTx(
+		client, batchSize, "delegation", stakeKeyDeposit, p.stakeRegistered,
+		func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error) {
+			credHash, credKey := credentialFor(inputs)
+			return BuildDelegationTx(
+				inputs, credHash, poolKeyHash, deposit, MinFee, changeAddr, credKey,
+			)
+		},
 	)
-	if err != nil {
-		p.logger.Error("build delegation failed", "err", err)
-		p.wallet.ReturnUTxOs(inputs)
-		return false
-	}
-
-	txID := deriveTestTxID(txBytes)
-	submitErr := client.SubmitTx(conwayEraID, txBytes)
-	entry := TxLog{
-		TxID:      txID,
-		TxType:    "delegation",
-		EraID:     conwayEraID,
-		NodeAddr:  client.Addr(),
-		BatchSize: batchSize,
-	}
-	if submitErr != nil {
-		entry.Status = "rejected"
-		entry.ErrorMsg = submitErr.Error()
-		p.logger.Warn("delegation tx rejected", "tx_id", txID, "err", submitErr)
-		p.wallet.ReturnUTxOs(inputs)
-	} else {
-		entry.Status = "submitted"
-		p.logger.Info("delegation tx submitted", "tx_id", txID)
-		var outputs []UTxO
-		if change > 0 {
-			outputs = []UTxO{{TxHash: txID, Index: 0, Amount: change}}
-		}
-		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
-	}
-	if p.txlog != nil {
-		if logErr := p.txlog.Log(entry); logErr != nil {
-			p.logger.Error("txlog write failed", "err", logErr)
-		}
-	}
-	return submitErr == nil
 }
 
-// submitGovernance builds and submits either a DRep registration or a vote
-// transaction (chosen randomly).
+// submitGovernance builds and submits a single signed DRep certificate
+// transaction: a registration for a new DRep credential, otherwise an update.
 func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
-	// Decide the type first so we can compute the correct coin selection.
-	// DRep registration needs fee + deposit; votes only need the fee.
-	var txKind string
-	if IntRange(0, 1) == 0 {
-		txKind = "drep_reg"
-	} else {
-		txKind = "vote"
-	}
+	return p.submitCertTx(
+		client, batchSize, "governance", drepDeposit, p.drepRegistered,
+		func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error) {
+			credHash, credKey := credentialFor(inputs)
+			if deposit > 0 {
+				return BuildDRepRegistrationTx(
+					inputs, credHash, deposit, MinFee, changeAddr, credKey,
+				)
+			}
+			return BuildDRepUpdateTx(inputs, credHash, MinFee, changeAddr, credKey)
+		},
+	)
+}
 
-	var required uint64
-	if txKind == "drep_reg" {
-		required = MinFee + 500_000_000 // registration deposit
-	} else {
-		required = MinFee
-	}
-
-	inputs, change, err := p.wallet.SelectCoins(required)
+// submitCertTx selects coins, builds a certificate transaction with build and
+// submits it. registered tracks credentials txpump has registered: an
+// unregistered credential pays registrationDeposit, and a fresh registration
+// is used only after the confirmation window, since the ledger rejects a
+// certificate for a credential whose registration is still pending. A
+// rejected registration marks the credential registered (the node may already
+// hold it) and a rejected follow-up forgets it, so a lost registration
+// self-corrects on the next attempt.
+func (p *Pump) submitCertTx(
+	client *NodeClient,
+	batchSize int,
+	txType string,
+	registrationDeposit uint64,
+	registered map[string]time.Time,
+	build func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error),
+) bool {
+	// Reserve enough for a registration deposit so the credential is known
+	// before deciding whether to pay it; change always stays above min-UTxO.
+	required := MinFee + registrationDeposit + minSendAmount
+	inputs, _, err := p.wallet.SelectCoins(required)
 	if err != nil {
 		p.logger.Warn(
-			"coin selection failed for governance",
+			"coin selection failed",
+			"tx_type", txType,
 			"required_lovelace", required,
-			"kind", txKind,
 			"err", err,
 		)
 		return false
 	}
-
-	raw, _ := hex.DecodeString(inputs[0].TxHash)
-	drepKeyHash := make([]byte, 28)
-	copy(drepKeyHash, raw)
+	credHash, credKey := credentialFor(inputs)
+	credID := hex.EncodeToString(credHash)
+	usableAt, isRegistered := registered[credID]
+	if isRegistered && time.Now().Before(usableAt) {
+		p.wallet.ReturnUTxOs(inputs)
+		return false
+	}
+	var deposit uint64
+	if !isRegistered {
+		deposit = registrationDeposit
+	}
 	changeAddr := controlledChangeAddr(inputs)
 
-	var txBytes []byte
-	var buildErr error
-
-	if txKind == "drep_reg" {
-		txBytes, buildErr = BuildDRepRegistrationTx(
-			inputs, drepKeyHash, 500_000_000, MinFee, changeAddr,
-		)
-	} else {
-		govActionHash := make([]byte, 32)
-		copy(govActionHash, raw)
-		txBytes, buildErr = BuildVoteTx(
-			inputs, drepKeyHash, govActionHash, 0, MinFee, changeAddr,
-		)
-	}
-
-	if buildErr != nil {
-		p.logger.Error(
-			"build governance tx failed",
-			"kind",
-			txKind,
-			"err",
-			buildErr,
-		)
+	txBytes, err := build(inputs, deposit, changeAddr)
+	if err != nil {
+		p.logger.Error("build tx failed", "tx_type", txType, "err", err)
 		p.wallet.ReturnUTxOs(inputs)
 		return false
 	}
@@ -607,7 +570,7 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	submitErr := client.SubmitTx(conwayEraID, txBytes)
 	entry := TxLog{
 		TxID:      txID,
-		TxType:    "governance",
+		TxType:    txType,
 		EraID:     conwayEraID,
 		NodeAddr:  client.Addr(),
 		BatchSize: batchSize,
@@ -616,18 +579,36 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 		entry.Status = "rejected"
 		entry.ErrorMsg = submitErr.Error()
 		p.logger.Warn(
-			"governance tx rejected",
-			"kind", txKind,
+			txType+" tx rejected",
 			"tx_id", txID,
+			"registration", deposit > 0,
 			"err", submitErr,
 		)
+		if isRegistered {
+			delete(registered, credID)
+		} else {
+			registered[credID] = time.Now()
+		}
 		p.wallet.ReturnUTxOs(inputs)
 	} else {
 		entry.Status = "submitted"
-		p.logger.Info("governance tx submitted", "kind", txKind, "tx_id", txID)
+		p.logger.Info(
+			txType+" tx submitted",
+			"tx_id", txID,
+			"registration", deposit > 0,
+		)
+		if !isRegistered {
+			registered[credID] = time.Now().Add(p.cfg.confirmationDelay())
+		}
+		var total uint64
+		for _, u := range inputs {
+			total += u.Amount
+		}
 		var outputs []UTxO
-		if change > 0 {
-			outputs = []UTxO{{TxHash: txID, Index: 0, Amount: change}}
+		if change := total - MinFee - deposit; change > 0 {
+			outputs = []UTxO{{
+				TxHash: txID, Index: 0, Amount: change, SigningKey: credKey,
+			}}
 		}
 		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
 	}
@@ -640,90 +621,117 @@ func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 }
 
 // submitPlutus builds and submits either a Plutus lock or unlock transaction
-// (chosen randomly).
+// (chosen randomly). Unlocking needs a locked output, a key-locked collateral
+// UTxO and the PlutusV3 cost model; otherwise it locks.
 func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
-	txKind := "plutus_lock"
-	var lockedInput UTxO
 	choose := IntRange
 	if p.intRangeFn != nil {
 		choose = p.intRangeFn
 	}
-	if len(p.plutusLocked) > 0 && choose(0, 1) == 1 {
-		txKind = "plutus_unlock"
-		var ok bool
-		lockedInput, ok = p.takeLockedPlutusUTxO()
-		if !ok {
-			txKind = "plutus_lock"
+	if len(p.plutusLocked) > 0 && len(p.cfg.PlutusV3CostModel) > 0 &&
+		choose(0, 1) == 1 {
+		if locked, ok := p.takeLockedPlutusUTxO(); ok {
+			return p.submitPlutusUnlock(client, batchSize, locked)
 		}
 	}
+	return p.submitPlutusLock(client, batchSize)
+}
 
-	var (
-		inputs []UTxO
-		change uint64
-		err    error
-	)
-	if txKind == "plutus_lock" {
-		required := minSendAmount + MinFee
-		inputs, change, err = p.wallet.SelectCoins(required)
-		if err != nil {
-			p.logger.Warn(
-				"coin selection failed for plutus",
-				"kind", txKind,
-				"required_lovelace", required,
-				"err", err,
-			)
-			return false
-		}
-	} else {
-		inputs = []UTxO{lockedInput}
-		if lockedInput.Amount < MinFee {
-			p.logger.Error(
-				"locked plutus UTxO cannot cover fee",
-				"tx_hash", lockedInput.TxHash,
-				"index", lockedInput.Index,
-				"amount", lockedInput.Amount,
-				"fee", MinFee,
-			)
-			p.addLockedPlutusUTxO(lockedInput)
-			return false
-		}
-		change = lockedInput.Amount - MinFee
-	}
-
-	script := alwaysSucceedsScript()
-	h := sha256.Sum256(script)
-	scriptHash := h[:28]
-	changeAddr := controlledChangeAddr(inputs)
-
-	var txBytes []byte
-	var buildErr error
-
-	if txKind == "plutus_lock" {
-		txBytes, buildErr = BuildPlutusLockTx(
-			inputs, scriptHash, minSendAmount, MinFee, changeAddr,
+func (p *Pump) submitPlutusLock(client *NodeClient, batchSize int) bool {
+	required := plutusLockAmount + MinFee + minSendAmount
+	inputs, _, err := p.wallet.SelectCoins(required)
+	if err != nil {
+		p.logger.Warn(
+			"coin selection failed for plutus",
+			"kind", "plutus_lock",
+			"required_lovelace", required,
+			"err", err,
 		)
-	} else {
-		txBytes, buildErr = BuildPlutusUnlockTx(
-			inputs, alwaysSucceedsScript(), MinFee, changeAddr,
-		)
-	}
-
-	if buildErr != nil {
-		p.logger.Error(
-			"build plutus tx failed",
-			"kind",
-			txKind,
-			"err",
-			buildErr,
-		)
-		if txKind == "plutus_lock" {
-			p.wallet.ReturnUTxOs(inputs)
-		} else {
-			p.addLockedPlutusUTxO(lockedInput)
-		}
 		return false
 	}
+	changeAddr := controlledChangeAddr(inputs)
+	txBytes, err := BuildPlutusLockTx(
+		inputs, alwaysSucceedsScriptHash(), plutusLockAmount, MinFee, changeAddr,
+	)
+	if err != nil {
+		p.logger.Error("build plutus tx failed", "kind", "plutus_lock", "err", err)
+		p.wallet.ReturnUTxOs(inputs)
+		return false
+	}
+	txID, ok := p.submitPlutusTx(client, batchSize, "plutus_lock", txBytes)
+	if !ok {
+		p.wallet.ReturnUTxOs(inputs)
+		return false
+	}
+	p.addLockedPlutusUTxOAfter(p.cfg.confirmationDelay(), UTxO{
+		TxHash: txID,
+		Index:  0,
+		Amount: plutusLockAmount,
+		// Keep the wallet-controlled address and its key with the script
+		// output so the unlock returns spendable change to the same wallet.
+		address:    append([]byte(nil), changeAddr...),
+		SigningKey: inputs[0].SigningKey,
+	})
+	var total uint64
+	for _, u := range inputs {
+		total += u.Amount
+	}
+	var outputs []UTxO
+	if change := total - plutusLockAmount - MinFee; change > 0 {
+		outputs = []UTxO{{
+			TxHash: txID, Index: 1, Amount: change, SigningKey: inputs[0].SigningKey,
+		}}
+	}
+	p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
+	return true
+}
 
+func (p *Pump) submitPlutusUnlock(client *NodeClient, batchSize int, locked UTxO) bool {
+	collateral, _, err := p.wallet.SelectCoins(plutusUnlockFee * 3 / 2)
+	if err != nil || len(collateral) != 1 || !collateral[0].SigningKey.canSign() {
+		if err == nil {
+			p.wallet.ReturnUTxOs(collateral)
+		}
+		p.logger.Warn("no key-locked collateral for plutus unlock", "err", err)
+		p.addLockedPlutusUTxO(locked)
+		return false
+	}
+	changeAddr, changeKey := locked.address, locked.SigningKey
+	if len(changeAddr) == 0 || !changeKey.canSign() {
+		changeAddr, changeKey = collateral[0].SigningKey.Address, collateral[0].SigningKey
+	}
+	txBytes, err := BuildPlutusUnlockTx(
+		locked, collateral[0], p.cfg.PlutusV3CostModel, plutusUnlockFee, changeAddr,
+	)
+	if err != nil {
+		p.logger.Error("build plutus tx failed", "kind", "plutus_unlock", "err", err)
+		p.wallet.ReturnUTxOs(collateral)
+		p.addLockedPlutusUTxO(locked)
+		return false
+	}
+	txID, ok := p.submitPlutusTx(client, batchSize, "plutus_unlock", txBytes)
+	if !ok {
+		p.wallet.ReturnUTxOs(collateral)
+		p.addLockedPlutusUTxO(locked)
+		return false
+	}
+	// Collateral is only consumed if the script fails; keep it reserved with
+	// the transaction so reconciliation returns it once the tx settles.
+	outputs := []UTxO{{
+		TxHash: txID, Index: 0, Amount: locked.Amount - plutusUnlockFee,
+		SigningKey: changeKey,
+	}}
+	p.wallet.RecordAccepted(txID, collateral, outputs, p.cfg.confirmationDelay())
+	return true
+}
+
+// submitPlutusTx submits a Plutus workload transaction and logs the outcome.
+func (p *Pump) submitPlutusTx(
+	client *NodeClient,
+	batchSize int,
+	kind string,
+	txBytes []byte,
+) (string, bool) {
 	txID := deriveTestTxID(txBytes)
 	submitErr := client.SubmitTx(conwayEraID, txBytes)
 	entry := TxLog{
@@ -732,53 +740,21 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 		EraID:     conwayEraID,
 		NodeAddr:  client.Addr(),
 		BatchSize: batchSize,
+		Status:    "submitted",
 	}
 	if submitErr != nil {
 		entry.Status = "rejected"
 		entry.ErrorMsg = submitErr.Error()
-		p.logger.Warn(
-			"plutus tx rejected",
-			"kind", txKind,
-			"tx_id", txID,
-			"err", submitErr,
-		)
-		if txKind == "plutus_lock" {
-			p.wallet.ReturnUTxOs(inputs)
-		} else {
-			p.addLockedPlutusUTxO(lockedInput)
-		}
+		p.logger.Warn("plutus tx rejected", "kind", kind, "tx_id", txID, "err", submitErr)
 	} else {
-		entry.Status = "submitted"
-		p.logger.Info("plutus tx submitted", "kind", txKind, "tx_id", txID)
-		if txKind == "plutus_lock" {
-			p.addLockedPlutusUTxOAfter(p.cfg.confirmationDelay(), UTxO{
-				TxHash: txID,
-				Index:  0,
-				Amount: minSendAmount,
-				// Keep the wallet-controlled address with the script output so
-				// an unsigned unlock can return its change to the same wallet.
-				address: append([]byte(nil), changeAddr...),
-			})
-		}
-		// Return the change output to the wallet so future transactions can
-		// spend it. For plutus_lock the script output is at index 0 and
-		// change is at index 1. For plutus_unlock change is at index 0.
-		var outputs []UTxO
-		if change > 0 {
-			changeIdx := uint32(0)
-			if txKind == "plutus_lock" {
-				changeIdx = 1
-			}
-			outputs = []UTxO{{TxHash: txID, Index: changeIdx, Amount: change}}
-		}
-		p.wallet.RecordAccepted(txID, inputs, outputs, p.cfg.confirmationDelay())
+		p.logger.Info("plutus tx submitted", "kind", kind, "tx_id", txID)
 	}
 	if p.txlog != nil {
 		if logErr := p.txlog.Log(entry); logErr != nil {
 			p.logger.Error("txlog write failed", "err", logErr)
 		}
 	}
-	return submitErr == nil
+	return txID, submitErr == nil
 }
 
 func (p *Pump) addLockedPlutusUTxO(utxo UTxO) {

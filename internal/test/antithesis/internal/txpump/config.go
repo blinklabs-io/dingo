@@ -16,6 +16,7 @@ package txpump
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -92,14 +93,10 @@ type Config struct {
 	// When set, EpochLength and NetworkMagic are read from the genesis.
 	GenesisFile string
 
-	// DelegationStakeKeyHash is the optional hex-encoded 28-byte stake key hash
-	// used for delegation transactions. Must be configured together with
-	// DelegationPoolKeyHash.
-	DelegationStakeKeyHash string
-
 	// DelegationPoolKeyHash is the optional hex-encoded 28-byte pool key hash
-	// (pool ID) used for delegation transactions. Must be configured together
-	// with DelegationStakeKeyHash.
+	// (pool ID) that delegation transactions delegate to. Delegation is
+	// disabled when it is empty. The stake credential is the funding input's
+	// payment key, so txpump can witness it.
 	DelegationPoolKeyHash string
 
 	// EpochLength is the number of slots per epoch. Default: 500.
@@ -107,6 +104,11 @@ type Config struct {
 
 	// SystemStartUnix is the genesis system start time in Unix seconds.
 	SystemStartUnix int64
+
+	// PlutusV3CostModel is the protocol's PlutusV3 cost model, read from the
+	// Conway genesis named by TXPUMP_CONWAY_GENESIS_FILE. Plutus unlocks
+	// commit to it in their script data hash and are skipped without it.
+	PlutusV3CostModel []int64
 }
 
 // LoadConfig reads configuration from environment variables and returns a
@@ -135,9 +137,6 @@ func LoadConfig() (*Config, error) {
 			"TXPUMP_GENESIS_UTXO_FILE", "",
 		),
 		GenesisFile: envString("TXPUMP_GENESIS_FILE", ""),
-		DelegationStakeKeyHash: envString(
-			"TXPUMP_DELEGATION_STAKE_KEY_HASH", "",
-		),
 		DelegationPoolKeyHash: envString(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH", "",
 		),
@@ -240,11 +239,37 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 
+	if path := os.Getenv("TXPUMP_CONWAY_GENESIS_FILE"); path != "" {
+		costModel, loadErr := loadPlutusV3CostModel(path)
+		if loadErr != nil {
+			return nil, fmt.Errorf("TXPUMP_CONWAY_GENESIS_FILE: %w", loadErr)
+		}
+		cfg.PlutusV3CostModel = costModel
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 
 	return cfg, nil
+}
+
+// loadPlutusV3CostModel reads plutusV3CostModel from a Conway genesis file.
+func loadPlutusV3CostModel(path string) ([]int64, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // trusted config path
+	if err != nil {
+		return nil, err
+	}
+	var conwayGenesis struct {
+		PlutusV3CostModel []int64 `json:"plutusV3CostModel"`
+	}
+	if err := json.Unmarshal(data, &conwayGenesis); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(conwayGenesis.PlutusV3CostModel) == 0 {
+		return nil, fmt.Errorf("%s has no plutusV3CostModel", path)
+	}
+	return conwayGenesis.PlutusV3CostModel, nil
 }
 
 func (c *Config) confirmationDelay() time.Duration {
@@ -319,21 +344,7 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	stakeConfigured := c.DelegationStakeKeyHash != ""
-	poolConfigured := c.DelegationPoolKeyHash != ""
-	if stakeConfigured != poolConfigured {
-		return errors.New(
-			"TXPUMP_DELEGATION_STAKE_KEY_HASH and " +
-				"TXPUMP_DELEGATION_POOL_KEY_HASH must be set together",
-		)
-	}
-	if stakeConfigured {
-		if _, err := decodeConfiguredHash(
-			"TXPUMP_DELEGATION_STAKE_KEY_HASH",
-			c.DelegationStakeKeyHash,
-		); err != nil {
-			return err
-		}
+	if c.DelegationPoolKeyHash != "" {
 		if _, err := decodeConfiguredHash(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH",
 			c.DelegationPoolKeyHash,
@@ -345,9 +356,7 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) delegationEnabled() bool {
-	return c != nil &&
-		c.DelegationStakeKeyHash != "" &&
-		c.DelegationPoolKeyHash != ""
+	return c != nil && c.DelegationPoolKeyHash != ""
 }
 
 // envString returns the value of the named environment variable, or the

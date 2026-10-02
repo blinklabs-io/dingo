@@ -17,15 +17,19 @@ package txpump
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
@@ -45,7 +49,6 @@ func TestWorkloadSubmissionsKeepControlledChangeAddress(t *testing.T) {
 		t.Run(workload.name, func(t *testing.T) {
 			controlled := append([]byte{0x60}, bytes.Repeat([]byte{0x42}, 28)...)
 			pump := testPump(time.Now().Add(-time.Second), time.Second)
-			pump.cfg.DelegationStakeKeyHash = hex.EncodeToString(sampleStakeKeyHash)
 			pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
 			pump.wallet.Add(UTxO{
 				TxHash: sampleHash, Index: 0, Amount: 600_000_000,
@@ -87,10 +90,15 @@ func TestPlutusUnlockReturnsChangeToLockedWalletAddress(t *testing.T) {
 	pump := testPump(time.Now().Add(-time.Second), time.Second)
 	pump.cfg.ConfirmationSlots = 0
 	pump.cfg.SlotLength = 0
-	pump.wallet.Add(UTxO{
-		TxHash: sampleHash, Index: 0, Amount: 600_000_000,
-		SigningKey: &UTxOKey{Address: controlled},
-	})
+	pump.cfg.PlutusV3CostModel = sampleCostModel
+	key := testSigningKey(0x24)
+	key.Address = controlled
+	for i := range 2 {
+		pump.wallet.Add(UTxO{
+			TxHash: fmt.Sprintf("%064x", i+1), Index: 0, Amount: 600_000_000,
+			SigningKey: key,
+		})
+	}
 	submitted := make(chan []byte, 2)
 	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
 		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
@@ -142,7 +150,6 @@ func TestUnsignedWorkloadSubmissionsKeepDeterministicChangeAddress(t *testing.T)
 	} {
 		t.Run(workload.name, func(t *testing.T) {
 			pump := testPump(time.Now().Add(-time.Second), time.Second)
-			pump.cfg.DelegationStakeKeyHash = hex.EncodeToString(sampleStakeKeyHash)
 			pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
 			pump.wallet.Add(UTxO{TxHash: sampleHash, Index: 0, Amount: 600_000_000})
 			submitted := make(chan []byte, 1)
@@ -210,8 +217,8 @@ func TestInputsEncodedAsSet(t *testing.T) {
 			name: "delegation",
 			build: func() ([]byte, error) {
 				return BuildDelegationTx(
-					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 1_000_000}},
-					make([]byte, 28), make([]byte, 28), MinFee, sampleAddr,
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 2_000_000}},
+					make([]byte, 28), make([]byte, 28), 0, MinFee, sampleAddr, nil,
 				)
 			},
 		},
@@ -220,16 +227,16 @@ func TestInputsEncodedAsSet(t *testing.T) {
 			build: func() ([]byte, error) {
 				return BuildDRepRegistrationTx(
 					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 600_000_000}},
-					make([]byte, 28), 500_000_000, MinFee, sampleAddr,
+					make([]byte, 28), drepDeposit, MinFee, sampleAddr, nil,
 				)
 			},
 		},
 		{
-			name: "vote",
+			name: "drep_update",
 			build: func() ([]byte, error) {
-				return BuildVoteTx(
-					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 1_000_000}},
-					make([]byte, 28), make([]byte, 32), 0, MinFee, sampleAddr,
+				return BuildDRepUpdateTx(
+					[]UTxO{{TxHash: sampleHash, Index: 0, Amount: 2_000_000}},
+					make([]byte, 28), MinFee, sampleAddr, nil,
 				)
 			},
 		},
@@ -384,4 +391,132 @@ func newProtocolTestClient(t *testing.T, serverOptions ...ouroboros.ConnectionOp
 	require.NotNil(t, serverConn)
 	t.Cleanup(func() { _ = serverConn.Close() })
 	return &NodeClient{conn: clientConn, addr: "pipe"}
+}
+
+// TestSubmitDelegationTracksStakeRegistration checks that the first delegation
+// for a credential registers it (certificate 11), later delegations only
+// delegate (certificate 2), and a rejection flips the tracked state so the
+// next attempt registers again.
+func TestSubmitDelegationTracksStakeRegistration(t *testing.T) {
+	key := testSigningKey(0x66)
+	pump := testPump(time.Now().Add(-time.Second), time.Second)
+	pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
+	for i := range 4 {
+		hash := fmt.Sprintf("%064x", i+1)
+		pump.wallet.Add(UTxO{TxHash: hash, Amount: 10_000_000, SigningKey: key})
+	}
+	submitted := make(chan []byte, 4)
+	var reject atomic.Bool
+	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+			submitted <- tx.Raw.Content.([]byte)
+			if reject.Load() {
+				return errors.New("rejected")
+			}
+			return nil
+		},
+	))
+	client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+
+	certType := func() common.Certificate {
+		t.Helper()
+		var raw []byte
+		select {
+		case raw = <-submitted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("submission callback was not reached")
+		}
+		var tx conway.ConwayTransaction
+		_, err := cbor.Decode(raw, &tx)
+		require.NoError(t, err)
+		require.Len(t, tx.Certificates(), 1)
+		return tx.Certificates()[0]
+	}
+
+	require.True(t, pump.submitDelegation(client, 1))
+	require.IsType(t, &common.StakeRegistrationDelegationCertificate{}, certType())
+	require.True(t, pump.submitDelegation(client, 1))
+	require.IsType(t, &common.StakeDelegationCertificate{}, certType())
+
+	reject.Store(true)
+	require.False(t, pump.submitDelegation(client, 1))
+	require.IsType(t, &common.StakeDelegationCertificate{}, certType())
+	reject.Store(false)
+	require.True(t, pump.submitDelegation(client, 1))
+	require.IsType(t, &common.StakeRegistrationDelegationCertificate{}, certType(),
+		"a rejected delegation must make the next attempt re-register")
+}
+
+// TestSubmitPaymentFoldsDustChangeIntoPayment checks that change below the
+// minimum output is sent with the payment instead of producing an output the
+// node rejects.
+func TestSubmitPaymentFoldsDustChangeIntoPayment(t *testing.T) {
+	key := testSigningKey(0x77)
+	pump := testPump(time.Now().Add(-time.Second), time.Second)
+	// Balance 2.5 ADA caps the send at 1.05 ADA, so one 1.25 ADA input
+	// covers it and leaves at most 0.05 ADA of change.
+	for i := range 2 {
+		hash := fmt.Sprintf("%064x", i+1)
+		pump.wallet.Add(UTxO{TxHash: hash, Amount: 1_250_000, SigningKey: key})
+	}
+	submitted := make(chan []byte, 1)
+	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+			submitted <- tx.Raw.Content.([]byte)
+			return nil
+		},
+	))
+	client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+	require.True(t, pump.submitPayment(client, 1))
+
+	var raw []byte
+	select {
+	case raw = <-submitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("submission callback was not reached")
+	}
+	var tx conway.ConwayTransaction
+	_, err := cbor.Decode(raw, &tx)
+	require.NoError(t, err)
+	for _, out := range tx.Outputs() {
+		require.GreaterOrEqual(t, out.Amount().Uint64(), minSendAmount,
+			"no output may fall below the minimum output")
+	}
+}
+
+// TestSubmitDelegationWaitsForPendingRegistration checks that a credential
+// whose registration is still inside the confirmation window is not used for
+// a plain delegation the ledger would reject.
+func TestSubmitDelegationWaitsForPendingRegistration(t *testing.T) {
+	key := testSigningKey(0x67)
+	pump := testPump(time.Now().Add(-time.Second), time.Second)
+	pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
+	pump.cfg.ConfirmationSlots = 30
+	pump.cfg.SlotLength = time.Second
+	for i := range 2 {
+		hash := fmt.Sprintf("%064x", i+1)
+		pump.wallet.Add(UTxO{TxHash: hash, Amount: 10_000_000, SigningKey: key})
+	}
+	submitted := make(chan []byte, 2)
+	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+			submitted <- tx.Raw.Content.([]byte)
+			return nil
+		},
+	))
+	client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+
+	require.True(t, pump.submitDelegation(client, 1))
+	select {
+	case <-submitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("registration submission callback was not reached")
+	}
+	require.False(t, pump.submitDelegation(client, 1),
+		"a pending registration must not be followed by a plain delegation")
+	select {
+	case <-submitted:
+		t.Fatal("no transaction may be submitted while the registration is pending")
+	default:
+	}
 }

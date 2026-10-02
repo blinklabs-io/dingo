@@ -221,6 +221,7 @@ services:
       TXPUMP_STARTUP_TIMEOUT: "60"
       TXPUMP_GENESIS_FILE: "/testnet/testnet.yaml"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+      TXPUMP_CONWAY_GENESIS_FILE: "/utxo-keys/genesis/conway-genesis.json"
     volumes:
       - ./testnet.yaml:/testnet/testnet.yaml:ro
       - p1-configs:/configs:ro

@@ -15,104 +15,135 @@
 package txpump
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
-	"math/big"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/plutigo/data"
 )
 
-// alwaysSucceedsScriptHex is a minimal Plutus V2 always-succeeds script
-// encoded in CBOR hex.  It is a double-CBOR-wrapped byte string as required
-// by the Cardano ledger for script serialisation.
-//
-// The inner bytes represent a minimal untyped Plutus Core program that
-// immediately returns unit regardless of its arguments.
-const alwaysSucceedsScriptHex = "4e4d01000033222220051200120011"
+// alwaysSucceedsScriptHex is a PlutusV3 script, as carried in a witness set
+// (a CBOR byte string wrapping the flat program), for
+// (program 1.1.0 (lam ctx (con unit ()))): it accepts any script context.
+const alwaysSucceedsScriptHex = "450101002499"
 
-// alwaysSucceedsScript returns the raw bytes of the always-succeeds script.
-// Returns nil if the hex constant cannot be decoded (should never happen with
-// a correct even-length hex string).
+// plutusV3 is the Plutus language version index used by protocol parameter
+// cost models and language views.
+const plutusV3 uint = 2
+
+// plutusLockAmount is the lovelace locked at the script address. It leaves
+// change above the minimum output after the unlock fee.
+const plutusLockAmount uint64 = 2_000_000
+
+// plutusUnlockFee covers the unlock transaction's size and script execution.
+const plutusUnlockFee uint64 = 400_000
+
+// plutusUnlockExUnits is the execution budget declared for the always-succeeds
+// script; it is far above what the script uses.
+var plutusUnlockExUnits = common.ExUnits{Memory: 100_000, Steps: 100_000_000}
+
+// alwaysSucceedsScript returns the always-succeeds PlutusV3 script bytes.
 func alwaysSucceedsScript() []byte {
-	b, err := hex.DecodeString(alwaysSucceedsScriptHex)
-	if err != nil {
-		// alwaysSucceedsScriptHex must be a valid even-length hex string;
-		// if decode fails the constant is malformed.
-		slog.Default().Error(
-			"alwaysSucceedsScriptHex decode failed",
-			"err", err,
-		)
-		return nil
-	}
+	b, _ := hex.DecodeString(alwaysSucceedsScriptHex)
 	return b
 }
 
-// scriptAddressFromHash builds a 29-byte Cardano enterprise address for a
-// script payment credential.  The network byte is 0x70 (mainnet script
-// enterprise) but for devnet testing the exact discriminant byte does not
-// affect the CBOR structure test.
+// alwaysSucceedsScriptHash returns the ledger hash of the always-succeeds
+// script: Blake2b-224 over the PlutusV3 language tag and the script bytes.
+func alwaysSucceedsScriptHash() []byte {
+	return common.PlutusV3Script(alwaysSucceedsScript()).Hash().Bytes()
+}
+
+// scriptAddressFromHash builds a testnet enterprise address whose payment
+// credential is the script hash (header 0x70: script, no stake, network 0).
 func scriptAddressFromHash(scriptHash []byte) []byte {
 	addr := make([]byte, 29)
-	addr[0] = 0x70 // script enterprise address discriminant
+	addr[0] = 0x70
 	copy(addr[1:], scriptHash)
 	return addr
 }
 
-// datumHash computes a 32-byte SHA-256 hash of the provided datum bytes.
-// On Cardano the datum hash used in pre-Babbage outputs is the Blake2b-256
-// hash of the CBOR-encoded datum; for Antithesis testing we use SHA-256 as a
-// stand-in since node signature validation is not enforced.
-func datumHash(datum []byte) []byte {
-	h := sha256.Sum256(datum)
-	return h[:]
+// plutusOutput is a map-encoded Babbage/Conway output.
+//
+// Key 0 = address
+// Key 1 = value (lovelace only)
+// Key 2 = datum_option ([1, #6.24(datum)] for an inline datum)
+type plutusOutput struct {
+	Address     []byte `cbor:"0,keyasint"`
+	Amount      uint64 `cbor:"1,keyasint"`
+	DatumOption []any  `cbor:"2,keyasint,omitempty"`
 }
 
-// txBodyWithDatumHash extends the basic tx body with datum hashes on outputs.
-// It uses a map-based encoding so we can include datum_hash (key 2 on the
-// output map — not to be confused with the top-level fee key).
+// txBodyPlutus is a Conway transaction body for the Plutus workload.
 //
-// For simplicity we represent outputs as raw CBOR so we can embed the
-// optional datum_hash field without defining a full post-Babbage output type.
-//
-// Key 0 = inputs
-// Key 1 = outputs  (array of map-encoded outputs)
-// Key 2 = fee
-type txBodyWithScriptOutput struct {
-	Inputs  cbor.Set          `cbor:"0,keyasint"`
-	Outputs []cbor.RawMessage `cbor:"1,keyasint"`
-	Fee     uint64            `cbor:"2,keyasint"`
+// Key 0  = inputs
+// Key 1  = outputs
+// Key 2  = fee
+// Key 11 = script_data_hash
+// Key 13 = collateral inputs
+type txBodyPlutus struct {
+	Inputs         cbor.Set       `cbor:"0,keyasint"`
+	Outputs        []plutusOutput `cbor:"1,keyasint"`
+	Fee            uint64         `cbor:"2,keyasint"`
+	ScriptDataHash []byte         `cbor:"11,keyasint,omitempty"`
+	Collateral     cbor.Set       `cbor:"13,keyasint,omitempty"`
 }
 
-// conwayTxWithScriptOutput is a Conway transaction targeting a script address.
-type conwayTxWithScriptOutput struct {
+// conwayTxPlutus is the top-level Conway transaction for the Plutus workload.
+type conwayTxPlutus struct {
 	cbor.StructAsArray
-	Body    txBodyWithScriptOutput
+	Body    txBodyPlutus
 	Witness map[any]any
 	IsValid bool
 	AuxData any
 }
 
-// scriptOutput is a map-encoded Babbage/Conway output that can carry an
-// optional datum hash.
-//
-// Key 0 = address
-// Key 1 = value (lovelace only)
-// Key 2 = datum_option (pair [0, datumHash] for hash-based datum)
-type scriptOutputDatumHash struct {
-	Address     []byte `cbor:"0,keyasint"`
-	Amount      uint64 `cbor:"1,keyasint"`
-	DatumOption []any  `cbor:"2,keyasint"`
+func plutusInputs(label string, utxos []UTxO) (cbor.Set, uint64, error) {
+	set := make(cbor.Set, 0, len(utxos))
+	var total uint64
+	for _, u := range utxos {
+		hashBytes, err := hex.DecodeString(u.TxHash)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"%s: invalid tx hash %q: %w", label, u.TxHash, err,
+			)
+		}
+		if len(hashBytes) != 32 {
+			return nil, 0, fmt.Errorf(
+				"%s: tx hash %q has unexpected length %d",
+				label, u.TxHash, len(hashBytes),
+			)
+		}
+		set = append(set, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		total += u.Amount
+	}
+	return set, total, nil
 }
 
-// BuildPlutusLockTx constructs a minimal CBOR-encoded Conway transaction that
-// sends ADA to a script address with an embedded datum hash.  The transaction
-// has no witnesses and will be rejected by a live node, but exercises the full
-// script-output submission path for Antithesis testing.
+func encodePlutusTx(label string, body txBodyPlutus, witness map[any]any, keys []*UTxOKey) ([]byte, error) {
+	bodyBytes, err := cbor.Encode(body)
+	if err != nil {
+		return nil, fmt.Errorf("%s: body encoding failed: %w", label, err)
+	}
+	for k, v := range BuildWitnessMap(bodyBytes, keys...) {
+		witness[k] = v
+	}
+	txBytes, err := cbor.Encode(conwayTxPlutus{
+		Body:    body,
+		Witness: witness,
+		IsValid: true,
+		AuxData: nil,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: CBOR encoding failed: %w", label, err)
+	}
+	return txBytes, nil
+}
+
+// BuildPlutusLockTx constructs a signed Conway transaction that sends amount
+// to the script address for scriptHash with an inline datum, returning any
+// change to changeAddr.
 func BuildPlutusLockTx(
 	inputs []UTxO,
 	scriptHash []byte,
@@ -135,246 +166,137 @@ func BuildPlutusLockTx(
 			amount, minSendAmount,
 		)
 	}
-
-	bodyInputs := make([]txBodyInput, 0, len(inputs))
-	for _, u := range inputs {
-		hashBytes, err := hex.DecodeString(u.TxHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"plutus_lock: invalid tx hash %q: %w", u.TxHash, err,
-			)
-		}
-		if len(hashBytes) != 32 {
-			return nil, fmt.Errorf(
-				"plutus_lock: tx hash %q has unexpected length %d",
-				u.TxHash, len(hashBytes),
-			)
-		}
-		bodyInputs = append(
-			bodyInputs,
-			txBodyInput{Hash: hashBytes, Idx: u.Index},
-		)
+	inputSet, total, err := plutusInputs("plutus_lock", inputs)
+	if err != nil {
+		return nil, err
 	}
-
-	var total uint64
-	for _, u := range inputs {
-		total += u.Amount
-	}
-	spent := amount + fee
-	if total < spent {
+	if total < amount+fee {
 		return nil, fmt.Errorf(
-			"plutus_lock: total input %d cannot cover amount (%d) + fee (%d) = %d",
-			total,
-			amount,
-			fee,
-			spent,
+			"plutus_lock: total input %d cannot cover amount %d + fee %d",
+			total, amount, fee,
 		)
 	}
-	change := total - spent
-	if change > 0 && len(changeAddr) == 0 {
-		return nil, errors.New(
-			"plutus_lock: non-zero change requires a change address",
-		)
-	}
+	change := total - amount - fee
 
-	scriptAddr := scriptAddressFromHash(scriptHash)
-
-	// Datum: a simple CBOR integer 0 as the locked datum.
+	// Inline datum: the integer 0, tagged as embedded CBOR.
 	datumBytes, err := cbor.Encode(uint64(0))
 	if err != nil {
 		return nil, fmt.Errorf("plutus_lock: datum encoding failed: %w", err)
 	}
-	dHash := datumHash(datumBytes)
-
-	// Encode the script output as a map with datum_option [0, hash].
-	scriptOut := scriptOutputDatumHash{
-		Address:     scriptAddr,
-		Amount:      amount,
-		DatumOption: []any{uint64(0), dHash},
-	}
-	scriptOutBytes, err := cbor.Encode(scriptOut)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"plutus_lock: script output encoding failed: %w", err,
-		)
-	}
-
-	outputs := []cbor.RawMessage{cbor.RawMessage(scriptOutBytes)}
-
-	if change > 0 && len(changeAddr) > 0 {
-		changeOut := scriptOutputDatumHash{
-			Address: changeAddr,
-			Amount:  change,
-		}
-		changeOutBytes, err := cbor.Encode(changeOut)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"plutus_lock: change output encoding failed: %w", err,
+	outputs := []plutusOutput{{
+		Address: scriptAddressFromHash(scriptHash),
+		Amount:  amount,
+		DatumOption: []any{
+			uint64(1),
+			cbor.Tag{Number: 24, Content: datumBytes},
+		},
+	}}
+	if change > 0 {
+		if len(changeAddr) == 0 {
+			return nil, errors.New(
+				"plutus_lock: non-zero change requires a change address",
 			)
 		}
-		outputs = append(outputs, cbor.RawMessage(changeOutBytes))
+		if change < minSendAmount {
+			return nil, fmt.Errorf(
+				"plutus_lock: change %d is below the minimum output %d",
+				change, minSendAmount,
+			)
+		}
+		outputs = append(outputs, plutusOutput{Address: changeAddr, Amount: change})
 	}
 
-	lockInputSet := make(cbor.Set, len(bodyInputs))
-	for i, inp := range bodyInputs {
-		lockInputSet[i] = inp
+	keys := make([]*UTxOKey, 0, len(inputs))
+	for _, u := range inputs {
+		keys = append(keys, u.SigningKey)
 	}
-	body := txBodyWithScriptOutput{
-		Inputs:  lockInputSet,
+	return encodePlutusTx("plutus_lock", txBodyPlutus{
+		Inputs:  inputSet,
 		Outputs: outputs,
 		Fee:     fee,
-	}
-
-	tx := conwayTxWithScriptOutput{
-		Body:    body,
-		Witness: map[any]any{},
-		IsValid: true,
-		AuxData: nil,
-	}
-
-	txBytes, err := cbor.Encode(tx)
-	if err != nil {
-		return nil, fmt.Errorf("plutus_lock: CBOR encoding failed: %w", err)
-	}
-	return txBytes, nil
+	}, map[any]any{}, keys)
 }
 
-// txBodyWithRedeemer extends the basic tx body with a redeemer map (key 5 in
-// witness set is where redeemers live in real Conway, but for the tx body
-// structure we keep this simple).
-//
-// Key 0 = inputs
-// Key 1 = outputs
-// Key 2 = fee
-type txBodyUnlock struct {
-	Inputs  cbor.Set       `cbor:"0,keyasint"`
-	Outputs []txBodyOutput `cbor:"1,keyasint"`
-	Fee     uint64         `cbor:"2,keyasint"`
-}
-
-// witnessWithScript is a Conway witness set that carries a Plutus V2 script
-// and a redeemer.
-//
-// Key 3 = plutus_v2_scripts (array of script bytes)
-// Key 5 = redeemers (map of redeemer_key -> redeemer_value)
-type witnessWithScript struct {
-	PlutusV2Scripts [][]byte    `cbor:"3,keyasint"`
-	Redeemers       map[any]any `cbor:"5,keyasint"`
-}
-
-// conwayTxWithScript is the top-level Conway transaction with script witness.
-type conwayTxWithScript struct {
-	cbor.StructAsArray
-	Body    txBodyUnlock
-	Witness witnessWithScript
-	IsValid bool
-	AuxData any
-}
-
-// BuildPlutusUnlockTx constructs a minimal CBOR-encoded Conway transaction
-// that spends from a script address with an inline redeemer.  The transaction
-// carries the script in the witness set.  It will be rejected by a live node
-// (no real validation), but exercises the full script-spend submission path
-// for Antithesis testing.
+// BuildPlutusUnlockTx constructs a signed Conway transaction that spends the
+// always-succeeds script output locked, pledging collateral (a key-locked
+// UTxO whose key signs the transaction) and returning the rest to changeAddr.
+// costModel is the protocol's PlutusV3 cost model, which the script data hash
+// commits to.
 func BuildPlutusUnlockTx(
-	inputs []UTxO,
-	scriptBytes []byte,
+	locked UTxO,
+	collateral UTxO,
+	costModel []int64,
 	fee uint64,
 	changeAddr []byte,
 ) ([]byte, error) {
-	if len(inputs) == 0 {
-		return nil, errors.New("plutus_unlock: at least one input required")
+	if len(costModel) == 0 {
+		return nil, errors.New("plutus_unlock: PlutusV3 cost model required")
 	}
-	if len(scriptBytes) == 0 {
-		scriptBytes = alwaysSucceedsScript()
-		if len(scriptBytes) == 0 {
-			return nil, errors.New(
-				"plutus_unlock: embedded always-succeeds script unavailable",
-			)
-		}
+	if !collateral.SigningKey.canSign() {
+		return nil, errors.New("plutus_unlock: collateral must be key-locked")
 	}
-
-	bodyInputs := make([]txBodyInput, 0, len(inputs))
-	for _, u := range inputs {
-		hashBytes, err := hex.DecodeString(u.TxHash)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"plutus_unlock: invalid tx hash %q: %w", u.TxHash, err,
-			)
-		}
-		if len(hashBytes) != 32 {
-			return nil, fmt.Errorf(
-				"plutus_unlock: tx hash %q has unexpected length %d",
-				u.TxHash, len(hashBytes),
-			)
-		}
-		bodyInputs = append(
-			bodyInputs,
-			txBodyInput{Hash: hashBytes, Idx: u.Index},
+	inputSet, total, err := plutusInputs("plutus_unlock", []UTxO{locked})
+	if err != nil {
+		return nil, err
+	}
+	collateralSet, collateralTotal, err := plutusInputs(
+		"plutus_unlock", []UTxO{collateral},
+	)
+	if err != nil {
+		return nil, err
+	}
+	// The ledger requires collateral of at least collateralPercentage (150%)
+	// of the fee.
+	if collateralTotal < fee*3/2 {
+		return nil, fmt.Errorf(
+			"plutus_unlock: collateral %d does not cover 150%% of fee %d",
+			collateralTotal, fee,
 		)
 	}
-
-	var total uint64
-	for _, u := range inputs {
-		total += u.Amount
-	}
-	if total < fee {
+	if total < fee+minSendAmount {
 		return nil, fmt.Errorf(
-			"plutus_unlock: total input %d cannot cover fee %d",
+			"plutus_unlock: locked amount %d cannot cover fee %d and a change output",
 			total, fee,
 		)
 	}
-	change := total - fee
-	if change > 0 && len(changeAddr) == 0 {
-		return nil, errors.New(
-			"plutus_unlock: non-zero change requires a change address",
-		)
+	if len(changeAddr) == 0 {
+		return nil, errors.New("plutus_unlock: change address required")
 	}
 
-	var outputs []txBodyOutput
-	if change > 0 && len(changeAddr) > 0 {
-		outputs = append(
-			outputs,
-			txBodyOutput{Address: changeAddr, Amount: change},
-		)
-	}
-
-	unlockInputSet := make(cbor.Set, len(bodyInputs))
-	for i, inp := range bodyInputs {
-		unlockInputSet[i] = inp
-	}
-	body := txBodyUnlock{
-		Inputs:  unlockInputSet,
-		Outputs: outputs,
-		Fee:     fee,
-	}
-
-	// Redeemer: spend tag (0), input index (0), data = integer 0, ExUnits.
-	// Key 5 of the witness set must be a CBOR map of
-	// redeemer_key => redeemer_value.
-	rKey := common.RedeemerKey{Tag: common.RedeemerTagSpend, Index: 0}
-	rVal := common.RedeemerValue{
-		Data: common.Datum{
-			Data: data.NewInteger(big.NewInt(0)),
-		},
-		ExUnits: common.ExUnits{Memory: 200_000, Steps: 700_000_000},
-	}
-
-	witness := witnessWithScript{
-		PlutusV2Scripts: [][]byte{scriptBytes},
-		Redeemers:       map[any]any{rKey: rVal},
-	}
-
-	tx := conwayTxWithScript{
-		Body:    body,
-		Witness: witness,
-		IsValid: true,
-		AuxData: nil,
-	}
-
-	txBytes, err := cbor.Encode(tx)
+	// Conway redeemers map: {[spend, 0]: [data, ex_units]}. The datum is
+	// inline, so the script data hash covers only redeemers and language
+	// views.
+	redeemerKey, err := cbor.Encode([]uint64{uint64(common.RedeemerTagSpend), 0})
 	if err != nil {
-		return nil, fmt.Errorf("plutus_unlock: CBOR encoding failed: %w", err)
+		return nil, fmt.Errorf("plutus_unlock: redeemer encoding failed: %w", err)
 	}
-	return txBytes, nil
+	redeemerValue, err := cbor.Encode([]any{
+		uint64(0),
+		[]int64{plutusUnlockExUnits.Memory, plutusUnlockExUnits.Steps},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("plutus_unlock: redeemer encoding failed: %w", err)
+	}
+	redeemers := append([]byte{0xa1}, redeemerKey...)
+	redeemers = append(redeemers, redeemerValue...)
+
+	langViews, err := common.EncodeLangViews(
+		map[uint]struct{}{plutusV3: {}},
+		map[uint][]int64{plutusV3: costModel},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("plutus_unlock: language views: %w", err)
+	}
+	scriptDataHash := common.Blake2b256Hash(append(append([]byte{}, redeemers...), langViews...))
+
+	return encodePlutusTx("plutus_unlock", txBodyPlutus{
+		Inputs:         inputSet,
+		Outputs:        []plutusOutput{{Address: changeAddr, Amount: total - fee}},
+		Fee:            fee,
+		ScriptDataHash: scriptDataHash.Bytes(),
+		Collateral:     collateralSet,
+	}, map[any]any{
+		uint64(5): cbor.RawMessage(redeemers),
+		uint64(7): [][]byte{alwaysSucceedsScript()},
+	}, []*UTxOKey{collateral.SigningKey})
 }

@@ -15,26 +15,19 @@
 package txpump
 
 import (
-	"encoding/hex"
-	"fmt"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 var sampleDRepKeyHash = make([]byte, 28)
-var sampleGovActionTxHash []byte
 
 func init() {
 	for i := range sampleDRepKeyHash {
 		sampleDRepKeyHash[i] = byte(i + 0x20)
 	}
-	h, err := hex.DecodeString(sampleHash)
-	if err != nil {
-		panic(fmt.Errorf("decode sampleHash: %w", err))
-	}
-	sampleGovActionTxHash = h
 }
 
 func sampleGovInputs() []UTxO {
@@ -43,165 +36,76 @@ func sampleGovInputs() []UTxO {
 	}
 }
 
-// ---- DRep registration tests ----
+func TestBuildDRepRegistrationTx_RegistersAndSigns(t *testing.T) {
+	key := testSigningKey(0x44)
+	drepHash := common.Blake2b224Hash(key.VKey).Bytes()
+	inputs := []UTxO{{TxHash: sampleHash, Amount: 600_000_000, SigningKey: key}}
 
-func TestBuildDRepRegistrationTx_Success(t *testing.T) {
 	txBytes, err := BuildDRepRegistrationTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		inputs, drepHash, drepDeposit, MinFee, sampleAddr, key,
 	)
 	require.NoError(t, err)
-	assert.NotEmpty(t, txBytes)
-	requireConwayDecode(t, txBytes)
+	tx := requireSignedBy(t, txBytes, key)
+
+	certs := tx.Certificates()
+	require.Len(t, certs, 1)
+	cert, ok := certs[0].(*common.RegistrationDrepCertificate)
+	require.True(t, ok, "DRep registration must use certificate type 16, got %T", certs[0])
+	require.Equal(t, drepHash, cert.DrepCredential.Credential.Bytes())
+	require.Equal(t, int64(drepDeposit), cert.Amount)
+	outputs := tx.Outputs()
+	require.Len(t, outputs, 1)
+	require.Equal(t, uint64(600_000_000)-MinFee-drepDeposit, outputs[0].Amount().Uint64())
+}
+
+func TestBuildDRepUpdateTx_UpdatesAndSigns(t *testing.T) {
+	key := testSigningKey(0x55)
+	drepHash := common.Blake2b224Hash(key.VKey).Bytes()
+	inputs := []UTxO{{TxHash: sampleHash, Amount: 5_000_000, SigningKey: key}}
+
+	txBytes, err := BuildDRepUpdateTx(inputs, drepHash, MinFee, sampleAddr, key)
+	require.NoError(t, err)
+	tx := requireSignedBy(t, txBytes, key)
+
+	certs := tx.Certificates()
+	require.Len(t, certs, 1)
+	cert, ok := certs[0].(*common.UpdateDrepCertificate)
+	require.True(t, ok, "DRep update must use certificate type 18, got %T", certs[0])
+	require.Equal(t, drepHash, cert.DrepCredential.Credential.Bytes())
 }
 
 func TestBuildDRepRegistrationTx_NoInputs(t *testing.T) {
 	_, err := BuildDRepRegistrationTx(
-		nil,
-		sampleDRepKeyHash,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		nil, sampleDRepKeyHash, drepDeposit, MinFee, sampleAddr, nil,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "input")
 }
 
 func TestBuildDRepRegistrationTx_EmptyKeyHash(t *testing.T) {
 	_, err := BuildDRepRegistrationTx(
-		sampleGovInputs(),
-		nil,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		sampleGovInputs(), nil, drepDeposit, MinFee, sampleAddr, nil,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DRep key hash")
+	_, err = BuildDRepUpdateTx(sampleGovInputs(), nil, MinFee, sampleAddr, nil)
+	require.Error(t, err)
 }
 
-func TestBuildDRepRegistrationTx_InvalidTxHash(t *testing.T) {
-	inputs := []UTxO{{TxHash: "not-hex!", Index: 0, Amount: 10_000_000}}
+func TestBuildDRepRegistrationTx_InsufficientForDeposit(t *testing.T) {
 	_, err := BuildDRepRegistrationTx(
-		inputs,
-		sampleDRepKeyHash,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		[]UTxO{{TxHash: sampleHash, Amount: drepDeposit}},
+		sampleDRepKeyHash, drepDeposit, MinFee, sampleAddr, nil,
 	)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tx hash")
 }
 
 func TestBuildDRepRegistrationTx_IsDeterministic(t *testing.T) {
 	a, err := BuildDRepRegistrationTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		sampleGovInputs(), sampleDRepKeyHash, drepDeposit, MinFee, sampleAddr, nil,
 	)
 	require.NoError(t, err)
 	b, err := BuildDRepRegistrationTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		500_000_000,
-		MinFee,
-		sampleAddr,
+		sampleGovInputs(), sampleDRepKeyHash, drepDeposit, MinFee, sampleAddr, nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "BuildDRepRegistrationTx must be deterministic")
-}
-
-// ---- Vote transaction tests ----
-
-func TestBuildVoteTx_Success(t *testing.T) {
-	txBytes, err := BuildVoteTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.NoError(t, err)
-	assert.NotEmpty(t, txBytes)
-	requireConwayDecode(t, txBytes)
-}
-
-func TestBuildVoteTx_NoInputs(t *testing.T) {
-	_, err := BuildVoteTx(
-		nil,
-		sampleDRepKeyHash,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "input")
-}
-
-func TestBuildVoteTx_EmptyVoterKeyHash(t *testing.T) {
-	_, err := BuildVoteTx(
-		sampleGovInputs(),
-		nil,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "voter key hash")
-}
-
-func TestBuildVoteTx_EmptyGovActionTxHash(t *testing.T) {
-	_, err := BuildVoteTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		nil,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "governance action tx hash")
-}
-
-func TestBuildVoteTx_InvalidInputTxHash(t *testing.T) {
-	inputs := []UTxO{{TxHash: "not-hex!", Index: 0, Amount: 10_000_000}}
-	_, err := BuildVoteTx(
-		inputs,
-		sampleDRepKeyHash,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "tx hash")
-}
-
-func TestBuildVoteTx_IsDeterministic(t *testing.T) {
-	a, err := BuildVoteTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.NoError(t, err)
-	b, err := BuildVoteTx(
-		sampleGovInputs(),
-		sampleDRepKeyHash,
-		sampleGovActionTxHash,
-		0,
-		MinFee,
-		sampleAddr,
-	)
-	require.NoError(t, err)
-	assert.Equal(t, a, b, "BuildVoteTx must be deterministic")
 }

@@ -88,7 +88,9 @@ type BlockEvent struct {
 // Two log formats are supported:
 //
 //   - dingo:         slog JSON with a "msg" key
-//   - cardano-node:  trace-dispatcher JSON with a "ns" key
+//   - cardano-node:  JSON with a "ns" key, either trace-dispatcher (string
+//     namespace) or legacy iohk-monitoring (namespace array, event name in
+//     data.kind or data.val.kind)
 func ParseLogLine(line string) *BlockEvent {
 	line = strings.TrimSpace(line)
 	if len(line) == 0 || line[0] != '{' {
@@ -100,11 +102,12 @@ func ParseLogLine(line string) *BlockEvent {
 		return nil
 	}
 
-	if _, hasMsgKey := raw["msg"]; hasMsgKey {
-		return parseDingoLine(raw)
-	}
+	// cardano-node lines also carry an (empty) "msg" key, so check "ns" first.
 	if _, hasNsKey := raw["ns"]; hasNsKey {
 		return parseCardanoNodeLine(raw)
+	}
+	if _, hasMsgKey := raw["msg"]; hasMsgKey {
+		return parseDingoLine(raw)
 	}
 	// txpump log format: {"ts":"...","tx_id":"...","tx_type":"...","status":"..."}
 	if _, hasTxType := raw["tx_type"]; hasTxType {
@@ -145,9 +148,10 @@ func parseDingoLine(raw map[string]interface{}) *BlockEvent {
 	return ev
 }
 
-// parseCardanoNodeLine handles cardano-node trace-dispatcher JSON format.
+// parseCardanoNodeLine handles cardano-node trace-dispatcher and legacy
+// iohk-monitoring JSON formats.
 func parseCardanoNodeLine(raw map[string]interface{}) *BlockEvent {
-	ns, _ := raw["ns"].(string)
+	ns := cardanoNodeEventName(raw)
 
 	var evType EventType
 	switch {
@@ -168,7 +172,48 @@ func parseCardanoNodeLine(raw map[string]interface{}) *BlockEvent {
 	ev.Slot = extractSlotCardano(raw)
 	ev.BlockHash = extractHash(raw)
 	ev.TxID = extractTxID(raw)
+	if data, ok := raw["data"].(map[string]interface{}); ok {
+		if val, ok := data["val"].(map[string]interface{}); ok {
+			if ev.Slot == 0 {
+				ev.Slot = extractSlot(val)
+			}
+			if ev.BlockHash == "" {
+				ev.BlockHash = stringValue(val["block"])
+			}
+		}
+		// Legacy AddedToCurrentChain reports the tip as "<hash>@<slot>".
+		if hash, slot, ok := strings.Cut(stringValue(data["newtip"]), "@"); ok {
+			if ev.BlockHash == "" {
+				ev.BlockHash = hash
+			}
+			if n, err := strconv.ParseUint(slot, 10, 64); err == nil && ev.Slot == 0 {
+				ev.Slot = n
+			}
+		}
+	}
 	return ev
+}
+
+// cardanoNodeEventName joins the namespace and event kinds of a cardano-node
+// log line so event matching works for both trace-dispatcher and legacy
+// iohk-monitoring output.
+func cardanoNodeEventName(raw map[string]interface{}) string {
+	var parts []string
+	switch ns := raw["ns"].(type) {
+	case string:
+		parts = append(parts, ns)
+	case []interface{}:
+		for _, p := range ns {
+			parts = append(parts, stringValue(p))
+		}
+	}
+	if data, ok := raw["data"].(map[string]interface{}); ok {
+		parts = append(parts, stringValue(data["kind"]))
+		if val, ok := data["val"].(map[string]interface{}); ok {
+			parts = append(parts, stringValue(val["kind"]))
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // extractTimestamp tries common timestamp keys in the JSON object.

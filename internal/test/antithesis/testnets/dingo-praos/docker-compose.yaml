@@ -224,6 +224,7 @@ services:
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_FILE: "/testnet-config/testnet.yaml"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+      TXPUMP_CONWAY_GENESIS_FILE: "/utxo-keys/genesis/conway-genesis.json"
     volumes:
       - logs:/logs
       - p1-configs:/configs:ro
