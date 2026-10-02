@@ -1,6 +1,12 @@
 # Example config file for dingo
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
+#
+# Keep a local copy that holds credentials (token registry headers, API keys)
+# outside the repository, or name it dingo.yaml, which git ignores. Key files
+# (*.skey, *.key, *.pem), .env and credentials.json are ignored too. Production
+# key paths are never embedded in the binary; set them with shelleyVrfKey,
+# shelleyKesKey and shelleyOperationalCertificate.
 
 # Public bind address for the Dingo server
 # CLI: --bind-addr

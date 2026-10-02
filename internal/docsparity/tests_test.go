@@ -3509,3 +3509,51 @@ func TestServiceContainersRelaxDurability(t *testing.T) {
 		}
 	}
 }
+
+// TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures pins both halves of
+// the secret-file patterns: names that carry local credentials are ignored,
+// and every tracked fixture that matches one of them is un-ignored explicitly,
+// so an intentional fixture is never one `git add -f` away from looking like
+// a leak.
+func TestGitignoreCoversLocalSecretsAndKeepsTrackedFixtures(t *testing.T) {
+	t.Parallel()
+
+	root := repoRoot(t)
+	if err := exec.Command(
+		"git", "-C", root, "rev-parse", "--git-dir",
+	).Run(); err != nil {
+		t.Skip("not a git checkout")
+	}
+
+	for _, name := range []string{
+		".env",
+		"payment.skey",
+		"payment.vkey",
+		"node.key",
+		"tls/server.pem",
+		"credentials.json",
+		"dingo.yaml",
+	} {
+		// --no-index judges the pattern alone, whether or not the path exists
+		// or is tracked.
+		err := exec.Command(
+			"git", "-C", root, "check-ignore", "--no-index", "-q", name,
+		).Run()
+		if err != nil {
+			t.Errorf("%s is not ignored: %v", name, err)
+		}
+	}
+
+	tracked, err := exec.Command(
+		"git", "-C", root, "ls-files", "-ci", "--exclude-standard",
+	).Output()
+	if err != nil {
+		t.Fatalf("listing ignored tracked files: %v", err)
+	}
+	if got := strings.TrimSpace(string(tracked)); got != "" {
+		t.Errorf(
+			"tracked files match an ignore pattern without a negation:\n%s",
+			got,
+		)
+	}
+}
