@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -140,6 +142,133 @@ func TestErrorEpochsAreSelectedAfterReferenceBecomesUnchanged(t *testing.T) {
 	accounts, err := cache.GetEpochsNeedingRetry("preview", true)
 	require.NoError(t, err)
 	require.Empty(t, accounts)
+}
+
+func TestReportedErrorRemainsRetryableAfterCacheReopen(t *testing.T) {
+	t.Parallel()
+	for _, accounts := range []bool{false, true} {
+		t.Run(
+			map[bool]string{false: "aggregate", true: "accounts"}[accounts],
+			func(t *testing.T) {
+				t.Parallel()
+				path := filepath.Join(t.TempDir(), "cache.db")
+				cache, err := openTestCache(path, nil)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, cache.Close()) })
+				now := time.Now().UTC()
+				require.NoError(
+					t,
+					cache.UpsertEpochInfo(
+						KoiosEpochInfo{
+							Network:   "preview",
+							Epoch:     5,
+							FetchedAt: now.Add(-time.Hour),
+						},
+					),
+				)
+				require.NoError(
+					t,
+					cache.UpsertCheckEpochStatus(CheckEpochStatus{
+						Network: "preview", Epoch: 5, LastCheckedAt: now,
+						AggregateStatus: StatusPass, AccountStatus: StatusPass,
+						DingoPoolCount: 11, KoiosPoolCount: 12,
+					}),
+				)
+				o := &Observer{
+					cache: cache,
+					cfg: ObserverConfig{
+						Network:         "preview",
+						Logger:          slog.New(slog.DiscardHandler),
+						ErrorRetryDelay: time.Hour,
+					},
+					retry:         make(map[uint64]time.Time),
+					retryAccounts: make(map[uint64]time.Time),
+				}
+				o.reportError(
+					5,
+					accounts,
+					errors.New("temporary source failure"),
+				)
+				require.NoError(t, cache.Close())
+				cache, err = openTestCache(path, nil)
+				require.NoError(t, err)
+				fresh, err := cache.GetEpochsNeedingCheck("preview", false)
+				require.NoError(t, err)
+				require.Empty(t, fresh, "reference timestamps remain fresh")
+				retrying, err := cache.GetEpochsNeedingRetry(
+					"preview",
+					accounts,
+				)
+				require.NoError(t, err)
+				require.Equal(t, []uint64{5}, retrying)
+				other, err := cache.GetEpochsNeedingRetry("preview", !accounts)
+				require.NoError(t, err)
+				require.Empty(t, other)
+				reference, err := cache.GetEpochInfo("preview", 5)
+				require.NoError(t, err)
+				require.NotNil(t, reference)
+				require.True(t, now.Add(-time.Hour).Equal(reference.FetchedAt))
+				statuses, err := cache.GetStatusSummary("preview")
+				require.NoError(t, err)
+				require.Len(t, statuses, 1)
+				require.Equal(t, 11, statuses[0].DingoPoolCount)
+				require.Equal(t, 12, statuses[0].KoiosPoolCount)
+			},
+		)
+	}
+}
+
+func TestRecordObserverErrorPreservesOtherQueueFailure(t *testing.T) {
+	t.Parallel()
+	for _, accounts := range []bool{false, true} {
+		t.Run(
+			map[bool]string{false: "aggregate", true: "accounts"}[accounts],
+			func(t *testing.T) {
+				t.Parallel()
+				cache, err := openTestCache(
+					filepath.Join(t.TempDir(), "cache.db"),
+					nil,
+				)
+				require.NoError(t, err)
+				t.Cleanup(func() { require.NoError(t, cache.Close()) })
+				require.NoError(
+					t,
+					cache.RecordObserverError("preview", 4, accounts),
+				)
+				aggregate, account := StatusPass, StatusFail
+				if accounts {
+					aggregate, account = account, aggregate
+				}
+				require.NoError(
+					t,
+					cache.UpsertCheckEpochStatus(CheckEpochStatus{
+						Network: "preview", Epoch: 5, LastCheckedAt: time.Now(),
+						AggregateStatus: aggregate, AccountStatus: account,
+						AggregateMismatchCount: 2, AccountMismatchCount: 3,
+						AggregateSignificantMismatchCount: 1, AccountSignificantMismatchCount: 2,
+					}),
+				)
+				require.NoError(
+					t,
+					cache.RecordObserverError("preview", 5, accounts),
+				)
+				statuses, err := cache.GetStatusSummary("preview")
+				require.NoError(t, err)
+				require.Len(t, statuses, 2)
+				require.Equal(t, StatusError, statuses[0].Status)
+				require.Equal(t, StatusFail, statuses[1].Status)
+				require.Equal(t, 5, statuses[1].MismatchCount)
+				require.Equal(t, 3, statuses[1].SignificantMismatchCount)
+				if accounts {
+					require.Equal(t, StatusFail, statuses[1].AggregateStatus)
+					require.Equal(t, StatusError, statuses[1].AccountStatus)
+				} else {
+					require.Equal(t, StatusError, statuses[1].AggregateStatus)
+					require.Equal(t, StatusFail, statuses[1].AccountStatus)
+				}
+			},
+		)
+	}
 }
 
 func TestSignificantCountMigrationUsesStoredCategoryAndScope(t *testing.T) {

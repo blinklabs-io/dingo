@@ -4538,3 +4538,7 @@ stored `check_mismatches` categories and scopes. Total counts and mismatch rows
 are preserved. Reopening an upgraded cache does not rerun the backfill. Observer retry selection uses the ERROR status of its own phase even when
 Koios reference timestamps have not changed, allowing a later check to observe
 newly committed Dingo state. CLI freshness selection is unchanged.
+Fetch/check errors update only the failed queue's persisted status and the
+check timestamp. The other queue's verdict, comparison counts, pool metadata,
+mismatch evidence, and Koios reference rows remain intact. This makes retries
+survive reopening the cache even when a previous PASS reference is still fresh.

@@ -945,11 +945,9 @@ func cancelled(ctx context.Context, err error) bool {
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
-// unlike every other outcome (PASS/FAIL) processEpoch reports. Not
-// persisted to the cache: checkEpoch/CheckEpoch itself does not persist
-// check_epoch_status on this class of failure either (a fetch or query
-// error that occurs before any comparison could run), so this stays
-// consistent with that existing behavior.
+// unlike every other outcome (PASS/FAIL) processEpoch reports. The queue's
+// ERROR status is persisted so startup can recover its retry even when the
+// prior reference remains fresh; prior comparison evidence stays untouched.
 //
 // accountsChecked names the phases the caller's check would have covered, so
 // the synthesized result carries the same CheckedScopes a completed check
@@ -960,6 +958,12 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
+		err = errors.Join(
+			err,
+			fmt.Errorf("persist observer retry: %w", persistErr),
+		)
+	}
 	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
 	o.fail(epoch, err, true)
 	now := time.Now()

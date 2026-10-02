@@ -8820,6 +8820,9 @@ reference data has not changed; CLI freshness selection keeps its existing
 contract. Each observer queue retries its own ERROR outcomes after at least
 `ObserverConfig.ErrorRetryDelay` (five minutes by default), without needing a
 new epoch transition. A completed non-ERROR check removes that pending retry.
+Fetch and check failures persist the affected queue's ERROR status before
+scheduling the in-memory retry, so restart recovery also selects an epoch
+whose previous comparison passed and whose Koios reference remains fresh.
 The aggregate and account timers are independent, and cancellation stops both.
 Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
 DB failures and validation disagreements still stop strict validation.

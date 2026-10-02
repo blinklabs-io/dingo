@@ -1757,6 +1757,37 @@ func (c *Cache) GetEpochsMissingParams(
 	return result, rows.Err()
 }
 
+// RecordObserverError makes a queue's failed fetch/check retryable after restart
+// without replacing prior comparison evidence or the other queue's verdict.
+func (c *Cache) RecordObserverError(
+	network string,
+	epoch uint64,
+	accounts bool,
+) error {
+	column, otherColumn := "aggregate_status", "account_status"
+	aggregateStatus, accountStatus := StatusError, ""
+	if accounts {
+		column, otherColumn = otherColumn, column
+		aggregateStatus, accountStatus = StatusPass, StatusError
+	}
+	return c.withClaimedSource(network, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO check_epoch_status
+			(network, epoch, last_checked_at, status, mismatch_count,
+			 dingo_pool_count, koios_pool_count, only_dingo_pools, only_koios_pools,
+			 aggregate_status, account_status)
+			VALUES (?, ?, ?, ?, 0, 0, 0, '', '', ?, ?)
+			ON CONFLICT(network, epoch) DO UPDATE SET
+			 last_checked_at=excluded.last_checked_at,
+			 `+column+`='`+StatusError+`',
+			 status=CASE WHEN `+otherColumn+`='`+StatusFail+`'
+			 THEN '`+StatusFail+`' ELSE '`+StatusError+`' END`,
+			network, epoch, time.Now().UTC(), StatusError,
+			aggregateStatus, accountStatus,
+		)
+		return err
+	})
+}
+
 // GetEpochsNeedingRetry returns ERROR epochs belonging to one observer queue.
 // Freshness-based CLI selection remains separate from the observer retry policy.
 func (c *Cache) GetEpochsNeedingRetry(network string, accounts bool) ([]uint64, error) {
