@@ -757,7 +757,13 @@ func poolRegistrationCertificate(
 			r.Port = &port
 		}
 		if relay.Hostname != "" {
+			// The stored row keeps no relay type. A single-host name is
+			// registered with a port, while a multi-host (SRV) name never
+			// carries one.
 			r.Type = lcommon.PoolRelayTypeSingleHostName
+			if relay.Port == 0 {
+				r.Type = lcommon.PoolRelayTypeMultiHostName
+			}
 			hostname := relay.Hostname
 			r.Hostname = &hostname
 		} else if relay.Ipv4 != nil || relay.Ipv6 != nil {

@@ -4079,15 +4079,19 @@ Supported query leaves also include epoch number, current protocol parameters,
 Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
 the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
 ledger peer snapshot, stake pools, stake pool parameters
-(`GetStakePoolParams`), the ledger tip (`GetLedgerTip`), an always-empty
-proposed protocol parameter update map, DRep state, account state, and the
-unfiltered stake distribution (`GetStakeDistribution`). Pool state, the
-version-1 pool distribution, non-myopic member rewards, reward info,
-reward provenance and the debug epoch-state queries are not answered, and the
-failed query ends the client's session. At protocol version 21 the
-Shelley genesis configuration encodes initial funds and staking as empty maps
-and the genesis injection data as the ledger's three-field
-`ShelleyExtraConfig` record; earlier versions keep the legacy layout. `GetCBOR` is a query
+(`GetStakePoolParams`, the parameters in effect this epoch, so a
+re-registration made during the epoch is not reported until the next one),
+the ledger tip (`GetLedgerTip`), the proposed protocol parameter update map
+(always empty from Conway on, and refused in earlier eras), DRep state,
+account state, and the unfiltered stake distribution
+(`GetStakeDistribution`). Pool state, the version-1 pool distribution,
+non-myopic member rewards, reward info, reward provenance and the debug
+epoch-state queries are not answered, and the failed query ends the client's
+session. At node-to-client version 21 the Shelley genesis configuration
+encodes initial funds and staking as empty maps and the genesis injection
+data as the ledger's three-field `ShelleyExtraConfig` record, encoded at the
+Shelley protocol version (pool owners as a plain array) with an absent
+section as `NoInjection`; earlier versions keep the legacy layout. `GetCBOR` is a query
 combinator: it re-runs the wrapped inner query through the same dispatch path
 and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
 cardano-node. `GetStakeSnapshots`

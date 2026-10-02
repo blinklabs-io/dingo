@@ -17,7 +17,6 @@ package ledger
 import (
 	"bytes"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -29,10 +28,11 @@ import (
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
-// stakePoolParams is the ledger's StakePoolParams record as it travels in
-// node-to-client results. The owners are a tag-258 set in ascending order,
-// the margin a tag-30 rational, and an absent metadata is null; empty owner
-// and relay lists must be empty arrays rather than null.
+// stakePoolParams is the ledger's StakePoolParams record. The owners are in
+// ascending order, a tag-258 set from protocol version 9 and a plain array
+// before it; the margin is a tag-30 rational at every version, an absent
+// metadata is null, and empty owner and relay lists are empty arrays rather
+// than null.
 type stakePoolParams struct {
 	cbor.StructAsArray
 	Operator      lcommon.Blake2b224
@@ -41,17 +41,20 @@ type stakePoolParams struct {
 	Cost          uint64
 	Margin        *cbor.Rat
 	RewardAccount lcommon.Address
-	Owners        cbor.Set
+	Owners        *cbor.SetType[lcommon.Blake2b224]
 	Relays        []lcommon.PoolRelay
 	Metadata      *lcommon.PoolMetadata
 }
 
 // newStakePoolParams adapts a registration certificate. rewardAccount is
 // passed separately because the certificate keeps only the key hash of the
-// reward account, not its credential type.
+// reward account, not its credential type. tagOwners selects the set tag,
+// which node-to-client results carry and the Shelley-version genesis
+// encoding does not.
 func newStakePoolParams(
 	cert *lcommon.PoolRegistrationCertificate,
 	rewardAccount lcommon.Address,
+	tagOwners bool,
 ) stakePoolParams {
 	margin := cbor.Rat{Rat: big.NewRat(0, 1)}
 	if cert.Margin.Rat != nil {
@@ -61,10 +64,11 @@ func newStakePoolParams(
 	slices.SortFunc(owners, func(a, b lcommon.AddrKeyHash) int {
 		return bytes.Compare(a[:], b[:])
 	})
-	ownerSet := make(cbor.Set, 0, len(owners))
+	ownerHashes := make([]lcommon.Blake2b224, 0, len(owners))
 	for _, owner := range owners {
-		ownerSet = append(ownerSet, lcommon.Blake2b224(owner))
+		ownerHashes = append(ownerHashes, lcommon.Blake2b224(owner))
 	}
+	ownerSet := cbor.NewSetType(ownerHashes, tagOwners)
 	relays := make([]lcommon.PoolRelay, 0, len(cert.Relays))
 	relays = append(relays, cert.Relays...)
 	return stakePoolParams{
@@ -74,7 +78,7 @@ func newStakePoolParams(
 		Cost:          cert.Cost,
 		Margin:        &margin,
 		RewardAccount: rewardAccount,
-		Owners:        ownerSet,
+		Owners:        &ownerSet,
 		Relays:        relays,
 		Metadata:      cert.PoolMetadata,
 	}
@@ -93,9 +97,12 @@ func rewardAccountAddress(
 	return lcommon.NewAddressFromParts(addrType, networkID, nil, keyHash[:])
 }
 
-// queryShelleyStakePoolParams answers GetStakePoolParams: the registration
-// parameters of each requested pool that is currently registered. Pools that
-// are not registered are omitted, and an empty request yields an empty map.
+// queryShelleyStakePoolParams answers GetStakePoolParams: the parameters in
+// effect for each requested pool that is currently registered. A
+// re-registration made during the current epoch is the ledger's future
+// parameters until the next epoch boundary, so it is not reported yet. Pools
+// that are not registered are omitted, and an empty request yields an empty
+// map.
 //
 // Live-only: pool registrations carry no per-point history to read back.
 func (ls *LedgerState) queryShelleyStakePoolParams(
@@ -107,35 +114,60 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	); err != nil {
 		return nil, err
 	}
+	result := make(map[ledger.PoolId]stakePoolParams, len(poolIds))
+	if len(poolIds) == 0 {
+		return []any{result}, nil
+	}
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 	networkID := uint8(ls.NewView(txn).NetworkId()) // #nosec G115 -- 0 or 1
-	result := make(map[ledger.PoolId]stakePoolParams, len(poolIds))
+	consensus, tip := ls.loadStateSnapshots()
+	epoch := consensus.currentEpoch
+	tipSlot := tip.currentTip.Point.Slot
+	keyHashes := make([]lcommon.PoolKeyHash, 0, len(poolIds))
 	for _, poolId := range poolIds {
-		pool, err := ls.db.GetPool(lcommon.PoolKeyHash(poolId), false, txn)
-		if err != nil {
-			if errors.Is(err, models.ErrPoolNotFound) {
-				continue
-			}
-			return nil, err
-		}
-		reg, _, _, ok := latestPoolRegistration(pool)
-		if !ok {
-			continue
-		}
-		cert, err := poolRegistrationCertificate(pool, reg)
+		keyHashes = append(keyHashes, lcommon.PoolKeyHash(poolId))
+	}
+	regs, err := ls.db.Metadata().GetPoolRegistrationsEffectiveForEpoch(
+		keyHashes,
+		epoch.StartSlot,
+		epoch.EpochId,
+		tipSlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for i := range regs {
+		reg := &regs[i]
+		cert, err := poolRegistrationCertificate(&models.Pool{
+			PoolKeyHash:   reg.PoolKeyHash,
+			VrfKeyHash:    reg.VrfKeyHash,
+			RewardAccount: reg.RewardAccount,
+			Margin:        reg.Margin,
+			Pledge:        reg.Pledge,
+			Cost:          reg.Cost,
+		}, reg)
 		if err != nil {
 			return nil, err
 		}
 		rewardAccount, err := rewardAccountAddress(
 			networkID,
-			pool.RewardAccountCredentialTag,
+			reg.RewardAccountCredentialTag,
 			cert.RewardAccount,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("pool %x reward account: %w", poolId[:], err)
+			return nil, fmt.Errorf(
+				"pool %x reward account: %w",
+				reg.PoolKeyHash,
+				err,
+			)
 		}
-		result[poolId] = newStakePoolParams(cert, rewardAccount)
+		result[ledger.PoolId(cert.Operator)] = newStakePoolParams(
+			cert,
+			rewardAccount,
+			true,
+		)
 	}
 	return []any{result}, nil
 }
@@ -189,6 +221,7 @@ func shelleyExtraConfigCBOR(
 		pools[lcommon.Blake2b224(cert.Operator)] = newStakePoolParams(
 			&cert,
 			rewardAccount,
+			false,
 		)
 	}
 	credentials := make(map[lcommon.Blake2b224]lcommon.Blake2b224)
@@ -202,16 +235,24 @@ func shelleyExtraConfigCBOR(
 		}
 	}
 
+	extra := genesis.ExtraConfig
 	return cbor.Encode([]any{
 		[]any{
-			injectionData(funds),
-			injectionData(pools),
-			injectionData(credentials),
+			injectionData(extra.InitialFunds.Data != nil, funds),
+			injectionData(extra.StakePools.Data != nil, pools),
+			injectionData(extra.StakeCredentials.Data != nil, credentials),
 		},
 	})
 }
 
-// injectionData wraps entries as an embedded InjectionData.
-func injectionData[M ~map[K]V, K comparable, V any](entries M) []any {
+// injectionData wraps entries as an embedded InjectionData, [2, map], or as
+// NoInjection, [0], when the genesis has no data for the section.
+func injectionData[M ~map[K]V, K comparable, V any](
+	present bool,
+	entries M,
+) []any {
+	if !present {
+		return []any{0}
+	}
 	return []any{2, entries}
 }

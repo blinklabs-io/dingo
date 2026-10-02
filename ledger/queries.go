@@ -987,8 +987,8 @@ func (ls *LedgerState) queryShelley(
 // after the pinned slot).
 //
 // Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
-// ShelleyProposedProtocolParamsUpdatesQuery (a constant empty map, so the
-// point is irrelevant).
+// ShelleyProposedProtocolParamsUpdatesQuery (a constant empty map from Conway
+// on, so the point is irrelevant; refused in earlier eras).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -1094,8 +1094,12 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyLedgerTipQuery:
 		return ls.queryShelleyLedgerTip(at)
 	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
-		// Conway replaced update proposals with governance actions, so the
-		// ledger holds none to report.
+		// Conway replaced update proposals with governance actions, so from
+		// Conway on the ledger holds none to report. Earlier eras do carry
+		// proposals, which this query does not read.
+		if ls.loadConsensusSnapshot().currentEra.Id < eras.ConwayEraDesc.Id {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
 		return []any{map[any]any{}}, nil
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		return ls.queryShelleyStakePoolParams(q.PoolIds.Items())

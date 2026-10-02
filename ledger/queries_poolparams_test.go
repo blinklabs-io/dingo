@@ -24,8 +24,10 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
@@ -64,6 +66,20 @@ func seedStakePoolParamsPool(
 	rewardTag uint8,
 ) {
 	t.Helper()
+	seedStakePoolParamsRegistration(t, ls, poolKeyHash, rewardTag, 1, 1_000_000)
+}
+
+// seedStakePoolParamsRegistration records one registration of the pool at
+// addedSlot with the given pledge.
+func seedStakePoolParamsRegistration(
+	t *testing.T,
+	ls *LedgerState,
+	poolKeyHash []byte,
+	rewardTag uint8,
+	addedSlot uint64,
+	pledge uint64,
+) {
+	t.Helper()
 	ipv4 := net.IPv4(192, 168, 1, 1)
 	relays := []models.PoolRegistrationRelay{
 		{Ipv4: &ipv4, Port: 3001},
@@ -83,7 +99,7 @@ func seedStakePoolParamsPool(
 			RewardAccount:              reward,
 			RewardAccountCredentialTag: rewardTag,
 			Margin:                     margin,
-			Pledge:                     dbtypes.Uint64(1_000_000),
+			Pledge:                     dbtypes.Uint64(pledge),
 			Cost:                       dbtypes.Uint64(340_000_000),
 		},
 		&models.PoolRegistration{
@@ -92,16 +108,35 @@ func seedStakePoolParamsPool(
 			RewardAccount:              reward,
 			RewardAccountCredentialTag: rewardTag,
 			Margin:                     margin,
-			Pledge:                     dbtypes.Uint64(1_000_000),
+			Pledge:                     dbtypes.Uint64(pledge),
 			Cost:                       dbtypes.Uint64(340_000_000),
 			MetadataUrl:                "https://a.io/p",
 			MetadataHash:               repeatedBytes(32, 0x55),
 			Owners:                     owners,
 			Relays:                     relays,
-			AddedSlot:                  1,
+			AddedSlot:                  addedSlot,
 		},
 		nil,
 	))
+}
+
+// setStakePoolParamsLiveState places the live tip at tipSlot inside an epoch
+// that starts at epochStart.
+func setStakePoolParamsLiveState(
+	ls *LedgerState,
+	epochID uint64,
+	epochStart uint64,
+	tipSlot uint64,
+) {
+	ls.currentEpoch = models.Epoch{
+		EpochId:       epochID,
+		StartSlot:     epochStart,
+		LengthInSlots: 100,
+	}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x01)),
+	}
+	ls.publishSnapshotsLocked()
 }
 
 // TestQueryStakePoolParams_WireEncoding compares the whole reply against
@@ -115,6 +150,7 @@ func TestQueryStakePoolParams_WireEncoding(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x11), 0)
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x88), 0)
 
@@ -158,6 +194,7 @@ func TestQueryStakePoolParams_ScriptRewardAccount(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x11), 1)
 
 	got, err := ls.Query(
@@ -182,6 +219,7 @@ func TestQueryStakePoolParams_EmptyFilter(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
 	seedStakePoolParamsPool(t, ls, repeatedBytes(28, 0x11), 0)
 
 	got, err := ls.Query(stakePoolParamsQuery(), QueryPoint{})
@@ -189,6 +227,71 @@ func TestQueryStakePoolParams_EmptyFilter(t *testing.T) {
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
 	require.Equal(t, "81a0", hex.EncodeToString(gotCbor))
+}
+
+// TestQueryStakePoolParams_ReregistrationIsFuture reports the parameters in
+// effect, not a re-registration made this epoch: the ledger holds that as
+// future parameters until the next epoch boundary.
+func TestQueryStakePoolParams_ReregistrationIsFuture(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 1, 100, 160)
+	pool := repeatedBytes(28, 0x11)
+	seedStakePoolParamsRegistration(t, ls, pool, 0, 5, 1_000_000)
+	seedStakePoolParamsRegistration(t, ls, pool, 0, 150, 2_000_000)
+
+	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	encoded := hex.EncodeToString(gotCbor)
+	require.Contains(t, encoded, strings.Repeat("aa", 32)+"1a000f4240")
+	require.NotContains(t, encoded, strings.Repeat("aa", 32)+"1a001e8480")
+}
+
+// TestQueryStakePoolParams_PortlessHostnameIsMultiHost maps a hostname relay
+// stored without a port to MultiHostName, the only relay form registered
+// without one.
+func TestQueryStakePoolParams_PortlessHostnameIsMultiHost(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
+	pool := repeatedBytes(28, 0x11)
+	vrf := repeatedBytes(32, 0xAA)
+	reward := repeatedBytes(28, 0x22)
+	require.NoError(t, ls.db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash:   pool,
+			VrfKeyHash:    vrf,
+			RewardAccount: reward,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash:   pool,
+			VrfKeyHash:    vrf,
+			RewardAccount: reward,
+			Relays: []models.PoolRegistrationRelay{
+				{Hostname: "relay.example"},
+			},
+			AddedSlot: 1,
+		},
+		nil,
+	))
+
+	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		hex.EncodeToString(gotCbor),
+		"81"+"82026d72656c61792e6578616d706c65",
+	)
 }
 
 // TestQueryLedgerTip answers the live tip when unpinned and the acquired
@@ -213,7 +316,9 @@ func TestQueryLedgerTip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		hex.EncodeToString(hexBytes(t, "8182", "18c8", "5820"+strings.Repeat("cd", 32))),
+		hex.EncodeToString(
+			hexBytes(t, "8182", "18c8", "5820"+strings.Repeat("cd", 32)),
+		),
 		hex.EncodeToString(liveCbor),
 	)
 
@@ -223,7 +328,9 @@ func TestQueryLedgerTip(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(
 		t,
-		hex.EncodeToString(hexBytes(t, "8182", "1864", "5820"+strings.Repeat("ab", 32))),
+		hex.EncodeToString(
+			hexBytes(t, "8182", "1864", "5820"+strings.Repeat("ab", 32)),
+		),
 		hex.EncodeToString(pinnedCbor),
 	)
 }
@@ -235,14 +342,50 @@ func TestQueryProposedProtocolParamsUpdates(t *testing.T) {
 
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.publishSnapshotsLocked()
 	got, err := ls.Query(
-		shelleyBlockQuery(&olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{}),
+		shelleyBlockQuery(
+			&olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{},
+		),
 		QueryPoint{},
 	)
 	require.NoError(t, err)
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
 	require.Equal(t, "81a0", hex.EncodeToString(gotCbor))
+}
+
+// TestShelleyExtraConfigCBORNoInjection encodes an absent injection section
+// as NoInjection, [0], rather than as an empty embedded map.
+func TestShelleyExtraConfigCBORNoInjection(t *testing.T) {
+	t.Parallel()
+
+	genesis := &gshelley.ShelleyGenesis{
+		ExtraConfig: &gshelley.ShelleyGenesisExtraConfig{},
+	}
+	got, err := shelleyExtraConfigCBOR(genesis, 0)
+	require.NoError(t, err)
+	require.Equal(t, "8183810081008100", hex.EncodeToString(got))
+}
+
+// TestQueryProposedProtocolParamsUpdatesBeforeConway refuses the query in an
+// era that still carries update proposals, rather than answering an empty
+// map that may be wrong.
+func TestQueryProposedProtocolParamsUpdatesBeforeConway(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.BabbageEraDesc
+	ls.publishSnapshotsLocked()
+	_, err := ls.Query(
+		shelleyBlockQuery(
+			&olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{},
+		),
+		QueryPoint{},
+	)
+	require.Error(t, err)
 }
 
 // TestGenesisConfigResultExtraConfigBytes compares the injection data of the
@@ -262,7 +405,8 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 	result, err := genesisConfigResult(cfg.ShelleyGenesis())
 	require.NoError(t, err)
 
-	want := hexBytes(t,
+	want := hexBytes(
+		t,
 		"81", // StrictMaybe SJust
 		"83", // ShelleyExtraConfig
 		// initial funds
@@ -277,10 +421,11 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 		"89",
 		"581cfd32267bc1c702ad9b530d4e9f9939ce93bbb99f55f31fbe4989ea88",
 		"5820f8eb3533e40984adc744cb326fd410c200dab831f915224c8515a06cedaabdc5",
-		"00", "00",
+		"00",
+		"00",
 		"d81e820001",
 		"581de0c002c1f5bccc09b7d2865b8ba5bc6fb280b2f5f0e63cb11da79f413e",
-		"d9010280",
+		"80", // owners: the Shelley encoding has no set tag
 		"80",
 		"f6",
 		// stake credentials
