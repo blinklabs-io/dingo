@@ -8,6 +8,7 @@ name: ci
 #
 #   lint, govulncheck                     2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
+#       -> devnet (block pipeline)        1 runner, PR pipeline only
 #       -> go-test (Linux)                    services, no race
 #          go-test (Linux, race)              race, no services
 #          go-test (macOS)               3 runners, 5-35 min
