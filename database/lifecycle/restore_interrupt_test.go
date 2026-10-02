@@ -65,15 +65,16 @@ const restoreInterruptHelperEnv = "DINGO_LIFECYCLE_RESTORE_INTERRUPT_HELPER"
 // The child is proven to be genuinely mid-restore (not just "started, at
 // some indeterminate point") without any sleep/size-based timing guess:
 // the snapshot's metadata backup file is replaced with a FIFO before the
-// child starts. RestoreFrom's raw file copy opens that path for reading,
-// which — per POSIX FIFO semantics — cannot proceed until this test opens
-// the write end; that open() call here blocks until the child's read-side
-// open() happens, giving a real, unconditional synchronization point:
-// once it returns, the child is provably inside RestoreFrom, blocked
-// reading the (still empty) pipe, and killing it there is deterministic
-// rather than a race against however fast a real file copy happens to be
-// on whatever machine runs this test. Skipped on Windows, which has no
-// POSIX FIFO equivalent this test can use the same way.
+// child starts. A read-side open of a FIFO cannot proceed until this test
+// opens the write end, and the write-side open blocks until it does, so each
+// open is a real, unconditional synchronization point. The child opens the
+// file twice: first to check it against the manifest digest, which this test
+// satisfies by writing the original bytes, then in RestoreFrom's raw copy.
+// Once the second open returns, the child is provably inside RestoreFrom,
+// blocked reading the (still empty) pipe, and killing it there is
+// deterministic rather than a race against however fast a real file copy
+// happens to be on whatever machine runs this test. Skipped on Windows,
+// which has no POSIX FIFO equivalent this test can use the same way.
 func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	t.Parallel()
 
@@ -95,10 +96,12 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Replace the real metadata backup file with a FIFO: RestoreFrom's
-	// os.Open(backupPath) for reading is then the only thing that can
-	// unblock this test's own write-side open below.
+	// Replace the real metadata backup file with a FIFO: the child's
+	// read-side opens of backupPath are then the only things that can
+	// unblock this test's own write-side opens below.
 	backupPath := filepath.Join(snapshotDir, lifecycle.MetadataBackupFileName)
+	backup, err := os.ReadFile(backupPath)
+	require.NoError(t, err)
 	require.NoError(t, os.Remove(backupPath))
 	require.NoError(t, syscall.Mkfifo(backupPath, 0o600))
 
@@ -117,6 +120,14 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
+
+	// Blocks until the child opens backupPath to verify it against the
+	// manifest, then feeds it the original bytes so that check passes.
+	verifyWriter, err := os.OpenFile(backupPath, os.O_WRONLY, 0)
+	require.NoError(t, err, "child never reached payload verification")
+	_, err = verifyWriter.Write(backup)
+	require.NoError(t, err)
+	require.NoError(t, verifyWriter.Close())
 
 	// Blocks until the child's RestoreFrom reaches os.Open(backupPath)
 	// for reading -- see the doc comment above for why this is a real
