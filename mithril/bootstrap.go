@@ -159,6 +159,10 @@ type BootstrapConfig struct {
 	// internally by downloadImmutables on a by-value copy of the config;
 	// callers do not populate it.
 	httpClient *http.Client
+	// immutableDigests is the verified digest list, set by downloadImmutables
+	// so each archive's members are checked as they are extracted. When nil,
+	// an immutable archive is extracted without a member allowlist.
+	immutableDigests map[string]string
 	// OnArtifactSelected, when set, is invoked once this run's aggregator
 	// artifact has been resolved, identity-checked and (when enabled)
 	// certificate-verified, and before anything is downloaded. A non-nil

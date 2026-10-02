@@ -16,8 +16,10 @@ package ledger
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 
@@ -146,6 +148,64 @@ func TestComputeCandidateNonceAsOf_SlowPathStopsAtFoldEnd(t *testing.T) {
 			"nonce is the value carried in")
 	assert.Equal(t, prevCandidate, candidate,
 		"and the candidate likewise stays at the value carried in")
+}
+
+// TestComputeCandidateNonce_RejectsWrappedEpochRange covers an epoch whose end
+// slot does not fit a uint64. Unchecked, the end and the freeze cutoff wrap to
+// small slots, so the fold would select blocks from the wrong end of the chain
+// or an empty interval and report success with the carried-in nonces.
+func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		db: newTestDB(t),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	prevEvolving := bytes.Repeat([]byte{0x61}, 32)
+	prevCandidate := bytes.Repeat([]byte{0x62}, 32)
+
+	for _, tc := range []struct {
+		name        string
+		start       uint64
+		length      uint64
+		wantOverrun bool
+	}{
+		{"end is MaxUint64", math.MaxUint64 - 1000, 1000, false},
+		{"end wraps by one", math.MaxUint64 - 999, 1001, true},
+		{"length is MaxUint64", 1, math.MaxUint64, true},
+		{"start is MaxUint64", math.MaxUint64, 100, true},
+	} {
+		for _, asOf := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/asOf=%v", tc.name, asOf), func(t *testing.T) {
+				t.Parallel()
+				err := ls.db.Transaction(false).Do(func(txn *database.Txn) error {
+					var err error
+					if asOf {
+						_, _, err = ls.computeCandidateNonceAsOf(
+							txn, eras.ConwayEraDesc.Id,
+							prevEvolving, prevCandidate,
+							tc.start, tc.length, tc.start,
+						)
+					} else {
+						_, _, err = ls.computeCandidateNonce(
+							txn, eras.ConwayEraDesc.Id,
+							prevEvolving, prevCandidate,
+							tc.start, tc.length,
+						)
+					}
+					return err
+				})
+				if tc.wantOverrun {
+					require.ErrorIs(t, err, errEpochRangeOverflow)
+					return
+				}
+				require.NoError(t, err)
+			})
+		}
+	}
 }
 
 // TestFoldEndSlotForTip pins the conversion from a tip slot to the fold's
