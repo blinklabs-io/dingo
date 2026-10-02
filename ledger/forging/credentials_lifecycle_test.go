@@ -92,6 +92,7 @@ func (f *credentialsRotationFixture) validated(
 ) *PoolCredentials {
 	t.Helper()
 	pc := NewPoolCredentials()
+	t.Cleanup(pc.Close)
 	require.NoError(t, pc.LoadFromFiles(
 		f.vrfPath, f.kesPath, f.opCert(t, counter, 0),
 	))

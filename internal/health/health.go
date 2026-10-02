@@ -48,6 +48,7 @@ package health
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -80,7 +81,7 @@ type Check struct {
 
 func (c Check) evaluate() error {
 	if c.Fn == nil {
-		return fmt.Errorf("health check callback is unavailable")
+		return errors.New("health check callback is unavailable")
 	}
 	return c.Fn()
 }
