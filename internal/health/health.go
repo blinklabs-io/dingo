@@ -78,6 +78,13 @@ type Check struct {
 	Fn func() error
 }
 
+func (c Check) evaluate() error {
+	if c.Fn == nil {
+		return fmt.Errorf("health check callback is unavailable")
+	}
+	return c.Fn()
+}
+
 // Status is the classified node health an individual probe reports.
 type Status struct {
 	// Live is true whenever this listener answered the request and no
@@ -110,7 +117,7 @@ func Evaluate(
 		if !check.Liveness {
 			continue
 		}
-		if err := check.Fn(); err != nil {
+		if err := check.evaluate(); err != nil {
 			status.Live = false
 			status.Reason = err.Error()
 			return status
@@ -138,7 +145,7 @@ func Evaluate(
 		if check.Liveness {
 			continue
 		}
-		if err := check.Fn(); err != nil {
+		if err := check.evaluate(); err != nil {
 			status.Reason = err.Error()
 			return status
 		}

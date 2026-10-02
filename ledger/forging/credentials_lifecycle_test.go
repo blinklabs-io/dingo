@@ -148,10 +148,14 @@ func TestPoolCredentialsCloseZeroizesAndRefusesUse(t *testing.T) {
 
 	// Whatever still holds a reference (a KES agent loop, a reload trigger)
 	// must not be able to load key material back in.
-	require.Error(t, pc.LoadFromFiles(
+	require.ErrorIs(t, pc.LoadFromFiles(
 		fixture.vrfPath, fixture.kesPath, fixture.opCert(t, 2, 0),
-	))
-	require.Error(t, pc.ReplaceWith(fixture.validated(t, 2)))
+	), errCredentialsClosed)
+	require.ErrorIs(
+		t,
+		pc.ReplaceWith(fixture.validated(t, 2)),
+		errCredentialsClosed,
+	)
 	require.False(t, pc.IsLoaded())
 
 	pc.Close() // idempotent
@@ -161,7 +165,24 @@ func TestPoolCredentialsReplaceWithRotatesAtomically(t *testing.T) {
 	t.Parallel()
 	fixture := newCredentialsRotationFixture(t)
 	live := fixture.validated(t, 1)
-	next := fixture.validated(t, 2)
+	next := NewPoolCredentials()
+	t.Cleanup(next.Close)
+	require.NoError(
+		t,
+		next.LoadFromFiles(
+			fixture.vrfPath,
+			fixture.kesPath,
+			fixture.opCert(t, 2, 1),
+		),
+	)
+	require.NoError(t, next.ValidateOpCert())
+	require.NoError(
+		t,
+		next.ValidateKESPeriod(
+			synthGenesis(100, 62, time.Second, time.Unix(0, 0)),
+			100,
+		),
+	)
 	oldKES := live.kesSKey.Data
 	// An attempt that selected the outgoing material before the swap.
 	inFlight := live.acquireCredentialGeneration()
@@ -186,11 +207,17 @@ func TestPoolCredentialsReplaceWithRotatesAtomically(t *testing.T) {
 	// material, which is still validly signed; the swap must not make it
 	// forfeit its leader slot.
 	require.NoError(t, inFlight.ensureCurrent())
+	require.NoError(
+		t,
+		inFlight.updateKESPeriod(0),
+		"outgoing snapshots must not evolve the replacement certificate",
+	)
 	_, err := inFlight.kesSign(0, []byte("body"))
 	require.NoError(t, err)
 	// New attempts see the new certificate.
-	require.Equal(t, uint64(2), live.acquireCredentialGeneration().
-		operationalCert.IssueNumber)
+	newGeneration := live.acquireCredentialGeneration()
+	defer newGeneration.release()
+	require.Equal(t, uint64(2), newGeneration.operationalCert.IssueNumber)
 }
 
 func TestPoolCredentialsReplaceWithRejectsAndKeepsLive(t *testing.T) {
@@ -198,6 +225,24 @@ func TestPoolCredentialsReplaceWithRejectsAndKeepsLive(t *testing.T) {
 	fixture := newCredentialsRotationFixture(t)
 
 	otherCold := newCredentialsRotationFixture(t)
+	alternateVRF := NewPoolCredentials()
+	t.Cleanup(alternateVRF.Close)
+	require.NoError(
+		t,
+		alternateVRF.LoadFromFiles(
+			createAlternateTestVRFKey(t),
+			fixture.kesPath,
+			fixture.opCert(t, 9, 0),
+		),
+	)
+	require.NoError(t, alternateVRF.ValidateOpCert())
+	require.NoError(
+		t,
+		alternateVRF.ValidateKESPeriod(
+			synthGenesis(100, 62, time.Second, time.Unix(0, 0)),
+			0,
+		),
+	)
 	unvalidated := NewPoolCredentials()
 	require.NoError(t, unvalidated.LoadFromFiles(
 		fixture.vrfPath, fixture.kesPath, fixture.opCert(t, 5, 0),
@@ -209,6 +254,7 @@ func TestPoolCredentialsReplaceWithRejectsAndKeepsLive(t *testing.T) {
 	}{
 		{"lower counter", fixture.validated(t, 2), "below the loaded counter"},
 		{"other pool", otherCold.validated(t, 9), "pool or VRF identity"},
+		{"other VRF", alternateVRF, "pool or VRF identity"},
 		{"not validated", unvalidated, "not validated"},
 		{"nil", nil, "replacement"},
 	} {
@@ -229,5 +275,26 @@ func TestPoolCredentialsReplaceWithRejectsAndKeepsLive(t *testing.T) {
 				"a rejected replacement must not wipe the live secrets")
 			require.NoError(t, before.ensureCurrent())
 		})
+	}
+}
+
+func TestPoolCredentialsReciprocalReplacementDoesNotDeadlock(t *testing.T) {
+	t.Parallel()
+	fixture := newCredentialsRotationFixture(t)
+	first := fixture.validated(t, 1)
+	second := fixture.validated(t, 1)
+	t.Cleanup(first.Close)
+	t.Cleanup(second.Close)
+	start := make(chan struct{})
+	done := make(chan struct{}, 2)
+	go func() { <-start; _ = first.ReplaceWith(second); done <- struct{}{} }()
+	go func() { <-start; _ = second.ReplaceWith(first); done <- struct{}{} }()
+	close(start)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("reciprocal replacements deadlocked")
+		}
 	}
 }

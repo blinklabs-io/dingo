@@ -74,6 +74,7 @@ func TestCredentialSwapDuringALeaderSlotDoesNotLoseTheSlot(t *testing.T) {
 			fixture := newCredentialsRotationFixture(t)
 			live := fixture.validated(t, 1)
 			next := fixture.validated(t, 2)
+			t.Cleanup(next.Close)
 			broadcaster := &forgerTestBroadcaster{}
 			forger, err := NewBlockForger(ForgerConfig{
 				Mode:        ModeProduction,

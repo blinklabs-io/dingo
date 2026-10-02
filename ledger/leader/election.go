@@ -936,6 +936,9 @@ func (e *Election) computeSchedule(
 		return nil, fmt.Errorf("resolve active slot coefficient: %w", err)
 	}
 
+	if e.vrfSeed == nil {
+		return nil, errors.New("pool VRF seed is unavailable")
+	}
 	seed := e.vrfSeed()
 	defer clear(seed)
 	if len(seed) == 0 {

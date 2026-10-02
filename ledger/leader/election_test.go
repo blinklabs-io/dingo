@@ -1880,3 +1880,19 @@ func TestComputeScheduleDeclinesUnresolvableConsensusMode(t *testing.T) {
 	require.Nil(t, schedule,
 		"no schedule may be produced from an unresolved consensus mode")
 }
+
+func TestComputeScheduleRejectsMissingVRFSeedProvider(t *testing.T) {
+	t.Parallel()
+	stake := &recordingStakeProvider{
+		poolStake:  sigmaAuditPoolStake,
+		totalStake: sigmaAuditTotalStake,
+	}
+	election := newSigmaAuditElection(
+		stake,
+		&sigmaAuditEpochProvider{floatCoeff: 0.05},
+		slog.New(slog.DiscardHandler),
+	)
+	election.vrfSeed = nil
+	_, err := election.computeSchedule(context.Background(), sigmaAuditEpoch)
+	require.ErrorContains(t, err, "pool VRF seed is unavailable")
+}

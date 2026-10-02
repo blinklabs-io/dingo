@@ -1618,6 +1618,14 @@ outgoing instance and silently lost.
 
 ### Shutdown Flow
 
+Credential zeroization is skipped if an earlier component's drain is unconfirmed,
+so abandoned key consumers retain their signing material. Hot credential swaps
+serialize reciprocal moves and distinguish material revisions from invalidation
+generations: an outgoing attempt evolves its private KES snapshot without
+mutating the newly installed key. Remote signer readiness checks availability
+with a fresh bounded agent Hello handshake without signing or evolving a key.
+
+
 Graceful shutdown proceeds in phases:
 
 ```

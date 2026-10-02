@@ -194,6 +194,20 @@ func TestChecksGateTheProbesTheyBelongTo(t *testing.T) {
 		wantMsg   string
 	}{
 		{
+			name:      "missing readiness callback",
+			checks:    []health.Check{{}},
+			wantLive:  200,
+			wantReady: 503,
+			wantMsg:   "callback is unavailable",
+		},
+		{
+			name:      "missing liveness callback",
+			checks:    []health.Check{{Liveness: true}},
+			wantLive:  503,
+			wantReady: 503,
+			wantMsg:   "callback is unavailable",
+		},
+		{
 			name: "passing checks change nothing",
 			checks: []health.Check{
 				{Fn: passing},

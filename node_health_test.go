@@ -260,11 +260,15 @@ func TestLedgerStateConfigKeepsTheHeartbeatWhileTicksArePaused(t *testing.T) {
 	require.Equal(t, uint64(3), gap, "a pause must not report a tip gap")
 
 	n.health.forgetTipGap()
+	rebuilt := n.ledgerStateConfig()
+	rebuilt.ReportTipGapFunc(3)
+	stall()
+	require.Error(t, n.EventLoopResponsive())
 	cfg.ReportTipGapFunc(5)
 	cfg.ReportSlotClockAliveFunc()
-	require.True(
+	require.Error(
 		t,
-		lastTick().IsZero(),
-		"a superseded ledger must not keep the heartbeat alive",
+		n.EventLoopResponsive(),
+		"a superseded ledger must not refresh the new heartbeat",
 	)
 }

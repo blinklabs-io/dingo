@@ -143,6 +143,34 @@ func TestReloadBlockProducerCredentialsRotatesTheLiveCredentials(t *testing.T) {
 	require.Contains(t, reloaded, "new_opcert_kes_period")
 }
 
+func TestReloadBlockProducerCredentialsDefersKESClockOutsideConfirmedHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+	r := newReloadTestNode(t, 1)
+	futurePeriod := uint64(5)
+	r.rotateTo(t, 2, &futurePeriod)
+	require.NoError(
+		t,
+		r.reloadBlockProducerCredentials(
+			0,
+			false,
+			func(*forging.PoolCredentials) error { return nil },
+		),
+	)
+	r.requireLiveCounter(t, 2)
+}
+
+func TestReloadBlockProducerCredentialsExportedEntryRotates(t *testing.T) {
+	t.Parallel()
+	started := newStartupCleanupProducerNode(t)
+	r := newReloadTestNode(t, 1)
+	r.ledgerState = started.ledgerState
+	r.rotateTo(t, 2, nil)
+	require.NoError(t, r.ReloadBlockProducerCredentials())
+	r.requireLiveCounter(t, 2)
+}
+
 // TestReloadBlockProducerCredentialsRejectsAndKeepsTheLoadedOnes covers every
 // way a reload can be refused. Each leaves the previously loaded credentials
 // loaded, validated and unchanged: a failed reload must never downgrade a

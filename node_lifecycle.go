@@ -257,6 +257,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// back to a direct Stop would drop out of it.
 	stopTimeout := n.configuredShutdownTimeout()
 	for _, cs := range componentStopsForQuiesce(n) {
+		if cs.name == "block producer credentials" &&
+			errors.Is(err, errStorageDrainUnconfirmed) {
+			continue
+		}
 		if stopErr := stopWithDeadline(
 			stopTimeout, cs.name, cs.stop,
 		); stopErr != nil {
