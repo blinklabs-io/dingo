@@ -342,9 +342,9 @@ func TestQueryShelleyPoolDistr2_ZeroTotalStakeDoesNotDivide(t *testing.T) {
 // Returning an error instead would not fail this one query. The LocalStateQuery
 // server propagates a query error as a protocol error, so the node drops the
 // connection and cardano-cli reports only a closed bearer -- which is exactly
-// the opaque failure #2997 was filed for. Because the unfiltered form of this
-// query covers every pool in the snapshot, one unregistered pool anywhere on
-// the chain would take leadership-schedule down for every operator.
+// the opaque failure operators reported for cardano-cli. Because the unfiltered
+// form of this query covers every pool in the snapshot, one unregistered pool
+// anywhere on the chain would take leadership-schedule down for every operator.
 //
 // The fixture therefore pairs the orphan with a healthy pool and asserts the
 // healthy one still answers. Asserting only the orphan's absence would pass

@@ -28,7 +28,7 @@ import (
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
 // startKoiosParityObserver wires the optional in-process Koios reward-parity
-// observer (dingo #3098) into the running node: it builds the narrow
+// observer into the running node: it builds the narrow
 // reward-parity source adapter directly from n.db (no export, no second
 // Dingo sync, no new permanent table — see koiosparity.DatabaseSource's doc
 // comment), constructs the observer, subscribes it to

@@ -846,9 +846,6 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
-		dingo.WithForgePrimaryChainTipToleranceSlots(
-			cfg.ForgePrimaryChainTipToleranceSlots,
-		),
 		dingo.WithForgeUpstreamStalenessSlots(
 			cfg.ForgeUpstreamStalenessSlots,
 		),
@@ -866,7 +863,7 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
-		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(

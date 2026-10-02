@@ -84,7 +84,7 @@ func TestCloseReleasesDirectoryLockDuringConcurrentExec(t *testing.T) {
 // TestNewTransactionOnClosedStoreFailsFast pins that a closed store hands back
 // an unusable transaction instead of calling into a closed Badger.
 //
-// Regression test for #3609. badger.DB.NewTransaction takes a read timestamp
+// badger.DB.NewTransaction takes a read timestamp
 // via oracle.readTs, which waits on the commit watermark with
 // context.Background(). Closing the DB stops the watermark's process
 // goroutine, and a Done mark still queued in markCh at that moment is dropped

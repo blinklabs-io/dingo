@@ -64,7 +64,7 @@ type CheckResult struct {
 //
 // When at is non-nil, Check skips the live-tip-agreement step entirely and
 // acquires the caller-named point directly on both connections instead --
-// explicit historical mode (blinklabs-io/dingo#382). This is what lets a
+// explicit historical mode. This is what lets a
 // caller fall behind the live chain and still walk through specific past
 // blocks (N, N+1, N+2, ...) one at a time rather than only ever comparing
 // "whatever the two nodes currently agree on." Neither node needs to be
@@ -105,7 +105,7 @@ func Check(
 		// checkpoint (interval, rollback, mismatch, epoch transition), so
 		// dialing this connection unconditionally meant every one of
 		// those checks paid for a handshake it then immediately closed
-		// unused (blinklabs-io/dingo#4183 review).
+		// unused.
 		cardanoTipConn, err := Dial(ctx, cardanoAddr, magic)
 		if err != nil {
 			return nil, fmt.Errorf("dial cardano-node %s: %w", cardanoAddr, err)

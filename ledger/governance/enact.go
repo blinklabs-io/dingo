@@ -70,7 +70,6 @@ type EnactmentResult struct {
 	// model, so a real governance enactment writing that exact value is the
 	// common case on any real network, not a rare coincidence a
 	// value-comparison could dismiss as "unchanged, therefore not written."
-	// See blinklabs-io/dingo#3825's PR review.
 	PlutusV2CostModelWritten bool
 }
 
@@ -489,18 +488,17 @@ func AddUnclaimedToTreasury(
 // immediately before this enactment keeps its existing TermStartSlot: it is
 // continuing, not rejoining, and the hot-key authorization/resignation
 // queries gate on term_start_slot to decide whether a stale, pre-removal
-// certificate should still resolve (blinklabs-io/dingo#4584). Stamping a
-// fresh TermStartSlot on every credential in the action's map -- including a
-// continuing member whose term is simply being renewed -- silently
-// invalidated that member's still-valid hot-key authorization the moment the
-// term renewed, despite no resignation or re-authorization ever occurring.
-// Only a credential genuinely new to the committee, or rejoining after having
-// been removed at some point since its last authorization, gets a fresh
-// TermStartSlot; that is what correctly excludes its stale pre-removal
-// authorization once it rejoins. The fresh start is the later of the
-// proposal's slot and ctx.PrevEpochStartSlot: certificates the credential
-// recorded while pending before the closing epoch were dropped at that
-// epoch's own boundary, when it was not yet a member.
+// certificate should still resolve. Stamping a fresh TermStartSlot on every
+// credential in the action's map -- including a continuing member whose term is
+// simply being renewed -- silently invalidated that member's still-valid
+// hot-key authorization the moment the term renewed, despite no resignation or
+// re-authorization ever occurring. Only a credential genuinely new to the
+// committee, or rejoining after having been removed at some point since its
+// last authorization, gets a fresh TermStartSlot; that is what correctly
+// excludes its stale pre-removal authorization once it rejoins. The fresh start
+// is the later of the proposal's slot and ctx.PrevEpochStartSlot: certificates
+// the credential recorded while pending before the closing epoch were dropped
+// at that epoch's own boundary, when it was not yet a member.
 func applyUpdateCommittee(
 	ctx *EnactmentContext,
 	a *lcommon.UpdateCommitteeGovAction,

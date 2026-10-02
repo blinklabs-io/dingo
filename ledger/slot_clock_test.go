@@ -943,6 +943,70 @@ func TestSlotClockPastHorizonIsNotAnErrorAndResumes(t *testing.T) {
 	assert.NotContains(t, readLog(), "level=ERROR")
 }
 
+// Ticks are paused past the horizon, but wall-clock metrics must keep moving,
+// so the clock reports each skipped slot through OnBehindHorizon and stops
+// once ticks resume.
+func TestSlotClockPastHorizonReportsWallSlot(t *testing.T) {
+	t.Parallel()
+
+	provider := &horizonBoundProvider{
+		mockSlotTimeProvider: newMockSlotTimeProvider(
+			time.Now(), 20*time.Millisecond, 100,
+		),
+	}
+	// The callback runs on the clock goroutine, so it must not block: a full
+	// buffer drops the report and the test fails on the missing values.
+	reports := make(chan uint64, 1024)
+	cfg := DefaultSlotClockConfig()
+	cfg.OnBehindHorizon = func(slot uint64) {
+		select {
+		case reports <- slot:
+		default:
+		}
+	}
+
+	clock := NewSlotClock(provider, cfg)
+	ch := clock.Subscribe()
+	clock.Start(t.Context())
+	defer clock.Stop()
+
+	// Two reports in a row show every skipped slot is reported, not just
+	// the transition into the state.
+	first := testutil.RequireReceive(
+		t, reports, testutil.AsyncWait, "first skipped-slot report",
+	)
+	second := testutil.RequireReceive(
+		t, reports, testutil.AsyncWait, "second skipped-slot report",
+	)
+	assert.NotZero(t, first)
+	assert.Greater(t, second, first)
+
+	provider.resolved.Store(true)
+	testutil.RequireReceive(
+		t, ch, testutil.AsyncWait, "tick after era history catches up",
+	)
+	// The clock reports from the goroutine that emits ticks, so every report
+	// from before the tick is already queued. Drain them, then let further
+	// ticks prove the clock kept running with no new reports.
+drain:
+	for {
+		select {
+		case <-reports:
+		default:
+			break drain
+		}
+	}
+	for range 3 {
+		testutil.RequireReceive(
+			t, ch, testutil.AsyncWait, "tick while era history is covered",
+		)
+	}
+	testutil.RequireNoReceive(
+		t, reports, 10*time.Millisecond,
+		"reports must stop once ticks resume",
+	)
+}
+
 // lockedWriter serializes writes from the clock goroutine against test reads.
 type lockedWriter struct {
 	mu *sync.Mutex

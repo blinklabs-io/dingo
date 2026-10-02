@@ -285,7 +285,7 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 }
 
 // BenchmarkMempoolPlugins is Dingo's counterpart to the concurrent
-// mempool-state-bench introduced by ouroboros-consensus PR #2148. It drives
+// mempool-state-bench introduced by ouroboros-consensus. It drives
 // the actual FIFO and DAG plugin providers with concurrent adders, snapshot
 // readers, and overlay rebuilds over the same offered-load/peer-count matrix.
 //

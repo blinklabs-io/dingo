@@ -460,9 +460,15 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 			return fmt.Errorf("querying midnight candidates: %w", err)
 		}
 		for _, utxo := range utxos {
-			var key candidateKey
-			copy(key.TxHash[:], utxo.TxId)
-			key.OutputIndex = utxo.OutputIdx
+			txHash, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+			if err != nil {
+				return fmt.Errorf(
+					"midnight candidate output %d: %w",
+					utxo.OutputIdx,
+					err,
+				)
+			}
+			key := candidateKey{TxHash: txHash, OutputIndex: utxo.OutputIdx}
 			idx.candidates[key] = bytes.Clone(utxo.Datum)
 		}
 	}

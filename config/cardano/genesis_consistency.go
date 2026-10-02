@@ -73,8 +73,8 @@ func (c *CardanoNodeConfig) validateGenesisConsistency() error {
 // configuration error and fails closed -- but only once header
 // verification actually runs, repeated on every single header, with
 // nothing naming the genesis field as the cause. A non-deferred failure
-// on every post-Byron header (issue #3528 made header crypto verification
-// unconditional) recycles the peer connection indefinitely rather than
+// on every post-Byron header (header crypto verification
+// is unconditional) recycles the peer connection indefinitely rather than
 // stalling once with a diagnosable error. Failing here, once, at load
 // time, gives an operator a clear message instead of a silent sync stall.
 func (c *CardanoNodeConfig) validateMaxKESEvolutionsPresent() error {

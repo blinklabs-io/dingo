@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package benchci implements CI benchmark regression detection for Dingo's
-// weekly benchmark workflow (blinklabs-io/dingo#1895). It shells out to
+// weekly benchmark workflow. It shells out to
 // golang.org/x/perf/cmd/benchstat to compare two `go test -bench`-format
 // result files, restricts the comparison to a curated set of benchmark
 // names, and flags a benchmark as regressed only when both:
@@ -56,8 +56,7 @@ const (
 
 	// RegressionThresholdPercent is the minimum "sec/op" delta, in percent,
 	// that (combined with benchstat-reported statistical significance)
-	// flags a curated benchmark as regressed. Matches the 5% figure from
-	// issue #1895.
+	// flags a curated benchmark as regressed.
 	RegressionThresholdPercent = 5.0
 
 	// secOpMetric is the metric name benchstat prints in the CSV header of

@@ -101,10 +101,10 @@ func voteForUnregisteredProposal(t *testing.T) []byte {
 	return append(payload, 0xff)
 }
 
-// TestAdvanceByronPBFTStateAppliesUpdatePayload covers #4378 at the block
-// level: the update payload of a Byron main block with a valid PBFT header is
-// registered through the update rules, and a failing one rejects the block
-// when the update state holds the whole chain history.
+// TestAdvanceByronPBFTStateAppliesUpdatePayload pins update adoption at the
+// block level: the update payload of a Byron main block with a valid PBFT
+// header is registered through the update rules, and a failing one rejects the
+// block when the update state holds the whole chain history.
 func TestAdvanceByronPBFTStateAppliesUpdatePayload(t *testing.T) {
 	t.Parallel()
 	stored := loadRealByronMainBlock(t)
@@ -143,7 +143,7 @@ func TestAdvanceByronPBFTStateAppliesUpdatePayload(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestValidateByronBlockSizesUsesAdoptedLimits covers #4418: a main block is
+// TestValidateByronBlockSizesUsesAdoptedLimits pins: a main block is
 // measured against the adopted limits, not the genesis ones.
 func TestValidateByronBlockSizesUsesAdoptedLimits(t *testing.T) {
 	t.Parallel()
@@ -192,11 +192,11 @@ func TestValidateByronBlockSizesUsesAdoptedLimits(t *testing.T) {
 	}
 }
 
-// TestByronShelleyTransitionRequiresAdoptedCandidate covers #4420 on the real
-// mainnet boundary: with an update state that holds the whole chain history
-// and no stable protocol version 2 candidate, the first Shelley block is
-// rejected. newByronShelleyBoundaryLedger's own tests cover the trusted start
-// that cannot know the candidate and so follows the chain.
+// TestByronShelleyTransitionRequiresAdoptedCandidate pins the adopted-candidate
+// gate on the real mainnet boundary: with an update state that holds the whole
+// chain history and no stable protocol version 2 candidate, the first Shelley
+// block is rejected. newByronShelleyBoundaryLedger's own tests cover the
+// trusted start that cannot know the candidate and so follows the chain.
 func TestByronShelleyTransitionRequiresAdoptedCandidate(t *testing.T) {
 	t.Parallel()
 	ls, lastByron, firstShelley := newByronShelleyBoundaryLedger(t)
@@ -303,7 +303,7 @@ func byronTestEbbHeader(
 	return &byron.ByronEpochBoundaryBlock{BlockHeader: &header}
 }
 
-// TestValidateByronEbbPreviousHashSemantics covers #4400: an EBB whose
+// TestValidateByronEbbPreviousHashSemantics pins: an EBB whose
 // previous hash is a genesis hash, in epoch 0 or through the 255 => "Genesis"
 // attribute, cannot continue a chain that already has a block, whatever its
 // bytes.
@@ -333,7 +333,7 @@ func TestValidateByronEbbPreviousHashSemantics(t *testing.T) {
 	}
 }
 
-// TestByronTxAuxRejectsTrailingFields covers #4383: a TxAux must be exactly
+// TestByronTxAuxRejectsTrailingFields pins: a TxAux must be exactly
 // [body, witnesses], so a third field fails decoding wherever a Byron
 // transaction or block body is decoded.
 func TestByronTxAuxRejectsTrailingFields(t *testing.T) {
@@ -372,9 +372,9 @@ func TestByronTxAuxRejectsTrailingFields(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestByronBlockPParams covers the block-application half of #4418 and
-// #4419: a Byron block is validated against its update state's adopted
-// parameters, and any other block against the era's own.
+// TestByronBlockPParams covers the block-application half of adopted
+// size and fee parameters: a Byron block is validated against its update
+// state's adopted parameters, and any other block against the era's own.
 func TestByronBlockPParams(t *testing.T) {
 	t.Parallel()
 	stored := loadRealByronMainBlock(t)
@@ -458,7 +458,7 @@ func seedByronInputFromWitness(
 }
 
 // TestLedgerProcessBlocksFromSourceUsesAdoptedByronParameters covers the
-// block-application half of #4379, #4418 and #4419 end to end: a real Byron
+// block-application half of adopted Byron parameters end to end: a real Byron
 // main block runs through ledgerProcessBlocksFromSource, and its size and
 // transaction checks see the limits and fee policy the update state adopted
 // rather than Byron genesis, which here allows only a one-byte block, header

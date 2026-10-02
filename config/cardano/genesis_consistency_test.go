@@ -105,10 +105,10 @@ func TestValidateGenesisConsistencyMismatch(t *testing.T) {
 }
 
 // TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions is a
-// regression test for a human-review finding: nothing rejected a Shelley
+// regression test: nothing rejected a Shelley
 // genesis with a missing or non-positive maxKESEvolutions at load time,
 // so the failure only surfaced once header verification ran -- on every
-// single header, since issue #3528 made header crypto verification
+// single header, since header crypto verification is
 // unconditional -- with nothing naming the genesis field as the cause.
 func TestValidateGenesisConsistencyRejectsMissingMaxKESEvolutions(
 	t *testing.T,
@@ -178,7 +178,7 @@ func validShelleyGenesisForSecurityParamTests() *shelley.ShelleyGenesis {
 }
 
 // TestValidateGenesisConsistencyRejectsInvalidSecurityParameters is a
-// regression test for issue #1649 case R2. Neither
+// regression test for a fail-fast audit case. Neither
 // LoadShelleyGenesisFromReader/LoadByronGenesisFromReader (used broadly by
 // unit tests to build deliberately-invalid fixtures for other guards, e.g.
 // TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffRejects) nor

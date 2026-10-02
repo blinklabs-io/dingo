@@ -67,6 +67,7 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -189,6 +190,11 @@ var schemaVersions = []struct {
 		Version: 31,
 		Name:    rewardCreditRoundTableSchemaRelease,
 		Dir:     "v31",
+	},
+	{
+		Version: 32,
+		Name:    rewardLeaderDeficitSchemaRelease,
+		Dir:     "v32",
 	},
 }
 
@@ -1101,7 +1107,7 @@ const (
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
-// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+// rebootstrap for the epochs the version bump actually changed.
 //
 // pool_stake_snapshot's stored values never depended on calculation version
 // -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so
