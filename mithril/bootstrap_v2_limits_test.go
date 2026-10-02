@@ -18,6 +18,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,9 +111,7 @@ func TestFetchImmutableArchiveAdmitsOnlyOwnTrio(t *testing.T) {
 				files["immutable/"+name] = content
 			}
 		}
-		for name, content := range extra {
-			files[name] = content
-		}
+		maps.Copy(files, extra)
 		return buildTarZst(t, files)
 	}
 

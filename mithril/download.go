@@ -1460,7 +1460,7 @@ func extractArchiveFile(
 					header.Name, limits.maxMemberBytes,
 				)
 			}
-			if verifyDigest {
+			if hasher != nil {
 				observed := hex.EncodeToString(hasher.Sum(nil))
 				if observed != expectedDigest {
 					_ = workDir.Remove(target)
