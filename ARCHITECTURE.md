@@ -3202,11 +3202,13 @@ transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
 65535 enter the UTxO set, and its fee balance and UTxO update use that set.
 gouroboros `ByronTransaction.Produced()` returns the same set, and every
 storage path builds UTxOs from `Produced()`. `byronOutputBalance` therefore
-sums `Produced()`, so value conservation and the minimum fee see exactly the
-outputs that are stored, while the output address rules
-(`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`) still cover
-every output. Later outputs remain in the transaction body, its ID and its
-serialized size, and a transaction is not rejected for having more outputs.
+sums `Produced()`, so the output value that value conservation and the fee
+balance subtract is exactly the value that is stored. The required minimum fee
+is still computed from the size of the whole serialized transaction, every
+output included, as the reference sizes the whole `TxAux`, and the output
+address rules (`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`)
+still cover every output. Later outputs remain in the transaction body and its
+ID, and a transaction is not rejected for having more outputs.
 
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and

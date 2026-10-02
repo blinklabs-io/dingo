@@ -153,3 +153,17 @@ func TestByronOutputNetworkStillChecksOutputsPastWord16(t *testing.T) {
 	require.True(t, errors.As(err, &mismatch), "got %v", err)
 	require.Equal(t, byronProducedLimit, mismatch.OutputIndex)
 }
+
+// TestByronTestTxProducedMatchesWord16Bound keeps the test double honest: a
+// rule that sums Produced must see the same bound on testByronTx as on a real
+// ByronTransaction.
+func TestByronTestTxProducedMatchesWord16Bound(t *testing.T) {
+	t.Parallel()
+	outputs := make([]lcommon.TransactionOutput, byronProducedLimit+1)
+	for i := range outputs {
+		outputs[i] = newTestOutput(1)
+	}
+	tx := &testByronTx{outputs: outputs}
+	require.Equal(t, byronProducedLimit, len(tx.Produced()))
+	require.Equal(t, big.NewInt(byronProducedLimit), byronOutputBalance(tx))
+}
