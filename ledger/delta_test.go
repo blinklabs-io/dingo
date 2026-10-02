@@ -685,6 +685,41 @@ func TestLedgerDeltaAppliesDRepVoteActivityBeforeRegistrationCertificates(t *tes
 	require.Equal(t, uint64(3), dormantEpochs)
 }
 
+func TestProcessGovernanceAllowsDRepDeregistrationWithoutConwayParameters(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(bytes.Repeat([]byte{0x31}, lcommon.Blake2b256Size))
+	tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.CredentialHash(bytes.Repeat([]byte{0x32}, lcommon.Blake2b224Size)),
+		},
+	})
+	ls := &LedgerState{
+		db:           db,
+		currentEpoch: models.Epoch{EpochId: 10},
+	}
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x33}, lcommon.Blake2b256Size)),
+		uint(conway.EraIdConway),
+		0,
+	)
+	defer delta.Release()
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		return delta.processGovernance(ls, tx, txn)
+	})
+	require.NoError(t, err)
+}
+
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
 	t *testing.T,
 ) {

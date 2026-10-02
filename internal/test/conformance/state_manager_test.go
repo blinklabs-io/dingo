@@ -287,10 +287,8 @@ func TestDingoStateManagerRestartSurvivesReopen(t *testing.T) {
 	)
 }
 
-// TestDingoStateManagerRollbackDiscardsWrites proves the audit's rollback
-// acceptance bullet: a write made inside a real database transaction that
-// is rolled back is not visible via a subsequent, fresh (independent) read
-// -- not just absent from some in-memory mirror.
+// TestDingoStateManagerRollbackDiscardsWrites verifies that rolled-back
+// writes are not visible to later reads.
 func TestDingoStateManagerRollbackDiscardsWrites(t *testing.T) {
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
@@ -1784,8 +1782,3 @@ func TestConformanceApplyTransactionResetsDormancyBeforeCertificates(t *testing.
 	require.NoError(t, err)
 	require.Zero(t, dormantEpochs)
 }
-
-// TestDingoStateManagerRollbackDiscardsWrites proves the audit's rollback
-// acceptance bullet: a write made inside a real database transaction that
-// is rolled back is not visible via a subsequent, fresh (independent) read
-// -- not just absent from some in-memory mirror.

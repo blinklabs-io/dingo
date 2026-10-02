@@ -475,20 +475,29 @@ func (d *LedgerDelta) processGovernance(
 	ls.RUnlock()
 
 	conwayPParams := conwayProtocolParameters(pparams)
-	if conwayPParams == nil {
+	if conwayPParams == nil &&
+		(len(proposals) > 0 || len(votes) > 0 || hasDRepActivityCerts) {
 		return fmt.Errorf(
 			"governance requires Conway protocol parameters, got %T",
 			pparams,
 		)
+	}
+	drepInactivityPeriod := uint64(0)
+	govActionValidityPeriod := uint64(0)
+	protocolMajor := uint64(0)
+	if conwayPParams != nil {
+		drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
+		govActionValidityPeriod = conwayPParams.GovActionValidityPeriod
+		protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
 	}
 
 	if err := governance.ProcessTransactionEffects(
 		tx,
 		d.Point,
 		currentEpoch,
-		conwayPParams.DRepInactivityPeriod,
-		conwayPParams.GovActionValidityPeriod,
-		uint64(conwayPParams.ProtocolVersion.Major),
+		drepInactivityPeriod,
+		govActionValidityPeriod,
+		protocolMajor,
 		ls.db,
 		txn,
 	); err != nil {

@@ -403,7 +403,7 @@ const (
 	// nodeSettingsGateTableName receives the v20 Alonzo-unit provenance
 	// marker while migrations bootstrap an otherwise-empty database.
 	nodeSettingsGateTableName = "node_settings_gate"
-	// drepDormancyStateTableName receives the v24 zero-epoch baseline while
+	// drepDormancyStateTableName receives the v33 zero-epoch baseline while
 	// migrations bootstrap an otherwise-empty database.
 	drepDormancyStateTableName = "drep_dormancy_state"
 )
@@ -411,7 +411,7 @@ const (
 // refuseIfTargetHasData errors out, before resetDatabase drops anything,
 // if any table contains data other than migration bookkeeping. Migration
 // v20 seeds node_settings_gate with the Alonzo per-word provenance marker,
-// and v24 seeds drep_dormancy_state with a zero epoch count. Those exact
+// and v33 seeds drep_dormancy_state with a zero epoch count. Those exact
 // rows are bootstrap data; any other row/value remains evidence of a
 // previously used target. A nonzero count anywhere else means this target
 // is most plausibly a live node's own database,

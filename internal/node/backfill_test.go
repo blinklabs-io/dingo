@@ -990,11 +990,8 @@ func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
 	assert.True(t, bf.immutableUtxoOffsetsTipSet)
 }
 
-// TestBackfill_ExplicitZeroOverridesAutoDetect addresses the reviewer
-// concern that SetImmutableUtxoOffsetsTipSlot(0) is documented as disabling
-// the optimisation. The override bit must beat auto-detection so callers
-// that intentionally need offset repair below the immutable-copy tip cannot
-// have the optimisation silently re-enabled behind their back.
+// TestBackfill_ExplicitZeroOverridesAutoDetect verifies that an explicit zero
+// disables immutable-offset skipping even when the database has a stored tip.
 func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
 	t.Parallel()
 
