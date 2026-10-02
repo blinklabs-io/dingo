@@ -646,7 +646,7 @@ func compareCostModels(
 			CategoryValueMismatch,
 		)}
 	}
-	languages := make([]string, 0, dingoLen+koiosLen)
+	var languages []string
 	for language := range dingoModels {
 		languages = append(languages, language)
 	}
