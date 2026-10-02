@@ -204,17 +204,38 @@ WHERE epoch = 2 AND folded`,
 	// A plan that loses the index entirely scans the table instead, which
 	// the prefix pattern above does not match.
 	tableScan := regexp.MustCompile(`(?m)^SCAN (rao|o)\b`)
-	var claimStatements int
+	// The id step must be answered from the index alone, seeking all four
+	// columns, and in id order without a sort; the row step must then read
+	// each claimed row by primary key.
+	idSeek := regexp.MustCompile(
+		`SEARCH o USING COVERING INDEX idx_reward_account_output_pending_round ` +
+			`\(spendable=\? AND guarded=\? AND folded=\? AND epoch=\?\)`,
+	)
+	rowSeek := regexp.MustCompile(`SEARCH rao USING INTEGER PRIMARY KEY`)
+	idFrom := regexp.MustCompile(`\bFROM reward_account_output o\b`)
+	rowFrom := regexp.MustCompile(`\bFROM reward_account_output rao\b`)
+	var idStatements, rowStatements int
 	for _, statement := range claimSQL {
 		if !strings.Contains(statement, "reward_account_output") ||
 			strings.HasPrefix(strings.TrimSpace(statement), "UPDATE") {
 			continue
 		}
-		claimStatements++
 		args := make([]any, strings.Count(statement, "?"))
 		plan := queryPlan(t, store.writeDB, statement, args...)
 		require.NotRegexp(t, prefixOnly, plan, "statement: %s", statement)
 		require.NotRegexp(t, tableScan, plan, "statement: %s", statement)
+		switch {
+		case idFrom.MatchString(statement):
+			idStatements++
+			require.Regexp(t, idSeek, plan, "statement: %s", statement)
+			require.NotContains(t, plan, "TEMP B-TREE", "statement: %s", statement)
+		case rowFrom.MatchString(statement):
+			rowStatements++
+			require.Regexp(t, rowSeek, plan, "statement: %s", statement)
+		default:
+			require.Failf(t, "unexpected claim statement", "%s", statement)
+		}
 	}
-	require.NotZero(t, claimStatements)
+	require.Equal(t, 3, idStatements, "one id selection per claim")
+	require.Equal(t, 2, rowStatements, "one row read per non-empty claim")
 }
