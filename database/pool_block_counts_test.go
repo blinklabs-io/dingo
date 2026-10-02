@@ -118,3 +118,32 @@ func TestMergeImportedPoolBlockCountsEpochCoverage(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, known)
 }
+
+func TestMergeImportedPoolBlockCountsRejectsRecordedEmptyAnchor(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	_, _, known, err := database.MergeImportedPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		1,
+		0,
+		map[string]uint64{},
+		0,
+	)
+	require.NoError(t, err)
+	require.True(t, known)
+	require.NoError(
+		t,
+		db.Metadata().SetSyncState("mithril_ledger_slot", "", nil),
+	)
+	_, _, _, err = database.MergeImportedPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		1,
+		0,
+		map[string]uint64{},
+		0,
+	)
+	require.Error(t, err)
+}

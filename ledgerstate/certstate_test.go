@@ -340,7 +340,10 @@ func TestParsePStateRetainsUnparsedRetirementKeys(t *testing.T) {
 	}
 	keys, ok := retirements[659]
 	if !ok || len(keys) != 1 || !bytes.Equal(keys[0], unparsedHash) {
-		t.Fatalf("unparsed retirement key was not retained: %x", retirements[659])
+		t.Fatalf(
+			"unparsed retirement key was not retained: %x",
+			retirements[659],
+		)
 	}
 }
 
@@ -765,7 +768,10 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 			}
 			if tc.wantEpoch == nil {
 				if pool.LeiosKeyRegistrationEpoch != nil {
-					t.Fatalf("unexpected registration epoch: %d", *pool.LeiosKeyRegistrationEpoch)
+					t.Fatalf(
+						"unexpected registration epoch: %d",
+						*pool.LeiosKeyRegistrationEpoch,
+					)
 				}
 			} else if pool.LeiosKeyRegistrationEpoch == nil || *pool.LeiosKeyRegistrationEpoch != *tc.wantEpoch {
 				t.Fatalf("registration epoch mismatch: %v", pool.LeiosKeyRegistrationEpoch)
@@ -1451,7 +1457,9 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 		}
 	}
 
-	shortHash, err := cbor.Encode([]any{uint64(1), cbor.RawMessage(anchorCBOR(t, 31))})
+	shortHash, err := cbor.Encode(
+		[]any{uint64(1), cbor.RawMessage(anchorCBOR(t, 31))},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1460,13 +1468,23 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	threeField, err := cbor.Encode(
-		[]any{uint64(1), []any{"https://example.com", bytes.Repeat([]byte{0x77}, 32), uint64(9)}},
+		[]any{
+			uint64(1),
+			[]any{
+				"https://example.com",
+				bytes.Repeat([]byte{0x77}, 32),
+				uint64(9),
+			},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	swapped, err := cbor.Encode(
-		[]any{uint64(1), []any{bytes.Repeat([]byte{0x77}, 32), "https://example.com"}},
+		[]any{
+			uint64(1),
+			[]any{bytes.Repeat([]byte{0x77}, 32), "https://example.com"},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1559,7 +1577,9 @@ func TestParseCommitteeVStateRejectsMalformedResignationMap(t *testing.T) {
 	m = append(m, malformed...)
 
 	if looksLikeCommitteeCredentialMap(m) {
-		t.Fatal("a malformed-resignation map must not look like a committee map")
+		t.Fatal(
+			"a malformed-resignation map must not look like a committee map",
+		)
 	}
 	if _, _, err := parseCommitteeVState([][]byte{m, {0x00}}); err == nil {
 		t.Fatal("a committee map of undecodable entries must fail the import")
@@ -1589,7 +1609,9 @@ func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
 	}
 
 	goodKey := enc([]any{uint64(1), coldGood})
-	goodVal := enc([]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))})
+	goodVal := enc(
+		[]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))},
+	)
 	badKey := enc([]any{uint64(1), coldBad})
 
 	for name, badVal := range map[string][]byte{
@@ -1629,5 +1651,57 @@ func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
 				len(resignations),
 			)
 		}
+	}
+}
+
+func TestParseCertStateConwayDRepsWithEmptyDState(t *testing.T) {
+	t.Parallel()
+	credential, err := cbor.Encode(
+		[]any{uint64(0), bytes.Repeat([]byte{0x71}, 28)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := cbor.Encode(
+		[]any{uint64(500), nil, uint64(500000000), []any{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drepMap := append(append([]byte{0xa1}, credential...), state...)
+	resignMap := append(append([]byte{0xa1}, credential...), 0xf6)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	for _, test := range []struct {
+		name  string
+		dreps []byte
+		count int
+	}{
+		{"registered DRep", drepMap, 1}, {"resignation is not DRep", []byte{0xa0}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := parseCertStateConway(
+				[][]byte{
+					test.dreps,
+					{0xa0},
+					resignMap,
+					poolState,
+					{0xa0},
+					{0x00},
+				},
+			)
+			if result == nil {
+				t.Fatalf("no parsed cert state: %v", err)
+			}
+			if len(result.DReps) != test.count {
+				t.Fatalf("DReps = %d, want %d", len(result.DReps), test.count)
+			}
+			if len(result.Accounts) != 0 {
+				t.Fatalf("unexpected accounts: %#v", result.Accounts)
+			}
+		})
+	}
+	dreps, err := parseDRepMap(resignMap)
+	if err == nil || len(dreps) != 0 {
+		t.Fatalf("malformed DRep accepted: %#v, %v", dreps, err)
 	}
 }

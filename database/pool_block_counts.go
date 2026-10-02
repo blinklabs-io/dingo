@@ -17,6 +17,7 @@ package database
 import (
 	"fmt"
 	"math"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -152,7 +153,19 @@ func mithrilAnchorSlot(
 		return 0, false, fmt.Errorf("read Mithril trust boundary: %w", err)
 	}
 	if value == "" {
-		return 0, false, nil
+		keys, err := meta.ListSyncStateKeysByPrefix(
+			mithrilLedgerSlotSyncKey,
+			metaTxn,
+		)
+		if err != nil {
+			return 0, false, fmt.Errorf(
+				"read Mithril trust boundary keys: %w",
+				err,
+			)
+		}
+		if !slices.Contains(keys, mithrilLedgerSlotSyncKey) {
+			return 0, false, nil
+		}
 	}
 	slot, err := parseMithrilTrustBoundary(value)
 	if err != nil {

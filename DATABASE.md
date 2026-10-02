@@ -4523,3 +4523,9 @@ against the current durable tip when a failed block may have left spent UTxOs
 or other speculative rows above it. The first repair restores those rows;
 retries of the same failure reuse the repaired state instead of repeating the
 full sweep. Ordinary same-tip rollback remains a no-op.
+
+Flattened Conway certificate snapshots classify nonempty stake-account and
+DRep maps by their value encodings. Empty DState maps do not claim a DRep
+registry, and resignation maps cannot create DRep rows. Imported pool block
+counts reject a recorded empty Mithril boundary; only an absent boundary
+means no snapshot was imported.

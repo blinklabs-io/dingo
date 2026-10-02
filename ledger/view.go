@@ -2677,7 +2677,7 @@ func (lv *LedgerView) GetExpiredDReps(
 func (lv *LedgerView) GetCommitteeAuthorizedCount() (int, error) {
 	count, err := lv.ls.db.GetCommitteeAuthorizedCount(lv.txn)
 	if err != nil {
-		return 0, fmt.Errorf("get committee active count: %w", err)
+		return 0, fmt.Errorf("get committee authorized count: %w", err)
 	}
 	return count, nil
 }
