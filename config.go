@@ -265,7 +265,6 @@ type Config struct {
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
-	forgePrimaryChainTipToleranceSlots                                                  uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
 	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   *uint64
@@ -883,7 +882,6 @@ func (c *Config) syncCompatFields() {
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
-	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
 	c.forgeEBMaxTxRefs, c.forgeEBMaxBytes = c.cfg.ForgeEBMaxTxRefs, c.cfg.ForgeEBMaxBytes
@@ -1602,15 +1600,6 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgePrimaryChainTipToleranceSlots sets how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-// Use 0 to fall back to the built-in default.
-func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.ForgePrimaryChainTipToleranceSlots = slots
-	}
-}
-
 // WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
 // 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
@@ -1622,9 +1611,10 @@ func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgeAppliedTipStalenessSlots sets how many slots older than the current
-// slot the newest block this node holds may be before forging is skipped. 0
-// disables this wall-clock backstop.
+// WithForgeAppliedTipStalenessSlots sets the optional wall-clock age bound
+// for newestKnown when a corroborated upstream target is available. The bound
+// is ignored when the target is unavailable, because tip age alone does not
+// show that the network advanced. Zero disables the bound.
 func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeAppliedTipStalenessSlots = slots
@@ -1637,9 +1627,8 @@ func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 // default", and nothing fills it in: see
 // internal/config.DefaultForgeEndorserBlockStalenessSlots, which is itself 0.
 //
-// Deliberately separate from WithForgePrimaryChainTipToleranceSlots: that one
-// bounds a local block-against-block comparison, this one bounds a
-// network-stage announcement watermark against the local applied tip.
+// This bounds a network-stage announcement watermark against the local
+// applied tip.
 func WithForgeEndorserBlockStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeEndorserBlockStalenessSlots = slots
@@ -2447,21 +2436,15 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
 }
 
-// ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-func (c *Config) ForgePrimaryChainTipToleranceSlots() uint64 {
-	return c.cfg.ForgePrimaryChainTipToleranceSlots
-}
-
 // ForgeUpstreamStalenessSlots returns how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
 func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
 	return c.cfg.ForgeUpstreamStalenessSlots
 }
 
-// ForgeAppliedTipStalenessSlots returns how many slots older than the current
-// slot the newest block this node holds may be before forging is skipped.
-// 0 disables the wall-clock backstop.
+// ForgeAppliedTipStalenessSlots returns the optional wall-clock age bound for
+// newestKnown when a corroborated upstream target is available. Zero disables
+// the bound; an unavailable target is not evidence of network progress.
 func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
 	return c.cfg.ForgeAppliedTipStalenessSlots
 }

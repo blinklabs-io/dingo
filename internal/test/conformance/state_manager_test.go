@@ -803,19 +803,16 @@ var (
 	trivialThreshold     = cbor.Rat{Rat: big.NewRat(0, 1)}
 )
 
-// noConfidenceCommitteeParams builds Conway protocol parameters with an
-// easy-to-clear MotionNoConfidence DRep threshold and a CommitteeNormal/
-// CommitteeNoConfidence DRep threshold no real stake distribution could
-// ever clear, so a test can tell which threshold committeeActionRatified
-// actually applied from the pass/fail outcome alone. Pool thresholds are
-// all trivial so every test here isolates the DRep side.
+// noConfidenceCommitteeParams builds thresholds that distinguish the
+// MotionNoConfidence, CommitteeNormal, and CommitteeNoConfidence paths.
+// Pool thresholds are trivial so tests isolate the DRep side.
 func noConfidenceCommitteeParams() *conway.ConwayProtocolParameters {
 	return &conway.ConwayProtocolParameters{
 		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 10},
 		DRepVotingThresholds: conway.DRepVotingThresholds{
 			MotionNoConfidence:    cbor.Rat{Rat: big.NewRat(1, 2)},
 			CommitteeNormal:       unreachableThreshold,
-			CommitteeNoConfidence: unreachableThreshold,
+			CommitteeNoConfidence: cbor.Rat{Rat: big.NewRat(1, 2)},
 		},
 		PoolVotingThresholds: conway.PoolVotingThresholds{
 			MotionNoConfidence:    trivialThreshold,
@@ -934,19 +931,58 @@ func TestCommitteeActionRatifiedUpdateCommitteeKeepsNoConfidenceDenominatorOnly(
 	)
 }
 
+func TestCommitteeActionRatifiedUpdateCommitteeUsesAbsentCommitteeThreshold(
+	t *testing.T,
+) {
+	m, err := NewDingoStateManager()
+	require.NoError(t, err)
+	defer func() { require.NoError(t, m.Close()) }()
+	m.protocolParams = noConfidenceCommitteeParams()
+
+	drepHash := testHash28(0xd3)
+	drepCredential := mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: testHash28(0xd4),
+	}
+	m.govState.DRepRegistrationsByCredential[mockledger.RewardAccountKey{
+		CredType:   common.CredentialTypeAddrKeyHash,
+		Credential: drepHash,
+	}] = true
+	m.govState.DRepDelegationsByCredential[drepCredential] = common.Drep{
+		Type:       common.DrepTypeAddrKeyHash,
+		Credential: drepHash[:],
+	}
+	m.govState.RewardAccountBalances[drepCredential] = 1_000_000
+
+	proposal := &conformance.ProposalState{
+		GovActionInfo: conformance.GovActionInfo{
+			ActionType: common.GovActionTypeUpdateCommittee,
+			Votes: map[string]uint8{
+				formatVoteKey(common.VoterTypeDRepKeyHash, drepHash): 1,
+			},
+		},
+	}
+
+	txn := m.db.Transaction(false)
+	defer txn.Release()
+	ratified, err := m.committeeActionRatified(txn, proposal, 5)
+	require.NoError(t, err)
+	require.True(t, ratified,
+		"an absent committee must select CommitteeNoConfidence, not CommitteeNormal")
+}
+
 // TestProcessEpochBoundaryRatifiesUpdateCommitteeWithoutCommitteeVote closes
 // the gap a PR review found in the two tests above: both call
 // committeeActionRatified directly, so neither one proves ratifyProposals
 // actually routes UpdateCommittee/NoConfidence proposals to it. Reverting
-// just that routing while
+// just that routing (back to the hasCC-requiring heuristic) while
 // keeping committeeActionRatified and both direct-call tests left the whole
 // package green, including those two tests -- nothing exercised the
 // decision of *which* ratification path a real proposal takes.
 //
 // This test drives the real entry point, ProcessEpochBoundary, the way the
 // harness calls it for every vector: a DRep and an SPO each cast an
-// explicit yes vote (the exact shape "CC re-election" vector
-// carries) and no committee vote is ever recorded. It only ratifies if
+// explicit yes vote and no committee vote is ever recorded. It only ratifies if
 // ProcessEpochBoundary's call into ratifyProposals actually reaches
 // committeeActionRatified for this action type; the old heuristic requires
 // a committee yes-vote that never exists here, so this proposal stays
@@ -1413,21 +1449,18 @@ func formatVoteKey(voterType uint8, credential common.Blake2b224) string {
 	return string(rune('0'+voterType)) + ":" + hex.EncodeToString(credential[:])
 }
 
-// TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake pins a PR
-// review finding: an active proposal deposit raises the return
-// account's DRep voting power, but it is not delegated stake behind a pool
-// and must not enter the SPO tally. Production reads SPO stake straight from
-// the stake distribution snapshot (tallySPOVotes over LoadSPOVotingState's
-// Dist), which carries no deposit adjustment.
+// TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake verifies that
+// active proposal deposits contribute to a return account's delegated pool
+// stake during SPO ratification.
 //
 // The stake is arranged so the deposit decides the outcome. The yes pool
 // holds 2,000,000 and the silent (implicit no) pool holds 1,000,000, so the
 // SPO ratio is 2/3 against a 1/2 threshold and the proposal ratifies. Route
 // a 3,000,000 deposit to the silent pool's delegator and, if the SPO tally
 // counted it, that pool would hold 4,000,000, dropping the ratio to 1/3 and
-// refusing the proposal. Passing the deposit map back into
-// spoStakeForCommitteeAction therefore fails this test.
-func TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake(
+// refusing the proposal. Omitting the deposit from spoStakeForCommitteeAction
+// therefore fails this test.
+func TestCommitteeActionRatifiedIncludesProposalDepositInSPOStake(
 	t *testing.T,
 ) {
 	m, err := NewDingoStateManager()
@@ -1490,7 +1523,7 @@ func TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake(
 		GovActionInfo: conformance.GovActionInfo{
 			ActionType:     common.GovActionTypeInfo,
 			SubmittedEpoch: 0,
-			ExpiresAfter:   10,
+			ExpiresAfter:   4,
 			Votes:          map[string]uint8{},
 			Deposit:        3_000_000,
 			ReturnAccount:  &depositReturnAccount,
@@ -1520,11 +1553,10 @@ func TestCommitteeActionRatifiedExcludesProposalDepositFromSPOStake(
 	// through the decision keeps the revert behavioural.
 	ratified, err := m.committeeActionRatified(txn, proposal, 5)
 	require.NoError(t, err)
-	require.True(
+	require.False(
 		t,
 		ratified,
-		"SPO ratio is 2/3 against a 1/2 threshold once the proposal "+
-			"deposit is excluded from pool stake",
+		"the active proposal deposit should lower the SPO ratio below the threshold",
 	)
 }
 
