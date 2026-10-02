@@ -211,7 +211,12 @@ func TestValidateTxDijkstraPlutusV4CostModel(t *testing.T) {
 }
 
 func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {
-	t.Parallel()
+	// Not t.Parallel: withoutDijkstraPhase1 replaces a package-level rule list.
+	withoutDijkstraPhase1(t)
+	dijkstraPhase1UtxoValidationRules = []indexedUtxoValidationRule{
+		{validationFunc: gdijkstra.UtxoValidateCostModelsPresent},
+	}
+
 	plain := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
 	for _, level := range []struct {
 		name  string
@@ -221,14 +226,18 @@ func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {
 		{"child", v4ChildLevel},
 	} {
 		t.Run(level.name, func(t *testing.T) {
-			t.Parallel()
 			tx := newDijkstraPlutusLevelTx(t, level.level, plain, v4TestBudget)
 			for name, params := range map[string]*gdijkstra.DijkstraProtocolParameters{
 				"absent": dijkstraV4TestParams(t, nil),
 				"empty":  dijkstraV4TestParams(t, []int64{}),
 			} {
 				t.Run(name, func(t *testing.T) {
-					err := ValidateTxDijkstra(tx, 0, newMockLedgerState(), params)
+					err := ValidateTxDijkstra(
+						tx,
+						0,
+						newMockLedgerState(),
+						params,
+					)
 					var missing lcommon.MissingCostModelError
 					require.ErrorAs(t, err, &missing)
 					require.Equal(t, uint(3), missing.Version)
@@ -244,7 +253,12 @@ func TestValidateTxDijkstraPlutusV4OnlyBuiltin(t *testing.T) {
 	program := plutusProgramBytes(t, v4OnlyBuiltinProgram)
 	wrongLength := plutusProgramBytes(
 		t,
-		strings.Replace(v4OnlyBuiltinProgram, "(con integer 3)", "(con integer 4)", 1),
+		strings.Replace(
+			v4OnlyBuiltinProgram,
+			"(con integer 3)",
+			"(con integer 4)",
+			1,
+		),
 	)
 	params := dijkstraV4TestParams(
 		t, defaultMachineCostModel(t, lang.LanguageVersionV4),
@@ -267,7 +281,10 @@ func TestValidateTxDijkstraPlutusV4OnlyBuiltin(t *testing.T) {
 			// above comes from the builtin's result and not from the
 			// script ignoring it.
 			wrong := newDijkstraPlutusLevelTx(
-				t, level.level, lcommon.PlutusV4Script(wrongLength), v4TestBudget,
+				t,
+				level.level,
+				lcommon.PlutusV4Script(wrongLength),
+				v4TestBudget,
 			)
 			var failed conway.PlutusScriptFailedError
 			require.ErrorAs(t, ValidateTxDijkstra(

@@ -804,4 +804,11 @@ func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
 	ledgerMin, err := gdijkstra.MinFeeTxWithUtxo(tx, pp, ls)
 	require.NoError(t, err)
 	require.Equal(t, ledgerMin, fee)
+	pp.RefScriptCostStride = 0
+	pp.RefScriptCostMultiplier = nil
+	fee, _, _, err = EvaluateTxDijkstra(tx, ls, pp)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000+250), fee,
+		"absent Dijkstra tiers retain Conway reference-script pricing")
+
 }

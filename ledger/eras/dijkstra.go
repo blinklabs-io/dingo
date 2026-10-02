@@ -460,7 +460,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 	hasOverlap := false
 	for levelIndex := range levels {
 		level := &levels[levelIndex]
-		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(level.body)
+		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(
+			level.body,
+		)
 		hasOverlap = hasOverlap || level.hasOverlap
 	}
 	if !hasOverlap {
@@ -470,7 +472,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 		return nil
 	}
 	if ls == nil {
-		return errors.New("ledger state is required for Dijkstra script validation")
+		return errors.New(
+			"ledger state is required for Dijkstra script validation",
+		)
 	}
 
 	available := make(map[lcommon.ScriptHash]lcommon.Script)
@@ -602,7 +606,11 @@ func EvaluateTxDijkstra(
 	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
-	var multiplier *big.Rat
+	stride := uint64(tmpPparams.RefScriptCostStride)
+	if stride == 0 {
+		stride = conwayRefScriptCostStride
+	}
+	multiplier := big.NewRat(6, 5)
 	if tmpPparams.RefScriptCostMultiplier != nil {
 		multiplier = tmpPparams.RefScriptCostMultiplier.ToBigRat()
 	}
@@ -610,7 +618,7 @@ func EvaluateTxDijkstra(
 		tx,
 		ls,
 		&tmpPparams.ConwayProtocolParameters,
-		uint64(tmpPparams.RefScriptCostStride),
+		stride,
 		multiplier,
 	)
 }
