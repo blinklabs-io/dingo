@@ -920,3 +920,55 @@ func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 			"while the old drain is unconfirmed",
 	)
 }
+
+// TestLeiosPersistPauseIsSafeAgainstConcurrentEnqueue runs lifecycle pauses
+// while enqueuers are active. A pause resets the writer's start guard and
+// queue state, so it must be synchronized with enqueues that start the writer
+// lazily; run under -race, an unsynchronized reset is a data race.
+func TestLeiosPersistPauseIsSafeAgainstConcurrentEnqueue(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	const enqueuers = 4
+	const perEnqueuer = 25
+
+	type entry struct {
+		point ocommon.Point
+		raw   cbor.RawMessage
+	}
+	entries := make([][]entry, enqueuers)
+	for e := range enqueuers {
+		for i := range perEnqueuer {
+			point, raw := testLeiosEndorserBlockRawWithRefs(
+				t, 100+e*perEnqueuer+i, 1,
+			)
+			entries[e] = append(entries[e], entry{point, raw})
+		}
+	}
+
+	var wg sync.WaitGroup
+	for e := range enqueuers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, en := range entries[e] {
+				o.enqueueLeiosPersist(en.point, en.raw, nil)
+			}
+		}()
+	}
+	pauses := make(chan struct{})
+	go func() {
+		defer close(pauses)
+		for range 20 {
+			// A pause may report an unconfirmed drain only on timeout, which
+			// an in-memory store never reaches.
+			if err := o.PauseLeiosPersistWriterForLiveLifecycleOp(); err != nil {
+				t.Errorf("pause: %v", err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	<-pauses
+	o.StopLeiosPersistWriter()
+}

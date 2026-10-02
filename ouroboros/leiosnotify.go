@@ -98,6 +98,11 @@ type leiosDeferredAnnouncement struct {
 
 const leiosMaxDeferredAnnouncements = 128
 
+// leiosMaxDeferredAnnouncementsPerSource keeps one connection from holding
+// every slot of the shared deferral cap, so other peers' announcements can
+// still be retained while the epoch cache catches up.
+const leiosMaxDeferredAnnouncementsPerSource = 16
+
 const leiosMaxAnnouncementValidationInFlight = 64
 
 const leiosNotifyMaxVoteVerificationsPerOffer = 64
@@ -1849,14 +1854,38 @@ func (o *Ouroboros) deferLeiosAnnouncement(
 	key := fmt.Sprintf("%s:%x", source, header.Hash().Bytes())
 	o.leiosDeferredMu.Lock()
 	defer o.leiosDeferredMu.Unlock()
+	if _, exists := o.leiosDeferredAnnouncements[key]; exists {
+		return
+	}
 	if len(o.leiosDeferredAnnouncements) >= leiosMaxDeferredAnnouncements {
 		return
 	}
-	if _, exists := o.leiosDeferredAnnouncements[key]; !exists {
-		o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
-			raw: append([]byte(nil), raw...), source: source,
+	fromSource := 0
+	for _, announcement := range o.leiosDeferredAnnouncements {
+		if announcement.source == source {
+			fromSource++
 		}
 	}
+	if fromSource >= leiosMaxDeferredAnnouncementsPerSource {
+		return
+	}
+	o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
+		raw: append([]byte(nil), raw...), source: source,
+	}
+}
+
+// dropDeferredLeiosAnnouncements releases the deferral slots held by a
+// connection that has closed, so they cannot outlive it and crowd out the
+// announcements of later connections.
+func (o *Ouroboros) dropDeferredLeiosAnnouncements(source string) {
+	o.leiosDeferredMu.Lock()
+	defer o.leiosDeferredMu.Unlock()
+	maps.DeleteFunc(
+		o.leiosDeferredAnnouncements,
+		func(_ string, announcement leiosDeferredAnnouncement) bool {
+			return announcement.source == source
+		},
+	)
 }
 
 // retryDeferredLeiosAnnouncements retries headers after ledger activity has
