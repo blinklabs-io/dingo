@@ -604,11 +604,10 @@ func (o *Ouroboros) stopLeiosPersistenceGC(drainTimeout time.Duration) bool {
 
 // PauseLeiosPersistWriterForLiveLifecycleOp stops the persistence writer
 // (draining whatever is already queued against the current, about-to-close
-// database) and resets its start-once guard, so a later enqueueLeiosPersist
-// call -- once LedgerState has been reassigned to the reinitialized
-// database after a live Restore/Truncate -- lazily relaunches a fresh
-// writer against the new database, the same way the very first call ever
-// does.
+// database) and the optional GC worker (canceling its current sweep). It
+// resets both start-once guards, so a later enqueueLeiosPersist call -- once
+// LedgerState has been reassigned to the reinitialized database after a live
+// Restore/Truncate -- lazily relaunches fresh workers against the new database.
 //
 // Without this, the writer (once started) ran for the whole Ouroboros
 // object's lifetime, since that object is retained (not rebuilt) across a
@@ -635,16 +634,11 @@ func (o *Ouroboros) stopLeiosPersistenceGC(drainTimeout time.Duration) bool {
 // practice, not just "shouldn't" by convention.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
-// the drain wait timed out: the old writer goroutine may still be running
-// drainLeiosPersist against the old database and the shared pending map,
-// so resetting leiosPersistOnce here would let the very next enqueue start
-// a second writer against a freshly reset map and channels while the old
-// one is still reading and deleting from that same map (now repointed)
-// under leiosPersistMu — silently stealing jobs meant for the new database
-// and, worse, writing them into the old one via the stale captured db
-// reference. The caller must not proceed to close storage or attempt
-// reinitializeAndResume in that case; it must escalate to a supervised
-// restart instead, the same as errStorageDrainUnconfirmed.
+// either worker misses the shared drain deadline. The writer may still be
+// writing against the old database, or the GC may still be scanning or
+// deleting through its pinned blob store. The caller must not proceed to close
+// or replace storage in that case; it must escalate to a supervised restart,
+// the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
 	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed

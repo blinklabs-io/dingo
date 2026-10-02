@@ -1798,12 +1798,12 @@ var errRestoreSwapUnrecoverable = errors.New(
 // closeStorageForLiveLifecycleOp failure where a background goroutine could
 // not be confirmed to have exited before its bounded wait timed out —
 // currently n.ledgerState.Close()'s rollback-event/dbWorkerPool waits, the
-// leios persist writer's drain (PauseLeiosPersistWriterForLiveLifecycleOp),
-// or a storage provider whose context-bounded Stop returned before its cleanup
-// completed. Unlike every other error
-// these functions can return, this one means a goroutine may still be
-// reading/writing n.db, not merely that some cleanup step reported failure
-// after the resource was already unused. Restore/Truncate must not treat
+// Leios persistence/GC worker drain
+// (PauseLeiosPersistWriterForLiveLifecycleOp), or a storage provider whose
+// context-bounded Stop returned before its cleanup completed. Unlike every
+// other error these functions can return, this one means a goroutine may
+// still be reading/writing n.db; other errors may only report cleanup failure
+// after a resource is already unused. Restore/Truncate must not treat
 // this the way they treat every other quiesce/close-storage error (attempt
 // reinitializeAndResume against the same on-disk data): reopening storage a
 // still-running goroutine may be touching is exactly the use-after-close

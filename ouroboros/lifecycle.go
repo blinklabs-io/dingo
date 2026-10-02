@@ -122,7 +122,7 @@ func (o *Ouroboros) subscribeTracked(
 
 // Close releases everything this Ouroboros owns that outlives it: EventBus
 // subscriptions, Prometheus collectors, and the background Leios
-// endorser-block persistence writer.
+// endorser-block persistence and optional GC workers.
 //
 // It exists because Ouroboros takes its dependencies at construction and so
 // cannot be retained across a live snapshot/restore. That operation discards

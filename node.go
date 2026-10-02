@@ -1305,11 +1305,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	n.ouroborosRef.Store(ouro)
-	// The asynchronous Leios endorser-block persistence writer, the EventBus
-	// subscriptions ouroboros makes on its own behalf, and its Prometheus
-	// collectors are all released by Close. Registering it on both the
-	// unwind stack and a defer covers startup failure and graceful shutdown;
-	// Close is idempotent.
+	// Close stops Leios persistence and optional GC workers and releases its
+	// EventBus subscriptions and Prometheus collectors. Register it on both
+	// the unwind stack and a defer for startup failure and graceful shutdown.
 	defer func() { _ = n.ouroboros().Close() }()
 	started = append(started, func() { _ = n.ouroboros().Close() })
 	// A closure, not a method value, even though n.ouroboros already exists
