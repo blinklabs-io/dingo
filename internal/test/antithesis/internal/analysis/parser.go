@@ -16,6 +16,7 @@ package analysis
 
 import (
 	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -194,7 +195,11 @@ func extractSlot(raw map[string]interface{}) uint64 {
 	for _, key := range []string{"slot", "slot_no", "slotNo"} {
 		switch v := raw[key].(type) {
 		case float64:
-			return uint64(v)
+			// JSON numbers decode to float64, which is exact only for
+			// integers below 2^53; anything else is not a slot.
+			if v >= 0 && v < 1<<53 && v == math.Trunc(v) {
+				return uint64(v)
+			}
 		case string:
 			if n, err := strconv.ParseUint(v, 10, 64); err == nil {
 				return n

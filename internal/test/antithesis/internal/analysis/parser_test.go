@@ -15,6 +15,7 @@
 package analysis
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -156,4 +157,58 @@ func TestParseLine_MissingTimestamp(t *testing.T) {
 	ev := ParseLogLine(line)
 	require.NotNil(t, ev)
 	require.True(t, ev.Timestamp.IsZero())
+}
+
+// A JSON number that is not an exactly representable non-negative integer must
+// not become a slot: 0 means "no slot" to every consumer, which is the only
+// safe reading of a malformed value.
+func TestExtractSlot_RejectsMalformedNumbers(t *testing.T) {
+	t.Parallel()
+	const maxSafe = float64(1<<53 - 1)
+	cases := []struct {
+		name string
+		slot interface{}
+		want uint64
+	}{
+		{"integral", float64(42), 42},
+		{"zero", float64(0), 0},
+		{"max safe integer", maxSafe, 1<<53 - 1},
+		{"above max safe integer", maxSafe + 2, 0},
+		{"far out of range", float64(1e30), 0},
+		{"fractional", 1.5, 0},
+		{"negative", float64(-3), 0},
+		{"negative fractional", -0.5, 0},
+		{"NaN", math.NaN(), 0},
+		{"positive infinity", math.Inf(1), 0},
+		{"negative infinity", math.Inf(-1), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t,
+				tc.want,
+				extractSlot(map[string]interface{}{"slot": tc.slot}),
+			)
+		})
+	}
+}
+
+func TestParseLine_MalformedSlotJSON(t *testing.T) {
+	t.Parallel()
+	for name, slot := range map[string]string{
+		"fractional":    `1.5`,
+		"negative":      `-7`,
+		"exponent past": `1e30`,
+		"imprecise":     `9007199254740993`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			ev := ParseLogLine(
+				`{"msg":"block produced","slot":` + slot + `,"block_hash":"abc"}`,
+			)
+			require.NotNil(t, ev)
+			require.Zero(t, ev.Slot)
+		})
+	}
 }
