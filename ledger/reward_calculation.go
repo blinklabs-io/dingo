@@ -4757,7 +4757,8 @@ func rewardParametersFromPParams(
 // miss the pre-anchor fees entirely or double-count them once
 // the historical backfill has stored pre-anchor transactions locally.
 // The two ranges are disjoint by construction, the same way
-// database.MergeImportedPoolBlockCounts's imported and observed block counts are.
+// database.MergeImportedPoolBlockCounts's imported and observed block counts
+// are.
 //
 // A row with no ImportedEpochFees -- every row a live boundary writes, and
 // every imported row written before the field existed -- keeps the

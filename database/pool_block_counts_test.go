@@ -51,7 +51,9 @@ func anchoredBlockCountFixture(
 		require.NoError(t, db.UpdatePoolOpCertSequence(pool, slot, slot, nil))
 	}
 	if withImported {
-		for _, imported := range []struct{ epoch, blocks uint64 }{{1, 4}, {2, 5}} {
+		for _, imported := range []struct{ epoch, blocks uint64 }{
+			{1, 4}, {2, 5},
+		} {
 			require.NoError(t, meta.SaveImportedPoolBlockCounts(
 				[]models.ImportedPoolBlockCount{{
 					Epoch:          imported.epoch,

@@ -913,5 +913,8 @@ func TestGetCommitteeAuthorizedCountCountsOnlyAuthorizedMembers(t *testing.T) {
 
 	seated, err := store.GetCommitteeMembers(nil)
 	require.NoError(t, err)
-	require.Len(t, seated, 4, "the unauthorized and resigned members stay seated")
+	require.Len(
+		t, seated, 4,
+		"the unauthorized and resigned members stay seated",
+	)
 }

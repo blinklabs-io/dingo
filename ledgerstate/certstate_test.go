@@ -1162,7 +1162,8 @@ func TestParseCertStateConwayAccountsSurviveLargerDRepMap(t *testing.T) {
 	})...)
 	if len(dstate) >= len(drepMap) {
 		t.Fatalf(
-			"fixture must make DState (%d bytes) smaller than the DRep map (%d)",
+			"fixture must make DState (%d bytes) smaller than "+
+				"the DRep map (%d)",
 			len(dstate), len(drepMap),
 		)
 	}
@@ -1191,7 +1192,10 @@ func TestParseCertStateConwayAccountsSurviveLargerDRepMap(t *testing.T) {
 		t.Fatalf("DReps = %d, want 3", len(result.DReps))
 	}
 	if len(result.CommitteeHotKeys) != 1 {
-		t.Fatalf("committee hot keys = %d, want 1", len(result.CommitteeHotKeys))
+		t.Fatalf(
+			"committee hot keys = %d, want 1",
+			len(result.CommitteeHotKeys),
+		)
 	}
 }
 

@@ -28,13 +28,13 @@ import (
 // whether the epoch's counts are known at all.
 //
 // The two sources are disjoint by construction. A bootstrap applies no block at
-// or below its anchor, and CountPoolBlocksInSlotRange raises its start slot past
-// the recorded anchor for exactly that reason, so the observed counts cover
-// (anchor, epochEnd] and the imported nesBcur covers [epochStart, anchor]. For
-// the epoch before the anchor's the observed side is empty and the imported
-// nesBprev is the whole epoch. Both sides already exclude TPraos overlay slots
-// when the observed side is read through the reward round's overlay-aware
-// reader.
+// or below its anchor, and CountPoolBlocksInSlotRange raises its start slot
+// past the recorded anchor for exactly that reason, so the observed counts
+// cover (anchor, epochEnd] and the imported nesBcur covers [epochStart,
+// anchor]. For the epoch before the anchor's the observed side is empty and the
+// imported nesBprev is the whole epoch. Both sides already exclude TPraos
+// overlay slots when the observed side is read through the reward round's
+// overlay-aware reader.
 //
 // The per-pool counts are merged only for pools the caller asked about, while
 // the epoch total takes every imported pool, because the total is the
@@ -65,10 +65,8 @@ func MergeImportedPoolBlockCounts(
 	if !anchored || anchor < epochStartSlot {
 		return counts, totalBlocks, true, nil
 	}
-	imported, importedTotal, importedKnown, err := meta.GetImportedPoolBlockCounts(
-		epoch,
-		metaTxn,
-	)
+	imported, importedTotal, importedKnown, err := meta.
+		GetImportedPoolBlockCounts(epoch, metaTxn)
 	if err != nil {
 		return nil, 0, false, fmt.Errorf(
 			"get imported pool block counts for epoch %d: %w",

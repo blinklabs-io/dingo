@@ -2424,7 +2424,11 @@ func TestVerifyBlockHeaderState_GenesisDelegateWaitsForStabilityWindow(
 	}{
 		{"certificate slot", certSlot, initialDelegate},
 		{"last slot of the window", certSlot + window - 1, initialDelegate},
-		{"first slot after the window", certSlot + window, delegateHash.Bytes()},
+		{
+			"first slot after the window",
+			certSlot + window,
+			delegateHash.Bytes(),
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			delegates, err := view.GenesisDelegateKeyHashes(tc.slot)
