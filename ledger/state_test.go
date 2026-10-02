@@ -2531,6 +2531,28 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
+// countGoroutines returns how many live goroutines in a full stack dump satisfy
+// match. The dump buffer grows until runtime.Stack fits, since a truncated dump
+// would hide a goroutine from the scan.
+func countGoroutines(match func(goroutine string) bool) int {
+	stack := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(stack, true)
+		if n < len(stack) {
+			stack = stack[:n]
+			break
+		}
+		stack = make([]byte, len(stack)*2)
+	}
+	count := 0
+	for goroutine := range strings.SplitSeq(string(stack), "\n\n") {
+		if match(goroutine) {
+			count++
+		}
+	}
+	return count
+}
+
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
 func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	t.Parallel()
@@ -2544,10 +2566,7 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	var completedCount atomic.Int32
 	started := make(chan struct{}, 5)
 	unblock := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() {
-		releaseOnce.Do(func() { close(unblock) })
-	}
+	release := sync.OnceFunc(func() { close(unblock) })
 	t.Cleanup(func() {
 		release()
 		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
@@ -2594,32 +2613,18 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 		if !pool.closed.Load() {
 			return false
 		}
-		stack := make([]byte, 1<<20)
-		var stackSize int
-		for {
-			stackSize = runtime.Stack(stack, true)
-			if stackSize < len(stack) {
-				break
-			}
-			stack = make([]byte, len(stack)*2)
-		}
 		shutdownFrame := "(*DatabaseWorkerPool).Shutdown(" + poolAddress
-		for _, goroutine := range strings.Split(
-			string(stack[:stackSize]),
-			"\n\n",
-		) {
-			if strings.Contains(goroutine, shutdownFrame) &&
-				strings.Contains(goroutine, "[select") {
-				return true
-			}
-		}
-		return false
+		return countGoroutines(func(goroutine string) bool {
+			return strings.Contains(goroutine, shutdownFrame) &&
+				strings.Contains(goroutine, "[select")
+		}) > 0
 	}, testutil.AsyncWait, "Shutdown should wait for in-flight operations")
-	select {
-	case err := <-shutdownDone:
-		t.Fatalf("shutdown returned before in-flight operations completed: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		shutdownDone,
+		20*time.Millisecond,
+		"shutdown returned before in-flight operations completed",
+	)
 	release()
 	require.NoError(t, <-shutdownDone)
 	for _, resultChan := range results {
@@ -2702,10 +2707,7 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 	started := make(chan struct{})
 	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseWorker := func() {
-		releaseOnce.Do(func() { close(release) })
-	}
+	releaseWorker := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(func() {
 		releaseWorker()
 		require.NoError(t, pool.Shutdown(5*time.Second))
@@ -2994,10 +2996,7 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	blockUntil := make(chan struct{})
 	resultChan := make(chan DatabaseResult, 1)
 	workerDone := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseWorker := func() {
-		releaseOnce.Do(func() { close(blockUntil) })
-	}
+	releaseWorker := sync.OnceFunc(func() { close(blockUntil) })
 	t.Cleanup(func() {
 		releaseWorker()
 		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
@@ -3028,27 +3027,24 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	err := pool.Shutdown(50 * time.Millisecond)
 	require.Error(t, err)
 
-	stack := make([]byte, 1<<20)
-	var stackSize int
-	for {
-		stackSize = runtime.Stack(stack, true)
-		if stackSize < len(stack) {
-			break
-		}
-		stack = make([]byte, len(stack)*2)
-	}
-	shutdownWaiters := 0
-	for _, goroutine := range strings.Split(
-		string(stack[:stackSize]),
-		"\n\n",
-	) {
-		if strings.Contains(
+	// Positive control: the marker format below is only trustworthy while a
+	// goroutine this package is known to start still matches it. A change to
+	// the runtime's "created by" rendering must fail here instead of reading
+	// as zero waiters.
+	const workerCreatedBy = "created by github.com/blinklabs-io/dingo/ledger.NewDatabaseWorkerPool"
+	require.Positive(
+		t,
+		countGoroutines(func(goroutine string) bool {
+			return strings.Contains(goroutine, workerCreatedBy)
+		}),
+		"goroutine dump no longer renders the created-by frame",
+	)
+	shutdownWaiters := countGoroutines(func(goroutine string) bool {
+		return strings.Contains(
 			goroutine,
 			"created by github.com/blinklabs-io/dingo/ledger.(*DatabaseWorkerPool).Shutdown",
-		) {
-			shutdownWaiters++
-		}
-	}
+		)
+	})
 	assert.Zero(
 		t,
 		shutdownWaiters,
