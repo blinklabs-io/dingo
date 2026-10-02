@@ -34,6 +34,7 @@ import (
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
 )
 
 func openRemoteArtifactStore(
@@ -336,7 +337,14 @@ func newGCSArtifactStore(
 	ctx context.Context,
 	bucket, prefix string,
 ) (*gcsArtifactStore, error) {
-	client, err := storage.NewClient(ctx)
+	var opts []option.ClientOption
+	if os.Getenv("STORAGE_EMULATOR_HOST") != "" {
+		// An emulator serves object reads only through the JSON API; the
+		// default XML reads put the escaped key in the URL path, which
+		// fake-gcs-server does not route.
+		opts = append(opts, storage.WithJSONReads())
+	}
+	client, err := storage.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating GCS client: %w", err)
 	}
