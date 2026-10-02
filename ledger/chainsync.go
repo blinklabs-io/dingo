@@ -310,6 +310,7 @@ func (h *peerHeaderHistoryCandidateHeap) Pop() any {
 	old := *h
 	last := len(old) - 1
 	candidate := old[last]
+	clear(old[last:])
 	candidate.index = -1
 	*h = old[:last]
 	return candidate
