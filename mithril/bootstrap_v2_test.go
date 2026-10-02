@@ -32,6 +32,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -280,6 +281,9 @@ type v2FixtureOptions struct {
 	// so resuming a fully cached file yields 416 with the total size, the way
 	// object storage does.
 	ancillaryHonorsRange bool
+	// ancillaryFailsMidBody announces the full ancillary length and drops
+	// the connection halfway through the body.
+	ancillaryFailsMidBody bool
 }
 
 type v2Fixture struct {
@@ -620,6 +624,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				if served := fixture.ancillaryServed.Load(); served != nil {
 					body = *served
 				}
+				if opts.ancillaryFailsMidBody {
+					serveHalfThenAbort(w, body)
+				}
 				if opts.ancillaryHonorsRange {
 					http.ServeContent(
 						w, r, "ancillary.tar.zst", time.Time{},
@@ -703,6 +710,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	)
 
 	return fixture
+}
+
+// serveHalfThenAbort announces len(body) bytes, sends the first half and then
+// aborts the connection, so the client sees a transfer fail mid-body.
+func serveHalfThenAbort(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body[:len(body)/2])
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // publishNewerArtifact advertises a newer artifact for the same chain content
@@ -1911,4 +1930,66 @@ func TestRemoveBadAncillaryArchiveKeepsPathWhenRemovalFails(t *testing.T) {
 	stuck := filepath.Join(dir, "stuck-ancillary.tar.zst")
 	require.NoError(t, os.MkdirAll(filepath.Join(stuck, "child"), 0o700))
 	assert.Equal(t, stuck, removeBadAncillaryArchive(logger, stuck))
+}
+
+// A failed ancillary download keeps its partial file at the destination path,
+// so the next run resumes the transfer instead of starting it again.
+func TestBootstrapV2KeepsPartialAncillaryOnDownloadFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber:   1,
+		ancillaryFailsMidBody: true,
+	})
+	downloadDir := t.TempDir()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg.DownloadMaxTransientRetries = -1
+
+	_, err := Bootstrap(context.Background(), cfg)
+	var dlErr *ancillaryDownloadError
+	require.ErrorAs(t, err, &dlErr)
+
+	data, err := os.ReadFile(filepath.Join(downloadDir, fmt.Sprintf(
+		"%s-%s-ancillary.tar.zst",
+		fixture.artifact.Network,
+		truncateDigest(fixture.artifact.Hash),
+	)))
+	require.NoError(t, err)
+	half := len(fixture.ancillaryArchive) / 2
+	assert.Equal(t, fixture.ancillaryArchive[:half], data)
+}
+
+// A failed digests download keeps its partial file for the same reason; only
+// a complete archive that cannot be used is discarded.
+func TestDownloadDigestsArchiveKeepsPartialOnDownloadFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			serveHalfThenAbort(w, fixture.digestArchive)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP:           true,
+		DownloadMaxTransientRetries: -1,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+	}
+	_, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.Error(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, filepath.Base(fmt.Sprintf(
+		"digests-%s.tar.zst", truncateDigest(fixture.artifact.Hash),
+	))))
+	require.NoError(t, err)
+	half := len(fixture.digestArchive) / 2
+	assert.Equal(t, fixture.digestArchive[:half], data)
 }
