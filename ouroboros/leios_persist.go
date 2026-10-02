@@ -494,10 +494,12 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // restored/truncated store.
 //
 // Must be called late in the quiesce sequence, after inbound network
-// traffic has actually stopped (connManager.Stop): enqueueLeiosPersist
-// doesn't take leiosPersistMu before touching leiosPersistOnce, so a
-// concurrent enqueue from still-live Leios fetch traffic could otherwise
-// race this reset. This is not merely a documented call-order convention:
+// traffic has actually stopped (connManager.Stop). leiosPersistLifecycleMu
+// makes the reset memory-safe against a concurrent enqueue, but an enqueue
+// whose byte reservation spans the pause and a lazy restart would still be
+// accounted against the restarted writer's freshly zeroed counters, so the
+// reset relies on no enqueue being in flight. This is not merely a
+// documented call-order convention:
 // node_lifecycle.go's quiesceForLiveLifecycleOp escalates a connManager.Stop
 // failure to errStorageDrainUnconfirmed (the same as this method's own
 // unconfirmed-drain error below), specifically because connManager.Stop
