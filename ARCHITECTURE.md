@@ -207,6 +207,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
   - [DMQ Message Authentication](#dmq-message-authentication)
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
+- [Mithril Snapshot Production and Serving](#mithril-snapshot-production-and-serving)
 - [External Interfaces](#external-interfaces)
 - [Architectural Boundaries](#architectural-boundaries)
 - [Design Patterns](#design-patterns)
@@ -1322,10 +1323,13 @@ dingo/
 │       ├── server.go    # Serves the MidnightState gRPC compatibility surface
 │       ├── service.go   # Governance/parameters/block/epoch/stability RPC handlers
 │       └── adapter.go   # *database.Database -> MidnightDatabase interface adapter
-├── mithril/             # Mithril snapshot bootstrap
+├── mithril/             # Mithril snapshot bootstrap, production and serving
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
-│   └── download.go      # Snapshot download and extraction
+│   ├── download.go      # Snapshot download and extraction
+│   ├── snapshot_create.go # Deterministic artifact production, retention
+│   ├── artifact_store*.go # Local, S3 and GCS artifact stores
+│   └── server.go        # Aggregator-compatible artifact HTTP handler
 ├── keystore/            # Key management
 │   ├── keystore.go      # Key store interface
 │   ├── keyfile.go       # Key file parsing
@@ -8274,6 +8278,46 @@ schema migration that created those indexes is recorded complete and never
 re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
+
+## Mithril Snapshot Production and Serving
+
+`dingo mithril snapshot create` and `dingo mithril serve` are the reverse of
+bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
+Mithril Cardano database, v2) and serve it through the aggregator artifact API.
+Neither starts the node; both read the `mithril.server` configuration, and the
+server binds the shared `bindAddr` with no credentials.
+
+**Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
+directory. Immutable file numbers must be contiguous from 0 with a chunk,
+primary and secondary file each. Production digests every file with SHA-256,
+derives the digest-list merkle root and artifact hash with the same
+`computeMMRRoot`/`ComputeHash` the client verifies against, then writes one
+`NNNNN.tar.zst` per file trio, `digests.tar.zst`, and `ancillary.tar.zst` holding
+the newest ledger state and an Ed25519-signed manifest
+(`mithril.server.ancillarySigningKeyFile`). The beacon epoch is the epoch of
+that ledger state. The archives are re-hashed as they are written, so a file
+rewritten after its digest was taken fails the run. `artifact.json` is written
+last and is the completion marker: a snapshot without it is not listed and not
+pruned. Output is a function of the directory alone (sorted entries, zero
+timestamps and owners, single-threaded zstd), so a second run reproduces the
+same bytes and hash. No certificate is produced; `certificate_hash` is empty.
+
+**Storage** is the `ArtifactStore` interface (`Put`, `Open`, `Subdirs`,
+`DeletePrefix`) selected by `mithril.server.artifactStore`: a directory, or an
+`s3://` / `gcs://` URI in builds with `dingo_extra_plugins`. Remote stores read
+credentials from the SDK default chain (`AWS_ENDPOINT` selects an
+S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
+`mithril.server.keepSnapshots` makes `snapshot create` prune all but the newest
+N complete snapshots, removing each one's metadata object first.
+
+**Serving** (`mithril.NewServerHandler`) answers `GET /artifact/cardano-database`,
+`/artifact/cardano-database/{hash}`, `/download/{hash}/{name}` and
+`/certificate/{hash}` (a stored `certificates/{hash}.json`, if present). Artifact
+locations are derived from the request host, so one stored snapshot is reachable
+under any address. Archive downloads use `http.ServeContent`, giving range and
+HEAD support; with `mithril.server.redirectBaseUrl` set they instead redirect
+to that base URL plus the object key. Path segments reaching the store are
+matched against a 64-hex-digit hash and a fixed archive-name pattern first.
 
 ## External Interfaces
 

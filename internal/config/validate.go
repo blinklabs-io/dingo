@@ -756,6 +756,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.Mithril.Server.KeepSnapshots < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.server.keepSnapshots %d (must not be negative; "+
+				"0 keeps every snapshot)",
+			c.Mithril.Server.KeepSnapshots,
+		))
+	}
+	if err := validatePort(
+		"mithril.server.port", c.Mithril.Server.Port, false, minBindable,
+	); err != nil {
+		errs = append(errs, err)
+	}
+
 	if c.DelegatorInactivityEnabled &&
 		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {
 		errs = append(errs, fmt.Errorf(

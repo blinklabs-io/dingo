@@ -44,6 +44,8 @@ func mithrilCommand() *cobra.Command {
 	cmd.AddCommand(mithrilListCommand())
 	cmd.AddCommand(mithrilShowCommand())
 	cmd.AddCommand(mithrilSyncCommand())
+	cmd.AddCommand(mithrilSnapshotCommand())
+	cmd.AddCommand(mithrilServeCommand())
 
 	return cmd
 }

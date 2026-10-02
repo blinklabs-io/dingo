@@ -92,6 +92,7 @@ const (
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
+	DefaultMithrilServerPort           = 8080
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -1162,6 +1163,36 @@ type MithrilConfig struct {
 	// pinned Mithril genesis verification key and verifies the chain back to it.
 	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
+	// Server configures snapshot production and serving
+	// (`dingo mithril snapshot create` and `dingo mithril serve`).
+	Server MithrilServerConfig `yaml:"server"`
+}
+
+// MithrilServerConfig holds configuration for producing Mithril snapshot
+// artifacts and serving them over HTTP. The server binds the shared BindAddr
+// and requires no credentials.
+type MithrilServerConfig struct {
+	// Port is the TCP port `dingo mithril serve` listens on.
+	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
+	// ArtifactStore is where produced artifacts are kept and served from: a
+	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
+	// URI (binaries built with dingo_extra_plugins).
+	ArtifactStore string `yaml:"artifactStore"           envconfig:"DINGO_MITHRIL_SERVER_ARTIFACT_STORE"`
+	// RedirectBaseURL, when set, makes the server answer archive requests
+	// with a redirect to this base URL plus the object key instead of
+	// streaming the object itself. Use it with a remote ArtifactStore whose
+	// objects are publicly readable at that URL.
+	RedirectBaseURL string `yaml:"redirectBaseUrl"         envconfig:"DINGO_MITHRIL_SERVER_REDIRECT_BASE_URL"`
+	// KeepSnapshots is how many of the newest snapshots to retain after
+	// `dingo mithril snapshot create` writes a new one. Zero keeps all.
+	KeepSnapshots int `yaml:"keepSnapshots"           envconfig:"DINGO_MITHRIL_SERVER_KEEP_SNAPSHOTS"`
+	// AncillarySigningKeyFile is the Ed25519 key that signs the ancillary
+	// manifest of produced snapshots, in the Mithril JSON-hex key format.
+	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
+	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
+	// tlsKeyFilePath. It is off by default; the server is public and
+	// unauthenticated either way.
+	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
@@ -1304,6 +1335,9 @@ func newDefaultConfig() *Config {
 			Backend:            "v2",
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
+			Server: MithrilServerConfig{
+				Port: DefaultMithrilServerPort,
+			},
 		},
 		// Database lifecycle defaults
 		DatabaseLifecycle: DatabaseLifecycleConfig{

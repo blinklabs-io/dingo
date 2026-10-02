@@ -631,6 +631,27 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid mithril.downloadIdleTimeout",
 		},
 		{
+			name: "negative mithril server retention",
+			modify: func(c *Config) {
+				c.Mithril.Server.KeepSnapshots = -1
+			},
+			wantErr: "invalid mithril.server.keepSnapshots",
+		},
+		{
+			name: "mithril server port above range",
+			modify: func(c *Config) {
+				c.Mithril.Server.Port = 70000
+			},
+			wantErr: "invalid mithril.server.port",
+		},
+		{
+			name: "mithril server retention and port in range",
+			modify: func(c *Config) {
+				c.Mithril.Server.KeepSnapshots = 3
+				c.Mithril.Server.Port = 8080
+			},
+		},
+		{
 			name:    "invalid chainsync strategy",
 			modify:  func(c *Config) { c.Chainsync.Strategy = "fastest" },
 			wantErr: "invalid chainsync.strategy",

@@ -712,6 +712,26 @@ Two further optional `CloudDestination` capabilities, meaningful on a destinatio
 
 **Automatic snapshots and the CLI.** `internal/dblifecycle.Manager` subscribes to `event.EpochTransitionEventType` on the EventBus — the same async, decoupled pattern `ledger/snapshot.Manager` uses for stake/reward snapshots, not the synchronous in-transaction hook, since a multi-gigabyte backup must never run inside the ledger's write transaction — and captures a snapshot into a deterministically named `epoch-<N>` directory when `databaseLifecycle.snapshotEnabled` is set, gated by `snapshotEveryNEpochs` and pruned to `snapshotRetention`; if `databaseLifecycle.snapshotCloudDestination` is also set, every automatic snapshot is additionally mirrored to that destination via `lifecycle.SnapshotToCloud` (see "Cloud snapshot destinations" above). Automatic snapshots are rejected when the primary blob provider is `s3` or `gcs`: those providers have no version-capture primitive, so their backup is an unbounded remote-object iteration that would hold `PauseCommitsContext` for its full duration. They are also rejected for the `badger` primary provider: Badger's native backup API combines MVCC-view selection with streaming every retained version and does not expose a separate, cheap capture step, so the commit barrier would otherwise span the full production-scale local backup. This restriction is limited to the automatic manager; the `dingo database snapshot` CLI and Bark's `DatabaseService` manual `CreateSnapshot` operation remain available for an operator who deliberately accepts that duration. The deterministic naming makes a redelivered epoch-transition event (e.g. after a restart) a harmless no-op: `Snapshot` already refuses to overwrite an existing directory. `internal/dblifecycle.Service` is the single entry point both the `dingo database snapshot|restore|truncate` CLI commands (`cmd/dingo/database.go`) and bark's `DatabaseService` handler (`bark/database.go`) call. By default it opens its own `*database.Database` against the configured data directory the same way `load`/`mithril` do (offline mode — must not run against a data directory a `dingo serve` process currently has open); `Service.SetLiveNode` optionally binds it to an already-running `*dingo.Node` instead, so Snapshot/Restore/Truncate all operate on that node's live storage in-process rather than requiring a stopped node (Restore/Truncate quiesce and rebuild it; Snapshot reads it directly, never quiescing). `node.go`'s `Run()` does exactly this when bark is enabled with a snapshot directory configured. See `ARCHITECTURE.md`'s "Database Lifecycle" and "Bark" sections for how the live path and the gRPC surface work.
 
+## Mithril Snapshot Store
+
+`dingo mithril snapshot create` and `dingo mithril serve` keep artifacts in an
+object store selected by `mithril.server.artifactStore` (a directory, or an
+`s3://` or `gcs://` URI), not in the metadata or blob stores. Objects are keyed
+by snapshot hash, the 64-hex-digit artifact hash:
+
+| Key | Content |
+|---|---|
+| `<hash>/artifact.json` | `CardanoDatabaseSnapshot` JSON without locations; written last and used as the completion marker |
+| `<hash>/<NNNNN>.tar.zst` | zstd tar of the `immutable/NNNNN.{chunk,primary,secondary}` trio |
+| `<hash>/digests.tar.zst` | zstd tar holding `digests.json`, the SHA-256 of every immutable file |
+| `<hash>/ancillary.tar.zst` | zstd tar of the newest `ledger/` state files and `ancillary_manifest.json`, the Ed25519-signed digest map |
+| `certificates/<hash>.json` | Mithril certificate JSON served by `/certificate/<hash>` |
+
+Local stores write each object under a `.partial` name and rename it, so a
+reader never sees a partial object. Retention (`mithril.server.keepSnapshots`)
+deletes `artifact.json` first, so an interrupted removal leaves an unlisted
+remainder rather than a listed snapshot with missing archives.
+
 ## Store Topology
 
 ```mermaid

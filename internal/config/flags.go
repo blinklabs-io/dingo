@@ -903,6 +903,40 @@ var flagSpecs = []flagSpec{
 		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
 	),
 
+	uintFlag(
+		"Mithril.Server.Port",
+		"mithril-server-port",
+		"port for the Mithril snapshot artifact server",
+	),
+	stringFlag(
+		"Mithril.Server.ArtifactStore",
+		"mithril-server-artifact-store",
+		"",
+		"Mithril artifact store: directory, s3://bucket/prefix or gcs://bucket/prefix",
+	),
+	stringFlag(
+		"Mithril.Server.RedirectBaseURL",
+		"mithril-server-redirect-base-url",
+		"",
+		"redirect Mithril archive requests to this base URL instead of streaming them",
+	),
+	intFlag(
+		"Mithril.Server.KeepSnapshots",
+		"mithril-server-keep-snapshots",
+		"newest Mithril snapshots to keep after producing one (0 keeps all)",
+	),
+	stringFlag(
+		"Mithril.Server.AncillarySigningKeyFile",
+		"mithril-server-ancillary-signing-key-file",
+		"",
+		"path to the Ed25519 key signing produced ancillary manifests",
+	),
+	boolFlag(
+		"Mithril.Server.TLSEnabled",
+		"mithril-server-tls-enabled",
+		"serve the Mithril artifact server over HTTPS with the shared TLS certificate",
+	),
+
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(
 		"DatabaseLifecycle.SnapshotEnabled",

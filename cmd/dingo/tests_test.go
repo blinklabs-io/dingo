@@ -120,6 +120,20 @@ func TestEffectiveRunMode(t *testing.T) {
 			config.RunModeServe,
 			config.RunModeMithril,
 		},
+		// The artifact producer and server start no node listeners; the server
+		// validates its own port, and neither may inherit serve's checks.
+		{
+			"mithril serve starts only the artifact server",
+			[]string{"mithril", "serve"},
+			config.RunModeServe,
+			config.RunModeMithril,
+		},
+		{
+			"mithril snapshot create is a one-shot mithril utility",
+			[]string{"mithril", "snapshot", "create"},
+			config.RunModeServe,
+			config.RunModeMithril,
+		},
 		{
 			"bare mithril is a read-only mithril utility",
 			[]string{"mithril"},

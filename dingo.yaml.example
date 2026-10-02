@@ -841,6 +841,31 @@
   # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
   # verifyCertificates: true
+  # Snapshot production and serving: 'dingo mithril snapshot create --db-dir
+  # <cardano-node db>' writes a Mithril snapshot artifact to artifactStore, and
+  # 'dingo mithril serve' serves those artifacts over HTTP on bindAddr and
+  # server.port. The server is public and unauthenticated.
+  # server:
+    # Port for 'dingo mithril serve' (default: 8080)
+    # CLI: --mithril-server-port
+    # port: 8080
+    # Where artifacts are kept and served from: a directory, or s3://bucket/prefix
+    # or gcs://bucket/prefix (requires a build with dingo_extra_plugins)
+    # CLI: --mithril-server-artifact-store
+    # artifactStore: ""
+    # Redirect archive requests to this base URL (plus the object key) instead of
+    # streaming them; for a remote store whose objects are publicly readable
+    # CLI: --mithril-server-redirect-base-url
+    # redirectBaseUrl: ""
+    # Newest snapshots kept after 'snapshot create' (0 keeps all)
+    # CLI: --mithril-server-keep-snapshots
+    # keepSnapshots: 0
+    # Ed25519 key (Mithril JSON-hex format) signing the ancillary manifest
+    # CLI: --mithril-server-ancillary-signing-key-file
+    # ancillarySigningKeyFile: ""
+    # Serve HTTPS with the shared tlsCertFilePath and tlsKeyFilePath (default: false)
+    # CLI: --mithril-server-tls-enabled
+    # tlsEnabled: false
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)
