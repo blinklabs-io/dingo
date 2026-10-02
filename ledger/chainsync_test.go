@@ -5880,6 +5880,80 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
 }
 
+// TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader pins the
+// blockfetch admission call site: a fetched block whose own header was
+// crypto-verified at chainsync ingress must not have its header crypto re-run
+// when that header is queued behind the head, while the same block queued
+// unverified still fails. The block carries a corrupted KES signature, so only
+// a skipped verification can admit it; the stateful half still runs and
+// defers against the empty stake state.
+func TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		verified bool
+	}{
+		{name: "verified", verified: true},
+		{name: "unverified", verified: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			connId := testRecycleConnId()
+			tb := createTestBlock(t, [32]byte{53}, 0, tamperKESSig)
+			ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+			ls.validationEnabled = true
+			ls.activeBlockfetchConnId = connId
+			ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+			ls.chain = &chain.Chain{}
+
+			fetched := tb.block.Header()
+			head := mockHeader{
+				hash:        fetched.PrevHash(),
+				blockNumber: fetched.BlockNumber() - 1,
+				slot:        fetched.SlotNumber() - 1,
+			}
+			require.NoError(t, ls.chain.AddVerifiedBlockHeader(head))
+			if tc.verified {
+				require.NoError(t, ls.chain.AddVerifiedBlockHeader(fetched))
+			} else {
+				require.NoError(t, ls.chain.AddBlockHeader(fetched))
+			}
+			point := ocommon.NewPoint(
+				fetched.SlotNumber(),
+				fetched.Hash().Bytes(),
+			)
+			require.False(t, ls.chain.FirstHeaderMatchesPoint(point))
+
+			err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
+				ConnectionId: connId,
+				Block:        tb.block,
+				Point:        point,
+			}, nil)
+			if !tc.verified {
+				require.Error(t, err)
+				assert.Contains(
+					t,
+					err.Error(),
+					"block header crypto verification failed",
+				)
+				assert.Empty(t, ls.pendingBlockfetchEvents)
+				return
+			}
+			require.NoError(
+				t,
+				err,
+				"verified queued header must not have its crypto re-run",
+			)
+			require.Len(t, ls.pendingBlockfetchEvents, 1)
+			assert.True(t, ls.consumeDeferredHeaderValidation(point))
+		})
+	}
+}
+
 // TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
 // regression test for a human-review finding: handleEventBlockfetchBlockDeferred
 // checked errors.Is(verifyErr, errHeaderVerificationDeferred) directly
