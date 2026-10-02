@@ -935,6 +935,7 @@ func TestSetGenesisCborWarmsCacheForOpenBatchTransaction(t *testing.T) {
 	// remains open. Resolving the offset must not read the new blob key through
 	// the older Badger transaction.
 	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
+	blockCbor[1] = 0xff
 
 	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, chunkTxn)
 	require.NoError(t, err)
@@ -942,4 +943,56 @@ func TestSetGenesisCborWarmsCacheForOpenBatchTransaction(t *testing.T) {
 	require.Equal(t, uint64(1), db.CborCache().Metrics().BlockLRUHits.Load())
 	require.Zero(t, db.CborCache().Metrics().ColdExtractions.Load())
 	require.NoError(t, chunkTxn.Commit())
+}
+
+func TestResolveUtxoCborUsesTxnBlockCacheAfterLRUEviction(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		CacheConfig: CborCacheConfig{
+			BlockLRUEntries: 1,
+		},
+	})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	chunkTxn := db.BlobTxn(true)
+	t.Cleanup(chunkTxn.Release)
+	var txID [32]byte
+	txID[0] = 1
+	var blockHash [32]byte
+	blockHash[0] = 2
+	const blockSlot = 42
+	want := []byte{0x82, 0x01, 0x02}
+	blockCbor := append([]byte{0x00}, want...)
+	offset := &CborOffset{
+		BlockSlot:  blockSlot,
+		BlockHash:  blockHash,
+		ByteOffset: 1,
+		ByteLength: uint32(len(want)),
+	}
+	require.NoError(t, store.SetUtxo(
+		chunkTxn.Blob(),
+		txID[:],
+		0,
+		EncodeUtxoOffset(offset),
+	))
+	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
+	chunkTxn.CacheBlockCbor(blockSlot, blockHash, blockCbor)
+
+	var otherHash [32]byte
+	otherHash[0] = 3
+	db.CborCache().blockLRU.Put(blockSlot+1, otherHash, newCachedBlock([]byte{0x01}))
+	blockCbor[1] = 0xff
+	_, ok := db.CborCache().blockLRU.Get(blockSlot, blockHash)
+	require.False(t, ok)
+
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, chunkTxn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Zero(t, db.CborCache().Metrics().ColdExtractions.Load())
+	require.NoError(t, chunkTxn.Commit())
+	require.Nil(t, chunkTxn.blockCbor)
 }

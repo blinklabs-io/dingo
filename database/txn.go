@@ -83,6 +83,7 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
+	blockCbor      map[blockKey]*CachedBlock
 
 	// onFinish holds the callbacks registered through OnFinish, and
 	// onFinishArmed reports whether any were ever registered so the terminal
@@ -159,6 +160,7 @@ func (t *Txn) releaseCommitBarrierLocked() {
 // (which cancellableBarrier panics on). Callers must hold t.lock.
 func (t *Txn) finishLocked() {
 	t.finished = true
+	t.blockCbor = nil
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
 }
@@ -405,6 +407,39 @@ func (t *Txn) IsCommitted() bool {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	return t.committed
+}
+
+// CacheBlockCbor keeps a copy of block CBOR available to reads using this
+// transaction until it finishes. This is for blocks committed separately
+// while an older batch transaction remains open.
+func (t *Txn) CacheBlockCbor(slot uint64, hash [32]byte, blockCbor []byte) {
+	if t == nil {
+		return
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return
+	}
+	if t.blockCbor == nil {
+		t.blockCbor = make(map[blockKey]*CachedBlock)
+	}
+	t.blockCbor[blockKey{slot: slot, hash: hash}] = newCachedBlock(
+		append([]byte(nil), blockCbor...),
+	)
+}
+
+func (t *Txn) cachedBlockCbor(slot uint64, hash [32]byte) (*CachedBlock, bool) {
+	if t == nil {
+		return nil, false
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return nil, false
+	}
+	block, ok := t.blockCbor[blockKey{slot: slot, hash: hash}]
+	return block, ok
 }
 
 // AfterCommit registers fn to run after this transaction commits durably.

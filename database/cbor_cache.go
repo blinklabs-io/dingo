@@ -206,7 +206,7 @@ func (c *TieredCborCache) cacheBlockCbor(
 	if c == nil || c.blockLRU == nil {
 		return
 	}
-	c.blockLRU.Put(slot, hash, newCachedBlock(blockCbor))
+	c.blockLRU.Put(slot, hash, newCachedBlock(append([]byte(nil), blockCbor...)))
 }
 
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
@@ -280,6 +280,16 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	offset, err := DecodeUtxoOffset(utxoData)
 	if err != nil {
 		return nil, fmt.Errorf("decode utxo offset: %w", err)
+	}
+	// A separate block commit can be newer than this transaction's blob
+	// snapshot. Keep its CBOR available for the whole batch even if the shared
+	// LRU evicts the block before this offset is resolved.
+	if cachedBlock, ok := callerTxn.cachedBlockCbor(offset.BlockSlot, offset.BlockHash); ok {
+		cbor := cachedBlock.Extract(offset.ByteOffset, offset.ByteLength)
+		if cbor != nil {
+			c.hotUtxo.Put(key, cbor)
+			return cbor, nil
+		}
 	}
 
 	// Tier 2: Check block LRU cache
