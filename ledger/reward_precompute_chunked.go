@@ -418,6 +418,14 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRoundInTxn(
 			err,
 		)
 	}
+	// A negative leader reward has no output row to carry it and may halt the
+	// boundary, which only the single-pass calculation decides. Decline the
+	// round so the boundary calculates it fresh.
+	for _, poolReward := range byPool {
+		if poolReward.LeaderRewardDeficit > 0 {
+			return nil, false, nil
+		}
+	}
 	round := &stakeRewardPrecomputeRound{
 		newEpoch:       newEpoch,
 		epochs:         epochs,

@@ -16,8 +16,9 @@ package benchci
 
 // CuratedBenchmarks lists the fixed-GOMAXPROCS benchmarks tracked across
 // the four tracked dimensions: block validation throughput, sync speed,
-// network throughput, and resource usage. Keep this in sync with the
-// Makefile bench-ci target's first `go test -bench` regex.
+// network throughput, and resource usage, plus ledger query latency. Keep
+// this in sync with the Makefile bench-ci target's first `go test -bench`
+// regex.
 var CuratedBenchmarks = []string{
 	// Block validation throughput (ledger/state_test.go).
 	"BenchmarkBlockProcessingThroughput",
@@ -58,6 +59,22 @@ var CuratedBenchmarks = []string{
 	"BenchmarkCborOffsetDecode",             // database/cbor_cache_test.go
 	"BenchmarkStorageModeIngest",            // ledger/benchmark_test.go
 	"BenchmarkStorageModeIngestSteadyState", // ledger/benchmark_test.go
+
+	// Query latency. Each of these seeds the record it queries from the
+	// immutable fixture and fails if the query does not hit, so a
+	// benchcheck delta here is a query-cost change rather than a miss
+	// timed under a RealData name (ledger/benchmark_test.go).
+	"BenchmarkUtxoLookupByAddressRealData",
+	"BenchmarkUtxoLookupByRefRealData",
+	"BenchmarkTransactionHistoryQueriesRealData",
+	"BenchmarkAccountLookupByStakeKeyRealData",
+	"BenchmarkPoolLookupByKeyHashRealData",
+	"BenchmarkDRepLookupByKeyHashRealData",
+	"BenchmarkDatumLookupByHashRealData",
+	"BenchmarkProtocolParametersLookupByEpochRealData",
+	"BenchmarkBlockNonceLookupRealData",
+	"BenchmarkStakeRegistrationLookupsRealData",
+	"BenchmarkPoolRegistrationLookupsRealData",
 }
 
 // LockContentionBenchmarks lists the GOMAXPROCS lock-contention sweep
@@ -82,13 +99,6 @@ var LockContentionBenchmarks = []string{
 	"BenchmarkTipSnapshotReadOnly",           // ledger/benchmark_test.go
 	"BenchmarkTipSnapshotReadUnderWriter",    // ledger/benchmark_test.go
 }
-
-// ledger/benchmark_test.go's RealData query benchmarks are deliberately
-// absent from both lists. Seeding writes fixture blocks to the block store,
-// but the accounts, pools, DReps, datums, protocol-parameter, nonce and
-// registration tables they query are populated by applying a block rather
-// than storing one, so each still times the same table miss its NoData twin
-// times. There is no hit path for benchcheck to detect a regression in.
 
 // TrackedBenchmarks is the full set of benchmarks compared for CI regression
 // detection: CuratedBenchmarks plus LockContentionBenchmarks. The Makefile
