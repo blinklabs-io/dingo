@@ -13143,6 +13143,11 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := ls.Close(); err != nil {
+			t.Errorf("close pruned UTxO fixture ledger state: %v", err)
+		}
+	})
 	ls.metrics.init(prometheus.NewRegistry())
 
 	// Every fixture block was applied, so each carries a recorded nonce.

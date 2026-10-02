@@ -72,16 +72,32 @@ type BlockIngestionResult struct {
 // BlockIndexer computes byte offsets for all items within a block.
 // It uses gouroboros's ExtractTransactionOffsets for efficient offset extraction.
 type BlockIndexer struct {
-	blockSlot             uint64
-	blockHash             [32]byte
+	blockSlot uint64
+	blockHash [32]byte
+	// blockHashErr records a hash that was not blockHashSize bytes. The
+	// constructor has no error return, and every offset the indexer emits is
+	// stamped with blockHash, so a wrong-length hash is reported from
+	// ComputeOffsets rather than silently zero-padded into every record.
+	blockHashErr          error
 	includeTxParts        bool
 	includeWitnessOffsets bool
 }
+
+// blockHashSize is the width of a Cardano block hash (Blake2b-256).
+const blockHashSize = 32
 
 // NewBlockIndexer creates a new BlockIndexer for the given block.
 func NewBlockIndexer(slot uint64, hash []byte) *BlockIndexer {
 	bi := &BlockIndexer{
 		blockSlot: slot,
+	}
+	if len(hash) != blockHashSize {
+		bi.blockHashErr = fmt.Errorf(
+			"invalid block hash: expected %d bytes, got %d",
+			blockHashSize,
+			len(hash),
+		)
+		return bi
 	}
 	copy(bi.blockHash[:], hash)
 	return bi
@@ -110,6 +126,9 @@ func (bi *BlockIndexer) ComputeOffsets(
 ) (*BlockIngestionResult, error) {
 	if block == nil {
 		return nil, errors.New("block cannot be nil")
+	}
+	if bi.blockHashErr != nil {
+		return nil, bi.blockHashErr
 	}
 
 	result := &BlockIngestionResult{
