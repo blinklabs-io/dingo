@@ -137,15 +137,16 @@ func parseCertStateConway(
 		}
 	}
 
-	// Find the DState: largest map element whose keys decode as
-	// credentials ([type, hash] arrays). We sort map candidates by
-	// size descending and pick the first that passes validation.
-	// This prevents misidentifying the pool deposit map as DState
-	// on networks where pools outnumber delegators.
+	// Find the DState: a credential-keyed map whose values are account
+	// states. The DRep and committee maps are credential-keyed too, so map
+	// size alone cannot tell them apart; account-shaped maps rank first and
+	// size only orders what is left. Pool deposit maps are excluded by the
+	// credential-array key check.
 	dIdx := -1
 	type mapCandidate struct {
-		idx  int
-		size int
+		idx     int
+		size    int
+		account bool
 	}
 	var mapCandidates []mapCandidate
 	for i, elem := range certState {
@@ -157,22 +158,30 @@ func parseCertStateConway(
 		if isMap {
 			mapCandidates = append(
 				mapCandidates,
-				mapCandidate{idx: i, size: len(elem)},
+				mapCandidate{
+					idx:     i,
+					size:    len(elem),
+					account: looksLikeAccountMap(elem),
+				},
 			)
 		}
 	}
-	// Sort by size descending
 	slices.SortFunc(
 		mapCandidates,
 		func(a, b mapCandidate) int {
+			if a.account != b.account {
+				if a.account {
+					return -1
+				}
+				return 1
+			}
 			return cmp.Compare(b.size, a.size)
 		},
 	)
 	for _, mc := range mapCandidates {
-		// ccHotKeys is also credential-keyed, so size alone would pick it when
-		// DState is empty or the smaller of the two. Its values are
-		// credentials, which an account state is not, so skip it here and let
-		// the committee scan below claim it.
+		// ccHotKeys is also credential-keyed and, when no map is
+		// account-shaped (an empty-valued fixture), size alone would pick
+		// it. Skip it here and let the committee scan below claim it.
 		if looksLikeCommitteeCredentialMap(certState[mc.idx]) {
 			continue
 		}
@@ -195,14 +204,13 @@ func parseCertStateConway(
 		}
 		major := elem[0] >> 5
 		isMap := major == 5 || elem[0] == 0xbf
-		// The VState drep map is a map that is smaller than
-		// the DState credential map. Pre-filter with
-		// looksLikeCredentialMap to avoid misidentifying
-		// non-credential maps (e.g. pool deposits) as DReps.
+		// The VState drep map is a credential-keyed map other than
+		// DState. Pre-filter with looksLikeCredentialMap to avoid
+		// misidentifying non-credential maps (e.g. pool deposits) as
+		// DReps, and skip the committee map, which is credential-keyed too.
 		if isMap &&
-			(dIdx < 0 ||
-				len(elem) < len(certState[dIdx])) &&
-			looksLikeCredentialMap(elem) {
+			looksLikeCredentialMap(elem) &&
+			!looksLikeCommitteeCredentialMap(elem) {
 			dreps, vErr := parseDRepMap(elem)
 			if vErr != nil {
 				warnings = append(warnings, vErr)
@@ -2015,6 +2023,23 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 		)
 	}
 	return dreps, warning
+}
+
+// looksLikeAccountMap reports whether a map's first value decodes as an
+// account state, which separates DState from the DRep and committee maps.
+// A DRepState leads with an expiry followed by an anchor, so it fails every
+// account encoding.
+func looksLikeAccountMap(data []byte) bool {
+	entry, ok := firstMapEntry(data)
+	if !ok || !isCredentialArray(entry.KeyRaw) {
+		return false
+	}
+	var elem []cbor.RawMessage
+	if _, err := cbor.Decode(entry.ValueRaw, &elem); err != nil {
+		return false
+	}
+	_, ok = parseAccountState(elem, &ParsedAccount{})
+	return ok
 }
 
 // looksLikeCredentialMap samples up to 3 keys from a CBOR map

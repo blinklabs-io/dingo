@@ -1114,6 +1114,87 @@ func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
 	}
 }
 
+// DState and the DRep map are both credential-keyed, so picking DState by map
+// size alone claimed the DRep map whenever it had more bytes, dropping every
+// stake account.
+func TestParseCertStateConwayAccountsSurviveLargerDRepMap(t *testing.T) {
+	t.Parallel()
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	encodeCredential := func(tag byte) []byte {
+		t.Helper()
+		out, err := cbor.Encode(
+			[]any{uint64(0), bytes.Repeat([]byte{tag}, 28)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	encodeValue := func(value any) []byte {
+		t.Helper()
+		out, err := cbor.Encode(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// DRepState = [expiry, anchor, deposit, delegators]
+	drepMap := []byte{0xa3}
+	for _, tag := range []byte{0x21, 0x22, 0x23} {
+		drepMap = append(drepMap, encodeCredential(tag)...)
+		drepMap = append(drepMap, encodeValue([]any{
+			uint64(500),
+			[]any{"https://example.com/drep", bytes.Repeat([]byte{tag}, 32)},
+			uint64(500000000),
+			[]any{},
+		})...)
+	}
+
+	// ConwayAccountState = [balance, deposit, pool, drep]
+	accountKey := encodeCredential(0x31)
+	dstate := append([]byte{0xa1}, accountKey...)
+	dstate = append(dstate, encodeValue([]any{
+		uint64(7), uint64(2000000), bytes.Repeat([]byte{0x41}, 28), nil,
+	})...)
+	if len(dstate) >= len(drepMap) {
+		t.Fatalf(
+			"fixture must make DState (%d bytes) smaller than the DRep map (%d)",
+			len(dstate), len(drepMap),
+		)
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		hotMap,
+		resignMap,
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	if result == nil {
+		t.Fatal("no parsed cert state")
+	}
+	if len(result.Accounts) != 1 {
+		t.Fatalf("stake accounts were dropped: %#v", result.Accounts)
+	}
+	if result.Accounts[0].Reward != 7 {
+		t.Fatalf("account reward = %d, want 7", result.Accounts[0].Reward)
+	}
+	if len(result.DReps) != 3 {
+		t.Fatalf("DReps = %d, want 3", len(result.DReps))
+	}
+	if len(result.CommitteeHotKeys) != 1 {
+		t.Fatalf("committee hot keys = %d, want 1", len(result.CommitteeHotKeys))
+	}
+}
+
 // TestParseCommitteeVStateAuthorizationSumType covers the encoding mainnet
 // actually uses. The committee map's values are the CommitteeAuthorization sum
 // type, [0, hot_credential] for an authorization and [1, maybe_anchor] for a
