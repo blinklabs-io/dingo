@@ -94,9 +94,11 @@ func (p *PeerGovernor) resolveMultiHost(
 			if !IsRoutableIP(ip) {
 				continue
 			}
-			if (hasV4 || hasV6) &&
-				!((ip.To4() != nil && hasV4) || (ip.To4() == nil && hasV6)) {
-				continue
+			if hasV4 || hasV6 {
+				isV4 := ip.To4() != nil
+				if (isV4 && !hasV4) || (!isV4 && !hasV6) {
+					continue
+				}
 			}
 			return ip
 		}
@@ -778,7 +780,6 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 		if !isRoutableAddr(resolved) {
 			return "", ErrUnroutableAddress
 		}
-
 	}
 
 	p.mu.Lock()
