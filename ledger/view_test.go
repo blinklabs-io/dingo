@@ -3581,6 +3581,7 @@ func TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict(t *testing.T) {
 
 			err := db.Transaction(true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
+					context.Background(),
 					txn,
 					ocommon.NewPoint(1, block.Hash().Bytes()),
 					block,
@@ -6867,6 +6868,7 @@ func (f *treasuryRolloverFixture) rollover(
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		result, rolloverErr = f.ls.processEpochRollover(
+			context.Background(),
 			txn,
 			currentEpoch,
 			eras.ConwayEraDesc,
@@ -7150,6 +7152,7 @@ func TestLedgerProcessBlockAnchorsValidationHorizonAtParent(t *testing.T) {
 			processErr := db.Transaction(true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(
 							previewBlockSlot,

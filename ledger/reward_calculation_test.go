@@ -6015,6 +6015,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 	txn := db.Transaction(true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, err := ls.processEpochRollover(
+			context.Background(),
 			txn,
 			models.Epoch{
 				EpochId:       0,
@@ -8108,6 +8109,7 @@ func (f *epochBoundaryBenchFixture) rollover(
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		_, err := f.ls.processEpochRollover(
+			context.Background(),
 			txn,
 			f.epochs[epochBoundaryBenchEndedEpoch],
 			eras.ConwayEraDesc,
@@ -8555,6 +8557,7 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		rollover, rolloverErr = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			*currentEpoch,
 			eras.ConwayEraDesc,

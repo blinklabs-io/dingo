@@ -210,12 +210,14 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		parentBytes,
 	); err != nil {
 		t.Fatalf("add parent transaction: %v", err)
 	}
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		childBytes,
 	); err != nil {
@@ -240,6 +242,7 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 		{name: "second fanout child", txBytes: secondBytes},
 	} {
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			item.txBytes,
 		); err != nil {
@@ -270,12 +273,14 @@ func TestBenchmarkTransactionShapes(t *testing.T) {
 		t.Fatalf("create second conflicting transaction: %v", err)
 	}
 	if err := pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		firstConflictBytes,
 	); err != nil {
 		t.Fatalf("add first conflicting transaction: %v", err)
 	}
 	err = pool.AddTransaction(
+		context.Background(),
 		uint(conway.EraIdConway),
 		secondConflictBytes,
 	)
@@ -637,6 +642,7 @@ func runBenchmarkAdder(
 		default:
 		}
 		if addErr := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); addErr != nil {
@@ -731,6 +737,7 @@ func prepareBenchmarkGenerators(
 				return nil, err
 			}
 			if err := pool.AddTransaction(
+				context.Background(),
 				uint(conway.EraIdConway),
 				parentBytes,
 			); err != nil {
@@ -793,6 +800,7 @@ func prefillBenchmarkPool(pool Pool, count int) error {
 			return fmt.Errorf("generate prefill transaction %d: %w", i, err)
 		}
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); err != nil {
@@ -1003,6 +1011,7 @@ func benchmarkRemovalCascade(
 				)
 			}
 			if err := pluginPool.pool.AddTransaction(
+				context.Background(),
 				uint(conway.EraIdConway),
 				txBytes,
 			); err != nil {
@@ -1253,7 +1262,7 @@ func TestAddTransactionAcceptsDijkstraSpendReferenceOverlap(t *testing.T) {
 
 	pool := newTestMempoolWithValidator(t, dijkstraOverlapValidator{})
 	defer pool.Stop(context.Background())
-	require.NoError(t, pool.AddTransaction(uint(dijkstra.TxTypeDijkstra), txCbor))
+	require.NoError(t, pool.AddTransaction(context.Background(), uint(dijkstra.TxTypeDijkstra), txCbor))
 	require.Len(t, pool.Transactions(), 1)
 }
 
@@ -1309,6 +1318,7 @@ func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {
 	for range b.N {
 		txBytes := generator.next(b)
 		if err := pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			txBytes,
 		); err != nil {
@@ -1340,6 +1350,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 				for range fifoRevalidationBenchmarkOccupancy {
 					txBytes := generator.next(b)
 					if err := pool.AddTransaction(
+						context.Background(),
 						uint(conway.EraIdConway),
 						txBytes,
 					); err != nil {
@@ -1366,6 +1377,7 @@ func BenchmarkFIFORevalidation(b *testing.B) {
 
 				admissionStart := time.Now()
 				if err := pool.AddTransaction(
+					context.Background(),
 					uint(conway.EraIdConway),
 					generator.next(b),
 				); err != nil {

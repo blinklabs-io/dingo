@@ -86,6 +86,7 @@ func TestAddTransactionRejectsDuplicateDijkstraSubTransactionBodyID(
 	txType := uint(dijkstra.TxTypeDijkstra)
 
 	err := pool.AddTransaction(
+		context.Background(),
 		txType,
 		dupBatch(t, [2]uint64{10, 10}, [2]any{nil, map[uint]any{1: "m"}}),
 	)
@@ -96,6 +97,7 @@ func TestAddTransactionRejectsDuplicateDijkstraSubTransactionBodyID(
 	require.NoError(
 		t,
 		pool.AddTransaction(
+			context.Background(),
 			txType,
 			dupBatch(t, [2]uint64{10, 11}, [2]any{nil, nil}),
 		),

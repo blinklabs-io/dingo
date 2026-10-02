@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -72,6 +73,7 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 	}
 	// Add transaction to mempool
 	err := o.mempool.AddTransaction(
+		context.Background(),
 		uint(tx.EraId),
 		rawTx,
 	)

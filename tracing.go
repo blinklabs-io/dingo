@@ -16,13 +16,18 @@ package dingo
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/url"
 
+	"github.com/blinklabs-io/dingo/internal/version"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 )
 
 // warnIfTracingMisconfigured logs a warning when stdout span export is
@@ -58,14 +63,23 @@ func (n *Node) setupTracing(ctx context.Context) error {
 			stdouttrace.WithPrettyPrint(),
 		)
 	} else {
-		// TODO: make options configurable
-		traceExporter, err = otlptracehttp.New(ctx)
+		var opts []otlptracehttp.Option
+		if n.config.tracingEndpoint != "" {
+			endpoint, endpointErr := otlpTracesURL(n.config.tracingEndpoint)
+			if endpointErr != nil {
+				return endpointErr
+			}
+			opts = append(opts, otlptracehttp.WithEndpointURL(endpoint))
+		}
+		traceExporter, err = otlptracehttp.New(ctx, opts...)
 	}
 	if err != nil {
 		return err
 	}
-	tracerProvider := trace.NewTracerProvider(
-		trace.WithBatcher(traceExporter),
+	tracerProvider := newTracerProvider(
+		traceExporter,
+		n.config.tracingServiceName,
+		n.config.tracingSampleRatio,
 	)
 	n.shutdownFuncs = append(n.shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
@@ -78,4 +92,42 @@ func (n *Node) setupTracing(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+func newTracerProvider(
+	exporter trace.SpanExporter,
+	serviceName string,
+	sampleRatio float64,
+) *trace.TracerProvider {
+	serviceVersion := version.Version
+	if serviceVersion == "" {
+		serviceVersion = "devel"
+	}
+	return trace.NewTracerProvider(
+		trace.WithBatcher(exporter),
+		trace.WithResource(resource.NewSchemaless(
+			semconv.ServiceName(serviceName),
+			semconv.ServiceVersion(serviceVersion),
+		)),
+		// Honor the caller's sampling decision so one trace is never
+		// sampled at some hops and dropped at others.
+		trace.WithSampler(
+			trace.ParentBased(trace.TraceIDRatioBased(sampleRatio)),
+		),
+	)
+}
+
+// otlpTracesURL returns the OTLP traces URL for endpoint. WithEndpointURL
+// uses the path verbatim, so a bare collector address such as
+// http://localhost:4318 gets the standard /v1/traces path, as the
+// OTEL_EXPORTER_OTLP_ENDPOINT variable would.
+func otlpTracesURL(endpoint string) (string, error) {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("invalid tracing endpoint: %w", err)
+	}
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/v1/traces"
+	}
+	return u.String(), nil
 }

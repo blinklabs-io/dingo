@@ -16,6 +16,7 @@ package chain_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -4208,14 +4209,14 @@ func TestAddBlocksRestoresChainStateWhenBatchFails(t *testing.T) {
 	require.Len(t, blocks, 4)
 
 	// Seed the chain so the failing batch has a real tip to be restored to.
-	require.NoError(t, c.AddBlocks(blocks[:1]))
+	require.NoError(t, c.AddBlocks(context.Background(), blocks[:1]))
 	tipBefore := c.Tip()
 	require.Equal(t, blocks[0].SlotNumber(), tipBefore.Point.Slot)
 
 	// blocks[1] fits the tip and is written; blocks[3] does not (its parent,
 	// blocks[2], was never added), so the closure fails and txn.Do rolls the
 	// whole batch back.
-	err = c.AddBlocks([]ledger.Block{blocks[1], blocks[3]})
+	err = c.AddBlocks(context.Background(), []ledger.Block{blocks[1], blocks[3]})
 	require.Error(t, err)
 
 	require.Equal(
@@ -4234,7 +4235,7 @@ func TestAddBlocksRestoresChainStateWhenBatchFails(t *testing.T) {
 		err,
 		"the failed batch's blocks must not survive in the database",
 	)
-	require.NoError(t, c.AddBlocks(blocks[1:3]))
+	require.NoError(t, c.AddBlocks(context.Background(), blocks[1:3]))
 	require.Equal(t, blocks[2].SlotNumber(), c.Tip().Point.Slot)
 }
 
@@ -4270,7 +4271,7 @@ func TestAddBlocksRestoresChainStateWhenCommitFails(t *testing.T) {
 	var origin common.Blake2b256
 	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
 	armed.Store(true)
-	err = c.AddBlocks(blocks)
+	err = c.AddBlocks(context.Background(), blocks)
 	require.ErrorIs(t, err, commitErr)
 
 	require.Equal(
@@ -4385,12 +4386,12 @@ func TestAddBlocksRestoresChainStateInsideClosureOnBatchFailure(t *testing.T) {
 	blocks := generateTestChain(t, 1, origin, 20, 20, 4)
 	require.Len(t, blocks, 4)
 
-	require.NoError(t, c.AddBlocks(blocks[:1]))
+	require.NoError(t, c.AddBlocks(context.Background(), blocks[:1]))
 	tipBefore := c.Tip()
 
 	// blocks[1] is accepted and advances the tip; blocks[3] does not fit, so
 	// the closure fails and txn.Do rolls back -- calling the observer.
-	require.Error(t, c.AddBlocks([]ledger.Block{blocks[1], blocks[3]}))
+	require.Error(t, c.AddBlocks(context.Background(), []ledger.Block{blocks[1], blocks[3]}))
 
 	require.True(
 		t,
@@ -6706,7 +6707,7 @@ func TestAddBlocksRestoresMemoryAfterBatchFailure(t *testing.T) {
 		testBlocks[2],
 		&invalid,
 	}
-	if err := pc.AddBlocks(blocks); err == nil {
+	if err := pc.AddBlocks(context.Background(), blocks); err == nil {
 		t.Fatal("expected AddBlocks to reject a mismatched parent")
 	}
 

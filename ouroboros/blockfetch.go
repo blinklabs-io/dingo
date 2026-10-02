@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -24,11 +25,13 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // blockfetchMetricsCdfUpdateInterval controls how often CDF metrics are
@@ -856,6 +859,17 @@ func (o *Ouroboros) blockfetchClientBlock(
 	block gledger.Block,
 ) error {
 	// Update metrics and peer scoring
+	_, span := tracing.Start(
+		context.Background(),
+		"blockfetch.block",
+		attribute.String("peer.id", ctx.ConnectionId.String()),
+		tracing.Uint64("block.slot", block.SlotNumber()),
+		attribute.String(
+			"block.hash",
+			hex.EncodeToString(block.Hash().Bytes()),
+		),
+	)
+	defer span.End()
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
 	startTime, exists := o.blockFetchStarts[key]

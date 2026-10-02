@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/hex"
 	"io"
@@ -143,6 +144,7 @@ func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{
 				Slot: blockSlot,

@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -61,6 +62,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // cleanupConsumedUtxosInterval is the period between consumed-UTxO cleanup
@@ -7296,6 +7298,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					return fmt.Errorf("unknown era ID %d", workingEraId)
 				}
 				result, err := ls.processEpochRollover(
+					ctx,
 					txn,
 					snapshotEpoch,
 					*workingEraPtr,
@@ -8029,6 +8032,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							)
 						}
 						delta, err = ls.ledgerProcessBlock(
+							ctx,
 							txn,
 							tmpPoint,
 							next,
@@ -8393,6 +8397,7 @@ func dijkstraEraGate(currentEra eras.EraDesc) bool {
 }
 
 func (ls *LedgerState) ledgerProcessBlock(
+	ctx context.Context,
 	txn *database.Txn,
 	point ocommon.Point,
 	block ledger.Block,
@@ -8408,7 +8413,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 	committeeEpoch uint64,
 	epochStartSlot uint64,
 	syntheticV2CostModel bool,
-) (*LedgerDelta, error) {
+) (delta *LedgerDelta, err error) {
+	_, span := tracing.Start(
+		ctx,
+		"ledger.process_block",
+		tracing.Uint64("block.slot", point.Slot),
+		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
+	)
+	defer func() { tracing.End(span, err) }()
 	// Check that we're processing things in order
 	if len(expectedPrevHash) > 0 {
 		if string(
@@ -8681,7 +8693,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	// Process transactions
-	var delta *LedgerDelta
 	// Steady-state, at-tip, validated application refuses to recover an absent
 	// consumed-input producer from the blob store and treats it as a hard error
 	// instead. See strictConsumedInputsEnabled for why the
@@ -10056,6 +10067,7 @@ func (ls *LedgerState) setEpochCache(
 	}
 	// Generate initial epoch
 	rolloverResult, err := ls.processEpochRollover(
+		context.Background(),
 		txn,
 		ls.currentEpoch,
 		ls.currentEra,

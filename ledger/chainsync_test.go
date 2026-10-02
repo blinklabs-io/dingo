@@ -17081,6 +17081,7 @@ END`)
 	txn := f.db.Transaction(true)
 	err = txn.Do(func(txn *database.Txn) error {
 		_, rolloverErr := f.ls.processEpochRollover(
+			context.Background(),
 			txn,
 			f.currentEpoch,
 			eras.ConwayEraDesc,
@@ -17217,6 +17218,7 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
 		_, rolloverErr := f.ls.processEpochRollover(
+			context.Background(),
 			txn,
 			f.currentEpoch,
 			eras.ConwayEraDesc,

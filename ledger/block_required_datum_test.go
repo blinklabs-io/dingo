@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
@@ -232,6 +233,7 @@ func applyRequiredDatumBlock(
 ) error {
 	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.NewPoint(slot, block.Hash().Bytes()),
 			block,

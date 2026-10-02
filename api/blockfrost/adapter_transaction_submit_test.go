@@ -64,7 +64,7 @@ type stubSubmitter struct {
 	calls int
 }
 
-func (s *stubSubmitter) AddTransaction(txType uint, txBytes []byte) error {
+func (s *stubSubmitter) AddTransaction(ctx context.Context, txType uint, txBytes []byte) error {
 	s.calls++
 	return s.err
 }

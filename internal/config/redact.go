@@ -75,6 +75,7 @@ var logURIConfigFields = []string{
 	"Mithril.AggregatorURL",
 	"OffchainMetadata.IPFSGatewayURL",
 	"TokenRegistry.SourceURL",
+	"TracingEndpoint",
 }
 
 // logProviderConfigFields are Config field paths holding a plugin
@@ -275,6 +276,8 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",
+	"TracingServiceName",
+	"TracingSampleRatio",
 	"TracingStdout",
 	"UnsafeFullPotRewardsOnStandardNetworks",
 	"ValidateForgedBlock",

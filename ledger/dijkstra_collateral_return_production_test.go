@@ -313,7 +313,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		})
 		assertDijkstraPointerReturnFailure(
 			t,
-			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
+			pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
 		)
 		require.Empty(t, pool.Transactions())
 	})
@@ -336,7 +336,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 			defer cancel()
 			require.NoError(t, pool.Stop(ctx))
 		})
-		require.NoError(t, pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
+		require.NoError(t, pool.AddTransaction(context.Background(), uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
 		require.Len(t, pool.Transactions(), 1)
 	})
 }
@@ -353,6 +353,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 			run: func(fx *dijkstraCollateralReturnFixture) error {
 				return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
 					_, err := fx.ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(dijkstraCollateralReturnTestSlot, fx.block.Hash().Bytes()),
 						fx.block,

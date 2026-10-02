@@ -223,6 +223,7 @@ func TestDAGTransactionsFallsBackOnInconsistentOrder(t *testing.T) {
 	require.NoError(
 		t,
 		pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			getTestTxBytes(t),
 		),
@@ -253,11 +254,11 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	require.NotNil(t, pool.dag)
@@ -306,11 +307,11 @@ func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 	assert.Len(t, pool.Transactions(), 2)
 
@@ -393,7 +394,7 @@ func TestDAGConcurrentSnapshotsAndMutations(t *testing.T) {
 	}
 	wg.Go(func() {
 		for range 200 {
-			errs <- pool.AddTransaction(uint(conway.EraIdConway), txBytes)
+			errs <- pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes)
 			pool.RemoveTransaction(txHash)
 		}
 	})
@@ -416,7 +417,7 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 
 	validator.arm()
@@ -432,6 +433,7 @@ func TestDAGAdmissionContinuesDuringRevalidation(t *testing.T) {
 	addDone := make(chan error, 1)
 	go func() {
 		addDone <- pool.AddTransaction(
+			context.Background(),
 			uint(conway.EraIdConway),
 			childBytes,
 		)
@@ -468,11 +470,11 @@ func TestDAGRemovalContinuesDuringRevalidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	validator.arm()
@@ -519,7 +521,7 @@ func TestDAGRevalidationRetriesAfterLedgerGenerationChange(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 	)
 	callsBeforeRevalidation := validator.calls.Load()
 
@@ -562,7 +564,7 @@ func TestDAGRevalidationBoundsLedgerGenerationRetries(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), txBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), txBytes),
 	)
 
 	validator.advanceEveryCall.Store(true)
@@ -584,7 +586,7 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	pool.revalidationJournalCap = 1
 
@@ -600,7 +602,7 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	pool.RemoveTransaction(parentHash)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	close(validator.release)
@@ -634,11 +636,11 @@ func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	validator.failHash = parentHash
@@ -664,11 +666,11 @@ func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), parentBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), parentBytes),
 	)
 	require.NoError(
 		t,
-		pool.AddTransaction(uint(conway.EraIdConway), childBytes),
+		pool.AddTransaction(context.Background(), uint(conway.EraIdConway), childBytes),
 	)
 
 	// Simulate an inconsistent live index. The missing parent has no

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"io"
 	"log/slog"
@@ -225,6 +226,7 @@ func applyDijkstraReferenceOverlapBlock(
 	}
 	return fixture.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := fixture.ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			point,
 			fixture.block,

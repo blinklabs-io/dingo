@@ -409,6 +409,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		result, rolloverErr = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -476,6 +477,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		result, rolloverErr = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			currentEpoch,
 			eras.DijkstraEraDesc,
@@ -3370,6 +3372,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	txn := db.Transaction(true)
 	err = txn.Do(func(txn *database.Txn) error {
 		result, err := ls.processEpochRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -3492,6 +3495,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 		err := txn.Do(func(txn *database.Txn) error {
 			var err error
 			result, err = ls.processEpochRollover(
+				context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
@@ -3624,6 +3628,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			var err error
 			result, err = ls.processEpochRollover(
+				context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
@@ -5771,6 +5776,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 10},
 			block,
@@ -5849,6 +5855,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: block.SlotNumber()},
 			block,
@@ -5943,6 +5950,7 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 10, Hash: []byte("dijkstra-validation")},
 			block,
@@ -6960,13 +6968,13 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 					}
 					currentParams.ProtocolVersion.Major = dijkstra.MinProtocolVersionDijkstra
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0, 0, false)
+						_, err := ls.ledgerProcessBlock(context.Background(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, eras.DijkstraEraDesc, currentParams, pp, 0, 0, false)
 						return err
 					})
 				},
 				"imported": func() error {
 					return db.Transaction(true).Do(func(txn *database.Txn) error {
-						_, err := ls.ledgerProcessBlock(txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
+						_, err := ls.ledgerProcessBlock(context.Background(), txn, ocommon.NewPoint(1, block.Hash().Bytes()), block, true, false, false, nil, envelopeParent{origin: true}, nil, era, pp, nil, 0, 0, false)
 						return err
 					})
 				},
@@ -7077,6 +7085,7 @@ func TestLedgerProcessBlockAllowsSyntheticByronBlocksWithPlaceholderCbor(
 
 	err := db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
 			block,
@@ -8030,6 +8039,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		result, err = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -8101,6 +8111,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		result, err = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			sourceEra,
@@ -8169,6 +8180,7 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		result, err = ls.processEpochRollover(
+			context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -8707,6 +8719,7 @@ func (f *hardForkRatifyFixture) rollover(
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
 		result, rolloverErr = f.ls.processEpochRollover(
+			context.Background(),
 			txn,
 			currentEpoch,
 			eras.ConwayEraDesc,
@@ -9904,6 +9917,7 @@ func TestLedgerProcessBlockRunsPhase1ForPhase2InvalidTransaction(
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: blockSlot, Hash: []byte("phase-1-invalid-tx")},
 			block,

@@ -948,7 +948,7 @@ func (s *Server) handleConstructionSubmit(
 	}
 
 	if err := s.config.Mempool.AddTransaction(
-		txType, txBytes,
+		r.Context(), txType, txBytes,
 	); err != nil {
 		writeError(w, wrapErr(
 			ErrSubmitFailed,

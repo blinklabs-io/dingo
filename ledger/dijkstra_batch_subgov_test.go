@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -517,6 +518,7 @@ func replaySubGovBlock(
 	require.NoError(t, err)
 	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
 		delta, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: slot, Hash: blockHash},
 			block,

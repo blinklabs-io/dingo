@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2886,7 +2887,7 @@ func BenchmarkBlockBatchProcessingThroughput(b *testing.B) {
 		b.StopTimer()
 		db, ledgerState := newBatchBenchmarkLedgerState(b, seedModels)
 		b.StartTimer()
-		if err := ledgerState.Chain().AddBlocks(batchBlocks); err != nil {
+		if err := ledgerState.Chain().AddBlocks(context.Background(), batchBlocks); err != nil {
 			_ = dbtest.CloseDatabase(db)
 			b.Fatal(err)
 		}

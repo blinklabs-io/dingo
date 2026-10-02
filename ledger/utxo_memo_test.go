@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"testing"
 
@@ -124,6 +125,7 @@ func TestUtxoByIdMemoReducesDbReads_LedgerProcessBlock(t *testing.T) {
 	before := fx.dingoLS.utxoByRefReads.Load()
 	err := fx.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := fx.dingoLS.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			point,
 			block,
@@ -452,6 +454,7 @@ func TestLedgerProcessBlockRejectsIntraBlockDoubleSpend(t *testing.T) {
 
 	processErr := fx.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := fx.ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.NewPoint(10, fx.block.Hash().Bytes()),
 			fx.block,
