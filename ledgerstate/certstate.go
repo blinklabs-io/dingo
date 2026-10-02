@@ -622,6 +622,12 @@ func parseLegacyUMElem(
 }
 
 func parseUint64(data []byte) (uint64, bool) {
+	// The decoder reads null as zero, and a null is what puts an anchorless
+	// DRepState in the shape of an account: only a CBOR unsigned integer is
+	// accepted.
+	if len(data) == 0 || data[0]>>5 != 0 {
+		return 0, false
+	}
 	var value uint64
 	if _, err := cbor.Decode(data, &value); err != nil {
 		return 0, false
@@ -2027,8 +2033,8 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 
 // looksLikeAccountMap reports whether a map's first value decodes as an
 // account state, which separates DState from the DRep and committee maps.
-// A DRepState leads with an expiry followed by an anchor, so it fails every
-// account encoding.
+// A DRepState leads with an expiry followed by an anchor or null, so it fails
+// every account encoding.
 func looksLikeAccountMap(data []byte) bool {
 	entry, ok := firstMapEntry(data)
 	if !ok || !isCredentialArray(entry.KeyRaw) {

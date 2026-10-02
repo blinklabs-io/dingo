@@ -1195,6 +1195,61 @@ func TestParseCertStateConwayAccountsSurviveLargerDRepMap(t *testing.T) {
 	}
 }
 
+// A DRep registered without an anchor encodes it as null, which leaves its
+// state reading as [uint, null, uint, set]. A null must not decode as an
+// account's deposit, or a larger anchorless DRep map is taken for DState.
+func TestParseCertStateConwayAccountsSurviveLargerAnchorlessDRepMap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	encode := func(value any) []byte {
+		t.Helper()
+		out, err := cbor.Encode(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	credential := func(tag byte) []byte {
+		return encode([]any{uint64(0), bytes.Repeat([]byte{tag}, 28)})
+	}
+
+	drepMap := []byte{0xa3}
+	for _, tag := range []byte{0x21, 0x22, 0x23} {
+		drepMap = append(drepMap, credential(tag)...)
+		drepMap = append(drepMap, encode([]any{
+			uint64(500), nil, uint64(500000000), []any{},
+		})...)
+	}
+	dstate := append([]byte{0xa1}, credential(0x31)...)
+	dstate = append(dstate, encode([]any{
+		uint64(7), uint64(2000000), bytes.Repeat([]byte{0x41}, 28), nil,
+	})...)
+	if len(dstate) >= len(drepMap) {
+		t.Fatalf("DState (%d bytes) must be smaller than the DRep map (%d)",
+			len(dstate), len(drepMap))
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap, hotMap, resignMap, poolState, dstate, {0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	if result == nil {
+		t.Fatal("no parsed cert state")
+	}
+	if len(result.Accounts) != 1 || result.Accounts[0].Reward != 7 {
+		t.Fatalf("stake accounts were dropped: %#v", result.Accounts)
+	}
+	if len(result.DReps) != 3 {
+		t.Fatalf("DReps = %d, want 3", len(result.DReps))
+	}
+}
+
 // TestParseCommitteeVStateAuthorizationSumType covers the encoding mainnet
 // actually uses. The committee map's values are the CommitteeAuthorization sum
 // type, [0, hot_credential] for an authorization and [1, maybe_anchor] for a
