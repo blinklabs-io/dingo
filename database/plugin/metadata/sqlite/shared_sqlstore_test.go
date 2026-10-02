@@ -3469,13 +3469,9 @@ func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
 	})
 }
 
-// TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
-// threshold discussed at length in sqliteCommonPragmas' doc comment: a
-// regression back to SQLite's compiled-in default of 1000 pages would
-// silently reintroduce the checkpoint-driven write amplification that
-// change fixed, without failing any functional test, since 1000 is itself a
-// valid, working value.
-func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
+// TestOpenSharedSQLStoreWALPragmas pins the checkpoint threshold and retained
+// WAL limit. Both pragmas are connection-local, so each pool must set them.
+func TestOpenSharedSQLStoreWALPragmas(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
@@ -3494,6 +3490,12 @@ func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
 			"PRAGMA wal_autocheckpoint",
 		).Scan(&pages))
 		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
+
+		var bytes int
+		require.NoError(t, db.QueryRow(
+			"PRAGMA journal_size_limit",
+		).Scan(&bytes))
+		require.Equalf(t, 67108864, bytes, "%s journal_size_limit", name)
 	}
 }
 

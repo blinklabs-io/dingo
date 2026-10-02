@@ -72,12 +72,13 @@ wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
 connection (never the write pool) — see `checkpointWAL` and
 `Store.Checkpoint` in DATABASE.md's write-amplification discussion for why
 the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
-on-disk size even when it fully succeeds, and why an active reader can leave
-a given TRUNCATE attempt busy. The tagged PostgreSQL/MySQL
-factories configure their direct drivers, pools, advisory migration locks, and
-repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
-business behavior is implemented once in `sqlstore` and dialect translation is
-limited to SQL mechanics.
+on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
+WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
+reader can prevent either operation from reclaiming space. The tagged
+PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
+migration locks, and repeatable-read snapshots. All three return
+`*sqlstore.Store`; metadata business behavior is implemented once in
+`sqlstore` and dialect translation is limited to SQL mechanics.
 
 Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
 optional representation. A label whose map keys collide after JSON
