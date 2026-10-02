@@ -128,6 +128,18 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	members, err := db.GetCommitteeMembers(nil)
 	require.NoError(t, err)
 	require.Len(t, members, 2)
+	imported := map[string]uint64{}
+	for _, member := range members {
+		imported[models.CommitteeCredential{
+			CredentialTag: member.ColdCredentialTag,
+			Credential:    member.ColdCredHash,
+		}.Key()] = member.ExpiresEpoch
+	}
+	wantImported := map[string]uint64{
+		(models.CommitteeCredential{CredentialTag: 0, Credential: keepHash}).Key():   700,
+		(models.CommitteeCredential{CredentialTag: 1, Credential: scriptHash}).Key(): 700,
+	}
+	require.Equal(t, wantImported, imported)
 
 	row, err := db.Metadata().GetGovernanceProposal(txHash, 0, nil)
 	require.NoError(t, err)
