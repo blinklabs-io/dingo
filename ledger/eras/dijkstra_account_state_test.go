@@ -67,8 +67,6 @@ func boundedInterval(
 	}
 }
 
-func u64(v uint64) *uint64 { return &v }
-
 func testSubTransaction(
 	deposits gdijkstra.DijkstraDirectDeposits,
 	intervals gdijkstra.DijkstraAccountBalanceIntervals,
@@ -224,11 +222,11 @@ func TestValidateTxDijkstraBalanceIntervalBounds(t *testing.T) {
 	}{
 		{name: "exact match", key: account, interval: exactInterval(100)},
 		{name: "exact below", key: account, interval: exactInterval(99), wantErr: &gdijkstra.BalancesOutsideAccountBalanceIntervalsError{}},
-		{name: "lower bound is inclusive", key: account, interval: boundedInterval(u64(100), nil)},
-		{name: "one below lower bound", key: account, interval: boundedInterval(u64(101), nil), wantErr: &gdijkstra.BalancesOutsideAccountBalanceIntervalsError{}},
-		{name: "upper bound is exclusive", key: account, interval: boundedInterval(nil, u64(100)), wantErr: &gdijkstra.BalancesOutsideAccountBalanceIntervalsError{}},
-		{name: "one below upper bound", key: account, interval: boundedInterval(nil, u64(101))},
-		{name: "both bounds around balance", key: account, interval: boundedInterval(u64(100), u64(101))},
+		{name: "lower bound is inclusive", key: account, interval: boundedInterval(new(uint64(100)), nil)},
+		{name: "one below lower bound", key: account, interval: boundedInterval(new(uint64(101)), nil), wantErr: &gdijkstra.BalancesOutsideAccountBalanceIntervalsError{}},
+		{name: "upper bound is exclusive", key: account, interval: boundedInterval(nil, new(uint64(100))), wantErr: &gdijkstra.BalancesOutsideAccountBalanceIntervalsError{}},
+		{name: "one below upper bound", key: account, interval: boundedInterval(nil, new(uint64(101)))},
+		{name: "both bounds around balance", key: account, interval: boundedInterval(new(uint64(100)), new(uint64(101)))},
 		{name: "nonexistent account", key: missing, interval: exactInterval(0), wantErr: &gdijkstra.MissingAccountsInBalanceIntervalsError{}},
 		{name: "wrong network", key: wrongNetwork, interval: exactInterval(0), wantErr: &gdijkstra.WrongNetworkAccountAddressesError{}},
 	} {
