@@ -92,8 +92,7 @@ func snapshotRegistryKey(reg prometheus.Registerer) (snapshotRegistryIdentity, b
 	if v.Comparable() {
 		return snapshotRegistryIdentity{typ: typ, value: reg}, true
 	}
-	switch v.Kind() {
-	case reflect.Map:
+	if v.Kind() == reflect.Map {
 		ptr := v.Pointer()
 		if ptr != 0 {
 			return snapshotRegistryIdentity{typ: typ, ptr: ptr}, true
