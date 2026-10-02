@@ -15095,3 +15095,5 @@ UTxO resolution workers. Reads are registered against their serving protocol
 instance before connection liveness is checked; closing that instance cancels
 its requests without canceling a replacement instance for the same connection
 identifier. UTxO RPC stake-distribution queries use their RPC request context.
+UTxO whole-query cancellation stops feeding new resolution work and drains
+in-flight results before releasing worker transactions and returning the error.

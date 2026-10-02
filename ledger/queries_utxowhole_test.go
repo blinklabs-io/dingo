@@ -278,6 +278,58 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 	)
 }
 
+func TestQueryShelleyUtxoWhole_CancelsDuringDecode(t *testing.T) {
+	// Not t.Parallel: swaps the package-level decodeUtxoWholeCborFunc seam.
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xAA}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	const rowCount = 100
+	for i := range rowCount {
+		seedBabbageUtxo(
+			t,
+			db,
+			byte(i),
+			uint32(i),
+			addr,
+			1_000_000,
+		) //nolint:gosec
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var decodedCount atomic.Int64
+	original := decodeUtxoWholeCborFunc
+	decodeUtxoWholeCborFunc = func(ref database.UtxoRef, cborBytes []byte) (ledger.TransactionOutput, error) {
+		decodedCount.Add(1)
+		cancel()
+		return decodeUtxoWholeCbor(ref, cborBytes)
+	}
+	t.Cleanup(func() { decodeUtxoWholeCborFunc = original })
+	ls := newPoolDistr2Ledger(t, db)
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ls.queryShelleyUtxoWhole(ctx, QueryPoint{}, nil)
+		errCh <- err
+	}()
+	err = testutil.RequireReceive(
+		t,
+		errCh,
+		testutil.AsyncWait,
+		"canceled UTxO query must drain workers and return",
+	)
+	require.ErrorIs(t, err, context.Canceled)
+	require.LessOrEqual(
+		t,
+		decodedCount.Load(),
+		int64(utxoWholeResolveWorkers),
+		"only already active workers may finish decoding",
+	)
+}
+
 // TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression
 // test for early abort: once one row's
 // resolve fails, the previous implementation kept feeding every remaining
@@ -417,7 +469,11 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 300}, nil)
+	result, err := ls.queryShelleyUtxoWhole(
+		t.Context(),
+		QueryPoint{Slot: 300},
+		nil,
+	)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -470,7 +526,11 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	pinned, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 300}, nil)
+	pinned, err := ls.queryShelleyUtxoWhole(
+		t.Context(),
+		QueryPoint{Slot: 300},
+		nil,
+	)
 	require.NoError(t, err)
 	pinnedArr, _ := pinned.([]any)
 	pinnedUtxos, _ := pinnedArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
@@ -517,7 +577,11 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
 	}, nil))
 
 	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 149_999}, nil)
+	_, err := ls.queryShelleyUtxoWhole(
+		t.Context(),
+		QueryPoint{Slot: 149_999},
+		nil,
+	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -536,7 +600,11 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 150_000}, nil)
+	_, err := ls.queryShelleyUtxoWhole(
+		t.Context(),
+		QueryPoint{Slot: 150_000},
+		nil,
+	)
 	require.NoError(t, err)
 }
 
