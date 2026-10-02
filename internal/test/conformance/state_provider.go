@@ -793,9 +793,13 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 		if len(tagsByHash[key.hash]) != 1 {
 			continue
 		}
+		coldHash, err := common.NewBlake2b224Checked([]byte(key.hash))
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		member, err := p.CommitteeCredentialMember(common.Credential{
 			CredType:   uint(key.tag),
-			Credential: common.NewBlake2b224([]byte(key.hash)),
+			Credential: coldHash,
 		})
 		if err != nil {
 			return nil, err
