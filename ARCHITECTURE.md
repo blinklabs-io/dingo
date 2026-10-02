@@ -8766,6 +8766,20 @@ register from its own `Run()` composition — described in its own subsection
 below; both modes share the same `internal/koiosparity` comparison logic
 (`compare.go`/`check.go`) so a mismatch means the same thing either way.
 
+The observer separately selects its ERROR epochs for startup retries even when
+reference data has not changed; CLI freshness selection keeps its existing
+contract. Each observer queue retries its own ERROR outcomes after at least
+`ObserverConfig.ErrorRetryDelay` (five minutes by default), without needing a
+new epoch transition. A completed non-ERROR check removes that pending retry.
+The aggregate and account timers are independent, and cancellation stops both.
+Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
+DB failures and validation disagreements still stop strict validation.
+
+Status reports retain total mismatch counts and separately report significant
+counts using the comparison's severity classification. Aggregate and account
+phase writes retain the other phase's counts, so concurrent observer queues
+cannot erase each other's evidence.
+
 **Architecture:**
 
 ```
