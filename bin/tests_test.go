@@ -152,13 +152,14 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 			)
 			_, process, output := harness.start(t)
 
-			require.NoError(t, waitForEntrypointChildReady(
+			requireEntrypointChildReady(
+				t,
 				process,
+				output,
 				harness.bootstrapStartedFile,
 				harness.bootstrapReadyFile,
-				testutil.AsyncWait,
 				"Mithril bootstrap",
-			))
+			)
 			require.NoError(t, process.cmd.Process.Signal(test.signal))
 
 			err := waitForEntrypoint(t, process.cmd, process, output)
@@ -175,8 +176,13 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 			)
 			require.False(
 				t,
-				fileExists(harness.serveReadyFile),
+				fileExists(harness.serveStartedFile),
 				"serve must not start after an interrupted bootstrap",
+			)
+			require.False(
+				t,
+				fileExists(harness.serveReadyFile),
+				"serve must not become ready after an interrupted bootstrap",
 			)
 		})
 	}
@@ -216,13 +222,14 @@ func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	harness.env = append(harness.env, "DINGO_TEST_SERVE_EXIT_CODE=39")
 	_, process, output := harness.start(t)
 
-	require.NoError(t, waitForEntrypointChildReady(
+	requireEntrypointChildReady(
+		t,
 		process,
+		output,
 		harness.serveStartedFile,
 		harness.serveReadyFile,
-		testutil.AsyncWait,
 		"serve",
-	))
+	)
 	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
 
 	err := waitForEntrypoint(t, process.cmd, process, output)
@@ -246,43 +253,80 @@ type entrypointProcess struct {
 	err  error
 }
 
-func TestWaitForEntrypointChildReadyReportsFailureStage(t *testing.T) {
+func TestWaitForEntrypointChildReady(t *testing.T) {
 	t.Parallel()
+	exitErr := errors.New("exit status 7")
 	tests := []struct {
 		name          string
 		started       bool
+		ready         bool
+		exited        bool
 		wantErrorPart string
 	}{
 		{
 			name:          "child never started",
-			wantErrorPart: "bootstrap child did not start",
+			wantErrorPart: "bootstrap child did not start within",
 		},
 		{
 			name:          "child started but never became ready",
 			started:       true,
 			wantErrorPart: "bootstrap child started but did not become ready",
 		},
+		{
+			name:          "entrypoint exited before the child started",
+			exited:        true,
+			wantErrorPart: "bootstrap child did not start: entrypoint exited: exit status 7",
+		},
+		{
+			name:          "entrypoint exited before the child became ready",
+			started:       true,
+			exited:        true,
+			wantErrorPart: "bootstrap child started but exited before becoming ready: exit status 7",
+		},
+		{
+			name:    "child became ready as the entrypoint exited",
+			started: true,
+			ready:   true,
+			exited:  true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			startedFile := filepath.Join(t.TempDir(), "child.started")
+			dir := t.TempDir()
+			startedFile := filepath.Join(dir, "child.started")
+			readyFile := filepath.Join(dir, "child.ready")
 			if test.started {
 				require.NoError(t, os.WriteFile(startedFile, []byte("started\n"), 0o600))
 			}
+			if test.ready {
+				require.NoError(t, os.WriteFile(readyFile, []byte("ready\n"), 0o600))
+			}
 			process := &entrypointProcess{done: make(chan struct{})}
+			if test.exited {
+				process.err = exitErr
+				close(process.done)
+			}
 			err := waitForEntrypointChildReady(
 				process,
 				startedFile,
-				filepath.Join(t.TempDir(), "child.ready"),
+				readyFile,
 				10*time.Millisecond,
 				"bootstrap",
 			)
+			if test.wantErrorPart == "" {
+				require.NoError(t, err)
+				return
+			}
 			require.ErrorContains(t, err, test.wantErrorPart)
 		})
 	}
 }
 
+// waitForEntrypointChildReady waits for the child's ready file. The file is
+// re-checked when the entrypoint exits or the deadline fires, because the child
+// can write it in the same window: a ready child must not be reported as one
+// that never became ready.
 func waitForEntrypointChildReady(
 	process *entrypointProcess,
 	startedFile string,
@@ -295,23 +339,56 @@ func waitForEntrypointChildReady(
 	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		if fileExists(readyFile) {
-			return nil
-		}
 		select {
 		case <-process.done:
+			if fileExists(readyFile) {
+				return nil
+			}
 			if !fileExists(startedFile) {
 				return fmt.Errorf("%s child did not start: entrypoint exited: %v", name, process.err)
 			}
 			return fmt.Errorf("%s child started but exited before becoming ready: %v", name, process.err)
 		case <-deadline.C:
+			if fileExists(readyFile) {
+				return nil
+			}
 			if !fileExists(startedFile) {
 				return fmt.Errorf("%s child did not start within %s", name, timeout)
 			}
 			return fmt.Errorf("%s child started but did not become ready within %s", name, timeout)
 		case <-poll.C:
+			if fileExists(readyFile) {
+				return nil
+			}
 		}
 	}
+}
+
+// requireEntrypointChildReady fails the test with the entrypoint's captured
+// output when the child never becomes ready. The entrypoint is stopped before
+// the output is read, since its copy goroutine is still writing to it.
+func requireEntrypointChildReady(
+	t *testing.T,
+	process *entrypointProcess,
+	output *bytes.Buffer,
+	startedFile string,
+	readyFile string,
+	name string,
+) {
+	t.Helper()
+	err := waitForEntrypointChildReady(
+		process,
+		startedFile,
+		readyFile,
+		testutil.AsyncWait,
+		name,
+	)
+	if err == nil {
+		return
+	}
+	_ = syscall.Kill(-process.cmd.Process.Pid, syscall.SIGKILL)
+	<-process.done
+	require.NoError(t, err, output.String())
 }
 
 func newEntrypointHarness(t *testing.T, resume bool) *entrypointHarness {
