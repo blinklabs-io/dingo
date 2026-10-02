@@ -325,8 +325,7 @@ func TestSTMVerifyLeavesMembershipFromBatchPath(t *testing.T) {
 			wantErr: "no leaves",
 		},
 		{
-			// With an overflowed padded size the walk is skipped and the
-			// root is compared against the bare leaf hash.
+			// Unsupported tree dimensions fail before any membership walk.
 			name: "max int leaf count", leaves: math.MaxInt, root: h1, leaf: 1,
 			path:   stmMerkleBatchPath{Indices: []int{0}},
 			wantIs: errSTMUnsupportedTreeSize,

@@ -67,7 +67,8 @@ const (
 	// immutableInflightBytes bounds the compressed bytes the immutable pool
 	// may have in flight, counting each download at its size limit. At the
 	// default limit the whole pool fits; raising the limit lowers concurrency
-	// instead of raising the disk the pool can claim.
+	// until only one download fits. An override above this budget requires
+	// enough capacity for that single download.
 	immutableInflightBytes = immutableDownloadWorkers * immutableArchiveMaxBytes
 )
 
@@ -76,6 +77,11 @@ const (
 var ancillaryMemberPattern = regexp.MustCompile(
 	`^immutable/[0-9]+\.(chunk|primary|secondary)$`,
 )
+
+func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
+	weight := cfg.objectMaxBytes(immutableArchiveMaxBytes)
+	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
+}
 
 // immutableArchiveLimits admits an immutable archive's own certified trio, and
 // hashes each file as it is written. The ledger tree is also admitted because
@@ -94,8 +100,8 @@ func immutableArchiveLimits(
 	}
 	return archiveLimits{
 		maxEntries:     64,
-		maxMemberBytes: 1 << 30,
-		maxTotalBytes:  3 << 30,
+		maxMemberBytes: maxExtractFileSize,
+		maxTotalBytes:  maxTotalExtractSize,
 		digests:        own,
 		allow: func(name string) bool {
 			if _, ok := own[name]; ok {
@@ -990,10 +996,7 @@ func downloadImmutables(
 	cfg.immutableDigests = digests
 	// Each in-flight download is charged at its size limit, since the real
 	// size is not known until it has arrived.
-	inflight := semaphore.NewWeighted(immutableInflightBytes)
-	inflightWeight := min(
-		cfg.objectMaxBytes(immutableArchiveMaxBytes), immutableInflightBytes,
-	)
+	inflight, inflightWeight := immutableDownloadBudget(cfg)
 
 	// Optional download<->processing pipeline: chunks are fetched in
 	// parallel (out of order) but seq invokes OnChunkContiguous in strict
@@ -1373,7 +1376,9 @@ func fetchImmutableArchive(
 	if cfg.immutableDigests != nil {
 		extractOpts = append(
 			extractOpts,
-			withArchiveLimits(immutableArchiveLimits(num, cfg.immutableDigests)),
+			withArchiveLimits(
+				immutableArchiveLimits(num, cfg.immutableDigests),
+			),
 		)
 	}
 	if _, err := extractArchiveFile(

@@ -16,15 +16,21 @@ package mithril
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,7 +257,7 @@ func TestDownloadDigestsArchiveAdmitsOnlyTheDigestList(t *testing.T) {
 func TestDownloadAncillaryV2AdmitsOnlyConsumedMembers(t *testing.T) {
 	t.Parallel()
 
-	manifest := []byte(`{"data":{},"signature":""}`)
+	manifest := []byte(nil)
 	for _, tc := range []struct {
 		name    string
 		files   map[string][]byte
@@ -290,10 +296,25 @@ func TestDownloadAncillaryV2AdmitsOnlyConsumedMembers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 0})
+			pub, priv, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			fixture.ancillaryVKey = mithrilJSONHexKey(t, pub)
+			signed := ancillaryManifest{Data: map[string]string{}}
+			for name, data := range tc.files {
+				if name == ancillaryManifestFilename {
+					continue
+				}
+				digest := sha256.Sum256(data)
+				signed.Data[name] = hex.EncodeToString(digest[:])
+			}
+			signed.Signature = hex.EncodeToString(
+				ed25519.Sign(priv, signed.computeHash()),
+			)
+			tc.files[ancillaryManifestFilename], err = json.Marshal(signed)
+			require.NoError(t, err)
 			fixture.ancillaryArchive = buildTarZst(t, tc.files)
 			cfg := fixture.bootstrapConfig(t.TempDir())
 			cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-			cfg.VerifyCertificateChain = false
 			dir := t.TempDir()
 			vetted, _, _, err := downloadAncillaryV2(
 				context.Background(), cfg, fixture.artifact, dir,
@@ -401,4 +422,43 @@ func TestDownloadAncillaryV1AdmitsOnlyConsumedMembers(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestExpansionReaderLargeCompressedCount(t *testing.T) {
+	t.Parallel()
+	var compressed atomic.Int64
+	compressed.Store(math.MaxInt64/256 + 1)
+	reader := expansionReader{
+		reader: strings.NewReader("data"),
+		read:   &compressed,
+		ratio:  256,
+		floor:  1 << 20,
+	}
+	n, err := reader.Read(make([]byte, 4))
+	require.NoError(t, err)
+	require.Equal(t, 4, n)
+}
+
+func TestImmutableDownloadBudgetAbovePoolLimit(t *testing.T) {
+	t.Parallel()
+	cfg := BootstrapConfig{DownloadMaxBytes: immutableInflightBytes + 1}
+	budget, weight := immutableDownloadBudget(cfg)
+	require.Equal(t, cfg.DownloadMaxBytes, weight)
+	require.True(t, budget.TryAcquire(weight))
+	require.False(
+		t,
+		budget.TryAcquire(weight),
+		"large overrides must serialize downloads",
+	)
+	budget.Release(weight)
+	require.True(t, budget.TryAcquire(weight))
+	budget.Release(weight)
+}
+
+func TestImmutableArchiveLimitsAdmitLedgerStateSizes(t *testing.T) {
+	t.Parallel()
+	limits := immutableArchiveLimits(0, nil)
+	require.True(t, limits.allow("ledger/100/state"))
+	require.GreaterOrEqual(t, limits.maxMemberBytes, int64(maxExtractFileSize))
+	require.GreaterOrEqual(t, limits.maxTotalBytes, int64(maxTotalExtractSize))
 }

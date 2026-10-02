@@ -181,23 +181,24 @@ func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
 		for _, asOf := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/asOf=%v", tc.name, asOf), func(t *testing.T) {
 				t.Parallel()
-				err := ls.db.Transaction(false).Do(func(txn *database.Txn) error {
-					var err error
-					if asOf {
-						_, _, err = ls.computeCandidateNonceAsOf(
-							txn, eras.ConwayEraDesc.Id,
-							prevEvolving, prevCandidate,
-							tc.start, tc.length, tc.start,
-						)
-					} else {
-						_, _, err = ls.computeCandidateNonce(
-							txn, eras.ConwayEraDesc.Id,
-							prevEvolving, prevCandidate,
-							tc.start, tc.length,
-						)
-					}
-					return err
-				})
+				err := ls.db.Transaction(false).
+					Do(func(txn *database.Txn) error {
+						var err error
+						if asOf {
+							_, _, err = ls.computeCandidateNonceAsOf(
+								txn, eras.ConwayEraDesc.Id,
+								prevEvolving, prevCandidate,
+								tc.start, tc.length, tc.start,
+							)
+						} else {
+							_, _, err = ls.computeCandidateNonce(
+								txn, eras.ConwayEraDesc.Id,
+								prevEvolving, prevCandidate,
+								tc.start, tc.length,
+							)
+						}
+						return err
+					})
 				if tc.wantOverrun {
 					require.ErrorIs(t, err, errEpochRangeOverflow)
 					return
@@ -241,9 +242,7 @@ func TestNextEpochNonceReadyCutoffSlot_RejectsWrappedEpochRange(t *testing.T) {
 				EraId:         eras.ConwayEraDesc.Id,
 			})
 			require.Equal(t, tc.wantReady, ready)
-			if tc.wantReady {
-				require.Equal(t, tc.wantCutoff, cutoff)
-			}
+			require.Equal(t, tc.wantCutoff, cutoff)
 		})
 	}
 }

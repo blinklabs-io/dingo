@@ -219,8 +219,11 @@ func (cfg DownloadConfig) sizeLimit() int64 {
 
 func (cfg DownloadConfig) sizeLimitError() error {
 	if cfg.ExpectedSize > 0 && cfg.ExpectedSize <= cfg.maxBytes() {
-		return fmt.Errorf("%w: download response exceeds expected size %d bytes",
-			ErrDownloadTooLarge, cfg.ExpectedSize)
+		return fmt.Errorf(
+			"%w: download response exceeds expected size %d bytes",
+			ErrDownloadTooLarge,
+			cfg.ExpectedSize,
+		)
 	}
 	return fmt.Errorf("%w: download response exceeds maximum %d bytes",
 		ErrDownloadTooLarge, cfg.maxBytes())
@@ -1093,7 +1096,10 @@ func downloadSnapshotOnce(
 	)
 	// Copy only the remaining file budget, then probe one byte without
 	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
-	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
+	_, copyErr := io.Copy(
+		pw,
+		io.LimitReader(body, cfg.sizeLimit()-existingSize),
+	)
 	if copyErr == nil && pw.written == cfg.sizeLimit() {
 		var probe [1]byte
 		var n int
@@ -1214,7 +1220,11 @@ type expansionReader struct {
 func (r *expansionReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	r.produced += int64(n)
-	if r.produced > r.floor+r.ratio*r.read.Load() {
+	compressed := r.read.Load()
+	// Compare the rounded-up required input instead of multiplying the
+	// compressed count, which can overflow for large operator limits.
+	excess := r.produced - r.floor
+	if excess > 0 && (r.ratio <= 0 || (excess-1)/r.ratio+1 > compressed) {
 		return n, fmt.Errorf(
 			"%w: expanded %d bytes from %d compressed",
 			ErrExtractLimitExceeded, r.produced, r.read.Load(),
