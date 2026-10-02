@@ -211,6 +211,7 @@ func TestReportedErrorRemainsRetryableAfterCacheReopen(t *testing.T) {
 				statuses, err := cache.GetStatusSummary("preview")
 				require.NoError(t, err)
 				require.Len(t, statuses, 1)
+				require.True(t, now.Equal(statuses[0].LastCheckedAt))
 				require.Equal(t, 11, statuses[0].DingoPoolCount)
 				require.Equal(t, 12, statuses[0].KoiosPoolCount)
 			},
@@ -233,7 +234,25 @@ func TestRecordObserverErrorPreservesOtherQueueFailure(t *testing.T) {
 				t.Cleanup(func() { require.NoError(t, cache.Close()) })
 				require.NoError(
 					t,
+					cache.UpsertEpochInfo(
+						KoiosEpochInfo{
+							Network:   "preview",
+							Epoch:     4,
+							FetchedAt: time.Now().Add(-time.Hour),
+						},
+					),
+				)
+				require.NoError(
+					t,
 					cache.RecordObserverError("preview", 4, accounts),
+				)
+				fresh, err := cache.GetEpochsNeedingCheck("preview", false)
+				require.NoError(t, err)
+				require.Equal(
+					t,
+					[]uint64{4},
+					fresh,
+					"a fetch error must not mark an unrun aggregate comparison as fresh",
 				)
 				aggregate, account := StatusPass, StatusFail
 				if accounts {

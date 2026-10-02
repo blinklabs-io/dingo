@@ -1759,6 +1759,7 @@ func (c *Cache) GetEpochsMissingParams(
 
 // RecordObserverError makes a queue's failed fetch/check retryable after restart
 // without replacing prior comparison evidence or the other queue's verdict.
+// A first error leaves the check timestamp zero because no comparison ran.
 func (c *Cache) RecordObserverError(
 	network string,
 	epoch uint64,
@@ -1768,7 +1769,7 @@ func (c *Cache) RecordObserverError(
 	aggregateStatus, accountStatus := StatusError, ""
 	if accounts {
 		column, otherColumn = otherColumn, column
-		aggregateStatus, accountStatus = StatusPass, StatusError
+		aggregateStatus, accountStatus = "", StatusError
 	}
 	return c.withClaimedSource(network, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`INSERT INTO check_epoch_status
@@ -1777,11 +1778,10 @@ func (c *Cache) RecordObserverError(
 			 aggregate_status, account_status)
 			VALUES (?, ?, ?, ?, 0, 0, 0, '', '', ?, ?)
 			ON CONFLICT(network, epoch) DO UPDATE SET
-			 last_checked_at=excluded.last_checked_at,
 			 `+column+`='`+StatusError+`',
 			 status=CASE WHEN `+otherColumn+`='`+StatusFail+`'
 			 THEN '`+StatusFail+`' ELSE '`+StatusError+`' END`,
-			network, epoch, time.Now().UTC(), StatusError,
+			network, epoch, time.Time{}, StatusError,
 			aggregateStatus, accountStatus,
 		)
 		return err
