@@ -85,7 +85,7 @@ services:
   # configurator — generates pool keys and genesis files from testnet.yaml
   # --------------------------------------------------------------------------
   configurator:
-    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
     environment:
       NODE_DATABASE_PATH: /data/db
@@ -105,7 +105,7 @@ services:
   # p1 — Dingo instrumented block producer (pool 1)
   # --------------------------------------------------------------------------
   p1:
-    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-main}-antithesis
+    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-fix-antithesis-ci}-antithesis
     init: true
     hostname: p1.example
     depends_on:
@@ -204,7 +204,7 @@ services:
   #       so txpump targets p1's TCP N2C endpoint exclusively (no fallback).
   # --------------------------------------------------------------------------
   txpump:
-    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
     # Named Docker volumes are root-owned on first mount; txpump writes
     # /logs/txpump.log for the analysis container.
@@ -237,7 +237,7 @@ services:
   # analysis — reads node logs, evaluates safety/liveness properties
   # --------------------------------------------------------------------------
   analysis:
-    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
     depends_on:
       p1:
