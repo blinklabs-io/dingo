@@ -22,11 +22,9 @@ vote-shape heuristic ("did each voter group say yes"), not by calling
 those two vectors need production's actual stake-weighted thresholds to
 distinguish. Building the `governance.ProposalTally` those two action types
 pass to `ShouldRatify` still happens in the harness rather than
-`ledger/governance`'s own tally. The harness tally predates the production
-tally counting an active proposal's own deposit as part of its return
-account's DRep voting power (CIP-1694 active voting stake, issue #4355);
-production now does (`ActiveProposalDepositDRepPower`), so the harness could
-switch to it.
+`ledger/governance`'s own tally. The harness adds active proposal deposits to
+each return account's delegated stake locally. Production applies the same
+CIP-1694 rule through `ActiveProposalDepositDRepPower`.
 
 ## What the vectors cover
 
