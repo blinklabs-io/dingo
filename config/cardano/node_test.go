@@ -687,3 +687,46 @@ func TestDeclaredVersusScheduledHardForkEpoch(t *testing.T) {
 		require.False(t, declared)
 	})
 }
+
+// A genesis file replaced after it was read must not change what is parsed:
+// the reader serves the devnet document on the first read of a name and an
+// unparseable one on every later read, so a loader that reads a name twice
+// fails here.
+func TestLoadGenesisDocumentsParsesTheHashedBytes(t *testing.T) {
+	t.Parallel()
+
+	reads := map[string]int{}
+	read := func(name string) ([]byte, error) {
+		reads[name]++
+		if reads[name] > 1 {
+			return []byte("{ replaced"), nil
+		}
+		return os.ReadFile(filepath.Join("devnet", name))
+	}
+	c := &CardanoNodeConfig{
+		ByronGenesisFile:    "byron-genesis.json",
+		ShelleyGenesisFile:  "shelley-genesis.json",
+		AlonzoGenesisFile:   "alonzo-genesis.json",
+		ConwayGenesisFile:   "conway-genesis.json",
+		DijkstraGenesisFile: "dijkstra-genesis.json",
+	}
+	require.NoError(
+		t,
+		c.loadGenesisDocuments(read),
+		"genesis must be parsed from the bytes that were hashed",
+	)
+	require.Equal(t, map[string]int{
+		"byron-genesis.json":    1,
+		"shelley-genesis.json":  1,
+		"alonzo-genesis.json":   1,
+		"conway-genesis.json":   1,
+		"dijkstra-genesis.json": 1,
+	}, reads)
+
+	shelleyBytes, err := os.ReadFile("devnet/shelley-genesis.json")
+	require.NoError(t, err)
+	require.Equal(t, blake2b256Hex(shelleyBytes), c.ShelleyGenesisHash)
+	require.NotNil(t, c.ShelleyGenesis())
+	require.NotNil(t, c.AlonzoGenesis())
+	require.NotNil(t, c.DijkstraGenesis())
+}
