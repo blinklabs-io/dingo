@@ -38,7 +38,7 @@ const noSlotUpperBound = uint64(math.MaxInt64)
 // PoolDetail returns the OpenAPI pool detail object for the requested pool
 // (bech32 or hex ID). Epoch-sensitive aggregates (active stake, saturation,
 // blocks_epoch) are computed for the current epoch.
-func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
+func (a *NodeAdapter) PoolDetail(ctx context.Context, poolID string) (PoolDetailInfo, error) {
 	poolKeyHash, err := parsePoolID(poolID)
 	if err != nil {
 		return PoolDetailInfo{}, err
@@ -46,7 +46,7 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	pkh := lcommon.PoolKeyHash(poolKeyHash)
 
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
 	pool, err := db.Metadata().GetPool(pkh, true, txn.Metadata())

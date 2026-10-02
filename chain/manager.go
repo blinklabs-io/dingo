@@ -276,6 +276,9 @@ func (cm *ChainManager) NewChainFromIntersect(
 				foundOrigin = true
 				continue
 			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Lookup block in database
 			intersectBlock, err = cm.blockByPoint(ctx, point, txn)
 			if err != nil {

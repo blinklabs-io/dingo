@@ -164,7 +164,7 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	relays := snapshotRelays
 	if !belowLedgerSlot {
 		var err error
-		relays, err = p.config.LedgerPeerProvider.GetPoolRelays()
+		relays, err = p.config.LedgerPeerProvider.GetPoolRelays(ctx)
 		if err != nil {
 			p.config.Logger.Error(
 				"failed to get ledger peers",

@@ -157,7 +157,7 @@ VALUES (X'80', 10, NULL, ?)`, alonzo.EraIdAlonzo)
 				require.NoError(t, err)
 				require.NoError(t, sqlDB.Close())
 			}
-			require.NoError(t, db.Metadata().SetNodeSettingsGates(
+			require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
 				nodesettings.Values{
 					nodesettings.AlonzoPParamsUnitGateName: tt.marker,
 				},
@@ -171,8 +171,8 @@ VALUES (X'80', 10, NULL, ?)`, alonzo.EraIdAlonzo)
 				)
 			}
 
-			require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery())
-			gates, err := db.Metadata().GetNodeSettingsGates()
+			require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(context.Background()))
+			gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 			require.NoError(t, err)
 			require.Equal(t, tt.wantMarker,
 				gates[nodesettings.AlonzoPParamsUnitGateName])
@@ -198,7 +198,7 @@ func TestRecoveryPhase1RechecksAlonzoPParamsUnit(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},
@@ -241,7 +241,7 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},
@@ -256,7 +256,7 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 	reopened, err := newTestDatabase(t, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, closeTestDatabase(reopened)) })
-	gates, err := reopened.Metadata().GetNodeSettingsGates()
+	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.AlonzoPParamsUnitWordV1,
 		gates[nodesettings.AlonzoPParamsUnitGateName])

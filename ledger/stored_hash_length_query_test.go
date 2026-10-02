@@ -133,7 +133,7 @@ func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			},
 		}
 	})
-	delegators, err := ls.allDRepDelegators()
+	delegators, err := ls.allDRepDelegators(t.Context())
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -150,7 +150,7 @@ func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			Key: shortStoredHash(lcommon.Blake2b224Size, 0x73),
 		}}
 	})
-	delegators, err := ls.drepDelegators(&models.Drep{
+	delegators, err := ls.drepDelegators(t.Context(), &models.Drep{
 		Credential: bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size),
 	})
 	require.ErrorContains(t, err, "drep delegator")
@@ -174,11 +174,10 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			},
 		}
 	})
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
-		[]olocalstatequery.StakeCredential{{
-			Tag:   0,
-			Bytes: lcommon.NewBlake2b224(cred),
-		}},
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(t.Context(), []olocalstatequery.StakeCredential{{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(cred),
+	}},
 	)
 	require.ErrorContains(t, err, "delegation pool id")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -196,13 +195,12 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 			VoterCredential: shortStoredHash(lcommon.Blake2b224Size, 0x77),
 		}}
 	})
-	state, err := ls.governanceProposalState(
-		&models.GovernanceProposal{
-			AnchorURL:     "https://example.invalid/proposal.json",
-			AnchorHash:    bytes.Repeat([]byte{0x78}, lcommon.Blake2b256Size),
-			ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
-			GovActionCbor: []byte{0x80},
-		},
+	state, err := ls.governanceProposalState(t.Context(), &models.GovernanceProposal{
+		AnchorURL:     "https://example.invalid/proposal.json",
+		AnchorHash:    bytes.Repeat([]byte{0x78}, lcommon.Blake2b256Size),
+		ReturnAddress: append([]byte{0xe0}, make([]byte, 28)...),
+		GovActionCbor: []byte{0x80},
+	},
 		lcommon.GovActionId{},
 	)
 	require.ErrorContains(t, err, "governance vote")
@@ -254,10 +252,9 @@ func TestQueryUtxoByTxInRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByTxIn(
-		[]ledger.ShelleyTransactionInput{
-			{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
-		},
+	result, err := ls.queryShelleyUtxoByTxIn(t.Context(), []ledger.ShelleyTransactionInput{
+		{TxId: lcommon.NewBlake2b256(bytes.Repeat([]byte{0x7B}, 32))},
+	},
 		QueryPoint{},
 		nil,
 	)
@@ -274,7 +271,7 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr})
+	result, err := ls.queryShelleyUtxoByAddress(t.Context(), []ledger.Address{addr})
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)
 }
@@ -298,7 +295,7 @@ func TestQueryPoolDistr2RejectsMalformedSnapshotPoolKey(t *testing.T) {
 	))
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.ErrorContains(t, err, "pool stake distribution snapshot pool key")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, result)
@@ -319,7 +316,7 @@ func TestChainDepStateRejectsMalformedStoredOpCertIssuer(t *testing.T) {
 	})
 	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
-	counters, err := ls.chainDepStateOpCertCounters(txn)
+	counters, err := ls.chainDepStateOpCertCounters(t.Context(), txn)
 	require.ErrorContains(t, err, "op-cert counter issuer key")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, counters)

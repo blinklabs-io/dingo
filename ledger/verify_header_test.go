@@ -5031,7 +5031,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 	// Rollover path, run in a transaction (production behaviour).
 	var rNonce, rEvolving, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -5323,7 +5323,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 
 	var rNonce, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, c, lab, err := ls.calculateEpochNonce(
+		n, _, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
 			nil,
 		)
@@ -5438,7 +5438,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 
 	var rNonce, rEvolving, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, 500, eras.ConwayEraDesc, initialEpoch,
 			nil,
 		)
@@ -5743,7 +5743,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 	// Rollover (authoritative) path.
 	var rNonce, rEvolving, rCandidate, rLab []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, ev, c, lab, err := ls.calculateEpochNonce(
+		n, ev, c, lab, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.ConwayEraDesc, prevEpoch,
 			nil,
 		)

@@ -275,7 +275,7 @@ func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
 			metadata.ProviderDependencies{DataDir: metaDir},
 		)
 		require.NoError(t, resolveErr)
-		gates, getErr := store.GetNodeSettingsGates()
+		gates, getErr := store.GetNodeSettingsGates(context.Background())
 		require.NoError(t, getErr)
 		_, hasMetadataPluginGate := gates["metadata_plugin"]
 		require.False(t, hasMetadataPluginGate)
@@ -291,7 +291,7 @@ func TestSidecarFailureDoesNotLatchMetadataPluginGate(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, sqlite.ProviderName, gates["metadata_plugin"])
 }
@@ -1854,7 +1854,7 @@ func TestPhase1PersistsNetworkMagicOnFirstStart(t *testing.T) {
 		NetworkMagic: 1,
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "1", gates["network_magic"])
 	require.NoError(t, closeTestDatabase(db))
@@ -1906,7 +1906,7 @@ func TestPhase1RecordsNoStartEraAndRejectsLaterDijkstra(t *testing.T) {
 		MetadataPlugin: "sqlite",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, nodesettings.NoStartEra, gates["start_era"])
 	require.NoError(t, closeTestDatabase(db))
@@ -1973,7 +1973,7 @@ func TestPhase1AllowsAPIToCore(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := reopened.Metadata().GetNodeSettingsGates()
+	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 	require.NoError(t, closeTestDatabase(reopened))
@@ -2015,11 +2015,11 @@ func TestPhase1LatchAndNetworkFillTogether(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := reopened.Metadata().GetNodeSettingsGates()
+	gates, err := reopened.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "core", gates["storage_mode"])
 	require.Equal(t, "preprod", gates["network"])
-	legacy, err := reopened.Metadata().GetNodeSettings()
+	legacy, err := reopened.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, legacy)
 	require.Equal(t, "preprod", legacy.Network)
@@ -2093,7 +2093,7 @@ func TestPhase1SkipsHistoryExpiryGateOnPartialReopen(t *testing.T) {
 	// Simulate a database that previously ran with history expiry enabled:
 	// there is no phase-1 Config field to drive this through, so persist the
 	// gate directly the way phase 2's write path eventually will.
-	require.NoError(t, db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, db.Metadata().SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{"history_expiry_active": nodesettings.LatchOn},
 		0,
 		0,
@@ -2150,7 +2150,7 @@ func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 		MetadataPlugin: "sqlite",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "badger", gates["blob_plugin"])
 
@@ -2404,7 +2404,7 @@ func TestNodeSettingsPersistence(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings()
+	s, err := db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
@@ -2481,7 +2481,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "core", "")
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings()
+	s, err := db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
@@ -2491,7 +2491,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 	db, err = newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
 
-	s, err = db.Metadata().GetNodeSettings()
+	s, err = db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)
@@ -2548,7 +2548,7 @@ func TestNodeSettingsAPIMode(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "api", "mainnet")
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings()
+	s, err := db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	require.Equal(t, "api", s.StorageMode)
@@ -2575,13 +2575,13 @@ func TestNodeSettingsMetadataSetDoesNotOverwrite(t *testing.T) {
 	db, err := newSettingsTestDB(t, dataDir, "core", "preview")
 	require.NoError(t, err)
 
-	err = db.Metadata().SetNodeSettings(&types.NodeSettings{
+	err = db.Metadata().SetNodeSettings(context.Background(), &types.NodeSettings{
 		StorageMode: "api",
 		Network:     "mainnet",
 	})
 	require.NoError(t, err)
 
-	s, err := db.Metadata().GetNodeSettings()
+	s, err := db.Metadata().GetNodeSettings(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, s)
 	require.Equal(t, "core", s.StorageMode)

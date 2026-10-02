@@ -86,6 +86,10 @@ func newChainIteratorWithContext(
 		// Reject the point here so callers get "not found" and can fail
 		// over (blockfetch answers NoBlocks).
 		if !chain.holdsBlockAtIndex(ctx, tmpBlock.ID, startPoint.Hash) {
+			if err := ctx.Err(); err != nil {
+				cancel()
+				return nil, err
+			}
 			return nil, models.ErrBlockNotFound
 		}
 		ci.nextBlockIndex = tmpBlock.ID

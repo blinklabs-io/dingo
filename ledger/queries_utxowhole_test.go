@@ -107,7 +107,7 @@ func TestQueryShelleyUtxoWhole_ReturnsLiveUtxos(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.Query(utxoWholeQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), utxoWholeQuery(), QueryPoint{})
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok, "expected the []any result wrapper")
@@ -142,7 +142,7 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -184,7 +184,7 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	ls := newPoolDistr2Ledger(t, db)
-	result, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.Error(t, err)
 	require.Nil(t, result)
 	require.Contains(t, err.Error(), "blake2b-256")
@@ -226,7 +226,7 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	_, err = ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	_, err = ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.Error(t, err)
 }
 
@@ -266,7 +266,7 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 
 	var queryErr error
 	require.NotPanics(t, func() {
-		_, queryErr = ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+		_, queryErr = ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	}, "a worker panic must not escape and crash the process")
 	require.Error(t, queryErr)
 	require.Contains(t, queryErr.Error(), "panicked")
@@ -347,7 +347,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+		_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 		errCh <- err
 	}()
 
@@ -417,7 +417,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 300}, nil)
+	result, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 300}, nil)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok)
@@ -470,7 +470,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 
 	ls := newPoolDistr2Ledger(t, db)
 
-	pinned, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 300}, nil)
+	pinned, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 300}, nil)
 	require.NoError(t, err)
 	pinnedArr, _ := pinned.([]any)
 	pinnedUtxos, _ := pinnedArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
@@ -483,7 +483,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 			"the pin (300) and must be reported",
 	)
 
-	live, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	live, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	liveArr, _ := live.([]any)
 	liveUtxos, _ := liveArr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
@@ -517,7 +517,7 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_TooOldRejected(t *testing.T) {
 	}, nil))
 
 	// floor = 200_000 - 50_000 = 150_000; one slot behind it must reject.
-	_, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 149_999}, nil)
+	_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 149_999}, nil)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
@@ -536,7 +536,7 @@ func TestQueryShelleyUtxoWhole_RetentionWindow_AtFloor_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(tipSlot, repeatedBytes(32, 0x0B)),
 	}, nil))
 
-	_, err := ls.queryShelleyUtxoWhole(QueryPoint{Slot: 150_000}, nil)
+	_, err := ls.queryShelleyUtxoWhole(t.Context(), QueryPoint{Slot: 150_000}, nil)
 	require.NoError(t, err)
 }
 

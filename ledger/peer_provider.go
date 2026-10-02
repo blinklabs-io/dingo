@@ -102,7 +102,7 @@ func (p *PoolRelayProvider) Close() {
 }
 
 // GetPoolRelays returns all active pool relays from the ledger.
-func (p *PoolRelayProvider) GetPoolRelays() (
+func (p *PoolRelayProvider) GetPoolRelays(ctx context.Context) (
 	[]PoolRelay,
 	error,
 ) {
@@ -117,7 +117,7 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 	p.cacheMu.RUnlock()
 
 	// Cache miss or expired - fetch from database
-	relays, err := p.db.GetActivePoolRelays(context.Background(), nil)
+	relays, err := p.db.GetActivePoolRelays(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("GetActivePoolRelays: fetch relays: %w", err)
 	}

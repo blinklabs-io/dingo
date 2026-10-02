@@ -511,7 +511,7 @@ func TestValidateForgedTxsRejectsIntraBlockDoubleSpend(t *testing.T) {
 	t.Parallel()
 	fx := newIntraBlockDoubleSpendFixture(t)
 
-	err := fx.ls.validateForgedTxs(fx.block)
+	err := fx.ls.validateForgedTxs(context.Background(), fx.block)
 
 	require.ErrorIs(
 		t,

@@ -64,6 +64,7 @@ type UtxorpcLedgerState interface {
 	// the zero value and txn is nil here -- this RPC handler always answers
 	// live, never pinned.
 	PoolStakeDistribution(
+		ctx context.Context,
 		poolFilter []lcommon.PoolKeyHash,
 		at ledger.QueryPoint,
 		txn *database.Txn,
@@ -71,7 +72,7 @@ type UtxorpcLedgerState interface {
 	SlotToTime(slot uint64) (time.Time, error)
 	SystemStart() (time.Time, error)
 	Tip() ochainsync.Tip
-	TransactionByHash(hash []byte) (*models.Transaction, error)
+	TransactionByHash(ctx context.Context, hash []byte) (*models.Transaction, error)
 	UtxoByRef(txId []byte, outputIdx uint32) (*models.Utxo, error)
 	UtxosByRefs(refs []models.UtxoId) ([]models.Utxo, error)
 	UtxosByAddressWithOrdering(

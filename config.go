@@ -2481,7 +2481,7 @@ func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
 }
 
 // ValidateForgedBlock returns whether to self-validate forged blocks.
-func (c *Config) ValidateForgedBlock() bool {
+func (c *Config) ValidateForgedBlock(ctx context.Context) bool {
 	return c.cfg.ValidateForgedBlock
 }
 

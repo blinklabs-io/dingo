@@ -179,6 +179,9 @@ func (t *Txn) releaseBlobPinLocked() {
 }
 
 func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	pinBlobStoreForTxn(t, db)
@@ -219,6 +222,9 @@ func NewMetadataOnlyTxn(
 	db *Database,
 	readWrite bool,
 ) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	// A metadata-only transaction opens no blob transaction, but it still

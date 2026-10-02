@@ -6236,7 +6236,7 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
-		_, err := ls.processEpochRollover(
+		_, err := ls.processEpochRollover(context.Background(),
 			txn,
 			models.Epoch{
 				EpochId:       0,
@@ -8336,7 +8336,7 @@ func (f *epochBoundaryBenchFixture) rollover(
 	var bodyDone time.Time
 	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		_, err := f.ls.processEpochRollover(
+		_, err := f.ls.processEpochRollover(context.Background(),
 			txn,
 			f.epochs[epochBoundaryBenchEndedEpoch],
 			eras.ConwayEraDesc,
@@ -8783,7 +8783,7 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		rollover, rolloverErr = ls.processEpochRollover(
+		rollover, rolloverErr = ls.processEpochRollover(context.Background(),
 			txn,
 			*currentEpoch,
 			eras.ConwayEraDesc,
@@ -9457,7 +9457,7 @@ INSERT INTO "transaction" (
 		require.NoError(t, db.SetTip(ochainsync.Tip{
 			Point: ocommon.NewPoint(boundary, hash),
 		}, nil))
-		result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+		result, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 		require.NoError(t, err)
 		dist := decodeStakeDistributionResult(t, result)
 		require.Len(t, dist.Results, 2)

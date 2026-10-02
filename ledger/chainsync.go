@@ -6624,7 +6624,7 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 // The caller must store candidateNonce as the new epoch's CandidateNonce
 // and labNonce as the new epoch's LastEpochBlockNonce so an empty next
 // epoch can carry it forward.
-func (ls *LedgerState) calculateEpochNonce(
+func (ls *LedgerState) calculateEpochNonce(ctx context.Context,
 	txn *database.Txn,
 	epochStartSlot uint64,
 	currentEra eras.EraDesc,
@@ -6769,7 +6769,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// Praos epoch VRF-failing; the same shape repeats at
 	// Babbage→Conway when this rule is broken.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
-		context.Background(),
+		ctx,
 		txn,
 		currentEpoch.EraId,
 		prevEvolvingNonce,
@@ -6799,7 +6799,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// the epoch being closed (a one-block Praos lag), NOT the last block's own
 	// hash. See epochLabNonce.
 	labNonceToSave, err := ls.epochLabNonce(
-		context.Background(),
+		ctx,
 		txn,
 		currentEpoch.StartSlot,
 		epochEndSlot,
@@ -7003,6 +7003,7 @@ func cloneProtocolParametersForEra(
 // result reports BoundarySnapshotDeferred so exactly one capture is taken —
 // re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
+	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
@@ -7049,7 +7050,7 @@ func (ls *LedgerState) processEpochRollover(
 		if err != nil {
 			return nil, fmt.Errorf("calculate epoch length: %w", err)
 		}
-		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
+		tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
 			txn,
 			0,
 			currentEra,
@@ -7273,7 +7274,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, "pparam_updates", func() error {
 			var err error
 			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
-				context.Background(),
+				ctx,
 				epochStartSlot,
 				currentEpoch.EpochId+1, // Target epoch for updates
 				currentEra.Id,
@@ -7349,7 +7350,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "governance", func() error {
 			var err error
-			govOut, err = governance.ProcessEpoch(&governance.EpochInput{
+			govOut, err = governance.ProcessEpoch(ctx, &governance.EpochInput{
 				DB:                       ls.db,
 				Txn:                      txn,
 				Logger:                   ls.config.Logger,
@@ -7406,11 +7407,11 @@ func (ls *LedgerState) processEpochRollover(
 						}
 						plan.SetBoundarySPOState(state)
 					}
-					decision, err := plan.Decide(txn)
+					decision, err := plan.Decide(ctx, txn)
 					if err != nil {
 						return err
 					}
-					_, err = plan.Apply(context.Background(), decision, txn)
+					_, err = plan.Apply(ctx, decision, txn)
 					return err
 				}
 				deferredPlan = plan
@@ -7578,7 +7579,7 @@ func (ls *LedgerState) processEpochRollover(
 	// result.NewCurrentPParams above and persisted by the enactment steps that
 	// precede this point. That is the set whose extraEntropy the new epoch's
 	// nonce mixes.
-	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
+	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(ctx,
 		txn,
 		epochStartSlot,
 		currentEra,

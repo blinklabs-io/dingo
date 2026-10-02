@@ -339,7 +339,7 @@ func TestProcessEpoch_NoConfidence_SPOThresholdUsesSameBoundaryMark(
 
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    newEpoch - 1,
@@ -467,7 +467,7 @@ func TestMidEpochPredictionAndBoundaryReadDifferentMarks(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    currentEpoch,
@@ -522,7 +522,7 @@ func TestProcessEpoch_MissingSameBoundarySPOState_Errors(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
@@ -576,7 +576,7 @@ func TestProcessEpoch_SuppliedSameBoundarySPOState_Ratifies(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
@@ -849,7 +849,7 @@ func runSPONonVoterRatification(
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,

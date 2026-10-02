@@ -2623,7 +2623,7 @@ type forgerReentrantBuilder struct {
 	calls       int
 }
 
-func (b *forgerReentrantBuilder) BuildBlock(
+func (b *forgerReentrantBuilder) BuildBlock(ctx context.Context,
 	_ uint64,
 	_ uint64,
 ) (ledger.Block, []byte, error) {
@@ -2885,7 +2885,7 @@ func (b *forgerTestBuilder) noteBuild() {
 	}
 }
 
-func (b *forgerTestBuilder) BuildBlock(
+func (b *forgerTestBuilder) BuildBlock(context.Context,
 	uint64,
 	uint64,
 ) (ledger.Block, []byte, error) {
@@ -2894,7 +2894,7 @@ func (b *forgerTestBuilder) BuildBlock(
 	return b.block, b.cbor, nil
 }
 
-func (b *forgerTestBuilder) BuildBlockWithLeios(
+func (b *forgerTestBuilder) BuildBlockWithLeios(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leiosData LeiosBlockData,
@@ -2909,7 +2909,7 @@ func (b *forgerTestBuilder) BuildBlockWithLeios(
 // tests can wire the equal-slot alternative path. It records the context it
 // was handed; the forger only reaches it when a test also supplies a
 // ChainContext and a SiblingAdopter.
-func (b *forgerTestBuilder) BuildBlockOnContext(
+func (b *forgerTestBuilder) BuildBlockOnContext(ctx context.Context,
 	_ uint64,
 	_ uint64,
 	leiosData LeiosBlockData,
@@ -2928,7 +2928,7 @@ type forgerTestBroadcaster struct {
 	calls int
 }
 
-func (b *forgerTestBroadcaster) AddBlock(
+func (b *forgerTestBroadcaster) AddBlock(context.Context,
 	ledger.Block,
 	[]byte,
 ) error {
@@ -3228,7 +3228,7 @@ type forgerTestLeiosParentAnnouncement struct {
 	rbHashAfterFirst *lcommon.Blake2b256
 }
 
-func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
+func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement(ctx context.Context) (
 	lcommon.Blake2b256,
 	lcommon.Blake2b256,
 	bool,
@@ -3943,7 +3943,7 @@ type forgerTestValidator struct {
 	calls int
 }
 
-func (v *forgerTestValidator) ValidateForgedBlock(ledger.Block, []byte) error {
+func (v *forgerTestValidator) ValidateForgedBlock(context.Context, ledger.Block, []byte) error {
 	v.calls++
 	if v.panic {
 		panic("validator panic")
@@ -4131,9 +4131,9 @@ type trackingBroadcaster struct {
 	onAdd func()
 }
 
-func (b *trackingBroadcaster) AddBlock(block ledger.Block, cbor []byte) error {
+func (b *trackingBroadcaster) AddBlock(ctx context.Context, block ledger.Block, cbor []byte) error {
 	b.onAdd()
-	return b.inner.AddBlock(block, cbor)
+	return b.inner.AddBlock(context.Background(), block, cbor)
 }
 
 // trackingBlockValidator calls a hook on ValidateForgedBlock.
@@ -4141,7 +4141,7 @@ type trackingBlockValidator struct {
 	onValidate func() error
 }
 
-func (v *trackingBlockValidator) ValidateForgedBlock(
+func (v *trackingBlockValidator) ValidateForgedBlock(context.Context,
 	ledger.Block,
 	[]byte,
 ) error {

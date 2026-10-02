@@ -901,7 +901,7 @@ func (n *listPaginationNode) PoolsExtended() ([]PoolExtendedInfo, error) {
 	return []PoolExtendedInfo{}, nil
 }
 
-func (n *listPaginationNode) AccountAssociatedAddresses(
+func (n *listPaginationNode) AccountAssociatedAddresses(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
@@ -910,7 +910,7 @@ func (n *listPaginationNode) AccountAssociatedAddresses(
 	return []AccountAssociatedAddressInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountDelegationHistory(
+func (n *listPaginationNode) AccountDelegationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
@@ -919,7 +919,7 @@ func (n *listPaginationNode) AccountDelegationHistory(
 	return []AccountDelegationHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountRegistrationHistory(
+func (n *listPaginationNode) AccountRegistrationHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
@@ -928,7 +928,7 @@ func (n *listPaginationNode) AccountRegistrationHistory(
 	return []AccountRegistrationHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountRewardHistory(
+func (n *listPaginationNode) AccountRewardHistory(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
@@ -937,7 +937,7 @@ func (n *listPaginationNode) AccountRewardHistory(
 	return []AccountRewardHistoryInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountUTXOs(
+func (n *listPaginationNode) AccountUTXOs(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountUTXOInfo, int, error) {
@@ -946,7 +946,7 @@ func (n *listPaginationNode) AccountUTXOs(
 	return []AccountUTXOInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountWithdrawals(
+func (n *listPaginationNode) AccountWithdrawals(ctx context.Context,
 	_ string,
 	params PaginationParams,
 ) ([]AccountWithdrawalInfo, int, error) {
@@ -955,7 +955,7 @@ func (n *listPaginationNode) AccountWithdrawals(
 	return []AccountWithdrawalInfo{}, 0, nil
 }
 
-func (n *listPaginationNode) AccountTransactions(
+func (n *listPaginationNode) AccountTransactions(ctx context.Context,
 	_ string,
 	params AccountTransactionsParams,
 ) ([]AccountTransactionInfo, int, error) {

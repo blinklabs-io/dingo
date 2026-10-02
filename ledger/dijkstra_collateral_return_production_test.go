@@ -376,7 +376,7 @@ func TestDijkstraCollateralReturnPointerRejectedByBlockValidation(t *testing.T) 
 		{
 			name: "forged block transaction revalidation",
 			run: func(fx *dijkstraCollateralReturnFixture) error {
-				return fx.ls.validateForgedTxs(fx.block)
+				return fx.ls.validateForgedTxs(context.Background(), fx.block)
 			},
 		},
 	}

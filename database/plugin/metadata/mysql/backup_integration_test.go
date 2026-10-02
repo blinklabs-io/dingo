@@ -230,7 +230,7 @@ func TestResetRefusesWhenTargetHasData(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already contains data")
 
-	restoredTimestamp, err := store.GetCommitTimestamp()
+	restoredTimestamp, err := store.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t, int64(999), restoredTimestamp,

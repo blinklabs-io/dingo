@@ -163,7 +163,7 @@ func (ls *LedgerState) takeDeferredRewardStakeInputs(
 	generation := ls.rewardInputGeneration.Load()
 	txn.AfterCommit(func() {
 		ls.queueDeferredRewardStakeInputs(
-			ctx,
+			context.WithoutCancel(ctx),
 			epoch, boundarySlot, inputs, generation,
 		)
 	})

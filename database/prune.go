@@ -82,9 +82,15 @@ func (d *Database) PruneBlock(
 		)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	var materialized int
 	blobTxn := d.BlobTxn(true)
 	if err := blobTxn.Do(func(txn *Txn) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		blobStore := txn.BlobStore()
 		if blobStore == nil {
 			return types.ErrBlobStoreUnavailable
@@ -98,11 +104,17 @@ func (d *Database) PruneBlock(
 			)
 		}
 		for _, ref := range utxoRefs {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			n, err := d.materializeUtxo(txn, slot, hash, blockCbor, ref)
 			if err != nil {
 				return err
 			}
 			materialized += n
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if err := blobStore.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(

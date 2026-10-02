@@ -15,6 +15,7 @@
 package dingo
 
 import (
+ "context"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestLeiosPipelineAdapterParentAnnouncementRejectsWrongLengthTipHash(
 		},
 	}
 
-	_, _, ok, err := adapter.ParentLeiosAnnouncement()
+	_, _, ok, err := adapter.ParentLeiosAnnouncement(context.Background())
 	if err == nil {
 		t.Fatal("expected an error for a 31-byte tip hash")
 	}

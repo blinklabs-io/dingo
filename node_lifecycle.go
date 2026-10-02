@@ -956,11 +956,11 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(ctx, n.config.listeners)
+				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts(ctx)
+				return n.ouroboros().OutboundConnOpts(n.ctx)
 			},
 			PromRegistry:            n.config.promRegistry,
 			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
@@ -1155,7 +1155,7 @@ func (n *Node) reinitializeAPIServers() error {
 				Metadata: n.db.Metadata(),
 				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
 					block, err := database.BlockByHash(
-						context.Background(),
+						n.ctx,
 						n.db,
 						hash,
 					)

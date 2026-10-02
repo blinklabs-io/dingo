@@ -679,7 +679,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		n.config.logger.Info(
 			"node settings gate enforcement deferred until database recovery completes",
 		)
-	} else if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+	} else if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
 		return fmt.Errorf("node settings: %w", err)
 	}
 	if pending, pendingErr := lifecycle.GetPendingTruncate(n.db); pendingErr != nil {
@@ -1179,11 +1179,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(ctx, n.config.listeners)
+				return n.ouroboros().ConfigureListeners(n.ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts(ctx)
+				return n.ouroboros().OutboundConnOpts(n.ctx)
 			},
 			PromRegistry:            n.config.promRegistry,
 			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
@@ -2178,7 +2178,7 @@ func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 		return fmt.Errorf("node settings phase 1: %w", err)
 	}
 	n.config.logger.Info("running deferred node settings gate enforcement")
-	if err := n.db.EnforceNodeSettings(n.nodeSettingsGateValues()); err != nil {
+	if err := n.db.EnforceNodeSettings(ctx, n.nodeSettingsGateValues()); err != nil {
 		return fmt.Errorf("node settings: %w", err)
 	}
 	return nil

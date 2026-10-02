@@ -133,7 +133,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err := db.Metadata().GetNodeSettingsGates()
+	gates, err := db.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	first := gates["blob_store_id"]
 	require.NotEmpty(t, first)
@@ -145,7 +145,7 @@ func TestBlobStoreIDIsMintedOnceAndStable(t *testing.T) {
 		Network:     "preprod",
 	})
 	require.NoError(t, err)
-	gates, err = reopened.Metadata().GetNodeSettingsGates()
+	gates, err = reopened.Metadata().GetNodeSettingsGates(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, first, gates["blob_store_id"])
 	require.NoError(t, closeTestDatabase(reopened))

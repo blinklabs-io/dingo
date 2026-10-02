@@ -32,7 +32,7 @@ type alonzoPParamsEraStore interface {
 }
 
 func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
-	gates, err := d.Metadata().GetNodeSettingsGates()
+	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -94,8 +94,8 @@ func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
 //
 // Missing and unknown markers are never inferred here. They remain hard
 // failures in checkAlonzoPParamsUnit rather than being silently blessed.
-func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
-	gates, err := d.Metadata().GetNodeSettingsGates()
+func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) error {
+	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"read Alonzo protocol-parameter unit marker: %w",
@@ -114,10 +114,12 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
 		// legacy and the following phase-1 check requires a resync.
 		return nil
 	}
+	txn := d.MetadataTxn(ctx, false)
 	hasAlonzo, err := store.HasPParamsForEra(
 		alonzo.EraIdAlonzo,
-		nil,
+		txn.Metadata(),
 	)
+	txn.Release()
 	if err != nil {
 		return fmt.Errorf(
 			"check recovered Alonzo protocol parameters: %w",
@@ -128,7 +130,7 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery() error {
 		return nil
 	}
 	epoch, slot := d.currentEpochSlot()
-	if err := d.Metadata().SetNodeSettingsGates(
+	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},
@@ -307,7 +309,7 @@ func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
 		}
 	}
 	epoch, slot := d.currentEpochSlot()
-	if err := d.Metadata().SetNodeSettingsGates(
+	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
 		},

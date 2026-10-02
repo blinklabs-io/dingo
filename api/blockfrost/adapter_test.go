@@ -117,7 +117,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, total)
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
@@ -131,7 +131,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page returns newest first", func(t *testing.T) {
-		items, gotTotal, err := adapter.AccountUTXOs(
+		items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 			stakeAddr,
 			PaginationParams{Count: 10, Page: 1, Order: PaginationOrderDesc},
 		)
@@ -145,7 +145,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page past the end is empty but reports the real total",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: 100,
@@ -162,7 +162,7 @@ func TestNodeAdapterAccountUTXOsLargeResultSetPagination(t *testing.T) {
 	t.Run(
 		"a page far beyond the address history is empty, not an error",
 		func(t *testing.T) {
-			items, gotTotal, err := adapter.AccountUTXOs(
+			items, gotTotal, err := adapter.AccountUTXOs(context.Background(),
 				stakeAddr,
 				PaginationParams{
 					Count: MaxPaginationCount,
@@ -185,7 +185,7 @@ func TestNodeAdapterAccountUTXOsEmpty(t *testing.T) {
 	adapter, raw, db := newDBBackedAdapter(t)
 	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
 
-	items, total, err := adapter.AccountUTXOs(
+	items, total, err := adapter.AccountUTXOs(context.Background(),
 		stakeAddr,
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -237,7 +237,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	}
 
 	t.Run("ascending page stops at the requested window", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 3, Order: PaginationOrderAsc},
 		)
@@ -249,7 +249,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page matches a full-history reverse", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 5, Order: PaginationOrderDesc},
 		)
@@ -263,7 +263,7 @@ func TestNodeAdapterAddressUTXOsLargeResultSetPagination(t *testing.T) {
 	})
 
 	t.Run("descending page past the end is empty", func(t *testing.T) {
-		items, total, err := adapter.AddressUTXOs(
+		items, total, err := adapter.AddressUTXOs(context.Background(),
 			addr.String(),
 			PaginationParams{Count: 10, Page: 26, Order: PaginationOrderDesc},
 		)
@@ -313,7 +313,7 @@ func TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch(t *testing.T) {
 	})
 	storePointerOutputCbor(t, db, txHash, 0, addr, 1_000_000)
 
-	items, total, err := adapter.AddressUTXOs(
+	items, total, err := adapter.AddressUTXOs(context.Background(),
 		addr.String(),
 		PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -649,7 +649,7 @@ func TestNodeAdapterEnterpriseAddressExcludesPointerUtxos(t *testing.T) {
 	require.Len(t, info.Amount, 1)
 	assert.Equal(t, "1000000", info.Amount[0].Quantity)
 
-	utxos, total, err := adapter.AddressUTXOs(
+	utxos, total, err := adapter.AddressUTXOs(context.Background(),
 		enterprise.String(),
 		PaginationParams{Count: 100, Page: 1, Order: PaginationOrderAsc},
 	)
@@ -929,7 +929,7 @@ func TestAccountRewardHistoryExcludesNonSpendableReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
@@ -978,7 +978,7 @@ func TestAccountRewardHistoryExcludesGuardedReward(t *testing.T) {
 		}, nil),
 	)
 
-	rows, total, err := adapter.AccountRewardHistory(
+	rows, total, err := adapter.AccountRewardHistory(context.Background(),
 		newRewardHistoryStakeAddress(t, stakingKey),
 		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)

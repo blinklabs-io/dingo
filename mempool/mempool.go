@@ -123,7 +123,7 @@ type TxValidator interface {
 // validators used by tests and alternate embeddings may continue to implement
 // only TxValidator.
 type TxValidationSessionProvider interface {
-	WithTxValidationSession(func(
+	WithTxValidationSession(context.Context, func(
 		validate func(
 			tx gledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -1385,7 +1385,7 @@ func (m *Mempool) withTxValidationSession(
 	) error,
 ) error {
 	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(fn)
+		return provider.WithTxValidationSession(context.Background(), fn)
 	}
 	return fn(m.validator.ValidateTxWithOverlay, func() bool { return true })
 }

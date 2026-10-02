@@ -340,7 +340,7 @@ func TestProcessEpochRatifiesWithMultipleKeyAndScriptProposalDeposits(
 	pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(40, 100)
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    epoch - 1,
@@ -516,7 +516,7 @@ func TestProcessEpochUpdateCommitteeThresholdUsesCommitteePresence(
 			pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(50, 100)
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    epoch - 1,

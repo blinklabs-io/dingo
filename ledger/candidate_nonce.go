@@ -221,6 +221,10 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	foldEndSlot uint64,
 	candidateBound uint64,
 ) ([]byte, []byte, error) {
+	if txn == nil {
+		txn = ls.db.Transaction(ctx, false)
+		defer txn.Release()
+	}
 	// Identify the actual last block of the FOLD in the blob store -- which is
 	// the epoch's last block only when the fold runs to the epoch's end. The
 	// evolving nonce is the nonce of THIS block, not whatever block_nonce row

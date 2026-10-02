@@ -124,7 +124,7 @@ func (ls *LedgerState) deferBoundaryJob(
 	// The callback runs in the committing goroutine before it returns, so no
 	// later block has committed yet; the first read below fixes the snapshot.
 	txn.AfterCommit(func() {
-		snapshot := ls.db.Transaction(context.Background(), false)
+		snapshot := ls.db.Transaction(ls.closeCtx(), false)
 		pinned, err := loadPendingRatification(ls.db, snapshot)
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
@@ -170,7 +170,7 @@ func (ls *LedgerState) runRatificationJob(
 		}
 	}
 	if err == nil && job.plan != nil {
-		decision, err = job.plan.Decide(snapshot)
+		decision, err = job.plan.Decide(ls.closeCtx(), snapshot)
 	}
 	snapshot.Release()
 	ls.ratificationMu.Lock()
@@ -394,7 +394,7 @@ func (ls *LedgerState) retryRatificationApply(ctx context.Context) {
 	if job.err != nil {
 		return
 	}
-	go ls.applyRatificationJob(ctx, job)
+	go ls.applyRatificationJob(context.WithoutCancel(ctx), job)
 }
 
 // resumePendingRatification rewinds below a boundary whose RATIFY decision a

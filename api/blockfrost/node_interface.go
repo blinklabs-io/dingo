@@ -14,6 +14,7 @@
 
 package blockfrost
 
+import "context"
 import "encoding/json"
 
 // BlockfrostNode is the interface that the Blockfrost API
@@ -64,7 +65,7 @@ type BlockfrostNode interface {
 	// PoolsList returns the paginated list of registered (active,
 	// non-retired) stake pool IDs, along with the total number of
 	// matching results before pagination.
-	PoolsList(PaginationParams) ([]string, int, error)
+	PoolsList(ctx context.Context, params PaginationParams) ([]string, int, error)
 
 	// Address returns summary information for an address,
 	// including balances aggregated across its live UTxOs.
@@ -82,12 +83,12 @@ type BlockfrostNode interface {
 	// pool (bech32 or hex ID), computing epoch-sensitive aggregates
 	// (blocks_epoch, live/active stake, saturation) as of the current
 	// epoch.
-	PoolDetail(poolID string) (PoolDetailInfo, error)
+	PoolDetail(ctx context.Context, poolID string) (PoolDetailInfo, error)
 
 	// AddressUTXOs returns the paginated current UTxOs for
 	// an address along with the total number of matching
 	// results before pagination.
-	AddressUTXOs(
+	AddressUTXOs(ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)
@@ -193,42 +194,42 @@ type BlockfrostNode interface {
 
 	// AccountAssociatedAddresses returns payment addresses
 	// associated with the requested stake address.
-	AccountAssociatedAddresses(
+	AccountAssociatedAddresses(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountAssociatedAddressInfo, int, error)
 
 	// AccountDelegationHistory returns delegation history
 	// rows for the requested stake address.
-	AccountDelegationHistory(
+	AccountDelegationHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountDelegationHistoryInfo, int, error)
 
 	// AccountRegistrationHistory returns registration
 	// history rows for the requested stake address.
-	AccountRegistrationHistory(
+	AccountRegistrationHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountRegistrationHistoryInfo, int, error)
 
 	// AccountRewardHistory returns reward history rows for
 	// the requested stake address.
-	AccountRewardHistory(
+	AccountRewardHistory(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountRewardHistoryInfo, int, error)
 
 	// AccountUTXOs returns the current UTxOs controlled by the
 	// stake credential behind the requested stake address.
-	AccountUTXOs(
+	AccountUTXOs(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountUTXOInfo, int, error)
 
 	// AccountWithdrawals returns withdrawal history rows for
 	// the requested stake address.
-	AccountWithdrawals(
+	AccountWithdrawals(context.Context,
 		string,
 		PaginationParams,
 	) ([]AccountWithdrawalInfo, int, error)
@@ -237,7 +238,7 @@ type BlockfrostNode interface {
 	// addresses controlled by the stake credential behind the
 	// requested stake address, optionally filtered by an
 	// inclusive from/to block-range position.
-	AccountTransactions(
+	AccountTransactions(context.Context,
 		string,
 		AccountTransactionsParams,
 	) ([]AccountTransactionInfo, int, error)

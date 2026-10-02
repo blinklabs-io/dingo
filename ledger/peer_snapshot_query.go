@@ -57,10 +57,9 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 // current chain tip rather than the acquired point. The reported slot is the
 // current tip slot. When that isolation lands, only the data-sourcing here
 // needs to observe the acquired view; the query surface stays the same.
-func (ls *LedgerState) queryLedgerPeerSnapshot(
-	peerKind olocalstatequery.LedgerPeerKind,
+func (ls *LedgerState) queryLedgerPeerSnapshot(ctx context.Context, peerKind olocalstatequery.LedgerPeerKind,
 ) (any, error) {
-	txn := ls.db.Transaction(context.Background(), false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 
 	// Read the tip from the same read transaction as the pool/stake data so
@@ -103,7 +102,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	pools, err := ls.db.GetPools(context.Background(), pkhs, txn)
+	pools, err := ls.db.GetPools(ctx, pkhs, txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get pools: %w", err)
 	}

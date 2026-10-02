@@ -89,7 +89,7 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *changingSessionValidator) WithTxValidationSession(
+func (v *changingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -131,7 +131,7 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *blockingSessionValidator) WithTxValidationSession(
+func (v *blockingSessionValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,
@@ -4573,7 +4573,7 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *blockingRejectingValidator) WithTxValidationSession(
+func (v *blockingRejectingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,

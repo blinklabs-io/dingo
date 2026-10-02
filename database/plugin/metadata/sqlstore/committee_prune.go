@@ -255,8 +255,8 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
 	tipTxn := s.ReadTransaction(ctx)
-	defer tipTxn.Rollback()      //nolint:errcheck
 	tip, err := s.GetTip(tipTxn) //nolint:contextcheck // tipTxn carries ctx
+	_ = tipTxn.Rollback()
 	if err != nil {
 		return fmt.Errorf("read tip for committee hot maintenance: %w", err)
 	}

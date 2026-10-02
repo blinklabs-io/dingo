@@ -178,7 +178,7 @@ func TestQueryShelleyStakeDistribution_ReportsFractionAndVrf(t *testing.T) {
 		Point: ocommon.NewPoint(1, tipHash),
 	}, nil))
 
-	result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	require.Len(t, dist.Results, 2)
@@ -245,7 +245,7 @@ func TestQueryShelleyStakeDistribution_ViaGetCBOR(t *testing.T) {
 		Point: ocommon.NewPoint(1, tipHash),
 	}, nil))
 
-	result, err := ls.Query(stakeDistributionCborQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), stakeDistributionCborQuery(), QueryPoint{})
 	require.NoError(
 		t,
 		err,
@@ -354,7 +354,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetPoolDistr2 must be unaffected: still sum-of-delegated (2_000_000),
 	// so each pool is 1/2.
-	poolDistr2Result, err := ls.Query(poolDistr2Query(), QueryPoint{})
+	poolDistr2Result, err := ls.Query(t.Context(), poolDistr2Query(), QueryPoint{})
 	require.NoError(t, err)
 	poolDistr2 := decodePoolDistr2Result(t, poolDistr2Result)
 	entryA2, ok := poolDistr2.Pools[lcommon.PoolId(pkhA)]
@@ -365,7 +365,7 @@ func TestQueryShelleyStakeDistribution_UsesCirculationNotGetPoolDistr2sTotal(
 
 	// GetStakeDistribution must use circulation (4_000_000) instead, so each
 	// pool is 1/4 -- not 1/2.
-	stakeDistResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	stakeDistResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	stakeDist := decodeStakeDistributionResult(t, stakeDistResult)
 	entryA, ok := stakeDist.Results[lcommon.PoolId(pkhA)]
@@ -406,8 +406,7 @@ func TestQueryShelleyStakeDistribution_PinnedAtLiveTip_Succeeds(t *testing.T) {
 		Point: ocommon.NewPoint(50, tipHash),
 	}, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 50, Hash: tipHash},
 	)
 	require.NoError(
@@ -472,8 +471,7 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 	// reserves for the slot-100 pin instead of the historical row above.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.NoError(t, err, "a real historical pin must now be answered")
@@ -491,7 +489,7 @@ func TestQueryShelleyStakeDistribution_PinnedBehindLiveTip_UsesHistoricalCircula
 	// The live (unpinned) query is unaffected: it still reads the latest
 	// NetworkState row, giving pool A a 1/6 fraction against 6_000_000
 	// circulation.
-	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	liveResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	liveDist := decodeStakeDistributionResult(t, liveResult)
 	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
@@ -547,8 +545,7 @@ func TestQueryShelleyStakeDistribution_PinnedBeforeAnyNetworkStateRow_Rejected(
 	// so GetNetworkStateAsOfSlot(100) finds nothing.
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 200, nil))
 
-	_, err := ls.Query(
-		stakeDistributionQuery(),
+	_, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.Error(t, err)
@@ -604,8 +601,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 	}, nil))
 	require.NoError(t, db.Metadata().SetNetworkState(0, 2_000_000, 100, nil))
 
-	result, err := ls.Query(
-		stakeDistributionQuery(),
+	result, err := ls.Query(t.Context(), stakeDistributionQuery(),
 		QueryPoint{Slot: 100, Hash: pastHash},
 	)
 	require.NoError(t, err)
@@ -619,7 +615,7 @@ func TestQueryShelleyStakeDistribution_PinnedVrfKeyUsesSlotNotLatestRegistration
 
 	// The live (unpinned) query is unaffected: it must report the pool's
 	// current key, since dingo validates incoming blocks against it.
-	liveResult, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+	liveResult, err := ls.Query(t.Context(), stakeDistributionQuery(), QueryPoint{})
 	require.NoError(t, err)
 	liveDist := decodeStakeDistributionResult(t, liveResult)
 	liveEntryA, ok := liveDist.Results[lcommon.PoolId(pkhA)]
@@ -640,7 +636,7 @@ func TestQueryShelleyStakeDistribution_EmptySnapshot(t *testing.T) {
 	db := newTestDB(t)
 	ls := newPoolDistr2Ledger(t, db)
 
-	result, err := ls.queryShelleyStakeDistribution(QueryPoint{}, nil)
+	result, err := ls.queryShelleyStakeDistribution(t.Context(), QueryPoint{}, nil)
 	require.NoError(t, err)
 	dist := decodeStakeDistributionResult(t, result)
 	assert.Empty(t, dist.Results)

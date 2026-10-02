@@ -176,7 +176,7 @@ Two gaps in that propagation are deliberate:
 `database.Database`'s own API carries the caller's `ctx` the rest of the way:
 `Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
 `NewMetadataOnlyTxn` pass it into the metadata store's `Transaction`/
-`ReadTransaction`, and every facade method that can open its own transaction
+`ReadTransaction`, and every facade method that can open its own metadata transaction
 (the block lookups such as `BlockByPoint` and `BlocksRecent`, and the domain
 methods that open one when called with a nil `txn`) takes `ctx` as its first
 parameter. A cancelled caller therefore cancels the metadata-store transaction
@@ -15089,3 +15089,9 @@ its own panics per-directory (`Manager.retryMirrorToCloud`) so one
 already-broken snapshot's cloud destination can't abort the scan for other
 directories or, since the scan runs synchronously ahead of the current
 epoch's own handling, block that epoch's own snapshot from ever running.
+
+LocalStateQuery handlers pass a request context through ledger queries and
+UTxO resolution workers. Reads are registered against their serving protocol
+instance before connection liveness is checked; closing that instance cancels
+its requests without canceling a replacement instance for the same connection
+identifier. UTxO RPC stake-distribution queries use their RPC request context.

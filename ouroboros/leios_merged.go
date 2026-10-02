@@ -2104,11 +2104,20 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 	connId ouroboros.ConnectionId,
 	owner *ochainsync.Server,
 ) ([]byte, error) {
+	ctx := context.Background()
+	if owner != nil {
+		connDone, cancelWaiter := o.registerLeiosServeWaiter(connId, owner)
+		defer cancelWaiter()
+		ctx = leiosConnDoneContext{done: connDone}
+	}
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(
-		context.Background(),
+		ctx,
 		block.Cbor,
 	)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		// A CertRB was identified but its bytes could not be spliced (malformed
 		// shape). This is a structural fault, not a missing closure; serve the
 		// raw block as a CBOR-safety fallback rather than wedging the client.
@@ -2129,9 +2138,12 @@ func (o *Ouroboros) serveLeiosRankingBlockCbor(
 		return merged, nil
 	}
 	ebHash, ebSlot, certified, resolved := o.certifiedEndorserBlockHash(
-		context.Background(),
+		ctx,
 		block.Cbor,
 	)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if !certified {
 		// Not a certifying ranking block (announcing or plain); serve as-is.
 		return block.Cbor, nil

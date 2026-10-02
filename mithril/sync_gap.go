@@ -294,6 +294,7 @@ func deleteBlobBlocksAboveSlot(
 	db *database.Database,
 	slot uint64,
 ) error {
+	ctx = context.WithoutCancel(ctx)
 	if slot == ^uint64(0) {
 		return nil
 	}

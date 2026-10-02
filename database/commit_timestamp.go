@@ -41,9 +41,9 @@ func (e CommitTimestampError) Error() string {
 	)
 }
 
-func (b *Database) checkCommitTimestamp() error {
+func (b *Database) checkCommitTimestamp(ctx context.Context) error {
 	// Get value from metadata
-	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp()
+	metadataTimestamp, metadataErr := b.Metadata().GetCommitTimestamp(ctx)
 	if metadataErr != nil {
 		return fmt.Errorf(
 			"failed to get metadata timestamp from plugin: %w",
@@ -193,14 +193,14 @@ func (d *Database) phase1GateValues() (nodesettings.Values, error) {
 // Reversing this order (copying the legacy row on top of the gate table)
 // would let that stale legacy column shadow a correctly-latched gate
 // value forever, which is exactly the bug this ordering fixes.
-func (d *Database) persistedGateValues() (nodesettings.Values, error) {
-	legacy, err := d.Metadata().GetNodeSettings()
+func (d *Database) persistedGateValues(ctx context.Context) (nodesettings.Values, error) {
+	legacy, err := d.Metadata().GetNodeSettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to get node settings from metadata: %w", err,
 		)
 	}
-	gates, err := d.Metadata().GetNodeSettingsGates()
+	gates, err := d.Metadata().GetNodeSettingsGates(ctx)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to get node settings gates from metadata: %w", err,
@@ -248,11 +248,11 @@ func (d *Database) persistedGateValues() (nodesettings.Values, error) {
 // ever touches network -- so this mirror can never contradict
 // node_settings_gate, which remains the only thing persistedGateValues
 // treats as authoritative for storage_mode.
-func (d *Database) writeGateValues(writes nodesettings.Values) error {
+func (d *Database) writeGateValues(ctx context.Context, writes nodesettings.Values) error {
 	if len(writes) == 0 {
 		return nil
 	}
-	legacy, err := d.Metadata().GetNodeSettings()
+	legacy, err := d.Metadata().GetNodeSettings(ctx)
 	if err != nil {
 		return fmt.Errorf(
 			"failed to get node settings from metadata: %w", err,
@@ -260,14 +260,14 @@ func (d *Database) writeGateValues(writes nodesettings.Values) error {
 	}
 	switch {
 	case legacy == nil:
-		if err := d.Metadata().SetNodeSettings(&types.NodeSettings{
+		if err := d.Metadata().SetNodeSettings(ctx, &types.NodeSettings{
 			StorageMode: writes["storage_mode"],
 			Network:     writes["network"],
 		}); err != nil {
 			return fmt.Errorf("failed to persist node settings: %w", err)
 		}
 	case legacy.Network == "" && writes["network"] != "":
-		if err := d.Metadata().SetNodeSettings(&types.NodeSettings{
+		if err := d.Metadata().SetNodeSettings(ctx, &types.NodeSettings{
 			StorageMode: legacy.StorageMode,
 			Network:     writes["network"],
 		}); err != nil {
@@ -275,7 +275,7 @@ func (d *Database) writeGateValues(writes nodesettings.Values) error {
 		}
 	}
 	epoch, slot := d.currentEpochSlot()
-	if err := d.Metadata().SetNodeSettingsGates(writes, epoch, slot); err != nil {
+	if err := d.Metadata().SetNodeSettingsGates(ctx, writes, epoch, slot); err != nil {
 		return fmt.Errorf("failed to persist node settings gates: %w", err)
 	}
 	d.writeDBInfoSidecar()
@@ -374,10 +374,10 @@ func mismatchStrings(mismatches []nodesettings.Mismatch) []string {
 // d.phase1GateValues() from a bare database open, phase 2 supplies node.go's
 // fully-resolved gate values -- so both callers reduce to a single call to
 // this with their own configured map.
-func (d *Database) evaluateAndPersistGates(
+func (d *Database) evaluateAndPersistGates(ctx context.Context,
 	configured nodesettings.Values,
 ) error {
-	persisted, err := d.persistedGateValues()
+	persisted, err := d.persistedGateValues(ctx)
 	if err != nil {
 		return err
 	}
@@ -438,7 +438,7 @@ func (d *Database) evaluateAndPersistGates(
 	}
 	if len(firstFill) > 0 {
 		epoch, slot := d.currentEpochSlot()
-		inserted, err := d.Metadata().InsertNodeSettingsGatesIfAbsent(
+		inserted, err := d.Metadata().InsertNodeSettingsGatesIfAbsent(ctx,
 			firstFill, epoch, slot,
 		)
 		if err != nil {
@@ -454,7 +454,7 @@ func (d *Database) evaluateAndPersistGates(
 			// sequential second start would do -- rather than trusting the
 			// persisted map read at the top of this function, which is now
 			// stale for at least the reserved names.
-			persisted, err = d.persistedGateValues()
+			persisted, err = d.persistedGateValues(ctx)
 			if err != nil {
 				return err
 			}
@@ -470,7 +470,7 @@ func (d *Database) evaluateAndPersistGates(
 			}
 		}
 	}
-	if err := d.writeGateValues(result.Writes); err != nil {
+	if err := d.writeGateValues(ctx, result.Writes); err != nil {
 		return err
 	}
 	// Verify every write actually landed rather than trusting the store
@@ -479,7 +479,7 @@ func (d *Database) evaluateAndPersistGates(
 	// writeGateValues's doc comment), so this turns any future write path
 	// that can drop a gate the same way into a loud startup failure instead
 	// of a database that quietly never enforces it.
-	persistedAfter, err := d.persistedGateValues()
+	persistedAfter, err := d.persistedGateValues(ctx)
 	if err != nil {
 		return err
 	}
@@ -520,7 +520,7 @@ func (d *Database) CheckNodeSettings(ctx context.Context) error {
 	// stopped after a committed rollback removed the final Alonzo row but
 	// before it rewrote the conservative legacy marker, a later ordinary open
 	// has matching commit timestamps and would not re-enter recovery.
-	if err := d.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
+	if err := d.ReconcileAlonzoPParamsUnitAfterRecovery(ctx); err != nil {
 		return err
 	}
 	if err := d.checkAlonzoPParamsUnit(ctx); err != nil {
@@ -530,5 +530,5 @@ func (d *Database) CheckNodeSettings(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return d.evaluateAndPersistGates(configured)
+	return d.evaluateAndPersistGates(ctx, configured)
 }

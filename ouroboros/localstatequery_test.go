@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -441,4 +442,21 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 		"the connection must remain usable after a graceful AcquireFailure",
 	)
 	require.NoError(t, client.Release())
+}
+
+func TestLocalStateQueryRequestCanceledByOwnerClose(t *testing.T) {
+	t.Parallel()
+	o := &Ouroboros{}
+	owner := &olocalstatequery.Server{}
+	other := &olocalstatequery.Server{}
+	callback := olocalstatequery.CallbackContext{Server: owner}
+	ctx, cleanup := o.localstatequeryRequestContext(callback)
+	defer cleanup()
+	o.ReleaseLocalStateQueryAcquiredPointOwner(callback.ConnectionId, other)
+	require.NoError(t, ctx.Err())
+	o.ReleaseLocalStateQueryAcquiredPointOwner(callback.ConnectionId, owner)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Empty(t, o.localstatequeryRequests)
+	cleanup()
+	require.Empty(t, o.localstatequeryRequests)
 }

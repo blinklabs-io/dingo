@@ -195,10 +195,10 @@ type blockingLedgerPeerProvider struct {
 	release   chan struct{}
 }
 
-func (m *blockingLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (m *blockingLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	m.startOnce.Do(func() { close(m.started) })
 	<-m.release
-	return m.mockLedgerPeerProvider.GetPoolRelays()
+	return m.mockLedgerPeerProvider.GetPoolRelays(ctx)
 }
 
 // TestPeerGovernorStopWaitsForInFlightGoroutines guards a real bug: Stop
@@ -1905,7 +1905,7 @@ type mockLedgerPeerProvider struct {
 	err         error
 }
 
-func (m *mockLedgerPeerProvider) GetPoolRelays() ([]PoolRelay, error) {
+func (m *mockLedgerPeerProvider) GetPoolRelays(ctx context.Context) ([]PoolRelay, error) {
 	if m.err != nil {
 		return nil, m.err
 	}

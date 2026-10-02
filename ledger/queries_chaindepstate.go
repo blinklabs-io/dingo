@@ -159,11 +159,11 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 // schedule, so leaving it unhandled does not merely fail one query: an
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
-func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
+func (ls *LedgerState) queryShelleyDebugChainDepState(ctx context.Context) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
 	// snapshots.
-	txn := ls.db.Transaction(context.Background(), false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 
 	tip, current, err := ls.epochAtTip(txn)
@@ -176,7 +176,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		lastSlot.Slot = tip.Point.Slot
 	}
 
-	counters, err := ls.chainDepStateOpCertCounters(txn)
+	counters, err := ls.chainDepStateOpCertCounters(ctx, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		// describes it at the tip. Recomputed here through the same function
 		// the consensus path uses at a boundary, stopped at the tip.
 		candidate, evolving, err := ls.computeCandidateNonceAsOf(
-			context.Background(),
+			ctx,
 			txn,
 			current.EraId,
 			current.EvolvingNonce,
@@ -386,11 +386,11 @@ func (ls *LedgerState) chainDepStateLabNonce(
 // never minted has no accepted number to report, and a pool that minted and
 // has since left the active set still has one the chain enforces against any
 // block claiming its cold key.
-func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
+func (ls *LedgerState) chainDepStateOpCertCounters(ctx context.Context, txn *database.Txn) (
 	map[lcommon.Blake2b224]uint64,
 	error,
 ) {
-	sequences, err := ls.db.LatestPoolOpCertSequences(context.Background(), txn)
+	sequences, err := ls.db.LatestPoolOpCertSequences(ctx, txn)
 	if err != nil {
 		return nil, err
 	}

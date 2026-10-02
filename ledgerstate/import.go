@@ -682,9 +682,8 @@ func ImportLedgerState(
 	}
 
 	// RebuildRewardLiveStake is a full-table rebuild in a single expensive
-	// transaction and takes no context, so it cannot observe cancellation once
-	// started. Bail out here if the import was cancelled during the preceding
-	// phases rather than beginning the rebuild on an interrupted sync.
+	// transaction. Check cancellation before starting; the rebuild also checks
+	// the caller context between SQL batches.
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf(
 			"cancelled before rebuilding reward live stake: %w",

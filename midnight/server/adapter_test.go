@@ -15,6 +15,7 @@
 package server_test
 
 import (
+	"context"
 	"math"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestBlockByNumber_OverflowIsRejected(t *testing.T) {
 	db := newTestDatabase(t)
 	adapted := server.NewDatabase(db)
 
-	_, err := adapted.BlockByNumber(math.MaxUint64)
+	_, err := adapted.BlockByNumber(context.Background(), math.MaxUint64)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -41,7 +42,7 @@ func TestBlockByNumber_ResolvesInsertedBlock(t *testing.T) {
 	blk := insertPlaceholderBlock(t, db, 5, 5, 0x05)
 	adapted := server.NewDatabase(db)
 
-	got, err := adapted.BlockByNumber(5)
+	got, err := adapted.BlockByNumber(context.Background(), 5)
 	require.NoError(t, err)
 	require.Equal(t, blk.Hash, got.Hash)
 }

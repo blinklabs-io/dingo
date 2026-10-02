@@ -298,7 +298,9 @@ func ResolveTargetBySlot(
 	db *database.Database,
 	slot uint64,
 ) (models.Block, error) {
-	tip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	tip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by slot: get tip: %w", err,
@@ -324,6 +326,9 @@ func ResolveTargetBySlot(
 	lo, hi := uint64(1), tipBlock.ID
 	var best *models.Block
 	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
 		mid := lo + (hi-lo)/2
 		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {
@@ -375,7 +380,9 @@ func ResolveTargetByNumber(
 	db *database.Database,
 	number uint64,
 ) (models.Block, error) {
-	tip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	tip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return models.Block{}, fmt.Errorf(
 			"resolve target by number: get tip: %w", err,
@@ -400,6 +407,9 @@ func ResolveTargetByNumber(
 	// forward to the next actually-indexed block instead of failing.
 	lo, hi := uint64(1), tipBlock.ID
 	for lo <= hi {
+		if err := ctx.Err(); err != nil {
+			return models.Block{}, err
+		}
 		mid := lo + (hi-lo)/2
 		block, err := db.BlockAtOrAfterIndex(mid, nil)
 		if err != nil {

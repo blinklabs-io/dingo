@@ -385,7 +385,7 @@ func (ls *LedgerState) handleDBTxnResult(ctx context.Context, err error) error {
 			"partial commit detected, attempting recovery: " + err.Error(),
 		)
 		// Attempt to recover from the partial commit state
-		if recoveryErr := ls.RecoverCommitTimestampConflict(ctx); recoveryErr != nil {
+		if recoveryErr := ls.RecoverCommitTimestampConflict(context.WithoutCancel(ctx)); recoveryErr != nil {
 			ls.config.Logger.Error(
 				"failed to recover from partial commit: " + recoveryErr.Error(),
 			)
@@ -484,12 +484,19 @@ func (ls *LedgerState) submitBlockApplyDBTxn(
 	return ls.handleDBTxnResult(ctx, err)
 }
 
+func (ls *LedgerState) lifecycleContext() context.Context {
+	if ls.ctx != nil {
+		return ls.ctx
+	}
+	return context.Background()
+}
+
 // SubmitAsyncDBReadTxn submits a read-only database transaction operation for execution on the worker pool.
 // This method blocks waiting for the result and must be called after Start() and before Close().
-func (ls *LedgerState) SubmitAsyncDBReadTxn(
+func (ls *LedgerState) SubmitAsyncDBReadTxn(ctx context.Context,
 	opFunc func(txn *database.Txn) error,
 ) error {
-	return ls.SubmitAsyncDBTxn(context.Background(), opFunc, false)
+	return ls.SubmitAsyncDBTxn(ctx, opFunc, false)
 }
 
 // Shutdown stops accepting new operations, then waits for every already
@@ -2362,7 +2369,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict(
 			"error", cleanupErr,
 		)
 	}
-	if err := ls.db.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
+	if err := ls.db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx); err != nil {
 		return errors.Join(committedRollbackErr, fmt.Errorf(
 			"reconcile Alonzo protocol-parameter unit after recovery: %w",
 			err,
@@ -7304,7 +7311,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				if !ok {
 					return fmt.Errorf("unknown era ID %d", workingEraId)
 				}
-				result, err := ls.processEpochRollover(
+				result, err := ls.processEpochRollover(ctx,
 					txn,
 					snapshotEpoch,
 					*workingEraPtr,
@@ -10087,7 +10094,7 @@ func (ls *LedgerState) setEpochCache(
 		ls.applyEraTransition(result)
 	}
 	// Generate initial epoch
-	rolloverResult, err := ls.processEpochRollover(
+	rolloverResult, err := ls.processEpochRollover(context.Background(),
 		txn,
 		ls.currentEpoch,
 		ls.currentEra,
@@ -12557,10 +12564,10 @@ func (ls *LedgerState) NewView(txn *database.Txn) *LedgerView {
 }
 
 // TransactionByHash returns a transaction record by its hash.
-func (ls *LedgerState) TransactionByHash(
+func (ls *LedgerState) TransactionByHash(ctx context.Context,
 	hash []byte,
 ) (*models.Transaction, error) {
-	return ls.db.GetTransactionByHash(context.Background(), hash, nil)
+	return ls.db.GetTransactionByHash(ctx, hash, nil)
 }
 
 // BlockByHash returns a block by its hash.
@@ -12984,7 +12991,7 @@ type txValidationApplyFunc func(
 	blockNumber uint64,
 ) error
 
-func (ls *LedgerState) WithTxValidationSession(
+func (ls *LedgerState) WithTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
 			tx ledger.Transaction,
@@ -12994,7 +13001,7 @@ func (ls *LedgerState) WithTxValidationSession(
 		stillCurrent func() bool,
 	) error,
 ) error {
-	return ls.withTxValidationSession(nil, nil, false, func(
+	return ls.withTxValidationSession(ctx, nil, nil, false, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
 		stillCurrent func() bool,
 		_ txValidationApplyFunc,
@@ -13003,7 +13010,7 @@ func (ls *LedgerState) WithTxValidationSession(
 	})
 }
 
-func (ls *LedgerState) withTxValidationSession(
+func (ls *LedgerState) withTxValidationSession(ctx context.Context,
 	expectedParentHash []byte,
 	referenceSlot *uint64,
 	readWrite bool,
@@ -13017,6 +13024,9 @@ func (ls *LedgerState) withTxValidationSession(
 		applyTx txValidationApplyFunc,
 	) error,
 ) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	snapshot := ls.txValidationSnapshot()
 	if expectedParentHash != nil &&
 		!bytes.Equal(snapshot.tipPoint.Hash, expectedParentHash) {
@@ -13026,7 +13036,7 @@ func (ls *LedgerState) withTxValidationSession(
 		snapshot.referenceSlot = *referenceSlot
 	}
 
-	txn := ls.db.Transaction(context.Background(), readWrite)
+	txn := ls.db.Transaction(ctx, readWrite)
 	// Validation sessions may stage ledger effects so later transactions see
 	// prior certificate and governance changes, but must never persist them.
 	rollbackValidationSession := errRollbackLedgerValidationSession
@@ -13122,7 +13132,7 @@ func (ls *LedgerState) withTxValidationSession(
 				UtxoOffsets: utxoOffsets,
 			}
 			return delta.applyWithoutRecordingDonations(
-				context.Background(),
+				ctx,
 				ls,
 				txn,
 			)
@@ -13176,7 +13186,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 		_, currentTip := ls.loadStateSnapshots()
 		return bytes.Equal(currentTip.currentTip.Point.Hash, parentHash)
 	}
-	return ls.withTxValidationSession(
+	return ls.withTxValidationSession(ctx,
 		parentHash,
 		&slot,
 		true,

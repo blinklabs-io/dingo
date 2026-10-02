@@ -36,7 +36,7 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	t.Parallel()
 
 	pparams := &shelley.ShelleyProtocolParameters{}
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		PParams: pparams,
 	})
 	require.NoError(t, err)
@@ -249,7 +249,7 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -344,7 +344,7 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -439,7 +439,7 @@ func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -550,7 +550,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -635,7 +635,7 @@ func TestProcessEpochReplaysBoundaryDroppedProposalAfterStakeRewardReset(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -726,7 +726,7 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -826,7 +826,7 @@ func TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify(
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
@@ -915,7 +915,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    4,
@@ -1077,7 +1077,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 				t.Helper()
 				txn := db.MetadataTxn(context.Background(), true)
 				defer txn.Release()
-				out, processErr := ProcessEpoch(&EpochInput{
+				out, processErr := ProcessEpoch(context.Background(), &EpochInput{
 					DB:           db,
 					Txn:          txn,
 					PrevEpoch:    prevEpoch,
@@ -1203,7 +1203,7 @@ func TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, processErr := ProcessEpoch(&EpochInput{
+		out, processErr := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    prevEpoch,
@@ -1292,7 +1292,7 @@ func TestProcessEpochReplaysBoundaryTreasuryWithdrawalAfterStakeRewardReset(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    4,
@@ -1439,7 +1439,7 @@ func TestProcessEpochUnclaimedDepositDoesNotIncreaseWithdrawalCapacity(
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -1811,7 +1811,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 
 			txn := db.MetadataTxn(context.Background(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(context.Background(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    currentEpoch - 1,
@@ -1852,7 +1852,7 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				assert.Equal(t, currentEpoch, *proposal.RatifiedEpoch)
 				if test.wantEnactment {
 					nextTxn := db.MetadataTxn(context.Background(), true)
-					nextOut, nextErr := ProcessEpoch(&EpochInput{
+					nextOut, nextErr := ProcessEpoch(context.Background(), &EpochInput{
 						DB:           db,
 						Txn:          nextTxn,
 						PrevEpoch:    currentEpoch,
@@ -2022,7 +2022,7 @@ func TestProcessEpochEnactedChildPreserved(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -2122,7 +2122,7 @@ func TestProcessEpochOrphanedSiblingMissingReturnAccountGoesToTreasury(
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -2225,7 +2225,7 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -2310,7 +2310,7 @@ func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -2368,7 +2368,7 @@ func TestProcessEpochOrphanedSiblingRestoredOnRollback(t *testing.T) {
 
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(context.Background(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    4,
@@ -2463,7 +2463,7 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 		t.Helper()
 		txn := db.MetadataTxn(context.Background(), true)
 		defer txn.Release()
-		out, err := ProcessEpoch(&EpochInput{
+		out, err := ProcessEpoch(context.Background(), &EpochInput{
 			DB:           db,
 			Txn:          txn,
 			PrevEpoch:    newEpoch - 1,
@@ -2606,6 +2606,7 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
 	require.NoError(t, err)
 	decision, err := decideRatification(
+		context.Background(),
 		in, &EpochOutput{UpdatedPParams: in.PParams}, conwayPParams, 0,
 	)
 	readTxn.Release()
@@ -2636,7 +2637,7 @@ func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
 
 	writeTxn := db.MetadataTxn(context.Background(), true)
 	defer writeTxn.Release()
-	out, err := ProcessEpoch(input(&EpochInput{Txn: writeTxn}))
+	out, err := ProcessEpoch(context.Background(), input(&EpochInput{Txn: writeTxn}))
 	require.NoError(t, err)
 	require.NoError(t, writeTxn.Commit())
 	require.Equal(t, 1, out.RatifiedCount)

@@ -13899,7 +13899,7 @@ func TestCalculateEpochNonce_ByronEra(t *testing.T) {
 	}
 
 	// Byron era should return nil nonce
-	nonce, _, _, _, err := ls.calculateEpochNonce(
+	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -13950,7 +13950,7 @@ func TestCalculateEpochNonce_InitialEpochWithoutNonce(t *testing.T) {
 	}
 
 	// Initial epoch should return genesis hash
-	nonce, _, _, _, err := ls.calculateEpochNonce(
+	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -14020,7 +14020,7 @@ func TestCalculateEpochNonce_InvalidGenesisHash(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(
+	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -14051,7 +14051,7 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 		},
 	}
 
-	_, _, _, _, err := ls.calculateEpochNonce(
+	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -14103,7 +14103,7 @@ func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
 
 	// Test will depend on whether the genesis loads successfully
 	// If it loads, we expect an error about negative k
-	_, _, _, _, err := ls.calculateEpochNonce(
+	_, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -14181,7 +14181,7 @@ func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 			}
 
 			// Initial epoch should return genesis hash
-			nonce, _, _, _, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 				nil,
 				0,
 				ls.currentEra,
@@ -14312,7 +14312,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 
 			// Test for Byron era - should return nil
 			if tc.era.Id == 0 {
-				nonce, _, _, _, err := ls.calculateEpochNonce(
+				nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 					nil,
 					0,
 					ls.currentEra,
@@ -14332,7 +14332,7 @@ func TestCalculateEpochNonce_StabilityWindowCalculation(t *testing.T) {
 			}
 
 			// For non-Byron eras, test initial epoch returns genesis hash
-			nonce, _, _, _, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 				nil,
 				0,
 				ls.currentEra,
@@ -14386,7 +14386,7 @@ func TestCalculateEpochNonce_IntegerArithmeticPrecision(t *testing.T) {
 	}
 
 	// Should handle fractional coefficients correctly using integer arithmetic
-	nonce, _, _, _, err := ls.calculateEpochNonce(
+	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		0,
 		ls.currentEra,
@@ -14534,7 +14534,7 @@ func TestCalculateEpochNonce_AllEras(t *testing.T) {
 				},
 			}
 
-			nonce, _, _, _, err := ls.calculateEpochNonce(
+			nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 				nil,
 				0,
 				ls.currentEra,
@@ -14593,7 +14593,7 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	}
 
 	// Byron era returns nil nonce immediately without genesis validation
-	nonce, _, _, _, err := ls.calculateEpochNonce(
+	nonce, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 		nil,
 		86400,
 		ls.currentEra,
@@ -15360,7 +15360,7 @@ func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
 	// entered.
 	var candidate []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, _, c, _, err := ls.calculateEpochNonce(
+		_, _, c, _, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
 			eras.BabbageEraDesc,
@@ -15555,7 +15555,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(
+		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -15687,7 +15687,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(
+		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -15831,7 +15831,7 @@ func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
 
 	var candidate, evolving []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		_, ev, c, _, err := ls.calculateEpochNonce(
+		_, ev, c, _, err := ls.calculateEpochNonce(context.Background(),
 			txn,
 			epochEnd,
 			eras.ConwayEraDesc,
@@ -16186,7 +16186,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 
 	var withEntropy, withoutParam []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, candidate, _, err := ls.calculateEpochNonce(
+		n, _, candidate, _, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		if err != nil {
@@ -16199,7 +16199,7 @@ func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
 			"candidate nonce must freeze at the pre-cutoff block nonce",
 		)
 		withEntropy = n
-		n, _, _, _, err = ls.calculateEpochNonce(
+		n, _, _, _, err = ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, neutral,
 		)
 		withoutParam = n
@@ -16308,7 +16308,7 @@ func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
 
 	var nonce []byte
 	require.NoError(t, db.Transaction(context.Background(), true).Do(func(txn *database.Txn) error {
-		n, _, _, _, err := ls.calculateEpochNonce(
+		n, _, _, _, err := ls.calculateEpochNonce(context.Background(),
 			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
 		)
 		nonce = n
@@ -17355,7 +17355,7 @@ END`)
 
 	txn := f.db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
-		_, rolloverErr := f.ls.processEpochRollover(
+		_, rolloverErr := f.ls.processEpochRollover(context.Background(),
 			txn,
 			f.currentEpoch,
 			eras.ConwayEraDesc,
@@ -17491,7 +17491,7 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 
 	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		_, rolloverErr := f.ls.processEpochRollover(
+		_, rolloverErr := f.ls.processEpochRollover(context.Background(),
 			txn,
 			f.currentEpoch,
 			eras.ConwayEraDesc,

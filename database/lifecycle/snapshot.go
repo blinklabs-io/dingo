@@ -201,9 +201,11 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}
-	tip, tipErr := db.GetTip(nil)
-	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
-	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
+	tipTxn := db.MetadataTxn(ctx, false)
+	tip, tipErr := db.GetTip(tipTxn)
+	tipTxn.Release()
+	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp(ctx)
+	gates, gatesErr := db.Metadata().GetNodeSettingsGates(ctx)
 
 	var backupErr, metadataErr error
 	var backupWG sync.WaitGroup

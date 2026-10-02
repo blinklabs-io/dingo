@@ -206,11 +206,11 @@ func (ls *LedgerState) verifyPointOnChain(
 // to gouroboros's own olocalstatequery.ErrAcquireFailurePointNotOnChain /
 // ErrAcquireFailurePointTooOld so the server replies gracefully instead of
 // closing the connection.
-func (ls *LedgerState) VerifyPointOnChain(at QueryPoint) error {
+func (ls *LedgerState) VerifyPointOnChain(ctx context.Context, at QueryPoint) error {
 	if !at.pinned() {
 		return nil
 	}
-	txn := ls.db.Transaction(context.Background(), false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 	return ls.verifyPointOnChain(txn, at)
 }
@@ -294,15 +294,14 @@ func errEpochNotResolved(at QueryPoint) error {
 // inside the same snapshot verifyPointOnChain already validated at
 // against, so a rollback landing between validation and this read cannot
 // make the two disagree about which chain they're describing.
-func (ls *LedgerState) queryShelleyEpochNo(
-	at QueryPoint,
+func (ls *LedgerState) queryShelleyEpochNo(ctx context.Context, at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if !at.pinned() {
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(context.Background(), false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -371,15 +370,14 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // ReAcquire, or disconnect -- a cross-cutting feature spanning three
 // independent pruning subsystems, not a fix scoped to this function.
 // Deferred rather than rushed; tracked as a follow-up issue.
-func (ls *LedgerState) VerifyPointQueryable(
-	txn *database.Txn,
+func (ls *LedgerState) VerifyPointQueryable(ctx context.Context, txn *database.Txn,
 	at QueryPoint,
 ) error {
 	if !at.pinned() {
 		return nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(context.Background(), false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 	}
 	if err := ls.verifyPointOnChain(txn, at); err != nil {
@@ -391,7 +389,7 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if err := ls.verifyStakeDistributionRetentionOnly(txn, at); err != nil {
 		return err
 	}
-	if _, err := ls.queryShelleyCurrentProtocolParams(at, txn); err != nil {
+	if _, err := ls.queryShelleyCurrentProtocolParams(ctx, at, txn); err != nil {
 		return err
 	}
 	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
@@ -400,8 +398,7 @@ func (ls *LedgerState) VerifyPointQueryable(
 	// the same reason every other check above is: Querying has no Failure
 	// transition, so a rejection surfacing from Query instead of here
 	// drops the connection rather than returning a clean AcquireFailure.
-	if _, err := ls.queryHardFork(
-		&olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
+	if _, err := ls.queryHardFork(ctx, &olocalstatequery.HardForkQuery{Query: &olocalstatequery.HardForkCurrentEraQuery{}},
 		at, txn,
 	); err != nil {
 		return err
@@ -428,8 +425,8 @@ func (ls *LedgerState) VerifyPointQueryable(
 // query type ignores at and continues answering from live state; full
 // scope (every query pinnable at any historical point) remains out of
 // scope for what cross-node validation via node-parity actually needs.
-func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
-	return ls.query(query, at, 0)
+func (ls *LedgerState) Query(ctx context.Context, query any, at QueryPoint) (any, error) {
+	return ls.query(ctx, query, at, 0)
 }
 
 // QueryWithProtocolVersion answers a LocalStateQuery using the negotiated
@@ -437,24 +434,25 @@ func (ls *LedgerState) Query(query any, at QueryPoint) (any, error) {
 // A zero version preserves the direct-call behavior used by non-network
 // callers and selects the current result layout only where the result itself
 // is constructed as such.
-func (ls *LedgerState) QueryWithProtocolVersion(
-	query any,
+func (ls *LedgerState) QueryWithProtocolVersion(ctx context.Context, query any,
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
-	return ls.query(query, at, protocolVersion)
+	return ls.query(ctx, query, at, protocolVersion)
 }
 
-func (ls *LedgerState) query(
-	query any,
+func (ls *LedgerState) query(ctx context.Context, query any,
 	at QueryPoint,
 	protocolVersion uint16,
 ) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// The latest boundary's mark snapshot and RATIFY marks may still be
 	// written by its background job; answer ledger-state queries from the
 	// state it decided, and before any pinned read opens.
 	if _, ok := query.(*olocalstatequery.BlockQuery); ok {
-		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+		if err := ls.WaitEpochBoundaryJob(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -468,7 +466,7 @@ func (ls *LedgerState) query(
 	// the canonical chain.
 	var txn *database.Txn
 	if at.pinned() {
-		txn = ls.db.Transaction(context.Background(), false)
+		txn = ls.db.Transaction(ctx, false)
 		defer txn.Release()
 		if err := ls.verifyPointOnChain(txn, at); err != nil {
 			return nil, err
@@ -476,35 +474,34 @@ func (ls *LedgerState) query(
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q, at, txn, protocolVersion)
+		return ls.queryBlock(ctx, q, at, txn, protocolVersion)
 	case *olocalstatequery.SystemStartQuery:
-		return ls.querySystemStart()
+		return ls.querySystemStart(ctx)
 	case *olocalstatequery.ChainBlockNoQuery:
-		return ls.queryChainBlockNo()
+		return ls.queryChainBlockNo(ctx)
 	case *olocalstatequery.ChainPointQuery:
-		return ls.queryChainPoint()
+		return ls.queryChainPoint(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
 }
 
-func (ls *LedgerState) queryBlock(
-	query *olocalstatequery.BlockQuery,
+func (ls *LedgerState) queryBlock(ctx context.Context, query *olocalstatequery.BlockQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(q, at, txn)
+		return ls.queryHardFork(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyQuery:
-		return ls.queryShelley(q, at, txn, protocolVersion)
+		return ls.queryShelley(ctx, q, at, txn, protocolVersion)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
 }
 
-func (ls *LedgerState) querySystemStart() (any, error) {
+func (ls *LedgerState) querySystemStart(ctx context.Context) (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return nil, errors.New(
@@ -534,7 +531,7 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 // uniformity for no real benefit.
 //
 //nolint:unparam // (any, error) matches every other case in Query's
-func (ls *LedgerState) queryChainBlockNo() (any, error) {
+func (ls *LedgerState) queryChainBlockNo(ctx context.Context) (any, error) {
 	tip := ls.loadTipSnapshot().currentTip
 	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
 	if len(tip.Point.Hash) == 0 {
@@ -544,7 +541,7 @@ func (ls *LedgerState) queryChainBlockNo() (any, error) {
 }
 
 //nolint:unparam // see queryChainBlockNo's identical note just above.
-func (ls *LedgerState) queryChainPoint() (any, error) {
+func (ls *LedgerState) queryChainPoint(ctx context.Context) (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
 
@@ -571,8 +568,7 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 // differs from dingo's live one -- e.g. pinning at genesis (slot 0)
 // against a dingo instance already many eras past it
 // (node-parity --from-genesis validation).
-func (ls *LedgerState) queryHardFork(
-	query *olocalstatequery.HardForkQuery,
+func (ls *LedgerState) queryHardFork(ctx context.Context, query *olocalstatequery.HardForkQuery,
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
@@ -582,7 +578,7 @@ func (ls *LedgerState) queryHardFork(
 			return ls.loadConsensusSnapshot().currentEra.Id, nil
 		}
 		if txn == nil {
-			txn = ls.db.Transaction(context.Background(), false)
+			txn = ls.db.Transaction(ctx, false)
 			defer txn.Release()
 		}
 		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
@@ -620,7 +616,7 @@ func (ls *LedgerState) queryHardFork(
 		}
 		return era.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
-		return ls.queryHardForkEraHistory()
+		return ls.queryHardForkEraHistory(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -668,7 +664,7 @@ type eraBoundData struct {
 	end    []any // same shape; nil for empty eras and populated current era
 }
 
-func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
+func (ls *LedgerState) queryHardForkEraHistory(ctx context.Context) (any, error) {
 	// Read the tip, current era, and transition info from the lock-free
 	// snapshots so this (potentially slow) DB-querying path never contends
 	// with the ledger write lock.
@@ -933,13 +929,12 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 	return time.Duration(ns.Int64())
 }
 
-func (ls *LedgerState) queryShelley(
-	query *olocalstatequery.ShelleyQuery,
+func (ls *LedgerState) queryShelley(ctx context.Context, query *olocalstatequery.ShelleyQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
-	return ls.queryShelleyLeaf(query.Query, at, txn, protocolVersion)
+	return ls.queryShelleyLeaf(ctx, query.Query, at, txn, protocolVersion)
 }
 
 // queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
@@ -1020,53 +1015,50 @@ func (ls *LedgerState) queryShelley(
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
-func (ls *LedgerState) queryShelleyLeaf(
-	query any,
+func (ls *LedgerState) queryShelleyLeaf(ctx context.Context, query any,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
 	switch q := query.(type) {
 	case *olocalstatequery.ShelleyCborQuery:
-		return ls.queryShelleyCbor(q, at, txn, protocolVersion)
+		return ls.queryShelleyCbor(ctx, q, at, txn, protocolVersion)
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		return ls.queryShelleyEpochNo(at, txn)
+		return ls.queryShelleyEpochNo(ctx, at, txn)
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		return ls.queryShelleyCurrentProtocolParams(at, txn)
+		return ls.queryShelleyCurrentProtocolParams(ctx, at, txn)
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
-		return ls.queryShelleyGenesisConfig(protocolVersion)
+		return ls.queryShelleyGenesisConfig(ctx, protocolVersion)
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
-		return ls.queryShelleyUtxoByAddress(q.Addrs)
+		return ls.queryShelleyUtxoByAddress(ctx, q.Addrs)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
-		return ls.queryShelleyUtxoByTxIn(q.TxIns, at, txn)
+		return ls.queryShelleyUtxoByTxIn(ctx, q.TxIns, at, txn)
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
-		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
-			q.Creds.Items(),
-		)
+		return ls.queryShelleyFilteredDelegationAndRewardAccounts(ctx, q.Creds.Items())
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
-		return ls.queryShelleyStakeDelegDeposits(q.Creds.Items())
+		return ls.queryShelleyStakeDelegDeposits(ctx, q.Creds.Items())
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
-		return ls.queryLedgerPeerSnapshot(q.PeerKind)
+		return ls.queryLedgerPeerSnapshot(ctx, q.PeerKind)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
-		return ls.queryShelleyStakePools()
+		return ls.queryShelleyStakePools(ctx)
 	case *olocalstatequery.ShelleyDRepStateQuery:
-		return ls.queryShelleyDRepState(q.Credentials.Items())
+		return ls.queryShelleyDRepState(ctx, q.Credentials.Items())
 	case *olocalstatequery.ShelleyAccountStateQuery:
-		return ls.queryShelleyAccountState()
+		return ls.queryShelleyAccountState(ctx)
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
-		return ls.queryShelleyStakeSnapshots(q)
+		return ls.queryShelleyStakeSnapshots(ctx, q)
 	case *olocalstatequery.ShelleyFilteredVoteDelegateesQuery:
-		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
+		return ls.queryShelleyFilteredVoteDelegatees(ctx, q.Credentials.Items())
 	case *olocalstatequery.ShelleyGetProposalsQuery:
-		return ls.queryShelleyGetProposals(q.ActionIds.Items())
+		return ls.queryShelleyGetProposals(ctx, q.ActionIds.Items())
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
-		return ls.queryShelleyDebugChainDepState()
+		return ls.queryShelleyDebugChainDepState(ctx)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
-		return ls.queryShelleyPoolDistr2(q, at, txn)
+		return ls.queryShelleyPoolDistr2(ctx, q, at, txn)
 	case *olocalstatequery.ShelleyStakeDistributionQuery:
-		return ls.queryShelleyStakeDistribution(at, txn)
+		return ls.queryShelleyStakeDistribution(ctx, at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
-		return ls.queryShelleyUtxoWhole(at, txn)
+		return ls.queryShelleyUtxoWhole(ctx, at, txn)
 	// TODO: implement the remaining Shelley ledger queries below.
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -1090,13 +1082,12 @@ func (ls *LedgerState) queryShelleyLeaf(
 // (CBOR-in-CBOR, tag 24), matching cardano-node. cardano-cli wraps several
 // queries this way (e.g. `query stake-snapshot`), so the whole class of
 // GetCBOR-wrapped queries flows through here.
-func (ls *LedgerState) queryShelleyCbor(
-	q *olocalstatequery.ShelleyCborQuery,
+func (ls *LedgerState) queryShelleyCbor(ctx context.Context, q *olocalstatequery.ShelleyCborQuery,
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
 ) (any, error) {
-	inner, err := ls.queryShelleyLeaf(q.Query, at, txn, protocolVersion)
+	inner, err := ls.queryShelleyLeaf(ctx, q.Query, at, txn, protocolVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,8 +1154,7 @@ func (ls *LedgerState) queryShelleyCbor(
 // for delayed reward calculation. dingo persists each boundary snapshot under
 // type "mark" keyed by its epoch, so set/go for the current epoch are read
 // from the mark snapshots at epoch-1 and epoch-2.
-func (ls *LedgerState) queryShelleyStakeSnapshots(
-	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
+func (ls *LedgerState) queryShelleyStakeSnapshots(ctx context.Context, q *olocalstatequery.ShelleyStakeSnapshotsQuery,
 ) (any, error) {
 	pools, all := q.PoolFilter()
 	consensus := ls.loadConsensusSnapshot()
@@ -1185,7 +1175,7 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// Read the mark/set/go snapshots under a single read transaction so all
 	// three epochs come from one consistent view even if an epoch boundary
 	// fires mid-query.
-	txn := ls.db.Transaction(context.Background(), false)
+	txn := ls.db.Transaction(ctx, false)
 	defer txn.Release()
 	metaTxn := txn.Metadata()
 
@@ -1520,8 +1510,7 @@ func (ls *LedgerState) circulatingSupplyGenesis() *gshelley.ShelleyGenesis {
 	return genesis
 }
 
-func (ls *LedgerState) queryShelleyGenesisConfig(
-	protocolVersion uint16,
+func (ls *LedgerState) queryShelleyGenesisConfig(ctx context.Context, protocolVersion uint16,
 ) (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if protocolVersion == 0 ||
@@ -1645,8 +1634,8 @@ func genesisConfigResult(
 // query unconditionally while balancing a transaction (e.g. `transaction
 // build`), so leaving it unhandled tears down the local-state-query
 // connection.
-func (ls *LedgerState) queryShelleyStakePools() (any, error) {
-	keyHashes, err := ls.db.GetActivePoolKeyHashes(context.Background(), nil)
+func (ls *LedgerState) queryShelleyStakePools(ctx context.Context) (any, error) {
+	keyHashes, err := ls.db.GetActivePoolKeyHashes(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1661,8 +1650,7 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 // epoch, optional anchor, deposit}. A malformed stored credential fails the
 // whole query: returning a map that silently omits one active DRep would
 // claim to be the complete state for this point.
-func (ls *LedgerState) queryShelleyDRepState(
-	creds []lcommon.Credential,
+func (ls *LedgerState) queryShelleyDRepState(ctx context.Context, creds []lcommon.Credential,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetDRepState",
@@ -1678,16 +1666,16 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// below, bounded by the query item limit checked above.
 	var allDeposits map[string]uint64
 	if len(creds) == 0 {
-		all, err := ls.db.GetActiveDreps(context.Background(), nil)
+		all, err := ls.db.GetActiveDreps(ctx, nil)
 		if err != nil {
 			return nil, err
 		}
-		allDelegators, err = ls.allDRepDelegators()
+		allDelegators, err = ls.allDRepDelegators(ctx)
 		if err != nil {
 			return nil, err
 		}
 		allDeposits, err = ls.db.GetDrepLastRegistrationDeposits(
-			context.Background(),
+			ctx,
 			nil,
 		)
 		if err != nil {
@@ -1701,7 +1689,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 			drep, err := ls.db.GetDrepByCredential(
-				context.Background(),
+				ctx,
 				credentialTag,
 				cred.Credential[:],
 				false,
@@ -1729,7 +1717,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 		// DRepState.drepDeposit and `query drep-state` serialises that
 		// stored field; nothing on the reference query path consults
 		// ppDRepDeposit.
-		deposit, err := ls.drepRecordedDeposit(drep, allDeposits)
+		deposit, err := ls.drepRecordedDeposit(ctx, drep, allDeposits)
 		if err != nil {
 			return nil, err
 		}
@@ -1741,7 +1729,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 			}.MapKey()]
 		} else {
 			var err error
-			delegators, err = ls.drepDelegators(drep)
+			delegators, err = ls.drepDelegators(ctx, drep)
 			if err != nil {
 				return nil, err
 			}
@@ -1786,8 +1774,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 // registered DRep without one is a state the reference cannot hold;
 // validation reads the same row through LedgerView.DRepRegistration, which
 // reports the same recorded amount.
-func (ls *LedgerState) drepRecordedDeposit(
-	drep *models.Drep,
+func (ls *LedgerState) drepRecordedDeposit(ctx context.Context, drep *models.Drep,
 	deposits map[string]uint64,
 ) (uint64, error) {
 	if deposits != nil {
@@ -1797,7 +1784,7 @@ func (ls *LedgerState) drepRecordedDeposit(
 		)], nil
 	}
 	recorded, err := ls.db.GetDrepLastRegistrationDeposit(
-		context.Background(),
+		ctx,
 		drep.CredentialTag,
 		drep.Credential,
 		nil,
@@ -1822,7 +1809,7 @@ func (ls *LedgerState) drepRecordedDeposit(
 // count on every empty GetDRepState request.
 const allDRepDelegatorsBatchSize = 10_000
 
-func (ls *LedgerState) allDRepDelegators() (
+func (ls *LedgerState) allDRepDelegators(ctx context.Context) (
 	map[string][]olocalstatequery.StakeCredential,
 	error,
 ) {
@@ -1835,7 +1822,7 @@ func (ls *LedgerState) allDRepDelegators() (
 		end := min(start+allDRepDelegatorsBatchSize, len(refs))
 		batch := refs[start:end]
 		accounts, err := ls.db.GetAccountsByCredential(
-			context.Background(),
+			ctx,
 			batch,
 			false,
 			nil,
@@ -1889,7 +1876,7 @@ func (ls *LedgerState) allDRepDelegators() (
 // in the single-element result array, so the wire shape is
 // [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
 // reserves negative).
-func (ls *LedgerState) queryShelleyAccountState() (any, error) {
+func (ls *LedgerState) queryShelleyAccountState(ctx context.Context) (any, error) {
 	state, err := ls.db.Metadata().GetNetworkState(nil)
 	if err != nil {
 		return nil, err
@@ -1932,11 +1919,10 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 // voting power to the given DRep, as the wire type, in canonical (tag, hash)
 // order so the resulting CBOR set (tag 258) is canonical — cardano clients
 // reject an unsorted set with "Canonicity violation".
-func (ls *LedgerState) drepDelegators(
-	drep *models.Drep,
+func (ls *LedgerState) drepDelegators(ctx context.Context, drep *models.Drep,
 ) ([]olocalstatequery.StakeCredential, error) {
 	refs, err := ls.db.GetDRepDelegators(
-		context.Background(),
+		ctx,
 		drep.CredentialTag,
 		drep.Credential,
 		nil,
@@ -1997,15 +1983,14 @@ func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 	return []any{poolIds}, nil
 }
 
-func (ls *LedgerState) queryShelleyUtxoByAddress(
-	addrs []ledger.Address,
+func (ls *LedgerState) queryShelleyUtxoByAddress(ctx context.Context, addrs []ledger.Address,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
 	utxos, err := ls.db.UtxosByAddress(
-		context.Background(),
+		ctx,
 		addrs,
 		database.MaxUtxosByAddressResults,
 		nil,
@@ -2047,8 +2032,7 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 // filtered out. The delegations map only contains accounts whose `Pool`
 // is currently set; an account that is registered but undelegated will
 // appear in the rewards map only.
-func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
-	creds []olocalstatequery.StakeCredential,
+func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(ctx context.Context, creds []olocalstatequery.StakeCredential,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetFilteredDelegationsAndRewardAccounts",
@@ -2081,10 +2065,10 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	}
 	var accounts map[string]*models.Account
 	pending := make(map[string]uint64)
-	readTxn := ls.db.Transaction(context.Background(), false)
+	readTxn := ls.db.Transaction(ctx, false)
 	if err := readTxn.Do(func(txn *database.Txn) error {
 		var err error
-		accounts, err = ls.db.GetAccountsByCredential(context.Background(), stakeCreds, false, txn)
+		accounts, err = ls.db.GetAccountsByCredential(ctx, stakeCreds, false, txn)
 		if err != nil {
 			return err
 		}
@@ -2136,8 +2120,7 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 // registration deposit currently locked by each requested active stake
 // credential. The latest registration event carries the historical deposit
 // actually paid, which may differ from the current protocol parameter.
-func (ls *LedgerState) queryShelleyStakeDelegDeposits(
-	creds []olocalstatequery.StakeCredential,
+func (ls *LedgerState) queryShelleyStakeDelegDeposits(ctx context.Context, creds []olocalstatequery.StakeCredential,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetStakeDelegDeposits",
@@ -2152,7 +2135,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 			return nil, err
 		}
 		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
-			context.Background(),
+			ctx,
 			credentialTag,
 			cred.Bytes[:],
 			1,
@@ -2183,8 +2166,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 // queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
 // each requested active stake credential. Credentials without a vote
 // delegation are omitted.
-func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
-	creds []lcommon.Credential,
+func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(ctx context.Context, creds []lcommon.Credential,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
 		"GetFilteredVoteDelegatees",
@@ -2216,7 +2198,7 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 		refs = append(refs, ref)
 	}
 	accounts, err := ls.db.GetAccountsByCredential(
-		context.Background(),
+		ctx,
 		refs,
 		false,
 		nil,
@@ -2268,12 +2250,11 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 
 // queryShelleyGetProposals returns the active Conway governance proposals,
 // optionally filtered by action ID.
-func (ls *LedgerState) queryShelleyGetProposals(
-	actionIds []lcommon.GovActionId,
+func (ls *LedgerState) queryShelleyGetProposals(ctx context.Context, actionIds []lcommon.GovActionId,
 ) (any, error) {
 	// GetProposals returns the Conway proposals set, which keeps an action
 	// RATIFY classified expired until the boundary that drops it.
-	proposals, err := ls.db.GetGovernanceProposalSet(context.Background(), nil)
+	proposals, err := ls.db.GetGovernanceProposalSet(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2298,7 +2279,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 				continue
 			}
 		}
-		state, err := ls.governanceProposalState(proposal, id)
+		state, err := ls.governanceProposalState(ctx, proposal, id)
 		if err != nil {
 			return nil, err
 		}
@@ -2307,8 +2288,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 	return []any{ret}, nil
 }
 
-func (ls *LedgerState) governanceProposalState(
-	proposal *models.GovernanceProposal,
+func (ls *LedgerState) governanceProposalState(ctx context.Context, proposal *models.GovernanceProposal,
 	id lcommon.GovActionId,
 ) (olocalstatequery.GovActionState, error) {
 	rewardAccount, err := lcommon.NewAddressFromBytes(proposal.ReturnAddress)
@@ -2355,7 +2335,7 @@ func (ls *LedgerState) governanceProposalState(
 		ExpiresAfter:      proposal.ExpiresEpoch,
 	}
 	votes, err := ls.db.GetGovernanceVotes(
-		context.Background(),
+		ctx,
 		proposal.ID,
 		nil,
 	)
@@ -2441,8 +2421,7 @@ func stakeCredentialFromVote(
 // node's spent-UTxO retention floor: see its doc comment for why answering
 // past that floor risks a silently wrong "absent" result instead of an
 // honest rejection.
-func (ls *LedgerState) queryShelleyUtxoByTxIn(
-	txIns []ledger.ShelleyTransactionInput,
+func (ls *LedgerState) queryShelleyUtxoByTxIn(ctx context.Context, txIns []ledger.ShelleyTransactionInput,
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
@@ -2461,20 +2440,20 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 	var err error
 	if at.pinned() {
 		if txn == nil {
-			txn = ls.db.Transaction(context.Background(), false)
+			txn = ls.db.Transaction(ctx, false)
 			defer txn.Release()
 		}
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
 		utxos, err = ls.db.UtxosByRefsAsOf(
-			context.Background(),
+			ctx,
 			refs,
 			at.Slot,
 			txn,
 		)
 	} else {
-		utxos, err = ls.db.UtxosByRefs(context.Background(), refs, txn)
+		utxos, err = ls.db.UtxosByRefs(ctx, refs, txn)
 	}
 	if err != nil {
 		return nil, err

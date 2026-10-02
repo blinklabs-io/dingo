@@ -3593,7 +3593,7 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 	}, nil)
 
 	tx := &conway.ConwayTransaction{TxIsValid: true}
-	err := ls.WithTxValidationSession(func(
+	err := ls.WithTxValidationSession(context.Background(), func(
 		validate func(
 			tx lcommon.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
@@ -3896,7 +3896,7 @@ func runProposalSetBoundary(
 	t.Helper()
 	txn := db.MetadataTxn(context.Background(), true)
 	defer txn.Release()
-	out, err := governance.ProcessEpoch(&governance.EpochInput{
+	out, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
@@ -6955,7 +6955,7 @@ func (f *treasuryRolloverFixture) rollover(
 	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = f.ls.processEpochRollover(
+		result, rolloverErr = f.ls.processEpochRollover(context.Background(),
 			txn,
 			currentEpoch,
 			eras.ConwayEraDesc,
@@ -7091,7 +7091,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 		var providerTreasury uint64
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			if _, err := governance.ProcessEpoch(&governance.EpochInput{
+			if _, err := governance.ProcessEpoch(context.Background(), &governance.EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    endedEpoch,

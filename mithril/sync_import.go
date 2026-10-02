@@ -125,7 +125,9 @@ func updateMithrilReadyState(
 	syncStatus string,
 	clearSyncState bool,
 ) error {
-	ledgerTip, err := db.GetTip(nil)
+	tipTxn := db.MetadataTxn(ctx, false)
+	ledgerTip, err := db.GetTip(tipTxn)
+	tipTxn.Release()
 	if err != nil {
 		return fmt.Errorf("reading imported ledger tip: %w", err)
 	}

@@ -358,7 +358,7 @@ func TestChainDepStateRejectsMalformedStoredEpochNonce(t *testing.T) {
 	))
 	ls := newChainDepStateLedger(t, db)
 
-	result, err := ls.Query(chainDepStateQuery(), QueryPoint{})
+	result, err := ls.Query(t.Context(), chainDepStateQuery(), QueryPoint{})
 	require.ErrorContains(t, err, "chain dep state epoch nonce")
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)

@@ -1353,7 +1353,7 @@ func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
 		alonzo.EraIdAlonzo,
 		nil,
 	))
-	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(context.Background(), 
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
 		},

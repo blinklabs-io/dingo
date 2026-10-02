@@ -89,7 +89,7 @@ func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
 		},
 	}
 
-	result, err := ls.Query(query, QueryPoint{})
+	result, err := ls.Query(t.Context(), query, QueryPoint{})
 	require.NoError(t, err)
 
 	snapshot, ok := result.(olocalstatequery.LedgerPeerSnapshotResult)
@@ -107,9 +107,7 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 
 	ls := &LedgerState{db: newTestDB(t)}
 
-	result, err := ls.queryLedgerPeerSnapshot(
-		olocalstatequery.LedgerPeerKindAll,
-	)
+	result, err := ls.queryLedgerPeerSnapshot(t.Context(), olocalstatequery.LedgerPeerKindAll)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)
@@ -128,9 +126,7 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.queryLedgerPeerSnapshot(
-		olocalstatequery.LedgerPeerKindAll,
-	)
+	result, err := ls.queryLedgerPeerSnapshot(t.Context(), olocalstatequery.LedgerPeerKindAll)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)

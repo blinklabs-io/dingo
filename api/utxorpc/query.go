@@ -767,7 +767,7 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	// Resolve the transaction metadata to find it's containing block.
-	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(hash)
+	txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(ctx, hash)
 	if err != nil {
 		return nil, fmt.Errorf("lookup transaction: %w", err)
 	}

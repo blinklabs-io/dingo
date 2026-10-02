@@ -97,7 +97,7 @@ func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *oneShotBlockingValidator) WithTxValidationSession(
+func (v *oneShotBlockingValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		validate func(
 			gledger.Transaction,

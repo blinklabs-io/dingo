@@ -93,7 +93,7 @@ func praosPrefersCandidateSibling(
 // It reports whether the block was adopted. Losing chain selection is a normal
 // outcome and returns (false, nil): the rival keeps the slot and the forged
 // block is discarded undiffused.
-func (ls *LedgerState) AdoptLocalForgedSibling(
+func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	block gledger.Block,
 ) (bool, error) {
 	if ls == nil || ls.chain == nil {
@@ -110,7 +110,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 
-	parent, incumbentTip, ok := ls.chain.TipPredecessor(context.Background())
+	parent, incumbentTip, ok := ls.chain.TipPredecessor(ctx)
 	if !ok {
 		return false, fmt.Errorf(
 			"%w: chain tip has no resolvable predecessor",
@@ -188,7 +188,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(
 			err,
 		)
 	}
-	if _, err := ls.chain.AddLocalBlockDeferred(context.Background(), block); err != nil {
+	if _, err := ls.chain.AddLocalBlockDeferred(ctx, block); err != nil {
 		// The chain is now at the fork point with neither candidate on it.
 		// That is recoverable -- chainsync re-offers the rival's header,
 		// which no longer conflicts with our tip -- but it is not a state

@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -154,6 +155,8 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	acquireTarget olocalstatequery.AcquireTarget,
 	reAcquire bool,
 ) error {
+	requestCtx, cancel := o.localstatequeryRequestContext(ctx)
+	defer cancel()
 	if specific, ok := acquireTarget.(olocalstatequery.AcquireSpecificPoint); ok {
 		point := ledger.QueryPoint{
 			Slot: specific.Point.Slot,
@@ -182,7 +185,7 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// VerifyPointQueryable's own doc comment covers verifyPointOnChain
 		// too, so this subsumes VerifyPointOnChain rather than needing
 		// both checks run separately.
-		if err := o.ledgerState.VerifyPointQueryable(nil, point); err != nil {
+		if err := o.ledgerState.VerifyPointQueryable(requestCtx, nil, point); err != nil {
 			if errors.Is(err, ledger.ErrPointNotOnChain) {
 				return fmt.Errorf(
 					"%w: %w",
@@ -243,6 +246,8 @@ func (o *Ouroboros) localstatequeryServerQuery(
 	ctx olocalstatequery.CallbackContext,
 	query olocalstatequery.QueryWrapper,
 ) (any, error) {
+	requestCtx, cancel := o.localstatequeryRequestContext(ctx)
+	defer cancel()
 	o.localstatequeryAcquireMutex.Lock()
 	at := o.localstatequeryAcquiredPoints[ctx.ConnectionId]
 	o.localstatequeryAcquireMutex.Unlock()
@@ -253,6 +258,7 @@ func (o *Ouroboros) localstatequeryServerQuery(
 		}
 	}
 	return o.ledgerState.QueryWithProtocolVersion(
+		requestCtx,
 		query.Query,
 		at,
 		protocolVersion,
@@ -272,6 +278,19 @@ func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
 ) {
 	o.localstatequeryAcquireMutex.Lock()
 	defer o.localstatequeryAcquireMutex.Unlock()
+	requests := o.localstatequeryRequests[connId]
+	for i := len(requests) - 1; i >= 0; i-- {
+		if requests[i].owner == owner {
+			requests[i].cancel()
+			requests = append(requests[:i], requests[i+1:]...)
+		}
+	}
+	if len(requests) == 0 {
+		delete(o.localstatequeryRequests, connId)
+	} else {
+		o.localstatequeryRequests[connId] = requests
+	}
+
 	_, ok := o.localstatequeryAcquiredPoints[connId]
 	currentOwner := o.localstatequeryOwners[connId]
 	if !ok || (currentOwner != nil && currentOwner != owner) {
@@ -328,4 +347,48 @@ func (o *Ouroboros) HasLocalStateQueryAcquiredPointForTesting(
 	defer o.localstatequeryAcquireMutex.Unlock()
 	_, ok := o.localstatequeryAcquiredPoints[connId]
 	return ok
+}
+
+// localstatequeryRequest tracks reads that must stop when their serving
+// connection closes, even while its callback prevents the protocol loop exiting.
+type localstatequeryRequest struct {
+	owner  *olocalstatequery.Server
+	cancel context.CancelFunc
+}
+
+func (o *Ouroboros) localstatequeryRequestContext(callback olocalstatequery.CallbackContext) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	request := &localstatequeryRequest{owner: callback.Server, cancel: cancel}
+	o.localstatequeryAcquireMutex.Lock()
+	if o.localstatequeryRequests == nil {
+		o.localstatequeryRequests = make(map[ouroboros.ConnectionId][]*localstatequeryRequest)
+	}
+	o.localstatequeryRequests[callback.ConnectionId] = append(o.localstatequeryRequests[callback.ConnectionId], request)
+	o.localstatequeryAcquireMutex.Unlock()
+	cleanup := func() {
+		cancel()
+		o.localstatequeryAcquireMutex.Lock()
+		defer o.localstatequeryAcquireMutex.Unlock()
+		requests := o.localstatequeryRequests[callback.ConnectionId]
+		for i, current := range requests {
+			if current == request {
+				requests = append(requests[:i], requests[i+1:]...)
+				break
+			}
+		}
+		if len(requests) == 0 {
+			delete(o.localstatequeryRequests, callback.ConnectionId)
+		} else {
+			o.localstatequeryRequests[callback.ConnectionId] = requests
+		}
+	}
+	// Register before checking liveness so a simultaneous connection close
+	// cannot fall between the check and registration and strand the read.
+	if o.connManager != nil {
+		conn := o.connManager.GetConnectionById(callback.ConnectionId)
+		if conn == nil || conn.LocalStateQuery() == nil || conn.LocalStateQuery().Server != callback.Server {
+			cleanup()
+		}
+	}
+	return ctx, cleanup
 }

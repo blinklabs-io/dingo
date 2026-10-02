@@ -155,6 +155,7 @@ type Ouroboros struct {
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	localstatequeryAcquireMutex   sync.Mutex
+	localstatequeryRequests       map[ouroboros.ConnectionId][]*localstatequeryRequest
 	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the

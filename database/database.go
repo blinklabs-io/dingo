@@ -286,7 +286,7 @@ func (d *Database) init(ctx context.Context) error {
 		d.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	// Check commit timestamp
-	if err := d.checkCommitTimestamp(); err != nil {
+	if err := d.checkCommitTimestamp(ctx); err != nil {
 		return err
 	}
 	// Check immutable settings have not changed since initial sync

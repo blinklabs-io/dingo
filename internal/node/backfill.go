@@ -427,6 +427,9 @@ func (b *Backfill) resolvePParams(
 					era.PParamsUpdateFunc, nil, nil,
 				)
 				if ppErr != nil {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					b.logger.Warn(
 						"pparam update resolution failed",
 						"component", "backfill",

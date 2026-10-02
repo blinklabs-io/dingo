@@ -1176,6 +1176,9 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 	batchOffset := 0
 	batchSize := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		batchSize = min(
 			blockImportBatchSize,
 			len(blocks)-batchOffset,
@@ -1226,13 +1229,17 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 					savedBlocks = slices.Clone(c.blocks)
 				}
 				for _, tmpBlock := range blocks[batchOffset : batchOffset+batchSize] {
-					evt, err := c.addBlockLocked(
-						tmpBlock,
-						ocommon.Point{},
-						txn,
-						false,
-						true,
-					)
+					var evt event.Event
+					err := ctx.Err()
+					if err == nil {
+						evt, err = c.addBlockLocked(
+							tmpBlock,
+							ocommon.Point{},
+							txn,
+							false,
+							true,
+						)
+					}
 					if err != nil {
 						c.currentTip = savedTip
 						c.tipBlockIndex = savedTipBlockIndex
@@ -1253,7 +1260,7 @@ func (c *Chain) AddBlocks(ctx context.Context, blocks []ledger.Block) error {
 				appliedTipBlockIndex = c.tipBlockIndex
 				appliedGeneration = c.mutationGeneration
 				appliedHeaderGeneration = c.headerMutationGeneration
-				return nil
+				return ctx.Err()
 			})
 			if err != nil && batchApplied {
 				c.mutex.Lock()
@@ -1485,6 +1492,9 @@ func (c *Chain) addRawBlocks(
 	}
 	batchOffset := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		batchSize := min(blockImportBatchSize, len(blocks)-batchOffset)
 		if batchSize == 0 {
 			break
@@ -1540,11 +1550,15 @@ func (c *Chain) addRawBlocks(
 					savedBlocks = slices.Clone(c.blocks)
 				}
 				for _, rb := range batch {
-					evt, err := c.addRawBlockLocked(
-						rb,
-						txn,
-						callback,
-					)
+					var evt event.Event
+					err := ctx.Err()
+					if err == nil {
+						evt, err = c.addRawBlockLocked(
+							rb,
+							txn,
+							callback,
+						)
+					}
 					if err != nil {
 						c.currentTip = savedTip
 						c.tipBlockIndex = savedTipBlockIndex
@@ -1569,7 +1583,7 @@ func (c *Chain) addRawBlocks(
 				appliedTipBlockIndex = c.tipBlockIndex
 				appliedGeneration = c.mutationGeneration
 				appliedHeaderGeneration = c.headerMutationGeneration
-				return nil
+				return ctx.Err()
 			})
 			if err != nil {
 				// Cover the Commit-failure path: closure returned nil
@@ -2916,11 +2930,15 @@ func blockFollowsPoint(block models.Block, point ocommon.Point) bool {
 }
 
 func (c *Chain) nextPersistentBlockAfterSparseIndex(
+	ctx context.Context,
 	iter *ChainIterator,
 ) (models.Block, bool, error) {
 	if !c.persistent || iter.reverse ||
 		iter.nextBlockIndex > c.tipBlockIndex {
 		return models.Block{}, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, false, err
 	}
 	previousPoint := chainIteratorPreviousPoint(iter)
 	block, err := c.manager.blockAtOrAfterIndex(
@@ -3013,6 +3031,7 @@ func (c *Chain) iterNext(
 		tmpBlock, err := c.blockByIndexLocked(ctx, iter.nextBlockIndex)
 		if errors.Is(err, models.ErrBlockNotFound) && !iter.reverse {
 			recoveredBlock, recovered, recoverErr := c.nextPersistentBlockAfterSparseIndex(
+				ctx,
 				iter,
 			)
 			if recoverErr != nil {

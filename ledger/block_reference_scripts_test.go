@@ -114,7 +114,7 @@ func additionalReferenceAdmission(
 				return err
 			})
 		},
-		"forged": func() error { return ls.validateForgedTxs(block) },
+		"forged": func() error { return ls.validateForgedTxs(context.Background(), block) },
 	} {
 		t.Run(path, func(t *testing.T) {
 			err := run()
@@ -391,16 +391,16 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 		ls := &LedgerState{}
 		require.ErrorContains(
 			t,
-			ls.ValidateBlockReferenceScripts(nil),
+			ls.ValidateBlockReferenceScripts(context.Background(), nil),
 			"nil block",
 		)
 		require.NoError(
 			t,
-			ls.ValidateBlockReferenceScripts(&conway.ConwayBlock{}),
+			ls.ValidateBlockReferenceScripts(context.Background(), &conway.ConwayBlock{}),
 		)
 		require.NoError(
 			t,
-			ls.ValidateBlockReferenceScripts(&dijkstra.DijkstraBlock{}),
+			ls.ValidateBlockReferenceScripts(context.Background(), &dijkstra.DijkstraBlock{}),
 		)
 	})
 	for _, tc := range []struct {
@@ -459,12 +459,12 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 				// The active Dijkstra prototype may decode blocks using
 				// the concrete Conway type; its explicit bypass policy
 				// follows the active era rather than that block type.
-				require.NoError(t, ls.ValidateBlockReferenceScripts(block))
+				require.NoError(t, ls.ValidateBlockReferenceScripts(context.Background(), block))
 				return
 			}
 			require.ErrorContains(
 				t,
-				ls.ValidateBlockReferenceScripts(block),
+				ls.ValidateBlockReferenceScripts(context.Background(), block),
 				"resolve consumed reference-script input",
 				"Conway input lookup must not bypass aggregate validation or use Dijkstra parameters",
 			)

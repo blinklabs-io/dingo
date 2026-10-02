@@ -408,7 +408,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = ls.processEpochRollover(
+		result, rolloverErr = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -475,7 +475,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = ls.processEpochRollover(
+		result, rolloverErr = ls.processEpochRollover(context.Background(),
 			txn,
 			currentEpoch,
 			eras.DijkstraEraDesc,
@@ -3369,7 +3369,7 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 	// Execute epoch rollover for initial epoch
 	txn := db.Transaction(context.Background(), true)
 	err = txn.Do(func(txn *database.Txn) error {
-		result, err := ls.processEpochRollover(
+		result, err := ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -3491,7 +3491,7 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 		txn := db.Transaction(context.Background(), true)
 		err := txn.Do(func(txn *database.Txn) error {
 			var err error
-			result, err = ls.processEpochRollover(
+			result, err = ls.processEpochRollover(context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
@@ -3623,7 +3623,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 			// Add a small delay to give readers time to run
 			time.Sleep(50 * time.Millisecond)
 			var err error
-			result, err = ls.processEpochRollover(
+			result, err = ls.processEpochRollover(context.Background(),
 				txn,
 				snapshotEpoch,
 				snapshotEra,
@@ -6135,7 +6135,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err = ls.withTxValidationSession(nil, nil, true, func(
+	err = ls.withTxValidationSession(context.Background(), nil, nil, true, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
 		_ func() bool,
 		applyTx txValidationApplyFunc,
@@ -6970,7 +6970,7 @@ func TestBlockReferenceScriptLimitAdmission(t *testing.T) {
 						return err
 					})
 				},
-				"forged": func() error { return ls.validateForgedTxs(block) },
+				"forged": func() error { return ls.validateForgedTxs(context.Background(), block) },
 			} {
 				t.Run(path, func(t *testing.T) {
 					err := run()
@@ -8029,7 +8029,7 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		result, err = ls.processEpochRollover(
+		result, err = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -8100,7 +8100,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		result, err = ls.processEpochRollover(
+		result, err = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			sourceEra,
@@ -8168,7 +8168,7 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		result, err = ls.processEpochRollover(
+		result, err = ls.processEpochRollover(context.Background(),
 			txn,
 			ls.currentEpoch,
 			ls.currentEra,
@@ -8706,7 +8706,7 @@ func (f *hardForkRatifyFixture) rollover(
 	txn := f.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var rolloverErr error
-		result, rolloverErr = f.ls.processEpochRollover(
+		result, rolloverErr = f.ls.processEpochRollover(context.Background(),
 			txn,
 			currentEpoch,
 			eras.ConwayEraDesc,
@@ -13800,7 +13800,7 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	}, nil))
 	require.NoError(t, ls.persistConsumedUtxoPruneFloor(400, nil))
 
-	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
+	err := ls.VerifyPointQueryable(t.Context(), nil, QueryPoint{Slot: 350, Hash: hash})
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }

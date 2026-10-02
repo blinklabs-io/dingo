@@ -59,15 +59,15 @@ import (
 // would not reduce it. The response is bare pool ID strings, so slicing
 // the resulting hash slice in memory before conversion is cheap relative
 // to that query.
-func (a *NodeAdapter) PoolsList(
+func (a *NodeAdapter) PoolsList(ctx context.Context,
 	params PaginationParams,
 ) ([]string, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(context.Background(), false)
+	txn := db.Transaction(ctx, false)
 	defer txn.Release()
 
 	poolKeyHashes, err := db.GetActivePoolKeyHashesOrdered(
-		context.Background(),
+		ctx,
 		txn,
 	)
 	if err != nil {

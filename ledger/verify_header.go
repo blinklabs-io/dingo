@@ -178,7 +178,7 @@ func (ls *LedgerState) ValidateBlockHeaderCrypto(
 	if header == nil {
 		return errors.New("nil block header")
 	}
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(context.Background(),
 		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		false,
@@ -241,7 +241,7 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	if ls.headerApplied(header) {
 		return nil
 	}
-	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(context.Background(),
 		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		true,
@@ -375,21 +375,22 @@ func verifyBlockHeaderHex(
 func (ls *LedgerState) verifyBlockHeaderCrypto(
 	block ledger.Block,
 ) error {
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false)
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(context.Background(), block, true, false)
 }
 
 func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
 	block ledger.Block,
 ) error {
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, true)
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(context.Background(), block, true, true)
 }
 
 func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
+	ctx context.Context,
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 	allowStateDefer bool,
 ) error {
-	epoch, epochCache, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
+	epoch, epochCache, err := ls.verifyBlockHeaderStatelessCryptoWithCache(ctx,
 		block,
 		allowEpochCacheAdvance,
 	)
@@ -397,7 +398,7 @@ func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
 		return err
 	}
 	return ls.verifyBlockHeaderStateWithCache(
-		context.Background(),
+		ctx,
 		block, epoch.EpochId, epochCache, allowStateDefer,
 	)
 }
@@ -429,13 +430,14 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 ) (models.Epoch, error) {
-	epoch, _, err := ls.verifyBlockHeaderStatelessCryptoWithCache(
+	epoch, _, err := ls.verifyBlockHeaderStatelessCryptoWithCache(context.Background(),
 		block, allowEpochCacheAdvance,
 	)
 	return epoch, err
 }
 
 func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
+	ctx context.Context,
 	block ledger.Block,
 	allowEpochCacheAdvance bool,
 ) (models.Epoch, []models.Epoch, error) {
@@ -445,13 +447,13 @@ func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithCache(
 	// and issuer-window checks run during ledger application because parallel
 	// pre-validation cannot see earlier blocks in the same batch.
 	if block.Era().Id == byron.EraIdByron {
-		err := ls.validateByronPBFTHeaderCrypto(context.Background(), block)
+		err := ls.validateByronPBFTHeaderCrypto(ctx, block)
 		return models.Epoch{}, nil, err
 	}
 
 	blockSlot := block.SlotNumber()
 	epoch, epochCache, err := ls.headerVerificationEpochWithCache(
-		context.Background(),
+		ctx,
 		blockSlot,
 		allowEpochCacheAdvance,
 	)
@@ -1935,10 +1937,12 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 		return lcommon.Blake2b256{}, false, err
 	}
 	if ok {
+		txn := ls.db.MetadataTxn(ctx, false)
+		defer txn.Release()
 		vrfKeyHash, found, err := ls.db.Metadata().GetPoolVrfKeyHashAtSlot(
 			poolKeyHash[:],
 			cutoffSlot,
-			nil,
+			txn.Metadata(),
 		)
 		if err != nil {
 			return lcommon.Blake2b256{}, false, err
@@ -1972,7 +1976,7 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 			GetPoolEarliestVrfKeyHashAtSlot(
 				poolKeyHash[:],
 				capturedSlot,
-				nil,
+				txn.Metadata(),
 			)
 		if err != nil {
 			return lcommon.Blake2b256{}, false, err

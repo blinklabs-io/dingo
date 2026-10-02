@@ -448,11 +448,13 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 	if ledgerTipSlot <= ancestor.Slot {
 		return nil
 	}
+	nonceTxn := ls.db.MetadataTxn(ctx, false)
 	nonceRows, err := ls.db.GetBlockNoncesInSlotRange(
 		ancestor.Slot,
 		ledgerTipSlot+1,
-		nil,
+		nonceTxn,
 	)
+	nonceTxn.Release()
 	if err != nil {
 		ls.config.Logger.Warn(
 			"failed to read applied block points for reconciliation undo events",

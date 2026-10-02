@@ -191,7 +191,7 @@ func runHardForkRewardRound(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		rollover, rolloverErr := ls.processEpochRollover(
+		rollover, rolloverErr := ls.processEpochRollover(context.Background(),
 			txn,
 			*currentEpoch,
 			eras.ConwayEraDesc,

@@ -136,7 +136,7 @@ func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 		t,
 		db.Transaction(context.Background(), true).
 			Do(func(txn *database.Txn) error {
-				n, _, c, lab, err := ls.calculateEpochNonce(
+				n, _, c, lab, err := ls.calculateEpochNonce(context.Background(),
 					txn,
 					epochEnd,
 					eras.ConwayEraDesc,

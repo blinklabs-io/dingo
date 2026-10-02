@@ -119,6 +119,9 @@ func (p *Pruner) prune(ctx context.Context) {
 			}
 
 			if err := p.pruneBlock(ctx, next); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				p.logger.Error(
 					"history expiry: failed to expire block",
 					"error",

@@ -78,11 +78,11 @@ func (a *databaseAdapter) GetEpochBySlot(slot uint64) (*models.Epoch, error) {
 	return a.db.GetEpochBySlot(slot, nil)
 }
 
-func (a *databaseAdapter) BlockByHash(hash []byte) (models.Block, error) {
-	return database.BlockByHash(context.Background(), a.db, hash)
+func (a *databaseAdapter) BlockByHash(ctx context.Context, hash []byte) (models.Block, error) {
+	return database.BlockByHash(ctx, a.db, hash)
 }
 
-func (a *databaseAdapter) BlockByNumber(number uint64) (models.Block, error) {
+func (a *databaseAdapter) BlockByNumber(ctx context.Context, number uint64) (models.Block, error) {
 	// Cardano block numbers are 0-based; the blob store's internal index is
 	// 1-based (database.BlockInitialIndex). Translate here, the same way
 	// api/blockfrost's block-by-height lookup does, so callers deal only in
@@ -99,10 +99,10 @@ func (a *databaseAdapter) BlockByNumber(number uint64) (models.Block, error) {
 	return a.db.BlockByIndex(number+database.BlockInitialIndex, nil)
 }
 
-func (a *databaseAdapter) BlocksRecent(count int) ([]models.Block, error) {
-	return database.BlocksRecent(context.Background(), a.db, count)
+func (a *databaseAdapter) BlocksRecent(ctx context.Context, count int) ([]models.Block, error) {
+	return database.BlocksRecent(ctx, a.db, count)
 }
 
-func (a *databaseAdapter) BlockBeforeSlot(slot uint64) (models.Block, error) {
-	return database.BlockBeforeSlot(context.Background(), a.db, slot)
+func (a *databaseAdapter) BlockBeforeSlot(ctx context.Context, slot uint64) (models.Block, error) {
+	return database.BlockBeforeSlot(ctx, a.db, slot)
 }

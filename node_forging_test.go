@@ -101,7 +101,7 @@ func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	require.NoError(t, broadcaster.AddBlock(blocks[0], blocks[0].Cbor()))
+	require.NoError(t, broadcaster.AddBlock(context.Background(), blocks[0], blocks[0].Cbor()))
 	require.Equal(
 		t,
 		blocks[0].Hash().Bytes(),
@@ -124,7 +124,7 @@ func TestBlockBroadcasterRejectsUnavailableChain(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	err = broadcaster.AddBlock(blocks[0], blocks[0].Cbor())
+	err = broadcaster.AddBlock(context.Background(), blocks[0], blocks[0].Cbor())
 	require.EqualError(t, err, "chain unavailable")
 }
 
@@ -1222,7 +1222,7 @@ func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
 		},
 	}
 
-	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement()
+	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement(context.Background())
 	if err != nil {
 		t.Fatalf("ParentLeiosAnnouncement: %v", err)
 	}
@@ -1466,7 +1466,7 @@ type forgedValidationRecorder struct {
 	err            error
 }
 
-func (v *forgedValidationRecorder) ValidateForgedBlock(
+func (v *forgedValidationRecorder) ValidateForgedBlock(context.Context,
 	gledger.Block,
 	[]byte,
 ) error {
@@ -1474,7 +1474,7 @@ func (v *forgedValidationRecorder) ValidateForgedBlock(
 	return v.err
 }
 
-func (v *forgedValidationRecorder) ValidateBlockReferenceScripts(
+func (v *forgedValidationRecorder) ValidateBlockReferenceScripts(context.Context,
 	gledger.Block,
 ) error {
 	v.aggregateCalls++
@@ -1498,13 +1498,13 @@ func TestForgedBlockValidatorDefaultAndFullModes(t *testing.T) {
 			)
 			require.ErrorIs(
 				t,
-				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+				validator.ValidateForgedBlock(context.Background(), &conway.ConwayBlock{}, nil),
 				failure,
 			)
 			state.err = nil
 			require.NoError(
 				t,
-				validator.ValidateForgedBlock(&conway.ConwayBlock{}, nil),
+				validator.ValidateForgedBlock(context.Background(), &conway.ConwayBlock{}, nil),
 			)
 			if full {
 				require.Equal(t, 2, state.fullCalls)

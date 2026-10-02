@@ -1284,7 +1284,7 @@ func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	return nil
 }
 
-func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
+func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(ctx context.Context,
 	fn func(
 		func(
 			gledger.Transaction,

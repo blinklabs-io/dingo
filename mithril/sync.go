@@ -66,10 +66,12 @@ func setStableMithrilLedgerTip(
 	// from the same certified immutable block while keeping the metadata
 	// cursor at the stable point; otherwise envelope validation would compare
 	// the first replayed block against a synthetic block number zero.
-	if err := db.SetTip(ochainsync.Tip{
-		Point:       point,
-		BlockNumber: block.Number,
-	}, nil); err != nil {
+	if err := db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
+		return db.SetTip(ochainsync.Tip{
+			Point:       point,
+			BlockNumber: block.Number,
+		}, txn)
+	}); err != nil {
 		return fmt.Errorf(
 			"recording stable Mithril anchor block number: %w",
 			err,

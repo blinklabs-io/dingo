@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -114,14 +115,14 @@ func TestPoolRelayProviderCacheHit(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// First call should return cached data
-	result1, err := adapter.GetPoolRelays()
+	result1, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result1, len(relays))
 	require.Equal(t, relays[0].Hostname, result1[0].Hostname)
 	require.Equal(t, relays[1].Hostname, result1[1].Hostname)
 
 	// Second call should also return cached data (same values)
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result2, len(relays))
 	require.Equal(t, relays[0].Hostname, result2[0].Hostname)
@@ -143,7 +144,7 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated initially
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -157,7 +158,7 @@ func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 
 	// After TTL expires, GetPoolRelays should re-fetch from DB.
 	// The in-memory DB has no pool registrations, so it returns empty.
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -176,7 +177,7 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -190,7 +191,7 @@ func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 	adapter.cacheMu.RUnlock()
 
 	// Next call should re-fetch from DB (returns empty since no data)
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(
 		t,
@@ -212,7 +213,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Verify cache is populated
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, len(relays))
 
@@ -236,7 +237,7 @@ func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	)
 
 	// After invalidation, fetching returns empty (no DB data)
-	result, err = adapter.GetPoolRelays()
+	result, err = adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 }
@@ -251,7 +252,7 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Get the first copy
-	result1, err := adapter.GetPoolRelays()
+	result1, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result1, 2)
 
@@ -269,7 +270,7 @@ func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	})
 
 	// Get a second copy from the cache
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -322,14 +323,14 @@ func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
 	seedCache(adapter, relays)
 
 	// Get a copy and mutate the IPv6 address
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	require.NotNil(t, result[0].IPv6)
 	(*result[0].IPv6)[0] = 0xFF
 
 	// Get another copy and verify it is unaffected
-	result2, err := adapter.GetPoolRelays()
+	result2, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -351,7 +352,7 @@ func TestPoolRelayProviderNilEventBus(t *testing.T) {
 	require.NotNil(t, adapter)
 
 	// Basic operations should still work
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 
@@ -366,7 +367,7 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
 	// With no seeded cache and empty DB, GetPoolRelays should return empty
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, result)
 
@@ -432,7 +433,7 @@ func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 			defer func() { done <- struct{}{} }()
 			for range iterations {
 				// Mix of reads and invalidations
-				_, _ = adapter.GetPoolRelays()
+				_, _ = adapter.GetPoolRelays(context.Background())
 				adapter.InvalidateCache()
 				seedCache(adapter, relays)
 			}
@@ -478,7 +479,7 @@ func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 	}
 	seedCache(adapter, relays)
 
-	result, err := adapter.GetPoolRelays()
+	result, err := adapter.GetPoolRelays(context.Background())
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	require.Equal(t, "hostname-only.example.com", result[0].Hostname)

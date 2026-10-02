@@ -787,7 +787,7 @@ func TestProcessEpochAgainstRealBackend(t *testing.T) {
 	txn := m.db.Transaction(context.Background(), true)
 	defer txn.Release()
 
-	_, err = governance.ProcessEpoch(&governance.EpochInput{
+	_, err = governance.ProcessEpoch(context.Background(), &governance.EpochInput{
 		DB:           m.db,
 		Txn:          txn,
 		PrevEpoch:    0,

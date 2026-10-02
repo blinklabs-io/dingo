@@ -15,8 +15,6 @@
 package dingo
 
 import (
-	"context"
-
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
@@ -59,7 +57,7 @@ func (n *Node) midnightIndexerConfig() midnightindexer.Config {
 		},
 		BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 			return database.ForEachBlockInRangeDB(
-				context.Background(),
+				n.ctx,
 				n.db,
 				startSlot,
 				endSlot,

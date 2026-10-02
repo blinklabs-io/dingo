@@ -377,7 +377,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 // to relevant events.
 func (cs *ChainSelector) Start(ctx context.Context) error {
 	cs.ctx, cs.cancel = context.WithCancel(ctx)
-	go cs.evaluationLoop() //nolint:contextcheck // the loop runs until Stop, independent of the Start ctx
+	go cs.evaluationLoop() //nolint:contextcheck // evaluationLoop observes the stored lifecycle context
 	return nil
 }
 

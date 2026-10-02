@@ -141,7 +141,7 @@ func queryProposals(
 	ls *LedgerState,
 ) olocalstatequery.ProposalsResult {
 	t.Helper()
-	result, err := ls.queryShelleyGetProposals(nil)
+	result, err := ls.queryShelleyGetProposals(t.Context(), nil)
 	require.NoError(t, err)
 	wrapped, ok := result.([]any)
 	require.True(t, ok)
@@ -359,7 +359,7 @@ func TestLedgerStateQueryWaitsForBoundaryJob(t *testing.T) {
 
 	answered := make(chan error, 1)
 	go func() {
-		_, err := s.ls.Query(&olocalstatequery.BlockQuery{}, QueryPoint{})
+		_, err := s.ls.Query(t.Context(), &olocalstatequery.BlockQuery{}, QueryPoint{})
 		answered <- err
 	}()
 	require.Never(t, func() bool { return len(answered) > 0 },
@@ -723,7 +723,7 @@ func (s *govDiffScenario) run(
 		txn := s.db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			var err error
-			result, err = s.ls.processEpochRollover(
+			result, err = s.ls.processEpochRollover(context.Background(),
 				txn, epoch, eras.ConwayEraDesc, pparams, false,
 			)
 			return err
