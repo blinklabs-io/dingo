@@ -71,3 +71,9 @@ func TestGCSBlockNumberBoundWorkIsIndependentOfArchiveSize(t *testing.T) {
 		func(key []byte) string { return store.fullKey(string(key)) },
 	)
 }
+
+func TestGCSPopulatedRestoreReplacesAndRollsBack(t *testing.T) {
+	t.Parallel()
+	store, fc := storeOnFakeCloud(t)
+	storagetest.RunCloudPopulatedRestore(t, fc, fakeBucket, store)
+}

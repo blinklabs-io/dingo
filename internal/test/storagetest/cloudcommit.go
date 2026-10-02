@@ -15,8 +15,10 @@
 package storagetest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"sync/atomic"
 	"testing"
 
@@ -251,4 +253,100 @@ func RunCloudPruneCommitVisibility(
 			})
 		}
 	}
+}
+
+// RunCloudPopulatedRestore checks that a populated cloud blob store can be
+// replaced from a backup the way a live restore does it -- Reset, then Restore
+// -- across more than one batch, that nothing of the previous contents
+// survives, and that a restore failing partway is undone exactly by resetting
+// again and restoring the retained rollback backup.
+//
+// store must be backed by fc, which must start empty.
+func RunCloudPopulatedRestore(
+	t *testing.T,
+	fc *fakecloud.Store,
+	bucket string,
+	store blob.BlobStore,
+) {
+	t.Helper()
+	ctx := t.Context()
+	backuper, ok := store.(blob.Backuper)
+	require.True(t, ok, "store is not a blob.Backuper")
+	restorer, ok := store.(blob.Restorer)
+	require.True(t, ok, "store is not a blob.Restorer")
+	resettable, ok := store.(blob.Resettable)
+	require.True(t, ok, "store is not a blob.Resettable")
+
+	// More than one restore batch, so Reset and Restore each cross a batch
+	// boundary.
+	const records = 1050
+	populate := func(prefix string, overlap bool) {
+		txn := store.NewTransaction(true)
+		for i := range records {
+			key := fmt.Sprintf("%s/%05d", prefix, i)
+			require.NoError(t, store.Set(txn, []byte(key), []byte(prefix+key)))
+		}
+		if overlap {
+			for i := range 100 {
+				key := fmt.Sprintf("a/%05d", i)
+				require.NoError(t, store.Set(txn, []byte(key), []byte("overwritten-"+key)))
+			}
+		}
+		require.NoError(t, txn.Commit())
+	}
+	contents := func() map[string]string {
+		out := map[string]string{}
+		for _, name := range fc.Keys(bucket, "") {
+			data, _ := fc.Get(bucket, name)
+			out[name] = string(data)
+		}
+		return out
+	}
+	reset := func() { require.NoError(t, resettable.Reset(ctx)) }
+	backup := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, backuper.Backup(ctx, &buf))
+		return buf.Bytes()
+	}
+	t.Cleanup(func() { fc.SetHooks(fakecloud.Hooks{}) })
+
+	populate("a", false)
+	wantA := contents()
+	backupA := backup()
+	reset()
+	require.Empty(t, contents(), "Reset must leave the store empty")
+	populate("b", true)
+	wantB := contents()
+	backupB := backup()
+	require.NotEqual(t, wantA, wantB)
+
+	// The target is populated with B and is replaced by A.
+	reset()
+	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupA)))
+	require.Equal(t, wantA, contents(), "restore of A over a reset store")
+
+	// The target is populated with A and is replaced by B.
+	reset()
+	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupB)))
+	require.True(t, maps.Equal(wantB, contents()), "nothing of A may survive a restore of B")
+
+	// A restore that fails after committing some batches is undone by
+	// resetting and restoring the rollback backup of what was there.
+	reset()
+	var puts atomic.Int32
+	fc.SetHooks(fakecloud.Hooks{
+		Before: func(op fakecloud.Op) error {
+			if op.Mutates && puts.Add(1) > records-20 {
+				return fakecloud.ErrInjected
+			}
+			return nil
+		},
+	})
+	err := restorer.Restore(ctx, bytes.NewReader(backupA))
+	fc.SetHooks(fakecloud.Hooks{})
+	require.Error(t, err)
+	require.NotEqual(t, wantB, contents(), "the failed restore must have left partial data")
+	reset()
+	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupB)))
+	require.True(t, maps.Equal(wantB, contents()), "rollback must restore B exactly")
 }
