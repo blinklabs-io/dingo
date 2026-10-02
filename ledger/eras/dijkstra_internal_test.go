@@ -529,8 +529,8 @@ func dijkstraGuardPParams() *gdijkstra.DijkstraProtocolParameters {
 	}
 }
 
-// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath covers a
-// human-reviewer finding on blinklabs-io/dingo#3962's PR: ValidateTxDijkstra
+// TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticNormalPath pins that
+// ValidateTxDijkstra
 // delegates phase-2 validation entirely to
 // gdijkstra.UtxoValidatePlutusScripts, which has no idea about Dingo's
 // synthetic marker -- without dijkstraSyntheticV2CostModelGuard, a

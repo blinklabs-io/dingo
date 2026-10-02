@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -60,7 +62,7 @@ func (f *fakeRemoteKESSigner) Sign(
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
 // opcert-lifetime gate applies inside kesSign itself, not only at its callers
-// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock). dingo#3115's
+// (BlockForger.SignBlockHeader, DefaultBlockBuilder.buildBlock).
 // KES agent client bypassed exactly this: it signed through a direct call to
 // the agent instead of through this method, so the opcert-lifetime check both
 // of those callers otherwise rely on never ran for the agent path.
@@ -468,13 +470,13 @@ func TestForgeSkipsWhenLedgerTipTrailsPrimaryChainTip(t *testing.T) {
 	require.Equal(
 		t,
 		float64(1),
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 	)
 	// Never silently: the skip is a WARN an operator can alert on.
 	require.Contains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs primary chain tip",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
 }
@@ -501,19 +503,29 @@ func TestStaleTipSkipCountsCouldNotForge(t *testing.T) {
 	)
 }
 
-// TestForgeProceedsWithinPrimaryChainTipTolerance pins the other side of the
-// bound: the ledger pipeline commits in batches, so a gap of a slot or two is
-// the normal steady state at the head of a fast chain and must not suppress
-// forging.
-func TestForgeProceedsWithinPrimaryChainTipTolerance(t *testing.T) {
+// TestForgeProceedsWithinBlockAndSlotBounds pins the allowed local lag: two
+// unapplied blocks inside the slot prefilter do not suppress forging.
+func TestForgeProceedsWithinBlockAndSlotBounds(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder, broadcaster := newStaleTipTestForger(
 		t,
 		200,
 		100,
-		100+forgePrimaryChainTipToleranceSlots,
+		105,
 		&logs,
 	)
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:           200,
+		chainTipSlot:          100,
+		chainTipBlockNumber:   1000,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        105,
+		primaryTipBlockNumber: 1002,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    true,
+		primaryTipDepth:       2,
+		slotsPerKESPeriod:     100,
+	}
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
@@ -521,7 +533,7 @@ func TestForgeProceedsWithinPrimaryChainTipTolerance(t *testing.T) {
 	require.Equal(t, 1, broadcaster.calls)
 	require.Zero(
 		t,
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 	)
 	require.Zero(
 		t,
@@ -530,7 +542,7 @@ func TestForgeProceedsWithinPrimaryChainTipTolerance(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs primary chain tip",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	// The post-mortem line survives the forge path. It is emitted below the
 	// credential recheck, i.e. after the last gate that can still refuse the
@@ -538,48 +550,126 @@ func TestForgeProceedsWithinPrimaryChainTipTolerance(t *testing.T) {
 	require.Contains(t, logs.String(), "forge context")
 }
 
-// TestForgeStaleTipToleranceIsConfigurable pins that the bound is a named,
-// overridable parameter rather than a literal buried in the gate.
-func TestForgeStaleTipToleranceIsConfigurable(t *testing.T) {
+// TestForgeRejectsLocalBlockGapAboveSmallBound ensures the era security
+// parameter cannot widen the local transaction-state safety limit.
+func TestForgeRejectsLocalBlockGapAboveSmallBound(t *testing.T) {
 	var logs bytes.Buffer
-	forger, builder, _ := newStaleTipTestForger(t, 200, 100, 120, &logs)
-	require.Equal(
-		t,
-		uint64(forgePrimaryChainTipToleranceSlots),
-		forger.forgePrimaryChainTipToleranceSlots,
-	)
+	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 100, 183, &logs)
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:           200,
+		chainTipSlot:          100,
+		chainTipBlockNumber:   1000,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        183,
+		primaryTipBlockNumber: 1004,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    true,
+		primaryTipDepth:       4,
+		securityParam:         432,
+		slotsPerKESPeriod:     100,
+	}
+
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
+	)
+	require.Contains(t, logs.String(), `"max_unapplied_blocks":2`)
+	require.Contains(t, logs.String(), `"security_param_k":432`)
+}
 
-	block := newForgerTestBlock(200, 2)
-	wideBuilder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	wide, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(&logs, nil)),
-		Credentials:      setupTestCredentials(t),
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     wideBuilder,
-		BlockBroadcaster: &forgerTestBroadcaster{},
-		SlotClock: forgerTestSlotClock{
-			currentSlot:  200,
-			chainTipSlot: 100,
-			// Explicit, not merely non-zero: this test's whole verdict is
-			// that a 20-slot gap is tolerated at a 50-slot bound, so it must
-			// not depend on the double's value-based opt-in rule. If that
-			// rule were ever tightened back to primaryTipExplicit alone the
-			// primary tip would mirror the applied tip, the gap would
-			// collapse to 0, and this test would still pass while the
-			// tolerance knob had stopped being honoured.
-			primaryTipExplicit: true,
-			primaryTipSlot:     120,
-			slotsPerKESPeriod:  100,
-		},
-		ForgePrimaryChainTipToleranceSlots: 50,
-		PromRegistry:                       prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
-	require.NoError(t, wide.checkAndForgeProduction(context.Background()))
-	require.Equal(t, 1, wideBuilder.calls)
+func TestForgeRejectsLocalSlotGapBeyondPrefilter(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 49, 150, &logs)
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:           200,
+		chainTipSlot:          49,
+		chainTipBlockNumber:   1000,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        150,
+		primaryTipBlockNumber: 1001,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    true,
+		primaryTipDepth:       1,
+		slotsPerKESPeriod:     100,
+	}
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
+	)
+}
+
+func TestForgeSkipsWhenCorroboratedPeerIsManyBlocksAhead(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		6_099,
+		6_000,
+		6_000,
+		&logs,
+	)
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:            6_099,
+		chainTipSlot:           6_000,
+		chainTipBlockNumber:    4_645_026,
+		primaryTipExplicit:     true,
+		primaryTipSlot:         6_000,
+		primaryTipBlockNumber:  4_645_026,
+		upstreamTipSlot:        6_099,
+		upstreamTipBlockNumber: 4_646_750,
+		upstreamActive:         true,
+		slotsPerKESPeriod:      100,
+	}
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Zero(t, builder.calls)
+	require.Zero(t, broadcaster.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipPeerHeightGap),
+		logs.String(),
+	)
+	require.Contains(t, logs.String(), `"reason":"peer_height_gap"`)
+}
+
+func TestForgeSkipsWhenAppliedTipIsNotPrimaryAncestor(t *testing.T) {
+	var logs bytes.Buffer
+	forger, builder, _ := newStaleTipTestForger(t, 210, 198, 200, &logs)
+	primaryHash := bytes.Repeat([]byte{0xBB}, 32)
+	clock := forgerTestSlotClock{
+		currentSlot:           210,
+		chainTipSlot:          198,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        200,
+		primaryTipHash:        primaryHash,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    false,
+		primaryTipDepth:       2,
+		slotsPerKESPeriod:     100,
+	}
+	forger.slotClock = clock
+
+	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+	require.Zero(t, builder.calls)
+	require.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipPrimaryNotAncestor),
+	)
+	require.Contains(
+		t,
+		logs.String(),
+		`"reason":"applied_tip_not_primary_ancestor"`,
+	)
 }
 
 // TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck is the observability
@@ -594,6 +684,18 @@ func TestTipGapGaugeReportsApplyBacklogOnEveryLeaderCheck(t *testing.T) {
 	// Within tolerance: the forge proceeds, and the gauge still reports the
 	// real backlog rather than 0.
 	forger, builder, _ := newStaleTipTestForger(t, 200, 100, 103, &logs)
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:           200,
+		chainTipSlot:          100,
+		chainTipBlockNumber:   1000,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        103,
+		primaryTipBlockNumber: 1002,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    true,
+		primaryTipDepth:       2,
+		slotsPerKESPeriod:     100,
+	}
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 	require.Equal(t, 1, builder.calls, "expected this check to forge")
 	require.Equal(
@@ -680,7 +782,7 @@ func TestForgeSkipsOnEqualSlotPrimaryTipDivergence(t *testing.T) {
 	// The slot-gap reason must not be charged for a divergence.
 	require.Zero(
 		t,
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 	)
 	// Reason-specific message: an equal-slot divergence is not a stale
 	// ledger tip, and the shared message used to say it was.
@@ -692,7 +794,7 @@ func TestForgeSkipsOnEqualSlotPrimaryTipDivergence(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs primary chain tip",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 	require.Contains(t, logs.String(), `"reason":"primary_tip_hash_diverged"`)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
@@ -724,7 +826,7 @@ func TestForgeProceedsWhenPrimaryTipMatchesAppliedTip(t *testing.T) {
 	require.NotContains(
 		t,
 		logs.String(),
-		"forge skip: ledger tip stale vs primary chain tip",
+		"forge skip: too many primary-chain blocks are unapplied",
 	)
 }
 
@@ -772,11 +874,8 @@ func TestForgeProceedsWhenEitherTipHashIsEmpty(t *testing.T) {
 // exists before the first skip, so a dashboard is not looking at an absent
 // series.
 //
-// Six series: the three tip disagreements (slot_gap,
-// primary_tip_hash_diverged, primary_tip_behind_applied), the pre-leader-check
-// unapplied_rival_at_leader_slot, and the two staleness bounds
-// (eb_manifest_ahead, applied_tip_stale), which are pre-materialized even
-// though both of applied_tip_stale's sources are off by default.
+// Eight series cover primary-chain ancestry, local and peer block-height gaps,
+// existing tip disagreements, the pre-leader-check rival, and staleness.
 func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	var logs bytes.Buffer
 	hash := bytes.Repeat([]byte{0xAA}, 32)
@@ -788,7 +887,7 @@ func TestForgeStaleTipSkipReasonsArePreMaterialized(t *testing.T) {
 	)
 	require.Equal(
 		t,
-		6,
+		8,
 		testutil.CollectAndCount(forger.metrics.forgeStaleTipSkip),
 	)
 }
@@ -863,11 +962,12 @@ func TestForgeSkipsWhenPrimaryTipAlreadyHasTheCurrentSlot(t *testing.T) {
 		200, // primary chain tip already carries a block at the current slot
 		&logs,
 	)
+	securityParam := forger.slotClock.(forgerTestSlotClock).SecurityParam()
 	require.LessOrEqual(
 		t,
 		uint64(2),
-		forger.forgePrimaryChainTipToleranceSlots,
-		"this test needs the 2-slot gap to be inside the tolerance",
+		uint64(securityParam),
+		"this test needs the two-block gap to be inside K",
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -970,13 +1070,13 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.Zero(t, builder.calls)
 		require.Zero(
 			t,
-			testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+			testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 			"a slot this node was never going to forge is not a lost block",
 		)
 		require.NotContains(
 			t,
 			logs.String(),
-			"forge skip: ledger tip stale vs primary chain tip",
+			"forge skip: too many primary-chain blocks are unapplied",
 		)
 		// The backlog is still reported on every leader check.
 		require.Equal(
@@ -1005,12 +1105,12 @@ func TestForgeStaleTipSkipCountsLostBlocksNotLeaderChecks(t *testing.T) {
 		require.Equal(
 			t,
 			float64(1),
-			testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+			testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 		)
 		require.Contains(
 			t,
 			logs.String(),
-			"forge skip: ledger tip stale vs primary chain tip",
+			"forge skip: too many primary-chain blocks are unapplied",
 		)
 	})
 }
@@ -1045,7 +1145,7 @@ func TestForgeSkipsWhenPrimaryTipIsBehindTheAppliedTip(t *testing.T) {
 	)
 	require.Zero(
 		t,
-		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 	)
 	require.Contains(t, logs.String(), `"reason":"primary_tip_behind_applied"`)
 	require.Contains(t, logs.String(), `"level":"WARN"`)
@@ -1134,11 +1234,12 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 				bytes.Repeat([]byte{0xBB}, 32),
 				&logs,
 			)
+			securityParam := forger.slotClock.(forgerTestSlotClock).SecurityParam()
 			require.LessOrEqual(
 				t,
 				uint64(2),
-				forger.forgePrimaryChainTipToleranceSlots,
-				"this test needs the 2-slot gap to be inside the tolerance",
+				uint64(securityParam),
+				"this test needs the two-block gap to be inside K",
 			)
 
 			require.NoError(
@@ -1165,7 +1266,7 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 			// refusal and must not move on this path.
 			require.Zero(
 				t,
-				testutil.ToFloat64(forger.metrics.forgeStaleTipSkipSlotGap),
+				testutil.ToFloat64(forger.metrics.forgeStaleTipSkipBlockGap),
 			)
 			require.Zero(
 				t,
@@ -1187,10 +1288,8 @@ func TestForgeCountsLeaderSlotLostToUnappliedRival(t *testing.T) {
 // with the upstream target and the corroborated endorser-block slot explicit.
 //
 // upstreamStalenessSlots and ebStalenessSlots are explicit and every caller
-// that exercises those bounds must pass a non-zero value: all three bounds are
-// opt-in, so a helper that defaulted any of them would hide the very
-// regressions TestForgeUpstreamStalenessIsOffByDefault and
-// TestForgeEndorserBlockStalenessIsOffByDefault exist to catch.
+// that exercises those bounds must pass a non-zero value. The wall-clock bound
+// applies only when a live upstream has published a positive target.
 func newStalenessTestForger(
 	t *testing.T,
 	currentSlot, chainTipSlot, primaryTipSlot, upstreamSlot uint64,
@@ -1312,14 +1411,20 @@ func TestForgeProceedsOnAQuietChain(t *testing.T) {
 	require.Contains(t, logs.String(), `"newest_known_slot":100`)
 }
 
-// TestForgeAppliedTipStalenessKnobIsOptIn pins the wall-clock backstop: off by
-// default, and refusing once an operator sets a bound.
+// TestForgeAppliedTipStalenessKnobIsOptIn pins the additional wall-clock bound
+// when a usable upstream reference exists: off by default, and refusing once
+// an operator sets a bound.
 func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("off by default", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
 			t, 600, 100, 100, 0, 0, 0, 0, 0, &logs,
 		)
+		forger.slotClock = forgerTestSlotClock{
+			currentSlot: 600, chainTipSlot: 100,
+			primaryTipExplicit: true, primaryTipSlot: 100,
+			upstreamTipSlot: 100, slotsPerKESPeriod: 100,
+		}
 		require.NoError(
 			t,
 			forger.checkAndForgeProduction(context.Background()),
@@ -1330,7 +1435,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	t.Run("refuses once set", func(t *testing.T) {
 		var logs bytes.Buffer
 		forger, builder := newStalenessTestForger(
-			t, 600, 100, 100, 0, 0, 100, 0, 0, &logs,
+			t, 600, 100, 100, 100, 0, 100, 0, 0, &logs,
 		)
 		require.NoError(
 			t,
@@ -1353,6 +1458,50 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 	})
 }
 
+func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
+	for _, upstreamActive := range []bool{false, true} {
+		for _, gap := range []uint64{100, 101} {
+			for _, appliedStalenessSlots := range []uint64{0, 50} {
+				t.Run(fmt.Sprintf(
+					"active=%t/gap=%d/applied_bound=%d",
+					upstreamActive,
+					gap,
+					appliedStalenessSlots,
+				), func(t *testing.T) {
+					var logs bytes.Buffer
+					currentSlot := uint64(1_000)
+					tipSlot := currentSlot - gap
+					forger, builder := newStalenessTestForger(
+						t, currentSlot, tipSlot, tipSlot, 0, 0,
+						appliedStalenessSlots, 0, 0, &logs,
+					)
+					forger.slotClock = forgerTestSlotClock{
+						currentSlot:        currentSlot,
+						chainTipSlot:       tipSlot,
+						primaryTipExplicit: true,
+						primaryTipSlot:     tipSlot,
+						upstreamActive:     upstreamActive,
+						slotsPerKESPeriod:  100,
+					}
+
+					require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+					require.Equal(t, 1, builder.calls)
+					require.Equal(
+						t,
+						1,
+						forger.blockBroadcaster.(*forgerTestBroadcaster).calls,
+					)
+					require.Zero(
+						t,
+						testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+					)
+					require.NotContains(t, logs.String(), `"stale_source":"wall_clock"`)
+				})
+			}
+		}
+	}
+}
+
 // TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead covers the Leios signal: a
 // corroborated endorser block shares its announcing ranking block's slot, so it
 // is proof a ranking block exists there even though no header has arrived. The
@@ -1360,7 +1509,7 @@ func TestForgeAppliedTipStalenessKnobIsOptIn(t *testing.T) {
 // tip -- so only this evidence can refuse the forge.
 //
 // The bound is opt-in, so this test sets ForgeEndorserBlockStalenessSlots
-// explicitly. It used to borrow forgePrimaryChainTipToleranceSlots and passed
+// explicitly. It used to borrow a slot-based primary-tip bound and passed
 // with both staleness bounds at 0, which is exactly the always-on refusal
 // TestForgeEndorserBlockStalenessIsOffByDefault now forbids.
 func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
@@ -1413,12 +1562,12 @@ func TestForgeSkipsWhenCorroboratedEndorserBlockIsAhead(t *testing.T) {
 // indicator says the node is healthy while the producer goes quiet.
 //
 // So the bound is 0 (disabled) by default and the path never refuses without
-// it. The shape below is the one that used to refuse: watermark far ahead,
-// both local tips agreeing, both other staleness bounds off.
+// it. The shape below isolates that path: the watermark is ahead, both local
+// tips agree, and the applied tip remains within the no-target sync tolerance.
 func TestForgeEndorserBlockStalenessIsOffByDefault(t *testing.T) {
 	var logs bytes.Buffer
 	forger, builder := newStalenessTestForger(
-		t, 900, 300, 300, 0, 360, 0, 0, 0, &logs,
+		t, 360, 300, 300, 0, 360, 0, 0, 0, &logs,
 	)
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
@@ -1478,7 +1627,17 @@ func TestForgeEndorserBlockBoundDoesNotBorrowThePrimaryChainTipTolerance(
 		t, 320, 300, 300, 0, 313, 0, 0, 5, &logs,
 	)
 	// Local tolerance wide open; only the endorser-block bound is tight.
-	forger.forgePrimaryChainTipToleranceSlots = 1000
+	forger.slotClock = forgerTestSlotClock{
+		currentSlot:           320,
+		chainTipSlot:          300,
+		primaryTipExplicit:    true,
+		primaryTipSlot:        300,
+		securityParam:         5,
+		primaryTipRelationSet: true,
+		primaryTipAncestor:    true,
+		primaryTipDepth:       0,
+		slotsPerKESPeriod:     100,
+	}
 
 	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
@@ -1493,7 +1652,7 @@ func TestForgeEndorserBlockBoundDoesNotBorrowThePrimaryChainTipTolerance(
 		float64(1),
 		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipEbAhead),
 	)
-	require.Contains(t, logs.String(), `"tolerance_slots":1000`)
+	require.Contains(t, logs.String(), `"max_unapplied_blocks":2`)
 	require.Contains(t, logs.String(), `"eb_staleness_slots":5`)
 }
 
@@ -1533,23 +1692,10 @@ func TestForgeStalenessDoesNotBlockWithoutAReference(t *testing.T) {
 	require.Contains(t, logs.String(), `"msg":"forge context"`)
 }
 
-// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins the state #4013
-// made reachable here.
-//
-// LedgerState publishes (0, true) from UpstreamSyncStatus for the whole window
-// between an active-connection switch and the newly selected peer's first
-// admitted trusted header. Before #4013 the sync gate refused every slot in
-// that window outright, so this bound never saw it. #4013 bounded that branch
-// by the local tip's lag instead -- a node at tip forges, and the header it
-// produces is what ends the window -- so a node at tip now arrives at this
-// gate with a live upstream and a target of zero.
-//
-// The bound must stay quiet there. It does, because upstreamTarget >
-// newestKnown cannot hold for a zero target, and NOT because anything below
-// refuses the slot first. Substituting a value for the missing target -- the
-// admitted header frontier was the obvious candidate, and an earlier revision
-// did it -- would refuse leader slots in exactly the window #4013 opened them
-// up for, which is the #4010 wedge again for any operator who set the knob.
+// TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget pins that a missing
+// corroborated target is not substituted with the wall clock or another
+// pipeline-stage value. A target-free peer-switch interval is not proof that
+// the network is ahead.
 func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 	var logs bytes.Buffer
 	block := newForgerTestBlock(300, 2)
@@ -1565,7 +1711,7 @@ func TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget(t *testing.T) {
 		BlockBroadcaster: &forgerTestBroadcaster{},
 		SlotClock: forgerTestSlotClock{
 			// At tip: the previous slot's block, one slot behind the
-			// current slot, so #4013's local-lag bound passes it through.
+			// current slot. An unknown target carries no contrary evidence.
 			currentSlot:        300,
 			chainTipSlot:       299,
 			primaryTipExplicit: true,
@@ -1714,13 +1860,29 @@ func TestForgeRecoversPanicFromEndorserBlockSource(t *testing.T) {
 	require.Contains(t, logs.String(), "forge callback panic recovered")
 }
 
-// forgeStalenessCountingUpstreamClock answers UpstreamSyncStatus with a
+// forgeStalenessCountingUpstreamClock answers UpstreamSyncTip with a
 // DIFFERENT value on every call, so a forge cycle that reads it twice cannot
 // agree with itself.
 type forgeStalenessCountingUpstreamClock struct {
 	forgerTestSlotClock
 	calls    *int
 	statuses []uint64
+}
+
+func (c forgeStalenessCountingUpstreamClock) UpstreamSyncTip() (
+	ochainsync.Tip,
+	bool,
+) {
+	i := *c.calls
+	*c.calls++
+	if i < len(c.statuses) {
+		return ochainsync.Tip{
+			Point: ocommon.Point{Slot: c.statuses[i]},
+		}, true
+	}
+	return ochainsync.Tip{
+		Point: ocommon.Point{Slot: c.statuses[len(c.statuses)-1]},
+	}, true
 }
 
 func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
@@ -1735,7 +1897,7 @@ func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
 	return c.statuses[len(c.statuses)-1], true
 }
 
-// TestForgeReadsUpstreamSyncStatusOncePerCycle pins the single-read contract.
+// TestForgeReadsUpstreamSyncTipOncePerCycle pins the single-read contract.
 //
 // The staleness bound and the pre-existing sync gate both need (target,
 // active). Reading the clock twice let one forge cycle evaluate the two
@@ -1748,7 +1910,7 @@ func (c forgeStalenessCountingUpstreamClock) UpstreamSyncStatus() (
 // cycle sees only the zero, which is "no target published yet" and no evidence
 // of staleness, so the node at tip forges. With two reads the sync gate would
 // see the second value and refuse.
-func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
+func TestForgeReadsUpstreamSyncTipOncePerCycle(t *testing.T) {
 	var logs bytes.Buffer
 	calls := 0
 	block := newForgerTestBlock(300, 2)
@@ -1784,7 +1946,7 @@ func TestForgeReadsUpstreamSyncStatusOncePerCycle(t *testing.T) {
 		t,
 		1,
 		calls,
-		"one forge cycle must read UpstreamSyncStatus once, so the "+
+		"one forge cycle must read UpstreamSyncTip once, so the "+
 			"staleness bound, the sync gate and the log line all describe "+
 			"the same upstream snapshot",
 	)
@@ -1981,19 +2143,26 @@ func (l *forgerCountingLeader) callCount() int {
 }
 
 type forgerTestSlotClock struct {
-	currentSlot  uint64
-	chainTipSlot uint64
-	chainTipHash []byte
+	currentSlot         uint64
+	chainTipSlot        uint64
+	chainTipHash        []byte
+	chainTipBlockNumber uint64
 	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
 	// used verbatim. When false the primary tip mirrors the applied tip,
 	// which is the caught-up steady state and what every test that does not
 	// care about the distinction wants.
-	primaryTipExplicit bool
-	primaryTipSlot     uint64
-	primaryTipHash     []byte
-	upstreamTipSlot    uint64
-	upstreamActive     bool
-	slotsPerKESPeriod  uint64
+	primaryTipExplicit     bool
+	primaryTipSlot         uint64
+	primaryTipHash         []byte
+	primaryTipBlockNumber  uint64
+	primaryTipRelationSet  bool
+	primaryTipAncestor     bool
+	primaryTipDepth        uint64
+	upstreamTipSlot        uint64
+	upstreamTipBlockNumber uint64
+	upstreamActive         bool
+	securityParam          int
+	slotsPerKESPeriod      uint64
 }
 
 func (c forgerTestSlotClock) CurrentSlot() (uint64, error) {
@@ -2006,6 +2175,17 @@ func (c forgerTestSlotClock) SlotsPerKESPeriod() uint64 {
 
 func (c forgerTestSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+func (c forgerTestSlotClock) ChainTipSnapshot() ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       c.ChainTip(),
+		BlockNumber: c.chainTipBlockNumber,
+	}
+}
+
+func (c forgerTestSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return c.ChainTipSnapshot(), c.SecurityParam()
 }
 
 // PrimaryChainTip mirrors the applied tip unless the test describes a primary
@@ -2031,6 +2211,34 @@ func (c forgerTestSlotClock) PrimaryChainTip() ocommon.Point {
 	return ocommon.Point{Slot: c.primaryTipSlot, Hash: c.primaryTipHash}
 }
 
+func (c forgerTestSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	depth := uint64(0)
+	ancestor := true
+	if c.primaryTipRelationSet {
+		return ochainsync.Tip{
+			Point:       primary,
+			BlockNumber: c.primaryTipBlockNumber,
+		}, c.primaryTipDepth, c.primaryTipAncestor, nil
+	}
+	if primary.Slot < point.Slot {
+		ancestor = false
+	} else if primary.Slot == point.Slot && len(primary.Hash) > 0 &&
+		len(point.Hash) > 0 && !bytes.Equal(primary.Hash, point.Hash) {
+		ancestor = false
+	} else if c.primaryTipBlockNumber > c.chainTipBlockNumber {
+		depth = c.primaryTipBlockNumber - c.chainTipBlockNumber
+	} else if primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{
+		Point:       primary,
+		BlockNumber: c.primaryTipBlockNumber,
+	}, depth, ancestor, nil
+}
+
 // NextSlotTime reports a boundary that is still ahead, which is what a
 // healthy clock reports for a leader forging inside its own slot. Handing
 // back the current instant would instead mean the slot has already closed,
@@ -2054,10 +2262,24 @@ func (c forgerTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTipSlot, c.upstreamActive || c.upstreamTipSlot > 0
 }
 
+func (c forgerTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: c.upstreamTipSlot},
+		BlockNumber: c.upstreamTipBlockNumber,
+	}, c.upstreamActive || c.upstreamTipSlot > 0
+}
+
+func (c forgerTestSlotClock) SecurityParam() int {
+	if c.securityParam > 0 {
+		return c.securityParam
+	}
+	return 5
+}
+
 // TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget verifies that
 // an active upstream with no admitted target does not suppress forging based on
 // wall-clock distance from the local tip. That distance describes a network
-// quiet stretch, not whether a peer is ahead (issue #4201).
+// quiet stretch, not whether a peer is ahead.
 func TestCheckAndForgeProductionAllowsUnknownActiveUpstreamTarget(
 	t *testing.T,
 ) {
@@ -3027,7 +3249,7 @@ func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
 // node never adopted.
 //
 // The forgeForged counter still increments before adoption, which is what
-// PR #2323 required: build-versus-adopt remains observable through
+// the forge metrics require: build-versus-adopt remains observable through
 // forgeForged and forgeCouldNot without publishing an unadopted block.
 func TestCheckAndForgeProductionSkipsObserverWhenNotAdopted(
 	t *testing.T,
@@ -3527,7 +3749,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 			// the forged ranking block's slot (10) or zero: the manifest is
 			// content-addressed, so the same hash could be a distinct,
 			// unrelated occurrence at another slot, and the wrong slot here
-			// would resolve the wrong occurrence (issue #3513 review).
+			// would resolve the wrong occurrence.
 			require.Equal(t, 1, leiosCerts.gotEbSlotCalls)
 			require.Equal(t, uint64(9), leiosCerts.gotEbSlot)
 		})

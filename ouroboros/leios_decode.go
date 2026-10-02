@@ -30,7 +30,7 @@ import (
 //
 // decode is a parameter rather than a direct call so the containment can be
 // driven by a decoder that genuinely panics instead of by a stubbed-out
-// recover, matching how blinklabs-io/dingo#4551 drives the txsubmission
+// recover, matching how the the txsubmission
 // guard. Production always supplies a real constructor, through the two
 // wrappers below.
 //

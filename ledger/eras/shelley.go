@@ -148,7 +148,7 @@ func CalculateEtaVShelley(
 	// output is hashed down to a Seed before folding into the rolling
 	// nonce. Folding the raw certificate bytes directly diverges the
 	// epoch nonce from peers and breaks header VRF verification at the
-	// next epoch boundary (#2125).
+	// next epoch boundary.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,

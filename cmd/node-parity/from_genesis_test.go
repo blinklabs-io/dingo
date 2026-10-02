@@ -174,7 +174,7 @@ func TestRecordEpochWithoutMetricsDoesNotPanic(t *testing.T) {
 }
 
 // TestRecordEpochDoesNotCountAWhollyIncompleteEpoch pins CodeRabbit's
-// finding on #4771: an epoch whose every check was untrusted verified
+// finding on an epoch whose every check was untrusted verified
 // nothing, so folding it into epochsTotal would inflate the count an
 // operator reads as "epochs actually validated" and make a wholly-degraded
 // run look like a working one.
@@ -227,7 +227,7 @@ func TestRecordDivergenceIdentifiesKoiosAsTheReference(t *testing.T) {
 }
 
 // TestFromGenesisMetricsRegistersNoWatchCounters is the regression test for
-// the review finding on #4771 that from-genesis would false-alert.
+// the review finding that from-genesis would false-alert.
 //
 // NodeParityNotChecking fires when checks_total, checks_skipped_total and
 // check_errors_total are all flat for 10 minutes. from-genesis records one
@@ -291,7 +291,7 @@ func TestFromGenesisMetricsPreMaterializesZeroSeries(t *testing.T) {
 }
 
 // TestShouldServeMetrics pins the --metrics-addr opt-in, which was unpinned
-// until review on #4771: replacing the condition with
+// until review on replacing the condition with
 // `globalFlags.metricsAddr != ""` left the whole cmd/node-parity suite
 // green. The flag defaults to ":9464", so that mutation makes every
 // from-genesis run bind a wildcard port nobody asked for, and fail outright

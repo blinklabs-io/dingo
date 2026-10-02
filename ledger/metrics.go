@@ -113,9 +113,9 @@ type stateMetrics struct {
 	//
 	// A histogram quantile is only an estimate bounded by its bucket edges,
 	// however wide they are; this is the exact worst-ever-seen value, so an
-	// epoch-boundary stall like blinklabs-io/dingo#4364 (block application
-	// blocked for 25s to over 300s) shows up exactly on the epoch_rollover
-	// stage instead of "somewhere past the last bucket boundary".
+	// epoch-boundary stall (block application blocked for 25s to over 300s)
+	// shows up exactly on the epoch_rollover stage instead of "somewhere past
+	// the last bucket boundary".
 	//
 	// Deliberately monotonic non-resetting ("worst ever seen"), not a
 	// windowed maximum: a windowed maximum needs a periodic-reset custom
@@ -186,7 +186,7 @@ type stateMetrics struct {
 	governanceProposalDecodeFailures prometheus.Counter
 	// Incremented when a peer repeatedly asks us to roll back to a point
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
-	// as a metric instead of only a WARN loop. See issue #2728.
+	// as a metric instead of only a WARN loop.
 	unrecoverableRollbacks prometheus.Counter
 	// Incremented when a chainsync peer asks for a rollback we refuse, but
 	// its own advertised tip is a strict ancestor of ours on our primary
@@ -200,26 +200,24 @@ type stateMetrics struct {
 	// connection is the signal noteNonExtendingBlockRejection uses to
 	// recycle it (see nonExtendingBlockFloodRecycles) -- this counter makes
 	// that pattern visible before it crosses the recycle threshold, and
-	// across all connections even when none individually crosses it. See
-	// issue #4272.
+	// across all connections even when none individually crosses it.
 	nonExtendingBlockRejections prometheus.Counter
 	// Incremented each time noteNonExtendingBlockRejection actually recycles
 	// a connection for flooding non-extending blocks (as opposed to every
-	// individual rejection, counted above). See issue #4272.
+	// individual rejection, counted above).
 	nonExtendingBlockFloodRecycles prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
 	// means local ledger validation is diverging from the network (e.g. a
-	// false-positive validation rejection), not a peer/fork problem. See
-	// issue #2939.
+	// false-positive validation rejection), not a peer/fork problem.
 	atTipRecoveryNonConverging prometheus.Counter
 	// Incremented when an at-tip recovery rewind target falls below the
 	// consumed-UTxO prune floor and is clamped to the ledger tip. The sweep
 	// hard-deletes spent rows, and rollback restores them with an UPDATE, so
 	// a rewind past the floor cannot rebuild the live UTxO set it implies. A
 	// rising value means recovery is asking for rewinds deeper than local
-	// history can support. See issue #3766.
+	// history can support.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
 	// Incremented when an at-tip recovery rewind target would cross the
 	// most recent epoch boundary and is clamped to the first block at or
@@ -227,12 +225,12 @@ type stateMetrics struct {
 	atTipRecoveryEpochBoundaryClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
-	// pruning another security-parameter window. See issue #3005.
+	// pruning another security-parameter window.
 	replayRecoveryNonConverging prometheus.Counter
 	// Incremented when the cross-fork continuation audit finds a freshly
 	// fetched body spending an input whose producing transaction is not on
 	// the local applied chain. A rising value means a peer is feeding the
-	// node a continuation from a fork it never applied. See issue #3005.
+	// node a continuation from a fork it never applied.
 	continuationInputUnresolved prometheus.Counter
 	// Incremented when the primary-chain/ledger divergence reconciler
 	// cannot resolve one of the ledger's own applied block_nonce points to
@@ -241,8 +239,7 @@ type stateMetrics struct {
 	// manager's block cache no longer retains it either. The reconciler
 	// still rolls the ledger back correctly; only the undo notification for
 	// that block is missing, so a rising value means ledger.tx subscribers
-	// may be carrying stale derived state for an abandoned branch. See
-	// issue #3516.
+	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
@@ -252,7 +249,7 @@ type stateMetrics struct {
 	// block_nonce-keyed search. A rising value means an applied block's
 	// ledger.tx undo event could not even be attempted for lack of a
 	// durable per-block record, not merely because the content was no
-	// longer reachable. See issue #3778.
+	// longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -292,14 +289,14 @@ type stateMetrics struct {
 	// made no tip progress, and to 1 while that count is past the point
 	// where the pipeline is treated as stuck. A deterministic failure (a
 	// rejected canonical block, say) repeats forever, so without this a
-	// wedged node is visible only as a repeating WARN. See issue #3165.
+	// wedged node is visible only as a repeating WARN.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
 	// Set to 1 once the ledger pipeline has stopped retrying altogether.
 	// Unlike pipelineStuck this is terminal: the pipeline goroutine has
 	// returned and nothing will clear it short of a restart, so it is the
 	// signal to alert on for a node that has permanently stopped following
-	// the chain. See issue #3261.
+	// the chain.
 	pipelineHalted prometheus.Gauge
 	// Incremented when validation recovery declares a failure unrepairable
 	// because every rewind target it may legally reach lies inside the
@@ -320,14 +317,13 @@ type stateMetrics struct {
 	// (see poolStakeDistribution's own comment), not a failure, so it
 	// does not abort the query -- but a sustained nonzero value means a
 	// real cross-node comparison tool would see dingo's reply as short by
-	// that many pools, the exact condition blinklabs-io/dingo#4152 found
-	// via cmd/node-parity against a real cardano-node without any other
-	// visible symptom. Making this a metric rather than only the existing
-	// WARN log lets that be caught by an alert instead of requiring a
-	// manual diff to notice again.
+	// that many pools, the exact condition found via cmd/node-parity against a
+	// real cardano-node without any other visible symptom. Making this a metric
+	// rather than only the existing WARN log lets that be caught by an alert
+	// instead of requiring a manual diff to notice again.
 	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
-	// block-processing pipeline (issue #1894), refreshed after every batch
+	// block-processing pipeline, refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
 	// counters because the pipeline itself owns the cumulative totals
 	// (they can only be Set from a periodic snapshot, not incremented
@@ -339,7 +335,7 @@ type stateMetrics struct {
 	blockPipelineQueueDepth       prometheus.Gauge
 	// blockPipelineExpectedEta0Errors/blockPipelineDeferredEpochCacheErrors/
 	// blockPipelineUnexpectedErrors count errors drained from
-	// blockPipeline.Errors() by drainBlockPipelineErrors (issue #1894
+	// blockPipeline.Errors() by drainBlockPipelineErrors (the pipeline
 	// deadlock fix): the eta0 counter tracks errBlockPipelineEta0Unavailable
 	// (no cached Praos nonce yet -- normal on every from-genesis sync, since
 	// it is how Byron-era slots always fail this lookup, but the same
@@ -361,7 +357,7 @@ type stateMetrics struct {
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
 	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
-	// Per-block composition metrics (issue #4367), all labelled by era
+	// Per-block composition metrics, all labelled by era
 	// (block.Era().Name, e.g. "Babbage", "Conway"). Recorded once per
 	// applied block, right where blocksProcessed is incremented in
 	// ledgerProcessBlocksFromSource, so a spike in
@@ -393,7 +389,7 @@ type stateMetrics struct {
 	// commitBatchBlocks observes len(nextBatch) each time
 	// ledgerReadChainIterator submits a gathered batch of blocks downstream
 	// for a single DB transaction (batchSize caps it at 50). Added
-	// alongside the dingo#4464 premature-flush fix so a future run can
+	// alongside the premature-flush fix so a future run can
 	// confirm the batch-size distribution actually shifted upward, rather
 	// than relying on re-measuring physical disk I/O.
 	commitBatchBlocks prometheus.Histogram
@@ -649,8 +645,7 @@ func (m *stateMetrics) registerBlockApplyBatchMaxLatency(
 // blockComposition summarizes the shape of one applied block: era,
 // transaction count, Plutus script/redeemer presence, UTxO churn, and
 // certificate count. computeBlockComposition derives it once per block so
-// observeBlockComposition never has to walk the block's transactions itself
-// (issue #4367).
+// observeBlockComposition never has to walk the block's transactions itself.
 type blockComposition struct {
 	era          string
 	transactions int
@@ -1049,7 +1044,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
 			// there. The upper end has to resolve epoch_rollover:
-			// blinklabs-io/dingo#4364 measured block application blocked
+			// epoch-boundary stalls measured block application blocked
 			// for 25s to 318s across preview boundaries, all of which the
 			// old ~3.3s ceiling put in +Inf.
 			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),

@@ -176,8 +176,8 @@ func decodeTxInFromBytes(
 ) ([]byte, uint32, error) {
 	// Binary format: 32-byte hash + 2-byte big-endian index.
 	// Preview UTxO-HD snapshots encode the trailing Word16 in
-	// network order; decoding it as little-endian inflates #1 to
-	// #256 and corrupts imported UTxO keys.
+	// network order; decoding it as little-endian inflates index 1 to
+	// index 256 and corrupts imported UTxO keys.
 	if len(data) == 34 {
 		txHash := make([]byte, 32)
 		copy(txHash, data[:32])

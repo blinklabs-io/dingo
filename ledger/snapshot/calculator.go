@@ -65,7 +65,7 @@ type StakeDistribution struct {
 	// which raises sigma_a for every surviving pool and under-credits every
 	// reward on the node by that share -- uniformly, silently, and invisibly
 	// to a check that compares the pool rows against it, because both sides
-	// are short by the same amount (dingo #4660).
+	// are short by the same amount.
 	TotalActiveStake uint64
 }
 
@@ -347,7 +347,7 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	}
 	// Fetch the stake of every delegated credential, not only those whose pool
 	// is still active, so TotalActiveStake is the ledger's credential-first
-	// sigma_a denominator (dingo #4660). Only activePools gets buckets below.
+	// sigma_a denominator. Only activePools gets buckets below.
 	delegatedPools, err := meta.GetDelegatedPoolKeyHashes(metaTxn)
 	if err != nil {
 		return nil, fmt.Errorf("get delegated pools: %w", err)
@@ -488,7 +488,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 
 	// Reconstruct the stake of every delegated credential, not only those
 	// whose pool is still active, so the returned total is the ledger's
-	// credential-first sigma_a denominator (dingo #4660). Only credentials of
+	// credential-first sigma_a denominator. Only credentials of
 	// an active pool are returned as inputs, so no pool's reward changes.
 	delegatedPools, err := meta.GetEpochBoundaryDelegatedPoolKeyHashes(
 		slot, boundarySlot, metaTxn,

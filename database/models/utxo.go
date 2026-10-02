@@ -432,7 +432,7 @@ func UtxoLedgerToModel(
 	// the position of a registration certificate rather than a credential,
 	// and resolving that position is the ledger's job. Keep the position so
 	// the stake computation can resolve it against the certificate history
-	// at the slot it is evaluating (dingo #3854).
+	// at the slot it is evaluating.
 	if pointer, ok := outAddr.StakingPayload().(lcommon.AddressPayloadPointer); ok {
 		ret.Pointer = &UtxoPointer{
 			Slot:      pointer.Slot,

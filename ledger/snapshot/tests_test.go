@@ -415,11 +415,11 @@ func TestCalculateEpochBoundaryFallbackHalvesAgree(t *testing.T) {
 }
 
 // TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce covers
-// the snapshot-capture half of the ordering blinklabs-io/dingo#4411 depends
+// the snapshot-capture half of the ordering depends
 // on: a post-snapshot boundary credit (POOLREAP refund, enacted treasury
 // withdrawal, or governance proposal-deposit refund) applied at epoch N's
 // boundary must be reflected exactly once in epoch N+1's mark snapshot, not
-// zero or twice. This passes both before and after the #4411 fix -- the SNAP
+// zero or twice. This passes both before and after the fix -- the SNAP
 // read/write split it exercises was already correct; the defect was in when
 // ledger/governance/epoch.go applied a proposal-deposit refund credit in the
 // first place (one epoch too early), which
@@ -447,7 +447,7 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
 
 	// Epoch 0 -> 1 boundary: SNAP, then a post-SNAP boundary credit (e.g. a
-	// governance proposal-deposit refund), matching dingo#4411's proposal
+	// governance proposal-deposit refund), matching proposal
 	// refund at the epoch677 boundary.
 	evt1 := event.EpochTransitionEvent{
 		PreviousEpoch:   0,
@@ -512,7 +512,7 @@ func TestCaptureEpochBoundaryIncludesPriorBoundaryPostSnapshotCreditOnce(t *test
 }
 
 // TestCurrentBoundarySPOStakeRows_FallsBackToHistoricalReconstruction covers
-// governance's dingo#4441 same-boundary SPO read when no
+// governance's same-boundary SPO read when no
 // ComputeEpochBoundarySnapshot stash exists for this boundary (the hook was
 // never installed, or its fast path failed): it must still return the
 // correct rows via the same historical reconstruction the persisted write
@@ -970,7 +970,7 @@ func TestFallbackRewardSnapshotGuardRequiresTransaction(t *testing.T) {
 // position. It returns the credential's staking key so a caller can inspect
 // reward_live_stake directly.
 //
-// This is the dingo #3854/#3811 shape: a pool whose stake is understated
+// This is the / shape: a pool whose stake is understated
 // because part of one delegator's stake sits at a pointer address.
 func seedPointerStakeFixture(
 	t *testing.T,
@@ -1045,7 +1045,7 @@ func seedPointerStakeFixture(
 	return stakeKey
 }
 
-// TestCaptureEpochBoundaryAgreesOnPointerStake is the dingo#3854 review's
+// TestCaptureEpochBoundaryAgreesOnPointerStake is the review's
 // blocking finding: ComputeEpochBoundarySnapshot (the SNAP-point hook a
 // normally operating node installs) reads only the live aggregate, while the
 // event-driven fallback (no stashed SNAP-point distribution) reconstructs
@@ -1295,7 +1295,7 @@ func TestCaptureEpochBoundaryAgreesOnPointerStakeAcrossTheEraCutover(
 //
 // mergePointerStakeInputs must add the overlay to the row dedupeStakeInputs
 // will keep. Attaching it to any other duplicate silently drops the pointer
-// stake at aggregation, reinstating dingo#3854 on exactly those nodes.
+// stake at aggregation, reinstating on exactly those nodes.
 func TestMergePointerStakeInputsAttachesToTheSurvivingLiveRow(t *testing.T) {
 	credential := bytes.Repeat([]byte{0x9c}, 28)
 	lowPool := bytes.Repeat([]byte{0x01}, 28)
@@ -1351,7 +1351,7 @@ SELECT ?, 0, id, ?, ? FROM pool WHERE pool_key_hash = ?`,
 }
 
 // TestStakeDistributionKeepsRetiredPoolStakeInDenominator pins the sigma_a
-// denominator against the defect behind dingo #4660.
+// denominator against the defect behind.
 //
 // cardano-ledger's ssTotalActiveStake sums every registered credential holding
 // a delegation and never consults the stake-pool set, so a credential still
@@ -1550,7 +1550,7 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 		uint64(bundle.snapshot.TotalActiveStake),
 	)
 
-	// The excluded pool's stake is tracked explicitly (dingo #4025), not just
+	// The excluded pool's stake is tracked explicitly, not just
 	// implied by the gap between TotalActiveStake and the surviving pool set,
 	// so reward calculation can check reward_pool_input sums to that gap
 	// exactly instead of merely no more than TotalActiveStake.
@@ -1561,7 +1561,7 @@ func TestRewardSnapshotActiveStakeKeepsDegradedPoolStake(t *testing.T) {
 // TestRewardSnapshotActiveStakeTracksNoExclusion is the no-degraded-pool
 // companion to TestRewardSnapshotActiveStakeKeepsDegradedPoolStake: when
 // nothing was excluded, ExcludedActiveStake must still be a tracked zero, not
-// left nil. Nil means "unknown, predates tracking" (dingo #4025); a fresh
+// left nil. Nil means "unknown, predates tracking"; a fresh
 // capture always knows the answer, even when that answer is zero.
 func TestRewardSnapshotActiveStakeTracksNoExclusion(t *testing.T) {
 	t.Parallel()
@@ -1737,7 +1737,7 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 	require.Equal(t, uint64(2), summary.TotalDelegators)
 
 	// ExcludedActiveStake round-trips through the database exactly (dingo
-	// #4025): a reward calculation reading this row back after a restart or
+	// ): a reward calculation reading this row back after a restart or
 	// replay -- not just the in-memory bundle buildRewardStateInputs
 	// returned -- must still be able to reconstruct the excluded amount.
 	reloaded, err := db.Metadata().

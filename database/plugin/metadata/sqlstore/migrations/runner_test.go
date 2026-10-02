@@ -39,7 +39,7 @@ var addColumnPattern = regexp.MustCompile(
 // testDBPragmas relaxes durability for throwaway per-test SQLite databases:
 // each one is created, migrated, asserted against, and deleted inside a
 // single test, so an fsync'd rollback journal buys nothing and is expensive
-// on a contended CI runner (dingo#4171). No test in this package kills a
+// on a contended CI runner. No test in this package kills a
 // connection mid-transaction, simulates crash recovery, or inspects a
 // journal/WAL file -- "interruption" tests resume from a schema_migrations
 // row an in-process UPDATE or a returned error puts into the dirty state, not
@@ -756,7 +756,7 @@ func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
 // DDL/state writes (13 migrations, each a separate transaction); sharing it
 // avoids redoing that work in every one of the ~13 parallel subtests, and
 // testDBPragmas removes the per-write fsync from both the shared baseline and
-// each subtest's own per-version replay (dingo#4171). The per-migration
+// each subtest's own per-version replay. The per-migration
 // replay under test -- resetting one version to PhaseExpand and calling
 // Run() again -- still runs against each subtest's own independent copy, so
 // the coverage this test exists for is unchanged.
@@ -771,7 +771,7 @@ func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	// later one has run. A single shared "migrated to latest" baseline worked
 	// for every version before v19 only because versions 1-18 are all purely
 	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
-	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// version's DDL against the newest schema was harmless. v19
 	// drops a column and index a later replay can no longer see, so
 	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
 	// that already ran v19 fails with "no such column" -- a state v1 can

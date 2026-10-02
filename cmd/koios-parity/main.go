@@ -473,7 +473,7 @@ func addKoiosURLFlag(cmd *cobra.Command) {
 			"KOIOS_ALLOW_PRIVATE_ADDRESSES=true)")
 }
 
-// addAccountsFlag registers the #3097 per-account exact-parity opt-in flag,
+// addAccountsFlag registers the per-account exact-parity opt-in flag,
 // shared by fetch/check/run/watch. Per-account fetching/checking issues far
 // more Koios requests than pool-level work (a chunked request set covering
 // the full address universe per epoch, versus one request per pool), so this
@@ -502,7 +502,7 @@ func accountsEnabled(cmd *cobra.Command) bool {
 	return v == "1" || strings.EqualFold(v, "true")
 }
 
-// addAccountChunkFlags registers dingo #3099's --account-chunk-size/
+// addAccountChunkFlags registers the --account-chunk-size/
 // --account-chunk-max-bytes flags, shared by fetch/run/watch (the
 // subcommands that actually issue /account_reward_history requests — check
 // only reads the cache, so it has no use for these). 0 (the default for

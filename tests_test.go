@@ -267,7 +267,7 @@ func TestMusashiProfileTrustBypassScope(t *testing.T) {
 }
 
 // TestBlockPipelineRejectedOnMusashi proves a node cannot be constructed with
-// the block-decode pipeline (issue #1894 phase 1) enabled against the
+// the block-decode pipeline (phase 1) enabled against the
 // Musashi prototype network. The vendored pipeline decode stage has no hook
 // for dingo's Leios-extended-header Conway fallback
 // (database/models.DecodeConwayBlock), so a Leios-extended block would fail
@@ -323,9 +323,9 @@ func TestBlockPipelineRejectedOnMusashi(t *testing.T) {
 }
 
 // TestBlockPipelineValidateRequiresPipelineEnabled proves a node cannot be
-// constructed with the block pipeline's VRF/KES validate stage (issue #1894
-// phase 3) enabled unless the block pipeline itself is also enabled -- see
-// configValidate's BlockPipelineValidateEnabled check.
+// constructed with the block pipeline's VRF/KES validate stage (phase 3
+// of the pipeline) enabled unless the block pipeline itself is also enabled --
+// see configValidate's BlockPipelineValidateEnabled check.
 func TestBlockPipelineValidateRequiresPipelineEnabled(t *testing.T) {
 	t.Parallel()
 

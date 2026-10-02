@@ -38,8 +38,8 @@ import (
 // awaiting-first-header best peer, never that chain selection ever hands the
 // watchdog one.
 //
-// It does, but only because of the rollback registration in chainselection
-// (#3989). The sequence a plateau resync produces is:
+// It does, but only because of the rollback registration in chainselection.
+// The sequence a plateau resync produces is:
 //
 //  1. the resync closes the connection (LocalTipPlateau is in
 //     chainsyncResyncRequiresFreshConnection, ouroboros/chainsync.go);
@@ -49,10 +49,10 @@ import (
 //  3. peer governance redials, and the replacement connection's first
 //     chainsync traffic is the post-FindIntersect MsgRollBackward.
 //
-// Before #3989, step 3 was dropped: HandlePeerRollbackEvent only updated an
+// Before, step 3 was dropped: HandlePeerRollbackEvent only updated an
 // entry that already existed, and only a RollForward created one, so
 // GetBestPeer() was nil and checkLocalTipPlateau returned before the fallback.
-// #3989 registers the peer from that rollback and exempts an entry with no delivered
+// registers the peer from that rollback and exempts an entry with no delivered
 // header from the two behind-filters in isPeerSelectableLocked, which is what
 // makes the peer selectable with a delivered block number of 0.
 
@@ -98,14 +98,14 @@ func rollbackEvent(
 }
 
 // TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector is the end-to-end
-// case #4139 claims to fix, driven through a real ChainSelector: a plateau
+// case the test covers, driven through a real ChainSelector: a plateau
 // resync closed the only upstream, the peer was removed on the
 // ConnectionClosedEvent, the replacement reconnected and has sent nothing but
 // its post-intersect rollback at the stalled local tip while advertising a tip
 // well ahead. The watchdog must still fire on the next plateau window.
 //
 // Red without the fallback (the delivered frontier is the stalled local tip, so
-// the plateau comparison sees no peer ahead), and red if #3989 is reverted
+// the plateau comparison sees no peer ahead), and red if the fix is reverted
 // (the replacement is not tracked at all, so GetBestPeer is nil).
 func TestTickResyncsOnPlateauAfterRecycleWithRealChainSelector(t *testing.T) {
 	const (

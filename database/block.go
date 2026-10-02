@@ -40,7 +40,7 @@ const (
 // BlockByHashTxn resolves via the O(1) hash index versus returning a
 // hard miss. A non-trivial miss rate on a healthy node is the load-only
 // signal that operators can use to justify a hash-index back-fill for
-// pre-#1915 blocks (see #2105).
+// blocks written before the hash index existed.
 var (
 	blockByHashIndexHits   atomic.Uint64
 	blockByHashIndexMisses atomic.Uint64
@@ -780,13 +780,13 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
 	// O(1) hash-index lookup. The index has been written for every block
-	// since #1915, so a miss on a healthy DB means either (a) the hash is
-	// genuinely unknown (the common fork-resolution case, peer probes an
-	// ancestor we have not seen) or (b) the block pre-dates the index and
-	// needs a back-fill. Treating both as ErrBlockNotFound keeps the path
-	// allocation-free; the previous iterator fallback ran a full block-
-	// blob prefix scan per probe and was the second largest CPU consumer
-	// during catch-up (issue #2105).
+	// since the hash index was added, so a miss on a healthy DB means either
+	// (a) the hash is genuinely unknown (the common fork-resolution case, peer
+	// probes an ancestor we have not seen) or (b) the block pre-dates the index
+	// and needs a back-fill. Treating both as ErrBlockNotFound keeps the path
+	// allocation-free; the previous iterator fallback ran a full block- blob
+	// prefix scan per probe and was the second largest CPU consumer during
+	// catch-up.
 	hashIndexKey := types.BlockHashIndexKey(hash)
 	blockKey, err := blob.Get(blobTxn, hashIndexKey)
 	if err == nil && len(blockKey) > 0 {
@@ -812,7 +812,7 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return models.Block{}, err
 	}
 	blockByHashIndexMisses.Add(1)
-	// Index miss is a hard miss (#2105). Per-peer chainsync /
+	// Index miss is a hard miss. Per-peer chainsync /
 	// intersect-point callers should fall back to PeerHeaderLookupFunc
 	// rather than scan the bp prefix on every miss; legacy blocks
 	// predating the hash index need an offline backfill.

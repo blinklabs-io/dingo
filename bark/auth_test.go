@@ -282,7 +282,7 @@ func newTestLifecycleService(t *testing.T) *dblifecycle.Service {
 	}, testDestinationRegistry, nil)
 }
 
-// TestStart_RejectsLifecycleWithoutClientCA pins bark#2988's fail-closed
+// TestStart_RejectsLifecycleWithoutClientCA pins the fail-closed
 // invariant: Start refuses to mount a DatabaseService (Lifecycle set)
 // without a configured client CA, rather than silently serving its
 // destructive RPCs to anonymous callers. This lives at Start, not NewBark —
@@ -297,7 +297,6 @@ func TestStart_RejectsLifecycleWithoutClientCA(t *testing.T) {
 		Lifecycle:       newTestLifecycleService(t),
 		SnapshotDir:     t.TempDir(),
 		Host:            "127.0.0.1",
-		Port:            freeTCPPort(t),
 		TlsCertFilePath: serverCertPath,
 		TlsKeyFilePath:  serverKeyPath,
 		// TlsClientCAFilePath deliberately left unset.
@@ -322,7 +321,6 @@ func TestStart_RejectsLifecycleWithoutTLS(t *testing.T) {
 		Lifecycle:           newTestLifecycleService(t),
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsClientCAFilePath: caCertPath,
 		// TlsCertFilePath/TlsKeyFilePath deliberately left unset.
 	})
@@ -348,7 +346,6 @@ func TestStartRejectsLifecycleWithoutOperatorAllowlist(t *testing.T) {
 		Lifecycle:           newTestLifecycleService(t),
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,
@@ -390,7 +387,6 @@ func TestStart_RejectsClientCAWithoutTLS_NoLifecycle(t *testing.T) {
 	b, err := NewBark(BarkConfig{
 		DB:                  newTestDB(t),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsClientCAFilePath: caCertPath,
 	})
 	require.NoError(t, err)
@@ -459,7 +455,6 @@ func TestDatabaseServiceAuthenticationAndOperatorAuthorization(t *testing.T) {
 		Lifecycle:           svc,
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: trustedCACertPath,

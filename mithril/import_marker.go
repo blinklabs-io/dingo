@@ -64,12 +64,12 @@ func setImmutableImportMarker(db *database.Database, num uint64) error {
 // delegator inactivity, whose per-account expiration state is absent from the
 // cardano-ledger snapshot and cannot be recovered after import.
 //
-// Databases bootstrapped before the immutable-import marker existed (pre-v0.62.0,
-// #2694) carry only the older mithril_ledger_slot trust boundary, so we fall
-// back to it. That boundary is written solely by the Mithril import completion
-// path (updateMithrilReadyState, sync_import.go) and never by a genesis sync, so
-// keying on its presence cannot misclassify a genesis-synced database as
-// bootstrapped.
+// Databases bootstrapped before the immutable-import marker existed
+// (pre-v0.62.0) carry only the older mithril_ledger_slot trust boundary, so we
+// fall back to it. That boundary is written solely by the Mithril import
+// completion path (updateMithrilReadyState, sync_import.go) and never by a
+// genesis sync, so keying on its presence cannot misclassify a genesis-synced
+// database as bootstrapped.
 func WasBootstrapped(db *database.Database) (bool, error) {
 	if _, ok, err := getImmutableImportMarker(db); err != nil || ok {
 		return ok, err

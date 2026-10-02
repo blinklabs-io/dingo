@@ -14,7 +14,7 @@
 
 // Package nodeparity compares Dingo's and a reference cardano-node's ledger
 // state over their node-to-client (NtC) LocalStateQuery interfaces, for
-// blinklabs-io/dingo#1900. It is the shared logic behind cmd/node-parity;
+// cross-node validation. It is the shared logic behind cmd/node-parity;
 // see that command for the on-demand check / polling watch CLI built on
 // top of this package.
 package nodeparity
@@ -86,7 +86,7 @@ func Dial(
 		// segment-read timeout by default as an anti-DoS guard against an
 		// untrusted remote peer, which does not describe this connection;
 		// disabling it here is what stops a slow-but-legitimate reply from
-		// getting the connection killed mid-flight (blinklabs-io/dingo#4082).
+		// getting the connection killed mid-flight.
 		ouroboros.WithMuxerSegmentReadTimeout(0),
 		// The mux fix above only removes the transport-level cap; gouroboros'
 		// LocalStateQuery client has its own, separate 180s state-transition
@@ -95,8 +95,7 @@ func Dial(
 		// mux's 120s always fired first. Disabled for the same reason as the
 		// mux timeout: LocalStateQuery has no protocol-level timeout at all
 		// (spec section 3.13.4), and this is a trusted NtC channel where a
-		// slow-but-legitimate whole-UTxO-set reply must not be killed either
-		// (blinklabs-io/dingo#4082).
+		// slow-but-legitimate whole-UTxO-set reply must not be killed either.
 		// A whole-UTxO-set reply is bounded only by how much live state the
 		// chain has, not by anything under this tool's control: confirmed
 		// live against Preview's ~3.17M UTxOs that the CBOR reply exceeds

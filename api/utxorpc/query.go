@@ -257,7 +257,7 @@ func (s *queryServiceServer) ReadParams(
 
 	// GetCurrentPParamsForReporting omits any synthetic (not-yet-real)
 	// PlutusV2 cost model from this reporting reply, matching what a real
-	// cardano-node reports -- see blinklabs-io/dingo#3825.
+	// cardano-node reports.
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParamsForReporting()
 	if protoParams == nil {
 		// Byron carries no protocol-parameter CBOR, so a genuine Byron

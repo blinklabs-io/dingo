@@ -306,7 +306,7 @@ func (c *Calculator) CalculateSchedule(
 	}
 	// Record the exact threshold every slot below is compared against so the
 	// sigma inputs of a computed schedule are auditable from one log line
-	// without recomputing anything (dingo #2798).
+	// without recomputing anything.
 	schedule.Threshold = threshold
 
 	for slot := epochStartSlot; slot < epochEndSlot; slot++ {

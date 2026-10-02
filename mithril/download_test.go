@@ -1400,7 +1400,7 @@ func TestDownloadConfigByteLimit(t *testing.T) {
 }
 
 // TestDownloadSnapshotRejectsPreexistingSymlinkEscape proves the TOCTOU
-// fix for issue #3147: a symlink placed at the download destination
+// fix: a symlink placed at the download destination
 // path *before* the download starts, pointing outside DestDir, must
 // not be followed. Before routing file creation through os.Root, a
 // plain os.OpenFile(destPath, ...) would re-resolve the path through

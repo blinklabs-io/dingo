@@ -269,8 +269,7 @@ func (ls *LedgerState) validateByronPBFTHeaderCrypto(
 	// it has no notion of Byron block kinds at all. A PBFT-signed regular
 	// block claiming block number 0 would otherwise pass that check and reach
 	// the crypto verification below, which validates the signature but not
-	// that this is the right kind of block to open the chain
-	// (blinklabs-io/dingo#4399).
+	// that this is the right kind of block to open the chain.
 	if ls.isFirstByronHeader(block) {
 		return fmt.Errorf(
 			"byron block at slot %d: only an epoch-boundary block may be "+
@@ -343,8 +342,7 @@ func (ls *LedgerState) isFirstByronHeader(block ledger.Block) bool {
 // mismatch at the first block with ChainValidationGenesisHashMismatch. The
 // chain package cannot enforce this itself -- it has no knowledge of the
 // network's genesis hash (see chain.firstBlockNumberValid) -- so binding the
-// anchor belongs here, in the ledger/config-aware layer
-// (blinklabs-io/dingo#4399).
+// anchor belongs here, in the ledger/config-aware layer.
 //
 // A ledger started from a snapshot or bulk import at a trusted non-origin
 // point never reaches this function with an unanchored EBB: its primary

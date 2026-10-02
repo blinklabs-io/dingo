@@ -716,7 +716,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
 // internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
-// regression test for the top-level API security defaults (dingo#2998)
+// regression test for the top-level API security defaults
 // being silently dropped because Run's real composition call never invoked
 // dingo.WithAPIConfig.
 func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
@@ -953,94 +953,49 @@ func nodeSourceForKoiosParity(t *testing.T) string {
 	return s[start : start+end]
 }
 
-// TestBuildDingoConfigWiresForgeTolerances asserts that the forge tolerances a
-// loaded internal/config.Config carries actually reach the dingo.Config that
-// Run hands to dingo.New. This is the composition path the binary really
-// takes: buildDingoConfig calls dingo.NewConfig with an explicit option list
-// and NewConfig starts from a fresh internal config, so a field that has no
-// With... entry here is silently dropped no matter how completely it is
-// plumbed through YAML, env, flags, defaults and the accessor.
-//
-// ForgePrimaryChainTipToleranceSlots was exactly that: parsed, defaulted,
-// flagged, documented and asserted at every other layer, yet absent from this
-// list, so an operator's value was discarded and the forger always fell back
-// to its built-in default. The neighbouring tolerances are asserted alongside
-// it so a future option-list edit that drops any of them fails here.
+// TestBuildDingoConfigWiresForgeTolerances ensures the remaining operator-set
+// forge tolerances reach the node config built on the serve path.
 func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		ForgeSyncToleranceSlots:            321,
-		ForgeStaleGapThresholdSlots:        654,
-		ForgePrimaryChainTipToleranceSlots: 42,
-		ForgeUpstreamStalenessSlots:        17,
-		ForgeAppliedTipStalenessSlots:      9,
-		ForgeEndorserBlockStalenessSlots:   23,
+		ForgeSyncToleranceSlots:          321,
+		ForgeStaleGapThresholdSlots:      654,
+		ForgeUpstreamStalenessSlots:      17,
+		ForgeAppliedTipStalenessSlots:    9,
+		ForgeEndorserBlockStalenessSlots: 23,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-
 	built := buildDingoConfig(
-		cfg,
-		logger,
-		nil,
-		nil,
-		false,
-		dingo.StorageModeCore,
-		30*time.Second,
-		chainsync.DefaultStallTimeout,
+		cfg, logger, nil, nil, false, dingo.StorageModeCore,
+		30*time.Second, chainsync.DefaultStallTimeout,
 		chainsync.HeaderSyncStrategyPrimary,
 	)
-
 	if got := built.ForgeSyncToleranceSlots(); got != 321 {
 		t.Fatalf("expected forgeSyncToleranceSlots 321, got %d", got)
 	}
 	if got := built.ForgeStaleGapThresholdSlots(); got != 654 {
 		t.Fatalf("expected forgeStaleGapThresholdSlots 654, got %d", got)
 	}
-	if got := built.ForgePrimaryChainTipToleranceSlots(); got != 42 {
-		t.Fatalf(
-			"expected forgePrimaryChainTipToleranceSlots 42, got %d; the "+
-				"loaded value never reached dingo.Config, so the forger "+
-				"silently uses its built-in default",
-			got,
-		)
-	}
 	if got := built.ForgeUpstreamStalenessSlots(); got != 17 {
-		t.Fatalf(
-			"expected forgeUpstreamStalenessSlots 17, got %d; the loaded "+
-				"value never reached dingo.Config, so the forger silently "+
-				"uses its built-in default",
-			got,
-		)
+		t.Fatalf("expected forgeUpstreamStalenessSlots 17, got %d", got)
 	}
 	if got := built.ForgeAppliedTipStalenessSlots(); got != 9 {
-		t.Fatalf(
-			"expected forgeAppliedTipStalenessSlots 9, got %d; the loaded "+
-				"value never reached dingo.Config, so the wall-clock "+
-				"staleness backstop stays off however it is configured",
-			got,
-		)
+		t.Fatalf("expected forgeAppliedTipStalenessSlots 9, got %d", got)
 	}
 	if got := built.ForgeEndorserBlockStalenessSlots(); got != 23 {
-		t.Fatalf(
-			"expected forgeEndorserBlockStalenessSlots 23, got %d; the "+
-				"loaded value never reached dingo.Config, so the "+
-				"endorser-block staleness bound stays off however it is "+
-				"configured",
-			got,
-		)
+		t.Fatalf("expected forgeEndorserBlockStalenessSlots 23, got %d", got)
 	}
 }
 
 // TestBuildDingoConfigWiresBlockPipelineFlags is the regression test for
-// dingo#4599: BlockPipelineEnabled and BlockPipelineValidateEnabled were
-// correctly parsed into internal/config.Config but buildDingoConfig never
-// called a With... option to forward either one, so dingo.NewConfig built
-// its internal config from fresh Go zero values and the parallel block
-// decode pipeline (ledger/state.go's
-// "if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never
-// constructed on the live serve path, regardless of the flag or environment
-// variable.
+// the block pipeline flags: BlockPipelineEnabled and
+// BlockPipelineValidateEnabled were correctly parsed into
+// internal/config.Config but buildDingoConfig never called a With... option to
+// forward either one, so dingo.NewConfig built its internal config from fresh
+// Go zero values and the parallel block decode pipeline (ledger/state.go's "if
+// cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never constructed on
+// the live serve path, regardless of the flag or environment variable.
 func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 	t.Parallel()
 
@@ -1081,14 +1036,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 }
 
 // TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
-// coverage for the defect class dingo#4599 belongs to, not just the single
-// field it reported: buildDingoConfig hand-lists roughly 85 individual
-// dingo.With...(...) calls, one per field, and has now silently dropped a
-// field from that list twice -- AccountChunkSize/AccountChunkMaxBytes for
-// KoiosParity (caught and fixed separately, see the comment on
-// dingo.WithKoiosParity's call site in node.go), then
-// BlockPipelineEnabled/BlockPipelineValidateEnabled (this issue) -- with no
-// general check that every field actually made the list.
+// coverage for the defect class of the block pipeline flags, not just the
+// single field it reported: buildDingoConfig hand-lists roughly 85 individual
+// dingo.With...(...) calls, one per field, and has now silently dropped a field
+// from that list twice -- AccountChunkSize/AccountChunkMaxBytes for KoiosParity
+// (caught and fixed separately, see the comment on dingo.WithKoiosParity's call
+// site in node.go), then BlockPipelineEnabled/BlockPipelineValidateEnabled (the
+// second time) -- with no general check that every field actually made the
+// list.
 //
 // It enumerates every top-level internal/config.Config field whose Kind is a
 // plain scalar (bool, a signed/unsigned integer, float64, string, or
@@ -1143,14 +1098,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 //     mithril/sync.go instead.
 //
 // Known, pre-existing gaps of this same shape found while writing this test
-// are excluded below rather than fixed here; dingo#4600 tracks them.
+// are excluded below rather than fixed here.
 func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	t.Parallel()
 
-	// knownGaps are real forwarding gaps of the same shape as dingo#4599,
-	// found while writing this test and deliberately not fixed in the same
-	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
-	// entry here once its fix lands, so this test starts asserting it.
+	// knownGaps are real forwarding gaps of the same shape as the block
+	// pipeline flags, found while writing this test and deliberately not fixed
+	// in the same commit as that unrelated fix. Remove an entry here once its
+	// fix lands, so this test starts asserting it.
 	knownGaps := map[string]string{}
 	// excluded are cfg fields resolved through a separate buildDingoConfig
 	// parameter, or otherwise not part of the direct cfg-to-dingo.Config

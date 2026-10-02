@@ -70,7 +70,7 @@ func resetBlockByHashStats() {
 
 // TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
 // unknown hash increments the miss counter (so operators can track the
-// index miss rate from #2105) and returns ErrBlockNotFound directly on
+// index miss rate) and returns ErrBlockNotFound directly on
 // the index miss, without any fallback scan.
 func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	t.Parallel()
@@ -111,7 +111,7 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 }
 
 // TestBlockByHashTxn_KnownHashStillResolves guards the fast path: every
-// block written via BlockCreate gets a hash-index entry (#1915), and a
+// block written via BlockCreate gets a hash-index entry, and a
 // lookup must hit it in O(1) and return the block.
 func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 	t.Parallel()

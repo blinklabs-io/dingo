@@ -254,9 +254,9 @@ func (d *Database) pparamEnactmentPending(
 // Conway/Dijkstra path -- comparing the merged result's value before and
 // after is unsound for the same reason it is there: HardForkBabbage's
 // synthetic default is the real, canonical mainnet value, so a real update
-// writing that exact value would otherwise look unchanged. See
-// blinklabs-io/dingo#3825's PR review. May be nil (no signal available for
-// this era, e.g. Byron), in which case the returned bool is always false.
+// writing that exact value would otherwise look unchanged. May be nil (no
+// signal available for this era, e.g. Byron), in which case the returned bool
+// is always false.
 func (d *Database) ComputeAndApplyPParamUpdates(
 	slot, epoch uint64,
 	era uint,
