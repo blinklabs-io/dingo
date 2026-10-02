@@ -40,12 +40,15 @@ type nsEra struct {
 }
 
 var (
-	nsShelley = nsEra{"shelley", ledger.BlockTypeShelley, ledger.TxTypeShelley, 3}
-	nsAllegra = nsEra{"allegra", ledger.BlockTypeAllegra, ledger.TxTypeAllegra, 5}
-	nsMary    = nsEra{"mary", ledger.BlockTypeMary, ledger.TxTypeMary, 5}
-	nsAlonzo  = nsEra{"alonzo", ledger.BlockTypeAlonzo, ledger.TxTypeAlonzo, 5}
-	nsBabbage = nsEra{"babbage", ledger.BlockTypeBabbage, ledger.TxTypeBabbage, 5}
-	nsConway  = nsEra{"conway", ledger.BlockTypeConway, ledger.TxTypeConway, 5}
+	nsShelley  = nsEra{"shelley", ledger.BlockTypeShelley, ledger.TxTypeShelley, 3}
+	nsAllegra  = nsEra{"allegra", ledger.BlockTypeAllegra, ledger.TxTypeAllegra, 5}
+	nsMary     = nsEra{"mary", ledger.BlockTypeMary, ledger.TxTypeMary, 5}
+	nsAlonzo   = nsEra{"alonzo", ledger.BlockTypeAlonzo, ledger.TxTypeAlonzo, 5}
+	nsBabbage  = nsEra{"babbage", ledger.BlockTypeBabbage, ledger.TxTypeBabbage, 5}
+	nsConway   = nsEra{"conway", ledger.BlockTypeConway, ledger.TxTypeConway, 5}
+	nsDijkstra = nsEra{
+		"dijkstra", ledger.BlockTypeDijkstra, ledger.TxTypeDijkstra, 6,
+	}
 
 	nsPostShelley = []nsEra{nsAllegra, nsMary, nsAlonzo, nsBabbage, nsConway}
 	nsAllEras     = append([]nsEra{nsShelley}, nsPostShelley...)
@@ -62,6 +65,19 @@ func nsNofK(n int64, s ...any) []any { return []any{uint64(3), n, s} }
 func nsBefore(slot uint64) []any     { return []any{uint64(4), slot} }
 func nsAfter(slot uint64) []any      { return []any{uint64(5), slot} }
 func nsGuard(hash []byte) []any      { return []any{uint64(6), []any{uint64(0), hash}} }
+
+func nsConstructor(ctor uint, key []byte) any {
+	constructors := map[uint]any{
+		0: nsSig(key),
+		1: nsAll(nsSig(key)),
+		2: nsAny(nsSig(key)),
+		3: nsNofK(1, nsSig(key)),
+		4: nsBefore(1),
+		5: nsAfter(1),
+		6: nsGuard(key),
+	}
+	return constructors[ctor]
+}
 
 func nsMustEncode(t *testing.T, v any) []byte {
 	t.Helper()
@@ -450,4 +466,24 @@ func TestNativeScriptConstructorDomainDijkstraAcceptsGuard(t *testing.T) {
 	data = nsMustEncode(t, []any{body, ws, true, nil})
 	_, err = safedecode.Transaction(ledger.TxTypeDijkstra, data)
 	require.ErrorContains(t, err, "invalid native script key hash")
+}
+
+// Dijkstra admits constructor 6 in auxiliary data and reference scripts, as it
+// does in the witness set. Keep these transaction decode paths pinned to the
+// era's highest constructor so a narrower placement-specific bound cannot pass.
+func TestNativeScriptConstructorDomainDijkstraAcceptsGuardInOtherDomains(
+	t *testing.T,
+) {
+	t.Parallel()
+	key := nsKeyHash(0x22)
+	script := nsConstructor(nsDijkstra.maxCtor, key)
+	for _, c := range []nsCase{
+		{era: nsDijkstra, script: script, aux: true},
+		{era: nsDijkstra, script: script, ref: true},
+	} {
+		t.Run(map[bool]string{true: "reference script", false: "auxiliary data"}[c.ref], func(t *testing.T) {
+			t.Parallel()
+			require.NoError(t, c.tx(t))
+		})
+	}
 }
