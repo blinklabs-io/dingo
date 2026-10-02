@@ -117,7 +117,7 @@ func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
 // TestChainSelectionEligible_FiltersRandomInboundSource ensures that inbound
 // connections from peers we don't know about (PeerSourceInboundConn) are not
 // treated as chain-selection sources even when the connection is a full-duplex
-// client. This preserves the protection added in #1699 against random
+// client. This preserves the protection against random
 // downstream peers polluting chain selection while still allowing topology
 // and P2P-discovered peers who happen to dial us first to drive chain sync.
 func TestChainSelectionEligible_FiltersRandomInboundSource(t *testing.T) {

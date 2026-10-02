@@ -1487,8 +1487,8 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 }
 
 // TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure is the
-// error-path counterpart to the test above, covering the case wolf31o2's
-// review specifically called out: downloadImmutables used to clean up after
+// error-path counterpart to the test above, covering the case:
+// downloadImmutables used to clean up after
 // a failed fetchImmutableArchive itself, by joining archiveDir -- a bare
 // path -- with the filename and calling os.Remove. Swapping archiveDir for a
 // symlink between the download finishing and that cleanup running let it

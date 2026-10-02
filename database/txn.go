@@ -280,7 +280,7 @@ func (t *Txn) DB() *Database {
 // would let a concurrent SetBlobStore swap hand recovery a different store
 // than the one being recovered from -- silently failing to find data that is
 // only in the old store, or (if the store were ever a writable target here)
-// repairing the wrong one (blinklabs-io/dingo#1900 review).
+// repairing the wrong one.
 //
 // The returned Txn's blobTxn/blobStore are the same values as t's, marked
 // sharedBlob so Release/Rollback tears down only the metadata transaction
@@ -297,7 +297,7 @@ func (t *Txn) withMetadataForRecovery() (*Txn, func()) {
 		// same store. Forcing it false here would make a write-capable
 		// caller's repair commit independently of the caller's own
 		// transaction, so a later rollback of that caller would no
-		// longer undo the repair (blinklabs-io/dingo#1900 review).
+		// longer undo the repair.
 		readWrite:  t.readWrite,
 		blobTxn:    t.blobTxn,
 		blobStore:  t.blobStore,
@@ -754,7 +754,7 @@ func (t *Txn) Commit() error {
 	// here -- left staged but never actually committed by this call --
 	// would either sit uncommitted until the owner's own Commit runs, or
 	// be overwritten by the owner's own timestamp; neither is this Txn's
-	// to decide (chrisguiney review; not reachable by any caller today,
+	// to decide (not reachable by any caller today,
 	// since the only current sharedBlob wrapper is only ever
 	// Released/Rolled back, never committed).
 	var commitTimestamp int64

@@ -57,8 +57,8 @@ func hashAddressChunk(addrs []string) string {
 
 // chunkAddressesByCountAndSize splits a sorted address list into groups
 // bounded by both address count (maxCount) and encoded-JSON body size
-// (maxBytes) — dingo #3099's "shape requests by both account count and
-// encoded request/response size" requirement, on top of #3097's
+// (maxBytes) — the requirement to "shape requests by both account count and
+// encoded request/response size", on top of the
 // count-only chunkAddresses/koiosAccountChunkSize.
 //
 // addrs must already be sorted (FetchAccountRewardsForEpoch sorts the

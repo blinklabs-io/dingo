@@ -59,8 +59,8 @@
 // rollback's undo events (Rollback: true) arriving before any
 // transaction event the ledger emits afterwards. Forward Apply events are
 // registered with the database transaction's AfterCommit hook, so a rollback
-// or failed commit publishes none. See
-// blinklabs-io/dingo#2287: while those undo events were emitted from a
+// or failed commit publishes none. While
+// those undo events were emitted from a
 // detached goroutine, a subscriber could apply an undo after the redo
 // that followed it and stay wrong indefinitely.
 //

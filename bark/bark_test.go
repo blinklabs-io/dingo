@@ -43,6 +43,26 @@ func TestBarkListenAddrSupportsIPv6(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
+// TestStartOnPortZeroBindsAFreePort asserts Port 0 asks the OS for a free port,
+// which Addr then reports. Two servers started that way must not contend for
+// one fixed port.
+func TestStartOnPortZeroBindsAFreePort(t *testing.T) {
+	t.Parallel()
+
+	addrs := make(map[string]bool)
+	for range 2 {
+		b, err := NewBark(BarkConfig{DB: newTestDB(t), Host: "127.0.0.1"})
+		require.NoError(t, err)
+		require.NoError(t, b.Start(t.Context()))
+		t.Cleanup(func() { _ = b.Stop(context.Background()) })
+		_, port, err := net.SplitHostPort(b.Addr())
+		require.NoError(t, err)
+		require.NotEqual(t, "0", port)
+		addrs[b.Addr()] = true
+	}
+	require.Len(t, addrs, 2)
+}
+
 func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 	t.Parallel()
 
@@ -60,7 +80,6 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 			cfg := BarkConfig{
 				DB:   newTestDB(t),
 				Host: "127.0.0.1",
-				Port: freeTCPPort(t),
 			}
 			if testCase.useTLS {
 				cfg.TlsCertFilePath, cfg.TlsKeyFilePath = writeTestTLSCertKey(t)
@@ -223,7 +242,7 @@ func TestAddrClearsAfterStop(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 	require.Empty(t, b.Addr(), "Addr must be empty before Start is ever called")
@@ -273,7 +292,7 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		db := newTestDB(t)
 		b, err := NewBark(
-			BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+			BarkConfig{DB: db, Host: "127.0.0.1"},
 		)
 		require.NoError(t, err)
 		require.NoError(t, b.Start(context.Background()))
@@ -332,7 +351,7 @@ func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 

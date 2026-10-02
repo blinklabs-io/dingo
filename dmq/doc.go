@@ -15,7 +15,7 @@
 // Package dmq implements phase 1 of CIP-0137's Decentralized Message Queue:
 // the generic message pool shared by every DMQ topic instance. It holds no
 // opinion about authentication, KES/opcert validation, network wiring, or
-// peer selection -- those belong to later CIP-0137 phases (issues #1949-#1954).
+// peer selection -- those belong to later CIP-0137 phases.
 //
 // The wire types -- Message, MessagePayload, and OperationalCertificate, along
 // with their CBOR encode/decode and message-ID computation -- already exist
@@ -40,7 +40,7 @@
 // CIP-0137's per-peer outstanding-message-ids queue for the node-to-node
 // message-submission mini-protocol (protocol 18), without implementing the
 // protocol's blocking/non-blocking request state machine itself -- that is
-// phase 3's job (issue #1950).
+// phase 3's job.
 //
 // # Size limits and backpressure
 //
