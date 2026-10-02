@@ -604,6 +604,7 @@ func decideRatification(
 		Txn:                   in.Txn,
 		StakeEpoch:            stakeEpochFor(in.NewEpoch),
 		CurrentEpoch:          in.NewEpoch,
+		ActiveProposalEpoch:   &in.PrevEpoch,
 		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
@@ -664,8 +665,9 @@ func decideRatification(
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
-		drepState, err = LoadDRepVotingState(
-			in.DB, in.Txn, in.NewEpoch, in.DelegatorInactivityOn,
+		drepState, err = loadDRepVotingState(
+			in.DB, in.Txn, in.NewEpoch, in.PrevEpoch,
+			in.DelegatorInactivityOn,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("load drep voting state: %w", err)

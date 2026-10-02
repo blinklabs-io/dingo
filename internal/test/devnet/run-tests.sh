@@ -25,15 +25,15 @@
 # Usage:
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
-#   ./run-tests.sh --accelerated      # Run the fast event-driven scenario timeline
+#   ./run-tests.sh --accelerated      # Run accelerated timeline and governance scenarios
 #   ./run-tests.sh -run TestBasic     # Run specific test pattern
 #   ./run-tests.sh --keep-up          # Don't tear down on success (for debugging)
 #
 # --accelerated brings the network up on the accelerated spec (shorter
-# slots, epochs and security parameter) and runs the single scenario
-# timeline in scenarios/accelerated_timeline_test.go, which is bounded by
-# a hard timeout. It composes with --conformance to run the same timeline
-# against the dingo + cardano-node topology. Without it the canonical
+# slots, epochs and security parameter) and runs the event-driven scenario
+# timeline plus the Conway SPO governance ratification scenario in dingo
+# mode. It composes with --conformance to run the timeline against the
+# dingo + cardano-node topology. Without it the canonical
 # timing network and the full suite run as before, which is what soak and
 # canary runs use.
 
@@ -337,13 +337,20 @@ if [[ "${MODE}" == "dingo" ]]; then
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
-    # Match the host user so the runner can remove its own temporary tree.
-    # The source volume is world-readable by configurator.sh.
+    # Copy root-only pool cold keys into the host user's private temporary
+    # directory, then return ownership and restrict all copied signing keys.
     docker run --rm \
-      --user "$(id -u):$(id -g)" \
+      --user 0:0 \
+      -e HOST_UID="$(id -u)" \
+      -e HOST_GID="$(id -g)" \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
-      alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
+      alpine sh -c 'cp -r /k/stake /out/stake; \
+        cp -r /k/pool-keys /out/pool-keys; \
+        cp /k/genesis.*.skey /k/genesis.*.vkey /k/genesis.*.addr.info /out/; \
+        chown -R "${HOST_UID}:${HOST_GID}" /out; \
+        find /out -type f -name "*.skey" -exec chmod 0600 {} +' \
+      2>/dev/null || true
   fi
   if [[ -d "${STAKE_KEYS_HOST_DIR}/stake" ]]; then
     export DEVNET_STAKE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}/stake"
@@ -354,6 +361,14 @@ if [[ "${MODE}" == "dingo" ]]; then
       warn "Genesis stake keys were not copied; skipping the CIP-50 scenario"
       unset DEVNET_CIP50_TEST
     fi
+  fi
+  if [[ "${ACCELERATED}" == "true" ]] &&
+    [[ -d "${STAKE_KEYS_HOST_DIR}/pool-keys" ]] &&
+    compgen -G "${STAKE_KEYS_HOST_DIR}/genesis.*.skey" >/dev/null; then
+    export DEVNET_GOVERNANCE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}"
+    log "DEVNET_GOVERNANCE_KEYS_DIR=${DEVNET_GOVERNANCE_KEYS_DIR}"
+  else
+    unset DEVNET_GOVERNANCE_KEYS_DIR
   fi
 fi
 
@@ -392,13 +407,16 @@ fi
 # Run tests with the mode's build tags.
 # The -count=1 flag disables test caching.
 #
-# The accelerated run is a single scenario timeline, so it selects that
-# test and takes a much tighter timeout: the scenario enforces its own
-# hard timeout internally, and this is the outer backstop.
+# The accelerated governance scenario crosses four epoch boundaries after
+# the timeline, so the outer timeout covers both tests.
 if [[ "${ACCELERATED}" == "true" ]]; then
-  TEST_TIMEOUT="${TEST_TIMEOUT:-8m}"
+  TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
   if [[ "${USER_RUN_FILTER}" == "false" ]]; then
-    TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+    if [[ "${MODE}" == "dingo" ]]; then
+      TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline|TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch')
+    else
+      TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+    fi
   fi
 else
   if [[ "${LEIOS}" == "true" ]]; then

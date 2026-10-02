@@ -51,6 +51,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -59,6 +60,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNegativeLeaderRewardApplicationRespectsExpiredAccountGuard(t *testing.T) {
+	t.Parallel()
+	credential, err := rewards.NewCredential(0, bytes.Repeat([]byte{0x41}, rewards.CredentialHashSize))
+	require.NoError(t, err)
+	negative := []rewards.NegativeLeaderReward{{
+		Credential: credential,
+		Amount:     10,
+		Spendable:  true,
+	}}
+	require.ErrorIs(
+		t,
+		negativeLeaderRewardApplicationError(negative, nil),
+		rewards.ErrNegativeLeaderReward,
+	)
+	guarded := map[string]struct{}{
+		models.NewStakeCredentialRef(credential.Tag, credential.Hash[:]).MapKey(): {},
+	}
+	require.NoError(t, negativeLeaderRewardApplicationError(negative, guarded))
+}
 
 const (
 	retentionNewEpoch            = uint64(4)
@@ -5675,6 +5696,54 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	)
 }
 
+func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.activeEras = append(
+		append([]eras.EraDesc(nil), eras.Eras...),
+		eras.DijkstraEraDesc,
+	)
+	ls.config.PledgeLeverageEnabled = true
+	ls.config.PledgeLeverage = 100
+	ls.config.MinPoolMargin = 250
+	performancePParamsValue := mockledger.NewMockConwayProtocolParams()
+	performancePParamsValue.NOpt = 10
+	performancePParamsValue.A0 = rewardCalcRat(1, 2)
+	performancePParamsValue.Rho = rewardCalcRat(1, 100)
+	performancePParamsValue.Tau = rewardCalcRat(0, 1)
+	performancePParamsValue.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 9}
+	performancePParams := &performancePParamsValue
+	calculationPParams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters:  mockledger.NewMockConwayProtocolParams(),
+		RefScriptCostMultiplier:   rewardCalcRat(1, 1),
+		MaxPledgeLeverage:         rewardCalcRat(1, 2),
+		MinPoolMargin:             rewardCalcRat(1, 20),
+		LeiosQuorumStakeThreshold: rewardCalcRat(1, 2),
+		CommitteeStakeCoverage:    rewardCalcRat(1, 2),
+		QuorumStakeThreshold:      rewardCalcRat(1, 2),
+	}
+	performanceCBOR, err := cbor.Encode(performancePParams)
+	require.NoError(t, err)
+	calculationCBOR, err := cbor.Encode(calculationPParams)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	require.NoError(t, meta.SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
+	require.NoError(t, meta.SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
+	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
+	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	_, params, _, err := ls.rewardParameters(
+		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
+	)
+	require.NoError(t, err)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(1, 2), params.PledgeLeverage)
+	require.Equal(t, big.NewRat(1, 40), params.MinPoolMargin)
+}
+
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 	t *testing.T,
 ) {
@@ -5724,11 +5793,11 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 	require.ErrorContains(t, err, "missing treasury expansion")
 }
 
-func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+func TestApplyPledgeLeveragePreDijkstraUsesExperimentalConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+	applyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, LedgerStateConfig{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        100,
 	})
@@ -5736,17 +5805,28 @@ func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
 	require.Equal(t, big.NewRat(100, 1), params.PledgeLeverage)
 }
 
-func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+func TestApplyPledgeLeverageDijkstraPParamOverridesConfig(t *testing.T) {
 	t.Parallel()
 
-	params := rewards.Parameters{
-		PledgeLeverageEnabled: true,
-		PledgeLeverage:        big.NewRat(50, 1),
-	}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
-		PledgeLeverageEnabled: false,
-		PledgeLeverage:        100,
-	})
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{MaxPledgeLeverage: rewardCalcRat(5, 1)},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(5, 1), params.PledgeLeverage)
+}
+
+func TestApplyPledgeLeverageDijkstraNilIgnoresConfig(t *testing.T) {
+	t.Parallel()
+
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
 	require.False(t, params.PledgeLeverageEnabled)
 	require.Nil(t, params.PledgeLeverage)
 }
@@ -6689,37 +6769,38 @@ func TestMinPoolMarginRat(t *testing.T) {
 }
 
 // applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
-// calculation is for Dijkstra (major >= 12); otherwise it leaves the field nil.
+// calculation era is Dijkstra or later; otherwise it leaves the field nil.
 func TestApplyMinPoolMarginConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		bp      uint
-		major   uint64
+		eraID   uint
 		wantRat *big.Rat // nil => expect nil
 	}{
-		{name: "disabled zero at dijkstra", bp: 0, major: 12},
-		{name: "pre-dijkstra ignored", bp: 150, major: 11},
+		{name: "disabled zero at dijkstra", bp: 0, eraID: eras.DijkstraEraDesc.Id},
+		{name: "pre-dijkstra ignored", bp: 150, eraID: eras.ConwayEraDesc.Id},
 		{
 			name:    "dijkstra sets rat",
 			bp:      150,
-			major:   12,
+			eraID:   eras.DijkstraEraDesc.Id,
 			wantRat: big.NewRat(150, 10_000),
 		},
 		{
 			name:    "post-dijkstra sets rat",
 			bp:      500,
-			major:   13,
+			eraID:   eras.DijkstraEraDesc.Id + 1,
 			wantRat: big.NewRat(500, 10_000),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := rewards.Parameters{ProtocolMajorVersion: tt.major}
+			params := rewards.Parameters{ProtocolMajorVersion: 9}
 			applyMinPoolMarginConfig(
 				&params,
 				LedgerStateConfig{MinPoolMargin: tt.bp},
+				tt.eraID,
 			)
 			if tt.wantRat == nil {
 				require.Nil(t, params.MinPoolMargin)
