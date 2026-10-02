@@ -1371,6 +1371,20 @@ func (t *testByronTx) Outputs() []lcommon.TransactionOutput {
 	return t.outputs
 }
 
+// Produced overrides the method promoted from the embedded ByronTransaction,
+// which would read its empty body instead of t.outputs.
+func (t *testByronTx) Produced() []lcommon.Utxo {
+	ret := make([]lcommon.Utxo, 0, len(t.outputs))
+	for idx, output := range t.outputs {
+		ret = append(ret, lcommon.Utxo{
+			//nolint:gosec // G115: test transactions are small
+			Id:     newTestInput(0xee, uint32(idx)),
+			Output: output,
+		})
+	}
+	return ret
+}
+
 func (t *testByronTx) Cbor() []byte {
 	return t.cbor
 }

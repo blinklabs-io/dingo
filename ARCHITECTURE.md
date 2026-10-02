@@ -3197,6 +3197,17 @@ input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
 pairing the two lists as `zip` does; and a witness's address root is hashed
 over the canonical encoding of the address's decoded attributes.
 
+Byron output indexes are Word16. The reference `txOutputUTxO` zips a
+transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
+65535 enter the UTxO set, and its fee balance and UTxO update use that set.
+gouroboros `ByronTransaction.Produced()` returns the same set, and every
+storage path builds UTxOs from `Produced()`. `byronOutputBalance` therefore
+sums `Produced()`, so value conservation and the minimum fee see exactly the
+outputs that are stored, while the output address rules
+(`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`) still cover
+every output. Later outputs remain in the transaction body, its ID and its
+serialized size, and a transaction is not rejected for having more outputs.
+
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and
 fee policy adopted as of the new tip. A stored chain that begins after genesis,
