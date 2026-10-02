@@ -320,4 +320,16 @@ func TestValidateTxDijkstraFeeAggregatesChildBudgets(t *testing.T) {
 			assert.False(t, hasFeeTooSmall(err), "exact minimum rejected: %v", err)
 		})
 	}
+
+	// A Dijkstra transaction without top-level or child redeemers pays only
+	// the size component, matching the pre-execution-unit fee path.
+	noRedeemers := feeTestDijkstraTx(t, feeTestBaseFee, nil)
+	sizeOnly := feeTestExpectedMin(t, noRedeemers)
+	err := ValidateTxDijkstra(
+		feeTestDijkstraTx(t, sizeOnly, nil),
+		0,
+		newMockLedgerState(),
+		pp,
+	)
+	assert.False(t, hasFeeTooSmall(err), "redeemer-free transaction rejected: %v", err)
 }
