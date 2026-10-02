@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"math/big"
 	"os"
 	"sort"
@@ -32,12 +33,14 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	hostplugin "github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -122,6 +125,14 @@ type DingoStateManager struct {
 
 	// currentEpoch tracks the current epoch
 	currentEpoch uint64
+
+	// appliedSlotMax is the highest slot ApplyTransaction has seen, and
+	// committeeEpochStartSlot is the first slot after the last epoch
+	// boundary. Conformance slots come from the vector rather than from
+	// conformanceSlotsPerEpoch, so the current epoch's committee window is
+	// located by the transactions applied since the boundary.
+	appliedSlotMax          uint64
+	committeeEpochStartSlot uint64
 
 	// committeeRemovals tracks the remove-set of pending UpdateCommittee
 	// proposals, keyed by gov action id. The upstream conformance
@@ -217,7 +228,7 @@ func NewDingoStateManager() (*DingoStateManager, error) {
 // newDingoStateManagerAt creates a sqlite-backed DingoStateManager rooted at
 // an explicit, caller-owned data directory. Used directly by tests that
 // close one manager and open a second at the same path to prove state
-// survives a restart (see state_manager_backend_test.go); NewDingoStateManager
+// survives a restart (see state_manager_test.go); NewDingoStateManager
 // uses it with a manager-owned temp directory.
 func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 	m, err := newDingoStateManager(realBackendOptions{
@@ -243,7 +254,7 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // mysqlProcessDatabase's in state_manager_mysql.go), so an individual
 // manager's Close must not drop a resource a sibling manager elsewhere in
 // the same process may still be using -- that cleanup belongs to TestMain
-// (conformance_main_test.go), once, after every test in the process has
+// (conformance_postgres_test.go), once, after every test in the process has
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
@@ -264,6 +275,8 @@ func (m *DingoStateManager) Close() error {
 func (m *DingoStateManager) Reset() error {
 	m.protocolParams = nil
 	m.currentEpoch = 0
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.govState = conformance.NewGovernanceState()
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
@@ -364,6 +377,8 @@ func (m *DingoStateManager) LoadInitialState(
 ) error {
 	m.protocolParams = pp
 	m.currentEpoch = state.CurrentEpoch
+	m.appliedSlotMax = 0
+	m.committeeEpochStartSlot = 0
 	m.committeeRemovals = make(map[string]map[common.Blake2b224]struct{})
 	m.committeeQuorums = make(map[string]*big.Rat)
 
@@ -587,9 +602,25 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	}
 	deposit := provider.DRepDepositAmount()
 	if deposit == nil || deposit.Sign() < 0 || !deposit.IsUint64() {
-		return 0, errors.New("protocol parameters contain an invalid DRep deposit")
+		return 0, errors.New(
+			"protocol parameters contain an invalid DRep deposit",
+		)
 	}
 	return deposit.Uint64(), nil
+}
+
+func stateManagerConwayProtocolParameters(
+	pp common.ProtocolParameters,
+) *conway.ConwayProtocolParameters {
+	switch params := pp.(type) {
+	case *conway.ConwayProtocolParameters:
+		return params
+	case *dijkstra.DijkstraProtocolParameters:
+		if params != nil {
+			return &params.ConwayProtocolParameters
+		}
+	}
+	return nil
 }
 
 // resolveInitialStakeRegistrations mirrors the original
@@ -812,7 +843,7 @@ func (m *DingoStateManager) certDepositsFor(
 ) map[int]uint64 {
 	deposits := make(map[int]uint64, len(certs))
 	var keyDeposit, poolDeposit uint64
-	if conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+	if conwayPP := stateManagerConwayProtocolParameters(m.protocolParams); conwayPP != nil {
 		keyDeposit = uint64(conwayPP.KeyDeposit)
 		poolDeposit = uint64(conwayPP.PoolDeposit)
 	}
@@ -849,8 +880,8 @@ func (m *DingoStateManager) initialStakeDepositLocked() *types.Uint64 {
 	// ledger/eras uses before dereferencing era parameters. Reporting nil
 	// here is the correct answer anyway: with no usable parameters the
 	// deposit is unknown.
-	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
-	if !ok || conwayPP == nil {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP == nil {
 		return nil
 	}
 	deposit := types.Uint64(conwayPP.KeyDeposit)
@@ -874,6 +905,7 @@ func (m *DingoStateManager) ApplyTransaction(
 ) error {
 	point := m.pointForSlot(slot)
 	idx := m.nextBlockIndex(slot)
+	m.appliedSlotMax = max(m.appliedSlotMax, slot)
 
 	txn := m.db.Transaction(true)
 	defer txn.Release()
@@ -892,76 +924,185 @@ func (m *DingoStateManager) ApplyTransaction(
 		return nil
 	}
 
-	if err := m.spendUtxos(txn, tx.Inputs(), slot); err != nil {
-		return fmt.Errorf("spend inputs: %w", err)
+	levels := dledger.TransactionLevelsForApply(tx)
+	childCount := uint64(len(levels)) - 1
+	storageParentIndex := uint64(idx) + childCount
+	if storageParentIndex > math.MaxUint32 {
+		return fmt.Errorf(
+			"expanded transaction index out of range: %d",
+			storageParentIndex,
+		)
 	}
-
-	txHash := tx.Hash()
-	for outIdx, output := range tx.Outputs() {
-		input := &dingoTransactionInput{
-			txId:  txHash,
-			index: uint32(outIdx), //nolint:gosec // idx bounded by tx outputs
-		}
-		utxo := common.Utxo{Id: input, Output: output}
-		if err := m.createUtxo(txn, utxo, slot); err != nil {
-			return fmt.Errorf("create output %d: %w", outIdx, err)
-		}
-	}
-
-	certDeposits := m.certDepositsFor(tx.Certificates())
-	if err := m.db.SetTransactionMetadataOnly(
-		tx, point, idx, certDeposits, txn,
-	); err != nil {
-		return fmt.Errorf("apply certificates: %w", err)
-	}
-	for _, cert := range tx.Certificates() {
-		m.updateGovStateForCertificate(cert)
-	}
-
+	// Reserve one consecutive metadata index for every child body and the
+	// enclosing body so later transactions at this slot retain ledger order.
+	m.blockIndex = uint32(storageParentIndex) //nolint:gosec
+	directDepositEffects := make(
+		[][]dledger.DijkstraDirectDepositEffect,
+		len(levels),
+	)
 	govActionLifetime := defaultGovActionLifetime
 	drepInactivityPeriod := defaultDRepInactivityPeriod
-	if conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+	if conwayPP := stateManagerConwayProtocolParameters(m.protocolParams); conwayPP != nil {
 		govActionLifetime = conwayPP.GovActionValidityPeriod
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
 
-	if proposals := tx.ProposalProcedures(); len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, m.currentEpoch, govActionLifetime, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process proposals: %w", err)
+	for levelIndex, level := range levels {
+		storageIndex := idx + uint32(levelIndex) //nolint:gosec
+		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
+			return fmt.Errorf(
+				"spend transaction body %d inputs: %w",
+				levelIndex,
+				err,
+			)
 		}
-		m.recordProposalsInGovState(tx, govActionLifetime)
-	}
-
-	if votes := tx.VotingProcedures(); len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx, point, m.currentEpoch, drepInactivityPeriod, m.db, txn,
-		); err != nil {
-			return fmt.Errorf("process votes: %w", err)
+		levelHash := level.Hash()
+		for outIdx, output := range level.Outputs() {
+			input := &dingoTransactionInput{
+				txId:  levelHash,
+				index: uint32(outIdx), //nolint:gosec // idx bounded by tx outputs
+			}
+			utxo := common.Utxo{Id: input, Output: output}
+			if err := m.createUtxo(txn, utxo, slot); err != nil {
+				return fmt.Errorf(
+					"create transaction body %d output %d: %w",
+					levelIndex,
+					outIdx,
+					err,
+				)
+			}
 		}
-		m.recordVotesInGovState(tx)
-	}
-
-	if governance.HasDRepActivityCertificates(tx) {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx, m.currentEpoch, drepInactivityPeriod, m.db, txn,
+		if err := m.db.SetTransactionMetadataOnly(
+			level,
+			point,
+			storageIndex,
+			m.certDepositsFor(level.Certificates()),
+			txn,
 		); err != nil {
-			return fmt.Errorf("process drep activity certs: %w", err)
+			return fmt.Errorf(
+				"store transaction body %d metadata: %w",
+				levelIndex,
+				err,
+			)
+		}
+		for _, cert := range level.Certificates() {
+			m.updateGovStateForCertificate(cert)
+		}
+		effects, err := dledger.DijkstraDirectDepositEffects(level)
+		if err != nil {
+			return fmt.Errorf(
+				"decode transaction body %d direct deposits: %w",
+				levelIndex,
+				err,
+			)
+		}
+		directDepositEffects[levelIndex] = effects
+		if err := dledger.ApplyDijkstraDirectDeposits(
+			m.db,
+			level,
+			slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"apply transaction body %d direct deposits: %w",
+				levelIndex,
+				err,
+			)
+		}
+
+		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
+			if err := governance.ProcessProposals(
+				level,
+				point,
+				m.currentEpoch,
+				govActionLifetime,
+				m.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"process transaction body %d proposals: %w",
+					levelIndex,
+					err,
+				)
+			}
+			m.recordProposalsInGovState(level, govActionLifetime)
+		}
+		if votes := level.VotingProcedures(); len(votes) > 0 {
+			if err := governance.ProcessVotes(
+				level,
+				point,
+				m.currentEpoch,
+				drepInactivityPeriod,
+				m.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"process transaction body %d votes: %w",
+					levelIndex,
+					err,
+				)
+			}
+			m.recordVotesInGovState(level)
+		}
+		if governance.HasDRepActivityCertificates(level) {
+			if err := governance.ProcessDRepActivityCertificates(
+				level,
+				m.currentEpoch,
+				drepInactivityPeriod,
+				m.db,
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"process transaction body %d DRep activity: %w",
+					levelIndex,
+					err,
+				)
+			}
 		}
 	}
 
 	if err := txn.Commit(); err != nil {
 		return err
 	}
-	for _, cert := range tx.Certificates() {
-		m.updateStakeDepositForCertificate(cert)
+	for levelIndex, level := range levels {
+		for _, cert := range level.Certificates() {
+			m.updateStakeDepositForCertificate(cert)
+		}
+		m.applyRewardWithdrawals(level)
+		if err := m.applyDirectDepositEffectsToGovState(
+			directDepositEffects[levelIndex],
+		); err != nil {
+			return fmt.Errorf(
+				"mirror transaction body %d direct deposits: %w",
+				levelIndex,
+				err,
+			)
+		}
+		m.removeUtxoIDs(level.Inputs())
+		for outIdx := range level.Outputs() {
+			m.addUtxoID(level.Hash(), outIdx)
+		}
 	}
-	m.applyRewardWithdrawals(tx)
-	m.removeUtxoIDs(tx.Inputs())
-	for outIdx := range tx.Outputs() {
-		m.addUtxoID(txHash, outIdx)
+	return nil
+}
+
+func (m *DingoStateManager) applyDirectDepositEffectsToGovState(
+	effects []dledger.DijkstraDirectDepositEffect,
+) error {
+	for _, effect := range effects {
+		key := rewardAccountKey(effect.Credential)
+		balance := m.govState.RewardAccountBalances[key]
+		if effect.Amount > ^uint64(0)-balance {
+			return fmt.Errorf(
+				"reward account balance overflow for %x",
+				effect.Credential.Credential,
+			)
+		}
+		m.govState.RewardAccountBalances[key] = balance + effect.Amount
 	}
+	m.govState.RewardAccounts = rewardBalancesByHash(
+		m.govState.RewardAccountBalances,
+	)
 	return nil
 }
 
@@ -1046,7 +1187,8 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 			m.govState.SetPoolDelegation(c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeStakeDelegation:
-		if c, ok := cert.(*common.StakeDelegationCertificate); ok && c.StakeCredential != nil {
+		if c, ok := cert.(*common.StakeDelegationCertificate); ok &&
+			c.StakeCredential != nil {
 			m.govState.SetPoolDelegation(*c.StakeCredential, c.PoolKeyHash)
 		}
 	case common.CertificateTypeVoteDelegation:
@@ -1070,7 +1212,10 @@ func (m *DingoStateManager) updateGovStateForCertificate(
 		if c, ok := cert.(*common.PoolRegistrationCertificate); ok {
 			m.govState.RegisterPool(c.Operator)
 			credential := c.RewardAccountCredential()
-			m.govState.SetPoolRewardAccount(c.Operator, rewardAccountKey(credential))
+			m.govState.SetPoolRewardAccount(
+				c.Operator,
+				rewardAccountKey(credential),
+			)
 		}
 	case common.CertificateTypePoolRetirement:
 		if c, ok := cert.(*common.PoolRetirementCertificate); ok {
@@ -1160,7 +1305,7 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 	switch c := cert.(type) {
 	case *common.StakeRegistrationCertificate:
 		credential, registered = c.StakeCredential, true
-		if pp, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+		if pp := stateManagerConwayProtocolParameters(m.protocolParams); pp != nil {
 			deposit = uint64(pp.KeyDeposit)
 		}
 	case *common.RegistrationCertificate:
@@ -1183,7 +1328,9 @@ func (m *DingoStateManager) updateStakeDepositForCertificate(
 	}
 }
 
-func rewardAccountKey(credential common.Credential) mockledger.RewardAccountKey {
+func rewardAccountKey(
+	credential common.Credential,
+) mockledger.RewardAccountKey {
 	return mockledger.RewardAccountKey{
 		CredType:   credential.CredType,
 		Credential: credential.Credential,
@@ -1191,7 +1338,7 @@ func rewardAccountKey(credential common.Credential) mockledger.RewardAccountKey 
 }
 
 func (m *DingoStateManager) drepInactivityPeriod() uint64 {
-	if pp, ok := m.protocolParams.(*conway.ConwayProtocolParameters); ok {
+	if pp := stateManagerConwayProtocolParameters(m.protocolParams); pp != nil {
 		return pp.DRepInactivityPeriod
 	}
 	return defaultDRepInactivityPeriod
@@ -1308,7 +1455,7 @@ func (m *DingoStateManager) recordVotesInGovState(tx common.Transaction) {
 // enact it -- reusing dingo's production side-effect code without
 // re-deriving its ratification math. governance.ProcessEpoch is exercised
 // directly, end-to-end, by TestProcessEpochAgainstRealBackend in
-// state_manager_backend_test.go.
+// state_manager_test.go.
 func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 	m.currentEpoch = newEpoch
 	m.govState.CurrentEpoch = newEpoch
@@ -1360,7 +1507,11 @@ func (m *DingoStateManager) ProcessEpochBoundary(newEpoch uint64) error {
 		}
 	}
 
-	return txn.Commit()
+	if err := txn.Commit(); err != nil {
+		return err
+	}
+	m.committeeEpochStartSlot = m.appliedSlotMax + 1
+	return nil
 }
 
 // pruneCommitteeResignations drops the resignation recorded for a cold
@@ -1435,12 +1586,12 @@ func (m *DingoStateManager) ratifyProposals(
 			// tally: a vector can carry the same yes-voter shape (one DRep,
 			// one SPO) as another vector that must NOT ratify once active
 			// proposal deposits are counted as part of the depositor's
-			// active voting stake (CIP-1694). See issue #4007.
+			// active voting stake (CIP-1694).
 			//
 			// This must run before the zero-explicit-vote guard below: a
 			// DRep or silent pool delegated AlwaysNoConfidence casts an
 			// automatic yes on a NoConfidence action without ever appearing
-			// in proposal.Votes (see drepStakeForCommitteeAction/
+			// in proposal.Votes (see drepStakeForCommitteeAction and
 			// spoStakeForCommitteeAction), so a proposal backed only by that
 			// implicit vote must still reach committeeActionRatified.
 			var err error
@@ -1518,8 +1669,9 @@ func (m *DingoStateManager) ratifyProposals(
 // types (NoConfidence, UpdateCommittee, NewConstitution,
 // TreasuryWithdrawal, Info) outright, regardless of votes.
 func (m *DingoStateManager) inConwayBootstrap() bool {
-	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
-	return ok && conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	return conwayPP != nil &&
+		conwayPP.ProtocolVersion.Major == common.ProtocolVersionConway
 }
 
 // committeeActionRatified evaluates NoConfidence/UpdateCommittee
@@ -1531,44 +1683,57 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // threshold selection (MotionNoConfidence vs. CommitteeNormal/
 // CommitteeNoConfidence), the Conway bootstrap gate, and
 // committeeTermsWithinLimit under production's own tests instead of a second,
-// hand-maintained copy of each -- an earlier revision duplicated the
-// threshold selection and bootstrap gate here, and the duplication itself
-// went untested and drifted (see PR #4333 review history).
+// hand-maintained copy of each -- duplicating the threshold selection and
+// bootstrap gate here would let the harness drift from production.
 //
 // The one thing this cannot delegate to ShouldRatify is the tally itself:
-// production's DRep voting-power query does not yet add a proposal's own
-// deposit to its return account's DRep voting power (CIP-1694 counts an
-// active proposal's deposit as part of the depositor's active voting stake).
-// That gap is tracked separately as issue #4355 -- it affects every
-// DRep-gated action type's real ratification, not just these two.
+// the harness has no in-memory UTxO set, so it reads stake from the real
+// backend and adds active proposal deposits to the return account's voting
+// stake, matching CIP-1694.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
 	currentEpoch uint64,
 ) (bool, error) {
-	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP == nil {
 		return false, fmt.Errorf(
 			"committee action ratification: protocol parameters are %T, want *conway.ConwayProtocolParameters",
 			m.protocolParams,
 		)
 	}
 
-	deposits := m.activeProposalDeposits(currentEpoch)
+	activeProposalEpoch := currentEpoch
+	if activeProposalEpoch > 0 {
+		activeProposalEpoch--
+	}
+	deposits := m.activeProposalDeposits(activeProposalEpoch)
 	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
 		txn, proposal, deposits, currentEpoch,
 	)
 	if err != nil {
 		return false, err
 	}
-	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(txn, proposal)
+	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
+		txn, proposal, deposits,
+	)
 	if err != nil {
 		return false, err
 	}
 
-	committeeNoConfidence, err := m.committeeInNoConfidence(txn)
+	committeeRoot, err := m.committeePurposeRoot(txn)
 	if err != nil {
 		return false, err
+	}
+	committeeNoConfidence := committeeRoot != nil &&
+		common.GovActionType(committeeRoot.ActionType) ==
+			common.GovActionTypeNoConfidence
+	committeeAbsent := false
+	if committeeRoot != nil {
+		committeeAbsent = common.GovActionType(committeeRoot.ActionType) !=
+			common.GovActionTypeUpdateCommittee
+	} else {
+		committeeAbsent = len(m.govState.CommitteeMembers) == 0
 	}
 
 	// ShouldRatify's UpdateCommittee branch requires a decoded GovAction to
@@ -1592,34 +1757,25 @@ func (m *DingoStateManager) committeeActionRatified(
 		PParams:               conwayPP,
 		GovAction:             govAction,
 		CurrentEpoch:          currentEpoch,
+		CommitteeAbsent:       committeeAbsent,
 		MajorVersion:          conwayPP.ProtocolVersion.Major,
 		CommitteeNoConfidence: committeeNoConfidence,
 	})
 	return decision.Ratified, nil
 }
 
-// committeeInNoConfidence reports whether the current committee-purpose root
-// (the most recently enacted NoConfidence/UpdateCommittee action) is itself
-// a NoConfidence action, mirroring ledger/governance's unexported
-// committeeNoConfidenceState. ShouldRatify uses this, not simply whether a
-// committee member is currently seated, to select CommitteeNormal vs.
-// CommitteeNoConfidence for an UpdateCommittee proposal.
-func (m *DingoStateManager) committeeInNoConfidence(
+func (m *DingoStateManager) committeePurposeRoot(
 	txn *database.Txn,
-) (bool, error) {
+) (*models.GovernanceProposal, error) {
 	rootID := m.govState.Roots.ConstitutionalCommittee
 	if rootID == nil {
-		return false, nil
+		return nil, nil
 	}
 	root, err := m.lookupGovernanceProposal(txn, *rootID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if root == nil {
-		return false, nil
-	}
-	return common.GovActionType(root.ActionType) ==
-		common.GovActionTypeNoConfidence, nil
+	return root, nil
 }
 
 // syntheticUpdateCommitteeGovAction builds just enough of a
@@ -1770,17 +1926,10 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
 // SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
 // ShouldRatify itself refuses both action types outright during bootstrap
-// before ever reading this tally, so a bootstrap-specific adjustment to the
-// tally would never run (an earlier revision carried one that PR #4333
-// review found was already dead code for exactly this reason).
+// before ever reading this tally, so bootstrap does not change this tally.
 //
-// Active-proposal deposits are deliberately excluded from this tally: a
-// deposit raises the return account's DRep voting power, not the delegated
-// stake behind a pool. Production reads SPO stake straight from the stake
-// distribution snapshot (tallySPOVotes over LoadSPOVotingState's Dist in
-// ledger/governance/tally.go), which carries no deposit adjustment, so
-// credentialVotingStake is called here with a nil deposit map while
-// drepStakeForCommitteeAction keeps the deposit-inclusive one. A silent
+// Active-proposal deposits are included for pools represented in the
+// snapshot distribution, matching the production SPO tally. A silent
 // pool whose reward account delegates AlwaysAbstain is excluded; one that
 // delegates AlwaysNoConfidence counts as an implicit Yes when the proposal
 // is a NoConfidence action (an implicit No otherwise, same as production's
@@ -1789,13 +1938,14 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 func (m *DingoStateManager) spoStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
+	deposits map[mockledger.RewardAccountKey]uint64,
 ) (uint64, uint64, error) {
 	poolStake := make(map[common.PoolKeyHash]*big.Int)
 	for credential, pool := range m.govState.PoolDelegationsByCredential {
 		if !m.govState.IsPoolRegistered(pool) {
 			continue
 		}
-		stake, err := m.credentialVotingStake(txn, credential, nil)
+		stake, err := m.credentialVotingStake(txn, credential, deposits)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -1977,20 +2127,25 @@ func (m *DingoStateManager) persistEnactment(
 		return m.db.SetGovernanceProposal(dbProposal, txn)
 	}
 
-	conwayPP, ok := m.protocolParams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP == nil {
 		return fmt.Errorf(
 			"enact governance proposal: protocol parameters are %T, want *conway.ConwayProtocolParameters",
 			m.protocolParams,
 		)
 	}
+	enactmentPP := common.ProtocolParameters(conwayPP)
+	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
+		enactmentPP = dijkstraPP
+	}
 	result, err := governance.EnactProposal(&governance.EnactmentContext{
-		DB:       m.db,
-		Txn:      txn,
-		Epoch:    m.currentEpoch,
-		Slot:     boundarySlot,
-		PParams:  conwayPP,
-		UpdateFn: eras.ConwayEraDesc.PParamsUpdateFunc,
+		DB:                 m.db,
+		Txn:                txn,
+		Epoch:              m.currentEpoch,
+		Slot:               boundarySlot,
+		PrevEpochStartSlot: m.committeeEpochStartSlot,
+		PParams:            enactmentPP,
+		UpdateFn:           stateManagerPParamsUpdateFunc(m.protocolParams),
 	}, dbProposal)
 	if err != nil {
 		return fmt.Errorf("enact governance proposal: %w", err)
@@ -1999,6 +2154,15 @@ func (m *DingoStateManager) persistEnactment(
 		m.protocolParams = result.UpdatedPParams
 	}
 	return nil
+}
+
+func stateManagerPParamsUpdateFunc(
+	pp common.ProtocolParameters,
+) func(common.ProtocolParameters, any) (common.ProtocolParameters, error) {
+	if _, ok := pp.(*dijkstra.DijkstraProtocolParameters); ok {
+		return eras.DijkstraEraDesc.PParamsUpdateFunc
+	}
+	return eras.ConwayEraDesc.PParamsUpdateFunc
 }
 
 // expireGovernanceProposal marks the real governance_proposal row expired
@@ -2063,13 +2227,19 @@ func (m *DingoStateManager) GetStateSnapshot() *conformance.StateSnapshot {
 	}
 	sort.Strings(utxoIDs)
 	return &conformance.StateSnapshot{
-		CurrentEpoch:                   m.currentEpoch,
-		UtxoIDs:                        utxoIDs,
-		StakeRegistrationsByCredential: maps.Clone(m.govState.StakeRegistrationsByCredential),
-		RewardAccountBalances:          maps.Clone(m.govState.RewardAccountBalances),
-		StakeCredentialDeposits:        maps.Clone(m.stakeDeposits),
-		PoolRegistrations:              maps.Clone(m.govState.PoolRegistrations),
-		Governance:                     m.govState,
+		CurrentEpoch: m.currentEpoch,
+		UtxoIDs:      utxoIDs,
+		StakeRegistrationsByCredential: maps.Clone(
+			m.govState.StakeRegistrationsByCredential,
+		),
+		RewardAccountBalances: maps.Clone(
+			m.govState.RewardAccountBalances,
+		),
+		StakeCredentialDeposits: maps.Clone(m.stakeDeposits),
+		PoolRegistrations: maps.Clone(
+			m.govState.PoolRegistrations,
+		),
+		Governance: m.govState,
 	}
 }
 
@@ -2214,7 +2384,10 @@ func initialCommitteeProposalCbor(info conformance.GovActionInfo) []byte {
 		Quorum:      cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
 	for credential := range info.RemovedMembers {
-		action.Credentials = append(action.Credentials, credential.AsCredential())
+		action.Credentials = append(
+			action.Credentials,
+			credential.AsCredential(),
+		)
 	}
 	for credential, epoch := range info.ProposedMembersByCredential {
 		cred := credential.AsCredential()

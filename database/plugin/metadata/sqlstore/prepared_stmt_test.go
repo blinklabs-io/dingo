@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"testing"
 
@@ -68,6 +69,50 @@ func TestPrepareHotStatementsPopulatesCacheOnStart(t *testing.T) {
 	entries := len(store.stmts)
 	store.stmtMu.Unlock()
 	require.Equal(t, len(hotStatements), entries)
+}
+
+func TestGetUtxoUsesPreparedLiveAndIncludingSpentStatements(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	txID := make([]byte, 32)
+	txID[0] = 0xa7
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:      txID,
+		OutputIdx: 3,
+		AddedSlot: 42,
+	}))
+
+	liveStmt, ok := store.lookupCachedStmt(getLiveUtxoByRefQuery)
+	require.True(t, ok)
+	require.NotNil(t, liveStmt)
+	spentStmt, ok := store.lookupCachedStmt(getUtxoIncludingSpentByRefQuery)
+	require.True(t, ok)
+	require.NotNil(t, spentStmt)
+
+	live, err := store.GetUtxo(txID, 3, nil)
+	require.NoError(t, err)
+	require.NotNil(t, live)
+	require.Equal(t, txID, live.TxId)
+	require.Equal(t, uint32(3), live.OutputIdx)
+	require.Equal(t, uint64(42), live.AddedSlot)
+
+	_, err = store.writeDB.ExecContext(
+		t.Context(),
+		"UPDATE utxo SET deleted_slot = 43 WHERE tx_id = ? AND output_idx = ?",
+		txID,
+		3,
+	)
+	require.NoError(t, err)
+
+	live, err = store.GetUtxo(txID, 3, nil)
+	require.NoError(t, err)
+	require.Nil(t, live)
+
+	includingSpent, err := store.GetUtxoIncludingSpent(txID, 3, nil)
+	require.NoError(t, err)
+	require.NotNil(t, includingSpent)
+	require.Equal(t, uint64(43), includingSpent.DeletedSlot)
 }
 
 // TestPrepareHotStatementsIsBestEffortWithoutMigrations proves a Store
@@ -424,5 +469,133 @@ func TestTxScopedStmtDoesNotLeakAcrossConcurrentEviction(t *testing.T) {
 			"after eviction -- if this now fails, txScopedStmt's eviction "+
 			"race was fixed and this test (and its doc comment reference) "+
 			"should be updated to match",
+	)
+}
+
+// TestCacheableForDialect is a table-driven unit test of the pure predicate
+// prepareHotStatements now consults before caching a hot statement. The only
+// case that must come back false is a RETURNING-id query on MySQL (see
+// insertUtxoQuery's doc comment); every other dialect/query combination,
+// including a RETURNING-id query on PostgreSQL (which supports RETURNING
+// natively) and a non-RETURNING query on MySQL, must come back true.
+func TestCacheableForDialect(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		dialect string
+		query   string
+		want    bool
+	}{
+		{
+			"sqlite insert with returning",
+			"sqlite", insertUtxoQueryIgnoreConflict, true,
+		},
+		{
+			"sqlite insert without conflict clause",
+			"sqlite", insertUtxoQuery, true,
+		},
+		{
+			"postgres insert with returning",
+			"postgres", insertUtxoQueryIgnoreConflict, true,
+		},
+		{
+			"mysql insert with returning (ignore conflict)",
+			"mysql", insertUtxoQueryIgnoreConflict, false,
+		},
+		{
+			"mysql insert with returning (no conflict clause)",
+			"mysql", insertUtxoQuery, false,
+		},
+		{
+			"mysql plain select, no returning",
+			"mysql", getAssetIDQuery, true,
+		},
+		{
+			"mysql reward account select, no returning",
+			"mysql", rewardLiveStakeAccountQuery, true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(
+				t,
+				tc.want,
+				cacheableForDialect(tc.dialect, tc.query),
+			)
+		})
+	}
+}
+
+// TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL is the end-to-end
+// counterpart to TestCacheableForDialect: it proves prepareHotStatements
+// itself actually leaves insertUtxoQuery/insertUtxoQueryIgnoreConflict
+// uncached against a MySQL-dialect Store, while a non-RETURNING hot
+// statement (getAssetIDQuery) still gets cached -- i.e. the skip is scoped
+// to the unsafe dialect+query-shape combination, not a blanket "MySQL never
+// caches anything".
+//
+// This borrows the real migrated schema a SQLite store already built
+// (newMigratedSQLiteStore) rather than running Start's migration runner
+// under a MySQL-labeled dialect: migrations.SQLiteRegistry() is SQLite DDL,
+// which the runner would try to execute as-is regardless of s.dialect, so
+// mixing a real MySQL Start with a SQLite migration registry would fail for
+// a reason unrelated to the thing this test checks. prepareHotStatements
+// itself only needs an existing schema and a writeDB to call PrepareContext
+// against, so a second, minimal Store value sharing the same *sql.DB (with
+// dialect swapped to MySQL) exercises exactly the code path under test.
+func TestPrepareHotStatementsSkipsReturningIDQueryOnMySQL(t *testing.T) {
+	t.Parallel()
+	sqliteStore := newMigratedSQLiteStore(t)
+
+	mysqlStore := &Store{
+		writeDB: sqliteStore.writeDB,
+		dialect: MySQLDialect(),
+		logger:  slog.Default(),
+	}
+	t.Cleanup(mysqlStore.closePreparedStatements)
+	mysqlStore.prepareHotStatements(context.Background())
+
+	_, ok := mysqlStore.lookupCachedStmt(insertUtxoQuery)
+	require.False(t, ok, "expected insertUtxoQuery to be uncached on MySQL")
+
+	_, ok = mysqlStore.lookupCachedStmt(insertUtxoQueryIgnoreConflict)
+	require.False(
+		t,
+		ok,
+		"expected insertUtxoQueryIgnoreConflict to be uncached on MySQL",
+	)
+
+	_, ok = mysqlStore.lookupCachedStmt(getAssetIDQuery)
+	require.True(
+		t,
+		ok,
+		"expected a non-RETURNING hot statement to still be cached on MySQL",
+	)
+}
+
+// TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements proves
+// Start eagerly caches both new per-touch queries (not just
+// sumCredentialUtxoStakeQuery) and that repeated lookups return the same
+// *sql.Stmt. This is the regression check for the caching change itself:
+// against the prior version of this function, lookupCachedStmt for either
+// query returned ok=false, since neither was in hotStatements.
+func TestRefreshRewardLiveStakeAggregateCachesAccountAndUpsertStatements(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+
+	accountStmt, ok := store.lookupCachedStmt(rewardLiveStakeAccountQuery)
+	require.True(t, ok, "expected the account lookup to be cached")
+	require.NotNil(t, accountStmt)
+
+	upsertStmt, ok := store.lookupCachedStmt(rewardLiveStakeUpsertQuery)
+	require.True(t, ok, "expected the upsert to be cached")
+	require.NotNil(t, upsertStmt)
+
+	require.NotSame(
+		t,
+		accountStmt,
+		upsertStmt,
+		"the two queries must not share a cache slot",
 	)
 }

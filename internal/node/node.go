@@ -204,12 +204,11 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
-// Two properties are load-bearing and are covered by tests:
+// Two properties are covered by tests:
 //
-//  1. It is not gated on storage mode. All three API listeners are started
-//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
-//     the default `core` mode, so a probe wired the way the APIs are would be
-//     inert in exactly the configuration the image ships with.
+//  1. It is not gated on storage mode. Client API listeners require
+//     storageMode.IsAPI(), while health probes must remain available in core
+//     mode so an orchestrator can verify node state.
 //  2. It binds cfg.BindAddr, the address the relay and metrics listeners
 //     already use, not the API listeners' loopback-by-default address. A
 //     probe is operational surface: a Docker HEALTHCHECK runs inside the
@@ -589,6 +588,16 @@ func applyRootPeerTargetFallback(cfg *config.Config, target int) {
 	}
 }
 
+// forgeEBCap resolves an optional endorser-block cap. Load applies the
+// defaults, so nil here means the Config was built directly rather than
+// loaded; an explicit 0 is preserved and disables the cap.
+func forgeEBCap(v *uint64, fallback uint64) uint64 {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
 // buildDingoConfig translates the loaded internal/config.Config, plus the
 // values Run derives from it (the resolved cardano-node config, listeners,
 // peer-sharing decision, storage mode, and parsed durations/strategy), into
@@ -660,15 +669,16 @@ func buildDingoConfig(
 			Frequency: cfg.HistoryExpiry.Frequency,
 		}),
 		dingo.WithKoiosParity(dingo.KoiosParityConfig{
-			Enabled:           cfg.KoiosParity.Enabled,
-			Network:           cfg.KoiosParity.Network,
-			CachePath:         cfg.KoiosParity.CachePath,
-			APIKey:            cfg.KoiosParity.APIKey,
-			BaseURL:           cfg.KoiosParity.BaseURL,
-			AllowInsecureHTTP: cfg.KoiosParity.AllowInsecureHTTP,
-			Strict:            cfg.KoiosParity.Strict,
-			GraceHours:        cfg.KoiosParity.GraceHours,
-			Accounts:          &cfg.KoiosParity.Accounts,
+			Enabled:               cfg.KoiosParity.Enabled,
+			Network:               cfg.KoiosParity.Network,
+			CachePath:             cfg.KoiosParity.CachePath,
+			APIKey:                cfg.KoiosParity.APIKey,
+			BaseURL:               cfg.KoiosParity.BaseURL,
+			AllowInsecureHTTP:     cfg.KoiosParity.AllowInsecureHTTP,
+			AllowPrivateAddresses: cfg.KoiosParity.AllowPrivateAddresses,
+			Strict:                cfg.KoiosParity.Strict,
+			GraceHours:            cfg.KoiosParity.GraceHours,
+			Accounts:              &cfg.KoiosParity.Accounts,
 			// AccountChunkSize and AccountChunkMaxBytes were omitted here
 			// while every other KoiosParity field was forwarded, so
 			// --koios-parity-account-chunk-size and
@@ -701,8 +711,16 @@ func buildDingoConfig(
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
+				MaxDecompressedBytes: cfg.TokenRegistry.
+					MaxDecompressedBytes,
 				MaxEntryBytes: cfg.TokenRegistry.
 					MaxEntryBytes,
+				MaxArchiveEntries: cfg.TokenRegistry.
+					MaxArchiveEntries,
+				MaxAcceptedEntries: cfg.TokenRegistry.
+					MaxAcceptedEntries,
+				MaxBatchBytes: cfg.TokenRegistry.
+					MaxBatchBytes,
 				StoreLogos: cfg.TokenRegistry.StoreLogos,
 				AllowPrivateAddresses: cfg.TokenRegistry.
 					AllowPrivateAddresses,
@@ -779,6 +797,10 @@ func buildDingoConfig(
 		),
 		dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 		dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
+		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
+		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,
@@ -829,9 +851,6 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
-		dingo.WithForgePrimaryChainTipToleranceSlots(
-			cfg.ForgePrimaryChainTipToleranceSlots,
-		),
 		dingo.WithForgeUpstreamStalenessSlots(
 			cfg.ForgeUpstreamStalenessSlots,
 		),
@@ -841,8 +860,15 @@ func buildDingoConfig(
 		dingo.WithForgeEndorserBlockStalenessSlots(
 			cfg.ForgeEndorserBlockStalenessSlots,
 		),
+		dingo.WithForgeEBSelectionReserve(cfg.ForgeEBSelectionReserve),
+		dingo.WithForgeEBMaxTxRefs(
+			forgeEBCap(cfg.ForgeEBMaxTxRefs, config.DefaultForgeEBMaxTxRefs),
+		),
+		dingo.WithForgeEBMaxBytes(
+			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
+		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
-		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(

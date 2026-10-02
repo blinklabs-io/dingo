@@ -310,6 +310,7 @@ type PoolStakeSnapshot struct {
 	CapturedSlot                  int64
 	LeiosKeyPublic                []byte
 	LeiosKeyPossessionProof       []byte
+	LeiosKeyRegistrationEpoch     sql.NullInt64
 	CalculationVersion            int64
 	RewardAccountAutoVote         int64
 	RewardAccountAutoVoteResolved bool
@@ -354,6 +355,7 @@ type RewardAccountOutput struct {
 	Guarded       bool
 	CapturedSlot  int64
 	BoundarySlot  int64
+	Folded        bool
 }
 
 type RewardAdaPot struct {

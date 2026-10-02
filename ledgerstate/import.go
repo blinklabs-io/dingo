@@ -314,8 +314,9 @@ type ParsedPool struct {
 	// verification does not happen here (ledgerstate must not depend on
 	// ledger/leios's BLS primitives); it happens where these keys are read
 	// back out for committee construction.
-	LeiosKeyPublic          []byte // 96 bytes
-	LeiosKeyPossessionProof []byte // 48 bytes
+	LeiosKeyPublic            []byte // 96 bytes
+	LeiosKeyPossessionProof   []byte // 48 bytes
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ParsedRelay represents a pool relay from the stake pool
@@ -373,12 +374,13 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash             []byte
-	StakeNumerator          uint64
-	StakeDenominator        uint64
-	VrfKeyHash              []byte
-	LeiosKeyPublic          []byte
-	LeiosKeyPossessionProof []byte
+	PoolKeyHash               []byte
+	StakeNumerator            uint64
+	StakeDenominator          uint64
+	VrfKeyHash                []byte
+	LeiosKeyPublic            []byte
+	LeiosKeyPossessionProof   []byte
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -1340,12 +1342,16 @@ func importPools(
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			LeiosKeyPublic:             pool.LeiosKeyPublic,
 			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-			AddedSlot:                  slot,
-			DepositAmount:              types.Uint64(pool.Deposit),
-			Owners:                     owners,
-			Relays:                     relays,
-			MetadataUrl:                pool.MetadataUrl,
-			MetadataHash:               pool.MetadataHash,
+			LeiosKeyRegistrationAgeUnknown: (len(pool.LeiosKeyPublic) > 0 ||
+				len(pool.LeiosKeyPossessionProof) > 0) &&
+				pool.LeiosKeyRegistrationEpoch == nil,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			AddedSlot:                 slot,
+			DepositAmount:             types.Uint64(pool.Deposit),
+			Owners:                    owners,
+			Relays:                    relays,
+			MetadataUrl:               pool.MetadataUrl,
+			MetadataHash:              pool.MetadataHash,
 		}
 
 		if err := store.ImportPool(
@@ -1902,7 +1908,7 @@ func seedImportedRewardBasis(
 	// including the anchor block (UTxOState.utxosFees minus SnapShots'
 	// ssFee), so a later local boundary calculation can add the fees it
 	// observes after the anchor instead of silently omitting everything
-	// before it (dingo #3975). cardano-ledger's NEWEPOCH rule leaves
+	// before it. cardano-ledger's NEWEPOCH rule leaves
 	// utxosFees equal to the new ssFee after every boundary and only
 	// transactions add to it within an epoch, so State.Fees below
 	// snapshots.Fee means the snapshot was not decoded as a consistent
@@ -2022,14 +2028,14 @@ func persistImportedSnapshot(
 		// epochs): faithful resolution needs the reward account's DRep
 		// delegation AS OF the historical boundary. That state is not
 		// available after a Mithril restore — cert history tables are
-		// empty for pre-snapshot epochs and #1902's persisted reward
+		// empty for pre-snapshot epochs and the persisted reward
 		// state does not capture reward-account DRep delegation. Resolving
 		// against live DRep delegation and marking the row authoritative
 		// would freeze a possibly-changed value onto a historical boundary.
 		// We therefore leave these rows RewardAccountAutoVoteResolved=false
 		// so the tally treats them as PoolRewardAccountAutoVoteNone
 		// (implicit no), matching pre-CIP-1694 behaviour, until per-boundary
-		// DRep-delegation state is persisted (follow-up to #1902).
+		// DRep-delegation state is persisted.
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
 				poolSnapshots, txn,
@@ -2367,7 +2373,8 @@ func ActivePoolDistributionSnapshots(
 			LeiosKeyPossessionProof: append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
 			),
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 	return snapshots
@@ -3689,7 +3696,7 @@ func importGovState(
 	// these synthetic enacted rows, the next chained proposal that
 	// references a parent enacted before the snapshot would be
 	// rejected by validateParentChain (currentRoot is nil) and
-	// silently expire — see issue #2195. Genesis-synced nodes get
+	// silently expire. Genesis-synced nodes get
 	// these rows from the normal enactment path; Mithril snapshots
 	// don't surface them otherwise.
 	if govState.PrevGovActionIds != nil {

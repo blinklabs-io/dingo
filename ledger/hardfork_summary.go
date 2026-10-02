@@ -149,7 +149,7 @@ type hardForkSummaryCacheEntry struct {
 //
 // The result is cached per hardForkSummaryCacheKey (see its doc comment); the
 // underlying epoch-cache walk is O(known epochs), which otherwise grows
-// without bound as the chain ages (issue #2093).
+// without bound as the chain ages.
 //
 // The returned Summary is shared by every caller holding the same cache entry
 // and must be treated as read only. Callers must not assign to its fields,
@@ -173,7 +173,7 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 // reached from applyChainTickLedgerResult's epochInfoLedger on the state left
 // by that predecessor). Because applySafeZone snaps the bound up to an epoch
 // boundary, a tip that trails by even one block can cost a whole epoch of
-// horizon and reject a transaction the reference accepts (issue #3844).
+// horizon and reject a transaction the reference accepts.
 //
 // horizonAnchorSlot 0 keeps the published tip, which is what every caller
 // without an applied block in hand wants.

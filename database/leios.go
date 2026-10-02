@@ -55,14 +55,14 @@ func (d *Database) SetLeiosEBManifest(
 // the exact (slot, hash) occurrence named. Returns ErrBlobKeyNotFound when no
 // manifest has been stored for that occurrence -- including when a manifest
 // exists for the same hash under a different slot, since the manifest is
-// content-addressed and that is a distinct occurrence (issue #3513 review).
+// content-addressed and that is a distinct occurrence.
 //
-// On a miss it also tries the pre-issue-#3513 legacy key (hash only), so
+// On a miss it also tries the legacy key (hash only), so
 // data persisted by a node running before the key format changed does not
 // become silently unreachable after an upgrade: that format could only ever
 // hold one occurrence per hash, and its value carries that occurrence's slot
 // as an 8-byte big-endian prefix, which must match the requested slot before
-// the legacy record is trusted (cubic review).
+// the legacy record is trusted.
 func (d *Database) GetLeiosEBManifest(
 	hash []byte,
 	slot uint64,
@@ -91,8 +91,7 @@ func (d *Database) GetLeiosEBManifest(
 	if legacyErr != nil {
 		// A real failure reading the legacy record (storage, network,
 		// auth) must not be hidden behind the exact-key not-found error;
-		// only "the legacy record doesn't exist either" collapses to that
-		// (cubic review).
+		// only "the legacy record doesn't exist either" collapses to that.
 		if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
 			return nil, legacyErr
 		}
@@ -106,7 +105,7 @@ func (d *Database) GetLeiosEBManifest(
 
 // MaxLeiosEBSlot returns the highest slot represented by a persisted Leios
 // endorser-block manifest. Current records encode the slot in the key; legacy
-// records (pre-issue-#3513, "em"+hash with no slot) encode it in the first
+// records ("em"+hash with no slot) encode it in the first
 // eight bytes of the value.
 //
 // COST. The full prefix scan is inherent, not an oversight: the current key
@@ -211,12 +210,11 @@ func (d *Database) SetLeiosEBTxs(
 // stored for that occurrence. The returned slice is in the same CBOR-in-CBOR
 // wrapped format used by the leios-fetch MsgBlockTxs wire message.
 //
-// On a miss it also tries the pre-issue-#3513 legacy key (hash only, see
+// On a miss it also tries the legacy key (hash only, see
 // GetLeiosEBManifest), gated on the legacy "em" record's embedded slot
 // matching: the legacy format paired one "em" and one "et" record per hash
 // (only one occurrence was ever trackable), so once that pairing is
-// confirmed to be this occurrence, its "et" value is safe to use too (cubic
-// review).
+// confirmed to be this occurrence, its "et" value is safe to use too.
 func (d *Database) GetLeiosEBTxs(
 	hash []byte,
 	slot uint64,
@@ -243,7 +241,7 @@ func (d *Database) GetLeiosEBTxs(
 		if legacyErr != nil {
 			// See GetLeiosEBManifest: a real failure reading the legacy
 			// manifest must not be hidden behind the exact-key not-found
-			// error (cubic review).
+			// error.
 			if !errors.Is(legacyErr, types.ErrBlobKeyNotFound) {
 				return nil, legacyErr
 			}

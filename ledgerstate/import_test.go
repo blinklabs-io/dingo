@@ -20,17 +20,952 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
+
+// inlineUTxOMap encodes the legacy inline UTxO map ImportLedgerState reads
+// from RawLedgerState.UTxOData: CBOR map[TxIn]TxOut, with the TxIn a 34-byte
+// binary key (32-byte hash plus big-endian output index) and the TxOut an
+// [address, coin] array.
+func inlineUTxOMap(
+	tb testing.TB,
+	addr []byte,
+	amounts []uint64,
+) cbor.RawMessage {
+	tb.Helper()
+	// A Go map cannot carry []byte keys, so build the CBOR map body by
+	// hand: header, then key/value pairs in order.
+	require.LessOrEqual(tb, len(amounts), 23, "short map header only")
+	body := []byte{0xa0 | byte(len(amounts))}
+	for i, amount := range amounts {
+		txHash := bytes.Repeat([]byte{byte(0x40 + i)}, 32)
+		key := append(append([]byte{}, txHash...), 0x00, 0x00)
+		keyRaw, err := cbor.Encode(key)
+		require.NoError(tb, err)
+		valRaw, err := cbor.Encode([]any{addr, amount})
+		require.NoError(tb, err)
+		body = append(body, keyRaw...)
+		body = append(body, valRaw...)
+	}
+	return cbor.RawMessage(body)
+}
+
+// TestImportLedgerStateRebuildsDeferredRewardLiveStake covers the invariant
+// the deferred per-batch refresh depends on: importUTxOs skips the aggregate
+// refresh on every batch, so ImportLedgerState's own
+// RebuildRewardLiveStake is the only thing that leaves reward_live_stake
+// correct. A return added between the two phases, or a rebuild removed,
+// ships an empty aggregate on a bootstrapped node.
+//
+// It runs against the real metadata store, which implements
+// deferredRewardLiveStakeImporter; the assertion below is meaningless
+// against a store that does not, so that is checked first.
+func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	_, ok := db.Metadata().(deferredRewardLiveStakeImporter)
+	require.True(
+		t, ok,
+		"the metadata store must take the deferred import path for this "+
+			"test to cover the rebuild it depends on",
+	)
+
+	stakeHash := bytes.Repeat([]byte{0x22}, 28)
+	addr := buildShelleyAddr(
+		0,
+		1,
+		bytes.Repeat([]byte{0x11}, 28),
+		stakeHash,
+	)
+	nonce := make([]byte, 32)
+	eraBounds := make([]EraBound, EraConway+1)
+
+	require.NoError(t, ImportLedgerState(
+		context.Background(),
+		ImportConfig{
+			Database: db,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			State: &RawLedgerState{
+				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000, 2_000_000}),
+				Epoch:               100,
+				EraIndex:            EraConway,
+				EraBounds:           eraBounds,
+				EpochNonce:          nonce,
+				EvolvingNonce:       nonce,
+				CandidateNonce:      nonce,
+				LastEpochBlockNonce: nonce,
+				Tip: &SnapshotTip{
+					Slot:      1_000,
+					BlockHash: make([]byte, 32),
+				},
+			},
+			EpochLength: func(uint) (uint, uint, error) {
+				return 1, 1_000, nil
+			},
+		},
+	))
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	var utxoStake string
+	require.NoError(t, raw.QueryRow(
+		"SELECT utxo_stake FROM reward_live_stake "+
+			"WHERE credential_tag = 0 AND staking_key = ?",
+		stakeHash,
+	).Scan(&utxoStake))
+	require.Equal(
+		t, "3000000", utxoStake,
+		"the post-import rebuild must aggregate every deferred batch",
+	)
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Release()
+	for i, amount := range []uint64{1_000_000, 2_000_000} {
+		txHash := bytes.Repeat([]byte{byte(0x40 + i)}, 32)
+		utxoCbor, err := db.Blob().GetUtxo(
+			blobTxn.Blob(), txHash, 0,
+		)
+		require.NoError(t, err,
+			"imported live UTxO %x#0 must remain replayable after repair",
+			txHash,
+		)
+		output, err := ledger.NewTransactionOutputFromCbor(utxoCbor)
+		require.NoError(t, err)
+		require.Equal(t, amount, output.Amount().Uint64())
+	}
+}
+
+// TestImportDRepsCarriesExpiryEpoch pins the snapshot's DRep expiry through the
+// import write path.
+//
+// ParseCertState decodes DRepState[0] into ParsedDRep.ExpiryEpoch, but
+// importDReps built its models.Drep literal without that field, so every
+// Mithril-imported DRep landed with expiry_epoch = 0. Zero is exempt from expiry
+// in both places that decide it -- drepActiveAtEpoch
+// (ledger/governance/epoch.go) and the SQL expiry sweep, whose predicate is
+// `expiry_epoch > 0 AND expiry_epoch <= ?` -- so imported DReps stayed in
+// countActiveDReps permanently and inflated the ratification quorum denominator
+// for the life of the database.
+//
+// The two DReps carry distinct non-zero expiries, so dropping the field fails
+// both assertions and a fix that stamped one shared constant would fail too.
+// Asserting a zero expiry would prove nothing here: that is the pre-fix value,
+// so such an assertion holds with the fix reverted.
+func TestImportDRepsCarriesExpiryEpoch(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	const (
+		keyExpiry    = uint64(700)
+		scriptExpiry = uint64(812)
+		slot         = uint64(197983346)
+		deposit      = uint64(500000000)
+	)
+
+	keyCred := Credential{
+		Type: CredentialTypeKey,
+		Hash: bytes.Repeat([]byte{0xd1}, 28),
+	}
+	scriptCred := Credential{
+		Type: CredentialTypeScript,
+		Hash: bytes.Repeat([]byte{0xd2}, 28),
+	}
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	require.NoError(t, importDReps(
+		context.Background(),
+		cfg,
+		[]ParsedDRep{
+			{
+				Credential:  keyCred,
+				ExpiryEpoch: keyExpiry,
+				Deposit:     deposit,
+				Active:      true,
+			},
+			{
+				Credential:  scriptCred,
+				ExpiryEpoch: scriptExpiry,
+				Deposit:     deposit,
+				Active:      true,
+			},
+		},
+		slot,
+	))
+
+	for _, tc := range []struct {
+		name       string
+		cred       Credential
+		wantExpiry uint64
+	}{
+		{name: "key credential", cred: keyCred, wantExpiry: keyExpiry},
+		{
+			name:       "script credential",
+			cred:       scriptCred,
+			wantExpiry: scriptExpiry,
+		},
+	} {
+		tag, err := models.CredentialTagFromUint(uint(tc.cred.Type))
+		require.NoError(t, err, tc.name)
+
+		got, err := db.GetDrepByCredential(tag, tc.cred.Hash, true, nil)
+		require.NoError(t, err, tc.name)
+		require.NotNil(t, got, tc.name)
+		require.Equal(
+			t,
+			tc.wantExpiry,
+			got.ExpiryEpoch,
+			"%s: imported DRep must keep the snapshot expiry; a zero here is "+
+				"treated as never-expiring and inflates the ratification quorum",
+			tc.name,
+		)
+	}
+}
+
+// mark, set and go span three epochs, so an import landing in the first two
+// epochs of a new era has set or go sitting in the era before it -- with a
+// different epoch length and a different boundary slot. Deriving their start
+// from the current era's bound puts the window edge in the wrong place, and
+// for an epoch wholly before that bound it lands past the epoch entirely:
+// every registration made during it then counts as pre-epoch, so the latest
+// one wins and the epoch is seeded with parameters that only took effect
+// afterwards. That is precisely the one-epoch-early error
+// GetPoolRegistrationsEffectiveForEpoch exists to avoid, reintroduced at the
+// window instead of the query.
+func TestImportedEpochStartSlotUsesTheEpochsOwnEra(t *testing.T) {
+	t.Parallel()
+
+	// Era 0 runs epochs 0..9 from slot 0 with 100-slot epochs; era 1 starts
+	// at epoch 10, slot 1000, with 500-slot epochs.
+	cfg := ImportConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			EraBounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 1000, Epoch: 10},
+			},
+			EraIndex:      1,
+			EraBoundEpoch: 10,
+			EraBoundSlot:  1000,
+			Epoch:         11,
+		},
+		EpochLength: func(era uint) (uint, uint, error) {
+			switch era {
+			case 0:
+				return 1, 100, nil
+			case 1:
+				return 1, 500, nil
+			}
+			return 0, 0, errors.New("unknown era")
+		},
+	}
+
+	for _, c := range []struct {
+		name  string
+		epoch uint64
+		want  uint64
+	}{
+		{"mark, in the current era", 11, 1500},
+		{"set, the current era's first epoch", 10, 1000},
+		{"go, in the previous era", 9, 900},
+		{"an earlier epoch of the previous era", 3, 300},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := importedEpochStartSlot(cfg, c.epoch)
+			require.True(t, ok, "this epoch is covered by the era bounds")
+			require.Equal(t, c.want, got)
+		})
+	}
+}
+
+// With no era bounds to consult, the current era's boundary is all there is.
+// It stays a usable window edge -- registrations before it fall on the
+// pre-epoch side, where the most recent wins -- but it is a fallback, not the
+// epoch's real start, so it must not be reached when bounds are available.
+func TestImportedEpochStartSlotFallsBackWithoutEraBounds(t *testing.T) {
+	t.Parallel()
+
+	cfg := ImportConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			EraIndex:      1,
+			EraBoundEpoch: 10,
+			EraBoundSlot:  1000,
+			Epoch:         11,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	for _, c := range []struct {
+		epoch uint64
+		want  uint64
+	}{
+		{11, 1500},
+		{10, 1000},
+	} {
+		got, ok := importedEpochStartSlot(cfg, c.epoch)
+		require.True(t, ok)
+		require.Equal(t, c.want, got)
+	}
+	// Epoch 9 began before this era did, and without bounds there is nothing
+	// describing where. The era boundary is not a stand-in: it follows the
+	// epoch, so every registration made during it would count as pre-epoch.
+	_, ok := importedEpochStartSlot(cfg, 9)
+	require.False(t, ok,
+		"an epoch the current era's arithmetic cannot reach has no window")
+}
+
+// Bounds that do not reach back to genesis leave an epoch with no era to
+// measure from, and neither available guess is safe. The current era's
+// boundary sits after the epoch, so every registration made during it counts
+// as pre-epoch and the newest wins. Widening to zero is the mirror image:
+// they all look in-epoch, so the pool's earliest registration wins and a
+// re-registration made before the target epoch is ignored. Both seed rewards
+// from parameters that were not in force, so neither is offered.
+func TestImportedEpochStartSlotHasNoWindowBelowTheFirstEraBound(t *testing.T) {
+	t.Parallel()
+
+	cfg := ImportConfig{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			EraBounds:     []EraBound{{Slot: 1000, Epoch: 10}},
+			EraIndex:      0,
+			EraBoundEpoch: 10,
+			EraBoundSlot:  1000,
+			Epoch:         11,
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	_, ok := importedEpochStartSlot(cfg, 9)
+	require.False(t, ok,
+		"an epoch before every known era bound has no window: the boundary "+
+			"that follows it is too late, and widening to zero is too early")
+	got, ok := importedEpochStartSlot(cfg, 11)
+	require.True(t, ok, "epochs the bounds do cover are unaffected")
+	require.Equal(t, uint64(1500), got)
+}
+
+const previewHistoricalPParamsSnapshotEpoch = uint64(1397)
+
+// A Preview snapshot in epoch 1397 seeds Mark/Set/Go reward bases for
+// 1397/1396/1395. The first boundary into 1398 consumes the Go basis and
+// evaluates epoch 1396's block performance, so both the snapshot's previous
+// and current parameters must survive the import as distinct historical rows.
+func TestImportPParamsPersistsPreviewRewardHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	seedPreviewRewardBases(t, db)
+	current, previous := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, previous)
+
+	require.NoError(t, importPParams(context.Background(), cfg))
+
+	previousRows, err := db.Metadata().GetPParams(1396, EraConway, nil)
+	require.NoError(t, err)
+	require.Len(t, previousRows, 1)
+	require.Equal(t, previous, previousRows[0].Cbor)
+	require.Equal(t, uint64(1396), previousRows[0].Epoch)
+
+	currentRows, err := db.Metadata().GetPParams(1397, EraConway, nil)
+	require.NoError(t, err)
+	require.Len(t, currentRows, 1)
+	require.Equal(t, current, currentRows[0].Cbor)
+	require.Equal(t, uint64(1397), currentRows[0].Epoch)
+	require.NotEqual(t, previousRows[0].Cbor, currentRows[0].Cbor,
+		"current parameters must not substitute for the historical epoch")
+}
+
+// An imported Go basis whose historical parameters are unavailable must be
+// left ineligible by snapshot seeding. The pparams phase still persists the
+// usable current parameters instead of turning one skipped reward round into a
+// permanently failing bootstrap.
+func TestImportPParamsStoresCurrentWithoutUnavailableHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	seedPreviewRewardBases(t, db)
+	current, _ := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, nil)
+
+	for range 2 {
+		require.NoError(t, importPParams(context.Background(), cfg))
+
+		previousRows, queryErr := db.Metadata().GetPParams(
+			1396, EraConway, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Empty(t, previousRows)
+
+		currentRows, queryErr := db.Metadata().GetPParams(
+			1397, EraConway, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Len(t, currentRows, 1)
+		require.Equal(t, current, currentRows[0].Cbor)
+	}
+}
+
+func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	// Model the first Conway epoch. GovState's previous field has already been
+	// translated to Conway, while reward performance for E-1 still needs a
+	// Babbage row. A prior pass stored that exact historical row.
+	seedRewardBasisMarkers(t, db, 1395)
+	current, translatedPrevious := distinctConwayPParams(t)
+	storedPrevious, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	require.NoError(t, db.Metadata().SetPParams(
+		storedPrevious, 99_999, 1396, EraBabbage, nil,
+	))
+	cfg := previewPParamsImportConfig(db, current, translatedPrevious)
+	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
+	cfg.State.EraBounds[EraConway] = EraBound{
+		Slot:  100_000,
+		Epoch: previewHistoricalPParamsSnapshotEpoch,
+	}
+
+	for range 2 {
+		require.NoError(t, importPParams(context.Background(), cfg))
+
+		previousRows, queryErr := db.Metadata().GetPParams(
+			1396, EraBabbage, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Len(t, previousRows, 1)
+		require.Equal(t, storedPrevious, previousRows[0].Cbor)
+		currentRows, queryErr := db.Metadata().GetPParams(
+			1397, EraConway, nil,
+		)
+		require.NoError(t, queryErr)
+		require.Len(t, currentRows, 1,
+			"re-entry must not duplicate an already-satisfying current row")
+		require.Equal(t, current, currentRows[0].Cbor)
+	}
+}
+
+func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	seedPreviewRewardBases(t, db)
+	current, previous := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, previous)
+	// Model an import at the first Conway epoch. GovState's previous payload
+	// is translated to the current-era shape, but the performance epoch is
+	// still Babbage. Persisting it as Babbage would not be exact, so reject it.
+	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
+	cfg.State.EraBounds[EraConway] = EraBound{
+		Slot:  100_000,
+		Epoch: previewHistoricalPParamsSnapshotEpoch,
+	}
+
+	require.NoError(t, importPParams(context.Background(), cfg))
+
+	previousRows, queryErr := db.Metadata().GetPParams(
+		1396, EraBabbage, nil,
+	)
+	require.NoError(t, queryErr)
+	require.Empty(t, previousRows)
+	currentRows, queryErr := db.Metadata().GetPParams(
+		1397, EraConway, nil,
+	)
+	require.NoError(t, queryErr)
+	require.Len(t, currentRows, 1)
+	require.Equal(t, current, currentRows[0].Cbor)
+}
+
+func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, state.Epoch, uint64(2))
+	current, translatedPrevious := distinctConwayPParams(t)
+	state.PParamsData = current
+	state.PrevPParamsData = translatedPrevious
+	state.EraIndex = EraConway
+	state.EraBoundEpoch = state.Epoch
+	state.EraBoundSlot = state.Tip.Slot
+	state.EraBounds = previewEraBounds()
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: state,
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	_, err = importCertState(
+		context.Background(), cfg, state.Tip.Slot, noProgress,
+	)
+	require.NoError(t, err)
+	// Reproduce the partial state left by the old importer: the provisional Go
+	// basis committed before the pparams phase discovered that its translated
+	// previous payload could not be decoded as the old era.
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+	preexistingGo, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, preexistingGo)
+	require.False(t, preexistingGo.Authoritative)
+	preexistingPools, err := db.Metadata().GetRewardPoolInputs(
+		state.Epoch-2, nil,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, preexistingPools)
+
+	state.EraBounds[EraConway] = EraBound{
+		Slot:  state.Tip.Slot,
+		Epoch: state.Epoch,
+	}
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+
+	goBasis, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, goBasis,
+		"the Go basis cannot be consumed without old-era historical pparams")
+	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
+	require.NoError(t, err)
+	require.Empty(t, goPools)
+	goStake, err := db.Metadata().GetRewardStakeInputs(state.Epoch-2, nil)
+	require.NoError(t, err)
+	require.Empty(t, goStake)
+	for _, epoch := range []uint64{state.Epoch - 1, state.Epoch} {
+		basis, queryErr := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, queryErr)
+		require.NotNil(t, basis,
+			"epoch %d does not depend on unavailable old-era history", epoch)
+	}
+
+	require.NoError(t, importPParams(context.Background(), cfg))
+	previousRows, err := db.Metadata().GetPParams(
+		state.Epoch-1, EraBabbage, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, previousRows)
+	currentRows, err := db.Metadata().GetPParams(
+		state.Epoch, EraConway, nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, currentRows, 1)
+}
+
+func TestImportSnapShotsPreservesAuthoritativeRewardBasis(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, dbtest.CloseDatabase(db))
+	})
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: state,
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	_, err = importCertState(
+		context.Background(), cfg, state.Tip.Slot, noProgress,
+	)
+	require.NoError(t, err)
+
+	const retainedPoolCount = uint64(999)
+	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+		&models.RewardSnapshot{
+			Epoch:          state.Epoch - 2,
+			SnapshotType:   "mark",
+			TotalPoolCount: retainedPoolCount,
+			Authoritative:  true,
+		},
+		nil,
+	))
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, state.Tip.Slot, noProgress, false,
+	))
+
+	basis, err := db.Metadata().GetRewardSnapshot(
+		state.Epoch-2, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, basis)
+	require.True(t, basis.Authoritative)
+	require.Equal(t, retainedPoolCount, basis.TotalPoolCount)
+}
+
+func seedPreviewRewardBases(t *testing.T, db *database.Database) {
+	t.Helper()
+	seedRewardBasisMarkers(t, db, 1395, 1396, 1397)
+}
+
+func seedRewardBasisMarkers(
+	t *testing.T,
+	db *database.Database,
+	epochs ...uint64,
+) {
+	t.Helper()
+	for _, epoch := range epochs {
+		require.NoError(t, db.Metadata().SaveRewardSnapshot(
+			&models.RewardSnapshot{
+				Epoch:        epoch,
+				SnapshotType: "mark",
+			},
+			nil,
+		))
+	}
+}
+
+func distinctConwayPParams(t *testing.T) (current, previous []byte) {
+	t.Helper()
+	currentParams := testConwayPParams()
+	previousParams := *currentParams
+	previousParams.MinFeeA++
+
+	var err error
+	current, err = cbor.Encode(currentParams)
+	require.NoError(t, err)
+	previous, err = cbor.Encode(&previousParams)
+	require.NoError(t, err)
+	return current, previous
+}
+
+func previewPParamsImportConfig(
+	db *database.Database,
+	current []byte,
+	previous []byte,
+) ImportConfig {
+	return ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+		State: &RawLedgerState{
+			PParamsData:     current,
+			PrevPParamsData: previous,
+			Epoch:           previewHistoricalPParamsSnapshotEpoch,
+			EraIndex:        EraConway,
+			EraBoundEpoch:   1200,
+			EraBoundSlot:    100_000,
+			EraBounds:       previewEraBounds(),
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 100, nil
+		},
+	}
+}
+
+func previewEraBounds() []EraBound {
+	// Preview starts several historical eras at epoch zero. The last bound at
+	// or before a target epoch therefore has to win, just as it does for a real
+	// imported telescope.
+	return []EraBound{
+		{Slot: 0, Epoch: 0}, // Byron
+		{Slot: 0, Epoch: 0}, // Shelley
+		{Slot: 0, Epoch: 0}, // Allegra
+		{Slot: 0, Epoch: 0}, // Mary
+		{Slot: 0, Epoch: 0}, // Alonzo
+		{Slot: 0, Epoch: 0}, // Babbage
+		{Slot: 0, Epoch: 0}, // Conway
+	}
+}
+
+// Driving importSnapShots itself, rather than the seeding function it calls.
+//
+// The distinction has already cost twice. The seeding's derivation was covered
+// by unit tests and checked against the reference, and the seeding function was
+// covered against a real snapshot -- and the glue between importSnapShots and
+// the store still carried a defect that would have failed the first Mithril
+// bootstrap outright (it passed the outer *database.Txn where the metadata
+// store wants txn.Metadata()). Reading that path did not find it; running it
+// did, immediately.
+//
+// So this runs the sequence the import actually performs: cert state first,
+// which is what puts the pool registrations in the database, then the stake
+// snapshots, whose seeding reads them back. Anything wired wrong between the
+// two -- ordering, transaction plumbing, a parameter source that turns out to
+// be empty -- shows up here rather than on an operator's first bootstrap.
+func TestImportSnapShotsSeedsRewardInputs(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err, "parsing the fixture snapshot")
+	require.NotNil(t, state.Tip)
+
+	cfg := ImportConfig{
+		Database: db,
+		State:    state,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+	noProgress := func(ImportProgress) {}
+	ctx := context.Background()
+	slot := state.Tip.Slot
+
+	// Cert state first, exactly as the import sequences it: this is what
+	// populates the pool registrations the seeding takes its parameters from.
+	// If this ever stops running before the snapshots, the seeding silently
+	// finds no parameters and writes nothing.
+	poolsImported, err := importCertState(ctx, cfg, slot, noProgress)
+	require.NoError(t, err)
+	require.Positive(t, poolsImported,
+		"the fixture must import pools, or the seeding below would be "+
+			"vacuous for the same reason the pool-distr defect was")
+
+	require.NoError(t, importSnapShots(ctx, cfg, slot, noProgress, false))
+
+	// The three epochs mark, set and go cover are the ones whose reward
+	// rounds a bootstrapped node cannot otherwise compute.
+	for _, epoch := range []uint64{
+		state.Epoch, state.Epoch - 1, state.Epoch - 2,
+	} {
+		snapshot, err := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, snapshot,
+			"epoch %d has no reward snapshot after a full import, so its "+
+				"reward round would be skipped and never made up", epoch)
+
+		poolInputs, err := db.Metadata().GetRewardPoolInputs(epoch, nil)
+		require.NoError(t, err)
+		require.Len(t, poolInputs, int(snapshot.TotalPoolCount))
+		for _, pool := range poolInputs {
+			require.NotEmpty(t, pool.RewardAccount,
+				"pool inputs seeded through the import path must carry a "+
+					"reward account; empty is what the snapshot's own "+
+					"pool-distr entries produce, and the ledger rejects it")
+		}
+
+		stakeInputs, err := db.Metadata().GetRewardStakeInputs(epoch, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, stakeInputs)
+	}
+
+	// The pots row is the other half of what a first reward round needs, and
+	// it is seeded by a different part of the import; assert the two agree on
+	// the epoch, since a mismatch leaves the round just as skipped.
+	pots, err := db.Metadata().GetRewardAdaPots(state.Epoch, nil)
+	require.NoError(t, err)
+	if pots != nil {
+		require.Equal(t, state.Epoch, pots.Epoch)
+	}
+}
+
+// The reward basis is derived from the pool registrations in the database, so
+// it can only be right if every registration the import is going to create
+// already exists when it runs. importSnapShots creates registrations in two
+// later stages -- the fallback pool import, and the retired-but-scheduled
+// synthesis at the end -- and the seeding used to sit ahead of both. Whatever
+// those stages added was therefore invisible to it, and which pools the
+// seeding could describe depended on where in the function it happened to sit
+// rather than on what the import knew.
+//
+// The fallback path shows it plainly: it exists for a resume where cert state
+// completed in an earlier run, so it is exactly the case where the pools come
+// from that later stage and nowhere else. Seeded ahead of it, the seeding sees
+// an empty pool table.
+//
+// Ordering is the assertion because it is the invariant -- the seeding must be
+// downstream of every stage that writes a pool. The rows are checked too, but
+// they cannot carry the ordering on their own: the snapshots describe their
+// own pools, so a basis seeds here whether or not the fallback import ran
+// first, and a row-level assertion alone would pass for reasons that have
+// nothing to do with the sequence.
+func TestImportSnapShotsSeedsAfterEveryPoolImportStage(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	state, err := ParseSnapshot(testdataLedgerSnapshot)
+	require.NoError(t, err)
+	require.NotNil(t, state.Tip)
+
+	recorder := &messageRecorder{}
+	cfg := ImportConfig{
+		Database: db,
+		State:    state,
+		Logger:   slog.New(recorder),
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 500, nil
+		},
+	}
+
+	// No importCertState: this is the resume the fallback exists for, where
+	// the only pools this run learns about come from the fallback itself.
+	require.NoError(t, importSnapShots(
+		context.Background(),
+		cfg,
+		state.Tip.Slot,
+		func(ImportProgress) {},
+		true,
+	))
+
+	// Matched against the two messages seedImportedRewardInputs emits, in
+	// full, rather than a shared fragment of them: "not seeding ..."
+	// contains "seeding ...", so a fragment would match both by accident and
+	// leave it unclear which one the fixture actually produces.
+	const (
+		seededMsg  = "seeded reward inputs for an imported epoch"
+		droppedMsg = "not seeding reward inputs for an imported epoch: " +
+			"the derived basis does not reconcile, so that epoch's reward " +
+			"round will be skipped and its rewards never credited"
+	)
+	messages := recorder.snapshot()
+	if len(messages) == 0 {
+		t.Fatal("the seeding did not run at all, so this test proves nothing")
+	}
+	seedIdx := firstIndexContaining(messages, seededMsg, droppedMsg)
+	if seedIdx < 0 {
+		t.Fatal("the seeding did not run at all, so this test proves nothing")
+	}
+	// Which one fires is a claim worth pinning: the snapshots carry their own
+	// pool parameters, so the basis must actually be seeded here. If that
+	// ever regresses to a drop, this says so rather than leaving the
+	// ordering assertions below to pass over an epoch nothing was written
+	// for.
+	require.Equal(t, seededMsg, messages[seedIdx],
+		"the snapshots carry pool parameters, so the basis must be seeded; "+
+			"a dropped basis means the parameters stopped being read")
+
+	for _, stage := range []string{
+		// The fallback pool import, which writes the registrations the
+		// seeding reads.
+		"importing pools",
+		// The last stage that can add a pool: retired-but-scheduled
+		// synthesis runs immediately after this one.
+		"imported active pool distribution",
+	} {
+		idx := firstIndexContaining(messages, stage)
+		require.GreaterOrEqual(t, idx, 0,
+			"stage %q did not run, so the ordering it anchors is untested",
+			stage)
+		require.Less(t, idx, seedIdx,
+			"the reward basis was seeded before %q, so any pool that stage "+
+				"created was invisible to it", stage)
+	}
+
+	// And the seeding actually produced a basis, so the ordering above is
+	// ordering of work that happened rather than of a no-op.
+	snapshot, err := db.Metadata().GetRewardSnapshot(state.Epoch, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, snapshot,
+		"the epoch the snapshots describe must be seeded")
+	require.Positive(t, snapshot.TotalPoolCount)
+}
+
+func firstIndexContaining(messages []string, needles ...string) int {
+	for i, msg := range messages {
+		if slices.ContainsFunc(needles, func(n string) bool {
+			return strings.Contains(msg, n)
+		}) {
+			return i
+		}
+	}
+	return -1
+}
+
+// messageRecorder is a slog.Handler that keeps messages in emission order.
+// Ordering is the thing under test, so the handler records sequence rather
+// than the test scraping a formatted buffer.
+type messageRecorder struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (r *messageRecorder) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (r *messageRecorder) Handle(_ context.Context, rec slog.Record) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messages = append(r.messages, rec.Message)
+	return nil
+}
+
+func (r *messageRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *messageRecorder) WithGroup(string) slog.Handler      { return r }
+
+func (r *messageRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.messages)
+}
 
 func importTestPool(
 	t *testing.T,
@@ -730,7 +1665,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // TestPersistImportedSnapshotMissingPoolsNotResolved verifies that when no
 // pool rows exist in the DB (e.g. the fallback pool import has not yet run),
 // the current-epoch snapshot is NOT falsely marked Resolved=true. This is the
-// main correctness invariant from issue #2440: a missing pool row must not
+// main correctness invariant: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	t.Parallel()
@@ -785,7 +1720,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 }
 
 // TestPersistImportedSnapshotPoolPresentAccountStates exercises the
-// current-epoch resolver's three account outcomes for issue #2440:
+// current-epoch resolver's three account outcomes:
 //   - reward account row absent entirely → Resolved=false (data may not be
 //     imported yet; must not be persisted as a false confirmed None);
 //   - reward account present but inactive (deregistered) → Resolved=true,
@@ -1092,7 +2027,7 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 }
 
 // TestImportSnapShotsFallbackPoolsResolveCurrentEpoch verifies the end-to-end
-// fix from issue #2440: when pools come from the snapshot-pool fallback path
+// fix: when pools come from the snapshot-pool fallback path
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
@@ -1352,6 +2287,8 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 				RewardAccount:              rewardAccount,
 				RewardAccountCredentialTag: 1,
 				MarginDen:                  1,
+				LeiosKeyPublic:             bytes.Repeat([]byte{0x71}, 96),
+				LeiosKeyPossessionProof:    bytes.Repeat([]byte{0x72}, 48),
 			},
 		},
 		456,
@@ -1375,6 +2312,7 @@ func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
 		uint8(1),
 		pool.Registration[0].RewardAccountCredentialTag,
 	)
+	require.True(t, pool.Registration[0].LeiosKeyRegistrationAgeUnknown)
 }
 
 func TestImportPoolsWritesPendingRetirementForBothQueries(t *testing.T) {
@@ -1485,8 +2423,8 @@ func TestImportPoolsRejectsPastPendingRetirement(t *testing.T) {
 	require.Empty(t, retiring)
 }
 
-// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry proves the cubic-dev-ai
-// review finding on ledgerstate/utxo.go: the indefinite-length UTxO map's
+// TestIndefiniteUTxOMapPartialCommitIsSafeToRetry verifies that the
+// indefinite-length UTxO map's
 // running entry-count check can only reject entry `limit`+1 after earlier
 // batches have already been streamed to the UTxO callback and committed to
 // the database (there is no header count to check up front, unlike the

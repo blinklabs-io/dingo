@@ -159,6 +159,21 @@ func (d *Database) LatestPoolOpCertSequenceAtOrBefore(
 	)
 }
 
+// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
+// sequence row at exactly slot. Ledger validation reads it at the Mithril
+// trust boundary to tell an imported certified counter map from one that was
+// never imported.
+func (d *Database) PoolOpCertSequencesExistAtSlot(
+	slot uint64,
+	txn *Txn,
+) (bool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.PoolOpCertSequencesExistAtSlot(slot, txn.Metadata())
+}
+
 // LatestPoolOpCertSequences returns the highest observed op-cert sequence for
 // every pool that has issued a block, keyed by pool key hash. This backs the
 // GetChainDepState local-state-query, whose counters cover every cold key the

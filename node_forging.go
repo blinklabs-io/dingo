@@ -687,6 +687,92 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
+// applyForgeTuning is the runtime mapping for operator-configured forge knobs.
+// Keeping the mapping together lets its test catch any setting that would
+// otherwise stop affecting the forger when configuration wiring changes.
+func applyForgeTuning(fc *forging.ForgerConfig, cfg *Config) {
+	fc.ForgeSyncToleranceSlots = cfg.forgeSyncToleranceSlots
+	fc.ForgeStaleGapThresholdSlots = cfg.forgeStaleGapThresholdSlots
+	fc.ForgeUpstreamStalenessSlots = cfg.forgeUpstreamStalenessSlots
+	fc.ForgeAppliedTipStalenessSlots = cfg.forgeAppliedTipStalenessSlots
+	fc.ForgeEndorserBlockStalenessSlots = cfg.forgeEndorserBlockStalenessSlots
+	fc.ForgeEBSelectionReserve = cfg.forgeEBSelectionReserve
+	fc.ForgeEBMaxTxRefs = cfg.forgeEBMaxTxRefs
+	fc.ForgeEBMaxBytes = cfg.forgeEBMaxBytes
+}
+
+// startBlockProducer validates the operator's credentials, starts leader
+// election and the block forger, and returns Run's startup-cleanup stack with
+// their stop appended.
+//
+// The stop is appended immediately after credential validation because that
+// step may start a KES agent loop, and every later startup check can fail.
+// Nil-guarded stops also cover failures while validating ledger credentials
+// or starting the forger.
+//
+// The stack is returned rather than mutated in place because append may
+// reallocate; the caller must use the returned slice on both the success and
+// the error path.
+func (n *Node) startBlockProducer(
+	ctx context.Context,
+	started []func(),
+) ([]func(), error) {
+	creds, err := n.validateBlockProducerStartup()
+	if err != nil {
+		return started, fmt.Errorf(
+			"block producer startup validation failed: %w",
+			err,
+		)
+	}
+	started = append(started, func() {
+		if n.blockForger != nil {
+			n.blockForger.Stop()
+		}
+		n.closeKESAgentClient()
+		if n.leaderElection != nil {
+			logErrIfNotNil(
+				n.config.logger,
+				"failed to stop leader election during cleanup",
+				n.leaderElection.Stop(),
+			)
+		}
+	})
+	// Cross-check loaded credentials against ledger state. Mismatch
+	// against on-chain pool registration is fatal; "not yet
+	// registered" is a warning so operators can stage credentials
+	// before submitting the registration cert.
+	if err := n.validateBlockProducerLedger(creds); err != nil {
+		return started, fmt.Errorf(
+			"block producer credentials failed ledger check: %w",
+			err,
+		)
+	}
+	if err := n.initBlockForger(ctx, creds); err != nil {
+		return started, fmt.Errorf(
+			"failed to initialize block forger: %w",
+			err,
+		)
+	}
+	// Enable Leios vote emission when a vote signing key is
+	// configured (experimental, leios mode only)
+	if err := n.enableLeiosVoting(creds); err != nil {
+		return started, fmt.Errorf("failed to enable leios voting: %w", err)
+	}
+	// Wire forger's slot tracker into ledger state for slot
+	// battle detection. The forger is created after the ledger
+	// state, so we use the late-binding setter.
+	if n.blockForger != nil {
+		n.ledgerState.SetForgedBlockChecker(
+			n.blockForger.SlotTracker(),
+		)
+		n.ledgerState.SetForgingEnabled(true)
+		n.ledgerState.SetSlotBattleRecorder(
+			n.blockForger,
+		)
+	}
+	return started, nil
+}
+
 // initBlockForger initializes the block forger for production mode.
 // This requires VRF, KES, and OpCert key files to be configured.
 func (n *Node) initBlockForger(
@@ -814,15 +900,15 @@ func (n *Node) initBlockForger(
 
 	// Always enforce aggregate reference-script limits before AddBlock.
 	// Full self-validation (header crypto, body-hash, per-tx ledger checks)
-	// runs too unless the operator explicitly opts out (issue #3528: fail
-	// closed by default).
+	// runs too unless the operator explicitly opts out (fail closed by
+	// default).
 	blockValidator := newForgedBlockValidator(
 		n.ledgerState,
 		n.config.validateForgedBlock,
 	)
 
 	// Create the block forger with the real leader election
-	forger, err := forging.NewBlockForger(forging.ForgerConfig{
+	forgerCfg := forging.ForgerConfig{
 		Mode:             forging.ModeProduction,
 		Logger:           n.config.logger,
 		Credentials:      creds,
@@ -839,14 +925,8 @@ func (n *Node) initBlockForger(
 		// mkCurrentBlockContext's EQ case. The primary chain supplies the
 		// fork context; LedgerState arbitrates with the same Praos
 		// comparison a peer's competing block goes through.
-		ChainContext:                       n.chainManager.PrimaryChain(),
-		SiblingAdopter:                     n.ledgerState,
-		ForgeSyncToleranceSlots:            n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:        n.config.forgeStaleGapThresholdSlots,
-		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        n.config.forgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      n.config.forgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   n.config.forgeEndorserBlockStalenessSlots,
+		ChainContext:   n.chainManager.PrimaryChain(),
+		SiblingAdopter: n.ledgerState,
 		// Closure, not a method value: n.ouroboros is rebuilt live, so this
 		// resolves the current instance when the forge loop asks.
 		LeiosVerifiedEbSlot: func() uint64 {
@@ -865,7 +945,9 @@ func (n *Node) initBlockForger(
 			ls: n.ledgerState,
 		},
 		EraParams: n.ledgerState,
-	})
+	}
+	applyForgeTuning(&forgerCfg, &n.config)
+	forger, err := forging.NewBlockForger(forgerCfg)
 	if err != nil {
 		// Stop election to prevent goroutine leak
 		_ = election.Stop()
@@ -1046,7 +1128,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 //
 // Two defects are fixed here, and both are load-bearing for consensus:
 //
-// dingo #3814 -- the denominator comes from LedgerView.GetTotalActiveStake,
+// Denominator -- the denominator comes from LedgerView.GetTotalActiveStake,
 // a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
 // same store accessor ledger/verify_header.go resolves the denominator
 // through when it checks an incoming header's leader eligibility.
@@ -1065,7 +1147,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 // decline a slot it is genuinely eligible for. Resolving both through one
 // accessor removes the second derivation entirely.
 //
-// dingo #3815 -- both values are read through one db.MetadataTxn and one
+// Atomicity -- both values are read through one db.MetadataTxn and one
 // LedgerView. Opening a transaction per value let a snapshot re-capture land
 // between them, yielding a sigma whose halves come from different writes.
 func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
@@ -1124,7 +1206,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 
 // The forging adapter must resolve sigma through the atomic pair accessor.
 // A drift back to two independent reads, or to summing the mark rows for the
-// denominator, is the pair of defects dingo #3814 and #3815 describe; make it
+// denominator, is the pair of defects described above; make it
 // a compile error rather than a silent consensus divergence.
 var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
@@ -1135,8 +1217,8 @@ type epochInfoAdapter struct {
 
 // computeSchedule discovers the exact-rational coefficient with a runtime type
 // assertion and silently falls back to the float64 accessor when it fails,
-// which yields a strictly larger leadership threshold than the reference node's
-// (dingo #2798). Make that drift a compile error;
+// which yields a strictly larger leadership threshold than the reference
+// node's. Make that drift a compile error;
 // TestEpochInfoAdapterProvidesExactActiveSlotCoeff covers the same pairing.
 var _ leader.ActiveSlotCoeffRatProvider = (*epochInfoAdapter)(nil)
 
@@ -1243,6 +1325,14 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 	return a.ledgerState.Tip().Point
 }
 
+func (a *slotClockAdapter) ChainTipSnapshot() ochainsync.Tip {
+	return a.ledgerState.Tip()
+}
+
+func (a *slotClockAdapter) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return a.ledgerState.ForgeTipSnapshot()
+}
+
 // ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
 // forger no longer calls it: it takes the tip hash from ChainTip above,
 // which returns slot and hash from one snapshot. Kept so the adapter still
@@ -1263,6 +1353,12 @@ func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
 	return a.ledgerState.PrimaryChainTip().Point
 }
 
+func (a *slotClockAdapter) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	return a.ledgerState.PrimaryChainTipRelation(point)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1273,6 +1369,14 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 
 func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
 	return a.ledgerState.UpstreamSyncStatus()
+}
+
+func (a *slotClockAdapter) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return a.ledgerState.UpstreamSyncTip()
+}
+
+func (a *slotClockAdapter) SecurityParam() int {
+	return a.ledgerState.SecurityParam()
 }
 
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to

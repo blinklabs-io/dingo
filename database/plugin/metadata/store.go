@@ -198,6 +198,13 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetGovernanceProposalSet returns the Conway proposals set: every
+	// proposal not yet enacted, dropped, or soft-deleted. An expired action
+	// stays a member until the boundary that drops it.
+	GetGovernanceProposalSet(
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetRatifiedGovernanceProposals returns proposals that have been
 	// ratified but not yet enacted. Used at epoch start by enactment.
 	GetRatifiedGovernanceProposals(
@@ -213,9 +220,9 @@ type GovernanceStore interface {
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
-	// GetExpiringGovernanceProposals returns proposals whose
-	// `expires_epoch` is strictly less than the given epoch and that
-	// have not yet been enacted, expired, or soft-deleted. Used at
+	// GetExpiringGovernanceProposals returns unratified proposals whose
+	// `expires_epoch` is strictly less than the given epoch and that have
+	// not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark proposals expired (ineligible for further
 	// ratification). Their deposit is not returned yet -- see
 	// GetExpiredAwaitingDropGovernanceProposals.
@@ -241,7 +248,7 @@ type GovernanceStore interface {
 	// later, the same one-epoch delay ratification has before enactment.
 	// Used at epoch start, before marking any new proposals expired, to
 	// return the deposit and finalize ("drop") proposals expired as of a
-	// prior boundary (dingo#4411). Only proposals whose expired_epoch is
+	// prior boundary. Only proposals whose expired_epoch is
 	// strictly below the given epoch are returned, so a reprocessed
 	// boundary cannot drop a proposal in the epoch that expired it.
 	GetExpiredAwaitingDropGovernanceProposals(
@@ -321,6 +328,12 @@ type GovernanceStore interface {
 
 	// GetActiveCommitteeMembers retrieves all active committee members.
 	GetActiveCommitteeMembers(types.Txn) ([]*models.AuthCommitteeHot, error)
+	// GetCommitteeHotAuthorizationsSince retrieves, per cold credential, the
+	// latest authorization when it was recorded at or after the given slot.
+	GetCommitteeHotAuthorizationsSince(
+		uint64,
+		types.Txn,
+	) ([]*models.AuthCommitteeHot, error)
 
 	// IsCommitteeMemberResigned checks if a committee member has resigned.
 	IsCommitteeMemberResigned(
@@ -660,7 +673,7 @@ type UtxoStore interface {
 	// live at atSlot but its spend record has since been hard-deleted by
 	// the periodic stability-window cleanup" (see UtxosDeleteConsumed).
 	// This method has no way to tell the two apart -- callers pinning a
-	// historical point (ledger.Query, blinklabs-io/dingo#382/#1900) must
+	// historical point (ledger.Query, node-parity) must
 	// reject a point older than their own retention floor themselves
 	// before calling this, rather than trust a possibly-incomplete result
 	// here.
@@ -852,9 +865,8 @@ type UtxoStore interface {
 
 	// MarkUtxosDeletedAtSlot marks every live UTxO row matching one
 	// of refs as deleted at atSlot. Refs that don't match any live
-	// row are silently ignored (the SQL filter is deleted_slot == 0,
-	// so already-deleted rows don't get rewritten). Rollback
-	// un-deletion is handled by SetUtxosNotDeletedAfterSlot.
+	// row are silently ignored. Rollback un-deletion is handled by
+	// SetUtxosNotDeletedAfterSlot.
 	MarkUtxosDeletedAtSlot(
 		txn types.Txn,
 		refs []types.UtxoKey,
@@ -1234,7 +1246,7 @@ type StakeSnapshotStore interface {
 	// including pools that are no longer registered. It is the historical-path
 	// counterpart of GetDelegatedPoolKeyHashes, and exists for the same reason:
 	// the sigma_a denominator must be enumerated from delegations, not from the
-	// stake-pool set (dingo #4660).
+	// stake-pool set.
 	GetEpochBoundaryDelegatedPoolKeyHashes(
 		uint64, // snapshotSlot
 		uint64, // boundarySlot
@@ -1837,6 +1849,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// PoolOpCertSequencesExistAtSlot reports whether any pool has an op-cert
+	// sequence row recorded at exactly slot. A Mithril restore writes the
+	// certified HeaderState counter map at its anchor slot and applies no
+	// block there, so no row at a recorded trust boundary means the certified
+	// counters were never imported.
+	PoolOpCertSequencesExistAtSlot(
+		uint64, // slot
+		types.Txn,
+	) (bool, error)
+
 	// LatestPoolOpCertSequences returns the highest observed op-cert sequence
 	// for every pool that has issued a block, keyed by pool key hash. Pools
 	// that have never issued one are absent rather than reported as zero.
@@ -1908,12 +1930,11 @@ type MetadataStore interface {
 	// first-ever registration is immediate). Callers must pass the current
 	// epoch's start slot, not an arbitrary point in the past.
 	//
-	// A key a pool proposed earlier in the same epoch and then superseded
-	// with a later re-registration (A -> B -> C) also still counts as
-	// claimed by that pool for the rest of the epoch, even though it is
-	// no longer that pool's pending value either: psVRFKeyHashes retains
-	// every key placed in psFutureStakePoolParams during the epoch, not
-	// only the current one.
+	// Only the pool's latest same-epoch registration reserves its key. A
+	// key proposed earlier in the same epoch and then superseded by a
+	// later re-registration (A -> B -> C) is freed once superseded: it was
+	// never placed in psStakePools and is no longer the pending value in
+	// psFutureStakePoolParams, so a different pool may claim it.
 	GetPoolByVrfKeyHash(
 		vrfKeyHash []byte,
 		epochStartSlot uint64,
@@ -2019,7 +2040,7 @@ type MetadataStore interface {
 	// checker asks about an epoch it reaches long after the fact.
 	// pool_registration/pool_retirement are retained for the life of the
 	// database, so this evidence outlives the pool_stake_snapshot retention
-	// window a trailing observer runs behind (dingo #3925).
+	// window a trailing observer runs behind.
 	GetPoolKeyHashesRetiredByEpoch(
 		epoch uint64,
 		boundarySlot uint64,
@@ -2050,12 +2071,20 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
+	// GetPostSnapshotRewardCredits returns each stake credential's total of
+	// the credits recorded at slot and marked AccountRewardDelta.PostSnapshot:
+	// what a boundary at slot credited after its SNAP point.
+	GetPostSnapshotRewardCredits(
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.AccountRewardDelta, error)
+
 	// GetDelegatedPoolKeyHashes returns every pool key hash the live reward
 	// stake aggregate attributes stake to, including pools that are no longer
 	// registered. cardano-ledger's ssTotalActiveStake sums registered
 	// credentials holding a delegation without consulting the stake-pool set,
 	// so the snapshot's sigma_a denominator must cover these pools too or every
-	// reward on the node is under-credited by their share (dingo #4660).
+	// reward on the node is under-credited by their share.
 	GetDelegatedPoolKeyHashes(types.Txn) ([][]byte, error)
 
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
@@ -2139,6 +2168,18 @@ type MetadataStore interface {
 		uint64, // amount
 		uint64, // slot
 		[]byte, // sourceHash
+		types.Txn,
+	) error
+
+	// AddAccountRewardsByCredential applies a batch of credits with exactly
+	// the effect of calling AddAccountRewardByCredential for each in order:
+	// a credit whose journal row already exists is skipped, every other
+	// credit is journaled and added to its account's reward balance, and the
+	// credited credentials' reward_live_stake rows are refreshed. It fails
+	// with models.ErrAccountNotFound before writing anything when a credited
+	// account is missing or inactive.
+	AddAccountRewardsByCredential(
+		[]models.AccountRewardCredit,
 		types.Txn,
 	) error
 
@@ -2246,6 +2287,14 @@ type MetadataStore interface {
 	// decoder for the CBOR to decode.
 	GetPParams(
 		uint64, // epoch
+		uint, // eraId
+		types.Txn,
+	) ([]models.PParams, error)
+
+	// ListPParamsForEra returns every stored protocol-parameter row for an era
+	// in insertion order. Callers that need the era's initial parameters use
+	// the first row rather than substituting a later parameter update.
+	ListPParamsForEra(
 		uint, // eraId
 		types.Txn,
 	) ([]models.PParams, error)
@@ -2516,11 +2565,131 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
 
+	// GetPendingRewardCreditRounds returns applied reward rounds retained until
+	// rollback crosses their boundary. Their outputs may already be folded.
+	GetPendingRewardCreditRounds(types.Txn) ([]models.RewardCreditRound, error)
+
+	// HasPendingRewardCreditRounds reports whether any applied round has
+	// spendable, unguarded account outputs not yet folded into account balances.
+	HasPendingRewardCreditRounds(types.Txn) (bool, error)
+
+	// HasUnfoldedRewardCreditsThroughEpoch reports whether any applied round
+	// through snapshotEpoch has spendable, unguarded outputs not yet folded.
+	HasUnfoldedRewardCreditsThroughEpoch(uint64, types.Txn) (bool, error)
+
+	// AddAppliedRewardCreditRound registers an applied reward round in the
+	// caller's transaction.
+	AddAppliedRewardCreditRound(models.RewardCreditRound, types.Txn) error
+
+	// HasAppliedRewardCreditRound reports whether the snapshot epoch has been
+	// applied, regardless of whether its output rows have been folded.
+	HasAppliedRewardCreditRound(uint64, types.Txn) (bool, error)
+
+	// SetPendingRewardCreditRounds replaces the applied-round index.
+	SetPendingRewardCreditRounds([]models.RewardCreditRound, types.Txn) error
+
+	// RewardCreditsAlreadyApplied reports, for each credit, whether its
+	// account_reward_delta journal row already exists.
+	RewardCreditsAlreadyApplied(
+		[]models.AccountRewardCredit,
+		types.Txn,
+	) ([]bool, error)
+
+	// TakeRewardEligibilityRecheck returns and clears the credentials whose
+	// registration a rollback restored since the last call.
+	TakeRewardEligibilityRecheck(types.Txn) ([]models.StakeCredentialRef, error)
+
+	// GetStakeCredentialsWithRegistrationEvents returns the credentials with
+	// a registration or deregistration certificate in the inclusive slot
+	// range.
+	GetStakeCredentialsWithRegistrationEvents(
+		uint64, // fromSlot
+		uint64, // toSlot
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// FoldRewardAccountOutputs marks a credential's unfolded credits of the
+	// given credited rounds as added to account.reward. Call it in the
+	// transaction that adds them.
+	FoldRewardAccountOutputs(
+		[]uint64, // snapshot epochs of the credited rounds
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) error
+	// GetRewardAccountOutputsForCredential returns one credential's unfolded
+	// credits (spendable, unguarded, not folded) in the given snapshot epochs.
+	GetRewardAccountOutputsForCredential(
+		[]uint64, // epochs
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+	// GetRewardAccountOutputsForEligibility returns one credential's unfolded
+	// outputs in the given snapshot epochs, including outputs currently marked
+	// nonspendable so the boundary can recheck registration changes.
+	GetRewardAccountOutputsForEligibility(
+		[]uint64, // epochs
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// GetPendingRewardAccountOutputsForCredential returns unfolded outputs in
+	// applied reward rounds for one credential.
+	GetPendingRewardAccountOutputsForCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// ClaimPendingRewardCreditsForCredential marks every unfolded credit of
+	// one stake credential in the credited rounds folded and returns them,
+	// for the caller to write to the account in the same transaction.
+	ClaimPendingRewardCreditsForCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// ClaimUnfoldedRewardCredits marks up to limit unfolded credits of one
+	// credited round folded and returns them, for the caller to write to
+	// their accounts in the same transaction.
+	ClaimUnfoldedRewardCredits(
+		uint64, // snapshotEpoch
+		int, // limit
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
+	// FoldPendingRewardAccountOutputs marks all of a credential's unfolded
+	// applied reward outputs as added to its account balance.
+	FoldPendingRewardAccountOutputs(uint8, []byte, types.Txn) error
+
+	// GetRewardAccountOutputsInPoolKeyHashRange returns an epoch's reward
+	// account outputs whose pool_key_hash is in the inclusive [lo, hi] range.
+	GetRewardAccountOutputsInPoolKeyHashRange(
+		uint64, // epoch
+		[]byte, // lo
+		[]byte, // hi
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
 	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
 	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
 
 	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
 	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// GetRewardStakeInputsInPoolKeyHashRange retrieves per-credential reward
+	// inputs for an epoch whose pool_key_hash falls in the inclusive [lo, hi]
+	// range, so a caller can process a contiguous batch of pools' delegators
+	// at a time instead of loading every pool's stake inputs at once.
+	GetRewardStakeInputsInPoolKeyHashRange(
+		epoch uint64,
+		poolKeyHashLo []byte,
+		poolKeyHashHi []byte,
+		txn types.Txn,
+	) ([]*models.RewardStakeInput, error)
 
 	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
 	DeleteRewardInputsForEpoch(uint64, types.Txn) error
@@ -2604,7 +2773,7 @@ type MetadataStore interface {
 
 	// GetNetworkStateAsOfSlot retrieves the most recent network state
 	// recorded at or before the given slot, for a historical
-	// GetStakeDistribution answer (blinklabs-io/dingo#382) rather than
+	// GetStakeDistribution answer rather than
 	// GetNetworkState's always-latest row.
 	GetNetworkStateAsOfSlot(uint64, types.Txn) (*models.NetworkState, error)
 
@@ -2680,7 +2849,7 @@ type MetadataStore interface {
 
 	// ListSyncStateKeysByPrefix returns every sync_state key that begins with
 	// the given prefix (used to enumerate the persisted deferred-header
-	// markers so their retention floor survives a restart -- issue #3727).
+	// markers so their retention floor survives a restart).
 	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
 
 	// ClearSyncState removes all sync state entries.

@@ -185,7 +185,7 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 }
 
 // TestProcessEpochExpiresProposalWithoutRefundingDeposit pins the first half
-// of the expire/drop split (dingo#4411): marking a proposal expired must not
+// of the expire/drop split: marking a proposal expired must not
 // itself refund its deposit. cardano-ledger does not return an expired
 // governance action's deposit until one full epoch after it is marked
 // expired -- refunding it immediately inflated the very next mark snapshot's
@@ -269,9 +269,9 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 }
 
 // TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch is the
-// regression test for dingo#4411: a proposal marked expired at epoch E must
-// have its deposit refunded only when ProcessEpoch runs for epoch E+1, not
-// immediately.
+// regression test for the early proposal-deposit refund: a proposal marked
+// expired at epoch E must have its deposit refunded only when ProcessEpoch runs
+// for epoch E+1, not immediately.
 func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	t *testing.T,
 ) {
@@ -360,9 +360,9 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 }
 
 // TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch covers the
-// crash-replay half of dingo#4411. A boundary that is reprocessed reruns
-// against the expiry the first pass already wrote, so the drop step's own
-// `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
+// crash-replay half of the early-refund fix. A boundary that is reprocessed
+// reruns against the expiry the first pass already wrote, so the drop step's
+// own `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
 // expiry step -- is what keeps the refund out of the epoch that expired it.
 func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 	t *testing.T,
@@ -479,7 +479,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 		nil, nil, &ratifiedEpoch, &ratifiedSlot,
 	), nil))
 	require.NoError(t, db.SetGovernanceProposal(buildNoConfidenceProposal(
-		t, siblingHash, 0, 12, 25, siblingAddr, 101,
+		t, siblingHash, 0, 4, 25, siblingAddr, 101,
 		nil, nil, nil, nil,
 	), nil))
 
@@ -507,6 +507,7 @@ func TestProcessEpochRefundsEnactmentOrphanInTheEnactingEpoch(t *testing.T) {
 	}
 
 	out := runEpoch(5, 500)
+	assert.Equal(t, 1, out.EnactedCount)
 	assert.Equal(t, 1, out.OrphanedCount)
 
 	winner, err := store.GetAccountByCredential(0, winnerCred, false, nil)
@@ -807,7 +808,7 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 					ActionIndex:   0,
 					ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
 					ProposedEpoch: 4,
-					ExpiresEpoch:  10,
+					ExpiresEpoch:  4,
 					AnchorURL:     "https://example.invalid/no-confidence",
 					AnchorHash:    testBytes(32, 0xA2),
 					ReturnAddress: testBytes(29, 0xA3),
@@ -846,6 +847,11 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, proposal.RatifiedEpoch)
 			assert.Equal(t, uint64(5), *proposal.RatifiedEpoch)
+			assert.Nil(
+				t,
+				proposal.ExpiredEpoch,
+				"a proposal ratified at its final boundary must not also expire",
+			)
 		})
 	}
 }
@@ -1008,7 +1014,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 }
 
 // TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a real ratify+enact
+// pins: a real ratify+enact
 // cycle through ProcessEpoch, not EnactProposal called in isolation, must
 // still surface PlutusV2CostModelWritten on the resulting EpochOutput --
 // proving applyEnactmentResult's OR into EpochOutput actually connects to
@@ -1420,21 +1426,45 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		},
 		{
 			Credential:  testBytes(28, 2),
-			ExpiryEpoch: 10,
+			ExpiryEpoch: 99,
 			Active:      true,
 		},
 		{
 			Credential:  testBytes(28, 3),
-			ExpiryEpoch: 11,
+			ExpiryEpoch: 100,
+			Active:      true,
+		},
+		{
+			Credential:  testBytes(28, 4),
+			ExpiryEpoch: 101,
 			Active:      true,
 		},
 	} {
 		require.NoError(t, store.CreateDrep(nil, &drep))
 	}
 
-	count, err := countActiveDReps(db, nil, 10)
-	require.NoError(t, err)
-	assert.Equal(t, 2, count)
+	for _, test := range []struct {
+		epoch uint64
+		count int
+	}{
+		{epoch: 99, count: 4},
+		{epoch: 100, count: 3},
+		{epoch: 101, count: 2},
+	} {
+		count, err := countActiveDReps(db, nil, test.epoch)
+		require.NoError(t, err)
+		assert.Equal(
+			t,
+			test.count,
+			count,
+			"active DRep count at epoch %d",
+			test.epoch,
+		)
+		state, err := LoadDRepVotingState(db, nil, test.epoch, false)
+		require.NoError(t, err)
+		assert.Len(t, state.Dreps, test.count,
+			"voting DRep set at epoch %d", test.epoch)
+	}
 }
 
 func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
@@ -1608,6 +1638,13 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				NewEpoch:     currentEpoch,
 				BoundarySlot: 500,
 				PParams:      pparams,
+				ConwayGenesis: &conway.ConwayGenesis{
+					Committee: conway.ConwayGenesisCommittee{
+						Members: map[string]int{
+							"keyHash-genesis-committee-member": 20,
+						},
+					},
+				},
 				UpdateFn: func(
 					pparams lcommon.ProtocolParameters,
 					_ any,
@@ -2243,4 +2280,123 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))
+}
+
+// The RATIFY and EXPIRY verdicts must be computable from a read-only view of
+// the boundary state, so they can be taken from a snapshot after the boundary
+// commits, and must equal what the boundary itself applies.
+func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
+	t.Parallel()
+
+	const currentEpoch = uint64(741)
+	const newEpoch = currentEpoch + 1
+
+	db, store := newTallyTestDB(t)
+	hardFork := seedHardForkInitiationProposal(
+		t, db, currentEpoch, 11, 1, 0x90,
+	)
+	hardFork.ReturnAddress = append([]byte{0xE0}, testBytes(28, 0x97)...)
+	// Its final RATIFY chance: EXPIRY must not also classify it expired.
+	hardFork.ExpiresEpoch = currentEpoch
+	require.NoError(t, db.SetGovernanceProposal(hardFork, nil))
+	coldCred := testBytes(28, 0x91)
+	hotCred := testBytes(28, 0x92)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: coldCred, ExpiresEpoch: newEpoch + 10},
+	}, nil))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldCred,
+		HotCredential:  hotCred,
+		CertificateID:  1,
+		AddedSlot:      1,
+	})
+	yesPool := testBytes(28, 0x93)
+	seedPoolWithStake(
+		t, store, yesPool, testBytes(29, 0x95), 6_283, newEpoch,
+	)
+	seedPoolWithStake(
+		t, store, testBytes(28, 0x94), testBytes(29, 0x96), 3_717, newEpoch,
+	)
+	for _, vote := range []*models.GovernanceVote{
+		{VoterType: models.VoterTypeCC, VoterCredential: hotCred},
+		{VoterType: models.VoterTypeSPO, VoterCredential: yesPool},
+	} {
+		vote.ProposalID = hardFork.ID
+		vote.Vote = models.VoteYes
+		vote.AddedSlot = 2
+		require.NoError(t, db.SetGovernanceVote(vote, nil))
+	}
+	returnAddr := buildRewardAddr(t, testBytes(28, 0x98))
+	expiringHash := testBytes(32, 0x99)
+	childHash := testBytes(32, 0x9a)
+	expiringIdx := uint32(0)
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, expiringHash, 0, currentEpoch-1, 3,
+			returnAddr, 10, nil, nil, nil, nil),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, newEpoch+5, 3,
+			returnAddr, 11, expiringHash, &expiringIdx, nil, nil),
+		nil,
+	))
+
+	input := func(txn *EpochInput) *EpochInput {
+		txn.DB = db
+		txn.PrevEpoch = currentEpoch
+		txn.NewEpoch = newEpoch
+		txn.BoundarySlot = newEpoch * 100
+		txn.PParams = stabilityConwayPParams(9)
+		txn.UpdateFn = func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		}
+		return txn
+	}
+
+	readTxn := db.MetadataTxn(false)
+	in := input(&EpochInput{Txn: readTxn})
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	require.NoError(t, err)
+	decision, err := decideRatification(
+		in, &EpochOutput{UpdatedPParams: in.PParams}, conwayPParams, 0,
+	)
+	readTxn.Release()
+	require.NoError(t, err)
+	identities := func(proposals []*models.GovernanceProposal) []string {
+		ret := make([]string, 0, len(proposals))
+		for _, p := range proposals {
+			ret = append(ret, proposalIdentityKey(p))
+		}
+		return ret
+	}
+	require.Equal(t, []string{proposalIdentityKey(hardFork)},
+		identities(decision.Ratified))
+	require.Equal(t,
+		[]string{proposalIdentityKey(&models.GovernanceProposal{
+			TxHash: expiringHash,
+		})},
+		identities(decision.Expired))
+
+	stored, err := db.GetGovernanceProposal(hardFork.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, stored.RatifiedEpoch, "deciding wrote a ratified mark")
+
+	writeTxn := db.MetadataTxn(true)
+	defer writeTxn.Release()
+	out, err := ProcessEpoch(input(&EpochInput{Txn: writeTxn}))
+	require.NoError(t, err)
+	require.NoError(t, writeTxn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+	require.Equal(t, 1, out.ExpiredCount)
+	require.Equal(t, 1, out.OrphanedCount)
+	stored, err = db.GetGovernanceProposal(hardFork.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored.RatifiedEpoch)
+	require.Equal(t, newEpoch, *stored.RatifiedEpoch)
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
 }

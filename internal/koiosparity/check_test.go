@@ -145,12 +145,12 @@ func TestCheckSurfacesPersistedErrorWhenNothingNeedsRechecking(t *testing.T) {
 }
 
 // TestCheckReselectsPoolOnlyEpochMissingAccountCoverage is the regression
-// test for the account-coverage-blind epoch-selection bug found in review of
-// #3097: an epoch fetched/checked before #3097 existed (pool-level Koios
-// data cached, a fresh persisted PASS, and no koios_account_coverage row at
-// all — the realistic pre-#3097-to-post-#3097 upgrade path for a Dingo
-// deployment that already ran koios-parity) must be reselected by
-// GetEpochsNeedingCheck/Check once AccountsEnabled is turned on, purely
+// test for the account-coverage-blind epoch-selection bug found in the
+// per-account phase: an epoch fetched/checked before per-account parity existed
+// (pool-level Koios data cached, a fresh persisted PASS, and no
+// koios_account_coverage row at all — the realistic pre-account-parity upgrade
+// path for a Dingo deployment that already ran koios-parity) must be reselected
+// by GetEpochsNeedingCheck/Check once AccountsEnabled is turned on, purely
 // because its account coverage is missing — not left at its stale pool-only
 // PASS forever just because nothing about its pool/aggregate data changed.
 //
@@ -173,9 +173,9 @@ func TestCheckReselectsPoolOnlyEpochMissingAccountCoverage(t *testing.T) {
 	fetchedAt := time.Now().Add(-time.Hour).UTC()
 
 	// Seed a complete pool-level cache (epoch_info + totals, matching a real
-	// pre-#3097 fetchEpoch commit) and a fresh persisted PASS — deliberately
-	// with NO koios_account_coverage row, simulating an epoch that was
-	// fetched/checked before #3097's per-account fetch/check phases existed.
+	// pre-account-parity fetchEpoch commit) and a fresh persisted PASS —
+	// deliberately with NO koios_account_coverage row, simulating an epoch that
+	// was fetched/checked before the per-account fetch/check phases existed.
 	require.NoError(t, cache.CommitEpochData(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
@@ -609,13 +609,13 @@ func TestCheckDetectsMissingKoiosTotalsOnUpgradedCache(t *testing.T) {
 }
 
 // TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure guards
-// against #3410: checkEpoch used to clear an epoch's persisted mismatch rows
-// before every fallible Dingo/cache read for that epoch had completed, so a
-// later read failure (here, cache.GetTotals erroring instead of returning
+// against a regression: checkEpoch used to clear an epoch's persisted mismatch
+// rows before every fallible Dingo/cache read for that epoch had completed, so
+// a later read failure (here, cache.GetTotals erroring instead of returning
 // sql.ErrNoRows) erased the last known evidence and left nothing behind. The
-// koios_totals table is dropped after seeding to force GetTotals to fail
-// with a real DB error partway through checkEpoch, well after the point
-// where the old code had already deleted the prior rows.
+// koios_totals table is dropped after seeding to force GetTotals to fail with a
+// real DB error partway through checkEpoch, well after the point where the old
+// code had already deleted the prior rows.
 func TestCheckEpochPreservesPriorMismatchEvidenceOnLaterReadFailure(
 	t *testing.T,
 ) {
@@ -859,10 +859,10 @@ func TestCheckAccountsCoverageDBErrorIsNotConflatedWithIncompleteCoverage(
 	)
 }
 
-// TestCheckAccountsEndToEndExactMatchAndMismatch is an end-to-end #3097 test:
-// with account coverage marked complete, an exact-match account produces no
-// mismatch and a 1-lovelace-off account produces a value_mismatch — proving
-// the full path from CheckConfig.AccountsEnabled through checkEpoch's
+// TestCheckAccountsEndToEndExactMatchAndMismatch is an end-to-end per-account
+// parity test: with account coverage marked complete, an exact-match account
+// produces no mismatch and a 1-lovelace-off account produces a value_mismatch —
+// proving the full path from CheckConfig.AccountsEnabled through checkEpoch's
 // coverage gate, StakeAddressFromCredential resolution, and
 // CompareAccountEpoch.
 func TestCheckAccountsEndToEndExactMatchAndMismatch(t *testing.T) {
@@ -1209,8 +1209,7 @@ func seedPoolPresenceFixture(
 // The presence check must therefore ignore it. Flagging it pool_only_dingo
 // reports a Dingo defect where both sides in fact agree: the pool simply did
 // not exist yet for the epoch being compared. Observed on preview epoch 7,
-// where two pools registered mid-epoch failed the strict observer (dingo
-// #3483).
+// where two pools registered mid-epoch failed the strict observer.
 func TestCheckIgnoresParamEpochOnlyPoolForPresence(t *testing.T) {
 	t.Parallel()
 
@@ -1296,7 +1295,7 @@ func TestCheckFlagsStakeEpochPoolMissingFromKoios(t *testing.T) {
 // (a K-1 reward_pool_input row) and absent from the K+1 snapshot, which is
 // itself committed — a ready epoch_summary row at K+1. That combination means
 // the pool left the pool set, so the epoch must still report PASS rather than
-// halting a strict-mode node (dingo #3485).
+// halting a strict-mode node.
 func TestCheckDepartedPoolDoesNotErrorEpoch(t *testing.T) {
 	t.Parallel()
 
@@ -1488,7 +1487,7 @@ func seedDepartureFixtureWithCount(
 // genuine missing input, not departure. Classifying it as pool_departed would
 // turn a real ERROR into a PASS, which is why departure is decided from
 // per-pool pool_stake_snapshot membership rather than from
-// epoch_summary.SnapshotReady (dingo #3485).
+// epoch_summary.SnapshotReady.
 func TestCheckDegradedActivePoolStillErrors(t *testing.T) {
 	t.Parallel()
 
@@ -1560,7 +1559,7 @@ func TestCheckMissingRewardBundleStillErrors(t *testing.T) {
 // present. The absent pool would look departed against that partial set, which
 // would pass the epoch and hide a dingo_db_missing. Membership is only trusted
 // when the number of readable mark rows equals the count the summary declares,
-// both being written from the same StakeDistribution (dingo #3485).
+// both being written from the same StakeDistribution.
 func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
 	t.Parallel()
 
@@ -1608,7 +1607,7 @@ func TestCheckIncompleteParamEpochPoolSetStillErrors(t *testing.T) {
 // `reward_pool_input` are both retained for the life of the database, and a K+1
 // reward-input set whose size matches the K+1 summary's declared pool count
 // accounts for every pool in that pool set. A pool missing from a complete set
-// left it (dingo #3795).
+// left it.
 func TestCheckDepartedPoolSurvivesSnapshotRetentionPrune(t *testing.T) {
 	t.Parallel()
 
@@ -1687,10 +1686,7 @@ func pruneParamEpochSnapshots(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
-	)
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 	_, err = db.Exec(
@@ -1732,10 +1728,10 @@ INSERT INTO reward_pool_input (
 }
 
 // seedRewardSnapshotForZeroStakeProof writes the mark reward_snapshot row at
-// paramEpoch that checkEpoch's paramEpochPositiveStakeProven route (dingo
-// #4691) reads. excludedKnown mirrors
+// paramEpoch that checkEpoch's paramEpochPositiveStakeProven route
+// reads. excludedKnown mirrors
 // DingoRewardSnapshotSummary.ExcludedActiveStakeKnown: false leaves the
-// column NULL, reproducing a snapshot captured before dingo #4025 added the
+// column NULL, reproducing a snapshot captured before excluded-stake
 // tracking.
 func seedRewardSnapshotForZeroStakeProof(
 	t *testing.T,
@@ -1768,7 +1764,7 @@ INSERT INTO reward_snapshot (
 	require.NoError(t, err)
 }
 
-// TestCheckZeroStakePoolNotDBMissingWhenSnapshotPruned is the dingo #4691
+// TestCheckZeroStakePoolNotDBMissingWhenSnapshotPruned is the zero-stake
 // case: a registered, non-retired pool whose delegated stake reaches zero at
 // the K+1 boundary (its only delegator redelegated away or deregistered) gets
 // no K+1 reward_pool_input row, because rewardStakeDistribution correctly
@@ -1778,7 +1774,7 @@ INSERT INTO reward_snapshot (
 // the K+1 epoch_summary declaring more pools than have reward-input rows
 // because a zero-stake-but-delegated pool inflates its count (route 2's
 // epoch_summary-based fallback can structurally never close on such a
-// network -- dingo #4691's Preview evidence: epoch 160 declared 113 pools
+// network -- Preview evidence: epoch 160 declared 113 pools
 // against 111 real reward-input rows), the pool must not read as
 // dingo_db_missing, nor as pool_departed, since it never left the network.
 // reward_snapshot's own (smaller, correct) pool count with a known-zero
@@ -1834,8 +1830,8 @@ func TestCheckZeroStakePoolNotDBMissingWhenSnapshotPruned(t *testing.T) {
 // TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion is the negative case
 // the issue calls out explicitly: reward_snapshot's own pool count must only
 // prove K+1 completeness when ExcludedActiveStake is known zero. A nonzero
-// value means a degraded pool's stake was excluded from reward_pool_input
-// (dingo #4025), so the same count match proves nothing about whether this
+// value means a degraded pool's stake was excluded from reward_pool_input,
+// so the same count match proves nothing about whether this
 // particular pool's absence is safe, and classification must stay
 // dingo_db_missing -- over-widening the new route to accept this case would
 // silently hide a real gap in Dingo's own computation.
@@ -1877,8 +1873,8 @@ func TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion(t *testing.T) {
 
 // TestCheckZeroStakeProofDoesNotMaskUnknownExclusion is
 // TestCheckZeroStakeProofDoesNotMaskDegradedPoolExclusion's other half: a
-// reward_snapshot row captured before dingo #4025 added ExcludedActiveStake
-// tracking has the column NULL rather than zero, and that must be treated the
+// reward_snapshot row captured before ExcludedActiveStake was tracked
+// has the column NULL rather than zero, and that must be treated the
 // same as "unknown, so unproven" -- never as "known zero".
 func TestCheckZeroStakeProofDoesNotMaskUnknownExclusion(t *testing.T) {
 	t.Parallel()
@@ -1917,7 +1913,7 @@ func TestCheckZeroStakeProofDoesNotMaskUnknownExclusion(t *testing.T) {
 }
 
 // TestCheckZeroStakeProofRequiresMatchingSnapshotCount covers the count half
-// of the dingo #4691 proof: a known-zero ExcludedActiveStake is not enough on
+// of the zero-stake proof: a known-zero ExcludedActiveStake is not enough on
 // its own. When reward_snapshot.TotalPoolCount (2) exceeds the K+1
 // reward-input rows actually present (1), a row is missing from Dingo's own
 // computation and the absent pool must stay dingo_db_missing.
@@ -2201,7 +2197,7 @@ func TestCheckUncreditedDingoRowStillFailsAgainstKoios(t *testing.T) {
 // proved a CategoryDBError still reaches its output at all.
 //
 // Both subtests matter, and for different reasons. The credited row is the
-// behaviour the inline loop had. The uncredited row is the one this PR could
+// behaviour the inline loop had. The uncredited row is the one a refactor could
 // have lost: accountLifecycleMismatches reports only the *previous* stake
 // epoch's decode failures and, for the current epoch, merely suppresses the
 // lifecycle diff on the stated assumption that compareEpochAccounts already
@@ -2397,10 +2393,7 @@ func seedPoolCertificateHistory(
 ) {
 	t.Helper()
 	path := filepath.Join(dingoDir, "metadata.sqlite")
-	db, err := sql.Open(
-		"sqlite",
-		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)",
-	)
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
 	require.NoError(t, err)
 	defer db.Close() //nolint:errcheck
 
@@ -2426,7 +2419,7 @@ VALUES (?, ?, ?, ?)`,
 	}
 }
 
-// TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence is the dingo #3925
+// TestCheckRetiredPoolIsDepartedWithoutAnyPoolSetEvidence is the retired-pool
 // case, reproduced with both routes to pool-set proof closed off exactly as
 // the Preview replay left them:
 //
@@ -2434,7 +2427,7 @@ VALUES (?, ?, ?, ?)`,
 //     currentEpoch-3, and the observer trails the node by far more than that);
 //   - the K+1 reward_pool_input set is short of the summary's declared pool
 //     count, because buildRewardStateInputs omits a degraded active pool from
-//     that table while keeping it in the pool set — so #3795's exact-match
+//     that table while keeping it in the pool set — so the exact-match
 //     fallback cannot fire either.
 //
 // That combination is TestCheckIncompleteRewardInputSetStillErrorsAfterPrune,
@@ -2581,8 +2574,8 @@ func TestCheckReregisteredPoolStillErrors(t *testing.T) {
 
 // earliestAvailableEpochStub wraps a RewardParitySource and overrides
 // GetEarliestAvailableEpoch with a fixed value, so a test can exercise
-// checkEpoch/CheckEpoch's earliest-available-epoch short-circuit (dingo
-// #4172) without simulating real Mithril boundary sync_state/epoch rows for
+// checkEpoch/CheckEpoch's earliest-available-epoch short-circuit
+// without simulating real Mithril boundary sync_state/epoch rows for
 // every scenario.
 type earliestAvailableEpochStub struct {
 	RewardParitySource
@@ -2596,8 +2589,8 @@ func (s *earliestAvailableEpochStub) GetEarliestAvailableEpoch(
 	return s.epoch, s.ok, nil
 }
 
-// TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch guards against dingo
-// #4172: a Mithril-bootstrapped node has zero local reward-calculation state
+// TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch guards the case where
+// a Mithril-bootstrapped node has zero local reward-calculation state
 // for any epoch before its own bootstrap boundary, even for a koios epoch
 // well above preStakingThroughEpoch, where Koios itself (full protocol
 // history) has real reference data. Before the fix, checkEpoch read Dingo's
@@ -2671,7 +2664,7 @@ func TestCheckEpochSkipsEpochBeforeEarliestAvailableEpoch(t *testing.T) {
 }
 
 // TestCheckEpochResultNamesOnlyThePhasesItRan pins the verdict boundary the
-// two observer queues (dingo #4339) created: the aggregate queue and the
+// two observer queues created: the aggregate queue and the
 // account queue both return an EpochCompareResult for the same epoch, and the
 // aggregate queue's check never looks at account data. Without CheckedScopes
 // its PASS is indistinguishable from the epoch's real verdict, so a consumer

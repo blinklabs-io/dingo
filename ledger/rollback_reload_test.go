@@ -49,16 +49,16 @@ func (s getEpochsFailingMetadataStore) GetEpochs(
 	return nil, s.err
 }
 
-// TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins case R3
-// of blinklabs-io/dingo#1649: rollbackWithBlocks's post-commit reload of
-// epochCache/currentEra/currentPParams can fail after the metadata truncation
-// has already committed. Today that failure is logged at Warn and the
-// rollback still reports success (nil), leaving those in-memory caches at
-// their pre-rollback values even though the database itself was truncated --
-// a later block then validates against stale era/epoch/protocol-parameter
-// state. After the fix this must surface as a rollbackCommittedError and
-// invoke FatalErrorFunc, so a supervised restart reloads the caches from the
-// database before any further block is validated.
+// TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins the
+// fail-fast case for epoch reload after commit: rollbackWithBlocks's
+// post-commit reload of epochCache/currentEra/currentPParams can fail after the
+// metadata truncation has already committed. Today that failure is logged at
+// Warn and the rollback still reports success (nil), leaving those in-memory
+// caches at their pre-rollback values even though the database itself was
+// truncated -- a later block then validates against stale
+// era/epoch/protocol-parameter state. After the fix this must surface as a
+// rollbackCommittedError and invoke FatalErrorFunc, so a supervised restart
+// reloads the caches from the database before any further block is validated.
 func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 	t *testing.T,
 ) {
@@ -159,6 +159,49 @@ func TestRollbackWithResyncSucceedsWithoutFatalWhenReloadWorks(t *testing.T) {
 		"a rollback whose post-commit reload succeeded must not invoke "+
 			"FatalErrorFunc",
 	)
+}
+
+func TestRollbackWithResyncFailsFastWhenDurableFloorReadFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	floorErr := errors.New("injected durable tip floor failure")
+	base := ls.db
+	failing, err := database.New(
+		base.Config(),
+		database.Stores{
+			Blob: base.Blob(),
+			Metadata: floorLookupFailingMetadataStore{
+				MetadataStore: base.Metadata(),
+				err:           floorErr,
+			},
+		},
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, failing.Close()) })
+	ls.db = failing
+
+	var fatalErrs []error
+	ls.config.FatalErrorFunc = func(err error) {
+		fatalErrs = append(fatalErrs, err)
+	}
+
+	rbErr := ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false)
+
+	var committedErr *rollbackCommittedError
+	require.ErrorAs(t, rbErr, &committedErr)
+	require.ErrorIs(t, rbErr, floorErr)
+	require.Len(
+		t,
+		fatalErrs,
+		1,
+		"a durable-floor read failure after commit must invoke FatalErrorFunc",
+	)
+	require.ErrorIs(t, fatalErrs[0], floorErr)
+	require.Equal(t, fixture.ancestorTip.Point, ls.currentTip.Point)
 }
 
 // epochsOverrideMetadataStore returns a fixed epoch list from the

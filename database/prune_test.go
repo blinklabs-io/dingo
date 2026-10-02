@@ -239,7 +239,7 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 }
 
 // TestPruneBlock_LeavesChainIteratorAtHistoryExpired exercises the post-fix
-// behavior for issue #2104. After prune the chain-iterator path resolves
+// behavior. After prune the chain-iterator path resolves
 // the (id|hash) → block-key mapping locally (bi/bh and metadata are kept)
 // and reaches the GetBlock call inside blockByKey, which now surfaces
 // ErrHistoryExpired. That sentinel is the explicit handoff point for a

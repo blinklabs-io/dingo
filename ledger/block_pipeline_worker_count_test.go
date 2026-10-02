@@ -48,7 +48,7 @@ func TestBlockPipelineWorkerCount(t *testing.T) {
 		want       int
 	}{
 		// Below the floor: a constrained host (a single-core container)
-		// must get exactly what it did before this change, never fewer.
+		// must get exactly what it did before CPU scaling, never fewer.
 		{gomaxprocs: 1, want: blockPipelineMinWorkers},
 		// At and within the floor/cap range: tracks GOMAXPROCS exactly.
 		{gomaxprocs: blockPipelineMinWorkers, want: blockPipelineMinWorkers},

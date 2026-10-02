@@ -65,7 +65,7 @@ type StakeDistribution struct {
 	// which raises sigma_a for every surviving pool and under-credits every
 	// reward on the node by that share -- uniformly, silently, and invisibly
 	// to a check that compares the pool rows against it, because both sides
-	// are short by the same amount (dingo #4660).
+	// are short by the same amount.
 	TotalActiveStake uint64
 }
 
@@ -317,6 +317,23 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	boundarySlot uint64,
 	expiryEpoch uint64,
 ) (*StakeDistribution, error) {
+	return c.calculateAdjustedLiveStakeDistributionInTxn(
+		ctx, txn, slot, boundarySlot, expiryEpoch, nil,
+	)
+}
+
+// calculateAdjustedLiveStakeDistributionInTxn is the live SNAP-point read
+// with adjust applied to the per-credential rows before they are summed.
+func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
+	ctx context.Context,
+	txn *database.Txn,
+	slot uint64,
+	boundarySlot uint64,
+	expiryEpoch uint64,
+	adjust func(
+		[]*models.RewardStakeInput,
+	) ([]*models.RewardStakeInput, error),
+) (*StakeDistribution, error) {
 	dist := &StakeDistribution{
 		Slot:           slot,
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
@@ -330,12 +347,15 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	}
 	// Fetch the stake of every delegated credential, not only those whose pool
 	// is still active, so TotalActiveStake is the ledger's credential-first
-	// sigma_a denominator (dingo #4660). Only activePools gets buckets below.
+	// sigma_a denominator. Only activePools gets buckets below.
 	delegatedPools, err := meta.GetDelegatedPoolKeyHashes(metaTxn)
 	if err != nil {
 		return nil, fmt.Errorf("get delegated pools: %w", err)
 	}
 	poolKeyHashBytes, activePools := stakeFetchPools(pools, delegatedPools)
+	for poolHash := range activePools {
+		dist.PoolStakes[poolHash] = 0
+	}
 	if len(poolKeyHashBytes) == 0 {
 		return dist, nil
 	}
@@ -364,6 +384,12 @@ func (c *Calculator) calculateLiveStakeDistributionInTxn(
 	rawInputs, err = mergePointerStakeInputs(rawInputs, pointerInputs)
 	if err != nil {
 		return nil, err
+	}
+	if adjust != nil {
+		rawInputs, err = adjust(rawInputs)
+		if err != nil {
+			return nil, err
+		}
 	}
 	inputs, err := rewardStakeInputsFromRows(rawInputs)
 	if err != nil {
@@ -462,7 +488,7 @@ func (c *Calculator) rewardStakeInputsInTxn(
 
 	// Reconstruct the stake of every delegated credential, not only those
 	// whose pool is still active, so the returned total is the ledger's
-	// credential-first sigma_a denominator (dingo #4660). Only credentials of
+	// credential-first sigma_a denominator. Only credentials of
 	// an active pool are returned as inputs, so no pool's reward changes.
 	delegatedPools, err := meta.GetEpochBoundaryDelegatedPoolKeyHashes(
 		slot, boundarySlot, metaTxn,
@@ -553,12 +579,12 @@ func (c *Calculator) calculateFromHistoricalStake(
 
 	for _, poolHash := range pools {
 		delegators := delegatorMap[poolHash]
+		stake := stakeMap[poolHash]
+		dist.PoolStakes[poolHash] = stake
 		if delegators > 0 {
-			stake := stakeMap[poolHash]
 			if dist.TotalStake > ^uint64(0)-stake {
 				return errors.New("total active stake overflow")
 			}
-			dist.PoolStakes[poolHash] = stake
 			dist.DelegatorCount[poolHash] = delegators
 			dist.TotalStake += stake
 		}

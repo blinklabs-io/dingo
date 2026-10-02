@@ -274,7 +274,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		n.poolRelayProvider.Close()
 		n.poolRelayProvider = nil
 	}
-	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
+	// The Koios parity observer reads Dingo's committed reward
 	// state through a RewardParitySource backed directly by n.db, the same
 	// way snapshotMgr above does -- it must be fully stopped (Observer.Stop
 	// blocks until its background goroutine has actually exited) and its
@@ -781,7 +781,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 
 // reinitializeBackgroundManagers rebuilds the stake-snapshot manager and
 // wires both its epoch-boundary hooks (the stake hook and the capture
-// hook), (re)starts the optional Koios parity observer (dingo #3098) if
+// hook), (re)starts the optional Koios parity observer if
 // configured, then starts n.ledgerState -- in that order, matching Run()'s
 // own "hooks configured → observer subscribed → ledger started" sequencing
 // (node.go), so an epoch boundary reached immediately after restart can
@@ -805,7 +805,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Mirror the Koios parity observer's enablement into the rebuilt snapshot
-	// manager too (see Run()'s identical call in node.go, dingo #4188), or a
+	// manager too (see Run()'s identical call in node.go), or a
 	// live restore/truncate would silently drop back to CORE mode's 4-epoch
 	// reward_account_output retention even though the observer is enabled.
 	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
@@ -814,7 +814,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission (issue #3727).
+	// floor selection is atomic with deferred-header admission.
 	// Set before Start; the pin is released automatically as headers resolve.
 	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
 		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
@@ -840,7 +840,8 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
-	// Reinstall governance's same-boundary SPO stake hook too (dingo#4441) --
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
+	// Reinstall governance's same-boundary SPO stake hook too --
 	// see node.go's Run() for why a production node must always have this
 	// wired alongside the other two.
 	n.ledgerState.SetCurrentBoundarySPOStakeHook(
@@ -952,10 +953,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		n.ledgerState,
 		n.chainsyncConfig(),
 	)
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 
 	// Providers, not eagerly-computed values, matching Run. Resolving these
 	// here would capture the outgoing ouroboros instance that is replaced
@@ -973,12 +971,13 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:           n.config.promRegistry,
-			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
-			MaxInboundConns:        n.config.maxInboundConns,
-			MaxNtCConns:            n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
+			PromRegistry:            n.config.promRegistry,
+			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
+			MaxInboundConns:         n.config.maxInboundConns,
+			MaxNtCConns:             n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
+			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(

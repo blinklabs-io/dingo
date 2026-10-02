@@ -81,6 +81,31 @@ func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {
 	require.Equal(t, uint64(42), cfg.ConfirmationSlots)
 }
 
+func TestLoadConfigTransactionEra(t *testing.T) {
+	clearTxpumpEnv(t)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "conway", cfg.TransactionEra)
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "dijkstra")
+	t.Setenv("TXPUMP_TYPES", "payment")
+	cfg, err = LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, "dijkstra", cfg.TransactionEra)
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "dijkstra")
+	t.Setenv("TXPUMP_TYPES", "payment,delegation")
+	_, err = LoadConfig()
+	require.ErrorContains(t, err, "supports payment only")
+
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_TRANSACTION_ERA", "unknown")
+	_, err = LoadConfig()
+	require.ErrorContains(t, err, "TXPUMP_TRANSACTION_ERA")
+}
+
 func TestLoadConfig_StartUpTimeout(t *testing.T) {
 	clearTxpumpEnv(t)
 
@@ -151,6 +176,7 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_CONFIRMATION_SLOTS",
 		"TXPUMP_STARTUP_TIMEOUT",
 		"TXPUMP_TYPES",
+		"TXPUMP_TRANSACTION_ERA",
 		"TXPUMP_LOG_DIR",
 		"TXPUMP_FALLBACK_ADDR",
 		"TXPUMP_GENESIS_UTXO_FILE",

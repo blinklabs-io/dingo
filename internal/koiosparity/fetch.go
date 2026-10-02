@@ -41,12 +41,16 @@ type FetchConfig struct {
 	// NewKoiosClient. Local dev and test only, including the httptest
 	// servers this package's own tests point BaseURL at.
 	AllowInsecureHTTP bool
-	CachePath         string
-	Concurrency       int
-	FromEpoch         uint64 // 0 = resume from last cached + 1
-	ThroughEpoch      uint64 // 0 = tip - 1
-	ForceRefresh      bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
-	// AccountsEnabled additionally fetches #3097's per-account Koios
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false unless the operator intentionally runs Koios on
+	// such a network.
+	AllowPrivateAddresses bool
+	CachePath             string
+	Concurrency           int
+	FromEpoch             uint64 // 0 = resume from last cached + 1
+	ThroughEpoch          uint64 // 0 = tip - 1
+	ForceRefresh          bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
+	// AccountsEnabled additionally fetches the per-account Koios
 	// reference data (FetchAccountRewardsForEpoch) for every epoch this run
 	// fetches. False by default: per-account fetching issues far more Koios
 	// requests than pool-level fetching (one chunked request set per epoch
@@ -64,7 +68,7 @@ type FetchConfig struct {
 	AccountsSource RewardParitySource
 	// GraceHours is forwarded to FetchAccountRewardsForEpoch's zero-row/lag
 	// gate (see its doc comment): a just-closed epoch (within this many
-	// hours of EpochEndTime) whose #3097 account fetch returns zero rows
+	// hours of EpochEndTime) whose account fetch returns zero rows
 	// across the whole address universe is left with koios_account_coverage
 	// incomplete rather than permanently accepted as "zero accounts earned
 	// rewards", since Koios's own /account_reward_history publishing lag is
@@ -72,7 +76,7 @@ type FetchConfig struct {
 	// result is accepted as final immediately). Unused when AccountsEnabled
 	// is false.
 	GraceHours int
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request by both address count and encoded
 	// body size (see chunkAddressesByCountAndSize). <=0 means "use the
 	// package default" (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault).
@@ -221,6 +225,7 @@ func Fetch(
 		cfg.APIKey,
 		cfg.BaseURL,
 		cfg.AllowInsecureHTTP,
+		cfg.AllowPrivateAddresses,
 	)
 	if err != nil {
 		return nil, err
@@ -285,7 +290,7 @@ func Fetch(
 		return nil, fmt.Errorf("get pool first-active epochs: %w", err)
 	}
 
-	// Koios's full historical account list (#3097) — hoisted once per Fetch
+	// Koios's full historical account list — hoisted once per Fetch
 	// run for the same reason poolIDs is, when account fetching is enabled.
 	var koiosAccountAddrs []string
 	if cfg.AccountsEnabled {
@@ -299,7 +304,7 @@ func Fetch(
 	// Normal mode: epochs NOT already in the cache (fills holes from prior
 	// failed/interrupted runs rather than naively resuming from max+1),
 	// UNIONED — when cfg.AccountsEnabled — with epochs that already have
-	// fresh pool-level Koios data but are still missing #3097's per-account
+	// fresh pool-level Koios data but are still missing the per-account
 	// coverage (accountOnlyEpochs below). Without this union, an epoch fetched
 	// before per-account fetching existed (or before AccountsEnabled was
 	// turned on) would look "already fetched" to GetUncachedEpochs forever and
@@ -309,7 +314,7 @@ func Fetch(
 	// ForceRefresh mode: fetch the full range and overwrite cached rows, used
 	// when the user suspects stale or corrupt cached data in [fromEpoch, through].
 	var epochs []uint64
-	// accountOnlyEpochs marks epochs that only need the #3097 account-level
+	// accountOnlyEpochs marks epochs that only need the account-level
 	// backfill below — their pool-level Koios data is already fresh, so the
 	// per-epoch worker skips the redundant pool/epoch_info/totals fetchEpoch
 	// call for these and fetches only account rewards.
@@ -481,7 +486,7 @@ loop:
 
 			// handleEpochFetchErr applies the shared "transient isolates to
 			// this epoch, anything else aborts the whole run" classification
-			// to both the pool-level fetch below and the optional #3097
+			// to both the pool-level fetch below and the optional
 			// account-level fetch that follows it, so a permanent/other
 			// error from either phase cancels the run the same way and a
 			// transient error from either phase lands this epoch in
@@ -521,7 +526,7 @@ loop:
 			switch {
 			case paramsOnlyEpochs[epoch] || accountOnlyEpochs[epoch]:
 				// Pool-level Koios data for this epoch is already fresh —
-				// only the parameter row and/or #3097's per-account coverage
+				// only the parameter row and/or the per-account coverage
 				// is missing — so skip the redundant
 				// pool/epoch_info/totals fetchEpoch call entirely rather
 				// than re-fetching thousands of already-fresh pool-history
@@ -635,7 +640,7 @@ loop:
 // one epoch using an already-open cache and Koios client, without reopening
 // the cache database or reconstructing a Koios client — the primitive Fetch's
 // per-epoch worker pool uses internally (fetchEpoch), exported so a
-// long-lived caller (the dingo #3098 in-process epoch observer, which fetches
+// long-lived caller (the in-process epoch observer, which fetches
 // one newly closed epoch at a time as epoch.transition events arrive rather
 // than batching a whole historical range) can reuse one cache handle and one
 // Koios client across many calls.
@@ -648,7 +653,7 @@ loop:
 // GetAllHistoricalPoolIDs/GetPoolFirstActiveEpochs and call
 // FetchEpochWithPools instead, to avoid repeating both full Koios scans on
 // every attempt. Efficient reuse/pagination across many distinct epochs is
-// #3099's chunked/resumable fetch scope, not this function's.
+// the chunked/resumable fetch's scope, not this function's.
 func FetchEpochWithClient(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -836,8 +841,8 @@ func fetchEpoch(
 		return 0, classifyFetchErr(fmt.Errorf("get totals: %w", err))
 	}
 
-	// 1c. Fetch /epoch_params — the per-epoch protocol parameters
-	// (dingo #3931). Another single sequential request, treated exactly like
+	// 1c. Fetch /epoch_params — the per-epoch protocol parameters.
+	// Another single sequential request, treated exactly like
 	// /totals above: any failure aborts the epoch rather than caching
 	// epoch_info and pool rows with a permanently missing parameter row.
 	paramsResp, err := koios.GetEpochParams(ctx, epoch)
@@ -1098,7 +1103,7 @@ func fetchEpochParamsOnly(
 // instead, matching this function's own prior inline form.
 //
 // Exported so cmd/node-parity's Koios-backed comparison
-// (blinklabs-io/dingo#1900) can build the same row shape a
+// can build the same row shape a
 // koios_pool_epoch-backed cache lookup would return, directly from a live
 // GetPoolEpochHistory call, without going through this package's own fetch
 // path -- the same convention EpochParamsFromKoios already follows for
@@ -1155,7 +1160,7 @@ func PoolEpochFromKoiosHistoryItem(
 // parameter" rather than as zero.
 //
 // Exported so cmd/node-parity's Koios-backed comparison
-// (blinklabs-io/dingo#1900) can build the same row shape
+// can build the same row shape
 // CompareEpochProtocolParams expects directly from a live GetEpochParams
 // call, without going through this package's own cache.
 func EpochParamsFromKoios(

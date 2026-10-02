@@ -291,7 +291,7 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-// legacyUtxorpcTLSPolicy expresses the pre-#2996 root tlsCertFilePath/
+// legacyUtxorpcTLSPolicy expresses the legacy root tlsCertFilePath/
 // tlsKeyFilePath fields as an apiconfig.TLSPolicy, for UTxORPC only. It
 // deliberately does not feed cfg.apiConfig.TLS (the shared api.tls default
 // every provider inherits from): UTxORPC was the only provider these root
@@ -815,7 +815,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Unconditional and independent of history expiry: the committee
 	// hot-key authorization pruner in the metadata store always runs and
 	// always needs the live immutable-slot bound to be safe on a sparse
-	// chain (issue #4353). A sync failure here is not fatal -- the pruner
+	// chain. A sync failure here is not fatal -- the pruner
 	// falls back to its slot-window assumption when no live value has been
 	// pushed -- so this only logs.
 	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
@@ -842,7 +842,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Create and start the Midnight indexer before LedgerState.Start so that
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
 	// (b) the EventBus subscription exists before any BlockActionApply events
-	// can be emitted, eliminating the startup gap identified in #2114. The
+	// can be emitted, eliminating the startup gap. The
 	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
 	// Ariadne/candidate rows. Both the explicit opt-in and API storage mode
 	// are required: the indexer depends on the api-mode indexes to function,
@@ -894,7 +894,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// When the Koios parity observer is enabled, retain reward_account_output
-	// without bound in CORE storage mode too (dingo #4188): the observer only
+	// without bound in CORE storage mode too: the observer only
 	// validates a closed epoch after fetching and comparing against Koios over
 	// the network, which can fall arbitrarily far behind chain progression
 	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
@@ -907,7 +907,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission (issue #3727).
+	// floor selection is atomic with deferred-header admission.
 	// Set before Start; the pin is released automatically as headers resolve.
 	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
 		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
@@ -930,7 +930,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
 		},
 	)
-	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
+	// Wire governance's same-boundary SPO stake read: RATIFY
 	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
 	// that row is not durably written until the hook above runs, later in
 	// the same rollover. Without this, governance would silently see zero
@@ -943,8 +944,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
 		},
 	)
+	// A Conway boundary leaves its mark snapshot to the ledger's post-commit
+	// job, which rebuilds the SNAP point from a read transaction pinned at the
+	// boundary's commit.
+	n.ledgerState.SetDeferredEpochBoundarySnapshotHooks(
+		n.snapshotMgr.DeferEpochBoundaryCapture,
+		n.snapshotMgr.DiscardEpochBoundaryCapture,
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) (ledger.DeferredBoundarySnapshot, error) {
+			return n.snapshotMgr.PrepareEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 
-	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
+	// Optional in-process Koios reward-parity observer. Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before
 	// n.ledgerState.Start below, whose slot-clock/block-processing
 	// goroutines are what can first publish that event — see
@@ -1091,11 +1105,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		chainsyncCfg,
 	)
 	n.liveLifecycleMu.Unlock()
-	n.eventBus.SubscribeFunc(
+	// Both consumers update state from one-shot eligibility transitions; a
+	// detach would leave peer governance or connection routing stale forever.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		n.handlePeerEligibilityChangedEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			n.ouroboros().HandlePeerEligibilityChangedEvent(evt)
@@ -1103,10 +1119,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	)
 	// Subscriber ID captured for the same reason as chainManager's above —
 	// n.chainsyncState is rebuilt during a live database restore/truncate.
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	// Client-removal requests are one-shot; dropping one leaves a chainsync
+	// client alive after its owner has asked it to stop.
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 	// Initialize chain selector for multi-peer chain selection
 	chainSelectorSecurityParam := uint64(0)
 	if k := n.ledgerState.SecurityParam(); k > 0 {
@@ -1168,12 +1183,13 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:           n.config.promRegistry,
-			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
-			MaxInboundConns:        n.config.maxInboundConns,
-			MaxNtCConns:            n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
+			PromRegistry:            n.config.promRegistry,
+			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
+			MaxInboundConns:         n.config.maxInboundConns,
+			MaxNtCConns:             n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
+			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
 	// Wire connection-manager and inbound/outbound connection events.
@@ -1300,7 +1316,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// pin this subscription to the replaced one forever, so outbound
 	// connections would be handled by a closed Ouroboros and the node would
 	// silently stop starting chainsync clients after any restore.
-	n.eventBus.SubscribeFunc(
+	// Outbound connection events are emitted once; losing one leaves an
+	// established connection without its Ouroboros protocols.
+	n.subscribeRequiredEvent(
 		peergov.OutboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleOutboundConnEvent(evt) },
 	)
@@ -1695,62 +1713,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
-		creds, err := n.validateBlockProducerStartup()
+		var err error
+		started, err = n.startBlockProducer(n.ctx, started)
 		if err != nil {
-			return fmt.Errorf(
-				"block producer startup validation failed: %w",
-				err,
-			)
-		}
-		// Registered before the checks below, not after the forger is
-		// built: validateBlockProducerStartup may have dialled a KES agent
-		// and started its serve-key loop, and every step between here and
-		// the end of this block can fail. Registering afterwards left that
-		// client and its background loop outside the rollback stack. Every
-		// stop in the closure is nil-guarded, so it is safe this early.
-		started = append(started, func() {
-			if n.blockForger != nil {
-				n.blockForger.Stop()
-			}
-			n.closeKESAgentClient()
-			if n.leaderElection != nil {
-				logErrIfNotNil(
-					n.config.logger,
-					"failed to stop leader election during cleanup",
-					n.leaderElection.Stop(),
-				)
-			}
-		})
-		// Cross-check loaded credentials against ledger state. Mismatch
-		// against on-chain pool registration is fatal; "not yet
-		// registered" is a warning so operators can stage credentials
-		// before submitting the registration cert.
-		if err := n.validateBlockProducerLedger(creds); err != nil {
-			return fmt.Errorf(
-				"block producer credentials failed ledger check: %w",
-				err,
-			)
-		}
-		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
-		if err := n.initBlockForger(n.ctx, creds); err != nil {
-			return fmt.Errorf("failed to initialize block forger: %w", err)
-		}
-		// Enable Leios vote emission when a vote signing key is
-		// configured (experimental, leios mode only)
-		if err := n.enableLeiosVoting(creds); err != nil {
-			return fmt.Errorf("failed to enable leios voting: %w", err)
-		}
-		// Wire forger's slot tracker into ledger state for slot
-		// battle detection. The forger is created after the ledger
-		// state, so we use the late-binding setter.
-		if n.blockForger != nil {
-			n.ledgerState.SetForgedBlockChecker(
-				n.blockForger.SlotTracker(),
-			)
-			n.ledgerState.SetForgingEnabled(true)
-			n.ledgerState.SetSlotBattleRecorder(
-				n.blockForger,
-			)
+			return err
 		}
 	}
 
@@ -1885,6 +1851,45 @@ func (n *Node) handleConnManagerClosedOwner(
 	}
 }
 
+// subscribeRequiredEvent keeps an internal node consumer attached when its
+// callback queue saturates. These event streams carry one-shot state
+// transitions that have no safe full-state replay after detachment. Its
+// handler must not synchronously publish to an EventBus path that can wait on
+// this subscriber; move such follow-up work out of the callback instead.
+func (n *Node) subscribeRequiredEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
+}
+
+// subscribeDetachableEvent is for observers whose missed events do not leave
+// node state stale. Such callbacks must not be used for state transitions that
+// have no replay or resynchronization path.
+func (n *Node) subscribeDetachableEvent(
+	eventType event.EventType,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	return n.eventBus.SubscribeFuncWithBufferPolicy(
+		eventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureDetach,
+		handler,
+	)
+}
+
+func (n *Node) subscribeChainsyncClientRemoveRequests() event.EventSubscriberId {
+	return n.subscribeRequiredEvent(
+		chainsync.ClientRemoveRequestedEventType,
+		n.chainsyncState.HandleClientRemoveRequestedEvent,
+	)
+}
+
 // subscribeConnectionRecycleRequests subscribes handler to
 // connmanager.ConnectionRecycleRequestedEventType with lossless delivery.
 //
@@ -1895,7 +1900,7 @@ func (n *Node) handleConnManagerClosedOwner(
 // clearest case -- a connection whose leios-fetch request slot is permanently
 // abandoned can never answer again, so dropping its single recycle request
 // leaves that connection in the pool for the rest of its life and the by-point
-// fetch keeps re-trying a corpse (dingo #3552). Detaching this subscriber under
+// fetch keeps re-trying a corpse. Detaching this subscriber under
 // backpressure would do exactly that, so it stays attached until it drains or
 // node shutdown closes it.
 func (n *Node) subscribeConnectionRecycleRequests(
@@ -1960,13 +1965,16 @@ func (n *Node) subscribeConnectionEvents() {
 	// These are closures rather than method values because this runs before
 	// n.ouroboros is constructed; each resolves it when the event fires,
 	// which cannot happen until the listeners below are open.
-	n.eventBus.SubscribeFunc(
+	// Connection closure is a one-shot lifecycle transition. Ouroboros must
+	// release the protocols and state attached to that connection.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) { n.ouroboros().HandleConnClosedEvent(evt) },
 	)
 	// Translate connmanager connection-closed events to ledger-owned events so
 	// ledger/ does not import connmanager/.
-	n.eventBus.SubscribeFunc(
+	// The translated close event drives ledger cleanup and is not replayed.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -1985,7 +1993,9 @@ func (n *Node) subscribeConnectionEvents() {
 			)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Inbound connections are delivered once; dropping the event leaves the
+	// accepted connection unhandled for its lifetime.
+	n.subscribeRequiredEvent(
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
@@ -2029,11 +2039,15 @@ func (n *Node) buildChainSelectorConfig(
 // peergov/.
 func (n *Node) subscribeChainSelectorEvents() {
 	// Subscribe chain selector to peer tip update events
-	n.eventBus.SubscribeFunc(
+	// Every peer tip observation contributes to chain selection; detachment
+	// would leave its view stale with no complete resnapshot operation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		n.chainSelector.HandlePeerTipUpdateEvent,
 	)
-	n.eventBus.SubscribeFunc(
+	// Peer activity refreshes liveness and selection state. A missed event
+	// cannot be recovered after permanent detachment.
+	n.subscribeRequiredEvent(
 		chainselection.PeerTipUpdateEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
@@ -2043,7 +2057,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.peerGov.TouchPeerByConnId(e.ConnectionId)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Activity events refresh selector and peer-governance liveness; the
+	// subscription must resume after transient queue saturation.
+	n.subscribeRequiredEvent(
 		chainselection.PeerActivityEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerActivityEvent)
@@ -2057,19 +2073,23 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to chain switch events to update active connection
-	n.eventBus.SubscribeFunc(
+	// Chain switches update the active connection used by ledger processing.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSwitchEventType,
 		n.handleChainSwitchEvent,
 	)
 	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
 	// uncorroborated Genesis fast source). The handler clears the ledger's active
 	// connection so it cannot retain a source ChainSelector no longer accepts.
-	n.eventBus.SubscribeFunc(
+	// A selected-to-none transition must clear the ledger's active connection;
+	// losing it can leave the node applying from a rejected source.
+	n.subscribeRequiredEvent(
 		chainselection.ChainSelectedNoneEventType,
 		n.handleChainSelectedNoneEvent,
 	)
 	// Subscribe to chain fork events for monitoring
-	n.eventBus.SubscribeFunc(
+	// This observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
 		chain.ChainForkEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chain.ChainForkEvent)
@@ -2086,7 +2106,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 		},
 	)
 	// Subscribe to connection closed events to remove peers from chain selector
-	n.eventBus.SubscribeFunc(
+	// Connection removal updates selector eligibility and ingress bookkeeping;
+	// the close event is not replayed if this subscription detaches.
+	n.subscribeRequiredEvent(
 		connmanager.ConnectionClosedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
@@ -2100,7 +2122,8 @@ func (n *Node) subscribeChainSelectorEvents() {
 	// Forward peer-governance eligibility and priority updates to the chain
 	// selector. Subscription is placed here (node composition layer) so that
 	// chainselection/ has no dependency on peergov/.
-	n.eventBus.SubscribeFunc(
+	// Eligibility transitions gate future chain selection and must not be lost.
+	n.subscribeRequiredEvent(
 		peergov.PeerEligibilityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
@@ -2110,7 +2133,9 @@ func (n *Node) subscribeChainSelectorEvents() {
 			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
 		},
 	)
-	n.eventBus.SubscribeFunc(
+	// Priority transitions affect source ranking and have no later full-state
+	// resynchronization, so keep this consumer attached under back-pressure.
+	n.subscribeRequiredEvent(
 		peergov.PeerPriorityChangedEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
@@ -2200,7 +2225,7 @@ func (n *Node) enforceRecoveredNodeSettings() error {
 // repeated restarts during investigation of an unrelated issue), but unsafe
 // to leave enabled permanently since it is what catches a stale or
 // pre-migration reward_live_stake table -- and, since reward_live_stake.utxo_stake
-// became an incrementally maintained running total (dingo #4421), the only
+// became an incrementally maintained running total, the only
 // automatic reconciliation of that total against the live UTxO set.
 //
 // Both probes are read-only and run on the read-only metadata connection; the
@@ -2371,7 +2396,11 @@ func (n *Node) newTokenRegistrySync() (
 			Interval:              n.config.tokenRegistry.Interval,
 			RequestTimeout:        n.config.tokenRegistry.RequestTimeout,
 			MaxBytes:              n.config.tokenRegistry.MaxBytes,
+			MaxDecompressedBytes:  n.config.tokenRegistry.MaxDecompressedBytes,
 			MaxEntryBytes:         n.config.tokenRegistry.MaxEntryBytes,
+			MaxArchiveEntries:     n.config.tokenRegistry.MaxArchiveEntries,
+			MaxAcceptedEntries:    n.config.tokenRegistry.MaxAcceptedEntries,
+			MaxBatchBytes:         n.config.tokenRegistry.MaxBatchBytes,
 			StoreLogos:            n.config.tokenRegistry.StoreLogos,
 			AllowPrivateAddresses: n.config.tokenRegistry.AllowPrivateAddresses,
 		},
@@ -2421,4 +2450,25 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		return int(window) //nolint:gosec // G115: window is bounded by MaxInt
 	}
 	return chainsyncCfg
+}
+
+// wireDeferredRewardStakeInputs lets the authoritative boundary capture leave
+// the snapshot's per-credential reward inputs to the ledger's background
+// writer instead of writing them inside the boundary transaction.
+func wireDeferredRewardStakeInputs(
+	ls *ledger.LedgerState,
+	mgr *snapshot.Manager,
+) {
+	ls.SetEpochBoundaryDeferredStakeInputsHook(
+		func(
+			txn *database.Txn,
+		) (uint64, uint64, []*models.RewardStakeInput, bool) {
+			deferred, ok := mgr.TakeDeferredRewardStakeInputs(txn)
+			if !ok {
+				return 0, 0, nil, false
+			}
+			return deferred.Epoch, deferred.BoundarySlot, deferred.Inputs, true
+		},
+	)
+	mgr.SetDeferRewardStakeInputs(true)
 }
