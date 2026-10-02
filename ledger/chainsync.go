@@ -1918,7 +1918,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	if e.Point.Slot > localTip.Point.Slot {
 		return false
 	}
-	block, err := ls.blockByHash(context.Background(), e.Point.Hash)
+	block, err := ls.blockByHash(ls.lifecycleContext(), e.Point.Hash)
 	if errors.Is(err, models.ErrBlockNotFound) {
 		// Blocks written before the hash index was introduced still have an
 		// exact point key and metadata. Probe that local path without allowing
@@ -1997,7 +1997,7 @@ func (ls *LedgerState) findPeerForkPath(
 		// lock-held walk over mostly-unpersisted peer-header hashes stays cheap
 		// for current stores. Blocks persisted before the hash index was added
 		// may still miss until the operator backfills the index.
-		ancestorBlock, err := ls.blockByHash(context.Background(), prevHash)
+		ancestorBlock, err := ls.blockByHash(ls.lifecycleContext(), prevHash)
 		switch {
 		case err == nil && ancestorBlock.Slot <= localTipSlot:
 			point := ocommon.NewPoint(
@@ -2994,7 +2994,7 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	currentTip := ls.currentTip
 	ls.RUnlock()
 	resolved, err := ls.resolveRollbackTarget(
-		context.Background(),
+		ls.lifecycleContext(),
 		point,
 		currentTip,
 	)
@@ -3013,7 +3013,7 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if err != nil || belowPruneFloor {
 		return false
 	}
-	return ls.chain.ValidateRollback(context.Background(), point) == nil
+	return ls.chain.ValidateRollback(ls.lifecycleContext(), point) == nil
 }
 
 // clearRollbackHistoryForPoint removes per-connection loop-detector records
@@ -3083,7 +3083,7 @@ func (ls *LedgerState) localTipPraosView(
 		return praos.PraosTiebreakerView{}
 	}
 	block, err := database.BlockByHash(
-		context.Background(),
+		ls.lifecycleContext(),
 		ls.db,
 		localTip.Point.Hash,
 	)
@@ -3739,11 +3739,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	var err error
 	if headerCryptoVerified {
 		err = ls.chain.AddVerifiedBlockHeader(
-			context.Background(),
+			ls.lifecycleContext(),
 			e.BlockHeader,
 		)
 	} else {
-		err = ls.chain.AddBlockHeader(context.Background(), e.BlockHeader)
+		err = ls.chain.AddBlockHeader(ls.lifecycleContext(), e.BlockHeader)
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
@@ -4143,11 +4143,11 @@ func (ls *LedgerState) addForkPathHeader(
 	if incomingCryptoVerified &&
 		pointMatches(forkEvent.Point, incomingPoint) {
 		return ls.chain.AddVerifiedBlockHeader(
-			context.Background(),
+			ls.lifecycleContext(),
 			forkEvent.BlockHeader,
 		)
 	}
-	return ls.chain.AddBlockHeader(context.Background(), forkEvent.BlockHeader)
+	return ls.chain.AddBlockHeader(ls.lifecycleContext(), forkEvent.BlockHeader)
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -4267,7 +4267,7 @@ func (ls *LedgerState) tryResolveFork(
 		}
 	}
 	ancestorBlock, err := ls.blockByHash(
-		context.Background(),
+		ls.lifecycleContext(),
 		ancestorPoint.Hash,
 	)
 	if err != nil {
@@ -4577,7 +4577,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
 		} else {
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
-				context.Background(),
+				ls.lifecycleContext(),
 				e.Block,
 				true,
 				true,
@@ -5658,7 +5658,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		// every chain mutation, so no rollback can interleave between the
 		// two.
 		evt, addBlockErr := ls.chain.AddBlockWithPointDeferredIf(
-			context.Background(),
+			ls.lifecycleContext(),
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
@@ -7861,7 +7861,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	}
 	err := hook(txn, evt)
 	if err == nil {
-		err = ls.takeDeferredRewardStakeInputs(context.Background(), txn)
+		err = ls.takeDeferredRewardStakeInputs(ls.lifecycleContext(), txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
