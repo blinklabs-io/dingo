@@ -11802,6 +11802,22 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
 }
 
+// blockFramingAllowance covers the CBOR array headers around a block's header
+// and body sections, which the protocol's header and body size limits do not
+// count.
+const blockFramingAllowance = 64
+
+// MaxBlockSize returns the largest serialized block the current protocol
+// parameters admit: the header and body limits plus framing. It returns 0 when
+// the parameters carry no such limits, which callers treat as unknown.
+func (ls *LedgerState) MaxBlockSize() uint64 {
+	limits, ok := protocolBlockLimits(ls.GetCurrentPParams())
+	if !ok {
+		return 0
+	}
+	return limits.maxHeaderSize + limits.maxBodySize + blockFramingAllowance
+}
+
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script
 // evaluation reuses across every redeemer, transaction, and block this
 // LedgerState validates or evaluates. Returns nil for a bare-constructed
