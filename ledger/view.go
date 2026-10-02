@@ -643,88 +643,13 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	var currentReg *lcommon.PoolRegistrationCertificate
-	var hasReg bool
-	var regLatestSlot uint64
-	var regLatestCertID uint
-	if len(pool.Registration) > 0 {
-		var latestIdx int
-		for i, reg := range pool.Registration {
-			// Use CertificateID for deterministic disambiguation when slots are equal
-			if reg.AddedSlot > regLatestSlot ||
-				(reg.AddedSlot == regLatestSlot && reg.CertificateID > regLatestCertID) {
-				regLatestSlot = reg.AddedSlot
-				regLatestCertID = reg.CertificateID
-				latestIdx = i
-			}
-		}
-		hasReg = true
-		reg := pool.Registration[latestIdx]
-		operator, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	reg, regLatestSlot, regLatestCertID, hasReg := latestPoolRegistration(pool)
+	if hasReg {
+		var err error
+		currentReg, err = poolRegistrationCertificate(pool, reg)
 		if err != nil {
-			return nil, nil, fmt.Errorf("pool current state operator: %w", err)
+			return nil, nil, err
 		}
-		vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"pool current state VRF key hash: %w",
-				err,
-			)
-		}
-		rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"pool current state reward account: %w",
-				err,
-			)
-		}
-		tmp := lcommon.PoolRegistrationCertificate{
-			CertType:   uint(lcommon.CertificateTypePoolRegistration),
-			Operator:   lcommon.PoolKeyHash(operator),
-			VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
-			Pledge:     uint64(pool.Pledge),
-			Cost:       uint64(pool.Cost),
-		}
-		if pool.Margin != nil {
-			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}
-		}
-		tmp.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
-		for _, owner := range reg.Owners {
-			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
-			if err != nil {
-				return nil, nil, fmt.Errorf(
-					"pool current state owner key hash: %w",
-					err,
-				)
-			}
-			tmp.PoolOwners = append(
-				tmp.PoolOwners,
-				lcommon.AddrKeyHash(ownerKeyHash),
-			)
-		}
-		for _, relay := range reg.Relays {
-			r := lcommon.PoolRelay{}
-			if relay.Port != 0 {
-				port := uint32(relay.Port) // #nosec G115
-				r.Port = &port
-			}
-			if relay.Hostname != "" {
-				r.Type = lcommon.PoolRelayTypeSingleHostName
-				hostname := relay.Hostname
-				r.Hostname = &hostname
-			} else if relay.Ipv4 != nil || relay.Ipv6 != nil {
-				r.Type = lcommon.PoolRelayTypeSingleHostAddress
-				r.Ipv4 = relay.Ipv4
-				r.Ipv6 = relay.Ipv6
-			}
-			tmp.Relays = append(tmp.Relays, r)
-		}
-		if reg.MetadataUrl != "" {
-			tmp.PoolMetadata = &lcommon.PoolMetadata{
-				Url:  reg.MetadataUrl,
-				Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
-			}
-		}
-		currentReg = &tmp
 	}
 	// pendingEpoch reports the target epoch of the pool's latest retirement
 	// certificate -- the one most recently added by (AddedSlot,
@@ -760,6 +685,95 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 	}
 	return currentReg, pendingEpoch, nil
+}
+
+// latestPoolRegistration selects the pool's most recent registration row,
+// returning its slot and certificate ID alongside it.
+func latestPoolRegistration(
+	pool *models.Pool,
+) (reg *models.PoolRegistration, slot uint64, certID uint, ok bool) {
+	var latestIdx int
+	for i, candidate := range pool.Registration {
+		// Use CertificateID for deterministic disambiguation when slots are equal
+		if candidate.AddedSlot > slot ||
+			(candidate.AddedSlot == slot && candidate.CertificateID > certID) {
+			slot = candidate.AddedSlot
+			certID = candidate.CertificateID
+			latestIdx = i
+		}
+	}
+	if len(pool.Registration) == 0 {
+		return nil, 0, 0, false
+	}
+	return &pool.Registration[latestIdx], slot, certID, true
+}
+
+// poolRegistrationCertificate rebuilds the registration certificate from the
+// pool row and one of its registration rows.
+func poolRegistrationCertificate(
+	pool *models.Pool,
+	reg *models.PoolRegistration,
+) (*lcommon.PoolRegistrationCertificate, error) {
+	operator, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state operator: %w", err)
+	}
+	vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state VRF key hash: %w", err)
+	}
+	rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+	if err != nil {
+		return nil, fmt.Errorf("pool current state reward account: %w", err)
+	}
+	cert := lcommon.PoolRegistrationCertificate{
+		CertType:   uint(lcommon.CertificateTypePoolRegistration),
+		Operator:   lcommon.PoolKeyHash(operator),
+		VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
+		Pledge:     uint64(pool.Pledge),
+		Cost:       uint64(pool.Cost),
+	}
+	if pool.Margin != nil {
+		cert.Margin = cbor.Rat{Rat: pool.Margin.Rat}
+	}
+	cert.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
+	for _, owner := range reg.Owners {
+		ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"pool current state owner key hash: %w",
+				err,
+			)
+		}
+		cert.PoolOwners = append(
+			cert.PoolOwners,
+			lcommon.AddrKeyHash(ownerKeyHash),
+		)
+	}
+	for _, relay := range reg.Relays {
+		r := lcommon.PoolRelay{}
+		if relay.Port != 0 {
+			port := uint32(relay.Port) // #nosec G115
+			r.Port = &port
+		}
+		if relay.Hostname != "" {
+			r.Type = lcommon.PoolRelayTypeSingleHostName
+			hostname := relay.Hostname
+			r.Hostname = &hostname
+		} else if relay.Ipv4 != nil || relay.Ipv6 != nil {
+			r.Type = lcommon.PoolRelayTypeSingleHostAddress
+			r.Ipv4 = relay.Ipv4
+			r.Ipv6 = relay.Ipv6
+		}
+		cert.Relays = append(cert.Relays, r)
+	}
+	if reg.MetadataUrl != "" {
+		cert.PoolMetadata = &lcommon.PoolMetadata{
+			Url:  reg.MetadataUrl,
+			Hash: lcommon.PoolMetadataHash(reg.MetadataHash),
+		}
+	}
+	return &cert, nil
 }
 
 // EpochForSlot returns the epoch containing the given slot, satisfying

@@ -4078,8 +4078,16 @@ from the persisted action CBOR, return address, deposit, anchor, and votes.
 Supported query leaves also include epoch number, current protocol parameters,
 Shelley genesis configuration, UTxO-by-address/transaction-input lookups,
 the whole live UTxO set (`GetUTxOWhole`), stake-delegation deposits, the
-ledger peer snapshot, stake pools, DRep state, account state, and the
-unfiltered stake distribution (`GetStakeDistribution`). `GetCBOR` is a query
+ledger peer snapshot, stake pools, stake pool parameters
+(`GetStakePoolParams`), the ledger tip (`GetLedgerTip`), an always-empty
+proposed protocol parameter update map, DRep state, account state, and the
+unfiltered stake distribution (`GetStakeDistribution`). Pool state, the
+version-1 pool distribution, non-myopic member rewards, reward info,
+reward provenance and the debug epoch-state queries are not answered, and the
+failed query ends the client's session. At protocol version 21 the
+Shelley genesis configuration encodes initial funds and staking as empty maps
+and the genesis injection data as the ledger's three-field
+`ShelleyExtraConfig` record; earlier versions keep the legacy layout. `GetCBOR` is a query
 combinator: it re-runs the wrapped inner query through the same dispatch path
 and returns the result as a tag-24 CBOR-in-CBOR `Serialised` value, matching
 cardano-node. `GetStakeSnapshots`
@@ -4152,7 +4160,9 @@ given -- unlike `GetNetworkState`'s
 always-latest-row read, `GetNetworkStateAsOfSlot` does have a
 historical-by-slot lookup, so a pin pairs a correct historical numerator
 with the reserves genuinely in effect at that same point, not today's.
-`GetUTxOWhole`
+`GetLedgerTip`
+answers the pinned point itself, and `GetStakePoolParams` reads live pool
+registrations. `GetUTxOWhole`
 honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s
 `queryShelleyLeaf` carries a full audit of every remaining query type,
