@@ -148,6 +148,7 @@ WHERE cold_credential_tag = ? AND cold_credential = ?`,
 }
 
 func TestCommitteeHotPruneSelectionUsesOrderedIndex(t *testing.T) {
+	t.Parallel()
 	store := newMigratedSQLiteStore(t)
 	plan := queryPlan(t, store.writeDB, `
 SELECT id
