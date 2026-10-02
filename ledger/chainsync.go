@@ -310,7 +310,6 @@ func (h *peerHeaderHistoryCandidateHeap) Pop() any {
 	old := *h
 	last := len(old) - 1
 	candidate := old[last]
-	old[last] = nil
 	candidate.index = -1
 	*h = old[:last]
 	return candidate
@@ -1758,10 +1757,8 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
 ) bool {
-	var (
-		evictable peerHeaderHistoryCandidateHeap
-		retirable peerHeaderHistoryCandidateHeap
-	)
+	evictable := make(peerHeaderHistoryCandidateHeap, 0)
+	retirable := make(peerHeaderHistoryCandidateHeap, 0)
 	retirableByKey := make(
 		map[string]*peerHeaderHistoryCandidate,
 		len(ls.peerHeaderHistory),
