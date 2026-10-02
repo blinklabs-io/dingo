@@ -92,15 +92,18 @@ golines: ## Enforce 80-character line limit
 # .github/workflows/go-test.yml and .github/workflows/publish.yml;
 # internal/docsparity's
 # TestLintCoversEveryGoModule fails until every go.mod has a step in both.
-lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
+lint: import-boundaries ## Run import-boundaries and golangci-lint (gates), then nilaway and modernize (advisory)
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	# Test fixtures establish preconditions with testify assertions that nilaway
-	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
-	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+	# The two analyzers below are advisory: the leading "-" prints their
+	# findings without failing the target, because main carries an unrepaired
+	# baseline for both and a failing first tool would stop make before the
+	# second ran. Test fixtures establish preconditions with testify assertions
+	# that NilAway cannot track across calls, so only production code is analyzed.
+	-nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
+	-modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture

@@ -29,7 +29,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 ## Pre-commit
 
 ```shell
-make lint         # import-boundaries, all modules, windows, nilaway, modernize
+make lint         # gates: import-boundaries, golangci-lint per module; advisory: nilaway, modernize
 modernize --fix ./...   # optional: auto-apply modernize's findings
 make docs-parity
 make config-parity  # embedded configs vs the pinned cardano-configs image; needs network + docker

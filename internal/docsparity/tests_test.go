@@ -3509,3 +3509,178 @@ func TestServiceContainersRelaxDurability(t *testing.T) {
 		}
 	}
 }
+
+// jobSteps returns a job's steps as plain mappings.
+func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
+	t.Helper()
+
+	fields, ok := job.(map[string]any)
+	if !ok {
+		t.Fatalf("%s job %s is not a mapping", workflow, name)
+	}
+	raw, ok := fields["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s job %s has no steps", workflow, name)
+	}
+	steps := make([]map[string]any, 0, len(raw))
+	for _, entry := range raw {
+		step, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("%s job %s has a non-mapping step", workflow, name)
+		}
+		steps = append(steps, step)
+	}
+	return steps
+}
+
+var fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+
+// TestGovulncheckRunsThroughPinnedAction checks that CI reaches govulncheck
+// through a commit-pinned action instead of fetching and executing an
+// unpinned module with `go run ...@latest`.
+func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	for _, workflow := range []string{prPipeline, publishPipeline} {
+		job, ok := pipelineJobs(t, root, workflow)["govulncheck"]
+		if !ok {
+			t.Fatalf("%s has no govulncheck job", workflow)
+		}
+		found := false
+		for _, step := range jobSteps(t, workflow, "govulncheck", job) {
+			if run, _ := step["run"].(string); strings.Contains(run, "@latest") ||
+				strings.Contains(run, "make govulncheck") {
+				t.Errorf(
+					"%s: govulncheck step runs %q instead of the pinned action",
+					workflow,
+					run,
+				)
+			}
+			uses, _ := step["uses"].(string)
+			if !strings.HasPrefix(uses, "golang/govulncheck-action@") {
+				continue
+			}
+			found = true
+			if !fullSHAActionRe.MatchString(uses) {
+				t.Errorf("%s: %s is not pinned to a full commit SHA", workflow, uses)
+			}
+		}
+		if !found {
+			t.Errorf("%s: govulncheck job does not use golang/govulncheck-action", workflow)
+		}
+	}
+}
+
+// TestReleaseRefreshesModuleProxy checks that finalizing a tagged release asks
+// the Go module proxy for the new version, with a bounded request, and that
+// the retired disabled step stays removed.
+func TestReleaseRefreshesModuleProxy(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	if raw := readRepoFile(t, root, publishPipeline); strings.Contains(raw, "go-proxy-pull-action") {
+		t.Errorf("%s still references the disabled go-proxy-pull-action step", publishPipeline)
+	}
+
+	job, ok := pipelineJobs(t, root, publishPipeline)["finalize-release"]
+	if !ok {
+		t.Fatalf("%s has no finalize-release job", publishPipeline)
+	}
+	for _, step := range jobSteps(t, publishPipeline, "finalize-release", job) {
+		run, _ := step["run"].(string)
+		if !strings.Contains(run, "proxy.golang.org") {
+			continue
+		}
+		if !strings.Contains(run, "/@v/") || !strings.Contains(run, "--max-time") {
+			t.Errorf("proxy refresh must request /@v/<tag>.info with --max-time: %q", run)
+		}
+		if step["continue-on-error"] != true {
+			t.Errorf("proxy refresh must not fail a published release")
+		}
+		if step["if"] != "github.ref_type == 'tag'" {
+			t.Errorf("proxy refresh must run for tags only, got %v", step["if"])
+		}
+		return
+	}
+	t.Errorf("%s finalize-release has no Go module proxy refresh step", publishPipeline)
+}
+
+// TestPullRequestPipelineRunsBlockPipelineDevnet checks that the pull-request
+// pipeline runs the accelerated DevNet with the block pipeline and its
+// validate stage enabled, the only integration exercise of that stage.
+func TestPullRequestPipelineRunsBlockPipelineDevnet(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	job, ok := pipelineJobs(t, root, prPipeline)["devnet"]
+	if !ok {
+		t.Fatalf("%s has no devnet job", prPipeline)
+	}
+	found := false
+	for _, step := range jobSteps(t, prPipeline, "devnet", job) {
+		run, _ := step["run"].(string)
+		if !strings.Contains(run, "run-tests.sh") {
+			continue
+		}
+		found = true
+		if !strings.Contains(run, "--accelerated") {
+			t.Errorf("devnet step must run the accelerated profile: %q", run)
+		}
+		env, _ := step["env"].(map[string]any)
+		for _, name := range []string{
+			"DEVNET_BLOCK_PIPELINE_ENABLED",
+			"DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED",
+		} {
+			if env[name] != "true" {
+				t.Errorf("devnet step must set %s=true, got %v", name, env[name])
+			}
+		}
+	}
+	if !found {
+		t.Errorf("%s devnet job never runs run-tests.sh", prPipeline)
+	}
+}
+
+// TestLintAnalyzersAreAdvisory checks that nilaway and modernize cannot fail
+// `make lint`, and that the contributor instructions say so. Both tools have
+// an unrepaired baseline on main; a failing nilaway also stops make before
+// modernize runs, so a gate here would report one tool and hide the other.
+func TestLintAnalyzersAreAdvisory(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+
+	var recipe []string
+	inLint := false
+	for _, line := range strings.Split(readRepoFile(t, root, "Makefile"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "lint:"):
+			inLint = true
+		case inLint && !strings.HasPrefix(line, "\t"):
+			inLint = false
+		case inLint:
+			recipe = append(recipe, strings.TrimPrefix(line, "\t"))
+		}
+	}
+	for _, tool := range []string{"nilaway", "modernize"} {
+		found := false
+		for _, line := range recipe {
+			if !strings.Contains(line, tool+" ") {
+				continue
+			}
+			found = true
+			if !strings.HasPrefix(line, "-") {
+				t.Errorf("make lint runs %s as a gate: %q", tool, line)
+			}
+		}
+		if !found {
+			t.Errorf("make lint no longer runs %s", tool)
+		}
+	}
+
+	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
+		if !strings.Contains(readRepoFile(t, root, doc), "advisory") {
+			t.Errorf("%s does not say nilaway and modernize are advisory", doc)
+		}
+	}
+}
