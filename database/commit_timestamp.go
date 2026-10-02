@@ -274,7 +274,7 @@ func (d *Database) writeGateValues(ctx context.Context, writes nodesettings.Valu
 			return fmt.Errorf("failed to persist node settings: %w", err)
 		}
 	}
-	epoch, slot := d.currentEpochSlot()
+	epoch, slot := d.currentEpochSlot(ctx)
 	if err := d.Metadata().SetNodeSettingsGates(ctx, writes, epoch, slot); err != nil {
 		return fmt.Errorf("failed to persist node settings gates: %w", err)
 	}
@@ -341,13 +341,15 @@ func (d *Database) writeDBInfoSidecarErr() error {
 // writes with when they were recorded. It returns zeros when there is no
 // tip yet, which is the normal state for a database open that precedes the
 // first block being processed.
-func (d *Database) currentEpochSlot() (epoch uint64, slot uint64) {
-	tip, err := d.GetTip(nil)
+func (d *Database) currentEpochSlot(ctx context.Context) (epoch uint64, slot uint64) {
+	txn := d.MetadataTxn(ctx, false)
+	defer txn.Release()
+	tip, err := d.GetTip(txn)
 	if err != nil || tip.Point.Slot == 0 {
 		return 0, 0
 	}
 	slot = tip.Point.Slot
-	ep, err := d.GetEpochBySlot(slot, nil)
+	ep, err := d.GetEpochBySlot(slot, txn)
 	if err != nil || ep == nil {
 		return 0, slot
 	}
@@ -437,7 +439,7 @@ func (d *Database) evaluateAndPersistGates(ctx context.Context,
 		}
 	}
 	if len(firstFill) > 0 {
-		epoch, slot := d.currentEpochSlot()
+		epoch, slot := d.currentEpochSlot(ctx)
 		inserted, err := d.Metadata().InsertNodeSettingsGatesIfAbsent(ctx,
 			firstFill, epoch, slot,
 		)

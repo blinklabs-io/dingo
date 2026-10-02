@@ -129,7 +129,7 @@ func (d *Database) ReconcileAlonzoPParamsUnitAfterRecovery(ctx context.Context) 
 	if hasAlonzo {
 		return nil
 	}
-	epoch, slot := d.currentEpochSlot()
+	epoch, slot := d.currentEpochSlot(ctx)
 	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
@@ -308,7 +308,7 @@ func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
 			return false, err
 		}
 	}
-	epoch, slot := d.currentEpochSlot()
+	epoch, slot := d.currentEpochSlot(ctx)
 	if err := d.Metadata().SetNodeSettingsGates(ctx,
 		nodesettings.Values{
 			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
