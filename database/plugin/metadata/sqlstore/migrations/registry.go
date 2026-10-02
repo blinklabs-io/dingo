@@ -67,6 +67,7 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
 	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
 	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
@@ -193,9 +194,14 @@ var schemaVersions = []struct {
 		Name:    rewardCreditRoundTableSchemaRelease,
 		Dir:     "v31",
 	},
-	{Version: 32, Name: drepExpiryHistorySchemaRelease, Dir: "v32"},
-	{Version: 33, Name: drepDormancyStateSchemaRelease, Dir: "v33"},
-	{Version: 34, Name: drepDelegatorStateSchemaRelease, Dir: "v34"},
+	{
+		Version: 32,
+		Name:    rewardLeaderDeficitSchemaRelease,
+		Dir:     "v32",
+	},
+	{Version: 33, Name: drepExpiryHistorySchemaRelease, Dir: "v33"},
+	{Version: 34, Name: drepDormancyStateSchemaRelease, Dir: "v34"},
+	{Version: 35, Name: drepDelegatorStateSchemaRelease, Dir: "v35"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
