@@ -1,4 +1,4 @@
-//go:build dingo_db_integration
+//go:build dingo_extra_plugins && dingo_db_integration
 
 // Copyright 2026 Blink Labs Software
 //
