@@ -6452,8 +6452,9 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // decodeReadChainBatch decodes a batch of raw blocks gathered from the chain
 // iterator into ledger.Block values, preserving input order. When
 // ls.blockPipeline is configured (LedgerStateConfig.BlockPipelineEnabled) it
-// submits the whole batch to the pipeline's decode worker pool up front, so
-// multiple blocks decode concurrently, then drains the results back in
+// submits the batch to the pipeline's decode worker pool while concurrently
+// draining results, so multiple blocks decode concurrently and a batch larger
+// than the pipeline's pending limit cannot stall Submit. Results come back in
 // submission order (the pipeline's apply stage guarantees this ordering
 // regardless of which worker finishes first). Otherwise it decodes serially,
 // exactly as ledgerReadChainIterator did before the pipeline existed.
@@ -6520,22 +6521,42 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
 	submitCtx := context.Background()
-	for _, raw := range rawBatch {
-		tip := ocommon.Tip{
-			Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
-			BlockNumber: raw.Number,
-		}
-		//nolint:contextcheck // deliberately not derived from ctx; see the
-		// doc comment above -- a submission must run to completion once
-		// started, not abort partway through a mere per-attempt cancel.
-		if err := ls.blockPipeline.Submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
-			ls.config.Logger.Error(
-				"failed to submit block to decode pipeline",
-				"error", err,
-			)
-			return nil, fmt.Errorf("submit block to decode pipeline: %w", err)
-		}
+	// Submit blocks once MaxPendingBlocks sequences are outstanding, and
+	// completions only advance as Results() is consumed, so submission runs
+	// in its own goroutine while this one drains results.
+	type submitOutcome struct {
+		submitted int
+		err       error
 	}
+	submitDone := make(chan submitOutcome, 1)
+	go func() {
+		submitted := 0
+		for _, raw := range rawBatch {
+			tip := ocommon.Tip{
+				Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
+				BlockNumber: raw.Number,
+			}
+			//nolint:contextcheck // deliberately not derived from ctx; see the
+			// doc comment above -- a submission must run to completion once
+			// started, not abort partway through a mere per-attempt cancel.
+			if err := ls.blockPipeline.Submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
+				ls.config.Logger.Error(
+					"failed to submit block to decode pipeline",
+					"error", err,
+				)
+				submitDone <- submitOutcome{
+					submitted: submitted,
+					err: fmt.Errorf(
+						"submit block to decode pipeline: %w",
+						err,
+					),
+				}
+				return
+			}
+			submitted++
+		}
+		submitDone <- submitOutcome{submitted: submitted}
+	}()
 	results := ls.blockPipeline.Results()
 	decoded = make([]ledger.Block, 0, len(rawBatch))
 	// retErr remembers a decode or validation failure anywhere in the batch.
@@ -6550,8 +6571,21 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	// notion of "whose submission is whose" beyond result order (see this
 	// function's doc comment on why a submission always runs to
 	// completion).
-	for range rawBatch {
-		item, chOk := <-results
+	expected := -1
+	var submitErr error
+	for read := 0; expected < 0 || read < expected; {
+		var (
+			item *pipeline.BlockItem
+			chOk bool
+		)
+		select {
+		case outcome := <-submitDone:
+			expected = outcome.submitted
+			submitErr = outcome.err
+			submitDone = nil
+			continue
+		case item, chOk = <-results:
+		}
 		if !chOk {
 			ls.config.Logger.Error(
 				"decode pipeline results channel closed unexpectedly",
@@ -6560,6 +6594,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 				"decode pipeline results channel closed unexpectedly",
 			)
 		}
+		read++
 		if retErr != nil {
 			continue
 		}
@@ -6649,6 +6684,9 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			}
 		}
 		decoded = append(decoded, block)
+	}
+	if submitErr != nil {
+		return nil, submitErr
 	}
 	if retErr != nil {
 		return nil, retErr
