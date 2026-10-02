@@ -8272,9 +8272,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// Determine block source for observability
 				source := "chainsync"
 				if checker != nil {
-					if _, forged := checker.WasForgedByUs(
+					// The tracker is keyed by slot, so a block that won a
+					// slot battle against ours shares the slot; only an
+					// equal hash makes the tip our block.
+					if forgedHash, forged := checker.WasForgedByUs(
 						tipForLog.Point.Slot,
-					); forged {
+					); forged &&
+						bytes.Equal(forgedHash, tipForLog.Point.Hash) {
 						source = "forged"
 					}
 				}
