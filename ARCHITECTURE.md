@@ -8081,8 +8081,9 @@ accepted exactly at the limit and rejected one past it.
 
 `ImportLedgerState` runs `validateImportState` before the UTxO phase. It
 parses the cert state, stake snapshots, active pool distribution and
-governance state, and checks the tip hash width, the evolving nonce, the
-certified opcert and block-count pool keys, and the protocol parameters, so a
+governance state, and checks the tip hash width, the epoch, evolving,
+candidate and last-epoch-block nonce widths, the certified opcert and
+block-count pool keys, and the protocol parameters, so a
 malformed input fails the import before any phase persists. A parse warning
 on the cert state or stake snapshots is a rejection rather than a log line.
 The phases parse again instead of reusing the result, which keeps those

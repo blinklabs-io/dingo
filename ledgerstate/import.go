@@ -740,8 +740,18 @@ func validateImportState(cfg ImportConfig) error {
 			"tip hash has %d bytes, expected %d", n, lcommon.Blake2b256Size,
 		)
 	}
-	if err := validateEvolvingNonce(state.EvolvingNonce); err != nil {
-		return err
+	for _, nonce := range []struct {
+		name  string
+		value []byte
+	}{
+		{"epoch", state.EpochNonce},
+		{"evolving", state.EvolvingNonce},
+		{"candidate", state.CandidateNonce},
+		{"last epoch block", state.LastEpochBlockNonce},
+	} {
+		if err := validateNonce(nonce.name, nonce.value); err != nil {
+			return err
+		}
 	}
 	if err := validateOpCertCounters(state.OpCertCounters); err != nil {
 		return err
@@ -2603,7 +2613,7 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 	// genesis hash, producing wrong block nonces and eventually a
 	// wrong epoch nonce that causes VRF verification to fail.
 	if len(cfg.State.EvolvingNonce) > 0 {
-		if err := validateEvolvingNonce(cfg.State.EvolvingNonce); err != nil {
+		if err := validateNonce("evolving", cfg.State.EvolvingNonce); err != nil {
 			return err
 		}
 		if err := store.SetBlockNonce(
@@ -2658,10 +2668,12 @@ func importTip(ctx context.Context, cfg ImportConfig) error {
 	return nil
 }
 
-func validateEvolvingNonce(nonce []byte) error {
-	if len(nonce) != 0 && len(nonce) != 32 {
+// validateNonce accepts a neutral (empty) nonce or a 32-byte hash.
+func validateNonce(name string, nonce []byte) error {
+	if len(nonce) != 0 && len(nonce) != lcommon.Blake2b256Size {
 		return fmt.Errorf(
-			"invalid evolving nonce length %d, expected 32", len(nonce),
+			"invalid %s nonce length %d, expected %d",
+			name, len(nonce), lcommon.Blake2b256Size,
 		)
 	}
 	return nil

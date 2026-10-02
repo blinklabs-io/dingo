@@ -2954,6 +2954,27 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			},
 			wantErr: "invalid evolving nonce length 1",
 		},
+		{
+			name: "epoch nonce",
+			mutate: func(s *RawLedgerState) {
+				s.EpochNonce = []byte{0x01}
+			},
+			wantErr: "invalid epoch nonce length 1",
+		},
+		{
+			name: "candidate nonce",
+			mutate: func(s *RawLedgerState) {
+				s.CandidateNonce = []byte{0x01}
+			},
+			wantErr: "invalid candidate nonce length 1",
+		},
+		{
+			name: "last epoch block nonce",
+			mutate: func(s *RawLedgerState) {
+				s.LastEpochBlockNonce = []byte{0x01}
+			},
+			wantErr: "invalid last epoch block nonce length 1",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
