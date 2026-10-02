@@ -204,12 +204,11 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
-// Two properties are load-bearing and are covered by tests:
+// Two properties are covered by tests:
 //
-//  1. It is not gated on storage mode. All three API listeners are started
-//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
-//     the default `core` mode, so a probe wired the way the APIs are would be
-//     inert in exactly the configuration the image ships with.
+//  1. It is not gated on storage mode. Client API listeners require
+//     storageMode.IsAPI(), while health probes must remain available in core
+//     mode so an orchestrator can verify node state.
 //  2. It binds cfg.BindAddr, the address the relay and metrics listeners
 //     already use, not the API listeners' loopback-by-default address. A
 //     probe is operational surface: a Docker HEALTHCHECK runs inside the
@@ -410,11 +409,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		storageMode = dingo.StorageModeAPI
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
@@ -633,6 +634,10 @@ func buildDingoConfig(
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIBlockfrost,
 			cfg.Plugins.API.Blockfrost,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIKupo,
+			cfg.Plugins.API.Kupo,
 		),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIMesh,

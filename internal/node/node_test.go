@@ -249,12 +249,10 @@ func getHealth(
 	return resp.StatusCode, decoded
 }
 
-// TestHealthListenerServesInCoreModeWithAPIsDisabled is the negative case the
-// issue turns on: the shipped docker-compose.yml runs the default `core`
-// storage mode with no API plugin configured, and all three API listeners are
-// gated on storageMode.IsAPI(). A probe wired the same way would be inert in
-// exactly that configuration. The node here is a real *dingo.Node built by the
-// production composition path with no API plugins and core storage.
+// TestHealthListenerServesInCoreModeWithAPIsDisabled verifies that health
+// probes remain available in core storage mode, where client API listeners
+// are disabled. The node is built through the production composition path
+// with no API plugins and core storage.
 func TestHealthListenerServesInCoreModeWithAPIsDisabled(t *testing.T) {
 	t.Parallel()
 

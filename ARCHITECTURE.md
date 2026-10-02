@@ -13,7 +13,7 @@ metrics registry unchanged, so corrected construction can reuse it.
 
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
-Mesh, UTxO RPC) is resolved only in API storage mode and only when its
+Kupo, Mesh, UTxO RPC) is resolved only in API storage mode and only when its
 configured port is nonzero, so core-mode nodes and disabled ports resolve
 none of them. Failures unwind providers in reverse order. Normal shutdown
 orders APIs, mempool, ledger/database, then storage.
@@ -278,6 +278,7 @@ graph TB
     subgraph "External Interfaces"
         URPC["UTxO RPC<br/><i>api/utxorpc/</i>"]
         BFA["Blockfrost API<br/><i>api/blockfrost/</i>"]
+        KupoAPI["Kupo API<br/><i>api/kupo/</i>"]
         Mesh["Mesh API<br/><i>api/mesh/</i>"]
         Bark["Bark<br/><i>bark/</i>"]
         MidnightIndex["Midnight indexer<br/><i>midnight/indexer/</i>"]
@@ -372,6 +373,7 @@ graph LR
     intrecycler["internal/chainsyncrecycler"]
     utxorpc["api/utxorpc"]
     blockfrost["api/blockfrost"]
+    kupo["api/kupo"]
     mesh["api/mesh"]
     bark["bark"]
     midnight["midnight/{indexer,server}"]
@@ -421,7 +423,7 @@ graph LR
 
     intcfg --> plugin & topology
     intplugins --> plugin & db_blob_impl & db_meta_impl & mempool
-    intplugins --> utxorpc & blockfrost & mesh
+    intplugins --> utxorpc & blockfrost & kupo & mesh
     intnode --> root & chain & chainsync & cardano_cfg
     intnode --> db & db_immutable & db_models & db_meta
     intnode --> ledger & ledger_eras & ledger_governance & intcfg
@@ -433,6 +435,7 @@ graph LR
     utxorpc --> ledger & ledger_eras & mempool & plugin
     mesh --> chain & db & db_models & ev & ledger & mempool & plugin
     blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool & plugin
+    kupo --> db & db_models & db_types & ledger
     bark --> db & db_blob & db_types & db_lifecycle
     midnight --> db & ev
 ```
@@ -1377,6 +1380,7 @@ type Node struct {
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
     committeeAuthSync *committeeauth.Syncer       // Live immutable-slot sync for committee auth pruning
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
+    kupoAPI        *kupo.Server                    // Kupo chain-index API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
@@ -1527,11 +1531,12 @@ When `Node.Run()` is called, components are initialized in this order:
 21. Midnight gRPC server (if API storage mode and
     `midnight.serverEnabled`, with a non-zero port)
 22. Blockfrost API (if API storage mode and port configured)
-23. Mesh API (if API storage mode and port configured)
-24. Off-chain metadata fetcher (if API storage mode)
-25. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
-26. Block forger + leader election (if block producer mode)
-27. Wait for shutdown signal
+23. Kupo API (if API storage mode and port configured)
+24. Mesh API (if API storage mode and port configured)
+25. Off-chain metadata fetcher (if API storage mode)
+26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
+27. Block forger + leader election (if block producer mode)
+28. Wait for shutdown signal
 ```
 
 Mempool revalidation uses a private candidate overlay while admissions and
@@ -1616,7 +1621,7 @@ Phase 1: Stop accepting new work
   Midnight indexer (unsubscribes from BlockEventType),
   chain selector, peer governor, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
-  Blockfrost API, Mesh API, off-chain metadata fetcher,
+  Blockfrost API, Kupo API, Mesh API, off-chain metadata fetcher,
   CIP-26 token registry sync
 
 Phase 2: Drain and close connections
@@ -2220,7 +2225,7 @@ the blob commit succeeded, the result is a `PartialCommitError`, which
 Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
-- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+- `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Kupo, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
 In core mode, the ledger's background consumed-UTxO pruner is advisory: it
 defers while the local tip is materially behind the known upstream tip, so its
@@ -8272,7 +8277,7 @@ those indexes in place while deferring the remaining manifest entries.
 
 ## External Interfaces
 
-Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. The health probes below are not an application API at all: they are operational surface for a container runtime or orchestrator, and are the one HTTP interface here that is available in every storage mode.
+Dingo provides four client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, Kupo, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. The health probes below are not an application API at all: they are operational surface for a container runtime or orchestrator, and are the one HTTP interface here that is available in every storage mode.
 
 ### Health probes (`internal/health`)
 
@@ -8282,7 +8287,7 @@ or serve failures are logged, never fatal):
 Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
 the health listener on `healthPort` (default `12799`, `0` disables).
 
-The health listener is **not** gated on storage mode. The three API
+The health listener is **not** gated on storage mode. The four API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
 `docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
@@ -8348,7 +8353,7 @@ than reading as perfectly caught up.
 
 ### API security (TLS)
 
-Blockfrost, Mesh, and UTxO RPC share one optional TLS contract. TLS is
+Blockfrost, Kupo, Mesh, and UTxO RPC share one optional TLS contract. TLS is
 validated before listeners bind: an invalid mode is rejected at construction,
 and `mode: server` requires both certificate and key paths. TLS may be configured
 through the shared `api.tls` policy or a provider's
@@ -8366,14 +8371,15 @@ API routes require no credentials, including health and reflection routes.
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these three providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost or Mesh.
-The three API listeners use the root `bindAddr`, whose default is
+The four API listeners use the root `bindAddr`, whose default is
 `0.0.0.0`. `debugBindAddr` remains the separate pprof
 listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
 CORS setting shared by the API providers.
 
 ### API listener lifecycle (`internal/apilistener`)
 
-All three API servers (`api/blockfrost`, `api/mesh`, `api/utxorpc`) share one
+All four API servers (`api/blockfrost`, `api/kupo`, `api/mesh`,
+`api/utxorpc`) share one
 start/stop protocol rather than each implementing its own, because the way they
 bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
 all three.
@@ -8481,6 +8487,49 @@ paths that need a bind still in flight when a wait expires — a real bind settl
 far too quickly to race, so those windows are constructed. Each API package
 keeps the black-box checks that it is wired to the protocol: the port is free
 when `Stop` returns, and the address is rebindable afterwards.
+
+### Kupo API (`api/kupo/`)
+
+The built-in Kupo provider implements a Kupo v2.12-compatible chain-index HTTP
+surface. It is registered as `plugin.CapabilityAPIKupo` and resolved by
+`node.go`, including API reinitialization after live restore or truncate, only
+in API storage mode with a nonzero port. It uses the shared
+`internal/apilistener` lifecycle and serves every route at both the root and
+Kupo's `/v1` prefix. TLS is optional and requests require no credentials.
+
+`NodeAdapter` is the only layer that reaches ledger and database types. Dingo
+indexes every output in API mode, so its installed pattern set is permanently
+`["*"]`: pattern additions are idempotent, while pattern or match deletion is
+rejected because it would violate the complete-index contract used by the
+other APIs. Match patterns remain query selectors.
+
+Checkpoint routes are a compatibility view over canonical committed block
+history rather than a second resume store. `/checkpoints` returns a bounded,
+exponentially spaced sample across the security window, and the slot route
+returns an exact point or nearest canonical ancestor.
+
+`/metadata/{slot_no}` selects the first canonical block whose slot is at least
+the requested slot. That matches Kupo for an empty slot, where its chain-sync
+client intersects at the preceding checkpoint and fetches the following block.
+A slot past Dingo's newest indexed block returns `400`, a deliberate divergence:
+Kupo waits for the next block, while Dingo answers from committed storage and
+does not hold an HTTP request open until a block is forged.
+
+Every data route opens a coordinated snapshot through
+`database.NewReadSnapshotContext`, so the body and its
+`X-Most-Recent-Checkpoint`/`ETag` headers share one view. Snapshot construction
+reserves a metadata read connection before briefly taking the commit barriers,
+keeping an exhausted-pool wait outside them. Admission remains held for the
+snapshot's lifetime and is capped at one below the provider's read-pool size,
+so client-paced `/matches` streams cannot consume the connection destructive
+rollback needs for operational reads.
+
+Match results stream in 512-row pages through an ordering cursor, hydrate
+spending details only for the current page, check request cancellation between
+rows, and flush every 128 results. Slot lookups avoid reverse blob iteration:
+metadata uses a forward seek, while non-strict checkpoints binary-search the
+ordered block index bounded by the snapshot tip. This matters for S3 and GCS,
+whose reverse iterators list the complete key prefix before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
@@ -11545,7 +11594,7 @@ Package isolation is enforced by direction, ownership, and composition:
   and `ledger/forging`.
 - `database/` and `database/plugin/*` own persistence and storage backends.
   They should not import node, ledger, mempool, networking, or API packages.
-- API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
+- API packages (`api/blockfrost/`, `api/kupo/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
   through local interfaces. Concrete adapters to `ledger`, `database`, and
   `mempool` are integration boundaries and should remain narrow.
 
@@ -12060,7 +12109,7 @@ Key configuration areas:
 - Off-chain metadata fetcher interval, request timeout, IPFS gateway, batch
   size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
-- External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
+- External interface ports (Blockfrost, Kupo, Mesh, UTxO RPC, Bark)
 
 ### Node Settings Gate Enforcement
 
@@ -12578,14 +12627,20 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected. If an imported basis fails reconciliation or lacks
-the historical protocol parameters needed to consume it, ledgerstate persists
-the failure reason in `reward_seed_failure` in the same metadata transaction as
-the import. A later reward boundary reads that marker when its reward snapshot
-is absent and reports the imported seeding failure; a genuinely missing import
-has no marker and is reported as a missing basis. Successful seeding clears the
-marker, and rollback removes markers above its slot, so the message cannot
-outlive the imported state it describes.
+reward basis is unaffected. If an imported basis is empty, fails
+reconciliation, or lacks the historical protocol parameters needed to consume
+it, the import fails with `errImportedRewardBasisUnusable`, naming the epoch
+and snapshot: continuing would cross that epoch's boundary with no reward
+round, leaving its rewards uncredited and the pots unmoved. In the first
+epoch of an era the go round reads the previous era's epoch, while the hard
+fork translated the snapshot's prevPParams to the new era; the import stores
+the ledger's input-free downgrade of it under the previous era
+(`downgradeConwayPParams`, `downgradeDijkstraPParams`), which keeps every
+reward input startStep reads. Only a step with no such downgrade -- Babbage to
+Alonzo needs `d` and `extraEntropy` -- still fails. `reward_seed_failure` is no
+longer written by the import; a later reward boundary still reads a marker a
+database written by an older version carries when its reward snapshot is
+absent, and successful seeding clears it.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
@@ -12653,13 +12708,13 @@ persisting a partial reward share. That rejection reports every incomplete
 pool and its delegated stake deterministically.
 
 Each epoch's derived basis is gated before it is written
-(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
-with a warning rather than persisted. The gate is mandatory, not defensive:
-the ledger validates the same invariants when it reads the basis, and on that
-path a failure returns an error rather than skipping the round, so an unusable
-row would turn a missing reward round into a node that cannot cross an epoch
-boundary at all. Dropping leaves the round to be skipped and counted as
-before, which is the conservative direction. Both skips are logged at WARN and counted by
+(`rewardInputBundle.validate`), and a basis that does not reconcile fails the
+import rather than being persisted or dropped. The gate is mandatory, not
+defensive: the ledger validates the same invariants when it reads the basis,
+and on that path a failure returns an error rather than skipping the round, so
+an unusable row would turn a missing reward round into a node that cannot cross
+an epoch boundary at all, while a dropped basis would skip the round and leave
+its rewards uncredited. Skipped rounds on the live path are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. At Debug level the
@@ -13704,18 +13759,42 @@ validator is left unclamped, so when the feature is active and any pool in the
 epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
-CIP-50 pledge-leverage rewards are an optional, consensus-affecting feature gate
-that defaults off. When `LedgerStateConfig.PledgeLeverageEnabled` is set (from
-operator config, not derived from the network), a pool's reward-eligible stake
-`sigma'` in `optimalPoolRewardChecked` (`ledger/rewards`) is additionally capped
-at `L` times its pledge, so `sigma' = min(sigma, z0, L*p)`; a zero-pledge pool
-then earns nothing. `L` is threaded from config onto `rewards.Parameters` at the
-single `LedgerState.rewardParameters` chokepoint (`applyPledgeLeverageConfig`),
-so the boundary-apply and precompute paths compute identical rewards. Disabled,
-the term is nil and the formula is byte-for-byte the pre-CIP-50 calculation.
-Because it changes reward amounts and therefore ADA pots and reward accounts, it
-must be enabled only on a network where every node also enables it (a devnet or
-custom network); enabling it off-consensus forks the node.
+CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
+parameter. `rewardParameters` normally reads it from the performance epoch's
+protocol parameters, matching cardano-ledger's previous-epoch reward inputs.
+For the first Dijkstra reward round, it reads the upgraded value from the
+calculation epoch's Dijkstra parameters while all other reward inputs remain
+from the Conway performance epoch. A nil value (including the Dijkstra genesis
+default) leaves the original formula unchanged; otherwise
+`optimalPoolRewardChecked` computes
+`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
+single parameter path feeds both boundary application and asynchronous reward
+precomputation. The operator setting remains an experimental override only for
+pre-Dijkstra local networks, where the protocol parameter does not exist.
+
+With a positive `a0`, `L = 0` or a very small `L` makes `maxPool'` negative,
+and, as in cardano-ledger, that pool's leader reward is negative while its
+members get nothing (`rewards.PoolReward.LeaderRewardDeficit`). Owed to an
+unregistered reward account, the negative amount is charged to the treasury
+and returned to reserves with the undistributed pot, matching
+`applyRUpdFiltered`'s `frTotalUnregistered` and `completeRupd`'s `deltaR2`.
+Owed to a registered one, the update cannot be applied, because
+cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
+returns an `errHaltLedgerPipeline` error wrapping
+`rewards.ErrNegativeLeaderReward`, before writing anything, and calls
+`FatalErrorFunc`. The CIP-0163 account-inactivity guard judges every reward
+account owed a negative leader reward, which has no account output, alongside
+the credited ones, and suppresses the halt for an expired one exactly as it
+suppresses crediting it. Per-pool history stores the negative magnitude in
+`reward_pool_output.leader_reward_deficit`, while the unsigned reward fields
+remain zero. The per-pool precompute declines such a round, as does the
+single-pass precompute, and reuse of persisted outputs rejects it; the
+boundary always calculates it fresh with the single-pass calculation.
+
+Stored Dijkstra parameters use the era decoder's `NonNegativeInterval`
+validation for `maxPledgeLeverage`, matching cardano-ledger. The governance
+update rules may impose a narrower range, but reward calculations use the
+enacted value directly, including zero.
 
 After an epoch-transition event, ledger precomputes the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. The calculation

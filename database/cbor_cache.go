@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -262,6 +263,11 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	outputIdx uint32,
 	dbTxn ...*Txn,
 ) ([]byte, error) {
+	// makeUtxoKey zero-pads or truncates to 32 bytes, so a wrong-length id
+	// would read another UTxO's entry from the hot cache.
+	if _, err := lcommon.NewBlake2b256Checked(txId); err != nil {
+		return nil, fmt.Errorf("resolve utxo cbor transaction id: %w", err)
+	}
 	key := makeUtxoKey(txId, outputIdx)
 
 	// Tier 1: Hot cache check
