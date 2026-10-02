@@ -85,6 +85,10 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, err
 	}
+	metrics, err := snapshotMetricsFor(db.Config().PromRegistry)
+	if err != nil {
+		return Manifest{}, err
+	}
 	// Pinned for the whole call: the Backup below runs long, and the store
 	// backing blobBackuper must not be drained and closed while it does.
 	blobStore, releaseBlob := db.PinBlob()
@@ -192,7 +196,6 @@ func Snapshot(
 	// rework of both, not attempted here.
 	metadataPath := filepath.Join(dir, MetadataBackupFileName)
 	logger := db.Logger()
-	pauseStart := time.Now()
 	if logger != nil {
 		logger.Debug(
 			"pausing commits for snapshot backup",
@@ -208,6 +211,28 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}
+	pauseStart := time.Now()
+	var pauseDuration time.Duration
+	pauseExceeded := false
+	barrierHeld := true
+	releaseBarrier := func() {
+		if barrierHeld {
+			resume()
+			pauseDuration = time.Since(pauseStart)
+			barrierHeld = false
+		}
+	}
+	defer func() {
+		result := snapshotResultOK
+		switch {
+		case pauseExceeded:
+			result = snapshotResultExceeded
+		case err != nil:
+			result = snapshotResultFailed
+		}
+		metrics.pause.WithLabelValues(result).Observe(pauseDuration.Seconds())
+	}()
+	defer releaseBarrier()
 	// The limit starts once the barrier is held; backupCtx is cancelled by
 	// the caller's ctx as well, so cancellation behaves as before.
 	backupCtx, cancelBackup := ctx, context.CancelFunc(func() {})
@@ -233,21 +258,10 @@ func Snapshot(
 
 	// Decided before resume(): a backup that merely finished near the limit
 	// is not a violation, only one the limit actually cancelled.
-	pauseExceeded := maxPause > 0 && ctx.Err() == nil &&
+	pauseExceeded = maxPause > 0 && ctx.Err() == nil &&
 		backupCtx.Err() != nil && (backupErr != nil || metadataErr != nil)
 	cancelBackup()
-	resume()
-	pauseDuration := time.Since(pauseStart)
-	metrics := snapshotMetricsFor(db.Config().PromRegistry)
-	pauseResult := snapshotResultOK
-	switch {
-	case pauseExceeded:
-		pauseResult = snapshotResultExceeded
-	case backupErr != nil || metadataErr != nil ||
-		tipErr != nil || commitTimestampErr != nil || gatesErr != nil:
-		pauseResult = snapshotResultFailed
-	}
-	metrics.pause.WithLabelValues(pauseResult).Observe(pauseDuration.Seconds())
+	releaseBarrier()
 	if logger != nil {
 		logger.Debug(
 			"resumed commits after snapshot backup",
@@ -257,6 +271,13 @@ func Snapshot(
 		)
 	}
 
+	if pauseExceeded {
+		return Manifest{}, fmt.Errorf(
+			"%w (%s): %w",
+			ErrCommitPauseExceeded, maxPause,
+			errors.Join(backupErr, metadataErr, tipErr, commitTimestampErr, gatesErr),
+		)
+	}
 	if tipErr != nil {
 		return Manifest{}, fmt.Errorf("get tip: %w", tipErr)
 	}
@@ -270,12 +291,6 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf(
 			"get node settings gates: %w",
 			gatesErr,
-		)
-	}
-	if pauseExceeded {
-		return Manifest{}, fmt.Errorf(
-			"%w (%s): %w",
-			ErrCommitPauseExceeded, maxPause, errors.Join(backupErr, metadataErr),
 		)
 	}
 	if backupErr != nil {

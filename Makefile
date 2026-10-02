@@ -157,7 +157,8 @@ bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
 
 bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BENCH_SCALE, see DATABASE.md)
-	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale' -benchtime=1x -benchmem -timeout=0 ./internal/integration
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
 
 bench-ci: mod-tidy ## Run mod-tidy, then the curated CI benchmark suite (count=10) plus a GOMAXPROCS lock-contention sweep
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench='^Benchmark(BlockProcessingThroughput|BlockProcessingThroughputPredecoded|BlockBatchProcessingThroughput|RawBlockBatchProcessingThroughput|VerifyBlockHeader|TransactionValidation|ChainSyncFromGenesis|RealBlockProcessing|EraTransitionPerformanceRealData|TestLoad|BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipFlushOnlyPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchVerifiedHeaderDispatch|BlockfetchClientBlockMetrics|UpdateConnectionMetrics|HasInboundPeerAddress|Reconcile|PublishSubscribers|BlockMemoryUsage|HotCacheGet|HotCachePut|HotCacheGetMiss|BlockLRUCacheGet|BlockLRUCachePut|TieredCacheHotHit|CachedBlockExtract|CborOffsetEncode|CborOffsetDecode|StorageModeIngest|StorageModeIngestSteadyState)$$' -benchmem -count=10 -timeout=90m ./...

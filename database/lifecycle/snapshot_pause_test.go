@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"testing"
@@ -128,6 +129,15 @@ func gatherFamily(
 	return nil
 }
 
+func metricLabel(mt *dto.Metric, name string) string {
+	for _, label := range mt.GetLabel() {
+		if label.GetName() == name {
+			return label.GetValue()
+		}
+	}
+	return ""
+}
+
 func TestSnapshotMaxCommitPauseAbortsAndReleasesBarrier(t *testing.T) {
 	t.Parallel()
 
@@ -205,12 +215,20 @@ func TestSnapshotReleasesBarrierWhenBackupFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			hooks := tc.hooks
-			db := newHookedDB(t, nil, &hooks)
+			reg := prometheus.NewRegistry()
+			db := newHookedDB(t, reg, &hooks)
 			dir := filepath.Join(t.TempDir(), "snap")
 			_, err := snapshotAt(t.Context(), db, dir)
 			require.ErrorIs(t, err, errInjectedBackup)
 			require.NoDirExists(t, dir)
 			requireBarrierReleased(t, db)
+			pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
+			require.NotNil(t, pause)
+			results := map[string]uint64{}
+			for _, mt := range pause.GetMetric() {
+				results[metricLabel(mt, "result")] = mt.GetHistogram().GetSampleCount()
+			}
+			require.Equal(t, uint64(1), results["failed"])
 		})
 	}
 }
@@ -236,9 +254,18 @@ func TestSnapshotReleasesBarrierOnCancellation(t *testing.T) {
 		_, err := snapshotAt(ctx, db, dir)
 		errCh <- err
 	}()
-	<-started
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("blob backup did not start before the deadline")
+	}
 	cancel()
-	err := <-errCh
+	var err error
+	select {
+	case err = <-errCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot did not return after cancellation")
+	}
 	require.ErrorIs(t, err, context.Canceled)
 	require.NotErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, dir)
@@ -255,9 +282,12 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 
 	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
 	require.NotNil(t, pause, "pause histogram not registered")
-	require.Len(t, pause.GetMetric(), 1)
-	require.Equal(t, "ok", pause.GetMetric()[0].GetLabel()[0].GetValue())
-	require.Equal(t, uint64(1), pause.GetMetric()[0].GetHistogram().GetSampleCount())
+	require.Len(t, pause.GetMetric(), 3)
+	results := map[string]uint64{}
+	for _, mt := range pause.GetMetric() {
+		results[metricLabel(mt, "result")] = mt.GetHistogram().GetSampleCount()
+	}
+	require.Equal(t, map[string]uint64{"ok": 1, "failed": 0, "exceeded": 0}, results)
 
 	written := gatherFamily(t, reg, "dingo_snapshot_bytes_written_total")
 	require.NotNil(t, written, "bytes counter not registered")
@@ -292,6 +322,32 @@ func TestSnapshotRecordsPauseResultOnFailure(t *testing.T) {
 
 	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
 	require.NotNil(t, pause)
-	require.Len(t, pause.GetMetric(), 1)
-	require.Equal(t, "exceeded", pause.GetMetric()[0].GetLabel()[0].GetValue())
+	require.Len(t, pause.GetMetric(), 3)
+	results := map[string]uint64{}
+	for _, mt := range pause.GetMetric() {
+		results[metricLabel(mt, "result")] = mt.GetHistogram().GetSampleCount()
+	}
+	require.Equal(t, uint64(1), results["exceeded"])
+}
+
+func TestSnapshotReusesMetricsForWrappedRegistry(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	wrapped := prometheus.WrapRegistererWith(prometheus.Labels{"network": "test"}, reg)
+	db := newHookedDB(t, wrapped, &backupHooks{})
+	for i := range 2 {
+		dir := filepath.Join(t.TempDir(), fmt.Sprintf("snap-%d", i))
+		_, err := snapshotAt(t.Context(), db, dir)
+		require.NoError(t, err)
+	}
+	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
+	require.NotNil(t, pause)
+	var count uint64
+	for _, mt := range pause.GetMetric() {
+		if metricLabel(mt, "network") == "test" && metricLabel(mt, "result") == "ok" {
+			count = mt.GetHistogram().GetSampleCount()
+		}
+	}
+	require.Equal(t, uint64(2), count)
 }

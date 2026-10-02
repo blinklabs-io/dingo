@@ -16,6 +16,7 @@ package integration
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -54,7 +55,7 @@ func parseScales(raw string) ([]int, error) {
 			part = part[:len(part)-1]
 		}
 		n, err := strconv.Atoi(part)
-		if err != nil || n <= 0 {
+		if err != nil || n <= 0 || n > math.MaxInt/mult {
 			return nil, fmt.Errorf("invalid scale %q in %q", part, raw)
 		}
 		out = append(out, n*mult)
@@ -87,6 +88,21 @@ func envInt(getenv func(string) string, name string, def int) (int, error) {
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {
 		return 0, fmt.Errorf("invalid %s=%q", name, raw)
+	}
+	return n, nil
+}
+
+func envIntAtLeast(
+	getenv func(string) string,
+	name string,
+	def, minimum int,
+) (int, error) {
+	n, err := envInt(getenv, name, def)
+	if err != nil {
+		return 0, err
+	}
+	if n < minimum {
+		return 0, fmt.Errorf("invalid %s=%q: must be >= %d", name, getenv(name), minimum)
 	}
 	return n, nil
 }

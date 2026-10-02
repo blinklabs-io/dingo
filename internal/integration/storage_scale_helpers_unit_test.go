@@ -28,7 +28,9 @@ func TestParseScales(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []int{1000, 50_000, 2_000_000, 1_000_000_000}, got)
 
-	for _, bad := range []string{"", "0", "-5", "abc", "1x", "5k,", "k"} {
+	for _, bad := range []string{
+		"", "0", "-5", "abc", "1x", "5k,", "k", "9223372037b",
+	} {
 		_, err := parseScales(bad)
 		require.Errorf(t, err, "input %q", bad)
 	}
@@ -71,6 +73,22 @@ func TestEnvInt(t *testing.T) {
 		_, err = envInt(env(bad), envBenchBlockBytes, 9)
 		require.Errorf(t, err, "input %q", bad)
 	}
+}
+
+func TestEnvIntAtLeast(t *testing.T) {
+	t.Parallel()
+
+	env := func(v string) func(string) string {
+		return func(string) string { return v }
+	}
+	n, err := envIntAtLeast(env(""), envBenchBlockBytes, 8, 8)
+	require.NoError(t, err)
+	require.Equal(t, 8, n)
+	n, err = envIntAtLeast(env("12"), envBenchBlockBytes, 8, 8)
+	require.NoError(t, err)
+	require.Equal(t, 12, n)
+	_, err = envIntAtLeast(env("7"), envBenchBlockBytes, 8, 8)
+	require.Error(t, err)
 }
 
 func TestPercentileNearestRank(t *testing.T) {

@@ -57,12 +57,13 @@ const MaxManifestBytes = 1 << 20
 // Callers can distinguish this resource rejection from missing or corrupt data.
 var ErrManifestTooLarge = errors.New("manifest size limit exceeded")
 
-// ManifestOption configures manifest I/O. The same options should be used
-// when creating, listing, labeling, and restoring a snapshot.
+// ManifestOption configures snapshot and manifest operations. Each option is
+// consumed only by the operations that use it.
 type ManifestOption func(*manifestConfig)
 
 type manifestConfig struct {
 	maxBytes int64
+	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
 }
 

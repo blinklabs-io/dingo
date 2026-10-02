@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	blobbadger "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	badgerdb "github.com/dgraph-io/badger/v4"
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,11 +53,12 @@ const (
 var scaleDefault = []int{10_000}
 
 type scaleConfig struct {
-	scales       []int
-	blockBytes   int
-	utxosPerBlk  int
-	latencyLimit int
-	dataDir      string
+	scales           []int
+	blockBytes       int
+	utxosPerBlk      int
+	latencyLimit     int
+	dataDir          string
+	productionBadger bool
 }
 
 func loadScaleConfig(tb testing.TB) scaleConfig {
@@ -65,13 +67,14 @@ func loadScaleConfig(tb testing.TB) scaleConfig {
 	var err error
 	cfg.scales, err = envScales(os.Getenv, envBenchScale, scaleDefault)
 	require.NoError(tb, err)
-	cfg.blockBytes, err = envInt(os.Getenv, envBenchBlockBytes, 32<<10)
+	cfg.blockBytes, err = envIntAtLeast(os.Getenv, envBenchBlockBytes, 32<<10, 8)
 	require.NoError(tb, err)
 	cfg.utxosPerBlk, err = envInt(os.Getenv, envBenchUtxosPerBlk, 10)
 	require.NoError(tb, err)
 	cfg.latencyLimit, err = envInt(os.Getenv, envBenchLatencySamps, scaleDefaultSamp)
 	require.NoError(tb, err)
 	cfg.dataDir = os.Getenv(envBenchDataDir)
+	cfg.productionBadger = os.Getenv(envBenchScale) != ""
 	return cfg
 }
 
@@ -91,9 +94,14 @@ func (c scaleConfig) newScaleDB(
 		require.NoError(tb, err)
 		tb.Cleanup(func() { _ = os.RemoveAll(dir) })
 	}
-	db, err := dbtest.NewDatabase(
-		tb, &database.Config{DataDir: dir, PromRegistry: reg},
-	)
+	opts := dbtest.Options{Config: &database.Config{DataDir: dir, PromRegistry: reg}}
+	if c.productionBadger {
+		opts.Blob.Config = map[string]any{
+			"valueLogFileSize": uint64(blobbadger.DefaultValueLogFileSize),
+			"memTableSize":     uint64(blobbadger.DefaultMemTableSize),
+		}
+	}
+	db, err := dbtest.NewDatabaseWithOptions(tb, opts)
 	require.NoError(tb, err)
 	return db
 }
@@ -231,10 +239,13 @@ func seedScaleBlocks(
 		for i := lo; i < hi; i++ {
 			// Distinct bytes per block keep Badger's compression honest.
 			binary.BigEndian.PutUint64(payload, uint64(i)) // #nosec G115 -- non-negative benchmark index
-			require.NoError(tb, store.SetBlock(
+			if err := store.SetBlock(
 				txn, uint64(i)*20, scaleTxID(i), payload,
 				uint64(i)+1, 1, uint64(i)+1, nil,
-			)) // #nosec G115 -- non-negative benchmark index
+			); err != nil { // #nosec G115 -- non-negative benchmark index
+				_ = txn.Rollback()
+				tb.Fatalf("write block %d: %v", i, err)
+			}
 		}
 		require.NoError(tb, txn.Commit())
 	}
@@ -312,7 +323,13 @@ func BenchmarkStorageScaleSnapshotPause(b *testing.B) {
 			var last lifecycle.Manifest
 			i := 0
 			b.ResetTimer()
+			lastDir := ""
 			for b.Loop() {
+				b.StopTimer()
+				if lastDir != "" {
+					require.NoError(b, os.RemoveAll(lastDir))
+				}
+				b.StartTimer()
 				dir := filepath.Join(snapRoot, "snap-"+strconv.Itoa(n)+"-"+strconv.Itoa(i))
 				i++
 				var err error
@@ -321,22 +338,45 @@ func BenchmarkStorageScaleSnapshotPause(b *testing.B) {
 					"bench", "badger", "sqlite",
 				)
 				require.NoError(b, err)
-				b.Cleanup(func() { _ = os.RemoveAll(dir) })
+				lastDir = dir
 			}
 			b.StopTimer()
+			if lastDir != "" {
+				b.Cleanup(func() { _ = os.RemoveAll(lastDir) })
+			}
 
 			families, err := reg.Gather()
 			require.NoError(b, err)
+			pauseObserved := false
 			for _, f := range families {
 				if f.GetName() != "dingo_snapshot_commit_pause_seconds" {
 					continue
 				}
-				h := f.GetMetric()[0].GetHistogram()
-				b.ReportMetric(
-					h.GetSampleSum()/float64(h.GetSampleCount()),
-					"commit-pause-s",
-				)
+				for _, metric := range f.GetMetric() {
+					isSuccessful := false
+					for _, label := range metric.GetLabel() {
+						if label.GetName() == "result" && label.GetValue() == "ok" {
+							isSuccessful = true
+							break
+						}
+					}
+					if !isSuccessful {
+						continue
+					}
+					h := metric.GetHistogram()
+					require.NotNil(b, h)
+					require.Positive(
+						b, h.GetSampleCount(),
+						"successful snapshots must record commit pause",
+					)
+					b.ReportMetric(
+						h.GetSampleSum()/float64(h.GetSampleCount()),
+						"commit-pause-s",
+					)
+					pauseObserved = true
+				}
 			}
+			require.True(b, pauseObserved, "commit-pause histogram has no ok series")
 			b.ReportMetric(float64(last.BlobBytes), "snapshot-blob-bytes")
 			b.ReportMetric(float64(last.MetadataBytes), "snapshot-metadata-bytes")
 			reportRSS(b)

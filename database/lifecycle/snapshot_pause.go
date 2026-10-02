@@ -16,6 +16,9 @@ package lifecycle
 
 import (
 	"errors"
+	"fmt"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -67,12 +70,71 @@ type snapshotMetrics struct {
 	bytes *prometheus.CounterVec
 }
 
+var snapshotMetricRegistryCache = struct {
+	sync.Mutex
+	byRegistry map[snapshotRegistryIdentity]snapshotMetricsCacheEntry
+}{byRegistry: make(map[snapshotRegistryIdentity]snapshotMetricsCacheEntry)}
+
+type snapshotRegistryIdentity struct {
+	typ   reflect.Type
+	value any
+	ptr   uintptr
+}
+
+type snapshotMetricsCacheEntry struct {
+	registerer prometheus.Registerer
+	metrics    *snapshotMetrics
+}
+
+func snapshotRegistryKey(reg prometheus.Registerer) (snapshotRegistryIdentity, bool) {
+	v := reflect.ValueOf(reg)
+	typ := v.Type()
+	if v.Comparable() {
+		return snapshotRegistryIdentity{typ: typ, value: reg}, true
+	}
+	switch v.Kind() {
+	case reflect.Map:
+		ptr := v.Pointer()
+		if ptr != 0 {
+			return snapshotRegistryIdentity{typ: typ, ptr: ptr}, true
+		}
+	}
+	return snapshotRegistryIdentity{}, false
+}
+
+func registerSnapshotCollector(
+	reg prometheus.Registerer,
+	collector prometheus.Collector,
+) (prometheus.Collector, bool, error) {
+	if err := reg.Register(collector); err != nil {
+		already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err)
+		if !ok {
+			return nil, false, err
+		}
+		var existing prometheus.Collector
+		switch collector.(type) {
+		case *prometheus.HistogramVec:
+			existing, ok = already.ExistingCollector.(*prometheus.HistogramVec)
+		case *prometheus.CounterVec:
+			existing, ok = already.ExistingCollector.(*prometheus.CounterVec)
+		}
+		if !ok {
+			return nil, false, fmt.Errorf(
+				"existing snapshot collector has unexpected type %T",
+				already.ExistingCollector,
+			)
+		}
+		return existing, false, nil
+	}
+	return collector, true, nil
+}
+
 // snapshotMetricsFor returns the snapshot collectors registered on reg,
 // registering them on first use. Collectors are per registry, so databases
 // sharing a registry share one series and tests with their own registries
 // stay isolated. A nil reg yields collectors that are observed but exposed
 // nowhere.
-func snapshotMetricsFor(reg prometheus.Registerer) *snapshotMetrics {
+func snapshotMetricsFor(reg prometheus.Registerer) (*snapshotMetrics, error) {
 	m := &snapshotMetrics{
 		pause: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "dingo_snapshot_commit_pause_seconds",
@@ -87,21 +149,40 @@ func snapshotMetricsFor(reg prometheus.Registerer) *snapshotMetrics {
 		}, []string{"store"}),
 	}
 	if reg == nil {
-		return m
+		return m, nil
 	}
-	if err := reg.Register(m.pause); err != nil {
-		if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
-			if existing, ok := already.ExistingCollector.(*prometheus.HistogramVec); ok {
-				m.pause = existing
-			}
+	snapshotMetricRegistryCache.Lock()
+	defer snapshotMetricRegistryCache.Unlock()
+	key, cacheable := snapshotRegistryKey(reg)
+	if cacheable {
+		if cached, ok := snapshotMetricRegistryCache.byRegistry[key]; ok {
+			return cached.metrics, nil
 		}
 	}
-	if err := reg.Register(m.bytes); err != nil {
-		if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
-			if existing, ok := already.ExistingCollector.(*prometheus.CounterVec); ok {
-				m.bytes = existing
-			}
+	pause, pauseRegistered, err := registerSnapshotCollector(reg, m.pause)
+	if err != nil {
+		return nil, fmt.Errorf("register snapshot pause metric: %w", err)
+	}
+	m.pause = pause.(*prometheus.HistogramVec)
+	bytes, _, err := registerSnapshotCollector(reg, m.bytes)
+	if err != nil {
+		if pauseRegistered {
+			reg.Unregister(m.pause)
+		}
+		return nil, fmt.Errorf("register snapshot bytes metric: %w", err)
+	}
+	m.bytes = bytes.(*prometheus.CounterVec)
+	for _, labels := range []string{snapshotResultOK, snapshotResultFailed, snapshotResultExceeded} {
+		m.pause.WithLabelValues(labels)
+	}
+	for _, store := range []string{"blob", "metadata"} {
+		m.bytes.WithLabelValues(store)
+	}
+	if cacheable {
+		snapshotMetricRegistryCache.byRegistry[key] = snapshotMetricsCacheEntry{
+			registerer: reg,
+			metrics:    m,
 		}
 	}
-	return m
+	return m, nil
 }
