@@ -275,6 +275,7 @@ func TestForgeBlockRevalidatesMempoolTransactions(t *testing.T) {
 		first := f.pendingSpend(t, in, value, fee, f.key)
 		second := f.pendingSpend(t, in, value, 2*fee, f.key)
 		require.Equal(t, []string{first.Hash}, f.forge(t, first, second))
+		require.Equal(t, []string{first.Hash}, f.mempool.removed)
 	})
 
 	t.Run("mutated mempool input spent by ledger", func(t *testing.T) {

@@ -234,7 +234,7 @@ func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 		return store, db
 	}
 	store, db := open()
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	reopen := func() {
 		require.NoError(t, store.Close())
 		require.NoError(t, db.Close())

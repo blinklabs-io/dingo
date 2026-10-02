@@ -41,6 +41,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -2716,6 +2717,7 @@ func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
 	)
 	require.NoError(t, err)
 
+	op.reserveCompletion()
 	op.mu.Lock()
 	var unlockOnce sync.Once
 	unlock := func() { unlockOnce.Do(op.mu.Unlock) }
@@ -2724,7 +2726,8 @@ func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.completeOperation(op, nil, 0)
+		h.finishOperation()
+		op.complete(nil, 0)
 	}()
 	released := func() bool {
 		h.mu.Lock()
@@ -2745,4 +2748,83 @@ func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
 		op.progress().GetStatus(),
 	)
+}
+
+func TestReservedOperationCompletionIgnoresLateCancellation(t *testing.T) {
+	// Not t.Parallel: bark database fixtures share the fake-cloud backing path.
+	for _, tc := range []struct {
+		name string
+		err  error
+		want databasev1alpha1.OperationStatus
+	}{
+		{"failure", errors.New("snapshot failed"), databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED},
+		{"success", nil, databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+			op, ctx, err := h.startOperation(
+				databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+			)
+			require.NoError(t, err)
+			op.reserveCompletion()
+			h.finishOperation()
+			_, err = h.CancelOperation(
+				t.Context(),
+				connect.NewRequest(
+					&databasev1alpha1.CancelOperationRequest{
+						OperationId: op.id,
+					},
+				),
+			)
+			require.NoError(t, err)
+			require.NoError(
+				t,
+				ctx.Err(),
+				"cancellation after reservation must not affect the worker outcome",
+			)
+			op.complete(tc.err, 0)
+			require.Equal(t, tc.want, op.progress().GetStatus())
+			if tc.err != nil {
+				require.Equal(t, tc.err.Error(), op.progress().GetMessage())
+			}
+		})
+	}
+}
+
+func TestCompleteOperationReservesOutcomeBeforeReleasingBusy(t *testing.T) {
+	// Not t.Parallel: bark database fixtures share the fake-cloud backing path.
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	op, ctx, err := h.startOperation(
+		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+	)
+	require.NoError(t, err)
+	h.mu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(h.mu.Unlock) }
+	defer unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.completeOperation(op, errors.New("snapshot failed"), 0)
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		op.mu.Lock()
+		defer op.mu.Unlock()
+		return op.completionReserved
+	}, 5*time.Second, "completion must be reserved before waiting to release busy")
+	op.requestCancel()
+	require.NoError(t, ctx.Err())
+	unlock()
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"completion must publish after releasing busy",
+	)
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_FAILED,
+		op.progress().GetStatus(),
+	)
+	require.Equal(t, "snapshot failed", op.progress().GetMessage())
 }

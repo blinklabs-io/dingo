@@ -122,15 +122,16 @@ type operation struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	mu              sync.Mutex
-	status          databasev1alpha1.OperationStatus
-	message         string
-	updatedAt       time.Time
-	completedAt     time.Time
-	hasCompleted    bool
-	cancelRequested bool
-	snapshotID      string // CreateSnapshot only
-	blocksRemoved   uint64 // Truncate only
+	mu                 sync.Mutex
+	status             databasev1alpha1.OperationStatus
+	message            string
+	updatedAt          time.Time
+	completedAt        time.Time
+	hasCompleted       bool
+	completionReserved bool
+	cancelRequested    bool
+	snapshotID         string // CreateSnapshot only
+	blocksRemoved      uint64 // Truncate only
 }
 
 func (o *operation) setRunning() {
@@ -175,11 +176,19 @@ func (o *operation) complete(err error, blocksRemoved uint64) {
 func (o *operation) requestCancel() databasev1alpha1.OperationStatus {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.hasCompleted {
+	if !o.hasCompleted && !o.completionReserved {
 		o.cancelRequested = true
 		o.cancel()
 	}
 	return o.status
+}
+
+// reserveCompletion freezes cancellation before the service releases its busy
+// flag, while leaving terminal status unpublished until the next operation can start.
+func (o *operation) reserveCompletion() {
+	o.mu.Lock()
+	o.completionReserved = true
+	o.mu.Unlock()
 }
 
 func (o *operation) progress() *databasev1alpha1.OperationProgress {
@@ -357,6 +366,7 @@ func (h *databaseServiceHandler) completeOperation(
 	err error,
 	blocksRemoved uint64,
 ) {
+	op.reserveCompletion()
 	h.finishOperation()
 	op.complete(err, blocksRemoved)
 }
@@ -802,7 +812,11 @@ func (h *databaseServiceHandler) resolveSnapshotSource(
 	if errors.Is(localErr, lifecycle.ErrManifestTooLarge) {
 		return "", connect.NewError(
 			connect.CodeResourceExhausted,
-			fmt.Errorf("snapshot %q manifest exceeds size limit: %w", snapshotID, localErr),
+			fmt.Errorf(
+				"snapshot %q manifest exceeds size limit: %w",
+				snapshotID,
+				localErr,
+			),
 		)
 	}
 	// A corrupted/hand-edited manifest means the snapshot IS there, just

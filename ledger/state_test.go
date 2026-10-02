@@ -13217,6 +13217,7 @@ func TestPrunedUtxoFixtureClosesLedgerStateOnCleanup(t *testing.T) {
 		ls = newPrunedUtxoFixture(t, 0).ls
 		require.False(t, ls.closed.Load())
 	})
+	require.NotNil(t, ls, "fixture must initialize before cleanup assertions")
 	require.True(
 		t,
 		ls.closed.Load(),
