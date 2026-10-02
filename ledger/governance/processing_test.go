@@ -927,3 +927,158 @@ func TestProposalRepairRejectsUnknownGovernanceEra(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "unexpected governance era 999")
 }
+
+// TestProcessHistoricalVotesSettlesRebuiltProposal covers the vote path's
+// proposal rebuild below a Mithril anchor. A proposal the snapshot does not
+// hold was already enacted, expired or dropped on chain, so a historical vote
+// that rebuilds it must store it settled, while the live path keeps a rebuilt
+// proposal eligible.
+func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
+	t.Parallel()
+
+	const (
+		proposalEpoch = uint64(100)
+		proposalSlot  = uint64(1000)
+		voteEpoch     = uint64(101)
+	)
+	for _, tc := range []struct {
+		name       string
+		historical bool
+	}{
+		{name: "live"},
+		{name: "historical", historical: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				DataDir: t.TempDir(),
+				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			defer dbtest.CloseDatabase(db)
+			require.NoError(t, db.SetEpoch(
+				proposalSlot, proposalEpoch, nil, nil, nil, nil,
+				conway.EraIdConway, 1, 432000, nil,
+			))
+			pparamsCbor, err := cbor.Encode(testConwayProtocolParameters())
+			require.NoError(t, err)
+			require.NoError(t, db.SetPParams(
+				pparamsCbor, proposalSlot, proposalEpoch,
+				conway.EraIdConway, nil,
+			))
+
+			rewardAddress, err := lcommon.NewAddressFromBytes(
+				append([]byte{0xE1}, testHash28("settle-reward")...),
+			)
+			require.NoError(t, err)
+			proposalProcedure := conway.ConwayProposalProcedure{
+				PPDeposit:       42,
+				PPRewardAccount: rewardAddress,
+				PPGovAction: conway.ConwayGovAction{
+					Type: uint(lcommon.GovActionTypeInfo),
+					Action: &lcommon.InfoGovAction{
+						Type: uint(lcommon.GovActionTypeInfo),
+					},
+				},
+				PPAnchor: lcommon.GovAnchor{
+					DataHash: [32]byte(testHash32("settle-anchor")),
+				},
+			}
+			proposalBodyCbor, err := cbor.Encode(&conway.ConwayTransactionBody{
+				TxProposalProcedures: []conway.ConwayProposalProcedure{
+					proposalProcedure,
+				},
+			})
+			require.NoError(t, err)
+			proposalTxHash := lcommon.Blake2b256Hash(proposalBodyCbor)
+			proposalTx := mockledger.NewTransactionBuilder()
+			proposalTx.WithId(proposalTxHash.Bytes())
+			proposalTx.WithType(gledger.TxTypeConway)
+			proposalTx.WithProposalProcedures(proposalProcedure)
+			proposalTx.WithValid(true)
+			proposalPoint := ocommon.Point{
+				Slot: proposalSlot,
+				Hash: testHash32("settle-proposal-block"),
+			}
+			blockBytes := append([]byte("settle-prefix-"), proposalBodyCbor...)
+			var blockHash [32]byte
+			copy(blockHash[:], proposalPoint.Hash)
+			var proposalHash [32]byte
+			copy(proposalHash[:], proposalTxHash.Bytes())
+			offsets := &database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					proposalHash: {
+						BlockSlot:  proposalSlot,
+						BlockHash:  blockHash,
+						ByteOffset: uint32(len(blockBytes) - len(proposalBodyCbor)),
+						ByteLength: uint32(len(proposalBodyCbor)),
+					},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			}
+			var voterHash [28]byte
+			copy(voterHash[:], testHash28("settle-voter"))
+			voteTx := mockledger.NewTransactionBuilder()
+			voteTx.WithId(testHash32("settle-vote-tx"))
+			voteTx.WithType(gledger.TxTypeConway)
+			voteTx.WithValid(true)
+			voteTx.WithVotingProcedures(lcommon.VotingProcedures{
+				&lcommon.Voter{
+					Type: lcommon.VoterTypeConstitutionalCommitteeHotKeyHash,
+					Hash: voterHash,
+				}: {
+					&lcommon.GovActionId{TransactionId: proposalHash}: {
+						Vote: models.VoteYes,
+					},
+				},
+			})
+			votePoint := ocommon.Point{
+				Slot: proposalSlot + 50,
+				Hash: testHash32("settle-vote-block"),
+			}
+
+			txn := db.Transaction(true)
+			defer txn.Release()
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				if err := db.Blob().SetBlock(
+					txn.Blob(), proposalSlot, proposalPoint.Hash, blockBytes,
+					0, 0, 0, nil,
+				); err != nil {
+					return err
+				}
+				if err := db.SetGapBlockTransaction(
+					proposalTx, proposalPoint, 0, nil, offsets, txn,
+				); err != nil {
+					return err
+				}
+				if tc.historical {
+					return ProcessHistoricalVotes(
+						voteTx, votePoint, voteEpoch, db, txn,
+					)
+				}
+				return ProcessVotes(voteTx, votePoint, voteEpoch, 20, db, txn)
+			}))
+
+			active, err := db.GetActiveGovernanceProposals(voteEpoch, nil)
+			require.NoError(t, err)
+			if !tc.historical {
+				require.Len(t, active, 1)
+				return
+			}
+			assert.Empty(t, active)
+			expiring, err := db.GetExpiringGovernanceProposals(200, nil)
+			require.NoError(t, err)
+			assert.Empty(t, expiring)
+			awaitingDrop, err := db.GetExpiredAwaitingDropGovernanceProposals(
+				200,
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Empty(t, awaitingDrop)
+			rebuilt, err := db.GetGovernanceProposal(proposalHash[:], 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, rebuilt.DroppedEpoch)
+			assert.Equal(t, proposalEpoch, *rebuilt.DroppedEpoch)
+		})
+	}
+}
