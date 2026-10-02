@@ -1638,6 +1638,13 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				NewEpoch:     currentEpoch,
 				BoundarySlot: 500,
 				PParams:      pparams,
+				ConwayGenesis: &conway.ConwayGenesis{
+					Committee: conway.ConwayGenesisCommittee{
+						Members: map[string]int{
+							"keyHash-genesis-committee-member": 20,
+						},
+					},
+				},
 				UpdateFn: func(
 					pparams lcommon.ProtocolParameters,
 					_ any,

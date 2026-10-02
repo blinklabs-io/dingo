@@ -2052,11 +2052,17 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 	})
 	assert.Zero(t, ls.UpstreamTipSlot())
 	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-		ConnectionId:      connA,
-		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(100, nil)},
+		ConnectionId: connA,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, nil),
+			BlockNumber: 101,
+		},
 		SyncTargetTrusted: true,
 	})
 	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
+	upstreamTip, upstreamLive := ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(101), upstreamTip.BlockNumber)
 
 	// A→B changes the authoritative active connection before the ledger has
 	// processed the switch. The A snapshot must not be visible as B's target.
@@ -2064,14 +2070,23 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 	target, active := ls.UpstreamSyncStatus()
 	assert.True(t, active)
 	assert.Zero(t, target)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
 	ls.publishActiveUpstream(connB)
 	assert.Zero(t, ls.UpstreamTipSlot())
 	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-		ConnectionId:      connB,
-		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(200, nil)},
+		ConnectionId: connB,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, nil),
+			BlockNumber: 202,
+		},
 		SyncTargetTrusted: true,
 	})
 	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(202), upstreamTip.BlockNumber)
 
 	// A deferred or rejected header never reaches the trusted publication path.
 	ls.recordAdmittedHeaderFrontier(ChainsyncEvent{ConnectionId: connB}, false)
@@ -6559,12 +6574,34 @@ func TestUpstreamSyncStatusReachableStates(t *testing.T) {
 			"pre-existing sync gate refuses this slot before the stale-tip "+
 			"gate runs, so no stale-tip branch may be written for it",
 	)
+	upstreamTip, upstreamLive := ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
+
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: conn,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(319, nil),
+			BlockNumber: 320,
+		},
+		SyncTargetTrusted: true,
+	})
+	target, active = ls.UpstreamSyncStatus()
+	assert.Equal(t, uint64(319), target)
+	assert.True(t, active)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(320), upstreamTip.BlockNumber)
+	assert.Equal(t, uint64(319), upstreamTip.Point.Slot)
 
 	// No live upstream -- (0, false).
 	live = false
 	target, active = ls.UpstreamSyncStatus()
 	assert.Zero(t, target)
 	assert.False(t, active)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.False(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
 }
 
 func TestSetForgedBlockChecker(t *testing.T) {
