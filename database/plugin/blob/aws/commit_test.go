@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/fakecloud"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	"github.com/stretchr/testify/require"
@@ -60,4 +61,13 @@ func TestS3PruneCommitVisibility(t *testing.T) {
 	t.Parallel()
 	store, fc := storeOnFakeCloud(t)
 	storagetest.RunCloudPruneCommitVisibility(t, fc, store)
+}
+
+func TestS3BlockNumberBoundWorkIsIndependentOfArchiveSize(t *testing.T) {
+	t.Parallel()
+	store, fc := storeOnFakeCloud(t)
+	dbtest.RunCloudBlockNumberBoundWork(
+		t, fc, fakeBucket, store,
+		func(key []byte) string { return store.fullKey(string(key)) },
+	)
 }

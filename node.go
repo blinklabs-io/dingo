@@ -1458,6 +1458,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			Port:                            n.config.barkPort,
 			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
 			DestinationRegistry:             n.destinationRegistry,
+			ArchiveMaxConcurrentFetches:     n.config.barkArchiveMaxConcurrentFetches,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and

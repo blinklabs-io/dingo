@@ -392,6 +392,11 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to a PEM CA bundle; client certs verified against it authenticate every Bark DatabaseService RPC (required whenever the database lifecycle service is enabled)",
 	),
+	intFlag(
+		"BarkArchiveMaxConcurrentFetches",
+		"bark-archive-max-concurrent-fetches",
+		"maximum concurrent Bark ArchiveService FetchBlock requests; requests over the limit are refused (0 = default of 16)",
+	),
 	stringSliceFlag(
 		"BarkOperatorCertificateFingerprints",
 		"bark-operator-certificate-fingerprints",
@@ -931,17 +936,17 @@ var flagSpecs = []flagSpec{
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
 	),
-}
-
-// RegisterFlags registers persistent CLI flags for every Config field.
-func RegisterFlags(cmd *cobra.Command) {
-	flags := cmd.PersistentFlags()
 	stringFlag(
 		"DatabaseLifecycle.SnapshotTrustKeyFile",
 		"db-snapshot-trust-key-file",
 		"",
 		"file holding the shared secret that authenticates snapshot manifests; snapshots are signed with it and restores require it to verify",
 	),
+}
+
+// RegisterFlags registers persistent CLI flags for every Config field.
+func RegisterFlags(cmd *cobra.Command) {
+	flags := cmd.PersistentFlags()
 	flags.SortFlags = false
 	// One snapshot for the whole loop. GetConfig deep-copies, so calling it
 	// per flag would deep-clone the config once per registered flag.

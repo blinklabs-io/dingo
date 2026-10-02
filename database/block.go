@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -340,13 +341,10 @@ func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
 // the highest block currently indexed.
 //
 // It is a value a caller resolves and carries, rather than something each
-// lookup rediscovers, because resolving it is the expensive half. Reading
-// the highest indexed block means a reverse iteration over the block-index
-// ("bi") prefix, and the s3 and gcs blob plugins implement a reverse
-// iterator by listing every object under the prefix into a temporary file
-// with no early break (listKeysToFile). One resolution is therefore a full
-// enumeration of every block-index object in the bucket. A caller resolving
-// more than one block number -- the bark archive service answers up to
+// lookup rediscovers, because resolving it is the expensive half: it takes
+// up to 64 probes into the block-index ("bi") prefix, each one a bounded
+// listing on the s3 and gcs blob plugins. A caller resolving more than one
+// block number -- the bark archive service answers up to
 // DefaultMaxFetchBlockRefs of them per unauthenticated request -- must
 // resolve the bound once and reuse it for the whole batch.
 type BlockNumberBound struct {
@@ -382,69 +380,48 @@ func ResolveBlockNumberBound(db *Database) (BlockNumberBound, error) {
 // ResolveBlockNumberBoundTxn resolves the bound within an existing
 // transaction. It reads only the ordered block-index entries and the small
 // per-block metadata object of the newest one, never block CBOR.
+//
+// The highest entry is found by bisecting the ID space with forward seeks
+// (blockIndexEntryAtOrAfterTxn) rather than by a reverse iteration: the s3
+// and gcs reverse iterators list the whole index prefix, so that read cost
+// grew with the archive, while a forward seek is one bounded listing. The
+// search narrows [lo, hi] around the highest ID, where lo is an ID known to
+// be indexed and nothing indexed lies above hi, so it ends after at most 64
+// probes whatever the index holds. Because every probe applies the same
+// staleness rules as the forward search that uses the bound, a stale entry at
+// the top is skipped here too.
 func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 	if txn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
-	blobTxn := txn.Blob()
-	if blobTxn == nil {
-		return BlockNumberBound{}, types.ErrNilTxn
-	}
-	blob := txn.BlobStore()
-	if blob == nil {
-		return BlockNumberBound{}, types.ErrBlobStoreUnavailable
-	}
-	prefix := []byte(types.BlockBlobIndexKeyPrefix)
-	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
-		Reverse: true,
-		Prefix:  prefix,
-	})
-	if it == nil {
-		return BlockNumberBound{}, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-	// 0xff sorts after any index key, so reverse iteration from it starts
-	// at the newest block. Same seek BlocksRecentTxn uses.
-	seek := append(slices.Clone(prefix), 0xff)
-	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
-		item := it.Item()
-		if item == nil {
-			continue
+	highest, err := blockIndexEntryAtOrAfterTxn(txn, 0)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return BlockNumberBound{}, nil
 		}
-		indexKey := item.Key()
-		if indexKey == nil {
-			continue
-		}
-		blockKey, err := item.ValueCopy(nil)
-		if err != nil {
-			return BlockNumberBound{}, err
-		}
-		metadata, err := blockMetadataByKey(txn, blockKey)
-		if err != nil {
-			// A stale index entry pointing at a block that is gone is
-			// skipped rather than fatal, so the bound and the forward
-			// search that uses it agree about which entries count.
-			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
-			}
-			return BlockNumberBound{}, err
-		}
-		// The index value is an indirection to the block blob, so a stale
-		// mapping can resolve to a block filed under a different ID. Only
-		// trust an entry whose block agrees with the index key.
-		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(metadata.ID)) {
-			continue
-		}
-		return BlockNumberBound{
-			HighestID:     metadata.ID,
-			HighestNumber: metadata.Height,
-			Resolved:      true,
-		}, nil
-	}
-	if err := it.Err(); err != nil {
 		return BlockNumberBound{}, err
 	}
-	return BlockNumberBound{}, nil
+	hi := uint64(math.MaxUint64)
+	for highest.id < hi {
+		// Upper midpoint, written to avoid overflow when the interval spans
+		// the whole ID space.
+		span := hi - highest.id
+		mid := highest.id + span/2 + span%2
+		entry, err := blockIndexEntryAtOrAfterTxn(txn, mid)
+		if err != nil {
+			if !errors.Is(err, models.ErrBlockNotFound) {
+				return BlockNumberBound{}, err
+			}
+			hi = mid - 1
+			continue
+		}
+		highest = entry
+	}
+	return BlockNumberBound{
+		HighestID:     highest.id,
+		HighestNumber: highest.number,
+		Resolved:      true,
+	}, nil
 }
 
 // BlockByNumber resolves the block carrying the given chain block number
