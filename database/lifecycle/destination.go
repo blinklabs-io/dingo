@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path"
@@ -75,9 +76,57 @@ type CloudDestination interface {
 	// (Snapshot's manifest.json/blob.bak/metadata.sqlite — it is not
 	// recursive) to the destination.
 	UploadDir(ctx context.Context, localDir string) error
-	// DownloadDir downloads the destination's contents into localDir,
-	// which must already exist and be empty.
-	DownloadDir(ctx context.Context, localDir string) error
+	// DownloadFiles downloads exactly the named objects into localDir, which
+	// must already exist. A snapshot's prefix is writable by anyone with
+	// access to the bucket, so objects that were not asked for are never
+	// listed or read, and a named object that is larger than its MaxBytes is
+	// rejected during transfer rather than written out in full. A missing
+	// object wraps ErrCloudSnapshotNotFound.
+	DownloadFiles(ctx context.Context, localDir string, files []DownloadFile) error
+}
+
+// DownloadFile names one object of a snapshot and the most bytes it may carry.
+type DownloadFile struct {
+	Name     string
+	MaxBytes int64
+}
+
+// ErrDownloadTooLarge reports an object that carried more bytes than the
+// snapshot's manifest declared for it.
+var ErrDownloadTooLarge = errors.New("cloud object exceeds its declared size")
+
+// copyBounded copies src to dst and fails once src yields more than maxBytes,
+// having written at most maxBytes. name only labels the error.
+func copyBounded(dst io.Writer, src io.Reader, maxBytes int64, name string) error {
+	n, err := io.Copy(dst, io.LimitReader(src, maxBytes))
+	if err != nil {
+		return err
+	}
+	if n < maxBytes {
+		return nil
+	}
+	var probe [1]byte
+	if m, _ := io.ReadFull(src, probe[:]); m > 0 {
+		return fmt.Errorf("%q exceeds %d bytes: %w", name, maxBytes, ErrDownloadTooLarge)
+	}
+	return nil
+}
+
+// writeBoundedFile creates path and fills it from src, removing it again when
+// the copy fails so a rejected object leaves nothing behind.
+func writeBoundedFile(path string, src io.Reader, file DownloadFile) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create %q for download: %w", path, err)
+	}
+	err = copyBounded(f, src, file.MaxBytes, file.Name)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+	}
+	return err
 }
 
 // CloudDestinationFactory constructs a CloudDestination from a parsed URI
@@ -276,14 +325,14 @@ func ParseCloudDestination(
 	return factory(u)
 }
 
-// downloadCloudSnapshot downloads the snapshot at the given cloud URI into
-// a fresh local temp directory and returns its path plus a cleanup func
-// that removes it. The caller must call cleanup once done (Restore defers
-// it immediately after a successful call).
-func downloadCloudSnapshot(
+// downloadCloudFiles downloads the named objects of the snapshot at the given
+// cloud URI into a fresh local temp directory and returns its path plus a
+// cleanup func that removes it. The caller must call cleanup once done.
+func downloadCloudFiles(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	uri string,
+	files []DownloadFile,
 ) (localDir string, cleanup func(), err error) {
 	dest, err := ParseCloudDestination(registry, uri)
 	if err != nil {
@@ -297,7 +346,7 @@ func downloadCloudSnapshot(
 		)
 	}
 	cleanup = func() { _ = os.RemoveAll(tempDir) }
-	if err := dest.DownloadDir(ctx, tempDir); err != nil {
+	if err := dest.DownloadFiles(ctx, tempDir, files); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf(
 			"download snapshot from %q: %w", uri, err,

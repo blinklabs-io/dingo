@@ -936,6 +936,12 @@ var flagSpecs = []flagSpec{
 // RegisterFlags registers persistent CLI flags for every Config field.
 func RegisterFlags(cmd *cobra.Command) {
 	flags := cmd.PersistentFlags()
+	stringFlag(
+		"DatabaseLifecycle.SnapshotTrustKeyFile",
+		"db-snapshot-trust-key-file",
+		"",
+		"file holding the shared secret that authenticates snapshot manifests; snapshots are signed with it and restores require it to verify",
+	),
 	flags.SortFlags = false
 	// One snapshot for the whole loop. GetConfig deep-copies, so calling it
 	// per flag would deep-clone the config once per registered flag.

@@ -155,9 +155,10 @@ func (*fakeInternalCloudDestination) UploadDir(
 	return nil
 }
 
-func (*fakeInternalCloudDestination) DownloadDir(
+func (*fakeInternalCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]DownloadFile,
 ) error {
 	return nil
 }

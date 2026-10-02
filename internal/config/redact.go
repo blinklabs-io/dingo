@@ -130,6 +130,7 @@ var logPlainConfigFields = []string{
 	"DatabaseLifecycle.SnapshotEveryNEpochs",
 	"DatabaseLifecycle.SnapshotRetention",
 	"DatabasePath",
+	"DatabaseLifecycle.SnapshotTrustKeyFile",
 	"DatabaseQueueSize",
 	"DatabaseWorkers",
 	"DebugBindAddr",

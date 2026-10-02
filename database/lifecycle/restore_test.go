@@ -1137,12 +1137,13 @@ func (d *manifestOnlyCloudDestination) UploadDir(
 	)
 }
 
-func (d *manifestOnlyCloudDestination) DownloadDir(
+func (d *manifestOnlyCloudDestination) DownloadFiles(
 	context.Context,
 	string,
+	[]lifecycle.DownloadFile,
 ) error {
 	return errors.New(
-		"manifestOnlyCloudDestination: DownloadDir must never be called",
+		"manifestOnlyCloudDestination: DownloadFiles must never be called",
 	)
 }
 
@@ -1217,11 +1218,12 @@ func (d *noManifestFetcherCloudDestination) UploadDir(
 	return d.inner.UploadDir(ctx, localDir)
 }
 
-func (d *noManifestFetcherCloudDestination) DownloadDir(
+func (d *noManifestFetcherCloudDestination) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	return d.inner.DownloadDir(ctx, localDir)
+	return d.inner.DownloadFiles(ctx, localDir, files)
 }
 
 var _ lifecycle.CloudDestination = &noManifestFetcherCloudDestination{}

@@ -83,23 +83,20 @@ func (d *barkFakeCloudDestination) UploadDir(
 	return nil
 }
 
-func (d *barkFakeCloudDestination) DownloadDir(
+func (d *barkFakeCloudDestination) DownloadFiles(
 	_ context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	entries, err := os.ReadDir(d.dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(d.dir, entry.Name()))
+	for _, file := range files {
+		data, err := os.ReadFile(filepath.Join(d.dir, file.Name))
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(localDir, entry.Name()), data, 0o600); err != nil {
+		if int64(len(data)) > file.MaxBytes {
+			return lifecycle.ErrDownloadTooLarge
+		}
+		if err := os.WriteFile(filepath.Join(localDir, file.Name), data, 0o600); err != nil {
 			return err
 		}
 	}
@@ -231,11 +228,12 @@ func (d *barkFakeCloudDestinationNoDelete) UploadDir(
 	return (&barkFakeCloudDestination{dir: d.dir}).UploadDir(ctx, localDir)
 }
 
-func (d *barkFakeCloudDestinationNoDelete) DownloadDir(
+func (d *barkFakeCloudDestinationNoDelete) DownloadFiles(
 	ctx context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	return (&barkFakeCloudDestination{dir: d.dir}).DownloadDir(ctx, localDir)
+	return (&barkFakeCloudDestination{dir: d.dir}).DownloadFiles(ctx, localDir, files)
 }
 
 func (d *barkFakeCloudDestinationNoDelete) FetchManifest(
@@ -297,9 +295,10 @@ func (d *barkFakeCloudDestinationCommError) UploadDir(
 	return errors.New("simulated cloud communication failure")
 }
 
-func (d *barkFakeCloudDestinationCommError) DownloadDir(
+func (d *barkFakeCloudDestinationCommError) DownloadFiles(
 	context.Context,
 	string,
+	[]lifecycle.DownloadFile,
 ) error {
 	return errors.New("simulated cloud communication failure")
 }

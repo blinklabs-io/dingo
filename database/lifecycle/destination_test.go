@@ -17,6 +17,7 @@ package lifecycle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -75,23 +76,28 @@ func (d *fakeCloudDestination) UploadDir(
 	return nil
 }
 
-func (d *fakeCloudDestination) DownloadDir(
+// DownloadFiles copies only the named files, rejecting one larger than its
+// MaxBytes, and records every name it was asked for in fetched.
+func (d *fakeCloudDestination) DownloadFiles(
 	_ context.Context,
 	localDir string,
+	files []lifecycle.DownloadFile,
 ) error {
-	entries, err := os.ReadDir(d.dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(d.dir, entry.Name()))
+	fakeCloudMu.Lock()
+	fakeCloudFetched = append(fakeCloudFetched, files...)
+	fakeCloudMu.Unlock()
+	for _, file := range files {
+		data, err := os.ReadFile(filepath.Join(d.dir, file.Name))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%s: %w", file.Name, lifecycle.ErrCloudSnapshotNotFound)
+			}
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(localDir, entry.Name()), data, 0o600); err != nil {
+		if int64(len(data)) > file.MaxBytes {
+			return fmt.Errorf("%s: %w", file.Name, lifecycle.ErrDownloadTooLarge)
+		}
+		if err := os.WriteFile(filepath.Join(localDir, file.Name), data, 0o600); err != nil {
 			return err
 		}
 	}
@@ -134,6 +140,9 @@ var (
 var (
 	fakeCloudMu  sync.Mutex
 	fakeCloudDir string
+	// fakeCloudFetched records every DownloadFile any fake destination was
+	// asked for since the current test took the fixture.
+	fakeCloudFetched []lifecycle.DownloadFile
 	// fakeCloudFixtureMu serializes use of the whole fixture above (not
 	// just each individual read/write of fakeCloudDir, which fakeCloudMu
 	// already does) across an entire test's lifetime: setFakeCloudBackingDir
@@ -191,10 +200,12 @@ func setFakeCloudBackingDir(t *testing.T, dir string) {
 	fakeCloudFixtureMu.Lock()
 	fakeCloudMu.Lock()
 	fakeCloudDir = dir
+	fakeCloudFetched = nil
 	fakeCloudMu.Unlock()
 	t.Cleanup(func() {
 		fakeCloudMu.Lock()
 		fakeCloudDir = ""
+		fakeCloudFetched = nil
 		fakeCloudMu.Unlock()
 		fakeCloudFixtureMu.Unlock()
 	})

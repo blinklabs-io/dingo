@@ -1226,6 +1226,14 @@ var configMu sync.RWMutex
 
 // newDefaultConfig returns a fresh Config carrying every built-in default.
 // This is the single source of truth for those defaults: globalConfig
+	// SnapshotTrustKeyFile is the path to a file holding the shared secret
+	// that authenticates snapshot manifests. When set, every snapshot's
+	// manifest is signed with it and a restore refuses a manifest that does
+	// not verify, so a writer to the cloud destination cannot substitute
+	// payloads. Without it a manifest is only checked against its own
+	// unkeyed checksum. Every node that restores another's snapshots must
+	// hold the same secret.
+	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 // (mutated over the process lifetime by LoadConfig/ApplyFlags) is seeded
 // from it. A test that needs to pin one of these defaults directly --
 // rather than through resetGlobalConfig's own, deliberately narrower test
