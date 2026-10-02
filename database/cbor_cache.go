@@ -198,6 +198,17 @@ func NewTieredCborCache(config CborCacheConfig, db *Database) *TieredCborCache {
 	}
 }
 
+func (c *TieredCborCache) cacheBlockCbor(
+	slot uint64,
+	hash [32]byte,
+	blockCbor []byte,
+) {
+	if c == nil || c.blockLRU == nil {
+		return
+	}
+	c.blockLRU.Put(slot, hash, newCachedBlock(blockCbor))
+}
+
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
 // It checks caches in order: hot UTxO cache, block LRU cache, then blob store.
 // An optional database transaction can be provided to see uncommitted writes
