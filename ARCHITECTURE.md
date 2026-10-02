@@ -8215,9 +8215,12 @@ then DRep deregistration cleanup. A deregistration-only transaction still
 clears that DRep's votes on active proposals. Conway certificate-state import
 also preserves the dormant-epoch count from both nested VState and historical
 flattened committee-state encodings, applying it to active DRep expiries. Once
-the flattened parser selects a DRep map, any DRep or reverse-delegator decode
-error fails the import; it must not checkpoint partial governance state as
-complete.
+the flattened parser selects a DRep map, a decode error in any DRep key,
+expiry, anchor (URL, or a hash that is not 32 bytes), deposit or delegator
+fails the import; it must not checkpoint partial governance state as complete.
+Live application, backfill and gap replay require Conway protocol parameters
+only for transactions that read them (`governance.TransactionRequiresConwayParameters`);
+a transaction that only deregisters DReps applies without them.
 
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,

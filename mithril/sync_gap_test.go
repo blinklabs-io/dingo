@@ -769,6 +769,102 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 	assert.Equal(t, point.Slot, votes[0].AddedSlot)
 }
 
+// A gap transaction that only deregisters DReps reads neither the DRep
+// inactivity period nor the governance action lifetime, so it must replay
+// without Conway protocol parameters; one that reads them must still fail.
+func TestProcessGapBlockTransactionsWithoutConwayParameters(t *testing.T) {
+	t.Parallel()
+
+	drepCred := testGapHash28("drep-without-params")
+	drepCertificate := func(certType uint) []lcommon.Certificate {
+		credential := lcommon.Credential{
+			CredType:   0,
+			Credential: lcommon.NewBlake2b224(drepCred),
+		}
+		if certType == uint(lcommon.CertificateTypeRegistrationDrep) {
+			return []lcommon.Certificate{&lcommon.RegistrationDrepCertificate{
+				CertType:       certType,
+				DrepCredential: credential,
+				Amount:         500,
+			}}
+		}
+		return []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
+			CertType:       certType,
+			DrepCredential: credential,
+		}}
+	}
+	for _, test := range []struct {
+		name     string
+		certType uint
+		wantErr  string
+	}{
+		{
+			name:     "deregistration only",
+			certType: uint(lcommon.CertificateTypeDeregistrationDrep),
+		},
+		{
+			name:     "registration",
+			certType: uint(lcommon.CertificateTypeRegistrationDrep),
+			wantErr:  "missing Conway protocol parameters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				DataDir: t.TempDir(),
+				Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			})
+			require.NoError(t, err)
+			defer dbtest.CloseDatabase(db)
+			require.NoError(t, db.CreateDrep(nil, &models.Drep{
+				CredentialTag: 0,
+				Credential:    drepCred,
+				Active:        true,
+			}))
+			var txHash lcommon.Blake2b256
+			copy(txHash[:], testGapHash32("drep-without-params-tx"))
+			tx := &mockGapGovernanceTransaction{
+				hash:         txHash,
+				isValid:      true,
+				certificates: drepCertificate(test.certType),
+			}
+			point := ocommon.Point{
+				Slot: 1000,
+				Hash: testGapHash32("gap-block-without-params"),
+			}
+			var blockHash, txHashArray [32]byte
+			copy(blockHash[:], point.Hash)
+			copy(txHashArray[:], txHash.Bytes())
+			offsets := &database.BlockIngestionResult{
+				TxOffsets: map[[32]byte]database.CborOffset{
+					txHashArray: {
+						BlockSlot:  point.Slot,
+						BlockHash:  blockHash,
+						ByteLength: 1,
+					},
+				},
+				UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+			}
+			err = processGapBlockTransactions(
+				db,
+				slog.New(slog.NewTextHandler(io.Discard, nil)),
+				point,
+				[]lcommon.Transaction{tx},
+				offsets,
+				100,
+				conway.EraIdConway,
+				nil,
+				nil,
+			)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 	t *testing.T,
 ) {

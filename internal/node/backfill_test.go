@@ -140,6 +140,63 @@ func TestBackfillBumpsDormantDRepAtEmptyEpochBoundary(t *testing.T) {
 	require.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
+// A proposal whose last live epoch is the one the boundary closes is no longer
+// live in the epoch the boundary opens, so it does not suppress the dormant
+// epoch bump.
+func TestBackfillBumpsDormantDRepWhenProposalExpiresAtBoundary(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	credential := bytes.Repeat([]byte{0xD5}, 28)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        bytes.Repeat([]byte{0xD6}, 32),
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ProposedEpoch: 0,
+			ExpiresEpoch:  0,
+			AnchorURL:     "https://example.invalid/backfill-final-epoch",
+			AnchorHash:    bytes.Repeat([]byte{0xD7}, 32),
+		},
+		nil,
+	))
+	for epoch, slot := range []uint64{0, 1} {
+		require.NoError(t, db.SetEpoch(
+			slot,
+			uint64(epoch),
+			nil,
+			nil,
+			nil,
+			nil,
+			conway.EraIdConway,
+			1,
+			1,
+			nil,
+		))
+	}
+	blocks, err := testfixtures.GenerateConwayChainAt(1, 0, 2)
+	require.NoError(t, err)
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:   block.SlotNumber(),
+			Hash:   block.Hash().Bytes(),
+			Number: block.BlockNumber(),
+			Cbor:   block.Cbor(),
+			Type:   uint(block.Type()),
+		}, nil))
+	}
+	backfill := NewBackfill(db, nil, slog.Default())
+	backfill.DisableNonceComputation()
+	require.NoError(t, backfill.Run(context.Background()))
+	drep, err := db.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	t *testing.T,
 ) {
@@ -357,6 +414,109 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
+}
+
+// A transaction that only deregisters DReps reads neither the DRep inactivity
+// period nor the governance action lifetime, so replay must apply it while no
+// Conway protocol parameters are available; a transaction that does read them
+// must still fail.
+func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	drepCredential := bytes.Repeat([]byte{0xA1}, lcommon.Blake2b224Size)
+	var credentialHash lcommon.CredentialHash
+	copy(credentialHash[:], drepCredential)
+	deregistration := func() lcommon.Transaction {
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA2}, lcommon.Blake2b256Size))
+		tx.WithCertificates(&lcommon.DeregistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+		})
+		tx.WithValid(true)
+		return tx
+	}
+	registration := func() lcommon.Transaction {
+		tx := mockledger.NewTransactionBuilder()
+		tx.WithId(bytes.Repeat([]byte{0xA3}, lcommon.Blake2b256Size))
+		tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: credentialHash,
+			},
+			Amount: 500,
+		})
+		tx.WithValid(true)
+		return tx
+	}
+	point := ocommon.NewPoint(1000, bytes.Repeat([]byte{0xA4}, 32))
+
+	for _, test := range []struct {
+		name    string
+		tx      func() lcommon.Transaction
+		wantErr string
+	}{
+		{name: "deregistration only", tx: deregistration},
+		{
+			name:    "registration",
+			tx:      registration,
+			wantErr: "missing Conway protocol parameters",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			backfill := NewBackfill(db, nil, slog.Default())
+			require.NoError(t, db.CreateDrep(nil, &models.Drep{
+				CredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				Credential:    drepCredential,
+				AddedSlot:     900,
+				Active:        true,
+			}))
+			require.NoError(t, db.SetGovernanceProposal(
+				&models.GovernanceProposal{
+					TxHash:        bytes.Repeat([]byte{0xA5}, 32),
+					ActionType:    uint8(lcommon.GovActionTypeInfo),
+					ProposedEpoch: 100,
+					ExpiresEpoch:  120,
+					AddedSlot:     900,
+				},
+				nil,
+			))
+			proposal, err := db.GetGovernanceProposal(
+				bytes.Repeat([]byte{0xA5}, 32), 0, nil,
+			)
+			require.NoError(t, err)
+			require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+				ProposalID:         proposal.ID,
+				VoterType:          uint8(models.VoterTypeDRep),
+				VoterCredentialTag: uint8(lcommon.CredentialTypeAddrKeyHash),
+				VoterCredential:    drepCredential,
+				Vote:               uint8(models.VoteYes),
+				AddedSlot:          900,
+			}, nil))
+			txn := db.Transaction(true)
+			defer txn.Release()
+			err = backfill.processBlockGovernanceLevel(
+				test.tx(), point, 100, nil, txn,
+			)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+			require.NoError(t, err)
+			assert.Empty(t, votes)
+		})
+	}
 }
 
 func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(

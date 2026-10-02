@@ -455,14 +455,8 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txn *database.Txn,
 ) error {
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	hasDRepDeregistrations := governance.HasDRepDeregistrationCertificates(tx)
-
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
-		!hasDRepDeregistrations {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
 
@@ -476,7 +470,7 @@ func (d *LedgerDelta) processGovernance(
 
 	conwayPParams := conwayProtocolParameters(pparams)
 	if conwayPParams == nil &&
-		(len(proposals) > 0 || len(votes) > 0 || hasDRepActivityCerts) {
+		governance.TransactionRequiresConwayParameters(tx) {
 		return fmt.Errorf(
 			"governance requires Conway protocol parameters, got %T",
 			pparams,

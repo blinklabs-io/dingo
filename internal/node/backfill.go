@@ -651,15 +651,10 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	hasDRepDeregistrations := governance.HasDRepDeregistrationCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts &&
-		!hasDRepDeregistrations {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
-	if conwayPP == nil && (len(proposals) > 0 || len(votes) > 0 || hasDRepActivityCerts) {
+	if conwayPP == nil && governance.TransactionRequiresConwayParameters(tx) {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
 		)

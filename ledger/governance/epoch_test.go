@@ -906,6 +906,72 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 	}
 }
 
+// An action ratified at the boundary that closes its final epoch has
+// expires_epoch below the new epoch, so it does not count as a live proposal
+// for the dormant-epoch bump into that new epoch.
+func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, _ := newTallyTestDB(t)
+	drepCredential := testBytes(28, 0x71)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	})
+	require.NoError(t, err)
+	txHash := testBytes(32, 0x72)
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        txHash,
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+			ProposedEpoch: 4,
+			ExpiresEpoch:  4,
+			AnchorURL:     "https://example.invalid/dormancy-final-boundary",
+			AnchorHash:    testBytes(32, 0x73),
+			ReturnAddress: testBytes(29, 0x74),
+			GovActionCbor: actionCbor,
+			AddedSlot:     400,
+		},
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams: &conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 	t *testing.T,
 ) {

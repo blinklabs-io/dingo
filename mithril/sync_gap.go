@@ -699,14 +699,11 @@ func processGapBlockTransactions(
 			if !level.IsValid() {
 				continue
 			}
-			hasGovernance := len(level.ProposalProcedures()) > 0 ||
-				len(level.VotingProcedures()) > 0
-			hasDRepActivity := governance.HasDRepActivityCertificates(level)
-			hasDRepDeregistration := governance.HasDRepDeregistrationCertificates(level)
-			if !hasGovernance && !hasDRepActivity && !hasDRepDeregistration {
+			if !governance.TransactionHasGovernanceEffects(level) {
 				continue
 			}
-			if (hasGovernance || hasDRepActivity) && conwayPParams == nil {
+			if conwayPParams == nil &&
+				governance.TransactionRequiresConwayParameters(level) {
 				return errors.New(
 					"missing Conway protocol parameters for governance gap block processing",
 				)

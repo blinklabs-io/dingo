@@ -211,6 +211,25 @@ func ProcessProposals(
 	)
 }
 
+// TransactionRequiresConwayParameters reports whether applying tx's governance
+// effects reads Conway protocol parameters: votes and DRep activity
+// certificates use the DRep inactivity period, and proposals use the governance
+// action lifetime. DRep deregistration reads neither, so a transaction that
+// only deregisters DReps applies without them. Live application, backfill and
+// gap replay share this predicate so their missing-parameter guards agree.
+func TransactionRequiresConwayParameters(tx lcommon.Transaction) bool {
+	return len(tx.ProposalProcedures()) > 0 ||
+		len(tx.VotingProcedures()) > 0 ||
+		HasDRepActivityCertificates(tx)
+}
+
+// TransactionHasGovernanceEffects reports whether ProcessTransactionEffects
+// has anything to apply for tx.
+func TransactionHasGovernanceEffects(tx lcommon.Transaction) bool {
+	return TransactionRequiresConwayParameters(tx) ||
+		HasDRepDeregistrationCertificates(tx)
+}
+
 // ProcessTransactionEffects applies transaction governance state after its
 // certificate records have been persisted. Keep this ordering shared by live
 // application, backfill, gap replay, and conformance state.
