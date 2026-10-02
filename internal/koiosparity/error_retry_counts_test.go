@@ -23,12 +23,14 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
 func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
+	t.Parallel()
 	for _, accounts := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate", true: "accounts"}[accounts], func(t *testing.T) {
 			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
@@ -85,6 +87,7 @@ func TestObserverAutomaticallyRecoversErrorEpochWithoutNewEvent(t *testing.T) {
 }
 
 func TestSignificantCountsSurviveIndependentPhaseWritesAndReports(t *testing.T) {
+	t.Parallel()
 	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cache.Close()) })
@@ -119,6 +122,7 @@ func TestSignificantCountsSurviveIndependentPhaseWritesAndReports(t *testing.T) 
 }
 
 func TestErrorEpochsAreSelectedAfterReferenceBecomesUnchanged(t *testing.T) {
+	t.Parallel()
 	cache, err := openTestCache(filepath.Join(t.TempDir(), "cache.db"), nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cache.Close()) })
@@ -139,6 +143,7 @@ func TestErrorEpochsAreSelectedAfterReferenceBecomesUnchanged(t *testing.T) {
 }
 
 func TestSignificantCountMigrationUsesStoredCategoryAndScope(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "cache.db")
 	cache, err := openTestCache(path, nil)
 	require.NoError(t, err)
@@ -176,6 +181,7 @@ func TestSignificantCountMigrationUsesStoredCategoryAndScope(t *testing.T) {
 }
 
 func TestObserverSeedsErrorRetriesForTheOwningPhase(t *testing.T) {
+	t.Parallel()
 	for _, accountError := range []bool{false, true} {
 		t.Run(map[bool]string{false: "aggregate", true: "account"}[accountError], func(t *testing.T) {
 			db := newTestDatabaseSourceDB(t)
@@ -203,6 +209,57 @@ func TestObserverSeedsErrorRetriesForTheOwningPhase(t *testing.T) {
 			} else {
 				require.Equal(t, map[uint64]struct{}{5: {}}, o.pending)
 				require.Empty(t, o.pendingAccounts)
+			}
+		})
+	}
+}
+
+func TestAccountRetryUsesItsOwnCompletedPhase(t *testing.T) {
+	t.Parallel()
+	for _, accountError := range []bool{false, true} {
+		t.Run(map[bool]string{false: "aggregate error account pass", true: "aggregate fail account error"}[accountError], func(t *testing.T) {
+			source, err := NewDatabaseSource(newTestDatabaseSourceDB(t))
+			require.NoError(t, err)
+			seedDingoEpochAggregate(t, source, 5, 2_000_000, 10, 20, 30)
+			db := sourceSQLDB(t, source.db)
+			if accountError {
+				require.NoError(t, db.Create(&models.RewardAccountOutput{
+					Epoch: 4, StakingKey: []byte{1}, PoolKeyHash: testPoolKeyHash(t, 0x66),
+					RewardType: "member", Amount: types.Uint64(1), Spendable: true,
+				}).Error)
+			} else {
+				require.NoError(t, db.Exec("DELETE FROM epoch_summary WHERE epoch = ?", 4).Error)
+			}
+			srv := newFakeKoiosServer(t, map[uint64]*fakeEpochRef{
+				5: {activeStake: "1000000", treasury: "10", reserves: "20", fees: "30", endTimeUnix: time.Now().Add(-time.Hour).Unix()},
+			})
+			var result *EpochCompareResult
+			o, err := NewObserver(ObserverConfig{
+				Network: "preview", Source: source, CachePath: filepath.Join(t.TempDir(), "cache.db"),
+				BaseURL: srv.URL, AllowInsecureHTTP: true, AllowPrivateAddresses: true,
+				AccountsEnabled: true, GraceHours: 24,
+				OnResult: func(r *EpochCompareResult) { result = r },
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, o.Stop(context.Background())) })
+			o.retryAccounts[5] = time.Now()
+			o.processAccountEpoch(context.Background(), 5)
+			require.NotNil(t, result)
+			require.True(t, result.CoversScope(ScopeAccount))
+			statuses, err := o.cache.GetStatusSummary("preview")
+			require.NoError(t, err)
+			require.Len(t, statuses, 1)
+			if accountError {
+				require.Equal(t, StatusFail, result.Status)
+				require.Equal(t, StatusFail, statuses[0].AggregateStatus)
+				require.Equal(t, StatusError, statuses[0].AccountStatus)
+				require.Contains(t, o.retryAccounts, uint64(5))
+				require.True(t, o.retryAccounts[5].After(time.Now()))
+			} else {
+				require.Equal(t, StatusError, result.Status)
+				require.Equal(t, StatusError, statuses[0].AggregateStatus)
+				require.Equal(t, StatusPass, statuses[0].AccountStatus)
+				require.NotContains(t, o.retryAccounts, uint64(5))
 			}
 		})
 	}

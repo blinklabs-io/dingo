@@ -888,7 +888,16 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
 		return
 	}
-	o.scheduleErrorRetry(epoch, true, result.Status)
+	if result.CoversScope(ScopeAccount) {
+		var accountMismatches []CheckMismatch
+		for _, mismatch := range result.Mismatches {
+			if mismatch.Scope == ScopeAccount {
+				accountMismatches = append(accountMismatches, mismatch)
+			}
+		}
+		// The merged verdict can hide an account ERROR under an aggregate FAIL.
+		o.scheduleErrorRetry(epoch, true, DetermineStatus(accountMismatches))
+	}
 	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
 		o.cfg.Logger.Warn(
