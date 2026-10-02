@@ -378,7 +378,7 @@ func (s *Store) listS3(rec *recorder, bucket string, q url.Values) {
 		n < limit {
 		limit = n
 	}
-	var page []string
+	page := make([]string, 0, limit)
 	truncated := false
 	for _, k := range s.Keys(bucket, q.Get("prefix")) {
 		if after != "" && k <= after {
