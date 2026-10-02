@@ -120,7 +120,10 @@ func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 		candidates = append(candidates, peer)
 	}
 	slices.SortStableFunc(nonRoot, p.redialRankCompare)
-	for _, peer := range nonRoot[:min(len(nonRoot), emergencyBudget)] {
+	for i, peer := range nonRoot {
+		if i >= emergencyBudget {
+			break
+		}
 		if p.metrics != nil {
 			p.metrics.coldPeerRedialsByTrigger.WithLabelValues(
 				trigger,

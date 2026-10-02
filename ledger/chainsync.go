@@ -285,7 +285,7 @@ type peerHeaderHistoryCandidate struct {
 
 type peerHeaderHistoryCandidateHeap []*peerHeaderHistoryCandidate
 
-func (h *peerHeaderHistoryCandidateHeap) Len() int { return len(*h) }
+func (h peerHeaderHistoryCandidateHeap) Len() int { return len(h) }
 
 func (h *peerHeaderHistoryCandidateHeap) Less(i, j int) bool {
 	if (*h)[i].sequence != (*h)[j].sequence {
@@ -310,7 +310,7 @@ func (h *peerHeaderHistoryCandidateHeap) Pop() any {
 	old := *h
 	last := len(old) - 1
 	candidate := old[last]
-	old[last] = nil
+	clear(old[last:])
 	candidate.index = -1
 	*h = old[:last]
 	return candidate

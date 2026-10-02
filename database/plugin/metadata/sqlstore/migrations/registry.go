@@ -345,7 +345,7 @@ func rewardCreditRoundBackfill(
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
 	}
-	var rounds []models.RewardCreditRound
+	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
 	}
@@ -361,7 +361,8 @@ func rewardCreditRoundBackfill(
 		start = parsed
 	}
 	end := min(start+batch.Limit, len(rounds))
-	for _, round := range rounds[start:end] {
+	for i := start; i < end; i++ {
+		round := rounds[i]
 		if round.SnapshotEpoch > uint64(1<<63-1) || round.BoundarySlot > uint64(1<<63-1) {
 			return BatchResult{}, fmt.Errorf(
 				"legacy reward credit round exceeds SQL integer range: epoch %d slot %d",
