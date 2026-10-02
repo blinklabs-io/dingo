@@ -2515,6 +2515,7 @@ func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	require.Len(t, state.poolOutputs, 1)
 	require.Equal(t, types.Uint64(90), state.poolOutputs[0].TotalReward)
 	require.Equal(t, types.Uint64(10), state.poolOutputs[0].LeaderReward)
+	require.Equal(t, types.Uint64(7), state.poolOutputs[0].LeaderRewardDeficit)
 	require.Len(t, state.accountOutputs, 1)
 	require.Equal(t, uint64(80), uint64(state.accountOutputs[0].Amount))
 	require.Empty(t, state.rolledBackPoolOutputs)
@@ -2695,6 +2696,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 				OptimalReward:       100,
 				TotalReward:         90,
 				LeaderReward:        10,
+				LeaderRewardDeficit: 7,
 				MemberRewardTotal:   80,
 				OwnerStake:          20,
 				Undistributed:       5,

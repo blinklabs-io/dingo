@@ -5224,7 +5224,7 @@ active or while corroboration is incomplete.
 
 #### Header Verification Handoff
 
-When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records whether the first queued header was stateless-crypto verified; blockfetch skips only that duplicate stateless work. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
+When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
 
 #### Leios CertRB Serving (NtC)
 
@@ -6431,7 +6431,8 @@ slot declines it without building; a primary chain tip already holding an
 unapplied block at the slot is counted as `unapplied_rival_at_leader_slot`;
 an applied tip that has fallen more than `forgeSyncToleranceSlots` behind the
 network refuses on `dingo_forge_sync_skip_total`; `primary_tip_behind_applied`,
-`primary_tip_hash_diverged`, `slot_gap` and the opt-in staleness bounds refuse
+`primary_tip_hash_diverged`, `applied_tip_not_primary_ancestor`,
+`unapplied_block_gap`, `peer_height_gap` and the opt-in staleness bounds refuse
 as they do at entry, counted on `dingo_forge_stale_tip_skip_total`; and last,
 an applied tip at the slot is counted once as a slot battle. When the chain
 context, durable forge fence and builder support it, the re-check refreshes
@@ -6669,56 +6670,54 @@ the ledger pipeline works through blocks it has added to the chain but not yet
 applied, the primary chain tip runs ahead, and forging then signs a block whose
 contents were chosen against an older chain position than its parent.
 
-`forgePrimaryChainTipToleranceSlots` (default 5, flag
-`--forge-primary-chain-tip-tolerance-slots`, env
-`CARDANO_DINGO_FORGE_PRIMARY_CHAIN_TIP_TOLERANCE_SLOTS`) bounds that gap. It is
-much smaller than `forgeSyncToleranceSlots` because both tips are local and are
-meant to describe the same chain position, whereas the sync tolerance
-deliberately allows trailing the network while catching up; it is not zero
-because the ledger pipeline commits in batches, so on a chain whose blocks
-arrive every slot or two a slot or two of gap is the normal steady state at the
-head. The gate also compares tip identity, not just position: an equal-slot
-fork the ledger has not applied has a gap of zero but still means the two views
-describe different blocks. Skips are logged at `WARN` with a reason-specific
-message (`slot_gap` keeps `forge skip: ledger tip stale vs primary chain tip`;
-the other four routed through that gate name their own comparison, since they
-can fire with the applied tip and the primary chain tip in exact agreement) and
-counted by `dingo_forge_stale_tip_skip_total`. The ledger-apply backlog itself
-is reported on every leader check by `dingo_forge_tip_gap_slots`. Raising the
-tolerance lets the node forge blocks whose contents were chosen against an
-older chain position than their parent, so raise it only where the ledger
-pipeline is known to be legitimately slow.
+The local safety gate checks ancestry and limits a coherent parent to at most
+two unapplied blocks. It also keeps `forgeSyncToleranceSlots` as a coarse slot
+prefilter for a large local gap. The block limit catches same-chain lag on both
+sparse and dense networks; the slot prefilter catches a long local delay even
+when only one block is awaiting application. Same-slot forks are detected by
+the ancestry check, not by comparing their slots alone.
 
-The bound is measured in slots, but the hazard is per unapplied *block*: each
-block added to the chain and not yet applied is one block's worth of divergence
-between the parent the builder would use and the ledger state the contents were
-chosen against. How many blocks a slot bound admits is decided by the chain's
-block density, so the same default means different things at the two ends. On a
-dense chain -- blocks every slot or two, as on the Leios devnet -- five slots can
-span several unapplied blocks, which is why the default is not smaller. On a
-sparse chain -- mainnet's active slot coefficient puts consecutive blocks
-roughly 20 slots apart -- a single in-flight block already leaves a gap near 20
-and trips `slot_gap` on its own, so five slots gives such a chain no headroom
-and the effective skip rate there is set by ledger apply latency rather than by
-the tolerance. Both ends err safe, so this is not an argument for a larger
-default: the default is calibrated for fast, dense chains, and an operator
-sizing it for a sparser chain (mainnet included) should derive it from that
-chain's expected block spacing and the number of unapplied blocks they are
-willing to forge on top of -- roughly `blocks_tolerated * slots_per_block` --
-rather than from the dense-chain "a slot or two" steady state. The bound is not
-yet expressed in blocks, or as an ancestry predicate over the unapplied span.
+For network catch-up, a corroborated upstream sync target is checked by block
+height against the current era's security parameter K. This catches a node
+whose peer is substantially ahead in blocks even when the slot gap is within
+`forgeSyncToleranceSlots`. The ordinary sync gate continues to use its slot
+tolerance for bulk catch-up. Both limits use full tip snapshots, including
+block numbers.
 
-The gate also covers the case the primary-chain-tip comparison structurally
-cannot see:
-header admission and ledger application stalling *together*. Both local tips
-then agree, every gap above reads 0, and the node forges on a parent the
-network has long built past. Three further bounds catch it, **all three off by
-default (0 = disabled)**. The first two are measured against `newestKnown` --
-the most recent block this node has evidence of from the two sources this gate
-can see: a block on the primary chain (`chain.Tip()`, applied or merely added)
-and a corroborated Leios endorser block. It deliberately does **not** include
-the admitted header frontier (`chain.HeaderTip()`), which is why the first
-bound below must be opt-in:
+The slot prefilter still measures a local delay in slots, so its effective
+headroom depends on block density. The independent two-block limit bounds how
+many unapplied blocks can separate the builder's parent from ledger state; the
+slot prefilter catches a long delay even when only one block is waiting. This
+keeps the local bound useful on both dense and sparse chains without sizing a
+slot threshold as a proxy for block count.
+
+Production slot-clock implementations must also provide `ForgeSafetyTipProvider`
+snapshots for the applied tip and K, primary-tip ancestry, and upstream block
+height. Forging returns an error when those snapshots are unavailable or K is
+not positive.
+
+`dingo_forge_stale_tip_skip_total` records the specific refusal reason, and
+`dingo_forge_tip_gap_slots` continues to report the slot backlog for diagnosis.
+The former `ForgePrimaryChainTipToleranceSlots` API field and
+`forgePrimaryChainTipToleranceSlots` YAML, environment, and CLI settings are
+removed. The local two-block limit and slot prefilter replace that slot-only
+setting; K remains the separate peer-height bound.
+The builder independently rechecks applied-tip ancestry before and after
+transaction selection against the tip it will actually use. Immediately before
+signing, `Chain.WithTip` holds the primary-chain lock while the builder confirms
+the parent and signs, preventing a tip change from invalidating the ancestry
+check.
+
+The gate also covers header admission and ledger application stalling
+*together*. Both local tips then agree, every local gap reads 0, and the node
+can forge on a parent the network has long built past. A block-height check
+catches a corroborated peer more than K blocks ahead. An unknown upstream
+target is not evidence that the network has advanced; in that state the forger
+does not compare the local tip with the wall clock. `forgeUpstreamStalenessSlots`
+and `forgeEndorserBlockStalenessSlots` remain opt-in. The first compares
+`newestKnown` -- the latest block on the primary chain or corroborated Leios
+endorser block -- with the upstream header target, so it must account for their
+different pipeline stages:
 
 - `forgeUpstreamStalenessSlots` (**default 0 = disabled**, flag
   `--forge-upstream-staleness-slots`, env
@@ -6758,11 +6757,10 @@ bound below must be opt-in:
   `TestForgeUpstreamStalenessIgnoresUnknownUpstreamTarget` pins this case.
 - `forgeAppliedTipStalenessSlots` (default 0 = disabled, flag
   `--forge-applied-tip-staleness-slots`, env
-  `CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS`) is a wall-clock backstop
-  bounding how many slots older than the current slot `newestKnown` may be. It
-  is off by default because "how old is my newest block" tracks the block
-  interval, so any fixed bound refuses constantly on a low-throughput chain;
-  set it only where the block interval is known and bounded.
+  `CARDANO_DINGO_FORGE_APPLIED_TIP_STALENESS_SLOTS`) optionally bounds the
+  wall-clock age of `newestKnown` when a corroborated upstream target is
+  available. It is ignored when the target is unknown because a quiet network
+  can leave a canonical tip unchanged for an arbitrary number of slots.
 - `forgeEndorserBlockStalenessSlots` (**default 0 = disabled**, flag
   `--forge-endorser-block-staleness-slots`, env
   `CARDANO_DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS`) bounds how far the
@@ -6771,14 +6769,9 @@ bound below must be opt-in:
   This is the only bound governing `eb_manifest_ahead`; when it is 0 that
   refusal path does not exist.
 
-  It has its own knob rather than borrowing
-  `forgePrimaryChainTipToleranceSlots` because that tolerance bounds a purely
-  *local*, block-against-block comparison and defaults to 5, while the
-  endorser-block watermark is a *network-stage* value that advances at
-  leios-notify announcement time, before a header for that slot has to arrive.
-  Sharing one number would tie two unrelated risk budgets together: widening it
-  to tolerate an announcement gap would equally loosen the local coherence
-  check that stops stale-parent forging.
+  It has its own knob because the endorser-block watermark is a
+  *network-stage* value that advances at leios-notify announcement time,
+  before a header for that slot has to arrive.
 
   It is off by default because the watermark is monotonic and is never lowered
   on a fork (see `MaxVerifiedEndorserBlockSlot`, which documents itself as
@@ -6804,54 +6797,52 @@ bound below must be opt-in:
   `TestForgeEndorserBlockStalenessIsOffByDefault` pins the default;
   `TestForgeProceedsWhenEndorserBlockIsWithinItsBound` pins the negative case.
 
-`dingo_forge_stale_tip_skip_total` carries a `reason` label with six values,
-each from a different pair of inputs:
+`dingo_forge_stale_tip_skip_total` carries a `reason` label with eight values:
 
 | `reason` | Meaning | Inputs |
 | --- | --- | --- |
-| `slot_gap` | The applied tip trails the primary chain tip by more than `forgePrimaryChainTipToleranceSlots`. | applied tip slot, primary chain tip slot |
+| `applied_tip_not_primary_ancestor` | The applied point is not an ancestor of the primary chain tip. | applied point, primary chain ancestry |
+| `unapplied_block_gap` | The applied tip exceeds the two-block local limit or the local slot prefilter. | applied and primary block heights and slots |
+| `peer_height_gap` | A corroborated upstream target is more than K blocks ahead of the applied tip. | applied and upstream block heights |
 | `primary_tip_hash_diverged` | Primary chain tip and applied tip are at the same slot but name different blocks -- an equal-slot fork the ledger has not applied. | applied tip hash, primary chain tip hash |
 | `primary_tip_behind_applied` | The primary chain tip is at a lower slot than the applied tip, so the builder's parent is a block the ledger has already built past. | applied tip slot, primary chain tip slot |
 | `unapplied_rival_at_leader_slot` | The primary chain tip already holds a block at this slot that the ledger has not applied, so forging would parent a block for slot S on a tip already at slot S. | current slot, applied tip slot, primary chain tip slot |
-| `eb_manifest_ahead` | The local tips alone looked fine; a corroborated Leios endorser block leads the applied tip by more than `forgeEndorserBlockStalenessSlots`, proving a ranking block exists at a slot whose header this node has not admitted. **Opt-in and off by default (0 = disabled)**, governed by that bound alone -- not by `forgePrimaryChainTipToleranceSlots` -- so this series stays at 0 unless an operator sets it. | applied tip slot, highest corroborated endorser-block slot |
-| `applied_tip_stale` | The local tips agree, but `newestKnown` is too old. **Both sources are opt-in and off by default**, so this series stays at 0 unless an operator sets a bound: trailing the upstream target by more than `forgeUpstreamStalenessSlots`, or trailing the current slot by more than `forgeAppliedTipStalenessSlots`. | `newestKnown`, upstream sync target, current slot |
+| `eb_manifest_ahead` | The local tips alone looked fine; a corroborated Leios endorser block leads the applied tip by more than `forgeEndorserBlockStalenessSlots`, proving a ranking block exists at a slot whose header this node has not admitted. **Opt-in and off by default (0 = disabled)**, governed by that bound alone -- so this series stays at 0 unless an operator sets it. | applied tip slot, highest corroborated endorser-block slot |
+| `applied_tip_stale` | Local evidence trails the corroborated upstream target beyond `forgeUpstreamStalenessSlots`, or with a usable target the optional `forgeAppliedTipStalenessSlots` wall-clock bound fires. | `newestKnown`, upstream sync target, current slot |
 
-The six reasons do not share one diagnosis, and reading them as if they did
-sends an operator to the wrong component. Only the first four are local
-checks -- comparisons between this node's own applied tip and its own primary
-chain tip. The other two are network-facing rather than local, and both are
-opt-in:
+The eight reasons do not share one diagnosis, and reading them as if they did
+sends an operator to the wrong component. The ancestry and block-gap reasons
+compare local ledger state with the primary chain; peer height and endorser
+block reasons use corroborated network evidence:
 
-- `slot_gap`, `primary_tip_hash_diverged` and `unapplied_rival_at_leader_slot`
-  mean the **ledger pipeline is behind this node's own primary chain** --
-  blocks admitted and selected but not yet applied.
+- `applied_tip_not_primary_ancestor`, `unapplied_block_gap`,
+  `primary_tip_hash_diverged` and `unapplied_rival_at_leader_slot`
+  mean the **ledger pipeline is behind or diverged from this node's primary
+  chain** -- blocks admitted and selected but not yet applied, or a ledger tip
+  that does not belong to that chain.
 - `primary_tip_behind_applied` is the **opposite**: the ledger is ahead of the
   primary chain. That is chain/ledger reconciliation, the state the ledger
   resolves at startup by rolling its own tip back to the chain tip, not an
   apply backlog.
-- `eb_manifest_ahead` and the upstream-target half of `applied_tip_stale` are
-  **not local checks**: both mean this node is **behind the network**, and
-  both fire on evidence of a block the node does not hold -- a corroborated
-  endorser block whose header has not been admitted, or a `newestKnown` that
-  trails the corroborated upstream target.
-- The wall-clock half of `applied_tip_stale` (`forgeAppliedTipStalenessSlots`)
-  is neither. It reports **age**, not network progress: `newestKnown` trailing
-  the current slot proves only that no block has arrived for that many slots,
-  which on a quiet chain is the chain being quiet rather than this node
-  missing anything. It is a backstop for the case no other reason can see --
-  header admission and ledger application stalled together, with no upstream
-  target to compare against -- and `stale_source` on the log line says which
-  of the two bounds fired. None of these three can fire unless an operator has
-  set the bound that governs it, so on a default configuration both series
-  stay at 0. When one does fire, the applied tip and the primary chain tip are
+- `peer_height_gap`, `eb_manifest_ahead` and the upstream-target half of
+  `applied_tip_stale` are **not local checks**: they mean this node is
+  **behind the network**, based on a corroborated peer target, an endorser
+  block whose header has not been admitted, or a `newestKnown` that trails
+  the corroborated upstream target.
+- The optional wall-clock half of `applied_tip_stale`
+  (`forgeAppliedTipStalenessSlots`) only runs with a usable corroborated
+  target. An unknown target provides no evidence that the local tip is behind.
+  `stale_source` on the log line distinguishes the
+  wall-clock bound from the upstream-target bound. When this reason fires, the
+  applied tip and the primary chain tip are
   typically in agreement and `gap_slots` reads 0 -- the local pair of values is
   not the problem -- so the log message names the comparison that actually
   refused the slot rather than the shared "ledger tip stale vs primary chain
   tip", and `stale_source` distinguishes the two bounds behind
   `applied_tip_stale`.
 
-All six count lost blocks rather than leader checks, but they do not establish
-leadership the same way. Five are counted after leader selection has proven
+All eight count lost blocks rather than leader checks, but they do not establish
+leadership the same way. Seven are counted after leader selection has proven
 this node elected. `unapplied_rival_at_leader_slot` is refused *before* the
 leader check -- it is the one gate that can drop a scheduled leader slot
 without moving `Forge_node_is_leader`, `Forge_node_not_leader` or
@@ -12587,14 +12578,20 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected. If an imported basis fails reconciliation or lacks
-the historical protocol parameters needed to consume it, ledgerstate persists
-the failure reason in `reward_seed_failure` in the same metadata transaction as
-the import. A later reward boundary reads that marker when its reward snapshot
-is absent and reports the imported seeding failure; a genuinely missing import
-has no marker and is reported as a missing basis. Successful seeding clears the
-marker, and rollback removes markers above its slot, so the message cannot
-outlive the imported state it describes.
+reward basis is unaffected. If an imported basis is empty, fails
+reconciliation, or lacks the historical protocol parameters needed to consume
+it, the import fails with `errImportedRewardBasisUnusable`, naming the epoch
+and snapshot: continuing would cross that epoch's boundary with no reward
+round, leaving its rewards uncredited and the pots unmoved. In the first
+epoch of an era the go round reads the previous era's epoch, while the hard
+fork translated the snapshot's prevPParams to the new era; the import stores
+the ledger's input-free downgrade of it under the previous era
+(`downgradeConwayPParams`, `downgradeDijkstraPParams`), which keeps every
+reward input startStep reads. Only a step with no such downgrade -- Babbage to
+Alonzo needs `d` and `extraEntropy` -- still fails. `reward_seed_failure` is no
+longer written by the import; a later reward boundary still reads a marker a
+database written by an older version carries when its reward snapshot is
+absent, and successful seeding clears it.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
@@ -12662,13 +12659,13 @@ persisting a partial reward share. That rejection reports every incomplete
 pool and its delegated stake deterministically.
 
 Each epoch's derived basis is gated before it is written
-(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
-with a warning rather than persisted. The gate is mandatory, not defensive:
-the ledger validates the same invariants when it reads the basis, and on that
-path a failure returns an error rather than skipping the round, so an unusable
-row would turn a missing reward round into a node that cannot cross an epoch
-boundary at all. Dropping leaves the round to be skipped and counted as
-before, which is the conservative direction. Both skips are logged at WARN and counted by
+(`rewardInputBundle.validate`), and a basis that does not reconcile fails the
+import rather than being persisted or dropped. The gate is mandatory, not
+defensive: the ledger validates the same invariants when it reads the basis,
+and on that path a failure returns an error rather than skipping the round, so
+an unusable row would turn a missing reward round into a node that cannot cross
+an epoch boundary at all, while a dropped basis would skip the round and leave
+its rewards uncredited. Skipped rounds on the live path are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. At Debug level the
@@ -13616,6 +13613,14 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    single-credential reads, `GetDRepVotingPower`'s) plain figure the same way
    `LoadDRepVotingState` does; without that, a DRep's reported voting power
    would silently disagree with the value ratification actually used for it.
+   `tallySPOVotes` applies the same active-deposit set to its in-memory
+   `SPOVotingState`: each deposit follows its return account's pool delegation
+   and is added only when that pool already appears in the mark distribution.
+   The overlay raises both that pool's voting stake and the voting total but
+   does not modify the persisted mark snapshot, which remains the leader-election
+   distribution. This matches Conway's `DRepPulser.computeDRepDistr`, which adds
+   proposal deposits to DRep and SPO voting distributions while leaving the
+   ordinary stake snapshot unchanged.
    Those call sites pass `expiryEpoch = 0` (matching `GetDRepVotingPower`'s
    existing point-in-time, ungated convention noted above), not
    `LoadDRepVotingState`'s epoch-boundary CIP-0163 value, so a return
@@ -13631,6 +13636,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    treats every silent pool as implicit No for HardForkInitiation; during
    Conway bootstrap, silent pools on other actions are Abstain. Only
    post-bootstrap non-voters reach the reward-account default-vote rules.
+
+   UpdateCommittee threshold selection uses elected-committee presence in the
+   post-ENACT enact state. `CommitteeNormal` applies when that state contains a
+   committee object, even if every member is expired; `CommitteeNoConfidence`
+   applies only when no committee is present. This follows Conway's
+   `votingCommitteeThreshold` rule, which tests whether `ensCommittee` is set.
 8. Treasury donations (`applyEpochDonations`), added after withdrawals.
 9. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
@@ -13699,18 +13710,42 @@ validator is left unclamped, so when the feature is active and any pool in the
 epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
-CIP-50 pledge-leverage rewards are an optional, consensus-affecting feature gate
-that defaults off. When `LedgerStateConfig.PledgeLeverageEnabled` is set (from
-operator config, not derived from the network), a pool's reward-eligible stake
-`sigma'` in `optimalPoolRewardChecked` (`ledger/rewards`) is additionally capped
-at `L` times its pledge, so `sigma' = min(sigma, z0, L*p)`; a zero-pledge pool
-then earns nothing. `L` is threaded from config onto `rewards.Parameters` at the
-single `LedgerState.rewardParameters` chokepoint (`applyPledgeLeverageConfig`),
-so the boundary-apply and precompute paths compute identical rewards. Disabled,
-the term is nil and the formula is byte-for-byte the pre-CIP-50 calculation.
-Because it changes reward amounts and therefore ADA pots and reward accounts, it
-must be enabled only on a network where every node also enables it (a devnet or
-custom network); enabling it off-consensus forks the node.
+CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
+parameter. `rewardParameters` normally reads it from the performance epoch's
+protocol parameters, matching cardano-ledger's previous-epoch reward inputs.
+For the first Dijkstra reward round, it reads the upgraded value from the
+calculation epoch's Dijkstra parameters while all other reward inputs remain
+from the Conway performance epoch. A nil value (including the Dijkstra genesis
+default) leaves the original formula unchanged; otherwise
+`optimalPoolRewardChecked` computes
+`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
+single parameter path feeds both boundary application and asynchronous reward
+precomputation. The operator setting remains an experimental override only for
+pre-Dijkstra local networks, where the protocol parameter does not exist.
+
+With a positive `a0`, `L = 0` or a very small `L` makes `maxPool'` negative,
+and, as in cardano-ledger, that pool's leader reward is negative while its
+members get nothing (`rewards.PoolReward.LeaderRewardDeficit`). Owed to an
+unregistered reward account, the negative amount is charged to the treasury
+and returned to reserves with the undistributed pot, matching
+`applyRUpdFiltered`'s `frTotalUnregistered` and `completeRupd`'s `deltaR2`.
+Owed to a registered one, the update cannot be applied, because
+cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
+returns an `errHaltLedgerPipeline` error wrapping
+`rewards.ErrNegativeLeaderReward`, before writing anything, and calls
+`FatalErrorFunc`. The CIP-0163 account-inactivity guard judges every reward
+account owed a negative leader reward, which has no account output, alongside
+the credited ones, and suppresses the halt for an expired one exactly as it
+suppresses crediting it. Per-pool history stores the negative magnitude in
+`reward_pool_output.leader_reward_deficit`, while the unsigned reward fields
+remain zero. The per-pool precompute declines such a round, as does the
+single-pass precompute, and reuse of persisted outputs rejects it; the
+boundary always calculates it fresh with the single-pass calculation.
+
+Stored Dijkstra parameters use the era decoder's `NonNegativeInterval`
+validation for `maxPledgeLeverage`, matching cardano-ledger. The governance
+update rules may impose a narrower range, but reward calculations use the
+enacted value directly, including zero.
 
 After an epoch-transition event, ledger precomputes the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. The calculation

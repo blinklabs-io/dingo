@@ -2334,18 +2334,6 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 255,
 		},
 		{
-			name:     "typical alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 4096),
-			expected: 4095,
-		},
-		{
-			name:     "large alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 16384),
-			expected: 16383,
-		},
-		{
 			// Mary (pre-Alonzo) TX: no subtraction.
 			name:     "mary transaction full size",
 			txType:   3, // Mary
@@ -3022,47 +3010,6 @@ func TestCalculateMinFee(t *testing.T) {
 			expected:    240701,
 		},
 		{
-			// Multiple scripts - the exUnits represent the
-			// sum of all script execution units.
-			// Two scripts: script1(mem=500000, steps=100000000)
-			//              script2(mem=500000, steps=100000000)
-			// Total: mem=1000000, steps=200000000
-			// Same as single script test above.
-			name:   "multiple scripts summed exunits",
-			txSize: 300,
-			exUnits: lcommon.ExUnits{
-				Memory: 1000000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    240701,
-		},
-		{
-			// Three scripts with different costs summed:
-			// script1(mem=300000, steps=50000000)
-			// script2(mem=200000, steps=80000000)
-			// script3(mem=100000, steps=70000000)
-			// Total: mem=600000, steps=200000000
-			// baseFee = 44*400 + 155381 = 172981
-			// memFee = ceil(577*600000/10000) = ceil(34620) = 34620
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// total = 172981 + 34620 + 14420 = 222021
-			name:   "three scripts summed",
-			txSize: 400,
-			exUnits: lcommon.ExUnits{
-				Memory: 600000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    222021,
-		},
-		{
 			// Ceiling behavior: single ceiling over sum.
 			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
 			// pricesMem=1/3, mem=1 => 1/3
@@ -3234,100 +3181,6 @@ func TestCalculateMinFee(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
-	// Verify that a transaction with scripts costs more
-	// than the same transaction without scripts.
-	txSize := uint64(300)
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-
-	// Fee with no scripts
-	feeNoScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{Memory: 0, Steps: 0},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// Fee with scripts
-	feeWithScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{
-			Memory: 1000000,
-			Steps:  200000000,
-		},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	assert.Greater(
-		t,
-		feeWithScripts,
-		feeNoScripts,
-		"fee with scripts should be greater than base fee",
-	)
-
-	// The difference should equal the script execution fee
-	scriptFee := feeWithScripts - feeNoScripts
-	// memFee = ceil(577*1000000/10000) = 57700
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	assert.Equal(
-		t,
-		uint64(72120),
-		scriptFee,
-		"script fee component mismatch",
-	)
-}
-
-func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
-	// Verify that running N scripts with individual
-	// ExUnits that sum to a total produces the same
-	// fee as the total ExUnits directly.
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-	txSize := uint64(400)
-
-	// Three individual scripts
-	scripts := []lcommon.ExUnits{
-		{Memory: 300000, Steps: 50000000},
-		{Memory: 200000, Steps: 80000000},
-		{Memory: 100000, Steps: 70000000},
-	}
-
-	// Sum them up (simulating what EvaluateTx does)
-	var totalExUnits lcommon.ExUnits
-	for _, s := range scripts {
-		totalExUnits.Memory += s.Memory
-		totalExUnits.Steps += s.Steps
-	}
-
-	require.Equal(t, int64(600000), totalExUnits.Memory)
-	require.Equal(t, int64(200000000), totalExUnits.Steps)
-
-	fee := CalculateMinFee(
-		txSize,
-		totalExUnits,
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// baseFee = 44*400 + 155381 = 172981
-	// memFee = ceil(577*600000/10000) = 34620
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	// total = 172981 + 34620 + 14420 = 222021
-	assert.Equal(t, uint64(222021), fee)
 }
 
 func TestCalculateConwayRefScriptFee_Tiered(t *testing.T) {

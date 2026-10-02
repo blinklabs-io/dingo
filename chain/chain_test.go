@@ -1564,6 +1564,55 @@ func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
 	}
 }
 
+func TestChainQueuedVerifiedHeaderMatchesPointFindsNonHeadHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	if err := c.AddVerifiedBlockHeader(testBlocks[0]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddVerifiedBlockHeader(testBlocks[1]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddBlockHeader(testBlocks[2]); err != nil {
+		t.Fatalf("unexpected error adding unverified header: %s", err)
+	}
+	pointOf := func(h *MockBlock) ocommon.Point {
+		return ocommon.NewPoint(h.SlotNumber(), h.Hash().Bytes())
+	}
+
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[0])) {
+		t.Fatal("verified head header should match")
+	}
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[1])) {
+		t.Fatal("verified non-head header should match its own point")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[2])) {
+		t.Fatal("unverified queued header must not match")
+	}
+	wrongSlot := ocommon.NewPoint(
+		testBlocks[1].SlotNumber()+1,
+		testBlocks[1].Hash().Bytes(),
+	)
+	if c.QueuedVerifiedHeaderMatchesPoint(wrongSlot) {
+		t.Fatal("point with matching hash but different slot must not match")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(
+		ocommon.NewPoint(
+			testBlocks[3].SlotNumber(),
+			testBlocks[3].Hash().Bytes(),
+		),
+	) {
+		t.Fatal("header that is not queued must not match")
+	}
+}
+
 func TestChainHeaderBlock(t *testing.T) {
 	t.Parallel()
 
@@ -2037,6 +2086,51 @@ func TestPointAtDepthNoDatabase(t *testing.T) {
 	}
 	if found {
 		t.Fatal("a chain shorter than k must have origin as its immutable tip")
+	}
+}
+
+func TestTipRelationUsesTheActivePrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := primary.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding primary block: %s", err)
+		}
+	}
+
+	tip, depth, ancestor, err := primary.TipRelation(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected tip relation error: %s", err)
+	}
+	if !ancestor || depth != 2 || !reflect.DeepEqual(tip.Point, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected ancestor relation: tip=%v depth=%d ancestor=%t", tip, depth, ancestor)
+	}
+
+	fork, err := cm.NewChain(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+	forkBlock := &MockBlock{
+		MockBlockNumber: 3,
+		MockSlot:        31,
+		MockHash:        testHashPrefix + "00aa",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+	if err := fork.AddBlock(forkBlock, nil); err != nil {
+		t.Fatalf("unexpected error adding fork block: %s", err)
+	}
+
+	_, _, ancestor, err = primary.TipRelation(blockPoint(forkBlock))
+	if err != nil {
+		t.Fatalf("unexpected fork relation error: %s", err)
+	}
+	if ancestor {
+		t.Fatal("a retained competing-fork block must not be reported as an ancestor")
 	}
 }
 

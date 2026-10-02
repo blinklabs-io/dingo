@@ -141,7 +141,6 @@ var logPlainConfigFields = []string{
 	"ForgeEBMaxTxRefs",
 	"ForgeEBSelectionReserve",
 	"ForgeEndorserBlockStalenessSlots",
-	"ForgePrimaryChainTipToleranceSlots",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",
 	"ForgeUpstreamStalenessSlots",
