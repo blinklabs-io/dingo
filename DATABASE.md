@@ -409,6 +409,10 @@ Migration `v30` (`reward-account-output-folded`, integer version 30) adds the
 per-output marker that keeps reward credits from being counted again after
 they are written into `account.reward`.
 
+Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
+`leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
+rounds retain the magnitude of negative leader rewards.
+
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
 Unix-millisecond `started_at`/`updated_at`, and nullable `completed_at`.
