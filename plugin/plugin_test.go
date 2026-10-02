@@ -675,3 +675,14 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 		t.Fatalf("Host.Stop error = %v, want deadline exceeded", err)
 	}
 }
+
+func TestHostStopWithExpiredContextAndNoStopCapabilityInFlight(t *testing.T) {
+	t.Parallel()
+
+	host := NewHost()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := host.Stop(ctx); err != nil {
+		t.Fatalf("Host.Stop error = %v, want nil with nothing in flight", err)
+	}
+}

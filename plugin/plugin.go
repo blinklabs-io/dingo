@@ -436,15 +436,23 @@ func (h *Host) Stop(ctx context.Context) error {
 	h.started = nil
 	h.mu.Unlock()
 	err := stopReverse(ctx, started)
-	capabilitiesDone := make(chan struct{})
-	go func() {
-		h.stopCapabilityWG.Wait()
-		close(capabilitiesDone)
-	}()
-	select {
-	case <-capabilitiesDone:
-	case <-ctx.Done():
-		err = errors.Join(err, ctx.Err())
+	// stopping counts in-flight StopCapability calls under mu, and none can
+	// start once stopped is set, so an empty map means there is nothing to
+	// wait for even when ctx has already ended.
+	h.mu.Lock()
+	inFlight := len(h.stopping) > 0
+	h.mu.Unlock()
+	if inFlight {
+		capabilitiesDone := make(chan struct{})
+		go func() {
+			h.stopCapabilityWG.Wait()
+			close(capabilitiesDone)
+		}()
+		select {
+		case <-capabilitiesDone:
+		case <-ctx.Done():
+			err = errors.Join(err, ctx.Err())
+		}
 	}
 	h.mu.Lock()
 	h.stopErr = err

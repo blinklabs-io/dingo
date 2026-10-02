@@ -1448,7 +1448,8 @@ func (e *EventBus) Close() {
 // SubscribeFunc handler to return, so a handler that never returns would hold
 // it forever. When ctx ends first, CloseContext stops waiting and returns an
 // error wrapping ctx.Err() that names the event types whose handlers are
-// still running. The abandoned Close keeps running in its own goroutine and
+// still running. When no handler is running at that point, it first allows
+// the close a bounded grace to finish. The abandoned Close keeps running in its own goroutine and
 // finishes once those handlers return.
 func (e *EventBus) CloseContext(ctx context.Context) error {
 	done := make(chan struct{})
@@ -1460,13 +1461,31 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf(
-			"event bus close abandoned with handlers still running for %v: %w",
-			e.runningHandlerTypes(),
-			ctx.Err(),
-		)
 	}
+	// A ctx that was already done on entry gives Close no time at all. With
+	// no handler running, Close is only finishing bookkeeping, so allow it a
+	// short bounded grace instead of reporting a drain that never stalled.
+	running := e.runningHandlerTypes()
+	if len(running) == 0 {
+		grace := time.NewTimer(closeContextIdleGrace)
+		defer grace.Stop()
+		select {
+		case <-done:
+			return nil
+		case <-grace.C:
+		}
+		running = e.runningHandlerTypes()
+	}
+	return fmt.Errorf(
+		"event bus close abandoned with handlers still running for %v: %w",
+		running,
+		ctx.Err(),
+	)
 }
+
+// closeContextIdleGrace bounds how long CloseContext keeps waiting past its
+// deadline when no handler is running.
+const closeContextIdleGrace = time.Second
 
 func (e *EventBus) shutdown(restart bool) {
 	if e == nil {

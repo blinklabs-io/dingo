@@ -1709,7 +1709,9 @@ reusable `EventBus.Stop` preserve queued events. The wait is bounded by the
 shutdown deadline (`EventBus.CloseContext`): a handler that never returns is
 abandoned, its event type is named in the returned error, and the unconfirmed
 drain makes phase 3 skip the `LedgerState.Close`, database close, and plugin
-host shutdown, since that handler may still be using them.
+host shutdown, since that handler may still be using them. When no handler is
+running at the deadline, the close gets a short bounded grace to finish rather
+than being reported as abandoned.
 
 If `LedgerState.Close` cannot confirm that its block-processing and database
 workers have drained, normal shutdown does not close the database or storage

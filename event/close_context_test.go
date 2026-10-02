@@ -66,3 +66,14 @@ func TestCloseContextClosesBusWhenNoHandlerIsBlocked(t *testing.T) {
 	require.NoError(t, bus.CloseContext(context.Background()))
 	require.True(t, bus.closed)
 }
+
+func TestCloseContextClosesIdleBusWhenDeadlineAlreadyPassed(t *testing.T) {
+	t.Parallel()
+
+	bus := NewEventBus(nil, nil)
+	bus.SubscribeFunc("test.close_context_expired_idle", func(Event) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, bus.CloseContext(ctx))
+	require.True(t, bus.closed)
+}

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,14 +33,15 @@ import (
 // batch loop past its teardown check.
 type parkedBlockfetchIterator struct {
 	stubBlockfetchIterator
-	entered chan struct{}
-	release chan struct{}
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
 }
 
 func (i *parkedBlockfetchIterator) Next(
 	bool,
 ) (*chain.ChainIteratorResult, error) {
-	close(i.entered)
+	i.enteredOnce.Do(func() { close(i.entered) })
 	<-i.release
 	return testBlockfetchIteratorBlock(1), nil
 }
