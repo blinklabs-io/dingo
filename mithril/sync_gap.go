@@ -701,6 +701,7 @@ func processGapBlockTransactions(
 				if err := governance.ProcessProposals(
 					level,
 					point,
+					uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 					epochId,
 					conwayPParams.GovActionValidityPeriod,
 					db,

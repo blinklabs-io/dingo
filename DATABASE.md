@@ -412,6 +412,9 @@ they are written into `account.reward`.
 Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
 `leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
 rounds retain the magnitude of negative leader rewards.
+Migration `v33` (`governance-proposal-order`, integer version 33) adds the
+`governance_proposal_order` companion table and backfills it from each
+proposal's stored transaction.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -1319,6 +1322,7 @@ updates preserve the previous activity and expiry epochs.
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
 | `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
+| `governance_proposal_order` | `proposal_id`, `tx_index` | PK `proposal_id` | Companion table recording a proposal's position in Conway submission order within its `added_slot`: the transaction's index in its block, or for a proposal imported from a ledger-state snapshot, its position in the snapshot's proposal sequence (all proposals of one epoch share that epoch's anchor slot). RATIFY and ENACT reads order equal-slot proposals by it, then by `action_index`. A companion table for the same reason as `governance_proposal_drop`. FK `proposal_id` references `governance_proposal.id` with cascade deletion, and `DeleteGovernanceProposalsAfterSlot` also deletes the rows of the proposals it removes explicitly. `SetGovernanceProposal` writes the row only when the caller supplies a position, so rewriting a loaded proposal without one keeps the stored position. The v33 migration backfills rows from each proposal's stored `transaction.block_index`; a proposal without a stored transaction (one imported before v33) has no row and keeps the pre-v33 `tx_hash` order until it leaves the proposal set, or until the database is rebuilt from a fresh import. |
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
 | `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. `SetGovernanceVote` upserts by the unique voter/proposal key, so a replaced vote overwrites `vote`/`anchor_url`/`anchor_hash`/`vote_updated_slot` in place; `governance_vote_history` is what lets rollback recover the value that predated a replacement. |
@@ -1328,6 +1332,11 @@ updates preserve the previous activity and expiry epochs.
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
 | `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
+
+When an enacted treasury withdrawal credits a proposal return account that also
+receives a deposit refund at the same boundary, `account_reward_delta` records
+separate event discriminators for the withdrawal and refund so both credits
+remain distinct and rollbackable.
 
 ### Off-chain Metadata Cache
 
@@ -4325,16 +4334,24 @@ WHERE proposal_id = $1
   AND deleted_slot IS NULL;
 ```
 
-Active governance proposals use Dingo's consensus-critical order:
+Active governance proposals use Dingo's consensus-critical order, which is
+Conway's submission order: slot, then the transaction's position in its block
+from the `governance_proposal_order` companion table (joined as `gpo` in every
+proposal read, `LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id =
+governance_proposal.id`), then the action index. `tx_hash` decides between
+two transactions only for rows without a recorded position:
 
 ```sql
-SELECT *
+SELECT governance_proposal.*
 FROM governance_proposal
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = governance_proposal.id
 WHERE expires_epoch >= $1
   AND enacted_epoch IS NULL
   AND expired_epoch IS NULL
   AND deleted_slot IS NULL
-ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
+ORDER BY proposed_epoch ASC, added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  tx_hash ASC, action_index ASC;
 ```
 
 `GetGovernanceProposalSet` returns the Conway proposals set that transaction
@@ -4343,36 +4360,73 @@ validation resolves votes, parents, and potential committee members against:
 ```sql
 SELECT gp.*
 FROM governance_proposal gp
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
 WHERE gp.enacted_epoch IS NULL
   AND gpd.dropped_epoch IS NULL
   AND gp.deleted_slot IS NULL
-ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  gp.tx_hash ASC, gp.action_index ASC;
 ```
 
 Epoch-boundary replay uses exact epoch/slot lifecycle lookups:
 
 ```sql
 -- GetEnactedGovernanceProposalsAt(epoch, slot)
-SELECT *
+SELECT governance_proposal.*
 FROM governance_proposal
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = governance_proposal.id
 WHERE ratified_epoch IS NOT NULL
   AND enacted_epoch = $1
   AND enacted_slot = $2
   AND deleted_slot IS NULL
 ORDER BY ratified_epoch ASC, ratified_slot ASC,
-  proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
+  proposed_epoch ASC, added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  tx_hash ASC, action_index ASC;
 ```
+
+The per-purpose enacted root lookup returns the newest enacted proposal with
+no enacted child of the requested action types at the same epoch boundary.
+This makes a same-boundary parent/child chain resolve to its terminal action,
+regardless of proposal insertion order:
+
+```sql
+SELECT gp.*
+FROM governance_proposal AS gp
+WHERE gp.action_type IN (<action-type placeholders>)
+  AND gp.enacted_epoch IS NOT NULL
+  AND gp.deleted_slot IS NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM governance_proposal AS child
+    WHERE child.parent_tx_hash = gp.tx_hash
+      AND child.parent_action_idx = gp.action_index
+      AND child.action_type IN (<same action-type placeholders>)
+      AND child.enacted_epoch = gp.enacted_epoch
+      AND child.enacted_slot = gp.enacted_slot
+      AND child.deleted_slot IS NULL
+  )
+ORDER BY gp.enacted_epoch DESC, gp.enacted_slot DESC, gp.id DESC
+LIMIT 1;
+```
+
+The action-type list is bound for both the candidate and child predicates, so
+actions from another governance purpose cannot advance this root.
 
 ```sql
 -- GetExpiredGovernanceProposalsAt(epoch, slot)
 SELECT *
 FROM governance_proposal
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = governance_proposal.id
 WHERE expired_epoch = $1
   AND expired_slot = $2
   AND enacted_epoch IS NULL
   AND deleted_slot IS NULL
-ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
+ORDER BY proposed_epoch ASC, added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  tx_hash ASC, action_index ASC;
 ```
 
 Marking a proposal expired (`expired_epoch`/`expired_slot`) never itself refunds
@@ -4391,21 +4445,27 @@ happened, keyed by `proposal_id`:
 -- would refund them in the epoch that expired them.
 SELECT gp.*
 FROM governance_proposal gp
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
 WHERE gp.expired_epoch < $1
   AND gpd.dropped_epoch IS NULL
   AND gp.deleted_slot IS NULL
-ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  gp.tx_hash ASC, gp.action_index ASC;
 
 -- GetDroppedGovernanceProposalsAt(epoch, slot): epoch-boundary replay lookup,
 -- mirroring GetEnactedGovernanceProposalsAt/GetExpiredGovernanceProposalsAt.
 SELECT gp.*
 FROM governance_proposal gp
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = gp.id
 LEFT JOIN governance_proposal_drop gpd ON gpd.proposal_id = gp.id
 WHERE gpd.dropped_epoch = $1
   AND gpd.dropped_slot = $2
   AND gp.deleted_slot IS NULL
-ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC, gp.tx_hash ASC, gp.action_index ASC;
+ORDER BY gp.proposed_epoch ASC, gp.added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  gp.tx_hash ASC, gp.action_index ASC;
 ```
 
 ### `GetChildGovernanceProposals`
@@ -4415,12 +4475,15 @@ Used during the Conway epoch boundary orphan sweep (`removeOrphanedProposals`). 
 ```sql
 SELECT *
 FROM governance_proposal
+LEFT JOIN governance_proposal_order gpo ON gpo.proposal_id = governance_proposal.id
 WHERE parent_tx_hash = $1
   AND parent_action_idx = $2
   AND enacted_epoch IS NULL
   AND expired_epoch IS NULL
   AND deleted_slot IS NULL
-ORDER BY proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC;
+ORDER BY proposed_epoch ASC, added_slot ASC,
+  CASE WHEN gpo.tx_index IS NULL THEN 0 ELSE 1 END ASC, gpo.tx_index ASC,
+  tx_hash ASC, action_index ASC;
 ```
 
 The sweep is transitive (BFS): each orphaned proposal is itself used as a seed to find its own children, continuing until the graph is exhausted. Orphaned proposals are marked with `expired_epoch`/`expired_slot` at the boundary slot so the existing slot-based rollback path in `DeleteGovernanceProposalsAfterSlot` reverts them cleanly.
