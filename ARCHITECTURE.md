@@ -12578,14 +12578,20 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected. If an imported basis fails reconciliation or lacks
-the historical protocol parameters needed to consume it, ledgerstate persists
-the failure reason in `reward_seed_failure` in the same metadata transaction as
-the import. A later reward boundary reads that marker when its reward snapshot
-is absent and reports the imported seeding failure; a genuinely missing import
-has no marker and is reported as a missing basis. Successful seeding clears the
-marker, and rollback removes markers above its slot, so the message cannot
-outlive the imported state it describes.
+reward basis is unaffected. If an imported basis is empty, fails
+reconciliation, or lacks the historical protocol parameters needed to consume
+it, the import fails with `errImportedRewardBasisUnusable`, naming the epoch
+and snapshot: continuing would cross that epoch's boundary with no reward
+round, leaving its rewards uncredited and the pots unmoved. In the first
+epoch of an era the go round reads the previous era's epoch, while the hard
+fork translated the snapshot's prevPParams to the new era; the import stores
+the ledger's input-free downgrade of it under the previous era
+(`downgradeConwayPParams`, `downgradeDijkstraPParams`), which keeps every
+reward input startStep reads. Only a step with no such downgrade -- Babbage to
+Alonzo needs `d` and `extraEntropy` -- still fails. `reward_seed_failure` is no
+longer written by the import; a later reward boundary still reads a marker a
+database written by an older version carries when its reward snapshot is
+absent, and successful seeding clears it.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
@@ -12653,13 +12659,13 @@ persisting a partial reward share. That rejection reports every incomplete
 pool and its delegated stake deterministically.
 
 Each epoch's derived basis is gated before it is written
-(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
-with a warning rather than persisted. The gate is mandatory, not defensive:
-the ledger validates the same invariants when it reads the basis, and on that
-path a failure returns an error rather than skipping the round, so an unusable
-row would turn a missing reward round into a node that cannot cross an epoch
-boundary at all. Dropping leaves the round to be skipped and counted as
-before, which is the conservative direction. Both skips are logged at WARN and counted by
+(`rewardInputBundle.validate`), and a basis that does not reconcile fails the
+import rather than being persisted or dropped. The gate is mandatory, not
+defensive: the ledger validates the same invariants when it reads the basis,
+and on that path a failure returns an error rather than skipping the round, so
+an unusable row would turn a missing reward round into a node that cannot cross
+an epoch boundary at all, while a dropped basis would skip the round and leave
+its rewards uncredited. Skipped rounds on the live path are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. At Debug level the
