@@ -1016,3 +1016,15 @@ func TestValidateTracingSampleRatio(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyDefaultsTracingEndpointEnablesTracing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Tracing)
+
+	cfg = &Config{TracingEndpoint: "http://localhost:4318"}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Tracing)
+}

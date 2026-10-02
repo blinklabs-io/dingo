@@ -145,7 +145,7 @@ var flagSpecs = []flagSpec{
 		"TracingEndpoint",
 		"tracing-endpoint",
 		"",
-		"OTLP HTTP collector URL for spans (default: OTEL_EXPORTER_OTLP_* env vars)",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
 	),
 	stringFlag(
 		"TracingServiceName",

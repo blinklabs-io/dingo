@@ -205,8 +205,9 @@
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
 # tracingStdout: false
 
-# OTLP HTTP collector URL for spans, for example http://localhost:4318. Empty
-# uses the OTEL_EXPORTER_OTLP_* env vars.
+# OTLP HTTP collector URL for spans, for example http://localhost:4318.
+# Setting it enables tracing. Empty leaves tracing to the tracing setting and
+# the destination to the OTEL_EXPORTER_OTLP_* env vars.
 # CLI: --tracing-endpoint  Env: DINGO_TRACING_ENDPOINT
 # tracingEndpoint: ""
 

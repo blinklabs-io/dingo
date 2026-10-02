@@ -126,6 +126,14 @@ func otlpTracesURL(endpoint string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid tracing endpoint: %w", err)
 	}
+	// url.Parse reads a bare host:port as a scheme and an opaque part, which
+	// the exporter would accept and then send nowhere.
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf(
+			"invalid tracing endpoint %q: want an http or https URL",
+			endpoint,
+		)
+	}
 	if u.Path == "" || u.Path == "/" {
 		u.Path = "/v1/traces"
 	}

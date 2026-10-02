@@ -784,6 +784,11 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 }
 
 func (c *Config) syncCompatFields() {
+	// A collector endpoint turns tracing on. The tracing flag alone still
+	// enables it with the OTEL_EXPORTER_OTLP_* destination.
+	if c.tracingEndpoint != "" {
+		c.tracing = true
+	}
 	c.dataDir, c.bindAddr = c.cfg.DatabasePath, c.cfg.BindAddr
 	c.network, c.networkMagic = c.cfg.Network, c.cfg.NetworkMagic
 	c.tlsCertFilePath, c.tlsKeyFilePath = c.cfg.TlsCertFilePath, c.cfg.TlsKeyFilePath
@@ -1236,7 +1241,7 @@ func WithTracing(tracing bool) ConfigOptionFunc {
 	}
 }
 
-// WithTracingEndpoint sets the OTLP HTTP collector URL. Empty defers to the OTEL_EXPORTER_OTLP_* env vars.
+// WithTracingEndpoint sets the OTLP HTTP collector URL and enables tracing. Empty leaves tracing to WithTracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
 func WithTracingEndpoint(endpoint string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.tracingEndpoint = endpoint

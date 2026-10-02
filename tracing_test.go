@@ -171,6 +171,29 @@ func TestOTLPTracesURL(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, want, got, endpoint)
 	}
-	_, err := otlpTracesURL("http://bad host:4318")
-	require.Error(t, err)
+	for _, endpoint := range []string{
+		"http://bad host:4318",
+		"localhost:4318",
+		"collector.example:4318/v1/traces",
+		"grpc://collector.example:4317",
+		"http://",
+	} {
+		_, err := otlpTracesURL(endpoint)
+		require.Error(t, err, endpoint)
+	}
+}
+
+func TestTracingEndpointEnablesTracing(t *testing.T) {
+	t.Parallel()
+
+	const endpoint = "http://localhost:4318"
+	unset := NewConfig()
+	require.False(t, unset.Tracing())
+	set := NewConfig(WithTracingEndpoint(endpoint))
+	require.True(t, set.Tracing())
+	setThenDisabled := NewConfig(
+		WithTracingEndpoint(endpoint),
+		WithTracing(false),
+	)
+	require.True(t, setThenDisabled.Tracing())
 }
