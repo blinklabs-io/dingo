@@ -1764,8 +1764,8 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		BlockBuilder:     builder,
 		BlockBroadcaster: broadcaster,
 		SlotClock: forgerTestSlotClock{
-			// The tip lags the current slot by more than the tolerance,
-			// which is direct evidence this node is behind.
+			// The current slot is far beyond the previous block, but the
+			// peer has no corroborated target and may also be at that tip.
 			currentSlot:       1000,
 			chainTipSlot:      9,
 			upstreamTipSlot:   0,
@@ -1787,6 +1787,11 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 		float64(0),
 		testutil.ToFloat64(forger.metrics.forgeSyncSkip),
 	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+	)
 	// This once asserted 991, the local tip's lag behind the wall clock,
 	// because the sync-skip path was then the only writer that could make
 	// dingo_forge_tip_gap_slots non-zero on this branch. The gauge now has
@@ -1799,9 +1804,9 @@ func TestForgeAllowsUnknownUpstreamTargetWhileWallClockIsStale(
 	// dingo_tip_gap_slots ("slots between wall-clock slot and chain tip",
 	// ledger/state.go), on every slot tick rather than only on a leader-slot
 	// skip, and the gate's own log line carries current_slot and tip_slot.
-	// The lag itself is not a forge-sync signal when the upstream target is
-	// unknown; see TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip for
-	// the at-tip case as well.
+	// The wall-clock refusal is reported separately from the peer-sync counter;
+	// TestForgeTakesLeaderSlotWhenUpstreamTargetUnknownAtTip covers the near-tip
+	// case that remains eligible.
 	assert.Equal(
 		t,
 		float64(0),
@@ -2275,6 +2280,14 @@ func (c *forgerMovingTipSlotClock) ChainTip() ocommon.Point {
 	return ocommon.Point{Slot: slot, Hash: c.chainTipHash}
 }
 
+func (c *forgerMovingTipSlotClock) ChainTipSnapshot() ochainsync.Tip {
+	return ochainsync.Tip{Point: c.ChainTip()}
+}
+
+func (c *forgerMovingTipSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return c.ChainTipSnapshot(), 5
+}
+
 // PrimaryChainTip is pinned to the ORIGINAL tip and never moves. This double
 // exists to model the applied tip shifting between the two reads
 // tipBlockOwnership makes; letting the primary tip follow it would put the
@@ -2284,6 +2297,14 @@ func (c *forgerMovingTipSlotClock) PrimaryChainTip() ocommon.Point {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return ocommon.Point{Slot: c.chainTipSlot, Hash: c.chainTipHash}
+}
+
+func (c *forgerMovingTipSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	return ochainsync.Tip{Point: primary}, 0,
+		primary.Slot == point.Slot && bytes.Equal(primary.Hash, point.Hash), nil
 }
 
 func (c *forgerMovingTipSlotClock) ChainTipHash() []byte {
@@ -2304,6 +2325,12 @@ func (*forgerMovingTipSlotClock) UpstreamTipSlot() uint64 {
 func (*forgerMovingTipSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return 0, false
 }
+
+func (*forgerMovingTipSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{}, false
+}
+
+func (*forgerMovingTipSlotClock) SecurityParam() int { return 5 }
 
 func (c *forgerMovingTipSlotClock) reads() (int, int) {
 	c.mu.Lock()
@@ -3319,26 +3346,32 @@ func TestForgeMarksTheReResolvedEndorserBlockSlot(t *testing.T) {
 // instant, so tests can put the forge either comfortably inside its slot or
 // past the end of it without sleeping.
 type retryTestSlotClock struct {
-	currentSlot  uint64
-	chainTipSlot uint64
-	chainTipHash []byte
+	currentSlot         uint64
+	chainTipSlot        uint64
+	chainTipHash        []byte
+	chainTipBlockNumber uint64
 	// primaryTipExplicit selects whether primaryTipSlot/primaryTipHash are
 	// used verbatim. When false the primary tip mirrors the applied tip,
 	// which is the caught-up steady state and what every test that does not
 	// care about the distinction wants. A test that needs an apply backlog
 	// -- the primary chain tip ahead of, behind, or replaced at the applied
 	// tip -- sets it and moves the primary tip on its own.
-	primaryTipExplicit bool
-	primaryTipSlot     uint64
-	primaryTipHash     []byte
-	slotsPerKESPeriod  uint64
-	slotEnd            time.Time
+	primaryTipExplicit    bool
+	primaryTipSlot        uint64
+	primaryTipHash        []byte
+	primaryTipRelationSet bool
+	primaryTipBlockNumber uint64
+	primaryTipDepth       uint64
+	primaryTipAncestor    bool
+	slotsPerKESPeriod     uint64
+	slotEnd               time.Time
 	// upstreamTarget and upstreamLive are what UpstreamSyncStatus reports.
 	// The zero value is (0, false) -- no upstream peer -- which is what
 	// every test that does not exercise the sync gate wants, and what this
 	// clock reported before the fields existed.
-	upstreamTarget uint64
-	upstreamLive   bool
+	upstreamTarget      uint64
+	upstreamLive        bool
+	upstreamBlockNumber uint64
 }
 
 func (c *retryTestSlotClock) CurrentSlot() (uint64, error) {
@@ -3372,6 +3405,50 @@ func (c *retryTestSlotClock) UpstreamTipSlot() uint64 { return 0 }
 
 func (c *retryTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return c.upstreamTarget, c.upstreamLive
+}
+
+func (c *retryTestSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	blockNumber := c.chainTipBlockNumber
+	if blockNumber == 0 {
+		blockNumber = c.chainTipSlot
+	}
+	return ochainsync.Tip{
+		Point:       c.ChainTip(),
+		BlockNumber: blockNumber,
+	}, 5
+}
+
+func (c *retryTestSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	if c.primaryTipRelationSet {
+		blockNumber := c.primaryTipBlockNumber
+		if blockNumber == 0 {
+			blockNumber = primary.Slot
+		}
+		return ochainsync.Tip{Point: primary, BlockNumber: blockNumber},
+			c.primaryTipDepth, c.primaryTipAncestor, nil
+	}
+	depth := uint64(0)
+	ancestor := true
+	if primary.Slot < point.Slot {
+		ancestor = false
+	} else if primary.Slot == point.Slot && len(primary.Hash) > 0 &&
+		len(point.Hash) > 0 && !bytes.Equal(primary.Hash, point.Hash) {
+		ancestor = false
+	} else if primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{Point: primary, BlockNumber: primary.Slot},
+		depth, ancestor, nil
+}
+
+func (c *retryTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: c.upstreamTarget},
+		BlockNumber: c.upstreamBlockNumber,
+	}, c.upstreamLive
 }
 
 // retryTestBuilder fails its first failCount build attempts with err and
@@ -4161,7 +4238,9 @@ func requireStaleTipSkips(
 ) {
 	t.Helper()
 	for _, reason := range []string{
-		forgeStaleTipReasonSlotGap,
+		forgeStaleTipReasonPrimaryNotAncestor,
+		forgeStaleTipReasonBlockGap,
+		forgeStaleTipReasonPeerHeightGap,
 		forgeStaleTipReasonHashDiverged,
 		forgeStaleTipReasonPrimaryTipBehind,
 		forgeStaleTipReasonUnappliedRival,
@@ -4312,14 +4391,14 @@ func TestForgeRefusesTheRetryWhenThePrimaryTipIsReplacedAtTheAppliedSlot(
 	})
 }
 
-// TestForgeRefusesTheRetryOnEveryStaleTipReason covers the two remaining
-// stale-tip refusals the entry gate applies from the two tips, so the
-// per-attempt decision is pinned to the whole of the entry decision rather
-// than to the three cases above.
+// TestForgeRefusesTheRetryOnEveryStaleTipReason covers the remaining stale-tip
+// refusals so the per-attempt decision is pinned to the whole entry decision
+// rather than only the three positional cases above.
 func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 	applied := bytes.Repeat([]byte{0xAA}, 32)
 	cases := map[string]struct {
 		appliedSlot uint64
+		configure   func(*retryTestSlotClock)
 		move        func(*retryTestSlotClock)
 		reason      string
 	}{
@@ -4331,16 +4410,41 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 			},
 			reason: forgeStaleTipReasonPrimaryTipBehind,
 		},
-		"apply backlog beyond the tolerance": {
-			// Applied at 3, primary moves to 9: a gap of 6 against the
-			// default tolerance of 5, with the parent slot still below
-			// the forged slot so no ordering refusal fires first.
+		"apply backlog beyond the block limit": {
+			// Applied at 3, primary moves to 9: six unapplied blocks,
+			// with the parent slot still below the forged slot so no
+			// ordering refusal fires first.
 			appliedSlot: 3,
 			move: func(c *retryTestSlotClock) {
 				c.primaryTipSlot = 9
 				c.primaryTipHash = bytes.Repeat([]byte{0xCC}, 32)
 			},
-			reason: forgeStaleTipReasonSlotGap,
+			reason: forgeStaleTipReasonBlockGap,
+		},
+		"applied tip is no longer a primary-tip ancestor": {
+			appliedSlot: 8,
+			move: func(c *retryTestSlotClock) {
+				c.primaryTipSlot = 9
+				c.primaryTipHash = bytes.Repeat([]byte{0xCC}, 32)
+				c.primaryTipRelationSet = true
+				c.primaryTipDepth = 1
+				c.primaryTipAncestor = false
+			},
+			reason: forgeStaleTipReasonPrimaryNotAncestor,
+		},
+		"corroborated peer height gap opens during selection": {
+			appliedSlot: 9,
+			configure: func(c *retryTestSlotClock) {
+				c.chainTipBlockNumber = 100
+				c.upstreamTarget = 9
+				c.upstreamLive = true
+				c.upstreamBlockNumber = 105
+			},
+			move: func(c *retryTestSlotClock) {
+				c.chainTipSlot = 8
+				c.chainTipBlockNumber = 99
+			},
+			reason: forgeStaleTipReasonPeerHeightGap,
 		},
 	}
 	for name, tc := range cases {
@@ -4352,6 +4456,9 @@ func TestForgeRefusesTheRetryOnEveryStaleTipReason(t *testing.T) {
 				applied,
 				time.Now().Add(2*time.Second),
 			)
+			if tc.configure != nil {
+				tc.configure(clock)
+			}
 			builder := &tipMovingBuilder{
 				block:     block,
 				cbor:      block.cbor,
@@ -4525,10 +4632,10 @@ func TestForgeRefusesABuildAfterARollbackPutsTheTipBehindTheNetwork(
 //     counts unapplied_rival_at_leader_slot, not dingo_forge_sync_skip_total.
 //
 //   - syncSkip above staleReason. An applied tip outside the tolerance whose
-//     apply backlog is also wider than forgePrimaryChainTipToleranceSlots.
+//     apply backlog is also wider than the local block limit.
 //     Entry takes the sync skip before the leader check and the stale-tip
 //     refusal only after it, so this counts dingo_forge_sync_skip_total, not
-//     slot_gap.
+//     a stale-tip reason.
 //
 //   - staleReason above appliedTipAtSlot. checkAndForgeProduction acts on
 //     staleTipReason after the leader check and takes its slot-battle
@@ -4569,9 +4676,9 @@ func TestForgeCountsAStaleTipAheadOfASlotBattleOnTheRetry(t *testing.T) {
 		// The applied tip rolls back to 3, outside the tolerance of 3
 		// against the upstream target at 10, and far enough behind the
 		// primary chain tip at 9 for the apply backlog to exceed
-		// forgePrimaryChainTipToleranceSlots as well. Entry takes the
-		// sync skip before the leader check, so slot_gap must not move.
-		"sync skip outranks the slot-gap stale reason": {
+		// the local block limit as well. Entry takes the sync skip before
+		// the leader check, so the stale-tip counter must not move.
+		"sync skip outranks the block-gap stale reason": {
 			move: func(c *retryTestSlotClock) {
 				c.chainTipSlot = 3
 				c.primaryTipSlot = 9
@@ -5443,6 +5550,32 @@ func (c *ebTestSlotClock) UpstreamTipSlot() uint64 { return 0 }
 
 func (c *ebTestSlotClock) UpstreamSyncStatus() (uint64, bool) {
 	return 0, false
+}
+
+func (c *ebTestSlotClock) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return ochainsync.Tip{
+		Point:       c.ChainTip(),
+		BlockNumber: c.chainTipSlot,
+	}, 5
+}
+
+func (c *ebTestSlotClock) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	primary := c.PrimaryChainTip()
+	depth := uint64(0)
+	ancestor := primary.Slot >= point.Slot
+	if ancestor && primary.Slot > point.Slot {
+		depth = primary.Slot - point.Slot
+	}
+	return ochainsync.Tip{
+		Point:       primary,
+		BlockNumber: primary.Slot,
+	}, depth, ancestor, nil
+}
+
+func (*ebTestSlotClock) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return ochainsync.Tip{}, false
 }
 
 // TestCheckAndForgeProductionSkipsEBWhenSlotIsOver pins what a late slot

@@ -639,6 +639,8 @@ func TestEnvelopeParentFromTipDoesNotAssumeByronEbbWhenTypeUnavailable(
 	)
 }
 
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
+// that an EBB shares its parent's block number instead of incrementing it.
 func byronOrderingEbb(
 	epoch, blockNumber uint64,
 ) *byron.ByronEpochBoundaryBlock {
@@ -662,7 +664,7 @@ func byronOrderingMain(
 	return block
 }
 
-// TestValidateInboundBlockEnvelopeByronEbbOrdering pins: the four
+// TestValidateInboundBlockEnvelopeByronEbbOrdering covers the four
 // parent/block combinations of the Byron envelope, including consecutive
 // EBBs across an otherwise empty epoch. These structured blocks deliberately
 // have no wire CBOR, so this isolates the ordering rule; the golden-fixture
@@ -704,6 +706,12 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 			byronOrderingEbb(2, 7),
 			regular(2*epochSlots-1, 7),
 			"",
+		},
+		{
+			"regular to EBB same slot",
+			byronOrderingEbb(2, 7),
+			regular(2*epochSlots, 7),
+			"does not follow parent slot",
 		},
 		{
 			"regular to EBB with next number",
@@ -758,6 +766,38 @@ func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {
 			require.ErrorContains(t, err, test.wantErr)
 		})
 	}
+}
+
+func TestValidateBlockOrderByronEbbAfterEbbIncrementsNumberAndSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	parent := envelopeParent{
+		slot:        byron.ByronSlotsPerEpoch,
+		blockNumber: 7,
+		byronEbb:    true,
+	}
+	newEbb := func(epoch, blockNumber uint64) *byron.ByronEpochBoundaryBlock {
+		ebb := &byron.ByronEpochBoundaryBlock{
+			BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+		}
+		ebb.BlockHeader.ConsensusData.Epoch = epoch
+		ebb.BlockHeader.ConsensusData.Difficulty.Value = blockNumber
+		return ebb
+	}
+
+	require.NoError(t, validateBlockOrder(newEbb(2, 8), parent, byron.ByronSlotsPerEpoch))
+	require.ErrorContains(
+		t,
+		validateBlockOrder(newEbb(1, 8), parent, byron.ByronSlotsPerEpoch),
+		"does not follow parent slot",
+	)
+	require.ErrorContains(
+		t,
+		validateBlockOrder(newEbb(2, 7), parent, byron.ByronSlotsPerEpoch),
+		"does not match expected block number",
+	)
 }
 
 // TestValidateByronEbbPlacementRejectsNilHeader ensures malformed Byron EBBs

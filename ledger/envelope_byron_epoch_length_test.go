@@ -87,6 +87,12 @@ func TestValidateInboundBlockEnvelopeByronOrderingUsesConfiguredEpochLength(
 			"",
 		},
 		{
+			"regular to EBB at the parent's slot",
+			byronOrderingEbb(1, 5),
+			byronOrderingMain(1, 0, 5),
+			"does not follow parent slot",
+		},
+		{
 			"regular to EBB of its own epoch",
 			byronOrderingEbb(1, 5),
 			byronOrderingMain(1, 5, 5),
