@@ -16,6 +16,7 @@ package cardano
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -39,16 +40,23 @@ func TestCardanoNodeConfigLoadsCheckpoints(t *testing.T) {
 	)
 }
 
+const (
+	testCheckpointHashA = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+	testCheckpointHashB = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+)
+
 func TestParseCheckpointsNormalizesHashCase(t *testing.T) {
 	t.Parallel()
 
 	data := []byte(
-		`{"checkpoints":[{"blockNo":1,"hash":"AABB"},{"blockNo":2,"hash":"ccdd"}]}`,
+		`{"checkpoints":[{"blockNo":1,"hash":" ` +
+			strings.ToUpper(testCheckpointHashA) +
+			` "},{"blockNo":2,"hash":"` + testCheckpointHashB + `"}]}`,
 	)
 	cps, err := parseCheckpoints(data, "")
 	require.NoError(t, err)
-	require.Equal(t, "aabb", cps[1])
-	require.Equal(t, "ccdd", cps[2])
+	require.Equal(t, testCheckpointHashA, cps[1])
+	require.Equal(t, testCheckpointHashB, cps[2])
 }
 
 func TestParseCheckpointsRejectsInvalidHash(t *testing.T) {
@@ -69,6 +77,26 @@ func TestParseCheckpointsRejectsInvalidHash(t *testing.T) {
 			hash:        "00xz",
 			errContains: "non-hex hash",
 		},
+		{
+			name:        "non-hex at full width",
+			hash:        strings.Repeat("a", 63) + "g",
+			errContains: "non-hex hash",
+		},
+		{
+			name:        "truncated",
+			hash:        testCheckpointHashA[:63],
+			errContains: "must be 64 hex characters",
+		},
+		{
+			name:        "odd length",
+			hash:        "abc",
+			errContains: "must be 64 hex characters",
+		},
+		{
+			name:        "overlong",
+			hash:        testCheckpointHashA + "a",
+			errContains: "must be 64 hex characters",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,7 +112,7 @@ func TestParseCheckpointsRejectsInvalidHash(t *testing.T) {
 func TestParseCheckpointsRejectsWrongHash(t *testing.T) {
 	t.Parallel()
 
-	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"aa"}]}`)
+	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"` + testCheckpointHashA + `"}]}`)
 	_, err := parseCheckpoints(data, "deadbeef")
 	require.EqualError(
 		t,
@@ -98,19 +126,20 @@ func TestParseCheckpointsRejectsWrongHash(t *testing.T) {
 func TestParseCheckpointsAcceptsCorrectHash(t *testing.T) {
 	t.Parallel()
 
-	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"aa"}]}`)
+	data := []byte(`{"checkpoints":[{"blockNo":1,"hash":"` + testCheckpointHashA + `"}]}`)
 	// blake2b256 of the exact bytes above.
 	correct := blake2b256Hex(data)
 	cps, err := parseCheckpoints(data, correct)
 	require.NoError(t, err)
-	require.Equal(t, "aa", cps[1])
+	require.Equal(t, testCheckpointHashA, cps[1])
 }
 
 func TestParseCheckpointsRejectsConflictingDuplicate(t *testing.T) {
 	t.Parallel()
 
 	data := []byte(
-		`{"checkpoints":[{"blockNo":1,"hash":"aa"},{"blockNo":1,"hash":"bb"}]}`,
+		`{"checkpoints":[{"blockNo":1,"hash":"` + testCheckpointHashA +
+			`"},{"blockNo":1,"hash":"` + testCheckpointHashB + `"}]}`,
 	)
 	_, err := parseCheckpoints(data, "")
 	require.Error(t, err)
