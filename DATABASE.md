@@ -4351,7 +4351,11 @@ protocol version that cannot follow epoch `E-1`'s, which is the only case that
 reads the `epoch` row for `E-1`; votes are grouped by decoded update value, not
 by CBOR bytes; and exactly one value must reach `updateQuorum`, with the
 result keeping `maxTxSize + maxBlockHeaderSize < maxBlockBodySize`.
-Otherwise nothing is enacted.
+An agreed update outside the reference domain is refused without enactment;
+malformed cost models are also refused when the submission epoch's protocol
+version requires cost-model validation. Out-of-domain carried-over rows do
+not participate in the protocol-version compatibility check. If any of these
+conditions fail, nothing is enacted.
 
 ```sql
 SELECT *
