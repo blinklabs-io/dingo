@@ -548,6 +548,24 @@ func TestStakeDistributionAdapterKeepsSigmaConsistentAcrossRecapture(
 // which cannot express a counter gap against an observed on-chain value.
 func opCertFixtureWithCounter(t *testing.T, issueNumber uint64) string {
 	t.Helper()
+	coldVKey, coldSKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate cold key: %v", err)
+	}
+	return opCertFixtureForColdKey(t, coldVKey, coldSKey, issueNumber, nil)
+}
+
+// opCertFixtureForColdKey is opCertFixtureWithCounter for a caller-supplied
+// cold key, so several certificates can belong to one pool. kesPeriod
+// overrides the start period the devnet certificate carries when non-nil.
+func opCertFixtureForColdKey(
+	t *testing.T,
+	coldVKey ed25519.PublicKey,
+	coldSKey ed25519.PrivateKey,
+	issueNumber uint64,
+	kesPeriodOverride *uint64,
+) string {
+	t.Helper()
 	devnetCert, err := bursa.LoadKeyFromFile(
 		filepath.Join(devnetKeysDir, "opcert.cert"),
 	)
@@ -556,11 +574,10 @@ func opCertFixtureWithCounter(t *testing.T, issueNumber uint64) string {
 	}
 	kesVKey := devnetCert.VKey
 	kesPeriod := devnetCert.OpCertKesPeriod
-
-	coldVKey, coldSKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate cold key: %v", err)
+	if kesPeriodOverride != nil {
+		kesPeriod = *kesPeriodOverride
 	}
+
 	// cardano-ledger OCertSignable.getSignableRepresentation:
 	//   KES vkey (32) || issue number (8 BE) || KES period (8 BE)
 	var certBody [48]byte

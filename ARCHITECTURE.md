@@ -1106,6 +1106,21 @@ not durably adopted:
   import's completion clear (`mithril/sync_import.go`) carries every
   `forge_fence:` row across, so a producer bootstrapped from a snapshot
   keeps its fence.
+- **Credential and rotation metrics.** Alongside the KES gauges
+  (`cardano_node_metrics_currentKESPeriod_int`,
+  `..._remainingKESPeriods_int`, `..._operationalCertificateStartKESPeriod_int`,
+  `..._operationalCertificateExpiryKESPeriod_int`) the forger exports, in
+  `core` and `api` storage modes alike and evaluated at scrape time:
+  `dingo_forge_opcert_counter_loaded` (issue number of the loaded certificate),
+  `dingo_forge_opcert_counter_onchain` (the highest counter the ledger applied
+  for this pool, the value `LedgerState.LatestOpCertSequence` returns and block
+  application persists; `NaN` until one is observed),
+  `dingo_forge_slots_per_kes_period`, and `dingo_forge_credentials_valid`
+  (1 when the loaded credentials could sign at the current slot). The next
+  certificate to issue carries counter `dingo_forge_opcert_counter_onchain + 1`.
+  `dingo_forge_missed_leader_slots_total` counts leader slots this node won
+  and did not turn into a block of its own on the chain: a build, validation or
+  adoption failure, a refused slot, or an equal-slot alternative that lost.
 
 ```mermaid
 sequenceDiagram
@@ -7073,6 +7088,38 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+**Reload.** A block producer re-reads its VRF, KES and operational certificate
+files on `SIGHUP` (`internal/node.reloadOnSignal`, registered only when
+`blockProducer` is set, so relays keep the signal's default behaviour). A
+Kubernetes Secret rotated in place is picked up with `kill -HUP` and no pod
+restart, so no leader schedule is lost. `Node.ReloadBlockProducerCredentials`
+loads the files into credentials of their own and runs the checks startup runs:
+certificate signature, KES window against the wall-clock slot, and the ledger
+cross-check against the pool registration and the on-chain counter. Only then
+does `PoolCredentials.ReplaceWith` move the material into the live set in one
+critical section. It refuses a replacement that is unvalidated, that belongs to
+another pool or VRF key, or whose counter is **below** the loaded one, and every
+refusal leaves the loaded credentials untouched: loading into the live set
+instead would fail closed on a bad file and stop a healthy producer. A
+successful reload logs the old and new counter and certificate KES period.
+Credentials sourced from a KES agent are rotated through the agent, and a
+reload against them is refused.
+
+`ReplaceWith` deliberately does not advance the credential generation. A forge
+attempt that already holds a snapshot owns a private copy of the outgoing
+material, still validly signed for the slot it selected, so the swap does not
+abandon it; an attempt begun afterwards acquires the new material. A double
+forge across the swap is prevented by the duplicate-slot fence, not by the
+generation.
+
+**Close.** `PoolCredentials.Close` zeroizes the VRF seed and the KES secret key
+and makes the credentials permanently unloaded, so no later load or reload can
+put keys back. The node owns the live set (`Node.blockProducerCreds`) and closes
+it in the same stop sequence that quiesces the forger, after the forger, the KES
+agent client and the leader election, which read from or install into it.
+The leader election holds no copy of the VRF seed: it takes one from the
+credentials for each schedule computation and wipes it afterwards.
+
 ### KES Agent (`kesagent/`, `ledger/forging/kes_signer.go`)
 
 `--shelley-kes-agent-socket` sources the KES signing key from an external
@@ -8285,7 +8332,7 @@ the health listener on `healthPort` (default `12799`, `0` disables).
 The health listener is **not** gated on storage mode. The three API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
-`docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
+image runs. It binds `bindAddr`, the address the relay/NtN
 and metrics listeners already use, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
@@ -8296,8 +8343,15 @@ onto a port an operator exposes for probing.
 
 | Path | Semantics |
 |------|-----------|
-| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered. Independent of sync state. |
-| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot; 503 otherwise. |
+| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered, independent of sync state. The one exception is a wedged event loop: once the slot clock has ticked, 503 if it then stays silent for five minutes. A node that has not ticked yet (database open, Mithril bootstrap, ledger startup) is live. |
+| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot **and** the database answers a read (not ready during startup, live restore or truncate, and shutdown); for a node configured as a block producer, also when the forger is running and its credentials could sign at the current slot (operational certificate loaded, validated and inside its KES window). 503 otherwise, with the first failing condition as the body's `reason`. |
+
+The checks beyond the tip gap are supplied by `Node.EventLoopResponsive`,
+`Node.DatabaseReady` and `Node.BlockProducerReady` through
+`health.Check`, and `nodeHealthChecks` marks only the first as a liveness
+check. The database and forger readings are taken under the node's lifecycle
+gates with `TryLock`, so a probe never waits on a restore and a gate held by
+one reads as not ready.
 
 The separation is a deliberate operational contract, not two names for one
 check. An orchestrator answers a liveness failure by *restarting* and a

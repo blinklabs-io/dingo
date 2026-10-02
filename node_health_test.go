@@ -185,3 +185,36 @@ func TestReinitializeCoreStorageForgetsTipGap(t *testing.T) {
 	assert.False(t, ok)
 	assert.Zero(t, gap)
 }
+
+// TestEventLoopResponsiveReportsAStoppedSlotClock pins the liveness signal:
+// the slot-tick loop that feeds the tip gap is the node's heartbeat. A node
+// that has not ticked yet is starting or bootstrapping and is alive; one whose
+// ticks stopped after they began is wedged; a live restore that forgets the
+// reading returns the node to "not ticked yet" rather than wedged.
+func TestEventLoopResponsiveReportsAStoppedSlotClock(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	require.NoError(t, n.EventLoopResponsive(), "no tick yet is not a stall")
+
+	n.health.recordTipGap(n.health.currentGeneration(), 3)
+	require.NoError(t, n.EventLoopResponsive(), "a fresh tick is responsive")
+	n.health.mu.Lock()
+	recorded := n.health.lastTick
+	n.health.mu.Unlock()
+	require.WithinDuration(
+		t,
+		time.Now(),
+		recorded,
+		time.Minute,
+		"a tick must be timestamped when it is recorded",
+	)
+
+	n.health.mu.Lock()
+	n.health.lastTick = time.Now().Add(-2 * eventLoopStallLimit)
+	n.health.mu.Unlock()
+	require.ErrorContains(t, n.EventLoopResponsive(), "slot clock")
+
+	n.health.forgetTipGap()
+	require.NoError(t, n.EventLoopResponsive())
+}

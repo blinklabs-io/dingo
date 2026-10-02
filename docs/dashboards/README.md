@@ -166,6 +166,11 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 | `dingo_metrics_blockForgingLatency_seconds_bucket` | Block is forged |
 | `cardano_node_metrics_remainingKESPeriods_int` | KES key is configured |
 | `dingo_forge_tip_gap_slots` | Forging is enabled |
+| `dingo_forge_opcert_counter_loaded` | Block producer credentials are loaded |
+| `dingo_forge_opcert_counter_onchain` | Block producer credentials are loaded; `NaN` until the ledger has applied a block carrying one of the pool's operational certificates. The next certificate to issue carries this value plus one |
+| `dingo_forge_slots_per_kes_period` | Block producer credentials are loaded |
+| `dingo_forge_credentials_valid` | Block producer credentials are loaded; 0 when they could not sign at the current slot |
+| `dingo_forge_missed_leader_slots_total` | Forging is enabled; increments for each leader slot won without an adopted block of the node's own |
 | `dingo_database_size_bytes` | Database stores are initialized |
 | `database_blob_*` | Badger blob store is active |
 

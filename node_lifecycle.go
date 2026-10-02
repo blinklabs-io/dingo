@@ -147,6 +147,14 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.leaderElection.Stop,
 		})
 	}
+	// After the forger, the agent client and the election: they all read or
+	// install key material, which this wipes.
+	if n.blockProducerCreds.Load() != nil {
+		stops = append(stops, namedStop{
+			name: "block producer credentials",
+			stop: func() error { n.closeBlockProducerCredentials(); return nil },
+		})
+	}
 	if n.leiosPipelineManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios pipeline manager",
@@ -1313,9 +1321,11 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	// running, so a failure below would otherwise leave that loop installing
 	// key pushes into credentials no forger holds, against an agent
 	// connection nothing reaches until the node shuts down.
+	n.blockProducerCreds.Store(creds)
 	defer func() {
 		if retErr != nil {
 			n.closeKESAgentClient()
+			n.closeBlockProducerCredentials()
 		}
 	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -37,6 +38,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// reloadOnSignal calls reload for every signal received on sigs until ctx is
+// done. A failed reload is logged and ends nothing: the node keeps running on
+// the credentials it already has.
+func reloadOnSignal(
+	ctx context.Context,
+	sigs <-chan os.Signal,
+	reload func() error,
+	logger *slog.Logger,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			logger.Info(
+				"reloading block producer credentials",
+				"component", "node",
+				"signal", sig.String(),
+			)
+			if err := reload(); err != nil {
+				logger.Error(
+					"block producer credential reload failed; keeping the loaded credentials",
+					"component", "node",
+					"error", err,
+				)
+			}
+		}
+	}
+}
 
 func waitForSignalOrError(
 	signalCtx context.Context,
@@ -201,6 +232,17 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 	}
 }
 
+// nodeHealthChecks is the node's contribution to the probes beyond the tip
+// gap: a stopped slot clock fails liveness, and an unavailable database or a
+// block producer that cannot forge holds readiness.
+func nodeHealthChecks(d *dingo.Node) []health.Check {
+	return []health.Check{
+		{Liveness: true, Fn: d.EventLoopResponsive},
+		{Fn: d.DatabaseReady},
+		{Fn: d.BlockProducerReady},
+	}
+}
+
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
@@ -227,6 +269,7 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 func NewHealthServer(
 	cfg *config.Config,
 	tipGap health.TipGapFunc,
+	checks ...health.Check,
 ) *http.Server {
 	if cfg.HealthPort == 0 {
 		return nil
@@ -242,7 +285,7 @@ func NewHealthServer(
 			cfg.BindAddr,
 			strconv.FormatUint(uint64(cfg.HealthPort), 10),
 		),
-		Handler:           health.NewMux(tipGap, readyTipGapSlots),
+		Handler:           health.NewMux(tipGap, readyTipGapSlots, checks...),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -470,7 +513,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// Liveness/readiness listener, on a port of its own so an orchestrator
 	// or load balancer can probe the node without being handed the metrics
 	// or pprof surface. Started for every storage mode.
-	healthServer := NewHealthServer(cfg, d.TipGapSlots)
+	healthServer := NewHealthServer(
+		cfg, d.TipGapSlots, nodeHealthChecks(d)...,
+	)
 	if healthServer != nil {
 		logger.Info(
 			"serving health probes on "+healthServer.Addr,
@@ -484,6 +529,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		syscall.SIGTERM,
 	)
 	defer signalCtxStop()
+	// A block producer re-reads its credential files on SIGHUP. Relays leave
+	// the signal at its default so their behaviour is unchanged.
+	if cfg.BlockProducer {
+		reloadSigs := make(chan os.Signal, 1)
+		signal.Notify(reloadSigs, syscall.SIGHUP)
+		defer signal.Stop(reloadSigs)
+		go reloadOnSignal(
+			signalCtx, reloadSigs, d.ReloadBlockProducerCredentials, logger,
+		)
+	}
 
 	// Error channel for the node goroutine. The metrics, pprof debug and
 	// health listeners are non-essential observability endpoints; their
