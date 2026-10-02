@@ -491,10 +491,10 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	}
 	return p.submitCertTx(
 		client, batchSize, "delegation", stakeKeyDeposit, p.stakeRegistered,
-		func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error) {
+		func(inputs []UTxO, deposit, fee uint64, changeAddr []byte) ([]byte, error) {
 			credHash, credKey := credentialFor(inputs)
 			return BuildDelegationTx(
-				inputs, credHash, poolKeyHash, deposit, MinFee, changeAddr, credKey,
+				inputs, credHash, poolKeyHash, deposit, fee, changeAddr, credKey,
 			)
 		},
 	)
@@ -505,14 +505,14 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 func (p *Pump) submitGovernance(client *NodeClient, batchSize int) bool {
 	return p.submitCertTx(
 		client, batchSize, "governance", drepDeposit, p.drepRegistered,
-		func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error) {
+		func(inputs []UTxO, deposit, fee uint64, changeAddr []byte) ([]byte, error) {
 			credHash, credKey := credentialFor(inputs)
 			if deposit > 0 {
 				return BuildDRepRegistrationTx(
-					inputs, credHash, deposit, MinFee, changeAddr, credKey,
+					inputs, credHash, deposit, fee, changeAddr, credKey,
 				)
 			}
-			return BuildDRepUpdateTx(inputs, credHash, MinFee, changeAddr, credKey)
+			return BuildDRepUpdateTx(inputs, credHash, fee, changeAddr, credKey)
 		},
 	)
 }
@@ -531,11 +531,12 @@ func (p *Pump) submitCertTx(
 	txType string,
 	registrationDeposit uint64,
 	registered map[string]time.Time,
-	build func(inputs []UTxO, deposit uint64, changeAddr []byte) ([]byte, error),
+	build func(inputs []UTxO, deposit, fee uint64, changeAddr []byte) ([]byte, error),
 ) bool {
+	fee := jitteredFee(MinFee)
 	// Reserve enough for a registration deposit so the credential is known
 	// before deciding whether to pay it; change always stays above min-UTxO.
-	required := MinFee + registrationDeposit + minSendAmount
+	required := fee + registrationDeposit + minSendAmount
 	inputs, _, err := p.wallet.SelectCoins(required)
 	if err != nil {
 		p.logger.Warn(
@@ -559,7 +560,7 @@ func (p *Pump) submitCertTx(
 	}
 	changeAddr := controlledChangeAddr(inputs)
 
-	txBytes, err := build(inputs, deposit, changeAddr)
+	txBytes, err := build(inputs, deposit, fee, changeAddr)
 	if err != nil {
 		p.logger.Error("build tx failed", "tx_type", txType, "err", err)
 		p.wallet.ReturnUTxOs(inputs)
@@ -605,7 +606,7 @@ func (p *Pump) submitCertTx(
 			total += u.Amount
 		}
 		var outputs []UTxO
-		if change := total - MinFee - deposit; change > 0 {
+		if change := total - fee - deposit; change > 0 {
 			outputs = []UTxO{{
 				TxHash: txID, Index: 0, Amount: change, SigningKey: credKey,
 			}}
@@ -638,7 +639,8 @@ func (p *Pump) submitPlutus(client *NodeClient, batchSize int) bool {
 }
 
 func (p *Pump) submitPlutusLock(client *NodeClient, batchSize int) bool {
-	required := plutusLockAmount + MinFee + minSendAmount
+	fee := jitteredFee(MinFee)
+	required := plutusLockAmount + fee + minSendAmount
 	inputs, _, err := p.wallet.SelectCoins(required)
 	if err != nil {
 		p.logger.Warn(
@@ -651,7 +653,7 @@ func (p *Pump) submitPlutusLock(client *NodeClient, batchSize int) bool {
 	}
 	changeAddr := controlledChangeAddr(inputs)
 	txBytes, err := BuildPlutusLockTx(
-		inputs, alwaysSucceedsScriptHash(), plutusLockAmount, MinFee, changeAddr,
+		inputs, alwaysSucceedsScriptHash(), plutusLockAmount, fee, changeAddr,
 	)
 	if err != nil {
 		p.logger.Error("build plutus tx failed", "kind", "plutus_lock", "err", err)
@@ -677,7 +679,7 @@ func (p *Pump) submitPlutusLock(client *NodeClient, batchSize int) bool {
 		total += u.Amount
 	}
 	var outputs []UTxO
-	if change := total - plutusLockAmount - MinFee; change > 0 {
+	if change := total - plutusLockAmount - fee; change > 0 {
 		outputs = []UTxO{{
 			TxHash: txID, Index: 1, Amount: change, SigningKey: inputs[0].SigningKey,
 		}}
@@ -687,7 +689,8 @@ func (p *Pump) submitPlutusLock(client *NodeClient, batchSize int) bool {
 }
 
 func (p *Pump) submitPlutusUnlock(client *NodeClient, batchSize int, locked UTxO) bool {
-	collateral, _, err := p.wallet.SelectCoins(plutusUnlockFee * 3 / 2)
+	// Collateral must cover 150% of the fee, including its jitter.
+	collateral, _, err := p.wallet.SelectCoins((plutusUnlockFee + maxFeeJitter) * 3 / 2)
 	if err != nil || len(collateral) != 1 || !collateral[0].SigningKey.canSign() {
 		if err == nil {
 			p.wallet.ReturnUTxOs(collateral)
@@ -700,8 +703,9 @@ func (p *Pump) submitPlutusUnlock(client *NodeClient, batchSize int, locked UTxO
 	if len(changeAddr) == 0 || !changeKey.canSign() {
 		changeAddr, changeKey = collateral[0].SigningKey.Address, collateral[0].SigningKey
 	}
+	fee := jitteredFee(plutusUnlockFee)
 	txBytes, err := BuildPlutusUnlockTx(
-		locked, collateral[0], p.cfg.PlutusV3CostModel, plutusUnlockFee, changeAddr,
+		locked, collateral[0], p.cfg.PlutusV3CostModel, fee, changeAddr,
 	)
 	if err != nil {
 		p.logger.Error("build plutus tx failed", "kind", "plutus_unlock", "err", err)
@@ -711,18 +715,34 @@ func (p *Pump) submitPlutusUnlock(client *NodeClient, batchSize int, locked UTxO
 	}
 	txID, ok := p.submitPlutusTx(client, batchSize, "plutus_unlock", txBytes)
 	if !ok {
+		// The usual cause is a lock transaction that never reached the chain,
+		// so retrying the same output would only be rejected again. Abandon
+		// it; a still-locked output costs the harness plutusLockAmount.
 		p.wallet.ReturnUTxOs(collateral)
-		p.addLockedPlutusUTxO(locked)
 		return false
 	}
 	// Collateral is only consumed if the script fails; keep it reserved with
 	// the transaction so reconciliation returns it once the tx settles.
 	outputs := []UTxO{{
-		TxHash: txID, Index: 0, Amount: locked.Amount - plutusUnlockFee,
+		TxHash: txID, Index: 0, Amount: locked.Amount - fee,
 		SigningKey: changeKey,
 	}}
 	p.wallet.RecordAccepted(txID, collateral, outputs, p.cfg.confirmationDelay())
 	return true
+}
+
+// maxFeeJitter bounds the random fee overpayment added to deterministic
+// workload transactions.
+const maxFeeJitter uint64 = 9_999
+
+// jitteredFee overpays base by a random amount below maxFeeJitter lovelace.
+// Certificate and Plutus transactions are otherwise fully determined by their
+// inputs, so after a rollback orphans one, the wallet would rebuild the same
+// transaction ID and the analyzer would report a duplicate submission;
+// payments get the same effect from their random amounts.
+func jitteredFee(base uint64) uint64 {
+	//nolint:gosec // IntRange returns a value in [0, maxFeeJitter]
+	return base + uint64(IntRange(0, int(maxFeeJitter)))
 }
 
 // submitPlutusTx submits a Plutus workload transaction and logs the outcome.
