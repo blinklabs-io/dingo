@@ -169,7 +169,7 @@ type SnapshotLister interface {
 // Restore's cloud-fallback path, used when no local copy exists). Unlike
 // SnapshotLister, this is meaningful on a CloudDestination parsed from a
 // specific snapshot's own URI (base destination + snapshot ID), the same
-// one UploadDir/DownloadDir operate on.
+// one UploadDir/DownloadFiles operate on.
 type CloudManifestFetcher interface {
 	FetchManifest(ctx context.Context) (Manifest, error)
 }
@@ -321,7 +321,7 @@ func ParseCloudDestination(
 		// prefix-matching compares against the raw prefix string
 		// unmodified — so a noncanonical path (repeated slashes, "."/".."
 		// segments) would make UploadDir write under one (cleaned) key
-		// while ListSnapshots/DownloadDir/Delete search under a different,
+		// while ListSnapshots/DownloadFiles/Delete search under a different,
 		// uncleaned one, silently splitting "upload" and "read" onto two
 		// different prefixes even though both came from the same
 		// configured URI. u.Path is always rooted ("/...") here since
@@ -367,7 +367,7 @@ func downloadCloudFiles(
 // a local restore directory (via filepath.Join/os.Create). A cloud object
 // key is attacker- or corruption-controlled input, not a trusted local
 // path component, so both destination_s3.go's and destination_gcs.go's
-// DownloadDir use this rather than only checking for "/": a bare ".."
+// DownloadFiles use this rather than only checking for "/": a bare ".."
 // resolves outside the target directory via filepath.Join's own cleaning
 // even with no separator present, and a literal "\" is a path separator
 // on Windows (but not Unix, where a "/"-only check would otherwise miss

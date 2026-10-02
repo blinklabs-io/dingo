@@ -110,7 +110,7 @@ func TestJoinCloudURIPreservesQueryAndFragment(t *testing.T) {
 // list/download/delete prefix matching compares against that same Path
 // left uncleaned — so a URI with repeated slashes or "."/".." segments
 // would make UploadDir write under one (cleaned) key while
-// ListSnapshots/DownloadDir/Delete search under a different, uncleaned
+// ListSnapshots/DownloadFiles/Delete search under a different, uncleaned
 // prefix, even though both derive from the exact same configured
 // destination string. ParseCloudDestination must canonicalize u.Path
 // before ever handing it to a registered factory.

@@ -1120,7 +1120,7 @@ func TestRestoreRejectsMismatchedTipBlockNumber(t *testing.T) {
 }
 
 // manifestOnlyCloudDestination implements CloudManifestFetcher but fails
-// UploadDir/DownloadDir outright -- used to prove a caller went through
+// UploadDir/DownloadFiles outright -- used to prove a caller went through
 // the lightweight FetchManifest path and never attempted a full
 // directory download at all, rather than merely happening to succeed
 // either way.
@@ -1181,9 +1181,9 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // cloud snapshotDir whose destination type supports fetching just the
 // one manifest.json object via CloudManifestFetcher -- downloading the
 // (possibly very large) blob/metadata backups alongside it just to read
-// its manifest. This uses a destination whose UploadDir/DownloadDir both
+// its manifest. This uses a destination whose UploadDir/DownloadFiles both
 // fail outright, so this test only passes if PeekManifest actually took
-// the lightweight FetchCloudManifest path and never called DownloadDir
+// the lightweight FetchCloudManifest path and never called DownloadFiles
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	t.Parallel()
@@ -1198,7 +1198,7 @@ func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 }
 
 // noManifestFetcherCloudDestination forwards to a real fakeCloudDestination
-// for UploadDir/DownloadDir but deliberately does not embed it or expose a
+// for UploadDir/DownloadFiles but deliberately does not embed it or expose a
 // FetchManifest method of its own -- unlike this package's "faketest"
 // scheme, whose fakeCloudDestination DOES implement CloudManifestFetcher.
 // A test resolving a destination through THIS wrapper's scheme instead

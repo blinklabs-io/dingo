@@ -32,7 +32,7 @@ import (
 )
 
 // fakeCloudDestination simulates a cloud object store by mirroring
-// UploadDir/DownloadDir onto another local directory, so tests can exercise
+// UploadDir/DownloadFiles onto another local directory, so tests can exercise
 // the registry/parsing/round-trip/listing logic in database/lifecycle
 // without any real network calls or cloud SDKs (those are exercised only
 // by the build-tag-gated destination_s3.go/destination_gcs.go, which need
