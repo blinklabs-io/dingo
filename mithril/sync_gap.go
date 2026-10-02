@@ -545,21 +545,6 @@ func processGapBlocks(
 			)
 		}
 		txs := parsedBlock.Transactions()
-		if len(txs) == 0 {
-			continue
-		}
-		indexer := database.NewBlockIndexer(
-			block.Slot, block.Hash,
-		)
-		offsets, err := indexer.ComputeOffsets(
-			block.Cbor, parsedBlock,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"computing offsets for gap block at slot %d: %w",
-				block.Slot, err,
-			)
-		}
 		point := ocommon.NewPoint(block.Slot, block.Hash)
 		epoch, err := gapBlockEpoch(epochs, block.Slot)
 		if err != nil {
@@ -567,6 +552,19 @@ func processGapBlocks(
 				"resolving epoch for gap block at slot %d: %w",
 				block.Slot,
 				err,
+			)
+		}
+		if len(txs) == 0 {
+			// The imported state already includes epoch dormancy through its
+			// tip, so gap metadata replay must not advance DRep expiry again.
+			continue
+		}
+		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
+		offsets, err := indexer.ComputeOffsets(block.Cbor, parsedBlock)
+		if err != nil {
+			return fmt.Errorf(
+				"computing offsets for gap block at slot %d: %w",
+				block.Slot, err,
 			)
 		}
 		blockPParams, cached := pparamsCache[epoch.EpochId]
@@ -668,7 +666,21 @@ func processGapBlockTransactions(
 			)
 		}
 		storageIndexOffset += childCount
+		protocolMajor := uint64(0)
+		if versioned, ok := pparams.(lcommon.PoolRuleProtocolParameters); ok {
+			protocolMajor = uint64(versioned.ProtocolMajorVersion())
+		}
 		for levelIndex, level := range levels {
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					level,
+					point,
+					db,
+					txn,
+				); err != nil {
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				}
+			}
 			if err := db.SetGapBlockTransaction(
 				level,
 				point,
@@ -676,6 +688,7 @@ func processGapBlockTransactions(
 				gapCertDeposits(logger, level, point, eraId, pparams),
 				offsets,
 				txn,
+				protocolMajor,
 			); err != nil {
 				return fmt.Errorf(
 					"storing transaction body %d: %w",
@@ -686,63 +699,32 @@ func processGapBlockTransactions(
 			if !level.IsValid() {
 				continue
 			}
-			hasGovernance := len(level.ProposalProcedures()) > 0 ||
-				len(level.VotingProcedures()) > 0 ||
-				governance.HasDRepActivityCertificates(level)
-			if !hasGovernance {
+			if !governance.TransactionHasGovernanceEffects(level) {
 				continue
 			}
-			if conwayPParams == nil {
+			if conwayPParams == nil &&
+				governance.TransactionRequiresConwayParameters(level) {
 				return errors.New(
 					"missing Conway protocol parameters for governance gap block processing",
 				)
 			}
-			if len(level.ProposalProcedures()) > 0 {
-				if err := governance.ProcessProposals(
-					level,
-					point,
-					epochId,
-					conwayPParams.GovActionValidityPeriod,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d governance proposals: %w",
-						levelIndex,
-						err,
-					)
-				}
+			drepInactivityPeriod := uint64(0)
+			govActionLifetime := uint64(0)
+			if conwayPParams != nil {
+				drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
+				govActionLifetime = conwayPParams.GovActionValidityPeriod
 			}
-			if len(level.VotingProcedures()) > 0 {
-				if err := governance.ProcessVotes(
-					level,
-					point,
-					epochId,
-					conwayPParams.DRepInactivityPeriod,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d governance votes: %w",
-						levelIndex,
-						err,
-					)
-				}
-			}
-			if governance.HasDRepActivityCertificates(level) {
-				if err := governance.ProcessDRepActivityCertificates(
-					level,
-					epochId,
-					conwayPParams.DRepInactivityPeriod,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"processing body %d DRep activity: %w",
-						levelIndex,
-						err,
-					)
-				}
+			if err := governance.ProcessTransactionEffects(
+				level,
+				point,
+				epochId,
+				drepInactivityPeriod,
+				govActionLifetime,
+				protocolMajor,
+				db,
+				txn,
+			); err != nil {
+				return fmt.Errorf("processing body %d transaction governance: %w", levelIndex, err)
 			}
 		}
 	}

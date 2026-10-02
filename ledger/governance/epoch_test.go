@@ -43,6 +43,46 @@ func TestProcessEpochSkipsPreConwayProtocolParameters(t *testing.T) {
 	assert.Same(t, pparams, out.UpdatedPParams)
 }
 
+func TestProcessEpochExtendsDRepsWhenNoLiveProposals(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	credential := testBytes(28, 0x71)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    credential,
+		ExpiryEpoch:   20,
+		Active:        true,
+	}))
+
+	processBoundary := func() {
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		_, err := ProcessEpoch(&EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    4,
+			NewEpoch:     5,
+			BoundarySlot: 500,
+			PParams:      conwayPParamsFixture(10),
+			UpdateFn: func(
+				pparams lcommon.ProtocolParameters,
+				_ any,
+			) (lcommon.ProtocolParameters, error) {
+				return pparams, nil
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, txn.Commit())
+	}
+
+	processBoundary()
+	processBoundary()
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestRatificationPreconditionAcceptsZeroCommitteeQuorum(t *testing.T) {
 	t.Parallel()
 
@@ -87,7 +127,6 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
-
 	err = refundProposalDeposit(db, nil, &models.GovernanceProposal{
 		Deposit:       7,
 		ReturnAddress: rewardAddrBytes,
@@ -213,6 +252,12 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 		Reward:     types.Uint64(5),
 		Active:     true,
 	}))
+	drepCredential := testBytes(28, 0x52)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
 	txHash := testBytes(32, 3)
 	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
 		TxHash:        txHash,
@@ -245,6 +290,11 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch,
+		"a proposal expiring in the previous epoch must not suppress the dormancy bump")
 
 	assert.Equal(t, 1, out.ExpiredCount)
 	assert.Equal(t, 0, out.DroppedCount)
@@ -854,6 +904,72 @@ func TestProcessEpochRatifiesConwayAndDijkstra(t *testing.T) {
 			)
 		})
 	}
+}
+
+// An action ratified at the boundary that closes its final epoch has
+// expires_epoch below the new epoch, so it does not count as a live proposal
+// for the dormant-epoch bump into that new epoch.
+func TestProcessEpochDormancyBumpIgnoresActionRatifiedAtFinalBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, _ := newTallyTestDB(t)
+	drepCredential := testBytes(28, 0x71)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	actionCbor, err := cbor.Encode(&lcommon.NoConfidenceGovAction{
+		Type: uint(lcommon.GovActionTypeNoConfidence),
+	})
+	require.NoError(t, err)
+	txHash := testBytes(32, 0x72)
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        txHash,
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeNoConfidence),
+			ProposedEpoch: 4,
+			ExpiresEpoch:  4,
+			AnchorURL:     "https://example.invalid/dormancy-final-boundary",
+			AnchorHash:    testBytes(32, 0x73),
+			ReturnAddress: testBytes(29, 0x74),
+			GovActionCbor: actionCbor,
+			AddedSlot:     400,
+		},
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams: &conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
 }
 
 func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(

@@ -3068,6 +3068,18 @@ because prior pot transitions cannot be repaired safely without replay.
     -------------------------------------------------
 ```
 
+Conway epoch processing extends every registered DRep's effective expiry by
+one epoch when the post-expiry live governance proposal set is empty, matching
+the ledger's dormant-DRep rule. The boundary write is idempotent across restart
+replay and records the prior expiry and activity state by slot so rollback
+restores both. Mithril certificate-state import folds its recorded dormant
+epoch count into each imported DRep expiry before the row enters this same
+effective-expiry model. Dingo also persists that count separately: PV9 DRep
+registrations include the accumulated count when computing their initial
+expiry, while PV10 and later use the already-adjusted expiry model. Processing
+a governance proposal resets the consecutive dormant count, and both boundary
+increments and resets are slot-journaled for rollback.
+
 ### Era-Specific Validation
 
 Validated Conway and Dijkstra block admission checks the aggregate consumed
@@ -8197,6 +8209,19 @@ batch only when it is non-empty, hash-linked from the requested start point,
 and terminates at the exact requested end point; a mismatch falls through to
 the next bootstrap peer before any block is stored.
 
+When that compatibility path replays a gap transaction, it applies governance
+effects in ledger order: votes, DRep registration/update activity, proposals,
+then DRep deregistration cleanup. A deregistration-only transaction still
+clears that DRep's votes on active proposals. Conway certificate-state import
+also preserves the dormant-epoch count from both nested VState and historical
+flattened committee-state encodings, applying it to active DRep expiries. Once
+the flattened parser selects a DRep map, a decode error in any DRep key,
+expiry, anchor (URL, or a hash that is not 32 bytes), deposit or delegator
+fails the import; it must not checkpoint partial governance state as complete.
+Live application, backfill and gap replay require Conway protocol parameters
+only for transactions that read them (`governance.TransactionRequiresConwayParameters`);
+a transaction that only deregisters DReps applies without them.
+
 The epoch nonce for the boundary into epoch N+1 is
 `candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce ⭒ extraEntropy(N+1)`,
 where the carried
@@ -12796,12 +12821,10 @@ remain outside the snapshot manager's responsibility.
 CIP-0163 reward-account inactivity (proof-of-life) tracks each account's
 `expiration_epoch`. An account is active iff `expiration_epoch == 0` (unset) or
 `expiration_epoch >= currentEpoch` (`ledger.accountExpiredAtEpoch`, negated).
-DRep activity uses a boundary one epoch later —
-`drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch`
-(`ledger/governance/epoch.go` `drepActiveAtEpoch`) — so a stored expiry equal
-to `currentEpoch` is still active for an account but already expired for a
-DRep; the two predicates are intentionally not shared code, matching the
-CIP text's separate account and DRep expiry semantics. When the
+DRep activity uses the same inclusive boundary:
+`drep.ExpiryEpoch == 0 || drep.ExpiryEpoch >= currentEpoch`
+(`ledger/governance/epoch.go` `drepActiveAtEpoch`). An expiry equal to
+`currentEpoch` remains active for both accounts and DReps. When the
 delegator-inactivity gate
 (`LedgerStateConfig.DelegatorInactivityEnabled` / `DelegatorInactivity`) is
 enabled, block application renews it: `LedgerDelta.applyWithDonationRecording`

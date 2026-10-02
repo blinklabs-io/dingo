@@ -54,6 +54,53 @@ func testConwayProtocolParameters() *conway.ConwayProtocolParameters {
 	return &pparams
 }
 
+func TestDormantDRepBoundaryUsesNewEpochProposalSet(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCredential := testHash28("dormant-boundary-drep")
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:  drepCredential,
+		Active:      true,
+		ExpiryEpoch: 20,
+	}))
+	require.NoError(t, db.SetGovernanceProposal(
+		&models.GovernanceProposal{
+			TxHash:        testHash32("expires-at-boundary"),
+			ActionIndex:   0,
+			ActionType:    uint8(lcommon.GovActionTypeInfo),
+			ProposedEpoch: 1,
+			ExpiresEpoch:  4,
+			AnchorURL:     "https://example.invalid/expired",
+			AnchorHash:    testHash32("dormant-boundary-anchor"),
+		},
+		nil,
+	))
+
+	previous, err := db.GetActiveGovernanceProposals(4, nil)
+	require.NoError(t, err)
+	require.Len(t, previous, 1)
+	current, err := db.GetActiveGovernanceProposals(5, nil)
+	require.NoError(t, err)
+	require.Empty(t, current)
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	require.NoError(t, BumpDormantDRepExpiryAtEpochBoundary(
+		db, 5, 500, txn,
+	))
+	require.NoError(t, txn.Commit())
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(21), drep.ExpiryEpoch)
+}
+
 func TestEpochContainsSlot(t *testing.T) {
 	t.Parallel()
 
@@ -226,8 +273,8 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	}))
 
 	tx := mockledger.NewTransactionBuilder().WithCertificates(
-		&lcommon.RegistrationDrepCertificate{
-			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		&lcommon.UpdateDrepCertificate{
+			CertType: uint(lcommon.CertificateTypeUpdateDrep),
 			DrepCredential: lcommon.Credential{
 				CredType:   lcommon.CredentialTypeAddrKeyHash,
 				Credential: credentialHash,
@@ -242,11 +289,20 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 		},
 	)
 	require.True(t, HasDRepActivityCertificates(tx))
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
 
 	txn := db.Transaction(true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ProcessDRepActivityCertificates(tx, 100, 20, db, txn)
+		return ProcessDRepActivityCertificates(
+			tx,
+			ocommon.Point{Slot: 1},
+			100,
+			20,
+			9,
+			db,
+			txn,
+		)
 	}))
 
 	keyDRep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
@@ -262,6 +318,89 @@ func TestProcessDRepActivityCertificates(t *testing.T) {
 	expired, err := db.GetExpiredDReps(100, nil)
 	require.NoError(t, err)
 	assert.Empty(t, expired)
+}
+
+func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	drepCredential := testHash28("drep-ordering-voter")
+	var drepHash lcommon.CredentialHash
+	copy(drepHash[:], drepCredential)
+	require.NoError(t, db.SetImportedDormantDRepEpochs(3, nil))
+
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testHash28("new-proposal-return")...),
+	)
+	require.NoError(t, err)
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/new",
+			DataHash: [32]byte(testHash32("new-proposal-anchor")),
+		},
+	}
+	registration := &lcommon.RegistrationDrepCertificate{
+		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
+		Amount:   500,
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: drepHash,
+		},
+	}
+	tx := mockledger.NewTransactionBuilder()
+	tx.WithId(testHash32("drep-ordering-tx"))
+	tx.WithValid(true)
+	tx.WithCertificates(registration)
+	tx.WithProposalProcedures(proposal)
+	point := ocommon.Point{Slot: 100, Hash: testHash32("drep-ordering-block")}
+
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := ResetDormantDRepExpiryBeforeCertificates(
+			tx,
+			point,
+			db,
+			txn,
+		); err != nil {
+			return err
+		}
+		if err := db.SetTransactionMetadataOnly(
+			tx,
+			point,
+			0,
+			map[int]uint64{0: 500},
+			txn,
+			9,
+		); err != nil {
+			return err
+		}
+		if err := ProcessDRepActivityCertificates(tx, point, 100, 20, 9, db, txn); err != nil {
+			return err
+		}
+		return ProcessProposals(tx, point, 100, 20, db, txn)
+	}))
+
+	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, drep)
+	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
+	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
+	require.NoError(t, err)
+	assert.Zero(t, dormantEpochs)
 }
 
 func TestExtractGovActionInfo_ParameterChange(t *testing.T) {

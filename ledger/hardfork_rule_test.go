@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 )
 
 // plominFixtureKeys holds the staking keys seeded by
@@ -105,6 +107,176 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 	assert.Equal(t, uint64(7777), dead.AddedSlot,
 		"AddedSlot must be bumped to the boundary slot so a later "+
 			"rollback past boundarySlot re-derives from cert history")
+}
+
+func TestApplyIntraEraHardForkRule_Pv10RebuildsDRepDelegators(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	drepOne := bytes.Repeat([]byte{0x71}, 28)
+	drepTwo := bytes.Repeat([]byte{0x72}, 28)
+	drepThree := bytes.Repeat([]byte{0x73}, 28)
+	stakeOne := bytes.Repeat([]byte{0x74}, 28)
+	stakeTwo := bytes.Repeat([]byte{0x75}, 28)
+
+	applyCertificates := func(
+		slot uint64,
+		id byte,
+		protocolMajor uint64,
+		certificates ...lcommon.Certificate,
+	) {
+		t.Helper()
+		tx := mockledger.NewTransactionBuilder().WithCertificates(certificates...)
+		tx.WithId(bytes.Repeat([]byte{id}, lcommon.Blake2b256Size))
+		tx.WithValid(true)
+		point := ocommon.Point{Slot: slot, Hash: tx.Hash().Bytes()}
+		deposits := make(map[int]uint64)
+		for i, certificate := range certificates {
+			if _, ok := certificate.(*lcommon.RegistrationDrepCertificate); ok {
+				deposits[i] = 500
+			}
+		}
+		txn := db.MetadataTxn(true)
+		defer txn.Release()
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			return db.Metadata().SetTransaction(
+				tx,
+				point,
+				0,
+				deposits,
+				false,
+				txn.Metadata(),
+				protocolMajor,
+			)
+		}))
+	}
+	deregister := func(
+		slot uint64,
+		id byte,
+		credential []byte,
+		protocolMajor uint64,
+	) {
+		t.Helper()
+		applyCertificates(
+			slot,
+			id,
+			protocolMajor,
+			&lcommon.DeregistrationDrepCertificate{
+				CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+				DrepCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.NewBlake2b224(credential),
+				},
+				Amount: 500,
+			},
+		)
+	}
+
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepOne,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeOne,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepOne,
+			AddedSlot:      1,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepTwo,
+			AddedSlot:     1,
+			Active:        true,
+			Delegators: []models.StakeCredentialRef{{
+				Tag: 0,
+				Key: stakeOne,
+			}},
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepTwo,
+			AddedSlot:      1,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    drepThree,
+			AddedSlot:     22,
+			Active:        true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: drepThree,
+			AddedSlot:      22,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeOne,
+		CredentialTag: 0,
+		Drep:          drepTwo,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     20,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    stakeTwo,
+		CredentialTag: 0,
+		Drep:          drepThree,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     21,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+
+	ls := newTestLSForHardForkRule(t, db)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyIntraEraHardForkRule(txn, 10, 30, 500)
+	}))
+
+	deregister(31, 0x7c, drepOne, 10)
+	deregister(32, 0x7d, drepThree, 10)
+	account, err := db.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep,
+		"deregistering stale D1 state must preserve the PV10 D2 delegation")
+	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep,
+		"deregistering D3 must clear its rebuilt reverse membership")
+
+	require.NoError(t, db.RestoreAccountStateAtSlot(29, nil))
+	require.NoError(t, db.RestoreDrepStateAtSlot(29, nil))
+	account, err = db.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepTwo, account.Drep)
+	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepThree, account.Drep)
+
+	deregister(31, 0x7e, drepOne, 9)
+	deregister(32, 0x7f, drepThree, 9)
+	account, err = db.GetAccountByCredential(0, stakeOne, true, nil)
+	require.NoError(t, err)
+	require.Nil(t, account.Drep,
+		"rollback must restore PV9's stale D1 reverse membership")
+	account, err = db.GetAccountByCredential(0, stakeTwo, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, drepThree, account.Drep,
+		"rollback must restore PV9's missing D3 reverse membership")
 }
 
 // Every major-version bump other than the ones with an explicit case

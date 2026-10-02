@@ -266,6 +266,7 @@ func (d *Database) GetDRepVotingPowerByType(
 func (d *Database) UpdateDRepActivity(
 	credentialTag uint8,
 	drepCredential []byte,
+	slot uint64,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
 	txn *Txn,
@@ -274,6 +275,7 @@ func (d *Database) UpdateDRepActivity(
 		if err := d.governanceStore().UpdateDRepActivity(
 			credentialTag,
 			drepCredential,
+			slot,
 			activityEpoch,
 			inactivityPeriod,
 			txn.Metadata(),
@@ -282,6 +284,62 @@ func (d *Database) UpdateDRepActivity(
 				"failed to update DRep activity: %w",
 				err,
 			)
+		}
+		return nil
+	})
+}
+
+// BumpDormantDRepExpiries extends active DRep expiries at an empty Conway
+// governance boundary. Replaying the same boundary slot is idempotent.
+func (d *Database) BumpDormantDRepExpiries(
+	slot uint64,
+	txn *Txn,
+) (int, error) {
+	var affected int
+	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		var err error
+		affected, err = d.governanceStore().BumpDormantDRepExpiries(
+			slot,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to bump dormant DRep expiries: %w", err)
+		}
+		return nil
+	})
+	return affected, err
+}
+
+func (d *Database) GetDormantDRepEpochs(txn *Txn) (uint64, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.governanceStore().GetDormantDRepEpochs(txn.Metadata())
+}
+
+func (d *Database) ResetDormantDRepEpochs(slot uint64, txn *Txn) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().ResetDormantDRepEpochs(
+			slot,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to reset dormant DRep epoch count: %w", err)
+		}
+		return nil
+	})
+}
+
+func (d *Database) SetImportedDormantDRepEpochs(
+	dormantEpochs uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetImportedDormantDRepEpochs(
+			dormantEpochs,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to import dormant DRep epoch count: %w", err)
 		}
 		return nil
 	})

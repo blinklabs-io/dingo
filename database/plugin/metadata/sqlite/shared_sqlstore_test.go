@@ -425,7 +425,7 @@ type drepStore interface {
 		[]byte,
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	UpdateDRepActivity(uint8, []byte, uint64, uint64, types.Txn) error
+	UpdateDRepActivity(uint8, []byte, uint64, uint64, uint64, types.Txn) error
 	GetExpiredDReps(uint64, types.Txn) ([]*models.Drep, error)
 	GetDrepLastRegistrationSlot(uint8, []byte, types.Txn) (uint64, error)
 	GetDrepLastRegistrationDeposit(uint8, []byte, types.Txn) (*uint64, error)
@@ -601,6 +601,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		1,
 		importedCredential,
 		30,
+		30,
 		5,
 		nil,
 	))
@@ -761,7 +762,7 @@ func exerciseDrepStore(t *testing.T, store drepStore) drepState {
 		},
 		ret.Deposits,
 	)
-	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, nil)
+	err = store.UpdateDRepActivity(0, missingCredential, 1, 1, 1, nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, models.ErrDrepActivityNotUpdated))
 	ret.MissingActivityError = err.Error()
@@ -4384,6 +4385,7 @@ type transactionWriteStore interface {
 		map[int]uint64,
 		bool,
 		types.Txn,
+		...uint64,
 	) error
 	SetTransactionBatchedHistorical(
 		lcommon.Transaction,
@@ -4394,6 +4396,7 @@ type transactionWriteStore interface {
 		bool,
 		types.MetadataBatchAccumulator,
 		types.Txn,
+		...uint64,
 	) error
 	GetTransactionByHash([]byte, types.Txn) (*models.Transaction, error)
 	GetUtxoIncludingSpent([]byte, uint32, types.Txn) (*models.Utxo, error)
@@ -5167,6 +5170,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	require.NoError(t, store.SetTransaction(
 		transaction,
@@ -5175,6 +5179,7 @@ func exerciseCertificateWriteStore(
 		deposits,
 		false,
 		nil,
+		10,
 	))
 	state := certificateWriteState{TableCounts: map[string]int{}}
 	require.NoError(t, db.QueryRow(`

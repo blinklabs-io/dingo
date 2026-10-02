@@ -651,51 +651,31 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if !tx.IsValid() {
 		return nil
 	}
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
-	if conwayPP == nil {
+	if conwayPP == nil && governance.TransactionRequiresConwayParameters(tx) {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
 		)
 	}
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx, point, epochId,
-			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance proposals: %w", err,
-			)
-		}
+	var inactivityPeriod, proposalLifetime, protocolVersion uint64
+	if conwayPP != nil {
+		inactivityPeriod = conwayPP.DRepInactivityPeriod
+		proposalLifetime = conwayPP.GovActionValidityPeriod
+		protocolVersion = uint64(conwayPP.ProtocolVersion.Major)
 	}
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx, point, epochId,
-			conwayPP.DRepInactivityPeriod,
-			b.db, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"governance votes: %w", err,
-			)
-		}
-	}
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx,
-			epochId,
-			conwayPP.DRepInactivityPeriod,
-			b.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf(
-				"DRep activity certificates: %w", err,
-			)
-		}
+	if err := governance.ProcessTransactionEffects(
+		tx,
+		point,
+		epochId,
+		inactivityPeriod,
+		proposalLifetime,
+		protocolVersion,
+		b.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("governance transaction effects: %w", err)
 	}
 	return nil
 }
@@ -983,6 +963,16 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 		// Detect epoch boundary and update pparams
 		if isNewEpoch {
+			if epochId > b.lastEpochId {
+				if err := governance.BumpDormantDRepExpiryAtEpochBoundary(
+					b.db,
+					epochId,
+					blk.Slot,
+					batchTxn,
+				); err != nil {
+					return fmt.Errorf("bumping dormant DRep expiry at epoch %d: %w", epochId, err)
+				}
+			}
 			b.processEpochBoundary(epochId, eraId)
 		}
 
@@ -1216,10 +1206,25 @@ func (b *Backfill) processBlockTxsBatched(
 		for levelIndex, level := range levels {
 			storageIndex := storageBaseIndex + uint64(levelIndex)
 			updateEpoch, paramUpdates := level.ProtocolParameterUpdates()
+			conwayPP := backfillConwayProtocolParameters(pp)
+			protocolMajor := uint64(0)
+			if versioned, ok := pp.(lcommon.PoolRuleProtocolParameters); ok {
+				protocolMajor = uint64(versioned.ProtocolMajorVersion())
+			}
 			if opts.SkipProducedUtxoOffsetWrites {
 				b.skippedUtxoRefs += uint64(len(level.Produced()))
 			}
 			setTxStart := time.Now()
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					level,
+					point,
+					b.db,
+					txn,
+				); err != nil {
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				}
+			}
 			if err := b.db.SetTransactionBatchedWithOpts(
 				level, point, uint32(storageIndex), //nolint:gosec
 				updateEpoch, paramUpdates,
@@ -1230,6 +1235,7 @@ func (b *Backfill) processBlockTxsBatched(
 					Stats:                        stats,
 					SkipWithdrawalWitnessWrite:   !b.delegatorInactivityEnabled,
 					HistoricalBackfill:           true,
+					ProtocolMajor:                protocolMajor,
 				},
 			); err != nil {
 				return fmt.Errorf(
@@ -1247,7 +1253,7 @@ func (b *Backfill) processBlockTxsBatched(
 				level,
 				point,
 				epochId,
-				backfillConwayProtocolParameters(pp),
+				conwayPP,
 				txn,
 			); err != nil {
 				return fmt.Errorf(

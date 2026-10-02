@@ -68,6 +68,9 @@ const (
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
+	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
+	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -196,6 +199,9 @@ var schemaVersions = []struct {
 		Name:    rewardLeaderDeficitSchemaRelease,
 		Dir:     "v32",
 	},
+	{Version: 33, Name: drepExpiryHistorySchemaRelease, Dir: "v33"},
+	{Version: 34, Name: drepDormancyStateSchemaRelease, Dir: "v34"},
+	{Version: 35, Name: drepDelegatorStateSchemaRelease, Dir: "v35"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

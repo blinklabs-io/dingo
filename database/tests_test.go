@@ -2789,6 +2789,7 @@ func (e *erroringMetadata) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return e.injectErr
 }
@@ -2800,6 +2801,7 @@ func (e *erroringMetadata) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return e.injectErr
 }
@@ -2812,6 +2814,7 @@ func (e *erroringMetadata) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
+	protocolMajor ...uint64,
 ) error {
 	return e.injectErr
 }

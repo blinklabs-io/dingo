@@ -395,13 +395,13 @@ func (d *Database) SetTransactionWithOpts(
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
+			txn.Metadata(), opts.ProtocolMajor,
 		)
 	} else {
 		setTxErr = d.transactionStore().SetTransaction(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
-			txn.Metadata(),
+			txn.Metadata(), opts.ProtocolMajor,
 		)
 	}
 	if setTxErr != nil {
@@ -443,6 +443,7 @@ func (d *Database) SetTransactionMetadataOnly(
 	idx uint32,
 	certDeposits map[int]uint64,
 	txn *Txn,
+	protocolMajor ...uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -466,6 +467,7 @@ func (d *Database) SetTransactionMetadataOnly(
 		// instead of implying real gate logic applies here.
 		false,
 		metadataTxn,
+		protocolMajor...,
 	); err != nil {
 		return fmt.Errorf(
 			"set transaction metadata only for tx %s (block idx %d, slot %d): %w",
@@ -495,6 +497,7 @@ func (d *Database) SetGapBlockTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+	protocolMajor ...uint64,
 ) error {
 	owned := false
 	if txn == nil {
@@ -566,7 +569,7 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	if err := d.transactionStore().SetGapBlockTransaction(
-		tx, point, idx, certDeposits, txn.Metadata(),
+		tx, point, idx, certDeposits, txn.Metadata(), protocolMajor...,
 	); err != nil {
 		return fmt.Errorf(
 			"set gap block transaction metadata: %w", err,

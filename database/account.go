@@ -164,15 +164,11 @@ func (d *Database) ResetAccountExpirationActivation(
 }
 
 // ClearDanglingDRepDelegations applies the cardano-ledger Conway HARDFORK
-// STS rule for protocol major version 10 (Plomin, mainnet January 2025): any
-// account with a credential-backed DRep delegation (DrepType 0 or 1) whose
-// target DRep credential is not currently registered as an active DRep has
-// its delegation cleared. Account.AddedSlot is updated to atSlot so the
-// rewritten row is excluded from a rollback restore targeting any slot
-// before atSlot (the restore filters on `added_slot <= targetSlot` and picks
-// up the prior certificate history instead). Pseudo-DRep delegations
-// (AlwaysAbstain, AlwaysNoConfidence) are preserved. Returns the number of
-// accounts updated.
+// STS rule at protocol major version 10 (Plomin): it clears credential-backed
+// account delegations to inactive DReps and rebuilds the reverse delegator set
+// from active account state. Both changes are rollbackable to atSlot.
+// Pseudo-DRep delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
+// Returns the number of account delegations cleared.
 //
 // See cardano-ledger Conway/Rules/HardFork.hs (updateDRepDelegations).
 func (d *Database) ClearDanglingDRepDelegations(

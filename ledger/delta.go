@@ -161,6 +161,13 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// initialized during startup.
 	var pparams lcommon.ProtocolParameters
 	var snapshotLoaded bool
+	ls.RLock()
+	currentPParams := ls.currentPParams
+	ls.RUnlock()
+	protocolMajor := uint64(0)
+	if version, err := GetProtocolVersion(currentPParams); err == nil {
+		protocolMajor = uint64(version.Major)
+	}
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
@@ -185,6 +192,17 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			certDeposits := certDepositsMapPool.Get().(map[int]uint64)
 			for certIndex := range certDeposits {
 				delete(certDeposits, certIndex)
+			}
+			if level.IsValid() {
+				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+					level,
+					d.Point,
+					ls.db,
+					txn,
+				); err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+				}
 			}
 			if len(certs) > 0 && !snapshotLoaded {
 				snapshot := ls.loadConsensusSnapshot()
@@ -231,6 +249,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
 					StrictAppliedInputConservation: d.strictConsumedInputs,
 					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
+					ProtocolMajor:                  protocolMajor,
 				},
 			)
 			certDepositsMapPool.Put(certDeposits)
@@ -436,12 +455,8 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txn *database.Txn,
 ) error {
-	proposals := tx.ProposalProcedures()
-	votes := tx.VotingProcedures()
-	hasDRepActivityCerts := governance.HasDRepActivityCertificates(tx)
-
 	// Early return if no governance data to process
-	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
+	if !governance.TransactionHasGovernanceEffects(tx) {
 		return nil
 	}
 
@@ -454,51 +469,33 @@ func (d *LedgerDelta) processGovernance(
 	ls.RUnlock()
 
 	conwayPParams := conwayProtocolParameters(pparams)
-	if conwayPParams == nil {
+	if conwayPParams == nil &&
+		governance.TransactionRequiresConwayParameters(tx) {
 		return fmt.Errorf(
 			"governance requires Conway protocol parameters, got %T",
 			pparams,
 		)
 	}
-
-	// Process governance proposals
-	if len(proposals) > 0 {
-		if err := governance.ProcessProposals(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.GovActionValidityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance proposals: %w", err)
-		}
+	drepInactivityPeriod := uint64(0)
+	govActionValidityPeriod := uint64(0)
+	protocolMajor := uint64(0)
+	if conwayPParams != nil {
+		drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
+		govActionValidityPeriod = conwayPParams.GovActionValidityPeriod
+		protocolMajor = uint64(conwayPParams.ProtocolVersion.Major)
 	}
 
-	// Process governance votes
-	if len(votes) > 0 {
-		if err := governance.ProcessVotes(
-			tx,
-			d.Point,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process governance votes: %w", err)
-		}
-	}
-
-	if hasDRepActivityCerts {
-		if err := governance.ProcessDRepActivityCertificates(
-			tx,
-			currentEpoch,
-			conwayPParams.DRepInactivityPeriod,
-			ls.db,
-			txn,
-		); err != nil {
-			return fmt.Errorf("process DRep activity certificates: %w", err)
-		}
+	if err := governance.ProcessTransactionEffects(
+		tx,
+		d.Point,
+		currentEpoch,
+		drepInactivityPeriod,
+		govActionValidityPeriod,
+		protocolMajor,
+		ls.db,
+		txn,
+	); err != nil {
+		return fmt.Errorf("process governance transaction effects: %w", err)
 	}
 
 	return nil

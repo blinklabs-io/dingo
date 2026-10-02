@@ -409,9 +409,30 @@ Migration `v30` (`reward-account-output-folded`, integer version 30) adds the
 per-output marker that keeps reward credits from being counted again after
 they are written into `account.reward`.
 
+Migration `v31` (`reward-credit-round-table`) stores applied reward rounds as
+rows rather than an epoch-sized JSON value.
+
 Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
 `leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
 rounds retain the magnitude of negative leader rewards.
+
+Migration `v33` (`drep-expiry-history`) adds `drep_expiry_history` and
+`drep_expiry_epoch_event`. The history stores pre-write expiry and activity
+state once per DRep and slot, allowing activity updates and dormant-epoch
+expiry extensions to roll back together. The event table makes each
+empty-governance boundary idempotent on replay.
+
+Migration `v34` (`drep-dormancy-state`) adds a singleton counter and history
+for consecutive no-proposal epochs. Boundary increments and proposal-driven
+resets are journaled for rollback; proposal-driven resets run before
+certificate processing, and snapshot import initializes the counter from
+parsed ledger state.
+
+Migration `v35` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+reverse index of stake credentials recorded in each active DRep's ledger
+delegator set. Its backfill and PV10 transition follow the ledger's active
+account delegation rules, and the schema preserves reverse delegators imported
+from cert-state snapshots.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -1314,7 +1335,12 @@ updates preserve the previous activity and expiry epochs.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. Activity updates set `last_activity_epoch` and `expiry_epoch` from the containing epoch and active protocol parameters; expiry changes and dormant-boundary extensions are rollbackable. PV9 registration uses accumulated dormant epochs. Mithril imports carry snapshot expiry and dormancy state but do not provide last-activity epochs; imported rows therefore retain `last_activity_epoch = 0`. |
+| `drep_expiry_history` | `credential_tag`, `credential`, `added_slot`, `previous_expiry_epoch`, `previous_last_activity_epoch` | PK `(credential_tag, credential, added_slot)`; index `added_slot` | First pre-mutation DRep activity/expiry state at each slot, restored during rollback. |
+| `drep_expiry_epoch_event` | `added_slot` | PK `added_slot` | Idempotence marker for dormant DRep expiry extension at an empty-proposal epoch boundary. |
+| `drep_dormancy_state` | `id`, `dormant_epochs` | PK `id` (singleton row id 1) | Consecutive epoch count with no governance proposals, used by PV9 registration expiry. |
+| `drep_dormancy_history` | `id`, `added_slot`, `previous_dormant_epochs` | PK `id`; index `added_slot` | Previous counter values for boundary increments and proposal resets, replayed in reverse during rollback. |
+| `drep_delegator` | `id`, `drep_credential_tag`, `drep_credential`, `stake_credential_tag`, `stake_credential`, `added_slot`, `removed_slot` | PK `id`; indexes `(drep_credential_tag, drep_credential, removed_slot)`, `(added_slot, removed_slot)` | Rollbackable reverse membership from registered DReps to stake credentials, including the reverse set imported from cert-state snapshots. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |

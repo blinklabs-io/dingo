@@ -528,8 +528,9 @@ func (p *RatificationPlan) Apply(
 // RatificationDecision is one boundary's RATIFY and EXPIRY verdicts: which
 // pending actions are accepted and which are classified expired.
 type RatificationDecision struct {
-	Ratified []*models.GovernanceProposal
-	Expired  []*models.GovernanceProposal
+	Ratified            []*models.GovernanceProposal
+	Expired             []*models.GovernanceProposal
+	ActiveProposalCount int
 }
 
 // decideRatification computes the RATIFY and EXPIRY verdicts for the boundary
@@ -551,6 +552,7 @@ func decideRatification(
 	if err != nil {
 		return nil, fmt.Errorf("get active proposals: %w", err)
 	}
+	verdicts.ActiveProposalCount = len(stillActive)
 	// --- RATIFICATION -------------------------------------------------
 	//
 	// The inputs assembled below (TallyContext, activeDRepCount,
@@ -1009,6 +1011,14 @@ func applyRatification(
 	)
 	if err != nil {
 		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
+	}
+	if err := BumpDormantDRepExpiryAtEpochBoundary(
+		in.DB,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	); err != nil {
+		return 0, fmt.Errorf("extend dormant DRep expiries: %w", err)
 	}
 	return expiredOrphanCount, nil
 }

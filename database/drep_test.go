@@ -53,6 +53,7 @@ func TestUpdateDRepActivityExpiryBounds(t *testing.T) {
 			err := db.UpdateDRepActivity(
 				1,
 				credential,
+				uint64(i+1),
 				tc.activity,
 				tc.inactivity,
 				nil,

@@ -942,13 +942,26 @@ func (m *DingoStateManager) ApplyTransaction(
 	)
 	govActionLifetime := defaultGovActionLifetime
 	drepInactivityPeriod := defaultDRepInactivityPeriod
-	if conwayPP := stateManagerConwayProtocolParameters(m.protocolParams); conwayPP != nil {
+	conwayPP := stateManagerConwayProtocolParameters(m.protocolParams)
+	if conwayPP != nil {
 		govActionLifetime = conwayPP.GovActionValidityPeriod
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
+	}
+	protocolMajor := uint64(0)
+	if versioned, ok := m.protocolParams.(common.PoolRuleProtocolParameters); ok {
+		protocolMajor = uint64(versioned.ProtocolMajorVersion())
 	}
 
 	for levelIndex, level := range levels {
 		storageIndex := idx + uint32(levelIndex) //nolint:gosec
+		if err := governance.ResetDormantDRepExpiryBeforeCertificates(
+			level,
+			point,
+			m.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
+		}
 		if err := m.spendUtxos(txn, level.Inputs(), slot); err != nil {
 			return fmt.Errorf(
 				"spend transaction body %d inputs: %w",
@@ -978,6 +991,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			storageIndex,
 			m.certDepositsFor(level.Certificates()),
 			txn,
+			protocolMajor,
 		); err != nil {
 			return fmt.Errorf(
 				"store transaction body %d metadata: %w",
@@ -1010,54 +1024,23 @@ func (m *DingoStateManager) ApplyTransaction(
 			)
 		}
 
+		if err := governance.ProcessTransactionEffects(
+			level,
+			point,
+			m.currentEpoch,
+			drepInactivityPeriod,
+			govActionLifetime,
+			protocolMajor,
+			m.db,
+			txn,
+		); err != nil {
+			return fmt.Errorf("process transaction body %d governance effects: %w", levelIndex, err)
+		}
 		if proposals := level.ProposalProcedures(); len(proposals) > 0 {
-			if err := governance.ProcessProposals(
-				level,
-				point,
-				m.currentEpoch,
-				govActionLifetime,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d proposals: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordProposalsInGovState(level, govActionLifetime)
 		}
 		if votes := level.VotingProcedures(); len(votes) > 0 {
-			if err := governance.ProcessVotes(
-				level,
-				point,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d votes: %w",
-					levelIndex,
-					err,
-				)
-			}
 			m.recordVotesInGovState(level)
-		}
-		if governance.HasDRepActivityCertificates(level) {
-			if err := governance.ProcessDRepActivityCertificates(
-				level,
-				m.currentEpoch,
-				drepInactivityPeriod,
-				m.db,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"process transaction body %d DRep activity: %w",
-					levelIndex,
-					err,
-				)
-			}
 		}
 	}
 
