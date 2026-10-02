@@ -2580,7 +2580,9 @@ fallback:
   `not_found` without discarding the rest of the batch.
 - A node with `historyExpiry.enabled` keeps its local blob plugin and starts
   `internal/historyexpiry.Pruner`. The worker derives its safety window from
-  `LedgerState.StabilityWindow()` and scans only blocks older than that window.
+  `LedgerState.StabilityWindow()` and scans only blocks older than that window,
+  starting from a durable cursor in `sync_state` so each round costs the newly
+  eligible blocks rather than every earlier tombstone.
   `Database.PruneBlock` materializes any UTxO CBOR still stored as block
   offsets before replacing the block CBOR value with an expired-history marker,
   leaving block indexes and metadata intact.
@@ -2590,7 +2592,9 @@ fallback:
   remote Bark archive and download the signed URL response. Block download URLs
   are accepted only when they are HTTPS, credential-free, and hosted by the
   expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
-  entry; redirects are disabled and response bodies are capped before buffering.
+  entry; redirects are disabled and response bodies are capped before buffering,
+  at the largest block the live protocol parameters admit (a 128 KiB default when
+  they give no limit).
   This wrapper can be used with or without local History Expiry. It is
   installed by replacing the database's blob-store reference
   (`Database.SetBlobStore`) after `database.New` has returned, on both the
@@ -11143,15 +11147,16 @@ Because the point is built from the identifiers the client supplied, hash and
 slot agree with the answer by construction; height is checked against the block
 metadata afterwards.
 
-That binary search is bounded above by the highest indexed block, and reading
-that bound is a reverse iteration over the block index, which `s3` and `gcs`
-answer by listing every block-index object in the bucket. `ArchiveService` is
-registered without the operator auth interceptor, so `FetchBlock` resolves the
-bound once for the whole batch and only when the batch actually contains a
-height-only reference — resolving it per reference would let one anonymous
-request carrying `DefaultMaxFetchBlockRefs` height-only references cost that
-many full-bucket enumerations. A batch of hash+slot references touches no index
-at all.
+That binary search is bounded above by the highest indexed block. Finding it
+takes at most 64 forward probes of the block index (`database.ResolveBlockNumberBound`),
+each a bounded listing on `s3` and `gcs`, so the cost does not grow with the
+archive; a reverse iteration would list every block-index object in the bucket.
+`ArchiveService` is registered without the operator auth interceptor, so
+`FetchBlock` resolves the bound once for the whole batch and only when the batch
+actually contains a height-only reference — resolving it per reference would let
+one anonymous request carrying `DefaultMaxFetchBlockRefs` height-only references
+repeat those probes that many times. A batch of hash+slot references touches no
+index at all.
 
 The batch is answered as a whole. A reference that names no stored block --
 absent, or carrying a height belonging to a different block -- is returned in
@@ -11243,7 +11248,13 @@ and the decompressed message before unary decoding reaches an interceptor; the
 send limit is also per message, so `StreamOperationProgress` can remain open
 across arbitrarily many bounded updates. Archive `FetchBlock` additionally
 requires 1–100 block references before it acquires the database, bounding URL
-signing/storage work and response growth. The HTTP server applies a 60-second
+signing/storage work and response growth, and takes one of
+`BarkConfig.ArchiveMaxConcurrentFetches` slots (`barkArchiveMaxConcurrentFetches`,
+default 16, negative rejected) before touching storage. A request that finds no
+free slot is refused with `RESOURCE_EXHAUSTED` rather than queued, so the work an
+unauthenticated caller can have in flight is bounded by configuration, and every
+height lookup is a bounded probe rather than a scan of the index; there is no
+setting that leaves an unbounded cloud scan reachable from ArchiveService. The HTTP server applies a 60-second
 request read timeout but no write timeout, so slow request bodies are bounded
 without imposing an overall deadline on long-lived server streams.
 
