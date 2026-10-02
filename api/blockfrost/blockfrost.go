@@ -263,6 +263,8 @@ func (b *Blockfrost) handler() http.Handler {
 		b.handleAccountTransactions,
 	)
 
+	b.registerUnsupportedLiterals(mux)
+
 	// Catch-all for any path not matched above. Registered
 	// last so more specific patterns still take precedence;
 	// ServeMux resolves by pattern specificity, not

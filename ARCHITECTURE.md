@@ -8804,6 +8804,17 @@ inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
 returned as a stream error.
 
+### Blockfrost unsupported operations
+
+The Blockfrost server distinguishes documented, unimplemented operations from
+unknown paths. Unsupported Blockfrost OpenAPI 0.1.91 operations return HTTP 501
+with the usual JSON error fields; an unsupported method on these paths returns
+HTTP 405 with an `Allow` header. Unknown paths retain HTTP 404. Implemented
+operations retain their handlers, while reserved literals such as `pools/retired`
+take precedence over generic parameter routes. Ambiguous upstream wildcard
+patterns are recognized by the bounded catch-all operation list rather than
+registered as conflicting Go `ServeMux` patterns.
+
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
 An operator tool that validates Dingo's closed-epoch reward inputs against Koios
