@@ -1103,9 +1103,10 @@ not durably adopted:
   The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
   operation: any increment points at a slot-clock regression or a
   rolled-back database. The fence lives in `sync_state`, and the Mithril
-  import's completion clear (`mithril/sync_import.go`) carries every
-  `forge_fence:` row across, so a producer bootstrapped from a snapshot
-  keeps its fence.
+  import's completion cleanup (`mithril/sync_import.go`) deletes only
+  transient sync keys and leaves every `forge_fence:` row untouched.
+  Concurrent fence advances cannot be overwritten by a stale import read,
+  so a producer bootstrapped from a snapshot keeps its latest fence.
 - **Credential and rotation metrics.** Alongside the KES gauges
   (`cardano_node_metrics_currentKESPeriod_int`,
   `..._remainingKESPeriods_int`, `..._operationalCertificateStartKESPeriod_int`,

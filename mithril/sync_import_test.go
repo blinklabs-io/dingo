@@ -17,8 +17,10 @@ package mithril
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -41,11 +44,8 @@ import (
 //
 // mithril sync rebuilds only the critical subset and deliberately leaves
 // deferred.SyncStateKey set so the first serve finishes the lazy manifest.
-// updateMithrilReadyState then runs db.ClearSyncState, which is an
-// unqualified DELETE FROM sync_state: without carrying the marker across
-// the clear, every completed Mithril sync erases it moments after
-// BuildCritical set it, and the lazy manifest entries are never built on
-// any Mithril-bootstrapped database.
+// Completion cleanup must leave that marker untouched so the lazy indexes
+// are still built when the Mithril-bootstrapped database starts serving.
 func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 	t.Parallel()
 	db := newMithrilTestDB(t)
@@ -220,6 +220,76 @@ func TestMithrilSyncLeavesLazyManifestForTheFirstServe(t *testing.T) {
 		t, pending,
 		"the full rebuild clears the marker it consumed",
 	)
+}
+
+type fenceUntouchedMetadata struct {
+	metadata.MetadataStore
+}
+
+func (m fenceUntouchedMetadata) GetSyncState(
+	key string,
+	txn dbtypes.Txn,
+) (string, error) {
+	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+		return "", errors.New(
+			"import must not snapshot a concurrently changing forge fence",
+		)
+	}
+	return m.MetadataStore.GetSyncState(key, txn)
+}
+
+func (m fenceUntouchedMetadata) DeleteSyncState(
+	key string,
+	txn dbtypes.Txn,
+) error {
+	if strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+		return errors.New("import must not delete a forge fence")
+	}
+	return m.MetadataStore.DeleteSyncState(key, txn)
+}
+
+func (m fenceUntouchedMetadata) ClearSyncState(dbtypes.Txn) error {
+	return errors.New(
+		"import must not clear concurrently changing forge fences",
+	)
+}
+
+func TestUpdateMithrilReadyStateLeavesForgeFenceUntouched(t *testing.T) {
+	t.Parallel()
+	base := newMithrilTestDB(t)
+	pool := lcommon.PoolKeyHash{0xA1}
+	fence := forging.NewSyncStateForgeFenceStore(base.Metadata(), pool)
+	require.NoError(t, fence.StoreLastForgedSlot(12_345))
+	require.NoError(t, base.SetSyncState("sync_status", "bootstrap", nil))
+	db, err := database.New(nil, database.Stores{
+		Blob: base.Blob(), Metadata: fenceUntouchedMetadata{base.Metadata()},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	hash := bytes.Repeat([]byte{0x77}, 32)
+	require.NoError(
+		t,
+		base.SetTip(ochainsync.Tip{Point: ocommon.NewPoint(30, hash)}, nil),
+	)
+	require.NoError(
+		t,
+		updateMithrilReadyState(
+			db,
+			slog.New(slog.DiscardHandler),
+			nil,
+			30,
+			hash,
+			"",
+			true,
+		),
+	)
+	status, err := base.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status)
+	slot, found, err := fence.LoadLastForgedSlot()
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(12_345), slot)
 }
 
 func newMithrilTestDB(t *testing.T) *database.Database {

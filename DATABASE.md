@@ -493,6 +493,12 @@ CI.
 
 ## Database Lifecycle (Snapshot, Restore, Truncate)
 
+Mithril import completion removes transient `sync_state` rows by key while
+leaving `forge_fence:` rows and the deferred-index pending marker untouched.
+It does not snapshot and restore fence values: a concurrent fence advance on
+PostgreSQL or MySQL must survive cleanup rather than be replaced by an older
+value read by the import.
+
 `database/lifecycle/` (package `lifecycle`) implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point, shared by the offline `dingo database` CLI commands and, for truncate, the live ledger rollback path. It is a pure library over `*database.Database` — no CLI, config, or node-composition knowledge — with node-facing orchestration in `internal/dblifecycle` (`Service` for the CLI, `Manager` for automatic epoch-boundary snapshots).
 
 **Backup-capable plugin interfaces.** Two new optional interfaces, checked via type assertion the same way `plugin.LoggerSetter` is (`database/plugin/log.go`):

@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -153,59 +154,20 @@ func updateMithrilReadyState(
 	txn := db.MetadataTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
-			// ClearSyncState is an unqualified DELETE FROM sync_state, so
-			// every row a completed sync still needs has to be carried
-			// across it explicitly — mithril_ledger_slot and
-			// mithril_ledger_hash below, and the deferred-index marker
-			// here. Mithril sync rebuilds only the critical subset
-			// (BuildCritical, sync.go) and deliberately leaves
-			// deferred.SyncStateKey set so the first serve's maintenance
-			// pass finishes the lazy manifest. Dropping it here erases
-			// that instruction moments after it was written, and the lazy
-			// entries are then never built on a Mithril-bootstrapped
-			// database.
-			deferredIndexesPending, err := db.GetSyncState(
-				deferred.SyncStateKey, txn,
-			)
+			// A read-clear-restore cycle can overwrite a newer fence on
+			// backends that allow concurrent writers. Leave persistent rows
+			// untouched so a forger's advancing slot never enters that cycle.
+			keys, err := db.ListSyncStateKeysByPrefix("", txn)
 			if err != nil {
-				return fmt.Errorf(
-					"reading deferred-index marker: %w", err,
-				)
+				return fmt.Errorf("listing sync state: %w", err)
 			}
-			// The block producer's last-forged-slot fences are written by
-			// the forger, not by the import, and the import has no pool
-			// credentials to name them by, so every fence row is carried
-			// across by prefix.
-			fenceKeys, err := db.ListSyncStateKeysByPrefix(
-				forging.ForgeFenceSyncKeyPrefix, txn,
-			)
-			if err != nil {
-				return fmt.Errorf("listing forge fences: %w", err)
-			}
-			fences := make(map[string]string, len(fenceKeys))
-			for _, key := range fenceKeys {
-				fences[key], err = db.GetSyncState(key, txn)
-				if err != nil {
-					return fmt.Errorf("reading forge fence %q: %w", key, err)
+			for _, key := range keys {
+				if key == deferred.SyncStateKey ||
+					strings.HasPrefix(key, forging.ForgeFenceSyncKeyPrefix) {
+					continue
 				}
-			}
-			if err := db.ClearSyncState(txn); err != nil {
-				return fmt.Errorf("cleaning up sync state: %w", err)
-			}
-			for key, value := range fences {
-				if err := db.SetSyncState(key, value, txn); err != nil {
-					return fmt.Errorf("restoring forge fence %q: %w", key, err)
-				}
-			}
-			if deferredIndexesPending != "" {
-				if err := db.SetSyncState(
-					deferred.SyncStateKey,
-					deferredIndexesPending,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"restoring deferred-index marker: %w", err,
-					)
+				if err := db.DeleteSyncState(key, txn); err != nil {
+					return fmt.Errorf("cleaning up sync state %q: %w", key, err)
 				}
 			}
 		} else if syncStatus != "" {
@@ -416,7 +378,9 @@ func importLedgerState(
 	err error,
 ) {
 	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
-		logger, result, maxTrustedSlot,
+		logger,
+		result,
+		maxTrustedSlot,
 	)
 	if err != nil {
 		return 0, nil, false, err
