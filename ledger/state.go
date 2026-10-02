@@ -6521,7 +6521,12 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	}()
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
-	submitCtx := context.Background()
+	submitCtx, cancelSubmit := context.WithCancel(context.Background())
+	submitExited := make(chan struct{})
+	defer func() {
+		cancelSubmit()
+		<-submitExited
+	}()
 	// Submit blocks once MaxPendingBlocks sequences are outstanding, and
 	// completions only advance as Results() is consumed, so submission runs
 	// in its own goroutine while this one drains results.
@@ -6531,6 +6536,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	}
 	submitDone := make(chan submitOutcome, 1)
 	go func() {
+		defer close(submitExited)
 		submitted := 0
 		for _, raw := range rawBatch {
 			tip := ocommon.Tip{

@@ -15058,3 +15058,8 @@ its own panics per-directory (`Manager.retryMirrorToCloud`) so one
 already-broken snapshot's cloud destination can't abort the scan for other
 directories or, since the scan runs synchronously ahead of the current
 epoch's own handling, block that epoch's own snapshot from ever running.
+
+The ledger batch decoder submits and consumes pipeline results concurrently.
+Its submission context survives an individual reader-attempt cancellation so
+that results remain aligned with the batch. Every return cancels that context
+and joins the submitter, including a pipeline shutdown that closes results.
