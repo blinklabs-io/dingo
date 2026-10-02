@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -45,8 +46,8 @@ import (
 const midnightCheckpointPhase = "midnight"
 
 // candidateRollbackDepth is the Cardano security parameter k: the maximum
-// number of blocks that Ouroboros can roll back. candidateRemovals journal
-// entries older than this depth are pruned after each block to bound memory.
+// number of blocks that Ouroboros can roll back. Rollback journal rows older
+// than this depth are pruned after each block to bound their size.
 const candidateRollbackDepth uint64 = 2160
 
 // SlotTimer converts a slot number to a wall-clock time.
@@ -240,14 +241,7 @@ type Indexer struct {
 	candidateAddr            lcommon.Address // parsed address for DB queries
 
 	// governance state
-	candidates        map[candidateKey][]byte
-	candidateRemovals map[uint64]map[candidateKey][]byte
-	// epochTransitions journals the currentEpoch value *before* each block that
-	// caused an epoch advance via advanceEpochLocked.  On rollback the entry
-	// lets us restore currentEpoch to the pre-advance value so that a
-	// re-applied block at the same slot is assigned the correct epoch instead
-	// of the post-transition one.  Entries are pruned beyond candidateRollbackDepth.
-	epochTransitions map[uint64]uint64 // blockNumber to prevCurrentEpoch
+	candidates       map[candidateKey][]byte
 	lastAriadneDatum []byte
 	currentEpoch     uint64
 	hasCurrentEpoch  bool
@@ -261,13 +255,11 @@ type Indexer struct {
 // matched correctly.
 func New(cfg Config) (*Indexer, error) {
 	idx := &Indexer{
-		config:            cfg,
-		metrics:           newIndexerMetrics(cfg.PromRegistry),
-		cNightUTxOs:       make(map[utxoKey]cNightUTxO),
-		regUTxOs:          make(map[utxoKey]registrationUTxO),
-		candidates:        make(map[candidateKey][]byte),
-		candidateRemovals: make(map[uint64]map[candidateKey][]byte),
-		epochTransitions:  make(map[uint64]uint64),
+		config:      cfg,
+		metrics:     newIndexerMetrics(cfg.PromRegistry),
+		cNightUTxOs: make(map[utxoKey]cNightUTxO),
+		regUTxOs:    make(map[utxoKey]registrationUTxO),
+		candidates:  make(map[candidateKey][]byte),
 	}
 
 	if cfg.CNightPolicyID != "" && cfg.CNightAssetName != "" {
@@ -707,7 +699,9 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 	}
 	switch blockEvt.Action {
 	case ledger.BlockActionUndo:
-		idx.rollbackBlock(blockEvt.Block)
+		if err := idx.rollbackBlock(blockEvt.Block); err != nil {
+			idx.fatal(err)
+		}
 	case ledger.BlockActionApply:
 		block := blockEvt.Block
 		decoded, err := block.Decode()
@@ -749,301 +743,292 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 	}
 }
 
+// errIncompleteRollback marks a rollback whose database changes committed but
+// whose in-memory candidate set could not be fully restored, so the index no
+// longer matches the chain.
+var errIncompleteRollback = errors.New("midnight indexer: incomplete rollback")
+
 // rollbackBlock undoes all midnight_* rows written for the given block and
-// restores the in-memory UTxO tracking sets to their pre-block state.
+// restores the in-memory tracking sets to their pre-block state. Every
+// database change runs in one transaction and the in-memory changes are
+// applied only after it commits, so a failure leaves both the database and
+// memory exactly as they were and the rollback can be retried.
 // Order: undo spends/deregistrations first (restore UTxOs), then undo
 // creates/registrations (remove UTxOs), so a UTxO created and spent within
 // the same block ends up correctly absent from memory after the rollback.
+//
+// A block that cannot be decoded cannot have the candidate outputs it created
+// removed; the rest of the rollback still commits and the returned error wraps
+// errIncompleteRollback.
 //
 // This deletes rows a prior, already-committed call to processBlock counted
 // via recordBlockEvents. blocksIndexed/eventsTotal are intentionally not
 // decremented here -- see newIndexerMetrics -- so a chain reorg leaves both
 // counters ahead of the database's live row counts by however much this
 // rollback just removed.
-func (idx *Indexer) rollbackBlock(block models.Block) {
-	if idx.cnightEnabled {
-		spends, err := idx.config.Metadata.DeleteMidnightAssetSpendsByBlock(
-			nil,
-			block.Number,
+func (idx *Indexer) rollbackBlock(block models.Block) error {
+	md := idx.config.Metadata
+	// context.Background(): the rollback runs off an EventBus callback with no
+	// context of its own, the same boundary processBlock documents.
+	txn := md.Transaction(context.Background())
+	defer txn.Rollback() //nolint:errcheck
+
+	// memory collects the in-memory effects, applied under idx.mu once the
+	// transaction has committed.
+	var memory []func()
+	fail := func(step string, err error) error {
+		return fmt.Errorf(
+			"midnight indexer: rollback %s block=%d: %w",
+			step, block.Number, err,
 		)
-		if err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback asset spends",
-				"error", err,
-				"block", block.Number,
-			)
+	}
+
+	if idx.cnightEnabled {
+		spends, err := md.DeleteMidnightAssetSpendsByBlock(txn, block.Number)
+		if err != nil {
+			return fail("asset spends", err)
 		}
-		if len(spends) > 0 {
-			idx.mu.Lock()
+		creates, err := md.DeleteMidnightAssetCreatesByBlock(txn, block.Number)
+		if err != nil {
+			return fail("asset creates", err)
+		}
+		memory = append(memory, func() {
 			for _, s := range spends {
-				key := utxoKey{
+				idx.cNightUTxOs[utxoKey{
 					TxHash: hex.EncodeToString(s.UtxoTxHash),
 					Index:  s.UtxoIndex,
-				}
-				idx.cNightUTxOs[key] = cNightUTxO{
-					Address:  s.Address,
-					Quantity: s.Quantity,
-				}
+				}] = cNightUTxO{Address: s.Address, Quantity: s.Quantity}
 			}
-			idx.mu.Unlock()
-		}
-
-		creates, err := idx.config.Metadata.DeleteMidnightAssetCreatesByBlock(
-			nil,
-			block.Number,
-		)
-		if err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback asset creates",
-				"error", err,
-				"block", block.Number,
-			)
-		}
-		if len(creates) > 0 {
-			idx.mu.Lock()
 			for _, c := range creates {
-				delete(
-					idx.cNightUTxOs,
-					utxoKey{
-						TxHash: hex.EncodeToString(c.TxHash),
-						Index:  c.OutputIndex,
-					},
-				)
+				delete(idx.cNightUTxOs, utxoKey{
+					TxHash: hex.EncodeToString(c.TxHash),
+					Index:  c.OutputIndex,
+				})
 			}
-			idx.mu.Unlock()
-		}
+		})
 	}
 
 	if idx.config.MappingValidatorAddress != "" {
-		deregs, err := idx.config.Metadata.DeleteMidnightDeregistrationsByBlock(
-			nil,
-			block.Number,
-		)
-		if err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback deregistrations",
-				"error", err,
-				"block", block.Number,
-			)
+		deregs, err := md.DeleteMidnightDeregistrationsByBlock(txn, block.Number)
+		if err != nil {
+			return fail("deregistrations", err)
 		}
-		if len(deregs) > 0 {
-			idx.mu.Lock()
+		regs, err := md.DeleteMidnightRegistrationsByBlock(txn, block.Number)
+		if err != nil {
+			return fail("registrations", err)
+		}
+		memory = append(memory, func() {
 			for _, d := range deregs {
-				key := utxoKey{
+				idx.regUTxOs[utxoKey{
 					TxHash: hex.EncodeToString(d.UtxoTxHash),
 					Index:  d.UtxoIndex,
-				}
-				idx.regUTxOs[key] = registrationUTxO{FullDatum: d.FullDatum}
+				}] = registrationUTxO{FullDatum: d.FullDatum}
 			}
-			idx.mu.Unlock()
-		}
-
-		regs, err := idx.config.Metadata.DeleteMidnightRegistrationsByBlock(
-			nil,
-			block.Number,
-		)
-		if err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback registrations",
-				"error", err,
-				"block", block.Number,
-			)
-		}
-		if len(regs) > 0 {
-			idx.mu.Lock()
 			for _, r := range regs {
-				delete(
-					idx.regUTxOs,
-					utxoKey{
-						TxHash: hex.EncodeToString(r.TxHash),
-						Index:  r.OutputIndex,
-					},
-				)
+				delete(idx.regUTxOs, utxoKey{
+					TxHash: hex.EncodeToString(r.TxHash),
+					Index:  r.OutputIndex,
+				})
 			}
-			idx.mu.Unlock()
-		}
+		})
 	}
 
 	if len(idx.techCommitteeAddrBytes) > 0 || len(idx.councilAddrBytes) > 0 {
-		if err := idx.config.Metadata.DeleteMidnightGovernanceDatumsByBlock(nil, block.Number); err != nil {
-			if idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: rollback governance datums",
-					"error", err,
-					"block", block.Number,
-				)
-			}
+		if err := md.DeleteMidnightGovernanceDatumsByBlock(txn, block.Number); err != nil {
+			return fail("governance datums", err)
 		}
 	}
 
 	if len(idx.permCandidatePolicyBytes) > 0 {
-		idx.rollbackAriadne(block.Number)
+		apply, err := idx.rollbackAriadne(txn, block.Number)
+		if err != nil {
+			return fail("ariadne params", err)
+		}
+		memory = append(memory, apply)
 	}
 
+	var incomplete error
 	if len(idx.candidateAddrBytes) > 0 {
-		// Snapshot cleanup and spend-journal restore only need block.Number;
-		// do both before decoding so a decode error leaves neither stale DB
-		// rows nor unrestored in-memory candidates.
-		idx.rollbackCandidateSnapshots(block)
-		idx.rollbackCandidateSpends(block.Number)
+		apply, err := idx.rollbackCandidateSnapshots(txn, block)
+		if err != nil {
+			return fail("epoch candidate snapshots", err)
+		}
+		memory = append(memory, apply)
+		apply, err = idx.rollbackCandidateSpends(txn, block.Number)
+		if err != nil {
+			return fail("candidate spends", err)
+		}
+		memory = append(memory, apply)
 		decoded, err := block.Decode()
 		if err != nil {
-			// Decode failure means we cannot remove the in-memory candidate
-			// outputs this block created. Their
-			// MidnightCommitteeCandidateRegistration provenance rows must
-			// therefore be RETAINED, not deleted: a later epoch snapshot may
-			// still serialize those candidates, and GetEpochCandidates needs
-			// the provenance to fill in tx_inputs/slot_number/tx_index/
-			// block_number. Deleting the rows here would leave the in-memory
-			// candidate set and the persisted provenance inconsistent.
-			if idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: rollback candidate decode block",
-					"error", err,
-					"block", block.Number,
-				)
-			}
+			// The in-memory candidate outputs this block created cannot be
+			// removed, so their MidnightCommitteeCandidateRegistration
+			// provenance rows must be RETAINED, not deleted: a later epoch
+			// snapshot may still serialize those candidates, and
+			// GetEpochCandidates needs the provenance to fill in
+			// tx_inputs/slot_number/tx_index/block_number.
+			incomplete = fmt.Errorf(
+				"%w: block=%d: decode block, created candidates not removed: %w",
+				errIncompleteRollback, block.Number, err,
+			)
 		} else {
-			idx.rollbackCandidateCreates(decoded.Transactions())
-			// The created candidates are now gone from the in-memory set, so
-			// their provenance rows can be deleted in lockstep. Doing this
-			// only on the decode-success path preserves the invariant that
-			// every in-memory candidate has a registration row.
-			if err := idx.config.Metadata.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
-				nil,
+			txs := decoded.Transactions()
+			memory = append(memory, func() { idx.removeCandidateCreates(txs) })
+			// The created candidates leave the in-memory set, so their
+			// provenance rows are deleted in lockstep, preserving the
+			// invariant that every in-memory candidate has a registration row.
+			if err := md.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+				txn,
 				block.Number,
-			); err != nil && idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: rollback committee candidate registrations",
-					"error", err,
-					"block", block.Number,
-				)
+			); err != nil {
+				return fail("committee candidate registrations", err)
 			}
 		}
 	}
 
-	// Restore currentEpoch if this block caused an epoch advance.
-	// Without this, a re-applied block at the same slot would see
+	// Restore currentEpoch if this block caused an epoch advance. Without
+	// this, a re-applied block at the same slot would see
 	// epoch <= currentEpoch and be assigned the wrong (post-transition) epoch.
-	idx.mu.Lock()
-	if prevEpoch, ok := idx.epochTransitions[block.Number]; ok {
-		idx.currentEpoch = prevEpoch
-		delete(idx.epochTransitions, block.Number)
-	}
-	idx.mu.Unlock()
-}
-
-func (idx *Indexer) rollbackCandidateSnapshots(block models.Block) {
-	if err := idx.config.Metadata.DeleteMidnightEpochCandidatesByBlock(nil, block.Number); err != nil {
-		if idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback epoch candidate snapshots",
-				"error", err,
-				"block", block.Number,
-			)
-		}
-		return
-	}
-
-	idx.mu.Lock()
-	idx.hasSnapshotEpoch = false
-	idx.snapshotEpoch = 0
-	idx.mu.Unlock()
-}
-
-func (idx *Indexer) rollbackAriadne(blockNumber uint64) {
-	entries, err := idx.config.Metadata.FindMidnightAriadneRollbacksByBlock(
-		nil,
-		blockNumber,
-	)
+	apply, err := idx.rollbackEpochTransition(txn, block.Number)
 	if err != nil {
-		if idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: load ariadne rollback journal",
-				"error", err,
-				"block", blockNumber,
-			)
-		}
-		return
+		return fail("epoch transition", err)
 	}
+	memory = append(memory, apply)
 
-	hasError := false
+	if err := txn.Commit(); err != nil {
+		return fail("commit", err)
+	}
+	idx.mu.Lock()
+	for _, apply := range memory {
+		apply()
+	}
+	idx.mu.Unlock()
+	return incomplete
+}
+
+// rollbackCandidateSnapshots deletes the epoch candidate snapshots written by
+// the block. The returned function, run under idx.mu once txn has committed,
+// clears the in-memory snapshot marker.
+func (idx *Indexer) rollbackCandidateSnapshots(
+	txn types.Txn,
+	block models.Block,
+) (func(), error) {
+	if err := idx.config.Metadata.DeleteMidnightEpochCandidatesByBlock(
+		txn,
+		block.Number,
+	); err != nil {
+		return nil, err
+	}
+	return func() {
+		idx.hasSnapshotEpoch = false
+		idx.snapshotEpoch = 0
+	}, nil
+}
+
+// rollbackAriadne restores the Ariadne rows the block upserted from its
+// journal and consumes the journal. The returned function, run under idx.mu
+// once txn has committed, refreshes the deduplication datum from the restored
+// rows.
+func (idx *Indexer) rollbackAriadne(
+	txn types.Txn,
+	blockNumber uint64,
+) (func(), error) {
+	md := idx.config.Metadata
+	entries, err := md.FindMidnightAriadneRollbacksByBlock(txn, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("load ariadne rollback journal: %w", err)
+	}
 	for _, entry := range entries {
-		var err error
 		if entry.PreviousExists {
-			err = idx.config.Metadata.UpsertMidnightAriadneParams(
-				nil,
+			err = md.UpsertMidnightAriadneParams(
+				txn,
 				&models.MidnightAriadneParams{
 					Epoch: entry.Epoch,
 					Datum: bytes.Clone(entry.PreviousDatum),
 				},
 			)
 		} else {
-			err = idx.config.Metadata.DeleteMidnightAriadneParamsByEpoch(nil, entry.Epoch)
+			err = md.DeleteMidnightAriadneParamsByEpoch(txn, entry.Epoch)
 		}
 		if err != nil {
-			hasError = true
-			if idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: rollback ariadne params",
-					"error", err,
-					"block", blockNumber,
-					"epoch", entry.Epoch,
-				)
-			}
-			continue
+			return nil, fmt.Errorf("restore ariadne epoch %d: %w", entry.Epoch, err)
 		}
 	}
-	if !hasError {
-		if err := idx.config.Metadata.DeleteMidnightAriadneRollbacksByBlock(nil, blockNumber); err != nil &&
-			idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: delete ariadne rollback journal",
-				"error", err,
-				"block", blockNumber,
-			)
-		}
+	if err := md.DeleteMidnightAriadneRollbacksByBlock(txn, blockNumber); err != nil {
+		return nil, fmt.Errorf("delete ariadne rollback journal: %w", err)
 	}
-
-	latest, err := idx.config.Metadata.GetLatestMidnightAriadneParams(nil)
+	latest, err := md.GetLatestMidnightAriadneParams(txn)
 	if err != nil {
-		if idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: refresh ariadne dedupe after rollback",
-				"error", err,
-				"block", blockNumber,
+		return nil, fmt.Errorf("refresh ariadne dedupe: %w", err)
+	}
+	return func() {
+		if latest == nil {
+			idx.lastAriadneDatum = nil
+		} else {
+			idx.lastAriadneDatum = bytes.Clone(latest.Datum)
+		}
+	}, nil
+}
+
+// rollbackCandidateSpends reads and consumes the persisted journal of
+// candidate UTxOs the block spent. The returned function, run under idx.mu
+// once txn has committed, restores them to the in-memory candidate set. It
+// does not require block decoding.
+func (idx *Indexer) rollbackCandidateSpends(
+	txn types.Txn,
+	blockNumber uint64,
+) (func(), error) {
+	md := idx.config.Metadata
+	removals, err := md.FindMidnightCandidateRemovalsByBlock(txn, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("load candidate spend journal: %w", err)
+	}
+	restore := make(map[candidateKey][]byte, len(removals))
+	for _, removal := range removals {
+		txHash, err := lcommon.NewBlake2b256Checked(removal.TxHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"candidate spend journal output %d: %w",
+				removal.OutputIndex,
+				err,
 			)
 		}
-		return
+		key := candidateKey{TxHash: txHash, OutputIndex: removal.OutputIndex}
+		restore[key] = bytes.Clone(removal.Datum)
 	}
-	idx.mu.Lock()
-	if latest == nil {
-		idx.lastAriadneDatum = nil
-	} else {
-		idx.lastAriadneDatum = bytes.Clone(latest.Datum)
+	if err := md.DeleteMidnightCandidateRemovalsByBlock(txn, blockNumber); err != nil {
+		return nil, fmt.Errorf("delete candidate spend journal: %w", err)
 	}
-	idx.mu.Unlock()
+	return func() { maps.Copy(idx.candidates, restore) }, nil
 }
 
-// rollbackCandidateSpends restores candidate UTxOs that were spent (removed
-// from idx.candidates) by the rolled-back block, using the candidateRemovals
-// journal.  It does not require block decoding.
-func (idx *Indexer) rollbackCandidateSpends(blockNumber uint64) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	if removals := idx.candidateRemovals[blockNumber]; len(removals) > 0 {
-		for key, datum := range removals {
-			idx.candidates[key] = bytes.Clone(datum)
-		}
-		delete(idx.candidateRemovals, blockNumber)
+// rollbackEpochTransition consumes the persisted epoch-transition journal
+// entry for the block. The returned function, run under idx.mu once txn has
+// committed, restores the epoch that preceded the block.
+func (idx *Indexer) rollbackEpochTransition(
+	txn types.Txn,
+	blockNumber uint64,
+) (func(), error) {
+	md := idx.config.Metadata
+	transition, err := md.GetMidnightEpochTransitionByBlock(txn, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("load epoch transition journal: %w", err)
 	}
+	if transition == nil {
+		return func() {}, nil
+	}
+	if err := md.DeleteMidnightEpochTransitionsByBlock(txn, blockNumber); err != nil {
+		return nil, fmt.Errorf("delete epoch transition journal: %w", err)
+	}
+	return func() {
+		idx.currentEpoch = transition.PreviousEpoch
+		idx.hasCurrentEpoch = true
+	}, nil
 }
 
-// rollbackCandidateCreates removes candidate UTxOs that were created by the
-// rolled-back block.  It requires the decoded transactions.
-func (idx *Indexer) rollbackCandidateCreates(txs []lcommon.Transaction) {
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
+// removeCandidateCreates removes candidate UTxOs that were created by the
+// rolled-back block from the in-memory set. idx.mu must be held.
+func (idx *Indexer) removeCandidateCreates(txs []lcommon.Transaction) {
 	for _, tx := range txs {
 		txHashBytes := tx.Id().Bytes()
 		for outIdx, out := range tx.Outputs() {
@@ -1113,21 +1098,6 @@ type blockMutationJournal struct {
 	regUTxOs    *mapJournal[utxoKey, registrationUTxO]
 	candidates  *mapJournal[candidateKey, []byte]
 
-	// candidateRemovals and epochTransitions are only ever written under
-	// this block's own key (block.Number) while processing it, so their
-	// journal is just that one key's pre-block value — not a per-key
-	// mapJournal, since every write this block makes to either map shares
-	// the same key.
-	candidateRemovalsExisted bool
-	candidateRemovalsBefore  map[candidateKey][]byte
-	epochTransitionExisted   bool
-	epochTransitionBefore    uint64
-
-	// Pruning deletes stale entries (keyed by *older* blocks) in the same
-	// pass; record exactly what it removes so undo can put them back.
-	prunedCandidateRemovals map[uint64]map[candidateKey][]byte
-	prunedEpochTransitions  map[uint64]uint64
-
 	// Scalars mutated at most a handful of times per block; recording the
 	// single pre-block value is already O(1).
 	lastAriadneDatumBefore []byte
@@ -1138,13 +1108,9 @@ type blockMutationJournal struct {
 }
 
 // newBlockMutationJournal starts a journal for the block about to be
-// processed, capturing the pre-block value of every field that is only
-// ever touched under this block's own key (so no per-key journal is
-// needed for it) plus the scalar fields. idx.mu must not be held by the
-// caller.
-func (idx *Indexer) newBlockMutationJournal(
-	blockNumber uint64,
-) *blockMutationJournal {
+// processed, capturing the scalar fields' pre-block values. idx.mu must not
+// be held by the caller.
+func (idx *Indexer) newBlockMutationJournal() *blockMutationJournal {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	j := &blockMutationJournal{
@@ -1157,42 +1123,18 @@ func (idx *Indexer) newBlockMutationJournal(
 		snapshotEpochBefore:    idx.snapshotEpoch,
 		hasSnapshotEpochBefore: idx.hasSnapshotEpoch,
 	}
-	if removals, ok := idx.candidateRemovals[blockNumber]; ok {
-		j.candidateRemovalsExisted = true
-		j.candidateRemovalsBefore = maps.Clone(removals)
-	}
-	if prevEpoch, ok := idx.epochTransitions[blockNumber]; ok {
-		j.epochTransitionExisted = true
-		j.epochTransitionBefore = prevEpoch
-	}
 	return j
 }
 
 // undo reverts every mutation this journal recorded, restoring idx's
 // in-memory state to exactly what it was before the block started. idx.mu
 // must not be held by the caller.
-func (idx *Indexer) undoBlockMutations(
-	j *blockMutationJournal,
-	blockNumber uint64,
-) {
+func (idx *Indexer) undoBlockMutations(j *blockMutationJournal) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	j.cNightUTxOs.undo(idx.cNightUTxOs)
 	j.regUTxOs.undo(idx.regUTxOs)
 	j.candidates.undo(idx.candidates)
-
-	if j.candidateRemovalsExisted {
-		idx.candidateRemovals[blockNumber] = j.candidateRemovalsBefore
-	} else {
-		delete(idx.candidateRemovals, blockNumber)
-	}
-	if j.epochTransitionExisted {
-		idx.epochTransitions[blockNumber] = j.epochTransitionBefore
-	} else {
-		delete(idx.epochTransitions, blockNumber)
-	}
-	maps.Copy(idx.candidateRemovals, j.prunedCandidateRemovals)
-	maps.Copy(idx.epochTransitions, j.prunedEpochTransitions)
 
 	idx.lastAriadneDatum = j.lastAriadneDatumBefore
 	idx.currentEpoch = j.currentEpochBefore
@@ -1230,11 +1172,11 @@ func (idx *Indexer) processBlock(
 	// memory ahead of the database. Journal each mutation's pre-block value
 	// so a failure can undo exactly this block's changes, without cloning
 	// the whole (chain-sized) live state on every block.
-	journal := idx.newBlockMutationJournal(block.Number)
+	journal := idx.newBlockMutationJournal()
 	committed := false
 	defer func() {
 		if !committed {
-			idx.undoBlockMutations(journal, block.Number)
+			idx.undoBlockMutations(journal)
 		}
 	}()
 
@@ -1262,9 +1204,12 @@ func (idx *Indexer) processBlock(
 			idx.mu.RUnlock()
 		} else {
 			idx.mu.Lock()
-			idx.advanceEpochLocked(epoch, block.Number, txn)
+			err := idx.advanceEpochLocked(epoch, block.Number, txn)
 			govEpoch = idx.currentEpoch
 			idx.mu.Unlock()
+			if err != nil {
+				return err
+			}
 		}
 	} else {
 		idx.mu.RLock()
@@ -1300,33 +1245,32 @@ func (idx *Indexer) processBlock(
 	// Prune rollback journals that are beyond the rollback window.
 	// Ouroboros cannot roll back more than candidateRollbackDepth blocks, so
 	// journal entries older than that depth will never be needed for rollback.
-	// Record exactly what gets pruned (never this block's own key — its
-	// block number is always >= pruneBelow) so a failure can put it back,
-	// without journaling the whole map.
+	// The deletes run in this block's transaction, so a failure undoes them
+	// along with everything else.
 	if block.Number > candidateRollbackDepth {
 		pruneBelow := block.Number - candidateRollbackDepth
-		idx.mu.Lock()
-		for bn, removals := range idx.candidateRemovals {
-			if bn < pruneBelow {
-				if journal.prunedCandidateRemovals == nil {
-					journal.prunedCandidateRemovals = make(
-						map[uint64]map[candidateKey][]byte,
-					)
-				}
-				journal.prunedCandidateRemovals[bn] = removals
-				delete(idx.candidateRemovals, bn)
-			}
+		if err := idx.config.Metadata.DeleteMidnightCandidateRemovalsBeforeBlock(
+			txn,
+			pruneBelow,
+		); err != nil {
+			return fmt.Errorf(
+				"midnight indexer: prune candidate spend journal block=%d prune_below=%d: %w",
+				block.Number,
+				pruneBelow,
+				err,
+			)
 		}
-		for bn, prevEpoch := range idx.epochTransitions {
-			if bn < pruneBelow {
-				if journal.prunedEpochTransitions == nil {
-					journal.prunedEpochTransitions = make(map[uint64]uint64)
-				}
-				journal.prunedEpochTransitions[bn] = prevEpoch
-				delete(idx.epochTransitions, bn)
-			}
+		if err := idx.config.Metadata.DeleteMidnightEpochTransitionsBeforeBlock(
+			txn,
+			pruneBelow,
+		); err != nil {
+			return fmt.Errorf(
+				"midnight indexer: prune epoch transition journal block=%d prune_below=%d: %w",
+				block.Number,
+				pruneBelow,
+				err,
+			)
 		}
-		idx.mu.Unlock()
 		if len(idx.permCandidatePolicyBytes) > 0 {
 			// Propagate the error (rather than log-and-continue) instead of
 			// risking a Commit below on a backend where a failed statement
@@ -1440,14 +1384,24 @@ func (idx *Indexer) processTx(
 		// Always attempt to remove from candidate set (no-op if not tracked).
 		if len(idx.candidateAddrBytes) > 0 {
 			idx.mu.Lock()
-			if candidateKey, datum, removed := idx.removeCandidate(journal, inpHashBytes, inpIdx); removed {
-				idx.recordCandidateRemovalLocked(
-					block.Number,
-					candidateKey,
-					datum,
-				)
-			}
+			candidateKey, datum, removed := idx.removeCandidate(journal, inpHashBytes, inpIdx)
 			idx.mu.Unlock()
+			if removed {
+				if err := idx.config.Metadata.CreateMidnightCandidateRemoval(
+					txn,
+					&models.MidnightCandidateRemoval{
+						BlockNumber: block.Number,
+						TxHash:      candidateKey.TxHash[:],
+						OutputIndex: candidateKey.OutputIndex,
+						Datum:       datum,
+					},
+				); err != nil {
+					return fmt.Errorf(
+						"write candidate spend journal tx=%s input=%s#%d: %w",
+						hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
+					)
+				}
+			}
 		}
 	}
 
@@ -1828,25 +1782,41 @@ func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 // epoch and the new epoch, then sets currentEpoch = epoch.
 // If hasCurrentEpoch is false (cold start), it skips snapshotting and just
 // sets the current epoch. idx.mu must be held.
+//
+// Before advancing it persists the pre-advance epoch in txn, so rollbackBlock
+// can restore it -- also after a restart -- and a block whose journal write
+// fails is not applied.
 func (idx *Indexer) advanceEpochLocked(
 	epoch uint64,
 	blockNumber uint64,
 	txn types.Txn,
-) {
+) error {
 	if !idx.hasCurrentEpoch {
 		idx.currentEpoch = epoch
 		idx.hasCurrentEpoch = true
-		return
+		return nil
 	}
 	if epoch <= idx.currentEpoch {
-		return
+		return nil
 	}
-	// Journal the pre-advance value so rollbackBlock can restore it.
-	idx.epochTransitions[blockNumber] = idx.currentEpoch
+	if err := idx.config.Metadata.UpsertMidnightEpochTransition(
+		txn,
+		&models.MidnightEpochTransition{
+			BlockNumber:   blockNumber,
+			PreviousEpoch: idx.currentEpoch,
+		},
+	); err != nil {
+		return fmt.Errorf(
+			"midnight indexer: journal epoch transition block=%d: %w",
+			blockNumber,
+			err,
+		)
+	}
 	for e := idx.currentEpoch; e < epoch; e++ {
 		idx.snapshotEpochLocked(e, blockNumber, txn)
 	}
 	idx.currentEpoch = epoch
+	return nil
 }
 
 // snapshotEpochLocked writes the current candidate set as the epoch snapshot.
@@ -1926,19 +1896,6 @@ func (idx *Indexer) removeCandidate(
 	journal.candidates.record(idx.candidates, key)
 	delete(idx.candidates, key)
 	return key, bytes.Clone(datum), true
-}
-
-func (idx *Indexer) recordCandidateRemovalLocked(
-	blockNumber uint64,
-	key candidateKey,
-	datum []byte,
-) {
-	removals := idx.candidateRemovals[blockNumber]
-	if removals == nil {
-		removals = make(map[candidateKey][]byte)
-		idx.candidateRemovals[blockNumber] = removals
-	}
-	removals[key] = bytes.Clone(datum)
 }
 
 // outputHasPolicy reports whether output carries any asset under policyID.

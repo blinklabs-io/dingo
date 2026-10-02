@@ -11480,9 +11480,10 @@ Once eligible to run, it subscribes to `ledger.block`
   address is added to an in-memory set; inputs consuming a tracked candidate
   UTxO remove it from the set. At every epoch boundary the set is serialised as
   deterministically ordered CBOR and upserted into `midnight_epoch_candidates`.
-  During block rollback, candidate removals recorded while applying that block
-  are restored, and candidate outputs created by the rolled-back block are
-  removed before any later epoch snapshot can use stale state. Persisted
+  Each candidate a block spends is journaled in `midnight_candidate_removals`
+  in the block's write transaction. During block rollback, the journaled
+  removals are restored, and candidate outputs created by the rolled-back block
+  are removed before any later epoch snapshot can use stale state. Persisted
   candidate snapshots record the block that created them, so rollback deletes
   snapshots created by the rolled-back block before readers can observe stale
   `midnight_epoch_candidates` rows.
@@ -11510,6 +11511,20 @@ cold start (`hasCurrentEpoch = false`), the first block's epoch is recorded
 without snapshotting so no spurious empty snapshot is written before any
 candidates are observed.
 
+The epoch that preceded an advance is journaled in `midnight_epoch_transitions`
+in the same transaction, before `currentEpoch` changes, so a rollback restores
+it (and marks the epoch initialized) even after a restart. Both rollback
+journals are pruned past `candidateRollbackDepth` in the block's transaction.
+
+**Rollback atomicity**: `rollbackBlock` deletes the block's rows, restores its
+journaled state, and consumes the journals in a single transaction, and applies
+the in-memory changes only after the commit. A database failure rolls the
+transaction back, leaves memory unchanged, and is returned to
+`handleBlockEvent`, which reports it through `FatalErrorFunc`; the journals
+survive, so the rollback can be retried. A block that cannot be decoded cannot
+have its created candidates removed: the remainder commits and the error wraps
+`errIncompleteRollback`, which is reported the same way.
+
 **Write atomicity**: `processBlock` opens one write transaction
 (`Metadata.Transaction()`) and threads it through every `Create*`/
 `InsertMidnightGovernanceDatum`/`UpsertMidnightAriadneParams`/
@@ -11525,8 +11540,7 @@ later. See DATABASE.md's Midnight Indexer section for how this pairs with
 
 `processTx`/`processOutput` also mutate the indexer's in-memory tracked-UTxO
 and governance state (`cNightUTxOs`, `regUTxOs`, `candidates`,
-`candidateRemovals`, `epochTransitions`, `lastAriadneDatum`, `currentEpoch`,
-`snapshotEpoch`) as they go, ahead of the write transaction's commit. To keep
+`lastAriadneDatum`, `currentEpoch`, `snapshotEpoch`) as they go, ahead of the write transaction's commit. To keep
 that memory from drifting ahead of the database when a later write in the
 same block fails, `processBlock` opens a `blockMutationJournal`
 (`newBlockMutationJournal`) before scanning any transactions and undoes it
@@ -11538,12 +11552,8 @@ a generic `mapJournal[K, V]`, the first time that key is touched in the
 block) rather than cloning `cNightUTxOs`/`regUTxOs`/`candidates` wholesale —
 those maps hold all actively tracked state for the whole chain, so a full
 clone would cost O(total live state) on every block instead of O(that
-block's own changes). `candidateRemovals`/`epochTransitions` are only ever
-written under the current block's own key while processing it, so the
-journal there is just that one key's pre-block value; the periodic pruning
-step that deletes older keys from both maps separately records exactly
-which entries it removes, so undo can restore them without journaling the
-maps' full contents either.
+block's own changes). The persisted rollback journals need no in-memory
+undo: they are written and pruned in the block's own transaction.
 
 **Startup and catch-up**: `node.go` calls
 `LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
