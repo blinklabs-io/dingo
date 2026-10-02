@@ -88,7 +88,7 @@ func RegisterProvider(host *hostplugin.Host) error {
 				compression = *cfg.Compression
 			}
 			gcEnabled := deps.RunMode != "load"
-			if cfg.GC != nil {
+			if cfg.GC != nil && deps.RunMode != "load" {
 				gcEnabled = *cfg.GC
 			}
 			gcDiscardRatio := DefaultGCDiscardRatio

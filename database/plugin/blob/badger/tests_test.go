@@ -338,6 +338,7 @@ func measureGCPolicy(
 		tb.Fatal("GC worker did not drain the fixture")
 	}
 	elapsed := time.Since(started)
+	require.NoError(tb, store.Close())
 	after, err := store.DiskSize()
 	require.NoError(tb, err)
 	mu.Lock()

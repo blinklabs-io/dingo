@@ -25,8 +25,17 @@ reports `rewrites`, `bytes_reclaimed`, and `drain_ms` (time from enabling the
 worker until it reports no further rewrite) for each interval and ratio pair;
 its `ns/op` includes fixture load and should be ignored.
 
-The benchmark compares discard ratios `0.25`, `0.50`, and `0.75` with the
-background ticker disabled. Record `ns/op`, allocations, and the GC metrics
+Run the production-worker benchmark separately:
+
+```sh
+GOWORK=off GOCACHE=/tmp/dingo-gc-cache \\
+  go test ./database/plugin/blob/badger \\
+  -run '^$' -bench '^BenchmarkValueLogGCPolicy$' -benchtime=1x -count=1
+```
+
+The direct-GC benchmark (`BenchmarkValueLogGC`) compares discard ratios `0.25`,
+`0.50`, and `0.75` with the background ticker disabled. Record `ns/op`,
+allocations, and the GC metrics
 from a registry-enabled store. For production-shaped evidence, repeat the
 same comparison while loading a fixed dataset for each workload: from-genesis
 sync, Mithril/bootstrap load, API backfill, history expiry/tombstones, and

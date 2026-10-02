@@ -16,6 +16,7 @@ package badger
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -54,6 +55,8 @@ func TestProviderRejectsInvalidGCPolicy(t *testing.T) {
 		{"ratio one", map[string]any{"gcDiscardRatio": 1.0}},
 		{"ratio above one", map[string]any{"gcDiscardRatio": 1.5}},
 		{"ratio zero", map[string]any{"gcDiscardRatio": 0.0}},
+		{"ratio NaN", map[string]any{"gcDiscardRatio": math.NaN()}},
+		{"ratio positive infinity", map[string]any{"gcDiscardRatio": math.Inf(1)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
