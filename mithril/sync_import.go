@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 )
 
@@ -171,8 +172,30 @@ func updateMithrilReadyState(
 					"reading deferred-index marker: %w", err,
 				)
 			}
+			// The block producer's last-forged-slot fences are written by
+			// the forger, not by the import, and the import has no pool
+			// credentials to name them by, so every fence row is carried
+			// across by prefix.
+			fenceKeys, err := db.ListSyncStateKeysByPrefix(
+				forging.ForgeFenceSyncKeyPrefix, txn,
+			)
+			if err != nil {
+				return fmt.Errorf("listing forge fences: %w", err)
+			}
+			fences := make(map[string]string, len(fenceKeys))
+			for _, key := range fenceKeys {
+				fences[key], err = db.GetSyncState(key, txn)
+				if err != nil {
+					return fmt.Errorf("reading forge fence %q: %w", key, err)
+				}
+			}
 			if err := db.ClearSyncState(txn); err != nil {
 				return fmt.Errorf("cleaning up sync state: %w", err)
+			}
+			for key, value := range fences {
+				if err := db.SetSyncState(key, value, txn); err != nil {
+					return fmt.Errorf("restoring forge fence %q: %w", key, err)
+				}
 			}
 			if deferredIndexesPending != "" {
 				if err := db.SetSyncState(

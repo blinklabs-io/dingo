@@ -1102,10 +1102,10 @@ not durably adopted:
   cannot be written fails the forge, rather than signing unprotected.
   The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
   operation: any increment points at a slot-clock regression or a
-  rolled-back database. The fence lives in `sync_state`, so a Mithril
-  import that ends in a full `ClearSyncState` drops it; a producer
-  bootstrapped from a snapshot has only the chain-tip check until it
-  next forges.
+  rolled-back database. The fence lives in `sync_state`, and the Mithril
+  import's completion clear (`mithril/sync_import.go`) carries every
+  `forge_fence:` row across, so a producer bootstrapped from a snapshot
+  keeps its fence.
 
 ```mermaid
 sequenceDiagram

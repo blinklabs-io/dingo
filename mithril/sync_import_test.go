@@ -28,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/forging"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -89,6 +91,61 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 	require.Equal(t, deferred.SyncStateValue, marker)
 
 	// The clear still does its job for everything else.
+	status, err := db.GetSyncState("sync_status", nil)
+	require.NoError(t, err)
+	require.Empty(t, status, "sync_status must still be cleared")
+}
+
+// TestUpdateMithrilReadyStateKeepsForgeFence pins that the sync-state clear
+// ending a Mithril import leaves every pool's last-forged-slot fence in place.
+// The fence is written by the forger during normal operation and guards a
+// slot whose block may already have been signed and diffused, so a producer
+// that re-bootstraps from a snapshot must still refuse it afterwards.
+func TestUpdateMithrilReadyStateKeepsForgeFence(t *testing.T) {
+	t.Parallel()
+	db := newMithrilTestDB(t)
+
+	poolA := lcommon.PoolKeyHash{0xA1}
+	poolB := lcommon.PoolKeyHash{0xB2}
+	const fenceA, fenceB = uint64(12_345), uint64(777)
+	storeA := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolA)
+	storeB := forging.NewSyncStateForgeFenceStore(db.Metadata(), poolB)
+	require.NoError(t, storeA.StoreLastForgedSlot(fenceA))
+	require.NoError(t, storeB.StoreLastForgedSlot(fenceB))
+
+	ledgerStateHash := bytes.Repeat([]byte{0x77}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(30, ledgerStateHash),
+	}, nil))
+	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	// A store built after the import is what a restarted node reads.
+	for _, tc := range []struct {
+		pool lcommon.PoolKeyHash
+		want uint64
+	}{{poolA, fenceA}, {poolB, fenceB}} {
+		restarted := forging.NewSyncStateForgeFenceStore(db.Metadata(), tc.pool)
+		slot, found, err := restarted.LoadLastForgedSlot()
+		require.NoError(t, err)
+		require.True(t, found, "the fence must survive the import")
+		require.Equal(t, tc.want, slot)
+		// A forge at or below the surviving fence cannot lower it.
+		require.NoError(t, restarted.StoreLastForgedSlot(tc.want-1))
+		slot, _, err = restarted.LoadLastForgedSlot()
+		require.NoError(t, err)
+		require.Equal(t, tc.want, slot)
+	}
+
 	status, err := db.GetSyncState("sync_status", nil)
 	require.NoError(t, err)
 	require.Empty(t, status, "sync_status must still be cleared")
