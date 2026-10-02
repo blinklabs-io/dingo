@@ -768,6 +768,31 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	); err != nil {
 		errs = append(errs, err)
 	}
+	if agg := c.Mithril.Server.Aggregator; agg.Enabled {
+		if agg.Epoch < 1 {
+			errs = append(errs, errors.New(
+				"invalid mithril.server.aggregator.epoch: must be at least 1",
+			))
+		}
+		if agg.K == 0 || agg.M == 0 {
+			errs = append(errs, errors.New(
+				"mithril.server.aggregator.k and mithril.server.aggregator.m "+
+					"must be positive",
+			))
+		}
+		if !(agg.PhiF > 0 && agg.PhiF <= 1) {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.server.aggregator.phiF %v: must be in (0, 1]",
+				agg.PhiF,
+			))
+		}
+		if agg.GenesisSigningKeyFile == "" {
+			errs = append(errs, errors.New(
+				"mithril.server.aggregator.genesisSigningKeyFile is required "+
+					"when the aggregator is enabled",
+			))
+		}
+	}
 
 	if c.DelegatorInactivityEnabled &&
 		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {

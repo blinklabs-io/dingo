@@ -726,6 +726,7 @@ by snapshot hash, the 64-hex-digit artifact hash:
 | `<hash>/digests.tar.zst` | zstd tar holding `digests.json`, the SHA-256 of every immutable file |
 | `<hash>/ancillary.tar.zst` | zstd tar of the newest `ledger/` state files and `ancillary_manifest.json`, the Ed25519-signed digest map |
 | `certificates/<hash>.json` | Mithril certificate JSON served by `/certificate/<hash>` |
+| `aggregator.json` | aggregator epoch, protocol parameters, closed signer set (BLS key, proof of possession, stake) and the genesis and latest certificate hashes |
 
 Local stores write each object under a `.partial` name and rename it, so a
 reader never sees a partial object. Retention (`mithril.server.keepSnapshots`)

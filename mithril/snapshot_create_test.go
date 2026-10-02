@@ -333,7 +333,7 @@ func TestCreateSnapshotDetectsFileChangedAfterDigest(t *testing.T) {
 	require.ErrorContains(t, err, "changed while archiving")
 }
 
-func TestParseAncillarySigningKey(t *testing.T) {
+func TestParseSigningKey(t *testing.T) {
 	t.Parallel()
 
 	pub, priv := newSigningKey(t)
@@ -343,7 +343,7 @@ func TestParseAncillarySigningKey(t *testing.T) {
 		"private key json-hex": mithrilJSONHexKey(t, priv),
 		"seed raw hex":         hex.EncodeToString(priv.Seed()),
 	} {
-		key, err := ParseAncillarySigningKey(encoded)
+		key, err := ParseSigningKey(encoded)
 		require.NoError(t, err, name)
 		assert.True(
 			t, ed25519.Verify(pub, message, ed25519.Sign(key, message)), name,
@@ -355,7 +355,7 @@ func TestParseAncillarySigningKey(t *testing.T) {
 		"not hex":    "zz",
 		"wrong size": hex.EncodeToString(make([]byte, 48)),
 	} {
-		_, err := ParseAncillarySigningKey(encoded)
+		_, err := ParseSigningKey(encoded)
 		assert.Error(t, err, name)
 	}
 }

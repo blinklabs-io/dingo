@@ -304,12 +304,10 @@ func itoa(n int) string { return strconv.Itoa(n) }
 
 func itoa5(n int) string { return fmt.Sprintf("%05d", n) }
 
-// TestServerSnapshotSyncsEndToEnd runs the whole `dingo mithril sync` pipeline
-// against a produced snapshot: bootstrap from the handler, import the ledger
-// state from the ancillary archive and load the immutable blocks.
-func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
-	t.Parallel()
-
+// newSyncableDB writes a cardano-node database directory whose immutable
+// blocks and ledger state Sync can import.
+func newSyncableDB(t *testing.T) string {
+	t.Helper()
 	db := t.TempDir()
 	files, blockHash := validImmutableFiles(t, 1000)
 	for name, content := range files {
@@ -326,6 +324,16 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 		minimalLedgerState(t, 1000, blockHash),
 		0o640,
 	))
+	return db
+}
+
+// TestServerSnapshotSyncsEndToEnd runs the whole `dingo mithril sync` pipeline
+// against a produced snapshot: bootstrap from the handler, import the ledger
+// state from the ancillary archive and load the immutable blocks.
+func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	db := newSyncableDB(t)
 	_, key := newSigningKey(t)
 	store, _ := newLocalStore(t)
 	_, err := CreateSnapshot(

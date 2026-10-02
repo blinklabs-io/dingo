@@ -645,6 +645,50 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid mithril.server.port",
 		},
 		{
+			name: "enabled mithril aggregator needs an epoch",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.Epoch = 0
+			},
+			wantErr: "invalid mithril.server.aggregator.epoch",
+		},
+		{
+			name: "enabled mithril aggregator needs positive k and m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.K = 0
+			},
+			wantErr: "mithril.server.aggregator.k and",
+		},
+		{
+			name: "enabled mithril aggregator phiF above one",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.PhiF = 1.5
+			},
+			wantErr: "invalid mithril.server.aggregator.phiF",
+		},
+		{
+			name: "enabled mithril aggregator needs a genesis key",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.GenesisSigningKeyFile = ""
+			},
+			wantErr: "mithril.server.aggregator.genesisSigningKeyFile",
+		},
+		{
+			name: "enabled mithril aggregator fully configured",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+			},
+		},
+		{
+			name: "disabled mithril aggregator is not validated",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator.PhiF = 7
+			},
+		},
+		{
 			name: "mithril server retention and port in range",
 			modify: func(c *Config) {
 				c.Mithril.Server.KeepSnapshots = 3
@@ -1432,5 +1476,16 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+func validMithrilAggregator() MithrilAggregatorConfig {
+	return MithrilAggregatorConfig{
+		Enabled:               true,
+		Epoch:                 10,
+		K:                     5,
+		M:                     40,
+		PhiF:                  0.5,
+		GenesisSigningKeyFile: "genesis.skey",
 	}
 }

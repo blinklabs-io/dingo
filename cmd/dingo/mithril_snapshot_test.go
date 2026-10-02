@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -268,4 +269,65 @@ func TestServeMithrilServesTLSWhenEnabled(t *testing.T) {
 
 	cancel()
 	require.NoError(t, <-done)
+}
+
+// aggregatorTestConfig enables the aggregator on a snapshot test config with
+// a freshly generated genesis signing key.
+func aggregatorTestConfig(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, dir := snapshotTestConfig(t)
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	keyFile := filepath.Join(dir, "genesis.skey")
+	require.NoError(t, os.WriteFile(
+		keyFile, []byte(hex.EncodeToString(key.Seed())), 0o600,
+	))
+	cfg.Mithril.Server.Aggregator = config.MithrilAggregatorConfig{
+		Enabled:               true,
+		Epoch:                 10,
+		K:                     5,
+		M:                     40,
+		PhiF:                  0.5,
+		GenesisSigningKeyFile: keyFile,
+	}
+	return cfg
+}
+
+func TestNewMithrilServerMountsAggregatorOnlyWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	endpoint := "/certificate-pending"
+	status := func(cfg *config.Config) int {
+		srv, err := newMithrilServer(t.Context(), cfg, discardLogger)
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(
+			rec, httptest.NewRequest(http.MethodGet, endpoint, nil),
+		)
+		return rec.Code
+	}
+
+	cfg, _ := snapshotTestConfig(t)
+	assert.Equal(t, http.StatusNotFound, status(cfg), "disabled")
+	assert.Equal(t, http.StatusNoContent, status(aggregatorTestConfig(t)),
+		"enabled")
+}
+
+func TestNewMithrilServerRejectsUnusableAggregatorKey(t *testing.T) {
+	t.Parallel()
+
+	missing := aggregatorTestConfig(t)
+	missing.Mithril.Server.Aggregator.GenesisSigningKeyFile = filepath.Join(
+		t.TempDir(), "absent.skey",
+	)
+	_, err := newMithrilServer(t.Context(), missing, discardLogger)
+	assert.ErrorContains(t, err, "reading genesis signing key")
+
+	malformed := aggregatorTestConfig(t)
+	require.NoError(t, os.WriteFile(
+		malformed.Mithril.Server.Aggregator.GenesisSigningKeyFile,
+		[]byte("not a key"), 0o600,
+	))
+	_, err = newMithrilServer(t.Context(), malformed, discardLogger)
+	assert.Error(t, err)
 }

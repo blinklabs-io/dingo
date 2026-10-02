@@ -1329,7 +1329,9 @@ dingo/
 │   ├── download.go      # Snapshot download and extraction
 │   ├── snapshot_create.go # Deterministic artifact production, retention
 │   ├── artifact_store*.go # Local, S3 and GCS artifact stores
-│   └── server.go        # Aggregator-compatible artifact HTTP handler
+│   ├── server.go        # Aggregator-compatible artifact HTTP handler
+│   ├── aggregator.go    # Signer registration, signature collection, certificates
+│   └── stm_aggregate.go # STM registration commitment and signature aggregation
 ├── keystore/            # Key management
 │   ├── keystore.go      # Key store interface
 │   ├── keyfile.go       # Key file parsing
@@ -8300,7 +8302,7 @@ rewritten after its digest was taken fails the run. `artifact.json` is written
 last and is the completion marker: a snapshot without it is not listed and not
 pruned. Output is a function of the directory alone (sorted entries, zero
 timestamps and owners, single-threaded zstd), so a second run reproduces the
-same bytes and hash. No certificate is produced; `certificate_hash` is empty.
+same bytes and hash. `certificate_hash` is empty until the aggregator certifies the snapshot.
 
 **Storage** is the `ArtifactStore` interface (`Put`, `Open`, `Subdirs`,
 `DeletePrefix`) selected by `mithril.server.artifactStore`: a directory, or an
@@ -8318,6 +8320,27 @@ under any address. Archive downloads use `http.ServeContent`, giving range and
 HEAD support; with `mithril.server.redirectBaseUrl` set they instead redirect
 to that base URL plus the object key. Path segments reaching the store are
 matched against a 64-hex-digit hash and a fixed archive-name pattern first.
+
+**Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
+is mounted on the same handler and certifies the stored snapshots of the
+configured network. `POST /register-signer` takes a BLS verification key with
+its proof of possession and stake; the first call to `GET /certificate-pending`
+or `POST /register-signatures` with a snapshot awaiting a certificate closes
+registration, orders the signers as the reference key registry does, builds the
+registration Merkle commitment and aggregate verification key, and issues a
+genesis certificate at `epoch-1` signed with the genesis key. The pending
+message binds the oldest uncertified snapshot's digest Merkle root. Each
+`POST /register-signatures` single signature is verified (key, lottery wins,
+signer index) before it counts; once the signatures cover `k` distinct lottery
+indices the aggregator selects them as the reference does, builds the batch
+Merkle path, checks the multi-signature with the same verifier clients use, and
+publishes the certificate chained to the previous one. The certified Mithril
+stake distribution is served at `/artifact/mithril-stake-distributions`, which
+certificate-chain verification of a Cardano database artifact reads. The closed
+signer set and chain head are stored in `aggregator.json` and restored on
+start; changing the epoch or parameters afterwards is refused. Signing itself is
+not part of the aggregator, and certificates carry no KES operational
+certificates: registration is trust-on-first-registration for the epoch.
 
 ## External Interfaces
 

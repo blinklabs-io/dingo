@@ -562,12 +562,12 @@ func PruneSnapshots(
 	return removed, nil
 }
 
-// ParseAncillarySigningKey parses an Ed25519 signing key in the Mithril
+// ParseSigningKey parses an Ed25519 signing key in the Mithril
 // JSON-hex format (or raw hex): a 32-byte seed or a 64-byte private key.
-func ParseAncillarySigningKey(data string) (ed25519.PrivateKey, error) {
+func ParseSigningKey(data string) (ed25519.PrivateKey, error) {
 	key, err := ParseVerificationKey(data)
 	if err != nil {
-		return nil, fmt.Errorf("parsing ancillary signing key: %w", err)
+		return nil, fmt.Errorf("parsing signing key: %w", err)
 	}
 	switch len(key.RawKeyBytes) {
 	case ed25519.SeedSize:
@@ -576,7 +576,7 @@ func ParseAncillarySigningKey(data string) (ed25519.PrivateKey, error) {
 		return ed25519.PrivateKey(key.RawKeyBytes), nil
 	default:
 		return nil, fmt.Errorf(
-			"ancillary signing key has unexpected size %d",
+			"signing key has unexpected size %d",
 			len(key.RawKeyBytes),
 		)
 	}

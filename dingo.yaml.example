@@ -866,6 +866,23 @@
     # Serve HTTPS with the shared tlsCertFilePath and tlsKeyFilePath (default: false)
     # CLI: --mithril-server-tls-enabled
     # tlsEnabled: false
+    # Aggregator: certify stored snapshots from registered signers' signatures.
+    # 'dingo mithril serve' mounts the registration and signature endpoints.
+    # aggregator:
+      # Mount the aggregator endpoints (default: false)
+      # CLI: --mithril-aggregator-enabled
+      # enabled: false
+      # Epoch signers register for; the genesis certificate is issued at epoch-1
+      # CLI: --mithril-aggregator-epoch
+      # epoch: 0
+      # STM parameters: quorum of lottery indices, lottery size, win probability
+      # CLI: --mithril-aggregator-k, --mithril-aggregator-m, --mithril-aggregator-phi-f
+      # k: 0
+      # m: 0
+      # phiF: 0
+      # Ed25519 genesis signing key file (Mithril JSON-hex format)
+      # CLI: --mithril-aggregator-genesis-signing-key-file
+      # genesisSigningKeyFile: ""
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)

@@ -1193,6 +1193,27 @@ type MithrilServerConfig struct {
 	// tlsKeyFilePath. It is off by default; the server is public and
 	// unauthenticated either way.
 	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
+	// Aggregator configures certificate production for the stored snapshots.
+	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`
+}
+
+// MithrilAggregatorConfig configures the aggregator that collects signer
+// registrations and signatures and certifies stored snapshots. It runs on the
+// `dingo mithril serve` listener.
+type MithrilAggregatorConfig struct {
+	// Enabled mounts the signer registration and signature endpoints.
+	Enabled bool `yaml:"enabled"               envconfig:"DINGO_MITHRIL_AGGREGATOR_ENABLED"`
+	// Epoch is the epoch signers register for; the genesis certificate is
+	// issued at the epoch before it, so it must be at least 1.
+	Epoch uint64 `yaml:"epoch"                 envconfig:"DINGO_MITHRIL_AGGREGATOR_EPOCH"`
+	// K, M and PhiF are the STM protocol parameters: the quorum of lottery
+	// indices, the lottery size and the lottery win probability.
+	K    uint64  `yaml:"k"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_K"`
+	M    uint64  `yaml:"m"                     envconfig:"DINGO_MITHRIL_AGGREGATOR_M"`
+	PhiF float64 `yaml:"phiF"                  envconfig:"DINGO_MITHRIL_AGGREGATOR_PHI_F"`
+	// GenesisSigningKeyFile holds the Ed25519 genesis signing key, in the
+	// Mithril JSON-hex key format, that signs the genesis certificate.
+	GenesisSigningKeyFile string `yaml:"genesisSigningKeyFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_GENESIS_SIGNING_KEY_FILE"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary

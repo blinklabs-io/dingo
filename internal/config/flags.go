@@ -936,6 +936,37 @@ var flagSpecs = []flagSpec{
 		"mithril-server-tls-enabled",
 		"serve the Mithril artifact server over HTTPS with the shared TLS certificate",
 	),
+	boolFlag(
+		"Mithril.Server.Aggregator.Enabled",
+		"mithril-aggregator-enabled",
+		"collect signer registrations and signatures and certify stored snapshots",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.Epoch",
+		"mithril-aggregator-epoch",
+		"epoch Mithril signers register for",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.K",
+		"mithril-aggregator-k",
+		"Mithril STM quorum of lottery indices",
+	),
+	uint64Flag(
+		"Mithril.Server.Aggregator.M",
+		"mithril-aggregator-m",
+		"Mithril STM lottery size",
+	),
+	float64Flag(
+		"Mithril.Server.Aggregator.PhiF",
+		"mithril-aggregator-phi-f",
+		"Mithril STM lottery win probability",
+	),
+	stringFlag(
+		"Mithril.Server.Aggregator.GenesisSigningKeyFile",
+		"mithril-aggregator-genesis-signing-key-file",
+		"",
+		"file holding the Ed25519 Mithril genesis signing key",
+	),
 
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(

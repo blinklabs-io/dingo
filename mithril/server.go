@@ -50,6 +50,9 @@ type ServerConfig struct {
 	// object from Store. It is meant for remote stores whose objects are
 	// publicly readable under that base URL.
 	RedirectBaseURL string
+	// Aggregator, when set, mounts its signer registration, signature and
+	// stake distribution endpoints beside the artifact API.
+	Aggregator *Aggregator
 	// Logger receives request failures; nil discards them.
 	Logger *slog.Logger
 }
@@ -136,6 +139,9 @@ func NewServerHandler(cfg ServerConfig) http.Handler {
 	mux.HandleFunc("GET /artifact/cardano-database/{hash}", s.handleDetail)
 	mux.HandleFunc("GET /download/{hash}/{name}", s.handleDownload)
 	mux.HandleFunc("GET /certificate/{hash}", s.handleCertificate)
+	if cfg.Aggregator != nil {
+		cfg.Aggregator.registerRoutes(mux)
+	}
 	return mux
 }
 
@@ -155,10 +161,10 @@ func (s *snapshotServer) fail(
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }
 
-func (s *snapshotServer) writeJSON(w http.ResponseWriter, v any) {
+func writeJSON(w http.ResponseWriter, v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		s.fail(w, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -186,7 +192,7 @@ func (s *snapshotServer) handleList(
 			CreatedAt:               snap.CreatedAt,
 		})
 	}
-	s.writeJSON(w, items)
+	writeJSON(w, items)
 }
 
 func (s *snapshotServer) handleDetail(
@@ -229,7 +235,7 @@ func (s *snapshotServer) handleDetail(
 	snap.Ancillary.Locations = []CardanoDatabaseLocation{
 		location(base + "/" + ancillaryArchiveName),
 	}
-	s.writeJSON(w, snap)
+	writeJSON(w, snap)
 }
 
 func (s *snapshotServer) handleDownload(

@@ -94,7 +94,7 @@ func runMithrilSnapshotCreate(
 	if err != nil {
 		return nil, fmt.Errorf("reading ancillary signing key: %w", err)
 	}
-	key, err := mithril.ParseAncillarySigningKey(string(keyData))
+	key, err := mithril.ParseSigningKey(string(keyData))
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,9 @@ func mithrilServeCommand() *cobra.Command {
 		Short: "Serve Mithril snapshot artifacts over HTTP",
 		Long: `Serve the snapshots in mithril.server.artifactStore through the
 Mithril aggregator artifact API, with range request support, on the shared
-bindAddr and mithril.server.port. The endpoint is public and unauthenticated.`,
+bindAddr and mithril.server.port. The endpoint is public and unauthenticated.
+With mithril.server.aggregator.enabled it also accepts signer registrations and
+signatures and certifies the stored snapshots.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -199,6 +201,10 @@ func newMithrilServer(
 	if err != nil {
 		return nil, err
 	}
+	aggregator, err := newMithrilAggregator(ctx, cfg, store)
+	if err != nil {
+		return nil, err
+	}
 	return &http.Server{
 		Addr: net.JoinHostPort(
 			cfg.BindAddr, strconv.FormatUint(uint64(server.Port), 10),
@@ -206,11 +212,46 @@ func newMithrilServer(
 		Handler: mithril.NewServerHandler(mithril.ServerConfig{
 			Store:           store,
 			RedirectBaseURL: server.RedirectBaseURL,
+			Aggregator:      aggregator,
 			Logger:          logger,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}, nil
+}
+
+// newMithrilAggregator builds the aggregator when mithril.server.aggregator is
+// enabled, and returns nil when it is not.
+func newMithrilAggregator(
+	ctx context.Context,
+	cfg *config.Config,
+	store mithril.ArtifactStore,
+) (*mithril.Aggregator, error) {
+	agg := cfg.Mithril.Server.Aggregator
+	if !agg.Enabled {
+		return nil, nil
+	}
+	keyData, err := os.ReadFile(agg.GenesisSigningKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading genesis signing key: %w", err)
+	}
+	key, err := mithril.ParseSigningKey(string(keyData))
+	if err != nil {
+		return nil, err
+	}
+	network := cfg.Network
+	if network == "" {
+		network = "preview"
+	}
+	return mithril.NewAggregator(ctx, mithril.AggregatorConfig{
+		Network: network,
+		Epoch:   agg.Epoch,
+		Parameters: mithril.ProtocolParameters{
+			K: agg.K, M: agg.M, PhiF: agg.PhiF,
+		},
+		GenesisSigningKey: key,
+		Store:             store,
+	})
 }
 
 // serveMithril serves srv on ln until ctx is done, then shuts it down. The
