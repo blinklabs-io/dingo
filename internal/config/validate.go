@@ -756,6 +756,44 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.Mithril.Server.KeepSnapshots < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.server.keepSnapshots %d (must not be negative; "+
+				"0 keeps every snapshot)",
+			c.Mithril.Server.KeepSnapshots,
+		))
+	}
+	if err := validatePort(
+		"mithril.server.port", c.Mithril.Server.Port, false, minBindable,
+	); err != nil {
+		errs = append(errs, err)
+	}
+	if agg := c.Mithril.Server.Aggregator; agg.Enabled {
+		if agg.Epoch < 1 {
+			errs = append(errs, errors.New(
+				"invalid mithril.server.aggregator.epoch: must be at least 1",
+			))
+		}
+		if agg.K == 0 || agg.M == 0 {
+			errs = append(errs, errors.New(
+				"mithril.server.aggregator.k and mithril.server.aggregator.m "+
+					"must be positive",
+			))
+		}
+		if !(agg.PhiF > 0 && agg.PhiF <= 1) {
+			errs = append(errs, fmt.Errorf(
+				"invalid mithril.server.aggregator.phiF %v: must be in (0, 1]",
+				agg.PhiF,
+			))
+		}
+		if agg.GenesisSigningKeyFile == "" {
+			errs = append(errs, errors.New(
+				"mithril.server.aggregator.genesisSigningKeyFile is required "+
+					"when the aggregator is enabled",
+			))
+		}
+	}
+
 	if c.DelegatorInactivityEnabled &&
 		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {
 		errs = append(errs, fmt.Errorf(
