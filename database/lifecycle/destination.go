@@ -257,21 +257,15 @@ func (r *DestinationRegistry) Register(
 // treating uri as a local path unchanged — this is what lets Restore
 // accept either a local directory or a cloud URI in the same string
 // parameter without breaking existing local-path callers.
-func recognizedCloudScheme(
-	r *DestinationRegistry,
-	uri string,
-) (scheme string, ok bool) {
+func recognizedCloudScheme(r *DestinationRegistry, uri string) bool {
 	u, err := url.Parse(uri)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return "", false
-	}
-	if r == nil {
-		return u.Scheme, false
+	if err != nil || u.Scheme == "" || u.Host == "" || r == nil {
+		return false
 	}
 	r.mu.RLock()
-	_, ok = r.types[u.Scheme]
+	_, ok := r.types[u.Scheme]
 	r.mu.RUnlock()
-	return u.Scheme, ok
+	return ok
 }
 
 // ParseCloudDestination resolves uri to a CloudDestination using r's

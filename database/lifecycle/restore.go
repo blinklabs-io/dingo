@@ -572,7 +572,7 @@ func resolveManifest(
 	if err != nil {
 		return Manifest{}, err
 	}
-	if _, ok := recognizedCloudScheme(registry, snapshotDir); !ok {
+	if !recognizedCloudScheme(registry, snapshotDir) {
 		return ReadManifest(snapshotDir, opts...)
 	}
 	// One byte over the limit lets ReadManifest, not the transfer, report an
@@ -599,7 +599,7 @@ func fetchPayloads(
 	snapshotDir string,
 	manifest Manifest,
 ) (resolvedDir string, cleanup func(), err error) {
-	if _, ok := recognizedCloudScheme(registry, snapshotDir); !ok {
+	if !recognizedCloudScheme(registry, snapshotDir) {
 		return snapshotDir, nil, nil
 	}
 	return downloadCloudFiles(
