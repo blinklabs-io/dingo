@@ -945,7 +945,7 @@ func TestSetGenesisCborWarmsCacheForOpenBatchTransaction(t *testing.T) {
 	require.NoError(t, chunkTxn.Commit())
 }
 
-func TestResolveUtxoCborUsesTxnBlockCacheAfterLRUEviction(t *testing.T) {
+func TestResolveUtxoCborUsesFreshSnapshotAfterLRUEviction(t *testing.T) {
 	t.Parallel()
 
 	db, err := newTestDatabase(t, &Config{
@@ -980,8 +980,9 @@ func TestResolveUtxoCborUsesTxnBlockCacheAfterLRUEviction(t *testing.T) {
 		EncodeUtxoOffset(offset),
 	))
 	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
-	chunkTxn.CacheBlockCbor(blockSlot, blockHash, blockCbor)
+	chunkTxn.MarkBlockCborCommittedSeparately(blockSlot, blockHash)
 
+	// A fresh blob snapshot must resolve this after the shared LRU evicts it.
 	var otherHash [32]byte
 	otherHash[0] = 3
 	db.CborCache().blockLRU.Put(blockSlot+1, otherHash, newCachedBlock([]byte{0x01}))
@@ -992,7 +993,35 @@ func TestResolveUtxoCborUsesTxnBlockCacheAfterLRUEviction(t *testing.T) {
 	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, chunkTxn)
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	require.Zero(t, db.CborCache().Metrics().ColdExtractions.Load())
+	require.Equal(t, uint64(1), db.CborCache().Metrics().ColdExtractions.Load())
+	_, ok = db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.False(t, ok)
 	require.NoError(t, chunkTxn.Commit())
-	require.Nil(t, chunkTxn.blockCbor)
+	require.Empty(t, chunkTxn.separatelyCommittedBlocks)
+}
+
+func TestResolveUtxoCborDoesNotCacheRolledBackUtxo(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
+	var txID [32]byte
+	txID[0] = 1
+	want := []byte{0x82, 0x01, 0x02}
+	require.NoError(t, store.SetUtxo(txn.Blob(), txID[:], 0, want))
+
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, txn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	_, ok := db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.False(t, ok)
+	require.NoError(t, txn.Rollback())
+
+	_, err = db.CborCache().ResolveUtxoCbor(txID[:], 0)
+	require.Error(t, err)
 }

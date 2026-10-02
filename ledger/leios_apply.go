@@ -236,7 +236,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
 	//     in its own blob transaction (nil txn) to avoid overflowing the shared
 	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     offset reads later in the chunk use a transaction-scoped CBOR copy.
+	//     offset reads use a fresh blob snapshot if the shared LRU misses.
 	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
 	//     the shared txn so a later block spending an endorser-produced output can
 	//     resolve it via read-your-writes.
@@ -250,9 +250,7 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 	if !ls.config.LeiosApplyEndorserBlockTxs {
-		// The blob committed separately; keep it reachable through this open
-		// chunk transaction even if the shared block LRU evicts it.
-		txn.CacheBlockCbor(ebSlot, ebHash, blob)
+		txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
 	}
 
 	delta := NewLedgerDelta(

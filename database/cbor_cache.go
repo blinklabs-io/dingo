@@ -209,6 +209,15 @@ func (c *TieredCborCache) cacheBlockCbor(
 	c.blockLRU.Put(slot, hash, newCachedBlock(append([]byte(nil), blockCbor...)))
 }
 
+// cacheResolvedUtxo keeps data staged by a write transaction out of the shared
+// cache, where a rollback could otherwise leave it visible.
+func (c *TieredCborCache) cacheResolvedUtxo(key, cbor []byte, txn *Txn) {
+	if txn != nil && txn.IsReadWrite() {
+		return
+	}
+	c.hotUtxo.Put(key, cbor)
+}
+
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
 // It checks caches in order: hot UTxO cache, block LRU cache, then blob store.
 // An optional database transaction can be provided to see uncommitted writes
@@ -272,7 +281,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	// Check if this is offset-based storage
 	if !IsUtxoOffsetStorage(utxoData) {
 		// Legacy format: raw CBOR data - populate hot cache and return
-		c.hotUtxo.Put(key, utxoData)
+		c.cacheResolvedUtxo(key, utxoData, callerTxn)
 		return utxoData, nil
 	}
 
@@ -281,24 +290,13 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	if err != nil {
 		return nil, fmt.Errorf("decode utxo offset: %w", err)
 	}
-	// A separate block commit can be newer than this transaction's blob
-	// snapshot. Keep its CBOR available for the whole batch even if the shared
-	// LRU evicts the block before this offset is resolved.
-	if cachedBlock, ok := callerTxn.cachedBlockCbor(offset.BlockSlot, offset.BlockHash); ok {
-		cbor := cachedBlock.Extract(offset.ByteOffset, offset.ByteLength)
-		if cbor != nil {
-			c.hotUtxo.Put(key, cbor)
-			return cbor, nil
-		}
-	}
-
 	// Tier 2: Check block LRU cache
 	if cachedBlock, ok := c.blockLRU.Get(offset.BlockSlot, offset.BlockHash); ok {
 		c.metrics.IncBlockLRUHit()
 		cbor := cachedBlock.Extract(offset.ByteOffset, offset.ByteLength)
 		if cbor != nil {
 			// Populate hot cache
-			c.hotUtxo.Put(key, cbor)
+			c.cacheResolvedUtxo(key, cbor, callerTxn)
 			return cbor, nil
 		}
 	}
@@ -307,8 +305,18 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
+	blockTxn := txn
+	if callerTxn != nil && callerTxn.blockCborCommittedSeparately(
+		offset.BlockSlot,
+		offset.BlockHash,
+	) {
+		// The open batch transaction predates this block commit. A fresh read
+		// transaction sees the block without adding it to the batch read set.
+		blockTxn = blob.NewTransaction(false)
+		defer blockTxn.Rollback() //nolint:errcheck
+	}
 	blockCbor, _, err := blob.GetBlock(
-		txn,
+		blockTxn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
 	)
@@ -334,7 +342,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	}
 
 	// Populate hot cache
-	c.hotUtxo.Put(key, cbor)
+	c.cacheResolvedUtxo(key, cbor, callerTxn)
 	return cbor, nil
 }
 
