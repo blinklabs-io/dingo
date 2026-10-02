@@ -991,5 +991,6 @@
   # destination cannot substitute payloads. Every node that restores another
   # node's snapshots must use the same secret. Unset leaves manifests checked
   # only by their unkeyed checksum.
+  # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
   # CLI: --db-snapshot-trust-key-file
   # snapshotTrustKeyFile: ""

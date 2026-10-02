@@ -298,11 +298,11 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf("stat %q: %w", metadataPath, err)
 	}
 
-	blobDigest, _, err := hashFile(blobPath)
+	blobDigest, _, err := hashFileContext(ctx, blobPath)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", blobPath, err)
 	}
-	metadataDigest, _, err := hashFile(metadataPath)
+	metadataDigest, _, err := hashFileContext(ctx, metadataPath)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash %q: %w", metadataPath, err)
 	}
@@ -324,6 +324,9 @@ func Snapshot(
 		MetadataBytes:   metadataInfo.Size(),
 		BlobSHA256:      blobDigest,
 		MetadataSHA256:  metadataDigest,
+	}
+	if err := ctx.Err(); err != nil {
+		return Manifest{}, err
 	}
 	if err := WriteManifest(dir, manifest, opts...); err != nil {
 		return Manifest{}, err

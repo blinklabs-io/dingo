@@ -1465,11 +1465,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// an operator who enabled bark only for its Archive service
 		// shouldn't get a DatabaseService that fails on first call.
 		if lifecycleEnabled {
-			// cfg is never read: SetLiveNode below makes every Service
-			// method delegate straight to n's own Restore/Truncate/
-			// Snapshot rather than the offline path that would use it.
 			dbLifecycleService := dblifecycle.NewService(
-				&internalconfig.Config{},
+				&internalconfig.Config{DatabaseLifecycle: n.config.databaseLifecycle},
 				n.destinationRegistry,
 				n.config.logger,
 			)

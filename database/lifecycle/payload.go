@@ -15,6 +15,7 @@
 package lifecycle
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -64,13 +65,17 @@ func (m Manifest) payloadDownloads() []DownloadFile {
 // hashFile returns the hex SHA-256 digest of the file at path and the number
 // of bytes read.
 func hashFile(path string) (digest string, size int64, err error) {
+	return hashFileContext(context.Background(), path)
+}
+
+func hashFileContext(ctx context.Context, path string) (digest string, size int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", 0, err
 	}
 	defer f.Close()
 	h := sha256.New()
-	size, err = io.Copy(h, f)
+	size, err = io.Copy(h, payloadContextReader{ctx: ctx, reader: f})
 	if err != nil {
 		return "", 0, err
 	}
@@ -122,4 +127,17 @@ func (m Manifest) verifyPayloads(dir string, requireDigests bool) error {
 		}
 	}
 	return nil
+}
+
+// payloadContextReader checks cancellation between bounded file reads.
+type payloadContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r payloadContextReader) Read(buf []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(buf)
 }

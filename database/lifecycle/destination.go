@@ -115,7 +115,8 @@ func copyBounded(
 		return nil
 	}
 	var probe [1]byte
-	if m, _ := io.ReadFull(src, probe[:]); m > 0 {
+	m, probeErr := io.ReadFull(src, probe[:])
+	if m > 0 {
 		return fmt.Errorf(
 			"%q exceeds %d bytes: %w",
 			name,
@@ -123,13 +124,16 @@ func copyBounded(
 			ErrDownloadTooLarge,
 		)
 	}
+	if probeErr != nil && !errors.Is(probeErr, io.EOF) {
+		return probeErr
+	}
 	return nil
 }
 
 // writeBoundedFile creates path and fills it from src, removing it again when
 // the copy fails so a rejected object leaves nothing behind.
 func writeBoundedFile(path string, src io.Reader, file DownloadFile) error {
-	f, err := os.Create(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create %q for download: %w", path, err)
 	}

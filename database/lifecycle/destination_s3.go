@@ -339,7 +339,14 @@ func (d *s3Destination) FetchManifestWithOptions(ctx context.Context, opts ...Ma
 	}
 	configured := *d
 	configured.maxManifestBytes = limit
-	return configured.FetchManifest(ctx)
+	m, err := configured.FetchManifest(ctx)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := m.Authenticate(opts...); err != nil {
+		return Manifest{}, err
+	}
+	return m, nil
 }
 
 // Delete implements CloudDeleter: it removes every object under this

@@ -534,8 +534,8 @@ func (s *Store) objectGCS(
 ) {
 	switch req.Method {
 	case http.MethodGet:
-		s.count("HEAD object")
-		if err := s.before(Op{Method: http.MethodHead, Bucket: bucket, Key: key}); err != nil {
+		s.count("GET object")
+		if err := s.before(Op{Method: req.Method, Bucket: bucket, Key: key}); err != nil {
 			internalError(rec, err)
 			return
 		}

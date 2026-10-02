@@ -174,7 +174,7 @@ func (d *gcsDestination) DownloadFiles(
 			return fmt.Errorf("open gcs object %q: %w", key, err)
 		}
 		err = writeBoundedFile(filepath.Join(localDir, file.Name), r, file)
-		_ = r.Close()
+		err = errors.Join(err, r.Close())
 		if err != nil {
 			return fmt.Errorf("download gcs object %q: %w", key, err)
 		}
@@ -298,7 +298,14 @@ func (d *gcsDestination) FetchManifestWithOptions(ctx context.Context, opts ...M
 	}
 	configured := *d
 	configured.maxManifestBytes = limit
-	return configured.FetchManifest(ctx)
+	m, err := configured.FetchManifest(ctx)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := m.Authenticate(opts...); err != nil {
+		return Manifest{}, err
+	}
+	return m, nil
 }
 
 // Delete implements CloudDeleter: it removes every object under this

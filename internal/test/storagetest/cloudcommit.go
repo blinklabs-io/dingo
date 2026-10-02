@@ -390,12 +390,9 @@ func RunCloudPopulatedRestore(
 	err := restorer.Restore(ctx, bytes.NewReader(backupA))
 	fc.SetHooks(fakecloud.Hooks{})
 	require.Error(t, err)
-	require.NotEqual(
-		t,
-		wantB,
-		contents(),
-		"the failed restore must have left partial data",
-	)
+	partial := contents()
+	require.NotEmpty(t, partial, "the failed restore must have left partial data")
+	require.NotEqual(t, wantA, partial, "the failed restore must not have completed")
 	reset()
 	require.NoError(t, restorer.Restore(ctx, bytes.NewReader(backupB)))
 	require.True(

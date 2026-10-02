@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -577,9 +578,13 @@ func resolveManifest(
 	}
 	// One byte over the limit lets ReadManifest, not the transfer, report an
 	// oversized manifest as ErrManifestTooLarge.
+	downloadLimit := limit
+	if limit < math.MaxInt64 {
+		downloadLimit++
+	}
 	dir, cleanup, err := downloadCloudFiles(
 		ctx, registry, snapshotDir,
-		[]DownloadFile{{Name: ManifestFileName, MaxBytes: limit + 1}},
+		[]DownloadFile{{Name: ManifestFileName, MaxBytes: downloadLimit}},
 	)
 	if err != nil {
 		return Manifest{}, err
@@ -600,7 +605,32 @@ func fetchPayloads(
 	manifest Manifest,
 ) (resolvedDir string, cleanup func(), err error) {
 	if !recognizedCloudScheme(registry, snapshotDir) {
-		return snapshotDir, nil, nil
+		// Consume private copies: reopening the operator's path after digest
+		// verification permits a replacement file to bypass authentication.
+		dir, err := os.MkdirTemp("", "dingo-restore-payloads-")
+		if err != nil {
+			return "", nil, err
+		}
+		cleanup := func() { _ = os.RemoveAll(dir) }
+		for _, file := range manifest.payloadDownloads() {
+			src, err := os.Open(filepath.Join(snapshotDir, file.Name))
+			if err != nil {
+				return "", cleanup, err
+			}
+			err = writeBoundedFile(filepath.Join(dir, file.Name),
+				payloadContextReader{ctx: ctx, reader: src}, file)
+			closeErr := src.Close()
+			if err != nil {
+				if errors.Is(err, ErrDownloadTooLarge) {
+					err = fmt.Errorf("%w: %w", ErrSnapshotPayloadMismatch, err)
+				}
+				return "", cleanup, err
+			}
+			if closeErr != nil {
+				return "", cleanup, closeErr
+			}
+		}
+		return dir, cleanup, nil
 	}
 	return downloadCloudFiles(
 		ctx, registry, snapshotDir, manifest.payloadDownloads(),

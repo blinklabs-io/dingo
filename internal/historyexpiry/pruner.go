@@ -130,7 +130,6 @@ func (p *Pruner) prune(ctx context.Context) {
 	// slot itself because only some of the blocks sharing it may be expired.
 	start := p.loadCursor()
 	cursor := start
-	stalled := false
 	defer func() {
 		if cursor > start {
 			p.saveCursor(cursor)
@@ -150,9 +149,7 @@ func (p *Pruner) prune(ctx context.Context) {
 			next, err := iter.NextRaw()
 			if err != nil {
 				if errors.Is(err, types.ErrHistoryExpired) {
-					if !stalled {
-						cursor, _ = iter.Progress()
-					}
+					cursor, _ = iter.Progress()
 					continue
 				}
 				p.logger.Error(
@@ -173,10 +170,9 @@ func (p *Pruner) prune(ctx context.Context) {
 					"error",
 					err,
 				)
-				stalled = true
-			} else if !stalled {
-				cursor = next.Slot
+				return
 			}
+			cursor = next.Slot
 		}
 	}
 }

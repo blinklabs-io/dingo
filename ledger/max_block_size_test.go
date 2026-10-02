@@ -19,6 +19,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
@@ -96,4 +99,19 @@ func TestMaxBlockSizeAdmitsByronHistory(t *testing.T) {
 	ls.currentPParams = nil
 	ls.publishSnapshotsLocked()
 	require.Equal(t, uint64(2000000), ls.MaxBlockSize())
+}
+
+func TestMaxBlockSizeRetainsPersistedHistoricalLimit(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, nil)
+	require.NoError(t, err)
+	historical := mithrilRewardConwayPParams()
+	historical.MaxBlockBodySize = 4000000
+	historical.MaxBlockHeaderSize = 1100
+	encoded, err := cbor.Encode(historical)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(encoded, 100, 1, gledger.EraIdConway, nil))
+	ls := &LedgerState{db: db, currentPParams: &conway.ConwayProtocolParameters{MaxBlockBodySize: 90112, MaxBlockHeaderSize: 1100}}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(4000000+1100+blockFramingAllowance), ls.MaxBlockSize())
 }

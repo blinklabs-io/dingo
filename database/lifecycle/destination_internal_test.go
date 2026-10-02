@@ -15,7 +15,10 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -180,4 +183,59 @@ func TestDestinationRegistryRegisterNilReceiverIsNoOp(t *testing.T) {
 			return nil, nil
 		})
 	})
+}
+
+type boundaryFailureReader struct {
+	data    *bytes.Reader
+	failure error
+}
+
+func (r boundaryFailureReader) Read(p []byte) (int, error) {
+	if r.data.Len() == 0 {
+		return 0, r.failure
+	}
+	return r.data.Read(p)
+}
+
+func TestCopyBoundedPropagatesBoundaryReadFailure(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("transfer failed")
+	err := copyBounded(io.Discard, boundaryFailureReader{bytes.NewReader([]byte("abc")), failure}, 3, "payload")
+	require.ErrorIs(t, err, failure)
+}
+
+func TestWriteBoundedFilePreservesExistingOutput(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+	require.Error(t, writeBoundedFile(path, bytes.NewReader([]byte("oversized")), DownloadFile{Name: "payload", MaxBytes: 1}))
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestFetchLocalPayloadsUsesIndependentBoundedCopies(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{BlobBackupFileName, MetadataBackupFileName} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("original"), 0o600))
+	}
+	copied, cleanup, err := fetchPayloads(context.Background(), nil, dir, Manifest{BlobBytes: 8, MetadataBytes: 8})
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	require.NotEqual(t, dir, copied)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, BlobBackupFileName), []byte("replaced"), 0o600))
+	got, err := os.ReadFile(filepath.Join(copied, BlobBackupFileName))
+	require.NoError(t, err)
+	require.Equal(t, "original", string(got))
+}
+
+func TestHashFileContextRejectsCancellation(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "payload")
+	require.NoError(t, os.WriteFile(path, []byte("payload"), 0o600))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := hashFileContext(ctx, path)
+	require.ErrorIs(t, err, context.Canceled)
 }

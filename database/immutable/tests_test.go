@@ -484,29 +484,6 @@ func TestGetBlockChecksHashAfterLocatingContainingChunk(t *testing.T) {
 	}
 }
 
-func TestGetBlockFindsExactPointInSingleEntryChunk(t *testing.T) {
-	dir := t.TempDir()
-	want := pointLookupPoint(777, 0x77)
-	writePointLookupChunk(t, dir, "00000", []ocommon.Point{want})
-	imm, err := New(dir)
-	if err != nil {
-		t.Fatalf("open immutable DB: %s", err)
-	}
-	got, err := imm.GetBlock(want)
-	if err != nil {
-		t.Fatalf("get exact point: %s", err)
-	}
-	if got == nil || got.Slot != want.Slot ||
-		!bytes.Equal(got.Hash, want.Hash) {
-		t.Fatalf(
-			"exact point lookup = %#v, want slot %d hash %x",
-			got,
-			want.Slot,
-			want.Hash,
-		)
-	}
-}
-
 func TestSingleEntryChunkLookupsAtZeroAndNonzeroSlot(t *testing.T) {
 	t.Parallel()
 	for _, slot := range []uint64{0, 777} {

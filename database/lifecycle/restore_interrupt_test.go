@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
@@ -121,19 +122,16 @@ func TestRestoreInterruptedByProcessKillLeavesTargetUntouched(t *testing.T) {
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill() })
 
-	// Blocks until the child opens backupPath to verify it against the
-	// manifest, then feeds it the original bytes so that check passes.
-	verifyWriter, err := os.OpenFile(backupPath, os.O_WRONLY, 0)
-	require.NoError(t, err, "child never reached payload verification")
-	_, err = verifyWriter.Write(backup)
+	var writer *os.File
+	testutil.WaitForCondition(t, func() bool {
+		var openErr error
+		writer, openErr = os.OpenFile(backupPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		return openErr == nil
+	}, 5*time.Second, "child never reached payload copying")
+	// Keep the stream open after supplying a prefix so the child cannot
+	// finish copying and authenticating the payload before the kill.
+	_, err = writer.Write(backup[:min(len(backup), 1024)])
 	require.NoError(t, err)
-	require.NoError(t, verifyWriter.Close())
-
-	// Blocks until the child's RestoreFrom reaches os.Open(backupPath)
-	// for reading -- see the doc comment above for why this is a real
-	// synchronization point, not a timing guess.
-	writer, err := os.OpenFile(backupPath, os.O_WRONLY, 0)
-	require.NoError(t, err, "child never reached the metadata backup FIFO")
 
 	require.NoError(t, cmd.Process.Kill())
 	_ = cmd.Wait() // expected to report a kill signal; not asserted on

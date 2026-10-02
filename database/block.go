@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -387,41 +388,54 @@ func ResolveBlockNumberBound(db *Database) (BlockNumberBound, error) {
 // grew with the archive, while a forward seek is one bounded listing. The
 // search narrows [lo, hi] around the highest ID, where lo is an ID known to
 // be indexed and nothing indexed lies above hi, so it ends after at most 64
-// probes whatever the index holds. Because every probe applies the same
-// staleness rules as the forward search that uses the bound, a stale entry at
-// the top is skipped here too.
+// probes for each candidate. Metadata is checked only at the highest candidate;
+// a stale tail candidate restarts the search below that ID.
 func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 	if txn == nil {
 		return BlockNumberBound{}, types.ErrNilTxn
 	}
-	highest, err := blockIndexEntryAtOrAfterTxn(txn, 0)
-	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+	upper := uint64(math.MaxUint64)
+	for {
+		// Search raw index keys first. Checking liveness while seeking from
+		// zero walks every stale entry left below the retained history.
+		highest, err := blockIndexSeekTxn(txn, 0, false)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return BlockNumberBound{}, nil
+			}
+			return BlockNumberBound{}, err
+		}
+		if highest.id > upper {
 			return BlockNumberBound{}, nil
 		}
-		return BlockNumberBound{}, err
-	}
-	hi := uint64(math.MaxUint64)
-	for highest.id < hi {
-		// Upper midpoint, written to avoid overflow when the interval spans
-		// the whole ID space.
-		span := hi - highest.id
-		mid := highest.id + span/2 + span%2
-		entry, err := blockIndexEntryAtOrAfterTxn(txn, mid)
-		if err != nil {
-			if !errors.Is(err, models.ErrBlockNotFound) {
-				return BlockNumberBound{}, err
+		hi := upper
+		for highest.id < hi {
+			span := hi - highest.id
+			mid := highest.id + span/2 + span%2
+			entry, err := blockIndexSeekTxn(txn, mid, false)
+			if err != nil || entry.id > upper {
+				if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+					return BlockNumberBound{}, err
+				}
+				hi = mid - 1
+				continue
 			}
-			hi = mid - 1
-			continue
+			highest = entry
 		}
-		highest = entry
+		metadata, err := blockMetadataByKey(txn, highest.blockKey)
+		if err == nil && metadata.ID == highest.id {
+			return BlockNumberBound{HighestID: highest.id,
+				HighestNumber: metadata.Height, Resolved: true}, nil
+		}
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
+			return BlockNumberBound{}, err
+		}
+		if highest.id == 0 {
+			return BlockNumberBound{}, nil
+		}
+		upper = highest.id - 1
 	}
-	return BlockNumberBound{
-		HighestID:     highest.id,
-		HighestNumber: highest.number,
-		Resolved:      true,
-	}, nil
+
 }
 
 // BlockByNumber resolves the block carrying the given chain block number
@@ -565,6 +579,10 @@ func blockIndexEntryAtOrAfterTxn(
 	txn *Txn,
 	blockIndex uint64,
 ) (blockIndexEntry, error) {
+	return blockIndexSeekTxn(txn, blockIndex, true)
+}
+
+func blockIndexSeekTxn(txn *Txn, blockIndex uint64, validate bool) (blockIndexEntry, error) {
 	blobTxn := txn.Blob()
 	if blobTxn == nil {
 		return blockIndexEntry{}, types.ErrNilTxn
@@ -597,6 +615,12 @@ func blockIndexEntryAtOrAfterTxn(
 		blockKey, err := item.ValueCopy(nil)
 		if err != nil {
 			return blockIndexEntry{}, err
+		}
+		if !validate {
+			if len(indexKey) != len(prefix)+8 {
+				return blockIndexEntry{}, fmt.Errorf("invalid block index key: %x", indexKey)
+			}
+			return blockIndexEntry{id: binary.BigEndian.Uint64(indexKey[len(prefix):]), blockKey: blockKey}, nil
 		}
 		metadata, err := blockMetadataByKey(txn, blockKey)
 		if err != nil {

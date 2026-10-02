@@ -62,8 +62,8 @@ func RunCloudBlockNumberBoundWork(
 		seeded = n
 	}
 
-	// A resolution walks at most 64 probes, each one bounded listing, plus
-	// the few requests that confirm the highest entry.
+	// Budget: one initial seek, 64 bisection probes, and five requests
+	// of headroom for bounded changes to the lookup algorithm.
 	const maxLists = 70
 	for _, n := range []uint64{200, 75_000} {
 		seedTo(n)
