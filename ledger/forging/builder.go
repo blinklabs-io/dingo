@@ -95,7 +95,7 @@ type EpochNonceProvider interface {
 	// EpochForSlot returns the epoch containing the given slot.
 	EpochForSlot(slot uint64) (uint64, error)
 	// EpochNonce returns the nonce for the given epoch.
-	EpochNonce(epoch uint64) []byte
+	EpochNonce(context.Context, uint64) []byte
 }
 
 // TxValidator re-validates a transaction against the current ledger
@@ -307,7 +307,8 @@ func (b *DefaultBlockBuilder) BuildBlockWithLeios(ctx context.Context,
 	)
 }
 
-func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
+func (b *DefaultBlockBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leios LeiosBlockData,
@@ -968,7 +969,11 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 		// on the empty-body fallback path and on genuinely idle
 		// producers.
 	case b.txValidator != nil:
-		selectErr = withTxValidationSession(ctx, b.txValidator, selectTransactions)
+		selectErr = withTxValidationSession(
+			ctx,
+			b.txValidator,
+			selectTransactions,
+		)
 	default:
 		// No validator configured: skip ledger re-validation entirely
 		// (unchanged from before), but still run the same selection loop
@@ -1091,7 +1096,7 @@ func (b *DefaultBlockBuilder) buildBlock(ctx context.Context,
 			err,
 		)
 	}
-	epochNonce := b.epochNonce.EpochNonce(blockEpoch)
+	epochNonce := b.epochNonce.EpochNonce(ctx, blockEpoch)
 	if len(epochNonce) == 0 {
 		return nil, nil, errors.New("epoch nonce not available")
 	}
@@ -1428,17 +1433,27 @@ func (b *DefaultBlockBuilder) checkAppliedTipRelation(
 		return nil
 	}
 	if allowAlternativeParent {
-		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(parentPoint)
+		parentTip, parentDepth, parentAncestor, err := relationProvider.TipRelation(
+			parentPoint,
+		)
 		if err != nil {
-			return fmt.Errorf("check alternative forge parent ancestry: %w", err)
+			return fmt.Errorf(
+				"check alternative forge parent ancestry: %w",
+				err,
+			)
 		}
-		if !tipsEqual(parentTip, currentTip) || !parentAncestor || parentDepth != 1 {
-			return errors.New("alternative forge parent is not the direct chain-tip predecessor")
+		if !tipsEqual(parentTip, currentTip) || !parentAncestor ||
+			parentDepth != 1 {
+			return errors.New(
+				"alternative forge parent is not the direct chain-tip predecessor",
+			)
 		}
 		return nil
 	}
 	if !pointsEqual(parentPoint, appliedTip.Point) {
-		return errors.New("alternative forge parent does not match the applied ledger tip")
+		return errors.New(
+			"alternative forge parent does not match the applied ledger tip",
+		)
 	}
 	return nil
 }

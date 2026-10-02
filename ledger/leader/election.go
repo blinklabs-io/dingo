@@ -132,7 +132,7 @@ type EpochInfoProvider interface {
 	CurrentEpoch() uint64
 
 	// EpochNonce returns the nonce for the given epoch.
-	EpochNonce(epoch uint64) []byte
+	EpochNonce(context.Context, uint64) []byte
 
 	// NextEpochNonceReadyEpoch reports the next epoch number when the
 	// upcoming epoch's nonce is already stable and its leader schedule can
@@ -667,7 +667,7 @@ func (e *Election) RefreshScheduleForEpoch(
 			"error", err,
 		)
 	} else if schedule != nil {
-		valid, reason, err := e.validatePersistedSchedule(epoch, schedule)
+		valid, reason, err := e.validatePersistedSchedule(ctx, epoch, schedule)
 		if err != nil {
 			e.logger.Warn(
 				"failed to validate persisted leader schedule",
@@ -727,6 +727,7 @@ func (e *Election) loadPersistedSchedule(
 }
 
 func (e *Election) validatePersistedSchedule(
+	ctx context.Context,
 	epoch uint64,
 	schedule *Schedule,
 ) (bool, string, error) {
@@ -746,7 +747,7 @@ func (e *Election) validatePersistedSchedule(
 		), nil
 	}
 
-	expectedNonce := e.epochProvider.EpochNonce(epoch)
+	expectedNonce := e.epochProvider.EpochNonce(ctx, epoch)
 	if len(expectedNonce) == 0 {
 		return false, "epoch nonce unavailable", nil
 	}
@@ -894,7 +895,7 @@ func (e *Election) computeSchedule(
 	// Get epoch nonce. The nonce may not be available yet if the slot clock
 	// fired the epoch transition before block processing computed the nonce.
 	// In that case, skip this schedule — the next epoch transition will retry.
-	epochNonce := e.epochProvider.EpochNonce(currentEpoch)
+	epochNonce := e.epochProvider.EpochNonce(ctx, currentEpoch)
 	if len(epochNonce) == 0 {
 		e.logger.Info(
 			"epoch nonce not yet available, skipping schedule",

@@ -1226,8 +1226,11 @@ func (a *epochInfoAdapter) CurrentEpoch() uint64 {
 	return a.ledgerState.CurrentEpoch()
 }
 
-func (a *epochInfoAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(context.Background(), epoch)
+func (a *epochInfoAdapter) EpochNonce(
+	ctx context.Context,
+	epoch uint64,
+) []byte {
+	return a.ledgerState.EpochNonce(ctx, epoch)
 }
 
 func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
@@ -1527,6 +1530,9 @@ func (a *epochNonceAdapter) EpochForSlot(slot uint64) (uint64, error) {
 	return epoch.EpochId, nil
 }
 
-func (a *epochNonceAdapter) EpochNonce(epoch uint64) []byte {
-	return a.ledgerState.EpochNonce(context.Background(), epoch)
+func (a *epochNonceAdapter) EpochNonce(
+	ctx context.Context,
+	epoch uint64,
+) []byte {
+	return a.ledgerState.EpochNonce(ctx, epoch)
 }

@@ -234,14 +234,19 @@ func TestBuildBlockRefusesAParentAtItsOwnSlot(t *testing.T) {
 	builder := newBlockContextTestBuilder(t, rival)
 
 	t.Run("live tip path", func(t *testing.T) {
-		block, blockCbor, err := builder.BuildBlock(context.Background(), contestedSlot, 0)
+		block, blockCbor, err := builder.BuildBlock(
+			context.Background(),
+			contestedSlot,
+			0,
+		)
 		require.ErrorIs(t, err, errParentSlotNotBelowBlock)
 		assert.Nil(t, block)
 		assert.Nil(t, blockCbor)
 	})
 
 	t.Run("explicit context naming the rival", func(t *testing.T) {
-		block, blockCbor, err := builder.BuildBlockOnContext(context.Background(),
+		block, blockCbor, err := builder.BuildBlockOnContext(
+			context.Background(),
 			contestedSlot,
 			0,
 			LeiosBlockData{},
@@ -256,23 +261,26 @@ func TestBuildBlockRefusesAParentAtItsOwnSlot(t *testing.T) {
 		assert.Nil(t, blockCbor)
 	})
 
-	t.Run("explicit context with a parent above the forged slot", func(t *testing.T) {
-		block, _, err := builder.BuildBlockOnContext(context.Background(),
-			contestedSlot,
-			0,
-			LeiosBlockData{},
-			BlockContext{
-				Parent: ocommon.Point{
-					Slot: contestedSlot + 1,
-					Hash: testHash32(0xBB),
+	t.Run(
+		"explicit context with a parent above the forged slot",
+		func(t *testing.T) {
+			block, _, err := builder.BuildBlockOnContext(context.Background(),
+				contestedSlot,
+				0,
+				LeiosBlockData{},
+				BlockContext{
+					Parent: ocommon.Point{
+						Slot: contestedSlot + 1,
+						Hash: testHash32(0xBB),
+					},
+					BlockNumber: rival.BlockNumber,
+					Rival:       rival,
 				},
-				BlockNumber: rival.BlockNumber,
-				Rival:       rival,
-			},
-		)
-		require.ErrorIs(t, err, errParentSlotNotBelowBlock)
-		assert.Nil(t, block)
-	})
+			)
+			require.ErrorIs(t, err, errParentSlotNotBelowBlock)
+			assert.Nil(t, block)
+		},
+	)
 }
 
 // TestBuildBlockOnContextAbandonsAStaleContest pins that a candidate bound to a
@@ -398,7 +406,11 @@ func TestBuildBlockOnContextCarriesNoMempoolTransactions(t *testing.T) {
 
 	// Live-tip control: the validator admits the transaction, so a normal
 	// build selects it. This is the state the alternative must not inherit.
-	control, _, err := builder.BuildBlock(context.Background(), contestedSlot+1, 0)
+	control, _, err := builder.BuildBlock(
+		context.Background(),
+		contestedSlot+1,
+		0,
+	)
 	require.NoError(t, err)
 	require.Len(
 		t,
@@ -470,7 +482,8 @@ func TestBuildBlockOnContextRejectsLeiosData(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			block, blockCbor, err := builder.BuildBlockOnContext(context.Background(),
+			block, blockCbor, err := builder.BuildBlockOnContext(
+				context.Background(),
 				contestedSlot,
 				0,
 				leios,
@@ -547,11 +560,14 @@ func bodyBudgetTransaction(
 	}
 	body := map[uint]any{
 		0: []any{[]any{make([]byte, 32), uint(index)}},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)},
+		},
 		2: uint(200000),
 		3: uint(200000),
 	}
-	if era == eraShelley || era == eraAllegra || era == eraMary || era == eraAlonzo {
+	if era == eraShelley || era == eraAllegra || era == eraMary ||
+		era == eraAlonzo {
 		body[3] = uint64(1000)
 	}
 	if auxiliary != nil {
@@ -640,7 +656,11 @@ func TestBuildBlockEncodedBodyBudget(t *testing.T) {
 						builder.pparamsProvider = &mockPParamsProvider{
 							pparams: bodyBudgetParams(era, limit),
 						}
-						block, encoded, err := builder.BuildBlock(context.Background(), 1001, 0)
+						block, encoded, err := builder.BuildBlock(
+							context.Background(),
+							1001,
+							0,
+						)
 						require.NoError(
 							t,
 							err,
@@ -839,7 +859,11 @@ func TestBuildBlockSupportsAllEras(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			block, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
+			block, blockCbor, err := builder.BuildBlock(
+				context.Background(),
+				1001,
+				0,
+			)
 			require.NoError(
 				t,
 				err,
@@ -1001,12 +1025,17 @@ func TestBuildBlockDijkstraAnnouncesLeiosEndorserBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	ebHash := lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size))
-	block, _, err := builder.BuildBlockWithLeios(context.Background(), 1001, 0, LeiosBlockData{
-		Announcement: &LeiosEndorserBlockAnnouncement{
-			Hash: ebHash,
-			Size: 1234,
+	block, _, err := builder.BuildBlockWithLeios(
+		context.Background(),
+		1001,
+		0,
+		LeiosBlockData{
+			Announcement: &LeiosEndorserBlockAnnouncement{
+				Hash: ebHash,
+				Size: 1234,
+			},
 		},
-	})
+	)
 	require.NoError(t, err)
 	dblock := block.(*dijkstra.DijkstraBlock)
 
@@ -1059,12 +1088,19 @@ func TestBuildBlockDijkstraDoesNotMixAnnouncedEndorserTransactions(
 	})
 	require.NoError(t, err)
 
-	block, _, err := builder.BuildBlockWithLeios(context.Background(), 1001, 0, LeiosBlockData{
-		Announcement: &LeiosEndorserBlockAnnouncement{
-			Hash: lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
-			Size: 1234,
+	block, _, err := builder.BuildBlockWithLeios(
+		context.Background(),
+		1001,
+		0,
+		LeiosBlockData{
+			Announcement: &LeiosEndorserBlockAnnouncement{
+				Hash: lcommon.NewBlake2b256(
+					make([]byte, lcommon.Blake2b256Size),
+				),
+				Size: 1234,
+			},
 		},
-	})
+	)
 	require.NoError(t, err)
 	require.Empty(t, block.Transactions())
 }
@@ -1105,12 +1141,17 @@ func TestBuildBlockDijkstraRejectsOversizeLeiosAnnouncement(t *testing.T) {
 	require.NoError(t, err)
 
 	ebHash := lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size))
-	_, _, err = builder.BuildBlockWithLeios(context.Background(), 1001, 0, LeiosBlockData{
-		Announcement: &LeiosEndorserBlockAnnouncement{
-			Hash: ebHash,
-			Size: uint64(math.MaxUint32) + 1,
+	_, _, err = builder.BuildBlockWithLeios(
+		context.Background(),
+		1001,
+		0,
+		LeiosBlockData{
+			Announcement: &LeiosEndorserBlockAnnouncement{
+				Hash: ebHash,
+				Size: uint64(math.MaxUint32) + 1,
+			},
 		},
-	})
+	)
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "leios announcement size exceeds uint32")
 }
@@ -1166,20 +1207,25 @@ func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(
 		signature[i] = byte(i)
 	}
 	announcedHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
-	block, _, err := builder.BuildBlockWithLeios(context.Background(), 1001, 0, LeiosBlockData{
-		Announcement: &LeiosEndorserBlockAnnouncement{
-			Hash: announcedHash,
-			Size: 1234,
+	block, _, err := builder.BuildBlockWithLeios(
+		context.Background(),
+		1001,
+		0,
+		LeiosBlockData{
+			Announcement: &LeiosEndorserBlockAnnouncement{
+				Hash: announcedHash,
+				Size: 1234,
+			},
+			Certificate: &lcommon.LeiosEbCertificate{
+				SlotNo: 900,
+				EndorserBlockHash: lcommon.NewBlake2b256(
+					make([]byte, lcommon.Blake2b256Size),
+				),
+				Signers:             []byte{0x80},
+				AggregatedSignature: signature,
+			},
 		},
-		Certificate: &lcommon.LeiosEbCertificate{
-			SlotNo: 900,
-			EndorserBlockHash: lcommon.NewBlake2b256(
-				make([]byte, lcommon.Blake2b256Size),
-			),
-			Signers:             []byte{0x80},
-			AggregatedSignature: signature,
-		},
-	})
+	)
 	require.NoError(t, err)
 	dblock := block.(*dijkstra.DijkstraBlock)
 
@@ -1387,7 +1433,8 @@ func TestSelectionStopsAtTheSlotDeadline(t *testing.T) {
 
 	generation := builder.creds.acquireCredentialGeneration()
 	defer generation.release()
-	block, _, err := builder.buildBlockWithCredentialGeneration(context.Background(),
+	block, _, err := builder.buildBlockWithCredentialGeneration(
+		context.Background(),
 		1001,
 		0,
 		LeiosBlockData{},
@@ -1509,7 +1556,8 @@ func (b *constraintRecordingBuilder) BuildBlock(context.Context,
 	return b.block, b.cbor, nil
 }
 
-func (b *constraintRecordingBuilder) buildBlockWithCredentialGeneration(ctx context.Context,
+func (b *constraintRecordingBuilder) buildBlockWithCredentialGeneration(
+	ctx context.Context,
 	_ uint64,
 	_ uint64,
 	_ LeiosBlockData,
@@ -2068,7 +2116,10 @@ func (m *mockEpochNonceProvider) EpochForSlot(slot uint64) (uint64, error) {
 	return slot / m.slotsPerEpoch, nil
 }
 
-func (m *mockEpochNonceProvider) EpochNonce(epoch uint64) []byte {
+func (m *mockEpochNonceProvider) EpochNonce(
+	_ context.Context,
+	epoch uint64,
+) []byte {
 	m.requestedEpochs = append(m.requestedEpochs, epoch)
 	if m.nonces != nil {
 		return m.nonces[epoch]
@@ -2386,7 +2437,11 @@ func TestDefaultBuilderRejectsReentrantProviderReload(t *testing.T) {
 	}
 	resultCh := make(chan buildResult, 1)
 	go func() {
-		block, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
+		block, blockCbor, err := builder.BuildBlock(
+			context.Background(),
+			1001,
+			0,
+		)
 		resultCh <- buildResult{block: block, cbor: blockCbor, err: err}
 	}()
 	result := dingotestutil.RequireReceive(
@@ -2600,7 +2655,8 @@ func TestBuildBlockRequiresLiveTipParentBelowBlockSlot(t *testing.T) {
 			var block ledger.Block
 			var blockCbor []byte
 			if tc.withLeios {
-				block, blockCbor, err = builder.BuildBlockWithLeios(context.Background(),
+				block, blockCbor, err = builder.BuildBlockWithLeios(
+					context.Background(),
 					tc.slot,
 					0,
 					LeiosBlockData{},
@@ -2770,7 +2826,11 @@ func TestBuildBlockUsesDingoProtocolMinor(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			_, blockCbor, err := builder.BuildBlock(context.Background(), tt.expectedSlot, 0)
+			_, blockCbor, err := builder.BuildBlock(
+				context.Background(),
+				tt.expectedSlot,
+				0,
+			)
 			require.NoError(t, err)
 
 			decodedBlock, err := conway.NewConwayBlockFromCbor(blockCbor)
@@ -2950,7 +3010,11 @@ func TestBuildBlockCborRoundTrip(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		block, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
+		block, blockCbor, err := builder.BuildBlock(
+			context.Background(),
+			1001,
+			0,
+		)
 		require.NoError(t, err)
 		require.NotNil(t, block)
 		require.NotEmpty(t, blockCbor)
@@ -2991,7 +3055,11 @@ func TestBuildBlockCborRoundTrip(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		block, blockCbor, err := builder.BuildBlock(context.Background(), 1001, 0)
+		block, blockCbor, err := builder.BuildBlock(
+			context.Background(),
+			1001,
+			0,
+		)
 		require.NoError(t, err)
 		require.NotNil(t, block)
 		require.NotEmpty(t, blockCbor)
@@ -3032,7 +3100,9 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 			Number:  258,
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)},
+		},
 		2: uint64(200000),
 	}
 
@@ -3300,7 +3370,9 @@ func makeMinimalTxCborWithInput(
 			Number:  258,
 			Content: []any{[]any{inputHash, inputIndex}},
 		},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)},
+		},
 		2: uint64(200000),
 	}
 
@@ -3780,7 +3852,9 @@ func makeMinimalTxCborWithExUnits(
 			Number:  258,
 			Content: []any{[]any{txHash, uint64(0)}},
 		},
-		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)}},
+		1: []any{
+			[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1000000)},
+		},
 		2: uint64(200000),
 	}
 
@@ -4275,8 +4349,9 @@ func TestBuildBlockRevalidationAndDoubleSpend(t *testing.T) {
 // call to simulate a concurrent ledger or chain-tip mutation landing
 // mid-selection.
 type sessionMockTxValidator struct {
-	sessions      int
-	validateCalls int
+	sessionContext context.Context
+	sessions       int
+	validateCalls  int
 	// staleAfterCalls, when non-zero, makes stillCurrent() report false
 	// once validateCalls reaches this count. This simulates a ledger
 	// publication (new block, rollback, epoch transition, or protocol
@@ -4327,6 +4402,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(ctx context.Context,
 		stillCurrent func() bool,
 	) error,
 ) error {
+	v.sessionContext = ctx
 	v.sessions++
 	stale := v.alwaysStale
 	validate := func(
@@ -4616,7 +4692,11 @@ func TestBuilderRequiresAppliedAncestorWithinLocalBlockLimit(t *testing.T) {
 		BlockNumber: 12,
 	}
 	builder := &DefaultBlockBuilder{
-		chainTip:    ancestryTestChainTip{tip: primary, depth: 2, ancestor: false},
+		chainTip: ancestryTestChainTip{
+			tip:      primary,
+			depth:    2,
+			ancestor: false,
+		},
 		txValidator: &ancestryTestTipValidator{appliedTip: applied, k: 5},
 	}
 
@@ -4626,7 +4706,10 @@ func TestBuilderRequiresAppliedAncestorWithinLocalBlockLimit(t *testing.T) {
 	builder.chainTip = ancestryTestChainTip{
 		tip: primary, depth: 2, ancestor: true,
 	}
-	require.NoError(t, builder.checkAppliedTipRelation(primary, applied.Point, false))
+	require.NoError(
+		t,
+		builder.checkAppliedTipRelation(primary, applied.Point, false),
+	)
 
 	builder.chainTip = ancestryTestChainTip{
 		tip: primary, depth: 6, ancestor: true,
@@ -4635,4 +4718,44 @@ func TestBuilderRequiresAppliedAncestorWithinLocalBlockLimit(t *testing.T) {
 		builder.checkAppliedTipRelation(primary, primary.Point, false),
 		"exceeds the maximum unapplied block depth",
 	)
+}
+
+func TestBuildBlockStopsSelectionWhenCallerCancels(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	validator := &sessionMockTxValidator{onValidate: func(int) { cancel() }}
+	builder := newSelectionTestBuilder(
+		t,
+		threeTxMempoolForSelection(t),
+		selectionTestChainTip(),
+		validator,
+	)
+	block, _, err := builder.BuildBlock(ctx, 1001, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, block)
+	require.Equal(t, 1, validator.validateCalls)
+	require.Equal(t, ctx, validator.sessionContext)
+}
+func TestLeiosSelectionHonorsCancellationAfterLastCandidate(t *testing.T) {
+	t.Parallel()
+	for _, count := range []int{1, 3} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			validator := &sessionMockTxValidator{
+				onValidate: func(int) { cancel() },
+			}
+			_, _, err := selectValidLeiosTransactions(
+				ctx,
+				leiosCandidateTxs(t, count),
+				validator,
+				leiosSelectionLimits{},
+			)
+			require.ErrorIs(t, err, context.Canceled)
+			require.Equal(t, 1, validator.validateCalls)
+			require.Equal(t, ctx, validator.sessionContext)
+		})
+	}
 }
