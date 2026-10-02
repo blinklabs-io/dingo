@@ -17,8 +17,6 @@ package ledger
 import (
 	"crypto/ed25519"
 	"crypto/sha3"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 
@@ -28,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,72 +143,17 @@ func processByronReferenceRuleBlock(
 	tx lcommon.Transaction,
 ) error {
 	t.Helper()
-	ls := &LedgerState{
-		db:         db,
-		currentEra: eras.ByronEraDesc,
-		config: LedgerStateConfig{
-			CardanoNodeConfig: nodeConfig,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-	block := &envelopeTestBlock{
-		header: &envelopeTestHeader{
-			cbor:   []byte{0x80},
-			slot:   1,
-			number: 1,
-			era:    byron.EraByron,
-		},
-		cbor: []byte{0x82, 0x80, 0x80},
-		txs:  []lcommon.Transaction{tx},
-	}
-	var txHash [32]byte
-	copy(txHash[:], tx.Hash().Bytes())
-	offsets := &database.BlockIngestionResult{
-		TxOffsets: map[[32]byte]database.CborOffset{
-			txHash: {
-				BlockSlot:  1,
-				ByteLength: uint32(len(tx.Cbor())), // #nosec G115
-			},
-		},
-		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
-	}
-	for _, utxo := range tx.Produced() {
-		offsets.UtxoOffsets[database.UtxoRef{
-			TxId:      txHash,
-			OutputIdx: utxo.Id.Index(),
-		}] = database.CborOffset{BlockSlot: 1, ByteLength: 1}
-	}
 	pparams, err := eras.NewByronProtocolParametersFromGenesis(
 		nodeConfig.ByronGenesis(),
 	)
-	if err != nil {
-		return err
-	}
-	return db.Transaction(true).Do(func(txn *database.Txn) error {
-		_, err := ls.ledgerProcessBlock(
-			txn,
-			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
-			block,
-			true,
-			false,
-			false,
-			nil,
-			envelopeParent{origin: true},
-			offsets,
-			eras.ByronEraDesc,
-			pparams,
-			nil,
-			0,
-			0,
-			false,
-		)
-		return err
-	})
+	require.NoError(t, err)
+	return processByronBlockWithPParams(t, db, nodeConfig, tx, pparams)
 }
 
 // TestLedgerProcessBlockByronReferenceRules drives real, correctly signed
-// Byron transactions through block application for #4379, #4381, #4394,
-// #4401 and #4405. The genesis supplies ppMaxTxSize, a zero fee policy and
+// Byron transactions through block application for the Byron reference rules
+// (ppMaxTxSize, unknown attributes, positional witnesses, repeated inputs,
+// Lovelace bounds). The genesis supplies ppMaxTxSize, a zero fee policy and
 // the mainnet protocol magic the witnesses sign under, so each case isolates
 // one rule.
 func TestLedgerProcessBlockByronReferenceRules(t *testing.T) {

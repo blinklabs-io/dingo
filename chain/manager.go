@@ -464,11 +464,17 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // same signal NtC clients rely on for a live rollback. Previously this
 // deleted blocks directly with no depth bound and no rollback/iterator
 // signal, silently truncating the chain out from under downstream
-// consumers (issue #3516).
+// consumers.
 //
 // Do not call this before SetLedger: it returns ErrSecurityParamNotConfigured
 // rather than silently pruning without a bound. RewindPrimaryChainAtStartup
 // is for that case.
+//
+// This rewinds chain state only. A caller that follows it with a ledger
+// metadata rollback must bracket both calls with
+// database.Database.BeginDestructiveTransition, so a coordinated read snapshot
+// cannot open between the two physical transactions and observe metadata that
+// still describes blocks the chain has already deleted.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
@@ -482,15 +488,14 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 // RewindPrimaryChainAtStartup prunes the persistent primary chain back to
 // the specified point without requiring the security parameter K to be
 // configured, for reconciling the primary chain against the ledger's own
-// applied tip during startup -- before SetLedger has run (issue #3516
-// review). It still publishes ChainRollbackEvent/ChainForkEvent and
-// wakes/marks chain iterators exactly once, the same as
-// RewindPrimaryChainToPoint; it only skips the K bound, since a startup
-// gap between two already-durable local stores is not the untrusted-peer
-// scenario that bound protects against. Never call this for a rollback an
-// untrusted peer requested -- use RewindPrimaryChainToPoint (or
-// SecurityParamConfigured to check readiness first) for anything reachable
-// from chainsync.
+// applied tip during startup -- before SetLedger has run. It still publishes
+// ChainRollbackEvent/ChainForkEvent and wakes/marks chain iterators exactly
+// once, the same as RewindPrimaryChainToPoint; it only skips the K bound, since
+// a startup gap between two already-durable local stores is not the
+// untrusted-peer scenario that bound protects against. Never call this for a
+// rollback an untrusted peer requested -- use RewindPrimaryChainToPoint (or
+// SecurityParamConfigured to check readiness first) for anything reachable from
+// chainsync.
 func (cm *ChainManager) RewindPrimaryChainAtStartup(
 	point ocommon.Point,
 ) error {
@@ -559,6 +564,11 @@ func (cm *ChainManager) addBlock(
 func (cm *ChainManager) removeBlockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {
+	// This per-block deletion is one step of a logical primary-chain
+	// rollback, and deliberately takes no destructive-transition barrier:
+	// rollbackLocked calls it once per block, so acquiring the barrier here
+	// would release it between blocks. The ledger rollback caller holds it
+	// across the whole chain-delete -> metadata-truncate sequence instead.
 	// Record removed block event for each non-primary chain
 	for chainId := range cm.chains {
 		if chainId == primaryChainId {

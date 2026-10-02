@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -87,10 +88,10 @@ func PParamsUpdateDijkstra(
 		)
 	}
 	// ParameterChange must never change protocol version; only
-	// HardForkInitiation may (dingo#4439). Transaction validation already
-	// rejects a ParameterChange carrying key 14 before it can be persisted,
-	// so this only guards an already-stored malformed proposal that reaches
-	// enactment some other way (e.g. replay of pre-fix data).
+	// HardForkInitiation may. Transaction validation already rejects a
+	// ParameterChange carrying key 14 before it can be persisted, so this only
+	// guards an already-stored malformed proposal that reaches enactment some
+	// other way (e.g. replay of pre-fix data).
 	dijkstraPParamsUpdate.ProtocolVersion = nil
 	if err := dijkstraPParams.ApplyUpdate(&dijkstraPParamsUpdate); err != nil {
 		return nil, err
@@ -482,9 +483,7 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 			return err
 		}
 		level.resolved = script.ConcatResolvedInputs(inputs, referenceInputs)
-		for hash, candidate := range script.PlutusWitnessScripts(level.witnesses) {
-			available[hash] = candidate
-		}
+		maps.Copy(available, script.PlutusWitnessScripts(level.witnesses))
 		for _, utxo := range level.resolved {
 			if utxo.Output == nil {
 				continue

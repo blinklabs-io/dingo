@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -786,7 +787,7 @@ func LoadWithDB(
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
 		},
 	)
-	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// Governance's same-boundary SPO stake read: RATIFY tallies
 	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
 	// durably written until the capture hook below runs, later in the same
 	// rollover. Load replays the exact same governance.ProcessEpoch path as
@@ -828,7 +829,7 @@ func LoadWithDB(
 	// node.go's normal startup path. Without this, replaying a devnet chain
 	// with genesis staking through `dingo load` never creates the epoch-0
 	// mark RewardSnapshot, silently skipping the first reward round applied
-	// at the epoch-3 boundary (#1959). This must run before any epoch
+	// at the epoch-3 boundary. This must run before any epoch
 	// boundaries are processed below.
 	if err := captureLoadGenesisSnapshot(ctx, snapshotMgr, cfg, logger); err != nil {
 		return err
@@ -1760,6 +1761,9 @@ func storeRawBlockUtxoOffsets(
 	if blob == nil {
 		return 0, errors.New("blob store not available")
 	}
+	if block.Type == gledger.BlockTypeDijkstra {
+		return storeDijkstraRawBlockUtxoOffsets(txn, blob, block)
+	}
 	var blockHash [32]byte
 	copy(blockHash[:], block.Hash)
 	totalUtxos := 0
@@ -1775,13 +1779,9 @@ func storeRawBlockUtxoOffsets(
 	if offsets == nil || len(offsets.Transactions) == 0 {
 		return 0, nil
 	}
-	invalidTxs, err := extractInvalidTxIndices(block.Cbor)
+	validity, err := rawBlockTransactionValidity(offsets)
 	if err != nil {
-		return 0, fmt.Errorf(
-			"block at slot %d: decode invalid tx indices: %w",
-			block.Slot,
-			err,
-		)
+		return 0, fmt.Errorf("block at slot %d: %w", block.Slot, err)
 	}
 	for txIdx, txLoc := range offsets.Transactions {
 		bodyEnd := txLoc.Body.Offset + txLoc.Body.Length
@@ -1796,8 +1796,7 @@ func storeRawBlockUtxoOffsets(
 		}
 		bodyBytes := block.Cbor[txLoc.Body.Offset:bodyEnd]
 		txHash := lcommon.Blake2b256Hash(bodyBytes)
-		_, txIsInvalid := invalidTxs[txIdx]
-		if !txIsInvalid {
+		if validity[txIdx] {
 			for i, outLoc := range txLoc.Outputs {
 				if outLoc.Length == 0 {
 					continue
@@ -1859,35 +1858,72 @@ func storeRawBlockUtxoOffsets(
 	return totalUtxos, nil
 }
 
-func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
-	decoder, err := gcbor.NewStreamDecoder(blockCbor)
+// storeDijkstraRawBlockUtxoOffsets stores the UTxO offsets of a Dijkstra
+// block from its decoded transactions. A CDDL Dijkstra block marks phase-2
+// validity with each transaction's trailing is_valid field, which the raw
+// offset extractor does not report, and a valid transaction also produces its
+// sub-transactions' outputs. The block indexer follows Produced(), as ledger
+// block application does, so the copy stores the same UTxO set.
+func storeDijkstraRawBlockUtxoOffsets(
+	txn *database.Txn,
+	store blob.BlobStore,
+	block chain.RawBlock,
+) (int, error) {
+	// Stored blocks can keep the early Musashi layout, which only the
+	// stored-block decoder accepts.
+	decoded, err := models.DecodeBlockCbor(block.Type, block.Cbor)
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf(
+			"block at slot %d: decode Dijkstra block: %w",
+			block.Slot,
+			err,
+		)
 	}
-	blockLen, _, _, err := decoder.DecodeArrayHeader()
+	offsets, err := database.NewBlockIndexer(block.Slot, block.Hash).
+		ComputeOffsets(block.Cbor, decoded)
 	if err != nil {
-		return nil, err
+		return 0, fmt.Errorf(
+			"block at slot %d: compute Dijkstra UTxO offsets: %w",
+			block.Slot,
+			err,
+		)
 	}
-	if blockLen < 5 {
-		return nil, nil
-	}
-	for range 4 {
-		if _, _, err := decoder.Skip(); err != nil {
-			return nil, err
+	for ref, offset := range offsets.UtxoOffsets {
+		if err := store.SetUtxo(
+			txn.Blob(),
+			ref.TxId[:],
+			ref.OutputIdx,
+			database.EncodeUtxoOffset(&offset),
+		); err != nil {
+			return 0, fmt.Errorf("storing UTxO offset: %w", err)
 		}
 	}
-	var invalidTxs []uint
-	if _, _, err := decoder.Decode(&invalidTxs); err != nil {
-		return nil, err
+	return len(offsets.UtxoOffsets), nil
+}
+
+// rawBlockTransactionValidity reads invalid_transactions the way
+// cardano-ledger's alignedValidFlags does. The list is walked in wire order,
+// not treated as a set: a descending index marks only the later transaction
+// and a repeated index also marks the one after it, so [1, 0] leaves the
+// first transaction valid and [0, 0] invalidates both. The reference block
+// decoder rejects an index outside the transaction list, and so does this.
+func rawBlockTransactionValidity(
+	offsets *lcommon.BlockTransactionOffsets,
+) ([]bool, error) {
+	count := len(offsets.Transactions)
+	for _, index := range offsets.InvalidTransactions {
+		if index >= uint(count) {
+			return nil, fmt.Errorf(
+				"invalid transaction index %d outside transaction list length %d",
+				index,
+				count,
+			)
+		}
 	}
-	if len(invalidTxs) == 0 {
-		return nil, nil
-	}
-	set := make(map[int]struct{}, len(invalidTxs))
-	for _, idx := range invalidTxs {
-		set[int(idx)] = struct{}{} // #nosec G115
-	}
-	return set, nil
+	return lcommon.TransactionValidityFlags(
+		count,
+		offsets.InvalidTransactions,
+	), nil
 }
 
 func txBodyMapValueRange(

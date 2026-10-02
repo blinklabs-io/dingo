@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -76,12 +76,14 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	if pool.RewardAccountCredentialTag == 1 {
 		rewardCredType = uint(lcommon.CredentialTypeScriptHash)
 	}
+	rewardAccountHash, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+	if err != nil {
+		return PoolDetailInfo{}, fmt.Errorf("pool reward account: %w", err)
+	}
 	rewardAccount, err := stakeAddressFromCredential(
 		lcommon.Credential{
-			CredType: rewardCredType,
-			Credential: lcommon.CredentialHash(
-				lcommon.NewBlake2b224(pool.RewardAccount),
-			),
+			CredType:   rewardCredType,
+			Credential: lcommon.CredentialHash(rewardAccountHash),
 		},
 		networkID,
 	)
@@ -96,12 +98,14 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	owners := make([]string, 0, len(reg.Owners))
 	ownerKeyHashes := make([][]byte, 0, len(reg.Owners))
 	for _, owner := range reg.Owners {
+		ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+		if err != nil {
+			return PoolDetailInfo{}, fmt.Errorf("pool owner key hash: %w", err)
+		}
 		addr, err := stakeAddressFromCredential(
 			lcommon.Credential{
-				CredType: uint(lcommon.CredentialTypeAddrKeyHash),
-				Credential: lcommon.CredentialHash(
-					lcommon.NewBlake2b224(owner.KeyHash),
-				),
+				CredType:   uint(lcommon.CredentialTypeAddrKeyHash),
+				Credential: lcommon.CredentialHash(ownerKeyHash),
 			},
 			networkID,
 		)

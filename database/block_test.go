@@ -16,14 +16,484 @@ package database
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// isolateBlockByHashMetrics runs exact-total assertions in their own process.
+// Any parallel database test can increment these process-wide metrics, even
+// without reading or resetting them. A mutex around the metric tests alone
+// therefore cannot isolate them. Each child runs just the selected test using
+// the same test binary, including its race instrumentation when enabled.
+func isolateBlockByHashMetrics(t *testing.T) bool {
+	t.Helper()
+	const marker = "DINGO_BLOCK_BY_HASH_METRIC_TEST"
+	if os.Getenv(marker) == t.Name() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
+		os.Args[0],
+		"-test.run=^"+t.Name()+"$",
+		"-test.v",
+	)
+	cmd.Env = append(os.Environ(), marker+"="+t.Name())
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("isolated metric test failed: %v\n%s", err, output)
+	}
+	return true
+}
+
+// resetBlockByHashStats zeros the hit/miss counters between tests.
+func resetBlockByHashStats() {
+	blockByHashIndexHits.Store(0)
+	blockByHashIndexMisses.Store(0)
+}
+
+// TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
+// unknown hash increments the miss counter (so operators can track the
+// index miss rate) and returns ErrBlockNotFound directly on
+// the index miss, without any fallback scan.
+func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
+	db := newTestDB(t)
+	resetBlockByHashStats()
+
+	const seeded = 16
+	for i := range seeded {
+		insertTestBlock(t, db, uint64(i+1), randomHash(t), []byte("cbor"))
+	}
+
+	unknown := randomHash(t)
+	_, err := BlockByHash(db, unknown)
+	require.ErrorIs(
+		t,
+		err,
+		models.ErrBlockNotFound,
+		"unknown hash must surface as ErrBlockNotFound so fork-resolution can rotate peers",
+	)
+
+	hits, misses := BlockByHashStats()
+	assert.Equal(
+		t,
+		uint64(0),
+		hits,
+		"no hash-index hit expected for unknown hash",
+	)
+	assert.Equal(
+		t,
+		uint64(1),
+		misses,
+		"miss counter must record the false-fallback so operators can track the back-fill rate (#2105)",
+	)
+}
+
+// TestBlockByHashTxn_KnownHashStillResolves guards the fast path: every
+// block written via BlockCreate gets a hash-index entry, and a
+// lookup must hit it in O(1) and return the block.
+func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
+	db := newTestDB(t)
+	resetBlockByHashStats()
+
+	hash := randomHash(t)
+	insertTestBlock(t, db, 42, hash, []byte("payload"))
+
+	got, err := BlockByHash(db, hash)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), got.Slot)
+	assert.Equal(t, hash, got.Hash)
+
+	hits, misses := BlockByHashStats()
+	assert.Equal(t, uint64(1), hits, "indexed lookup must take the fast path")
+	assert.Equal(t, uint64(0), misses)
+}
+
+// TestBlockByHashTxn_EmptyIndexEntryIsCorruption asserts that a hash-
+// index entry whose value is an empty byte slice surfaces a descriptive
+// non-ErrBlockNotFound error rather than a soft miss. An empty value
+// means the index was written but the pointer is invalid: a local DB
+// problem the operator needs to see, not a fork-resolution miss.
+func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
+	db := newTestDB(t)
+	resetBlockByHashStats()
+
+	hash := randomHash(t)
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	txn := db.BlobTxn(true)
+	require.NoError(t, db.Blob().Set(txn.Blob(), hashIndexKey, []byte{}))
+	require.NoError(t, txn.Commit())
+
+	_, err := BlockByHash(db, hash)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, models.ErrBlockNotFound,
+		"empty index entry must not be reported as a soft miss")
+	assert.True(t,
+		strings.Contains(err.Error(), "empty block hash index entry"),
+		"error should identify corruption: got %v", err)
+
+	hits, misses := BlockByHashStats()
+	assert.Equal(t, uint64(0), hits)
+	assert.Equal(t, uint64(0), misses,
+		"corruption must not be folded into the miss counter")
+}
+
+// TestRegisterBlockByHashMetrics_PerRegistry verifies that every registry
+// passed to RegisterBlockByHashMetrics exposes the hash-index counters, not
+// just the first one in the process, and that reusing a registry is a no-op.
+func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
+	t.Parallel()
+	if isolateBlockByHashMetrics(t) {
+		return
+	}
+
+	resetBlockByHashStats()
+	blockByHashIndexMisses.Add(3)
+
+	for i := range 2 {
+		reg := prometheus.NewRegistry()
+		require.NoError(t, RegisterBlockByHashMetrics(reg))
+		// reuse must not error or duplicate
+		require.NoError(t, RegisterBlockByHashMetrics(reg))
+
+		families, err := reg.Gather()
+		require.NoError(t, err)
+		found := map[string]float64{}
+		for _, mf := range families {
+			for _, m := range mf.GetMetric() {
+				found[mf.GetName()] = m.GetCounter().GetValue()
+			}
+		}
+		assert.Contains(t, found,
+			"dingo_database_block_hash_index_hits_total",
+			"registry %d must expose the hit counter", i)
+		assert.Equal(t, float64(3),
+			found["dingo_database_block_hash_index_misses_total"],
+			"registry %d must read the shared miss total", i)
+	}
+	resetBlockByHashStats()
+}
+
+// BenchmarkBlockByHashTxn_UnknownHash measures the cost of the fork-
+// resolution miss path on a small DB.
+//
+// Run with: go test -bench=BenchmarkBlockByHashTxn -benchmem ./database/
+func BenchmarkBlockByHashTxn_UnknownHash(b *testing.B) {
+	db := newBenchDB(b)
+	const seeded = 1024
+	for i := range seeded {
+		hash := make([]byte, 32)
+		hash[0] = byte(i)
+		hash[1] = byte(i >> 8)
+		block := models.Block{
+			Slot: uint64(i + 1),
+			Hash: hash,
+			Cbor: []byte("cbor"),
+			Type: 1,
+		}
+		require.NoError(b, db.BlockCreate(block, nil))
+	}
+
+	unknown := make([]byte, 32)
+	for i := range unknown {
+		unknown[i] = 0xFF
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = BlockByHash(db, unknown)
+	}
+}
+
+func newBenchDB(b *testing.B) *Database {
+	b.Helper()
+	cfg := &Config{DataDir: ""}
+	db, err := newTestDatabase(b, cfg)
+	require.NoError(b, err)
+	b.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// TestCountBlocksAndOldestSlot_EmptyDatabase verifies that a database
+// with no blocks reports a zero count and a zero oldest slot.
+func TestCountBlocksAndOldestSlot_EmptyDatabase(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Zero(t, count)
+	require.Zero(t, oldestSlot)
+}
+
+// TestCountBlocksAndOldestSlot_CountsAndFindsOldest verifies that blocks
+// inserted out of slot order still report the correct count and oldest slot.
+func TestCountBlocksAndOldestSlot_CountsAndFindsOldest(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	// Inserted out of slot order on purpose: the oldest slot must be
+	// found by content, not by insertion order.
+	insertTestBlock(t, db, 300, randomHash(t), []byte{0x80})
+	insertTestBlock(t, db, 100, randomHash(t), []byte{0x80})
+	insertTestBlock(t, db, 200, randomHash(t), []byte{0x80})
+
+	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), count)
+	require.Equal(t, uint64(100), oldestSlot)
+}
+
+// TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks verifies that a
+// history-expiry-pruned block (its bp key kept alive with a tombstone
+// marker so bi/bh lookups still resolve — see TombstoneBlock) is excluded
+// from both the count and the oldest-slot search: its content isn't
+// actually retained, so counting it would overstate how much history is
+// available and understate how far back retained history actually goes.
+func TestCountBlocksAndOldestSlot_ExcludesTombstonedBlocks(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	oldestHash := randomHash(t)
+	insertTestBlock(t, db, 100, oldestHash, []byte{0x80})
+	insertTestBlock(t, db, 200, randomHash(t), []byte{0x80})
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *Txn) error {
+		return db.Blob().TombstoneBlock(txn.Blob(), 100, oldestHash)
+	}))
+
+	count, oldestSlot, err := db.CountBlocksAndOldestSlot(nil)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(1),
+		count,
+		"the tombstoned block must not be counted",
+	)
+	require.Equal(
+		t, uint64(200), oldestSlot,
+		"the tombstoned block's slot must not be reported as the oldest",
+	)
+}
+
+func TestExtractTransactionOffsets(t *testing.T) {
+	t.Parallel()
+
+	// Load blocks from immutable test data
+	imm, err := immutable.New("immutable/testdata")
+	require.NoError(t, err, "failed to open immutable database")
+
+	// Get an iterator starting from the beginning
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err, "failed to create block iterator")
+	defer iter.Close()
+
+	// Test offset extraction on multiple blocks
+	blocksWithTx := 0
+	maxBlocksToTest := 500
+
+	for i := range maxBlocksToTest {
+		immBlock, err := iter.Next()
+		if err != nil {
+			t.Fatalf("unexpected error reading block %d: %s", i, err)
+		}
+		if immBlock == nil {
+			break // End of chain
+		}
+
+		// Parse the block
+		block, err := ledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		if err != nil {
+			// Skip blocks that can't be parsed (e.g., Byron EBB)
+			continue
+		}
+
+		// Skip blocks without transactions (e.g., Byron EBB or empty blocks)
+		txs := block.Transactions()
+		if len(txs) == 0 {
+			continue
+		}
+
+		blocksWithTx++
+
+		// Extract offsets
+		offsets, err := common.ExtractTransactionOffsets(immBlock.Cbor)
+		require.NoError(
+			t,
+			err,
+			"failed to extract offsets from block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
+
+		// Verify we got offsets for all transactions
+		assert.Equal(
+			t,
+			len(txs),
+			len(offsets.Transactions),
+			"transaction count mismatch for block %d (slot %d)",
+			i,
+			immBlock.Slot,
+		)
+
+		// Verify each offset points to valid data
+		for txIdx, tx := range txs {
+			if txIdx >= len(offsets.Transactions) {
+				continue
+			}
+
+			loc := offsets.Transactions[txIdx]
+
+			// Verify body offset is within block bounds
+			bodyEnd := uint64(loc.Body.Offset) + uint64(loc.Body.Length)
+			assert.LessOrEqual(t, bodyEnd, uint64(len(immBlock.Cbor)),
+				"body offset out of bounds for tx %d in block %d", txIdx, i)
+
+			// Extract body CBOR and verify it matches transaction body
+			if loc.Body.Offset > 0 && loc.Body.Length > 0 &&
+				bodyEnd <= uint64(len(immBlock.Cbor)) {
+				extractedBody := immBlock.Cbor[loc.Body.Offset : loc.Body.Offset+loc.Body.Length]
+
+				// The extracted data should be valid CBOR (basic sanity check)
+				assert.Greater(t, len(extractedBody), 0,
+					"extracted body is empty for tx %d in block %d", txIdx, i)
+
+				// Compare with transaction's stored CBOR if available
+				txCbor := tx.Cbor()
+				if len(txCbor) > 0 {
+					// Transaction CBOR includes both body and witnesses,
+					// so extracted body should be a prefix or we need to
+					// compare differently based on era
+					assert.LessOrEqual(
+						t,
+						len(extractedBody),
+						len(txCbor)+1000,
+						"extracted body unexpectedly larger than tx cbor for tx %d in block %d",
+						txIdx,
+						i,
+					)
+				}
+			}
+
+			// Verify witness offset is within block bounds
+			witnessEnd := uint64(
+				loc.Witness.Offset,
+			) + uint64(
+				loc.Witness.Length,
+			)
+			assert.LessOrEqual(t, witnessEnd, uint64(len(immBlock.Cbor)),
+				"witness offset out of bounds for tx %d in block %d", txIdx, i)
+
+			// Verify datum, redeemer, and script offsets if present
+			for hash, datumLoc := range loc.Datums {
+				datumEnd := uint64(datumLoc.Offset) + uint64(datumLoc.Length)
+				assert.LessOrEqual(t, datumEnd, uint64(len(immBlock.Cbor)),
+					"datum offset out of bounds for hash %x in tx %d block %d",
+					hash[:8], txIdx, i)
+			}
+
+			for key, redeemerLoc := range loc.Redeemers {
+				redeemerEnd := uint64(
+					redeemerLoc.Offset,
+				) + uint64(
+					redeemerLoc.Length,
+				)
+				assert.LessOrEqual(
+					t,
+					redeemerEnd,
+					uint64(len(immBlock.Cbor)),
+					"redeemer offset out of bounds for key (%d,%d) in tx %d block %d",
+					key.Tag,
+					key.Index,
+					txIdx,
+					i,
+				)
+			}
+
+			for hash, scriptLoc := range loc.Scripts {
+				scriptEnd := uint64(scriptLoc.Offset) + uint64(scriptLoc.Length)
+				assert.LessOrEqual(t, scriptEnd, uint64(len(immBlock.Cbor)),
+					"script offset out of bounds for hash %x in tx %d block %d",
+					hash[:8], txIdx, i)
+			}
+		}
+
+		// Stop after testing some blocks with transactions
+		if blocksWithTx >= 20 {
+			break
+		}
+	}
+
+	assert.Greater(
+		t,
+		blocksWithTx,
+		0,
+		"no blocks with transactions were tested",
+	)
+	t.Logf("Successfully tested %d blocks with transactions", blocksWithTx)
+}
+
+func TestExtractTransactionOffsetsEmptyBlock(t *testing.T) {
+	t.Parallel()
+
+	// Test that the function handles blocks with empty/minimal structure
+	// Byron EBB blocks have a different structure
+
+	imm, err := immutable.New("immutable/testdata")
+	require.NoError(t, err, "failed to open immutable database")
+
+	// Get first block (typically Byron genesis or EBB)
+	iter, err := imm.BlocksFromPoint(ocommon.Point{Slot: 0, Hash: []byte{}})
+	require.NoError(t, err, "failed to create block iterator")
+	defer iter.Close()
+
+	immBlock, err := iter.Next()
+	require.NoError(t, err, "failed to get first block")
+	require.NotNil(t, immBlock, "expected at least one block")
+
+	// Should not panic on Byron blocks
+	offsets, err := common.ExtractTransactionOffsets(immBlock.Cbor)
+	// Error is acceptable for unsupported block formats
+	if err == nil {
+		assert.NotNil(t, offsets, "offsets should not be nil when no error")
+	}
+}
 
 type countingBlockReadStore struct {
 	blob.BlobStore
@@ -495,4 +965,188 @@ func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
 
 	_, err = BlockByNumber(db, 99)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+// reverseIteratorCountingStore records reverse blob iterators opened through
+// it. The s3 and gcs plugins implement reverse iteration by listing every key
+// under the prefix into a temporary file before the seek runs, so a reverse
+// iterator in a request path is unbounded work there however few steps the
+// caller takes.
+type reverseIteratorCountingStore struct {
+	blob.BlobStore
+	reverseIterators int
+}
+
+func (s *reverseIteratorCountingStore) NewIterator(
+	txn types.Txn,
+	opts types.BlobIteratorOptions,
+) types.BlobIterator {
+	if opts.Reverse {
+		s.reverseIterators++
+	}
+	return s.BlobStore.NewIterator(txn, opts)
+}
+
+func seedSparseChain(t *testing.T, db *Database) []models.Block {
+	t.Helper()
+	blocks := []models.Block{
+		testIndexedBlock(10, 1, 0x10),
+		testIndexedBlock(20, 2, 0x20),
+		testIndexedBlock(30, 3, 0x30),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	return blocks
+}
+
+// TestBlockPointAtOrAfterSlotSelectsTheFollowingBlock pins the direction of
+// the forward slot lookup: an empty slot resolves to the next canonical block,
+// never the previous one.
+func TestBlockPointAtOrAfterSlotSelectsTheFollowingBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+	store := &reverseIteratorCountingStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"empty slot takes the next block": {slot: 15, want: 1},
+		"slot holding a block takes it":   {slot: 20, want: 1},
+		"slot below the first block":      {slot: 1, want: 0},
+		"slot one below a block":          {slot: 30, want: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			txn := db.BlobTxn(false)
+			defer txn.Release()
+			point, err := BlockPointAtOrAfterSlotTxn(t.Context(), txn, tc.slot)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, err := BlockPointAtOrAfterSlotTxn(t.Context(), txn, 31)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(
+		t,
+		store.reverseIterators,
+		"the forward slot lookup must not open a reverse blob iterator",
+	)
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedSelectsThePrecedingBlock pins the bounded
+// at-or-before lookup, including that it answers without a reverse blob
+// iterator.
+func TestBlockPointAtOrBeforeSlotBoundedSelectsThePrecedingBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+	tipID := blocks[len(blocks)-1].ID
+	store := &reverseIteratorCountingStore{BlobStore: db.Blob()}
+	db.SetBlobStore(store)
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"empty slot takes the previous block": {slot: 15, want: 0},
+		"slot holding a block takes it":       {slot: 20, want: 1},
+		"slot above the tip takes the tip":    {slot: 10_000, want: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			txn := db.BlobTxn(false)
+			defer txn.Release()
+			point, err := BlockPointAtOrBeforeSlotBoundedTxn(
+				txn,
+				tc.slot,
+				tipID,
+			)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	_, err := BlockPointAtOrBeforeSlotBoundedTxn(txn, 9, tipID)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Zero(
+		t,
+		store.reverseIterators,
+		"the bounded at-or-before lookup must not open a reverse blob iterator",
+	)
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedSkipsSparseIndexGap proves the binary
+// search tolerates gaps in the block-ID space, which a Mithril bootstrap or a
+// drain import leaves behind. A probe landing in the gap seeks forward to the
+// next indexed block, so the loop must advance its lower bound past the block
+// it actually read rather than treating the overshoot as a reason to shrink
+// the upper bound: that variant converges into the dense low range and answers
+// a slot above the gap with a block below it. Matches
+// TestBlockByNumberSkipsSparseIndexGap, which pins the same gap for the
+// height search.
+func TestBlockPointAtOrBeforeSlotBoundedSkipsSparseIndexGap(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ids := []uint64{1, 2, 3, 1000, 1001, 1002}
+	blocks := make([]models.Block, 0, len(ids))
+	for i, id := range ids {
+		// #nosec G115 -- fixed small test fixture values.
+		block := testIndexedBlock(id*10, id, byte(i+1))
+		require.NoError(t, db.BlockCreate(block, nil))
+		blocks = append(blocks, block)
+	}
+	tipID := blocks[len(blocks)-1].ID
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+
+	for name, tc := range map[string]struct {
+		slot uint64
+		want int
+	}{
+		"slot above the gap takes the block at it":     {slot: 10_010, want: 4},
+		"empty slot above the gap takes the previous":  {slot: 10_015, want: 4},
+		"slot inside the gap takes the last low block": {slot: 500, want: 2},
+		"slot below the gap takes its own block":       {slot: 20, want: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			point, err := BlockPointAtOrBeforeSlotBoundedTxn(
+				txn,
+				tc.slot,
+				tipID,
+			)
+			require.NoError(t, err)
+			require.Equal(t, blocks[tc.want].Slot, point.Slot)
+			require.Equal(t, blocks[tc.want].Hash, point.Hash)
+		})
+	}
+}
+
+// TestBlockPointAtOrBeforeSlotBoundedHonorsTheBound pins that the bound caps
+// the search: a slot above a lower bound resolves to the bounding block, not
+// to a newer one the blob store still holds.
+func TestBlockPointAtOrBeforeSlotBoundedHonorsTheBound(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	blocks := seedSparseChain(t, db)
+
+	txn := db.BlobTxn(false)
+	defer txn.Release()
+	point, err := BlockPointAtOrBeforeSlotBoundedTxn(txn, 10_000, blocks[1].ID)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].Slot, point.Slot)
+	require.Equal(t, blocks[1].Hash, point.Hash)
 }

@@ -130,10 +130,10 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 
 // shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
 // its own context and then waits for a goroutine to exit with no deadline of
-// its own. #3558 bounded this style of wait for live restore/truncate but not
-// on the normal process-shutdown path (dingo#1649 case R9): a goroutine that
-// never observes n.cancel() could wedge Node.Stop past shutdownTimeout with
-// no error for the caller to act on.
+// its own. Live restore/truncate already bounds this style of wait, but the
+// normal process-shutdown path did not: a goroutine that never observes
+// n.cancel() could wedge Node.Stop past shutdownTimeout with no error for the
+// caller to act on.
 //
 // The two context-owned waits run first and unconditionally -- both no-op
 // when their worker was never started. The selected-to-none worker must
@@ -294,6 +294,7 @@ func (n *Node) shutdown() error {
 		for _, capability := range []plugin.Capability{
 			plugin.CapabilityAPIUtxorpc,
 			plugin.CapabilityAPIMesh,
+			plugin.CapabilityAPIKupo,
 			plugin.CapabilityAPIBlockfrost,
 		} {
 			if stopErr := n.pluginHost.StopCapability(ctx, capability); stopErr != nil {

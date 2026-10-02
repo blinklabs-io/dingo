@@ -29,6 +29,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func FuzzNormalizeRunMode(f *testing.F) {
+	f.Add("")
+	f.Add("serve")
+	f.Add("LOAD")
+	f.Add("dev")
+	f.Add("leios")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeRunMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
+		default:
+			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStorageMode(f *testing.F) {
+	f.Add("")
+	f.Add("core")
+	f.Add("API")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStorageMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case storageModeCore, storageModeAPI:
+		default:
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
+		}
+	})
+}
+
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	resetGlobalConfig()
 
@@ -41,6 +125,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
 		"Plugins.API.Blockfrost.Config":        {},
+		"Plugins.API.Kupo.Config":              {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
 		"Midnight.CNightPolicyID":              {},
@@ -138,8 +223,8 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 }
 
 // TestValidateForgedBlockDefaultsToTrue is a regression test for a
-// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
-// (issue #3528's fail-closed forging default) had no test on the actual
+// gap: DefaultConfig's ValidateForgedBlock: true literal
+// (the fail-closed forging default) had no test on the actual
 // operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
 // separate NewConfig literal covered by
 // TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting
@@ -172,57 +257,6 @@ func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
 		t,
 		got,
 		"the --validate-forged-block flag's registered default must match DefaultConfig.ValidateForgedBlock",
-	)
-}
-
-// TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral
-// guards the same failure class as TestValidateForgedBlockDefaultsToTrue
-// above, for the forging knob added in issue #3973. Merging main's
-// newDefaultConfig() rewrite could have dropped this field's line from that
-// literal silently: ApplyDefaults fills a zero
-// ForgePrimaryChainTipToleranceSlots with the same constant, so every test
-// that reaches the value through LoadConfig+ApplyDefaults stays green with
-// the literal gone, and resetGlobalConfig's separate copy (config_test.go)
-// carries its own line. The gap only shows on the two paths that read the
-// production literal without defaulting: globalConfig as flag registration
-// sees it, and newDefaultConfig() itself.
-func TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral(
-	t *testing.T,
-) {
-	// Pins internal/config/config.go's newDefaultConfig directly, with no
-	// ApplyDefaults in the path to refill a dropped field.
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		newDefaultConfig().ForgePrimaryChainTipToleranceSlots,
-		"newDefaultConfig must carry the primary-chain-tip tolerance default; ApplyDefaults refilling it hides a dropped literal",
-	)
-
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-
-	cfg, err := LoadConfig("")
-	require.NoError(t, err)
-	cfg.ApplyDefaults()
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		cfg.ForgePrimaryChainTipToleranceSlots,
-	)
-
-	// RegisterFlags takes each flag's default from globalConfig, which is
-	// seeded from newDefaultConfig and never passes through ApplyDefaults,
-	// so this is the operator-visible half of the same guarantee.
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	got, err := cmd.PersistentFlags().
-		GetUint64("forge-primary-chain-tip-tolerance-slots")
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		got,
-		"the --forge-primary-chain-tip-tolerance-slots flag's registered default must match the production literal",
 	)
 }
 

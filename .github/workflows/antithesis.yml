@@ -195,7 +195,6 @@ jobs:
   # Requires the following GitHub configuration:
   #
   # Secrets:
-  #   MOOG_GITHUB_PAT        - GitHub PAT for Moog API access
   #   MOOG_REQUESTER_WALLET  - Base64-encoded Cardano preprod wallet JSON
   #
   # Variables:
@@ -216,13 +215,12 @@ jobs:
     steps:
       - id: check
         env:
-          MOOG_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
           MOOG_REQUESTER_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
         run: |
-          if [ -n "$MOOG_PAT" ] && [ -n "$MOOG_REQUESTER_WALLET" ]; then
+          if [ -n "$MOOG_REQUESTER_WALLET" ]; then
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
-            echo "MOOG_GITHUB_PAT or MOOG_REQUESTER_WALLET not configured - skipping submission"
+            echo "MOOG_REQUESTER_WALLET not configured - skipping submission"
             echo "available=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -332,7 +330,9 @@ jobs:
           echo "id=$ID" >> "$GITHUB_OUTPUT"
           echo "Launched Antithesis test run: $ID"
         env:
-          MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
+          # Moog uses this only for read-only GitHub API checks; the run token
+          # avoids an expiring personal access token.
+          MOOG_GITHUB_PAT: ${{ github.token }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
           DURATION_HOURS: ${{ steps.duration.outputs.hours }}
 

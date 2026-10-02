@@ -17,8 +17,10 @@ package node
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,6 +28,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +37,500 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/health"
+	hostplugin "github.com/blinklabs-io/dingo/plugin"
 )
+
+// sentinelConfig builds a config whose every secret-bearing field carries a
+// distinctive sentinel value, alongside non-secret values that must survive
+// redaction.
+func sentinelConfig() (*config.Config, []string) {
+	cfg := &config.Config{
+		Network:      "preview",
+		DatabasePath: "/var/lib/dingo",
+		KoiosParity: config.KoiosParityConfig{
+			Enabled: true,
+			APIKey:  "SENTINEL-KOIOS-API-KEY",
+		},
+		BarkBaseUrl: "https://bark:SENTINEL-BARK-PASSWORD@bark.example/api",
+		Mithril: config.MithrilConfig{
+			AggregatorURL: "https://aggregator.example/aggregator" +
+				"?apiKey=SENTINEL-MITHRIL-KEY",
+		},
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Metadata: hostplugin.Selection{
+					Provider: "postgres",
+					Config: map[string]any{
+						"host":     "db.example",
+						"user":     "dingo",
+						"password": "SENTINEL-PG-PASSWORD",
+						"dsn": "postgres://dingo:SENTINEL-DSN-PASSWORD" +
+							"@db.example:5432/dingo?sslmode=require",
+						"futureKey": "SENTINEL-UNKNOWN-PROVIDER-KEY",
+					},
+				},
+			},
+		},
+	}
+	return cfg, []string{
+		"SENTINEL-KOIOS-API-KEY",
+		"SENTINEL-BARK-PASSWORD",
+		"SENTINEL-MITHRIL-KEY",
+		"SENTINEL-PG-PASSWORD",
+		"SENTINEL-DSN-PASSWORD",
+		"SENTINEL-UNKNOWN-PROVIDER-KEY",
+	}
+}
+
+// TestLogStartupConfigRedactsSecrets covers the startup debug log that
+// records the effective configuration: no secret-bearing value may reach it.
+func TestLogStartupConfigRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	cfg, sentinels := sentinelConfig()
+	for _, handler := range []struct {
+		name string
+		make func(*bytes.Buffer) slog.Handler
+	}{
+		{"text", func(b *bytes.Buffer) slog.Handler {
+			return slog.NewTextHandler(b, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})
+		}},
+		{"json", func(b *bytes.Buffer) slog.Handler {
+			return slog.NewJSONHandler(b, &slog.HandlerOptions{
+				Level: slog.LevelDebug,
+			})
+		}},
+	} {
+		t.Run(handler.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			logStartupConfig(slog.New(handler.make(&buf)), cfg)
+			rendered := buf.String()
+			if rendered == "" {
+				t.Fatal("startup config log produced no output")
+			}
+			for _, sentinel := range sentinels {
+				if strings.Contains(rendered, sentinel) {
+					t.Errorf(
+						"rendered log leaks %s: %s",
+						sentinel,
+						rendered,
+					)
+				}
+			}
+			// Negative case: redaction must not blank the whole record.
+			for _, want := range []string{
+				"preview",
+				"/var/lib/dingo",
+				"db.example",
+				"postgres",
+				"sslmode=require",
+			} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf(
+						"rendered log dropped non-secret %q: %s",
+						want,
+						rendered,
+					)
+				}
+			}
+		})
+	}
+}
+
+// healthProbeResponse mirrors health.Status as it arrives over the wire, so
+// these tests assert the served JSON rather than the in-process struct.
+type healthProbeResponse struct {
+	Status      string  `json:"status"`
+	Live        bool    `json:"live"`
+	Ready       bool    `json:"ready"`
+	Reason      string  `json:"reason"`
+	TipGapSlots *uint64 `json:"tipGapSlots"`
+}
+
+// startHealthListener starts the health listener exactly as Run does --
+// NewHealthServer, then serveAuxiliaryListener in its own goroutine -- and
+// returns its base URL. Requests in these tests therefore traverse the real
+// net/http server and the real mux, not a handler called directly.
+func startHealthListener(
+	t *testing.T,
+	cfg *config.Config,
+	tipGap health.TipGapFunc,
+) string {
+	t.Helper()
+
+	cfg.BindAddr = "127.0.0.1"
+	listener, port := reservedTCPListener(t, "127.0.0.1")
+	cfg.HealthPort = port
+
+	srv := NewHealthServer(cfg, tipGap)
+	if srv == nil {
+		t.Fatal("expected an enabled health listener")
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	go serveAuxiliaryListenerOn("health", srv, listener, logger)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	base := "http://" + srv.Addr
+	waitForListener(t, base+health.PathLive)
+	return base
+}
+
+// reservedTCPListener binds a loopback port on host and returns the live
+// listener with the port it bound. The listener stays bound for the whole
+// test and is handed to the server under test.
+//
+// Binding, closing and returning the number instead would be a race rather
+// than a reservation: any other bind in the process -- most often a request
+// for a kernel-assigned port -- can take it in the gap, and the server then
+// fails to come up. The health port has no kernel-assigned form to fall back
+// on, because 0 is the operator's opt-out.
+func reservedTCPListener(t *testing.T, host string) (net.Listener, uint) {
+	t.Helper()
+	l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		t.Fatalf("reserve port on %s: %s", host, err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	_, portStr, err := net.SplitHostPort(l.Addr().String())
+	if err != nil {
+		t.Fatalf("split port: %s", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("parse port: %s", err)
+	}
+	return l, uint(port)
+}
+
+func waitForListener(t *testing.T, url string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url) //nolint:noctx
+		if err == nil {
+			resp.Body.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("health listener never accepted a connection at %s", url)
+}
+
+func getHealth(
+	t *testing.T,
+	url string,
+) (int, healthProbeResponse) {
+	t.Helper()
+	resp, err := http.Get(url) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET %s: %s", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %s", url, err)
+	}
+	var decoded healthProbeResponse
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode %s body %q: %s", url, body, err)
+	}
+	return resp.StatusCode, decoded
+}
+
+// TestHealthListenerServesInCoreModeWithAPIsDisabled verifies that health
+// probes remain available in core storage mode, where client API listeners
+// are disabled. The node is built through the production composition path
+// with no API plugins and core storage.
+func TestHealthListenerServesInCoreModeWithAPIsDisabled(t *testing.T) {
+	t.Parallel()
+
+	// Start from the shipped defaults (the plugin selections dingo.New
+	// validates), then apply exactly what the shipped docker-compose.yml
+	// runs: core storage, and no API listener configured at all.
+	base := *config.GetConfig()
+	cfg := &base
+	cfg.Network = "preview"
+	cfg.StorageMode = "core"
+	cfg.Plugins.API.Blockfrost.Config = map[string]any{"port": 0}
+	cfg.Plugins.API.Mesh.Config = map[string]any{"port": 0}
+	cfg.Plugins.API.Utxorpc.Config = map[string]any{"port": 0}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	listeners := []dingo.ListenerConfig{
+		{
+			ListenNetwork: "tcp",
+			// Kernel-assigned: the node binds it once and nothing
+			// here reads the port back.
+			ListenAddress: "127.0.0.1:0",
+		},
+	}
+	node, err := dingo.New(
+		buildDingoConfig(
+			cfg,
+			logger,
+			nil,
+			listeners,
+			false,
+			dingo.StorageModeCore,
+			30*time.Second,
+			chainsync.DefaultStallTimeout,
+			chainsync.HeaderSyncStrategyPrimary,
+		),
+	)
+	if err != nil {
+		t.Fatalf("build node: %s", err)
+	}
+	t.Cleanup(func() { _ = node.Stop() })
+
+	baseURL := startHealthListener(t, cfg, node.TipGapSlots)
+
+	for _, path := range []string{health.PathHealth, health.PathLive} {
+		code, body := getHealth(t, baseURL+path)
+		if code != http.StatusOK {
+			t.Fatalf(
+				"%s in core mode with APIs disabled = %d, want 200",
+				path,
+				code,
+			)
+		}
+		if !body.Live {
+			t.Fatalf("%s reported live=false: %+v", path, body)
+		}
+	}
+
+	// A node that has never seen a slot tick has no chain tip, so readiness
+	// must refuse rather than default to ready.
+	code, body := getHealth(t, baseURL+health.PathReady)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"%s for a node with no tip = %d, want 503 (body %+v)",
+			health.PathReady,
+			code,
+			body,
+		)
+	}
+	if body.Ready {
+		t.Fatalf("readiness true for a node with no tip: %+v", body)
+	}
+	if body.Reason == "" {
+		t.Fatalf("expected a reason for the unready verdict: %+v", body)
+	}
+}
+
+// TestHealthListenerReportsUnreadyWhenTipFrozen covers the condition a probe
+// exists to catch: the process is up and answering, but its tip has stopped
+// advancing. Liveness must stay 200 (a restart does not repair a wedged
+// fetch, and a restart loop would destroy the evidence), while readiness must
+// fail so an orchestrator drains traffic.
+func TestHealthListenerReportsUnreadyWhenTipFrozen(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		HealthReadyGapSlots: 1000,
+	}
+	frozen := func() (uint64, bool) { return 5000, true }
+	base := startHealthListener(t, cfg, frozen)
+
+	code, body := getHealth(t, base+health.PathReady)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"%s with a 5000-slot tip gap = %d, want 503 (body %+v)",
+			health.PathReady,
+			code,
+			body,
+		)
+	}
+	if body.Ready {
+		t.Fatalf("readiness true with a 5000-slot tip gap: %+v", body)
+	}
+	if body.TipGapSlots == nil || *body.TipGapSlots != 5000 {
+		t.Fatalf("expected the observed tip gap in the body: %+v", body)
+	}
+
+	code, body = getHealth(t, base+health.PathLive)
+	if code != http.StatusOK {
+		t.Fatalf(
+			"%s with a frozen tip = %d, want 200: liveness must not "+
+				"restart-loop a node a restart cannot repair",
+			health.PathLive,
+			code,
+		)
+	}
+	if body.Ready {
+		t.Fatalf("liveness body must still report ready=false: %+v", body)
+	}
+}
+
+// TestHealthListenerReportsReadyWithinTolerance is the counterpart: a probe
+// that can only ever answer 503 is as useless as one that can only answer 200.
+func TestHealthListenerReportsReadyWithinTolerance(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		HealthReadyGapSlots: 1000,
+	}
+	caughtUp := func() (uint64, bool) { return 12, true }
+	base := startHealthListener(t, cfg, caughtUp)
+
+	code, body := getHealth(t, base+health.PathReady)
+	if code != http.StatusOK {
+		t.Fatalf(
+			"%s with a 12-slot tip gap = %d, want 200 (body %+v)",
+			health.PathReady,
+			code,
+			body,
+		)
+	}
+	if !body.Ready {
+		t.Fatalf("readiness false with a 12-slot tip gap: %+v", body)
+	}
+}
+
+// A node that is legitimately catching up must not be killed: the gap is
+// enormous, so readiness refuses, but liveness stays 200.
+func TestHealthListenerStaysLiveDuringInitialSync(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{HealthReadyGapSlots: 1000}
+	syncing := func() (uint64, bool) { return 90_000_000, true }
+	base := startHealthListener(t, cfg, syncing)
+
+	if code, body := getHealth(t, base+health.PathHealth); code != http.StatusOK {
+		t.Fatalf(
+			"%s during sync = %d, want 200 (%+v)",
+			health.PathHealth,
+			code,
+			body,
+		)
+	}
+	if code, _ := getHealth(t, base+health.PathReady); code != http.StatusServiceUnavailable {
+		t.Fatalf("%s during sync = %d, want 503", health.PathReady, code)
+	}
+}
+
+// The listener is opt-out, and opting out must not leave a half-built server.
+func TestNewHealthServerDisabledOnZeroPort(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{BindAddr: "127.0.0.1", HealthPort: 0}
+	if srv := NewHealthServer(cfg, nil); srv != nil {
+		t.Fatalf("healthPort 0 must disable the listener, got %+v", srv)
+	}
+}
+
+// The health listener binds BindAddr -- the address the relay and metrics
+// listeners use -- and not the API listeners' own bind address. A kubelet or
+// load-balancer probe reaches the container from outside, so a loopback
+// default would fail those closed.
+func TestHealthServerBindsPublicBindAddr(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{BindAddr: "0.0.0.0", HealthPort: 12799}
+	srv := NewHealthServer(cfg, nil)
+	if srv == nil {
+		t.Fatal("expected an enabled health listener")
+	}
+	if got, want := srv.Addr, "0.0.0.0:12799"; got != want {
+		t.Fatalf("health listener address = %q, want %q", got, want)
+	}
+}
+
+// An IPv6 bindAddr has to be bracketed: "%s:%d" would produce "::1:12799",
+// which net.Listen rejects, and the probes would silently never come up.
+func TestHealthServerBracketsIPv6BindAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		bindAddr string
+		want     string
+	}{
+		{bindAddr: "0.0.0.0", want: "0.0.0.0:12799"},
+		{bindAddr: "127.0.0.1", want: "127.0.0.1:12799"},
+		{bindAddr: "::", want: "[::]:12799"},
+		{bindAddr: "::1", want: "[::1]:12799"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.bindAddr, func(t *testing.T) {
+			t.Parallel()
+			cfg := &config.Config{
+				BindAddr:   test.bindAddr,
+				HealthPort: 12799,
+			}
+			srv := NewHealthServer(cfg, nil)
+			if srv == nil {
+				t.Fatal("expected an enabled health listener")
+			}
+			if srv.Addr != test.want {
+				t.Fatalf(
+					"health listener address = %q, want %q",
+					srv.Addr,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+// The address must not merely look right: it has to bind and answer.
+func TestHealthListenerBindsIPv6Loopback(t *testing.T) {
+	t.Parallel()
+
+	// One bind does both jobs: it establishes that the host has an IPv6
+	// loopback at all, and it holds the port the server is about to serve
+	// on.
+	listener, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback on this host: %s", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	_, portStr, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("split port: %s", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("parse port: %s", err)
+	}
+
+	cfg := &config.Config{HealthPort: uint(port), BindAddr: "::1"}
+	srv := NewHealthServer(cfg, func() (uint64, bool) { return 4, true })
+	if srv == nil {
+		t.Fatal("expected an enabled health listener")
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	go serveAuxiliaryListenerOn("health", srv, listener, logger)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	base := "http://" + srv.Addr
+	waitForListener(t, base+health.PathLive)
+	if code, body := getHealth(t, base+health.PathReady); code != http.StatusOK {
+		t.Fatalf(
+			"%s over IPv6 = %d, want 200 (%+v)",
+			health.PathReady,
+			code,
+			body,
+		)
+	}
+}
 
 func TestWaitForSignalOrErrorPrefersQueuedError(t *testing.T) {
 	t.Parallel()
@@ -218,7 +714,7 @@ func TestShutdownNodeResourcesReturnsNilWithoutErrors(t *testing.T) {
 // TestBuildDingoConfigWiresAPIConfig asserts that a loaded
 // internal/config.Config's api.tls policy (as set via YAML/env/CLI)
 // actually reaches the dingo.Config that Run() hands to dingo.New() --
-// regression test for the top-level API security defaults (dingo#2998)
+// regression test for the top-level API security defaults
 // being silently dropped because Run's real composition call never invoked
 // dingo.WithAPIConfig.
 func TestBuildDingoConfigWiresAPIConfig(t *testing.T) {
@@ -455,94 +951,49 @@ func nodeSourceForKoiosParity(t *testing.T) string {
 	return s[start : start+end]
 }
 
-// TestBuildDingoConfigWiresForgeTolerances asserts that the forge tolerances a
-// loaded internal/config.Config carries actually reach the dingo.Config that
-// Run hands to dingo.New. This is the composition path the binary really
-// takes: buildDingoConfig calls dingo.NewConfig with an explicit option list
-// and NewConfig starts from a fresh internal config, so a field that has no
-// With... entry here is silently dropped no matter how completely it is
-// plumbed through YAML, env, flags, defaults and the accessor.
-//
-// ForgePrimaryChainTipToleranceSlots was exactly that: parsed, defaulted,
-// flagged, documented and asserted at every other layer, yet absent from this
-// list, so an operator's value was discarded and the forger always fell back
-// to its built-in default. The neighbouring tolerances are asserted alongside
-// it so a future option-list edit that drops any of them fails here.
+// TestBuildDingoConfigWiresForgeTolerances ensures the remaining operator-set
+// forge tolerances reach the node config built on the serve path.
 func TestBuildDingoConfigWiresForgeTolerances(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{
-		ForgeSyncToleranceSlots:            321,
-		ForgeStaleGapThresholdSlots:        654,
-		ForgePrimaryChainTipToleranceSlots: 42,
-		ForgeUpstreamStalenessSlots:        17,
-		ForgeAppliedTipStalenessSlots:      9,
-		ForgeEndorserBlockStalenessSlots:   23,
+		ForgeSyncToleranceSlots:          321,
+		ForgeStaleGapThresholdSlots:      654,
+		ForgeUpstreamStalenessSlots:      17,
+		ForgeAppliedTipStalenessSlots:    9,
+		ForgeEndorserBlockStalenessSlots: 23,
 	}
 	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
-
 	built := buildDingoConfig(
-		cfg,
-		logger,
-		nil,
-		nil,
-		false,
-		dingo.StorageModeCore,
-		30*time.Second,
-		chainsync.DefaultStallTimeout,
+		cfg, logger, nil, nil, false, dingo.StorageModeCore,
+		30*time.Second, chainsync.DefaultStallTimeout,
 		chainsync.HeaderSyncStrategyPrimary,
 	)
-
 	if got := built.ForgeSyncToleranceSlots(); got != 321 {
 		t.Fatalf("expected forgeSyncToleranceSlots 321, got %d", got)
 	}
 	if got := built.ForgeStaleGapThresholdSlots(); got != 654 {
 		t.Fatalf("expected forgeStaleGapThresholdSlots 654, got %d", got)
 	}
-	if got := built.ForgePrimaryChainTipToleranceSlots(); got != 42 {
-		t.Fatalf(
-			"expected forgePrimaryChainTipToleranceSlots 42, got %d; the "+
-				"loaded value never reached dingo.Config, so the forger "+
-				"silently uses its built-in default",
-			got,
-		)
-	}
 	if got := built.ForgeUpstreamStalenessSlots(); got != 17 {
-		t.Fatalf(
-			"expected forgeUpstreamStalenessSlots 17, got %d; the loaded "+
-				"value never reached dingo.Config, so the forger silently "+
-				"uses its built-in default",
-			got,
-		)
+		t.Fatalf("expected forgeUpstreamStalenessSlots 17, got %d", got)
 	}
 	if got := built.ForgeAppliedTipStalenessSlots(); got != 9 {
-		t.Fatalf(
-			"expected forgeAppliedTipStalenessSlots 9, got %d; the loaded "+
-				"value never reached dingo.Config, so the wall-clock "+
-				"staleness backstop stays off however it is configured",
-			got,
-		)
+		t.Fatalf("expected forgeAppliedTipStalenessSlots 9, got %d", got)
 	}
 	if got := built.ForgeEndorserBlockStalenessSlots(); got != 23 {
-		t.Fatalf(
-			"expected forgeEndorserBlockStalenessSlots 23, got %d; the "+
-				"loaded value never reached dingo.Config, so the "+
-				"endorser-block staleness bound stays off however it is "+
-				"configured",
-			got,
-		)
+		t.Fatalf("expected forgeEndorserBlockStalenessSlots 23, got %d", got)
 	}
 }
 
 // TestBuildDingoConfigWiresBlockPipelineFlags is the regression test for
-// dingo#4599: BlockPipelineEnabled and BlockPipelineValidateEnabled were
-// correctly parsed into internal/config.Config but buildDingoConfig never
-// called a With... option to forward either one, so dingo.NewConfig built
-// its internal config from fresh Go zero values and the parallel block
-// decode pipeline (ledger/state.go's
-// "if cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never
-// constructed on the live serve path, regardless of the flag or environment
-// variable.
+// the block pipeline flags: BlockPipelineEnabled and
+// BlockPipelineValidateEnabled were correctly parsed into
+// internal/config.Config but buildDingoConfig never called a With... option to
+// forward either one, so dingo.NewConfig built its internal config from fresh
+// Go zero values and the parallel block decode pipeline (ledger/state.go's "if
+// cfg.BlockPipelineEnabled && !cfg.ManualBlockProcessing") never constructed on
+// the live serve path, regardless of the flag or environment variable.
 func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 	t.Parallel()
 
@@ -583,14 +1034,14 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 }
 
 // TestBuildDingoConfigForwardsScalarConfigFields is recurrence-prevention
-// coverage for the defect class dingo#4599 belongs to, not just the single
-// field it reported: buildDingoConfig hand-lists roughly 85 individual
-// dingo.With...(...) calls, one per field, and has now silently dropped a
-// field from that list twice -- AccountChunkSize/AccountChunkMaxBytes for
-// KoiosParity (caught and fixed separately, see the comment on
-// dingo.WithKoiosParity's call site in node.go), then
-// BlockPipelineEnabled/BlockPipelineValidateEnabled (this issue) -- with no
-// general check that every field actually made the list.
+// coverage for the defect class of the block pipeline flags, not just the
+// single field it reported: buildDingoConfig hand-lists roughly 85 individual
+// dingo.With...(...) calls, one per field, and has now silently dropped a field
+// from that list twice -- AccountChunkSize/AccountChunkMaxBytes for KoiosParity
+// (caught and fixed separately, see the comment on dingo.WithKoiosParity's call
+// site in node.go), then BlockPipelineEnabled/BlockPipelineValidateEnabled (the
+// second time) -- with no general check that every field actually made the
+// list.
 //
 // It enumerates every top-level internal/config.Config field whose Kind is a
 // plain scalar (bool, a signed/unsigned integer, float64, string, or
@@ -645,25 +1096,15 @@ func TestBuildDingoConfigWiresBlockPipelineFlags(t *testing.T) {
 //     mithril/sync.go instead.
 //
 // Known, pre-existing gaps of this same shape found while writing this test
-// are excluded below rather than fixed here; dingo#4600 tracks them.
+// are excluded below rather than fixed here.
 func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 	t.Parallel()
 
-	// knownGaps are real forwarding gaps of the same shape as dingo#4599,
-	// found while writing this test and deliberately not fixed in the same
-	// commit as that unrelated fix; dingo#4600 tracks all three. Remove an
-	// entry here once its fix lands, so this test starts asserting it.
-	knownGaps := map[string]string{
-		"MaxNtCConns": "dingo.WithMaxNtCConns exists but buildDingoConfig " +
-			"never calls it, so --max-ntc-conns is silently ignored",
-		"MaxNtCConnectionsPerIP": "dingo.WithMaxNtCConnectionsPerIP exists " +
-			"but buildDingoConfig never calls it, so " +
-			"--max-ntc-connections-per-ip is silently ignored",
-		"SkipRewardLiveStakeBackfillCheck": "no With... option exists at " +
-			"all for this field, and buildDingoConfig has no call to set " +
-			"it, so --skip-reward-live-stake-backfill-check is silently " +
-			"ignored on the serve path despite being consumed by node.go",
-	}
+	// knownGaps are real forwarding gaps of the same shape as the block
+	// pipeline flags, found while writing this test and deliberately not fixed
+	// in the same commit as that unrelated fix. Remove an entry here once its
+	// fix lands, so this test starts asserting it.
+	knownGaps := map[string]string{}
 	// excluded are cfg fields resolved through a separate buildDingoConfig
 	// parameter, or otherwise not part of the direct cfg-to-dingo.Config
 	// passthrough this test checks; see the function doc comment.

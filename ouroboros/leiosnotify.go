@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -27,7 +28,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/dingo/ledger"
+	dingleios "github.com/blinklabs-io/dingo/ledger/leios"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -76,6 +79,7 @@ type leiosForgedEBEntry struct {
 const (
 	leiosNotifyMaxAnnouncementAge   = 10 * time.Minute
 	leiosNotifyRelayAnnouncementAge = 5 * time.Minute
+	leiosAnnouncementClockSkew      = 2 * time.Second
 )
 
 type leiosAnnouncement struct {
@@ -93,6 +97,99 @@ type leiosDeferredAnnouncement struct {
 }
 
 const leiosMaxDeferredAnnouncements = 128
+
+const leiosMaxAnnouncementValidationInFlight = 64
+
+const leiosNotifyMaxVoteVerificationsPerOffer = 64
+
+const (
+	leiosInvalidAnnouncementWindow   = time.Minute
+	leiosInvalidAnnouncementLimit    = 3
+	leiosInvalidAnnouncementMaxPeers = 1024
+)
+
+var errLeiosAnnouncementValidationBudget = errors.New(
+	"leios announcement validation budget exhausted",
+)
+
+var errLeiosAnnouncementLocalState = errors.New(
+	"local leios announcement state unavailable",
+)
+
+var errLeiosAnnouncementClockSkew = errors.New(
+	"announcement is within the permitted clock-skew window",
+)
+
+func (o *Ouroboros) recordInvalidLeiosAnnouncement(
+	connectionID string,
+	err error,
+) error {
+	now := time.Now()
+	o.leiosInvalidAnnouncementMu.Lock()
+	defer o.leiosInvalidAnnouncementMu.Unlock()
+	if o.leiosInvalidAnnouncements == nil {
+		o.leiosInvalidAnnouncements = ratewindow.NewFixedWindow(
+			leiosInvalidAnnouncementWindow,
+			0,
+			0,
+			leiosInvalidAnnouncementMaxPeers,
+		)
+	}
+	count, tracked := o.leiosInvalidAnnouncements.Record(connectionID, now)
+	if !tracked {
+		return err
+	}
+	if count >= leiosInvalidAnnouncementLimit {
+		return fmt.Errorf("repeated invalid announcements from connection %s: %w", connectionID, err)
+	}
+	return nil
+}
+
+func validateLeiosNotifyVoteOffer(m *oleiosnotify.MsgVotesOffer) error {
+	count := len(m.FullVotes) + len(m.PrototypeVotes)
+	if count > leiosNotifyMaxVoteVerificationsPerOffer {
+		return fmt.Errorf(
+			"leios-notify vote offer contains %d votes, maximum is %d",
+			count,
+			leiosNotifyMaxVoteVerificationsPerOffer,
+		)
+	}
+	return nil
+}
+
+func (o *Ouroboros) reserveLeiosAnnouncementValidation(
+	key string,
+	ebHash lcommon.Blake2b256,
+	ebSize uint64,
+	raw []byte,
+) (bool, func(), error) {
+	o.leiosAnnouncementsMu.Lock()
+	if previous, exists := o.leiosAnnouncements[key]; exists {
+		o.leiosAnnouncementsMu.Unlock()
+		if previous.ebHash == ebHash && previous.ebSize == ebSize &&
+			bytes.Equal(previous.raw, raw) {
+			return true, nil, nil
+		}
+		return false, nil, errors.New(
+			"announcement is inconsistent with a previously observed ranking block",
+		)
+	}
+	if _, exists := o.leiosAnnouncementInFlight[key]; exists {
+		o.leiosAnnouncementsMu.Unlock()
+		return true, nil, nil
+	}
+	if len(o.leiosAnnouncementInFlight) >= leiosMaxAnnouncementValidationInFlight {
+		o.leiosAnnouncementsMu.Unlock()
+		return false, nil, errLeiosAnnouncementValidationBudget
+	}
+	o.leiosAnnouncementInFlight[key] = struct{}{}
+	o.leiosAnnouncementsMu.Unlock()
+	return false, func() {
+		o.leiosAnnouncementsMu.Lock()
+		delete(o.leiosAnnouncementInFlight, key)
+		o.leiosAnnouncementsMu.Unlock()
+	}, nil
+}
 
 type leiosDeliveryReservation struct {
 	index int
@@ -615,6 +712,44 @@ func (o *Ouroboros) leiosTipPrefetchEnabled() bool {
 	return o.ledgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
 }
 
+func (o *Ouroboros) handleInvalidLeiosAnnouncement(
+	connectionID string,
+	err error,
+) error {
+	if errors.Is(err, errLeiosAnnouncementValidationBudget) {
+		o.config.Logger.Debug(
+			"dropping leios announcement while validation budget is full",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", connectionID,
+		)
+		return nil
+	}
+	if ledger.IsHeaderVerificationDeferred(err) ||
+		errors.Is(err, errLeiosAnnouncementLocalState) ||
+		errors.Is(err, errLeiosAnnouncementClockSkew) {
+		o.config.Logger.Debug(
+			"dropping leios announcement while local validation state is unavailable",
+			"component", "network",
+			"protocol", "leios-notify",
+			"connection_id", connectionID,
+			"error", err,
+		)
+		return nil
+	}
+	if penaltyErr := o.recordInvalidLeiosAnnouncement(connectionID, err); penaltyErr != nil {
+		return penaltyErr
+	}
+	o.config.Logger.Debug(
+		"suppressing invalid leios announcement",
+		"component", "network",
+		"protocol", "leios-notify",
+		"connection_id", connectionID,
+		"error", err,
+	)
+	return nil
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
@@ -626,18 +761,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	}
 	switch m := msg.(type) {
 	case *oleiosnotify.MsgBlockAnnouncement:
-		// w31 carries the full ranking-block header. Validate before accepting
-		// it into the relay log; invalid announcements are deliberately
-		// suppressed so a peer cannot tear down a shared connection with a
-		// malformed or stale experimental message.
+		// w31 carries the full ranking-block header. Suppress isolated invalid
+		// announcements, but disconnect a peer that repeats them within a
+		// bounded window.
 		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
-			o.config.Logger.Debug(
-				"suppressing invalid leios announcement",
-				"component", "network",
-				"protocol", "leios-notify",
-				"connection_id", connId,
-				"error", err,
-			)
+			return o.handleInvalidLeiosAnnouncement(connId, err)
 		}
 		return nil
 	case *oleiosnotify.MsgBlockOffer:
@@ -662,7 +790,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// bandwidth once per connected peer. Mirrors the same guard on the
 		// txs offer below. The lookup is keyed by point, not hash alone: the
 		// same hash can be a live, independently required occurrence at
-		// another slot at the same time (issue #3513), and that other
+		// another slot at the same time, and that other
 		// occurrence being cached must not suppress fetching this one.
 		if _, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok {
 			return nil
@@ -789,7 +917,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// empty) at this offer's point. Skip without spawning a fetch. The
 		// lookup is keyed by point, not hash alone, for the same reason as
 		// MsgBlockOffer above: a different, unrelated occurrence of this hash
-		// being complete must not satisfy this offer's point (issue #3513).
+		// being complete must not satisfy this offer's point.
 		if data, ok := o.lookupLeiosEndorserBlock(point.Slot, point.Hash); ok &&
 			(data.txCount == 0 || data.completeTxCache()) {
 			return nil
@@ -936,8 +1064,14 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		if o.leiosVotes == nil {
 			return nil
 		}
+		if err := validateLeiosNotifyVoteOffer(m); err != nil {
+			return err
+		}
 		for _, vote := range m.FullVotes {
 			if err := o.leiosVotes.HandleVote(connId, vote); err != nil {
+				if errors.Is(err, dingleios.ErrPeerMisbehavior) {
+					return err
+				}
 				o.config.Logger.Debug(
 					"failed to handle pushed leios vote",
 					"component", "network",
@@ -951,6 +1085,9 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		}
 		for _, vote := range m.PrototypeVotes {
 			if err := o.leiosVotes.HandlePrototypeVote(connId, vote); err != nil {
+				if errors.Is(err, dingleios.ErrPeerMisbehavior) {
+					return err
+				}
 				o.config.Logger.Debug(
 					"failed to handle pushed prototype leios vote",
 					"component", "network",
@@ -981,8 +1118,7 @@ type leiosBlockRequester interface {
 // by a MsgBlockOffer and binds the fetched body to the offer's declared size
 // before the caller stores it. A peer that offers one size and serves another
 // is a fetch/serving mismatch, not a cacheable result, so it is rejected here
-// rather than admitted under a byte budget the offer misrepresented (issue
-// #3512).
+// rather than admitted under a byte budget the offer misrepresented.
 func fetchAndValidateLeiosEbManifest(
 	ctx context.Context,
 	client leiosBlockRequester,
@@ -1077,7 +1213,7 @@ type leiosFetchGuard struct {
 	// protocol shutdown) can drain it, so every later request on the same bearer
 	// returns ErrRequestSlotAbandoned after its grace period. A cooldown cannot
 	// repair that -- the connection has to be replaced -- so a dead connection is
-	// ordered last and recycled (dingo #3552).
+	// ordered last and recycled.
 	protocolDead atomic.Bool
 	// recycleRequested records that a recycle has already been published for this
 	// connection, so a burst of failing fetches raises one request rather than one
@@ -1264,7 +1400,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 // deliberately has none for Block/BlockTxs) — so an attempt overshoots the
 // deadline by at most one round;
 // this lets the by-point backfill fail over to another connection rather than
-// parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
+// parking the whole ledger apply loop on one peer. A zero deadline
 // disables the bound, preserving the tip-path behavior.
 func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
 	ctx context.Context,
@@ -1324,7 +1460,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 	// often ends before the block is whole; the prefix it gathered is retained
 	// against the cached block (below) and seeded back here, so a re-offer
 	// requests only the still-missing tail instead of re-fetching transactions
-	// dingo already has (issue #2629).
+	// dingo already has.
 	o.seedLeiosPartialTxs(point.Slot, point.Hash, result, validate)
 	// Retain whatever this attempt ends up holding, so an attempt that stops
 	// short (tail budget, per-attempt deadline, protocol error) leaves the
@@ -1392,7 +1528,7 @@ func (o *Ouroboros) fetchLeiosEbTxsBatchedUntilWithValidator(
 			// A relay-declared bitmap referencing an index beyond this
 			// endorser block's txCount is rejected before it is expanded: a
 			// small txCount must not license decoding a disproportionately
-			// large index list (issue #3523).
+			// large index list.
 			return leiosCollectTxs(result), fmt.Errorf(
 				"leios-fetch response bitmap: %w",
 				err,
@@ -1481,7 +1617,7 @@ func leiosNeededBitmap(
 // LSB-first mask only round-trips for full (all-64-bit) windows; for a partial
 // window of k<64 txs it made the relay serve just max(0, 2k-64) of them (the
 // relay read the high bits), so a final window of <=32 txs was never served
-// and from-genesis catch-up stalled mid-epoch (issue #2656).
+// and from-genesis catch-up stalled mid-epoch.
 func leiosWindowNeededMask(result []cbor.RawMessage, w, txCount int) uint64 {
 	var mask uint64
 	base := w * 64
@@ -1571,8 +1707,9 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	deferVerification bool,
 ) error {
 	if isNilInterface(o.leiosAnnouncementLedger) {
-		return errors.New(
-			"cannot accept leios announcement without announcement ledger",
+		return fmt.Errorf(
+			"%w: cannot accept leios announcement without announcement ledger",
+			errLeiosAnnouncementLocalState,
 		)
 	}
 	// raw is the header bytes a LeiosNotify peer put on the wire, decoded on
@@ -1590,28 +1727,65 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 			"ranking-block header has no valid endorser-block announcement",
 		)
 	}
+	announcementKey := string(header.Hash().Bytes())
+	alreadyKnown, releaseValidation, err := o.reserveLeiosAnnouncementValidation(
+		announcementKey,
+		ebHash,
+		ebSize,
+		raw,
+	)
+	if err != nil {
+		return err
+	}
+	if alreadyKnown {
+		return nil
+	}
+	defer releaseValidation()
 	currentSlot, slotErr := o.leiosAnnouncementLedger.CurrentSlot()
 	if slotErr != nil {
 		return fmt.Errorf(
-			"read current slot for announcement validation: %w",
+			"%w: read current slot for announcement validation: %w",
+			errLeiosAnnouncementLocalState,
 			slotErr,
-		)
-	}
-	if header.SlotNumber() > currentSlot {
-		return fmt.Errorf(
-			"announcement slot %d is ahead of current slot %d",
-			header.SlotNumber(),
-			currentSlot,
 		)
 	}
 	announcementStart, timeErr := o.leiosAnnouncementLedger.SlotToTime(
 		header.SlotNumber(),
 	)
 	if timeErr != nil {
-		return fmt.Errorf("read announcement slot time: %w", timeErr)
+		return fmt.Errorf(
+			"%w: read announcement slot time: %w",
+			errLeiosAnnouncementLocalState,
+			timeErr,
+		)
+	}
+	if header.SlotNumber() > currentSlot {
+		earlyBy := time.Until(announcementStart)
+		if earlyBy >= 0 && earlyBy <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d is ahead of current slot %d by %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				currentSlot,
+				earlyBy,
+			)
+		}
+		return fmt.Errorf(
+			"announcement slot %d is ahead of current slot %d",
+			header.SlotNumber(),
+			currentSlot,
+		)
 	}
 	age := time.Since(announcementStart)
 	if age < 0 {
+		if -age <= leiosAnnouncementClockSkew {
+			return fmt.Errorf(
+				"%w: announcement slot %d begins in %s",
+				errLeiosAnnouncementClockSkew,
+				header.SlotNumber(),
+				-age,
+			)
+		}
 		return fmt.Errorf(
 			"announcement slot %d is in the future",
 			header.SlotNumber(),
@@ -1772,7 +1946,7 @@ func (o *Ouroboros) pruneLeiosAnnouncements() {
 // endorser block's slot, so it also reconciles any endorser block cached before
 // it arrived: the relay (and dingo's own forge path) offer the block before
 // announcing it, so the cached entry routinely carries an as-yet-unverified
-// peer-supplied slot (issue #3513).
+// peer-supplied slot.
 func (o *Ouroboros) recordLeiosAnnouncement(
 	raw []byte,
 	ebHash lcommon.Blake2b256,
@@ -1790,7 +1964,7 @@ func (o *Ouroboros) recordLeiosAnnouncement(
 	// the resulting entry would never be verified by anything. Holding the
 	// lock across both closes that window; storeLeiosEndorserBlock takes the
 	// same lock (announcementsMu before leiosMu) across its own check and
-	// insertion for the same reason (issue #3513 review).
+	// insertion for the same reason.
 	o.leiosAnnouncementsMu.Lock()
 	err := o.recordLeiosAnnouncementLocked(
 		raw,
@@ -1909,11 +2083,11 @@ func (o *Ouroboros) recordLeiosAnnouncementLocked(
 // still-live ranking-block announcement vouches for ebHash at exactly slot.
 // It lets a leios-fetch offer or store be bound to a point its own
 // announcement actually vouched for, rather than trusting whatever point the
-// offering connection supplies (issue #3513). It is a membership check, not
+// offering connection supplies. It is a membership check, not
 // a single-scalar comparison, because the manifest is content-addressed: the
 // same hash can be a live, independently required occurrence at more than
 // one slot at once, so the presence of a *different* live slot for this hash
-// says nothing about whether this one is bound (issue #3513 review). The
+// says nothing about whether this one is bound. The
 // caller must hold leiosAnnouncementsMu: every caller already needs it held
 // across a wider check-then-act sequence (storeLeiosEndorserBlock's
 // announcement check through its cache insertion; recordLeiosAnnouncement's
@@ -1934,7 +2108,7 @@ func (o *Ouroboros) leiosAnnouncementBindsSlotLocked(
 	// elsewhere. Treating an expired binding as still authoritative would
 	// reject a later offer or announcement for the same hash as a conflict
 	// forever, instead of just leaving it unverified like a hash with no
-	// binding at all (issue #3513 review). Entries recorded without a ledger
+	// binding at all. Entries recorded without a ledger
 	// wired (unit tests) never expire, matching pruneLeiosAnnouncements' own
 	// no-op when the ledger is absent.
 	if !isNilInterface(o.leiosAnnouncementLedger) {

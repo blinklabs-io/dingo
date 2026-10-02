@@ -523,12 +523,19 @@ func validateBlockSizes(
 // A main block is measured against ppMaxBlockSize and ppMaxHeaderSize as
 // adopted for its epoch when pparams carries them; genesis only initializes
 // those parameters. Epoch boundary blocks, and callers with no adopted
-// parameters, use the genesis limits.
+// parameters, use the genesis limits. A main block whose adopted parameters
+// are unknown (eras.ByronProtocolParameters.AdoptionUnknown) is not measured.
 func validateByronBlockSizes(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
 	config *cardano.CardanoNodeConfig,
 ) error {
+	if _, isMain := block.(*byron.ByronMainBlock); isMain {
+		if adopted, ok := pparams.(*eras.ByronProtocolParameters); ok &&
+			adopted != nil && adopted.AdoptionUnknown {
+			return nil
+		}
+	}
 	maxBlockSize, maxHeaderSize, err := byronBlockSizeLimits(
 		block, pparams, config,
 	)
