@@ -5951,7 +5951,7 @@ func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
 	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
 	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer func() { _ = txn.Rollback() }()
 	_, params, _, err := ls.rewardParameters(
 		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},

@@ -79,7 +79,7 @@ func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
 			return finalizer.RebuildRewardLiveStakeFromRunningTotalsInBatches(
 				slot,
 				func(runBatch func(types.Txn) error) error {
-					return d.withMetadataWriteTxn(nil, func(t *Txn) error {
+					return d.withMetadataWriteTxn(ctx, nil, func(t *Txn) error {
 						return runBatch(t.Metadata())
 					})
 				},

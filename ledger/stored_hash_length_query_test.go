@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -233,7 +234,7 @@ func seedShortTxIDUtxo(
 	cborBytes, err := cbor.Encode(&out)
 	require.NoError(t, err)
 	shortTxID := shortStoredHash(lcommon.Blake2b256Size, 0x7A)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.Blob().SetUtxo(txn.Blob(), shortTxID, 0, cborBytes))
 	require.NoError(t, txn.Commit())
 	paymentKey := addr.PaymentKeyHash()
@@ -316,7 +317,7 @@ func TestChainDepStateRejectsMalformedStoredOpCertIssuer(t *testing.T) {
 			string(shortStoredHash(lcommon.Blake2b224Size, 0x7D)): 3,
 		}
 	})
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
 	counters, err := ls.chainDepStateOpCertCounters(txn)
 	require.ErrorContains(t, err, "op-cert counter issuer key")

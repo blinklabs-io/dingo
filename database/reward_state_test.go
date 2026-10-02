@@ -116,7 +116,7 @@ func TestRebuildRewardLiveStakeFromRunningTotalsUsesBatchFinalizer(
 	}
 	db.metadata = store
 
-	require.NoError(t, db.RebuildRewardLiveStakeFromRunningTotals(123, nil))
+	require.NoError(t, db.RebuildRewardLiveStakeFromRunningTotals(context.Background(), 123, nil))
 	require.Equal(t, 1, store.batchCalls)
 	require.Equal(t, uint64(123), store.batchSlot)
 	require.Zero(t, store.transactional)

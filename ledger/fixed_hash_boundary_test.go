@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -115,7 +116,7 @@ func TestLedgerViewPoolCurrentStateRejectsMalformedHashes(t *testing.T) {
 					store.pool = pool
 				},
 			)
-			txn := db.Transaction(false)
+			txn := db.Transaction(context.Background(), false)
 			defer txn.Release()
 			view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 
@@ -133,7 +134,7 @@ func TestLedgerViewDRepRegistrationsRejectsMalformedCredential(t *testing.T) {
 			{Credential: make([]byte, lcommon.Blake2b224Size-1)},
 		}
 	})
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	view := &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 

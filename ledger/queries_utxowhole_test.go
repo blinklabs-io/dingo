@@ -171,9 +171,9 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 	require.NoError(t, err)
 	shortTxID := bytes.Repeat([]byte{0xA2}, 31)
 	paddedTxID := append(bytes.Clone(shortTxID), 0)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      shortTxID,
 		OutputIdx: 0,
 		AddedSlot: 100,

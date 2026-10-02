@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"math/big"
@@ -148,7 +149,7 @@ func newStoredHashDB(
 
 func storedHashView(t *testing.T, db *database.Database) *LedgerView {
 	t.Helper()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	t.Cleanup(txn.Release)
 	return &LedgerView{ls: &LedgerState{db: db}, txn: txn}
 }
@@ -173,7 +174,7 @@ func TestMIRDelegStateRejectsMalformedStoredCredential(t *testing.T) {
 			Amount:     big.NewInt(10),
 		}})
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	err := txn.Do(func(txn *database.Txn) error {
 		lv := &LedgerView{ls: ls, txn: txn, epochStartSlot: 100}
 		_, err := lv.MIRDelegState(200, true)
