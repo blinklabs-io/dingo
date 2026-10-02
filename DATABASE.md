@@ -409,12 +409,12 @@ Migration `v30` (`reward-account-output-folded`, integer version 30) adds the
 per-output marker that keeps reward credits from being counted again after
 they are written into `account.reward`.
 
+Migration `v31` (`reward-credit-round-table`, integer version 31) moves pending
+reward-credit round state from the metadata JSON list into an indexed table.
+
 Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
 `leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
 rounds retain the magnitude of negative leader rewards.
-
-Migration `v31` (`reward-credit-round-table`, integer version 31) moves pending
-reward-credit round state from the metadata JSON list into an indexed table.
 
 Migration `v33` (`committee-hot-authorization-prune-order`, integer version
 33) adds a tagged cold-credential index ordered by descending `added_slot` and

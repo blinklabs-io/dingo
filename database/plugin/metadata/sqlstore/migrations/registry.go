@@ -67,8 +67,8 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
-	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -197,7 +197,11 @@ var schemaVersions = []struct {
 		Name:    rewardLeaderDeficitSchemaRelease,
 		Dir:     "v32",
 	},
-	{Version: 33, Name: committeeHotAuthorizationPruneOrderSchemaRelease, Dir: "v33"},
+	{
+		Version: 33,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v33",
+	},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
