@@ -348,6 +348,19 @@ func (h *databaseServiceHandler) finishOperation() {
 	h.mu.Unlock()
 }
 
+// completeOperation releases the busy flag and then publishes op's terminal
+// status. The order matters: a client that observes a terminal status must be
+// able to start the next operation, so the flag cannot still be held when the
+// status becomes visible.
+func (h *databaseServiceHandler) completeOperation(
+	op *operation,
+	err error,
+	blocksRemoved uint64,
+) {
+	h.finishOperation()
+	op.complete(err, blocksRemoved)
+}
+
 func (h *databaseServiceHandler) lookupOperation(
 	id string,
 ) (*operation, error) {
@@ -423,9 +436,8 @@ func (h *databaseServiceHandler) CreateSnapshot(
 	description := req.Msg.GetDescription()
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, snapErr := h.bark.config.Lifecycle.Snapshot(
 				ctx, destDir, name, description,
 			)
@@ -994,9 +1006,8 @@ func (h *databaseServiceHandler) VerifySnapshot(
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			return verifySnapshotIntegrity(
 				opCtx,
 				h.bark.config.DestinationRegistry,
@@ -1042,9 +1053,8 @@ func (h *databaseServiceHandler) Restore(
 	)
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
-		op.complete(runProtected(func() error {
+		h.completeOperation(op, runProtected(func() error {
 			_, restoreErr := h.bark.config.Lifecycle.Restore(opCtx, source)
 			return restoreErr
 		}), 0)
@@ -1136,7 +1146,6 @@ func (h *databaseServiceHandler) Truncate(
 	}
 
 	go func() {
-		defer h.finishOperation()
 		op.setRunning()
 		var blocksRemoved uint64
 		err := runProtected(func() error {
@@ -1147,7 +1156,7 @@ func (h *databaseServiceHandler) Truncate(
 			)
 			return truncErr
 		})
-		op.complete(err, blocksRemoved)
+		h.completeOperation(op, err, blocksRemoved)
 	}()
 
 	return connect.NewResponse(&databasev1alpha1.TruncateResponse{

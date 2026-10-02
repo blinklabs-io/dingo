@@ -2700,3 +2700,49 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		listResp.Msg.GetSnapshots()[0].GetSnapshotId(),
 	)
 }
+
+// TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus holds the
+// operation's lock, which blocks only the terminal-status write, and requires
+// the busy flag to be released regardless. A client that sees a terminal
+// status must be able to start the next operation.
+func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	op, _, err := h.startOperation(
+		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
+	)
+	require.NoError(t, err)
+
+	op.mu.Lock()
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(op.mu.Unlock) }
+	defer unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.completeOperation(op, nil, 0)
+	}()
+	released := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return !h.busy
+	}
+	require.Eventually(
+		t,
+		released,
+		10*time.Second,
+		time.Millisecond,
+		"busy flag must be released before the terminal status is published",
+	)
+	unlock()
+	<-done
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
+		op.progress().GetStatus(),
+	)
+}
