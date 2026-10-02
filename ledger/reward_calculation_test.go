@@ -5706,6 +5706,7 @@ func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
 	)
 	ls.config.PledgeLeverageEnabled = true
 	ls.config.PledgeLeverage = 100
+	ls.config.MinPoolMargin = 250
 	performancePParamsValue := mockledger.NewMockConwayProtocolParams()
 	performancePParamsValue.NOpt = 10
 	performancePParamsValue.A0 = rewardCalcRat(1, 2)
@@ -5740,6 +5741,7 @@ func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, params.PledgeLeverageEnabled)
 	require.Equal(t, big.NewRat(1, 2), params.PledgeLeverage)
+	require.Equal(t, big.NewRat(1, 40), params.MinPoolMargin)
 }
 
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
@@ -6767,37 +6769,38 @@ func TestMinPoolMarginRat(t *testing.T) {
 }
 
 // applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
-// calculation is for Dijkstra (major >= 12); otherwise it leaves the field nil.
+// calculation era is Dijkstra or later; otherwise it leaves the field nil.
 func TestApplyMinPoolMarginConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		bp      uint
-		major   uint64
+		eraID   uint
 		wantRat *big.Rat // nil => expect nil
 	}{
-		{name: "disabled zero at dijkstra", bp: 0, major: 12},
-		{name: "pre-dijkstra ignored", bp: 150, major: 11},
+		{name: "disabled zero at dijkstra", bp: 0, eraID: eras.DijkstraEraDesc.Id},
+		{name: "pre-dijkstra ignored", bp: 150, eraID: eras.ConwayEraDesc.Id},
 		{
 			name:    "dijkstra sets rat",
 			bp:      150,
-			major:   12,
+			eraID:   eras.DijkstraEraDesc.Id,
 			wantRat: big.NewRat(150, 10_000),
 		},
 		{
 			name:    "post-dijkstra sets rat",
 			bp:      500,
-			major:   13,
+			eraID:   eras.DijkstraEraDesc.Id + 1,
 			wantRat: big.NewRat(500, 10_000),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := rewards.Parameters{ProtocolMajorVersion: tt.major}
+			params := rewards.Parameters{ProtocolMajorVersion: 9}
 			applyMinPoolMarginConfig(
 				&params,
 				LedgerStateConfig{MinPoolMargin: tt.bp},
+				tt.eraID,
 			)
 			if tt.wantRat == nil {
 				require.Nil(t, params.MinPoolMargin)

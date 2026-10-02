@@ -3785,20 +3785,20 @@ func minPoolMarginRat(basisPoints uint) *big.Rat {
 
 // applyMinPoolMarginConfig overlays the CIP-23 minimum pool margin operator
 // setting onto the reward parameters. It sets params.MinPoolMargin only when the
-// configured value is nonzero AND the calculation is for Dijkstra or later
-// (protocol major version >= dijkstra.MinProtocolVersionDijkstra); otherwise it
-// leaves the field nil so pre-Dijkstra reward calculation is byte-for-byte
+// configured value is nonzero AND the calculation is for Dijkstra or later;
+// otherwise it leaves the field nil so pre-Dijkstra reward calculation stays
 // unchanged. This is the reward-path half of the whole-feature Dijkstra+ gate;
 // the certificate half is that checkPoolMarginFloor is wired only into
 // ValidateTxDijkstra.
 func applyMinPoolMarginConfig(
 	params *rewards.Parameters,
 	cfg LedgerStateConfig,
+	calculationEraID uint,
 ) {
 	if cfg.MinPoolMargin == 0 {
 		return
 	}
-	if params.ProtocolMajorVersion < dijkstra.MinProtocolVersionDijkstra {
+	if calculationEraID < eras.DijkstraEraDesc.Id {
 		return
 	}
 	params.MinPoolMargin = minPoolMarginRat(cfg.MinPoolMargin)
@@ -3922,7 +3922,6 @@ func (ls *LedgerState) rewardParameters(
 	// CIP-23: overlay the operator-configured minimum pool margin, gated to
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
-	applyMinPoolMarginConfig(&params, ls.config)
 	// At the first Dijkstra reward round, the performance epoch still carries
 	// Conway parameters, while the reference's prevPParams has already been
 	// upgraded by Dijkstra enactment. Use the calculation epoch's enacted value
@@ -3935,6 +3934,7 @@ func (ls *LedgerState) rewardParameters(
 			calculationEpochRow.EraId, calculationEpoch,
 		)
 	}
+	applyMinPoolMarginConfig(&params, ls.config, calculationEraDesc.Id)
 	if calculationEraDesc.Id == eras.DijkstraEraDesc.Id &&
 		performanceEraDesc.Id != eras.DijkstraEraDesc.Id {
 		pledgeLeveragePParams, err = ls.loadPersistedRewardProtocolParameters(
