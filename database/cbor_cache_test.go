@@ -1025,3 +1025,43 @@ func TestResolveUtxoCborDoesNotCacheRolledBackUtxo(t *testing.T) {
 	_, err = db.CborCache().ResolveUtxoCbor(txID[:], 0)
 	require.Error(t, err)
 }
+
+func TestResolveUtxoCborCachesCommittedUtxoInReadWriteTxn(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	var txID [32]byte
+	txID[0] = 1
+	committed := []byte{0x82, 0x01, 0x02}
+	seed := db.BlobTxn(true)
+	require.NoError(t, store.SetUtxo(seed.Blob(), txID[:], 0, committed))
+	require.NoError(t, store.SetUtxo(seed.Blob(), txID[:], 1, committed))
+	require.NoError(t, seed.Commit())
+
+	// An output committed before the batch began is not staged by it, so its
+	// lookups keep using the shared hot cache.
+	batch := db.BlobTxn(true)
+	t.Cleanup(batch.Release)
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, batch)
+	require.NoError(t, err)
+	require.Equal(t, committed, got)
+	cached, ok := db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.True(t, ok)
+	require.Equal(t, committed, cached)
+
+	// Overwriting the row inside the batch makes the batch's value staged:
+	// it must be served to the batch but never reach the shared cache.
+	staged := []byte{0x82, 0x03, 0x04}
+	overwrite := db.BlobTxn(true)
+	t.Cleanup(overwrite.Release)
+	require.NoError(t, store.SetUtxo(overwrite.Blob(), txID[:], 1, staged))
+	got, err = db.CborCache().ResolveUtxoCbor(txID[:], 1, overwrite)
+	require.NoError(t, err)
+	require.Equal(t, staged, got)
+	_, ok = db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 1))
+	require.False(t, ok)
+}
