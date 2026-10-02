@@ -128,10 +128,22 @@ const (
 	// the local chain sits below a slot corroborated for a chain this node
 	// does not adopt.
 	DefaultForgeEndorserBlockStalenessSlots = 0
-	DefaultMempoolCapacityPraos             = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios             = 26214400 // 25 MiB
-	DefaultMempoolRevalidationDeltaCap      = 64
-	DefaultMempoolImplementation            = "fifo"
+	// Backstops on endorser-block construction. The slot deadline is the
+	// operative bound in normal operation; these cap the manifest when the
+	// slot clock cannot answer, and are deliberately far above the block
+	// sizes seen in practice so they never become the binding constraint
+	// on throughput.
+	DefaultForgeEBMaxTxRefs = 20000
+	DefaultForgeEBMaxBytes  = 25165824 // 24 MiB, just under the Leios mempool default
+	// DefaultForgeEBSelectionReserve is what endorser-block selection
+	// leaves of the slot for ranking-block assembly, signing, adoption
+	// and broadcast. It is the same number as the forging package's own
+	// fallback, which the two pinning tests keep in step.
+	DefaultForgeEBSelectionReserve     = 300 * time.Millisecond
+	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
+	DefaultMempoolRevalidationDeltaCap = 64
+	DefaultMempoolImplementation       = "fifo"
 )
 
 // RunMode represents the operational mode of the dingo node
@@ -300,6 +312,19 @@ type GenesisBootstrapConfig struct {
 	// is denied selection and stalls rather than steering the local chain. A
 	// zero value disables corroboration (density-only Genesis selection).
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
+	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
+	// Genesis selection is syncing, a ChainSync peer that delivers its
+	// advertised progress more slowly than LimitOnPatienceRate headers per
+	// second, beyond a LimitOnPatienceCapacity token allowance, is
+	// disconnected.
+	LimitOnPatienceEnabled bool `yaml:"limitOnPatienceEnabled"      envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_ENABLED"`
+	// LimitOnPatienceCapacity is the per-peer patience bucket size in tokens
+	// (one token per header that raises the peer's block number). 0 selects
+	// the default of 1000.
+	LimitOnPatienceCapacity uint64 `yaml:"limitOnPatienceCapacity"     envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_CAPACITY"`
+	// LimitOnPatienceRate is the bucket leak rate in tokens per second. 0
+	// selects the default of 5.
+	LimitOnPatienceRate uint64 `yaml:"limitOnPatienceRate"         envconfig:"DINGO_GENESIS_BOOTSTRAP_LIMIT_ON_PATIENCE_RATE"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.
@@ -311,7 +336,7 @@ type HistoryExpiryConfig struct {
 }
 
 // KoiosParityConfig controls the in-process Koios reward-parity observer
-// (dingo #3098). When enabled, Dingo subscribes an epoch-boundary observer to
+// When enabled, Dingo subscribes an epoch-boundary observer to
 // its own EventBus (event.EpochTransitionEventType) and validates each newly
 // closed epoch's committed reward state directly against Koios reference
 // data as the node advances, instead of requiring a separate koios-parity
@@ -344,26 +369,31 @@ type KoiosParityConfig struct {
 	// tamperable in flight -- a MITM could induce a false PASS. Local dev and
 	// test only, mirroring Mithril.AllowInsecureHTTP.
 	AllowInsecureHTTP bool `yaml:"allowInsecureHttp"    envconfig:"DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP"`
-	// Strict stops/cancels the node on the first Koios/tool error or exact
-	// parity mismatch, rather than logging it and continuing normal node
-	// operation.
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false for the default outbound request guard.
+	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES"`
+	// Strict stops/cancels the node on the first Koios/tool error or
+	// non-pass parity result, rather than logging it and continuing normal
+	// operation. The one exception is an epoch whose only significant
+	// mismatches are reference_lag (Koios's data has not caught up yet),
+	// which is logged and recorded but never stops the node.
 	Strict bool `yaml:"strict"               envconfig:"DINGO_KOIOS_PARITY_STRICT"`
 	// GraceHours is the window after an epoch closes during which a
 	// Dingo-side row still missing is treated as reference/sync lag rather
 	// than a failure. 0 selects the default (24).
 	GraceHours int `yaml:"graceHours"           envconfig:"DINGO_KOIOS_PARITY_GRACE_HOURS"`
-	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. Defaults to true (see
 	// DefaultKoiosParityConfig): the in-process observer is the
-	// operationally-real, continuously-driven path #3098 exists to make
+	// operationally-real, continuously-driven path the observer exists to make
 	// possible, unlike the standalone koios-parity CLI's `--accounts` flag,
 	// which stays opt-in-only for cost/compatibility reasons (see
 	// cmd/koios-parity's addAccountsFlag). Set false explicitly to keep the
 	// observer pool-level-only, e.g. to bound Koios request volume on a
 	// resource-constrained deployment.
 	Accounts bool `yaml:"accounts"             envconfig:"DINGO_KOIOS_PARITY_ACCOUNTS"`
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request issued by the Accounts phase above, by
 	// both address count and encoded body size. 0 for either selects the
 	// package default (koiosparity.koiosAccountChunkSize/
@@ -376,7 +406,7 @@ type KoiosParityConfig struct {
 // observer settings. Strict and Accounts both default to true: once an
 // operator opts into the feature at all (Enabled), the safety-motivated
 // fail-stop behavior (Strict) and the complete per-account exact-parity
-// coverage (Accounts, #3097) it exists for are both on unless explicitly
+// coverage (Accounts) it exists for are both on unless explicitly
 // disabled with --koios-parity-strict=false/--koios-parity-accounts=false or
 // their DINGO_KOIOS_PARITY_STRICT/DINGO_KOIOS_PARITY_ACCOUNTS env var
 // equivalents — matching KoiosParityConfig.Strict/Accounts's and
@@ -433,8 +463,16 @@ type TokenRegistryConfig struct {
 	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
+	// MaxDecompressedBytes bounds all expanded tar content.
+	MaxDecompressedBytes int64 `yaml:"maxDecompressedBytes"  envconfig:"DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES"`
 	// MaxEntryBytes bounds a single registry mapping document.
 	MaxEntryBytes int64 `yaml:"maxEntryBytes"         envconfig:"DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES"`
+	// MaxArchiveEntries bounds all tar headers, including non-mappings.
+	MaxArchiveEntries int `yaml:"maxArchiveEntries"     envconfig:"DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES"`
+	// MaxAcceptedEntries bounds parsed rows and database upsert work.
+	MaxAcceptedEntries int `yaml:"maxAcceptedEntries"    envconfig:"DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES"`
+	// MaxBatchBytes bounds retained mapping payload per database batch.
+	MaxBatchBytes int64 `yaml:"maxBatchBytes"          envconfig:"DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES"`
 	// StoreLogos persists base64 logo payloads, which are roughly 90% of
 	// registry bytes. Off by default; text properties are what wallets need.
 	StoreLogos bool `yaml:"storeLogos"            envconfig:"DINGO_TOKEN_REGISTRY_STORE_LOGOS"`
@@ -458,7 +496,8 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 // configuration values.
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
-		Enabled: true,
+		Enabled:                true,
+		LimitOnPatienceEnabled: true,
 	}
 }
 
@@ -642,7 +681,7 @@ type Config struct {
 	// known to be consistent).
 	//
 	// reward_live_stake.utxo_stake is a running total maintained
-	// incrementally by the block-application path (dingo #4421), so this
+	// incrementally by the block-application path, so this
 	// check is also the only automatic reconciliation of that total against
 	// the live UTxO set. Skipping it leaves any drift in place for the whole
 	// life of the process, including across the epoch boundaries whose stake
@@ -671,11 +710,11 @@ type Config struct {
 	// replay loop that reads blocks back from the primary chain and applies
 	// them to the ledger. Not consensus-affecting -- it only changes how
 	// CBOR decode work is scheduled, not validation or apply behavior -- but
-	// defaults off until throughput and stability are proven (issue #1894
-	// phase 1). See ARCHITECTURE.md ("Block Processing Pipeline").
+	// defaults off until throughput and stability are proven (phase 1 of the
+	// pipeline rollout). See ARCHITECTURE.md ("Block Processing Pipeline").
 	BlockPipelineEnabled bool `yaml:"blockPipelineEnabled"                envconfig:"DINGO_BLOCK_PIPELINE_ENABLED"`
 	// BlockPipelineValidateEnabled adds parallel VRF/KES and OpCert checks to
-	// block-pipeline replay (issue #1894 phase 3). It requires
+	// block-pipeline replay (phase 3 of the pipeline rollout). It requires
 	// BlockPipelineEnabled. Admission-time header validation remains the
 	// authoritative gate because ls.chain is visible to downstream readers
 	// before replay reaches this stage. See ARCHITECTURE.md ("Block Processing
@@ -708,6 +747,7 @@ type Config struct {
 	MaxInboundConns          int           `yaml:"maxInboundConns"          envconfig:"DINGO_MAX_INBOUND_CONNS"`
 	MaxNtCConns              int           `yaml:"maxNtCConns"              envconfig:"DINGO_MAX_NTC_CONNS"`
 	MaxNtCConnectionsPerIP   int           `yaml:"maxNtCConnectionsPerIP"   envconfig:"DINGO_MAX_NTC_CONNECTIONS_PER_IP"`
+	MaxTrustedLocalNtCConns  int           `yaml:"maxTrustedLocalNtCConns"  envconfig:"DINGO_MAX_TRUSTED_LOCAL_NTC_CONNS"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`
@@ -722,7 +762,7 @@ type Config struct {
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
 
 	// KoiosParity configures the optional in-process Koios reward-parity
-	// observer (dingo #3098). Disabled by default.
+	// observer Disabled by default.
 	KoiosParity KoiosParityConfig `yaml:"koiosParity"`
 
 	// Off-chain metadata fetcher configuration.
@@ -755,8 +795,33 @@ type Config struct {
 	ShelleyVRFKey                 string `yaml:"shelleyVrfKey"                      envconfig:"SHELLEY_VRF_KEY"`
 	ShelleyKESKey                 string `yaml:"shelleyKesKey"                      envconfig:"SHELLEY_KES_KEY"`
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate"      envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
-	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
-	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+	// ShelleyKESAgentSocket, when set, sources the KES signing key from a
+	// running bursa KES agent over the given Unix-domain service socket
+	// instead of a local --shelley-kes-key file. The VRF key and operational
+	// certificate flags still apply. Mirrors cardano-node's
+	// --shelley-kes-agent-socket.
+	//
+	// Block production is supported on Linux and macOS only, so this flag
+	// does not apply on Windows. The path must fit the platform's sun_path
+	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
+	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
+	// startup rather than leaving it to surface as a bare "invalid argument"
+	// from connect().
+	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"              envconfig:"SHELLEY_KES_AGENT_SOCKET"`
+	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
+	// agent pushes the evolving KES sign key and the node signs headers
+	// locally) or "sign" (the node forwards header bodies and the agent
+	// returns signatures; the key never enters the node). Defaults to
+	// "serve-key" when a socket is set.
+	ShelleyKESAgentMode string `yaml:"shelleyKesAgentMode"                envconfig:"SHELLEY_KES_AGENT_MODE"`
+	// ShelleyKESAgentSignTimeout bounds one sign-mode round trip to the KES
+	// agent. It must stay below a slot: block production calls the signer
+	// synchronously on the slot-aligned loop, so a longer timeout parks
+	// forging for several slots when the agent stops answering. Zero uses
+	// the client default (500ms).
+	ShelleyKESAgentSignTimeout  time.Duration `yaml:"shelleyKesAgentSignTimeout"         envconfig:"SHELLEY_KES_AGENT_SIGN_TIMEOUT"`
+	ForgeSyncToleranceSlots     uint64        `yaml:"forgeSyncToleranceSlots"            envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
+	ForgeStaleGapThresholdSlots uint64        `yaml:"forgeStaleGapThresholdSlots"        envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	// ForgePrimaryChainTipToleranceSlots bounds how far the ledger-applied tip
 	// may trail this node's own primary chain tip before forging is skipped.
 	// Raise it only if the ledger pipeline is legitimately slow on this
@@ -789,6 +854,15 @@ type Config struct {
 	// sharing the local tolerance would tie two unrelated risk budgets to one
 	// number and could withhold leader slots indefinitely.
 	ForgeEndorserBlockStalenessSlots uint64 `yaml:"forgeEndorserBlockStalenessSlots"   envconfig:"DINGO_FORGE_ENDORSER_BLOCK_STALENESS_SLOTS"`
+	// Endorser-block manifest backstops. Pointers so that "the operator
+	// never mentioned this" (nil, take the default) stays distinct from
+	// an explicit 0, which disables the cap.
+	ForgeEBMaxTxRefs *uint64 `yaml:"forgeEbMaxTxRefs"              envconfig:"DINGO_FORGE_EB_MAX_TX_REFS"`
+	ForgeEBMaxBytes  *uint64 `yaml:"forgeEbMaxBytes"               envconfig:"DINGO_FORGE_EB_MAX_BYTES"`
+	// ForgeEBSelectionReserve is how much of the slot endorser-block
+	// selection must leave for the ranking block. Zero or negative takes
+	// DefaultForgeEBSelectionReserve.
+	ForgeEBSelectionReserve time.Duration `yaml:"forgeEbSelectionReserve"       envconfig:"DINGO_FORGE_EB_SELECTION_RESERVE"`
 	// ValidateForgedBlock self-validates locally-forged blocks before
 	// adoption and diffusion. Defaults to true (fail closed); set to false
 	// only to explicitly opt out.
@@ -891,7 +965,7 @@ type APIPluginsConfig struct {
 // not API-specific (the relay/NtN and metrics listeners use it too),
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
-// today with no override need identified by dingo#2996/#2998, so
+// today with no override need identified, so
 // duplicating any of them here would only add a second source of truth for no
 // behavioral gain.
 type APIConfig struct {
@@ -1177,7 +1251,7 @@ var configMu sync.RWMutex
 // defaulting logic in isolation -- should call this instead of adding a
 // third hand-maintained copy. TestValidateForgedBlockDefaultsToTrue
 // (flags_test.go) is a regression test for exactly this: this literal
-// gained ValidateForgedBlock: true for issue #3528, but
+// gained ValidateForgedBlock: true as the fail-closed forging default, but
 // resetGlobalConfig's copy did not, and no test noticed.
 func newDefaultConfig() *Config {
 	return &Config{
@@ -1257,10 +1331,19 @@ func newDefaultConfig() *Config {
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ForgeEBSelectionReserve:            DefaultForgeEBSelectionReserve,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(DefaultForgeEBMaxBytes),
 		// Fail closed: self-validate locally-forged blocks before adoption and
 		// diffusion unless an operator explicitly opts out.
 		ValidateForgedBlock: true,
 	}
+}
+
+// forgeEBCapDefault returns a pointer to v, for the endorser-block cap
+// defaults. A nil cap means "unset"; an explicit 0 disables the cap.
+func forgeEBCapDefault(v uint64) *uint64 {
+	return new(v)
 }
 
 var globalConfig = newDefaultConfig()
@@ -1348,6 +1431,14 @@ func cloneConfig(cfg *Config) *Config {
 	if cfg.PeerSharing != nil {
 		peerSharing := *cfg.PeerSharing
 		clone.PeerSharing = &peerSharing
+	}
+	if cfg.ForgeEBMaxTxRefs != nil {
+		maxTxRefs := *cfg.ForgeEBMaxTxRefs
+		clone.ForgeEBMaxTxRefs = &maxTxRefs
+	}
+	if cfg.ForgeEBMaxBytes != nil {
+		maxBytes := *cfg.ForgeEBMaxBytes
+		clone.ForgeEBMaxBytes = &maxBytes
 	}
 	clone.API.TLS = cloneTLSPolicy(cfg.API.TLS)
 	clone.Plugins.Storage.Blob = clonePluginSelection(
@@ -1579,6 +1670,9 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
+	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
+		c.ShelleyKESAgentMode = "serve-key"
+	}
 	// Match the Midnight server's default for explicitly empty YAML or
 	// environment values.
 	if c.Midnight.Host == "" {
@@ -1629,6 +1723,20 @@ func (c *Config) ApplyDefaults() {
 	// Neither staleness bound is defaulted here: for both, 0 is the "disabled"
 	// value rather than "unset", so filling one with a default would turn on a
 	// forge refusal an operator never asked for.
+	// A reserve of zero or less leaves the ranking block no time at all,
+	// so it can only mean "unset": take the default.
+	if c.ForgeEBSelectionReserve <= 0 {
+		c.ForgeEBSelectionReserve = DefaultForgeEBSelectionReserve
+	}
+	// Only an unset (nil) cap takes the default. An explicit 0 is
+	// preserved: it means the operator switched the cap off, which the
+	// flag help and the forger contract both document.
+	if c.ForgeEBMaxTxRefs == nil {
+		c.ForgeEBMaxTxRefs = forgeEBCapDefault(DefaultForgeEBMaxTxRefs)
+	}
+	if c.ForgeEBMaxBytes == nil {
+		c.ForgeEBMaxBytes = forgeEBCapDefault(DefaultForgeEBMaxBytes)
+	}
 	// Only an unset (zero) frequency takes the default; an explicitly
 	// negative value is preserved so Validate can reject it instead of
 	// the node silently starting the expiry worker on the default cadence

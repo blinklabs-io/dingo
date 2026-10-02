@@ -313,7 +313,7 @@ func newByronShelleyBoundaryLedger(
 	cfg := &cardano.CardanoNodeConfig{
 		ShelleyGenesisHash: strings.Repeat("42", 32),
 	}
-	require.NoError(t, cfg.LoadByronGenesisFromReader(
+	require.NoError(t, loadByronGenesisForTest(t, cfg,
 		strings.NewReader(byronGenesisJSON),
 	))
 	require.NoError(t, cfg.LoadShelleyGenesisFromReader(
@@ -446,10 +446,9 @@ func TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams(
 }
 
 // TestByronShelleyBoundaryDefersReadResultDoneUntilCachedBatchApplied is a
-// regression test for issue #3533: ledgerProcessBlocksFromSource must not
-// signal a readChainResult's done channel until the whole result has been
-// applied, including any post-boundary remainder deferred through
-// cachedNextBatch.
+// regression test: ledgerProcessBlocksFromSource must not signal a
+// readChainResult's done channel until the whole result has been applied,
+// including any post-boundary remainder deferred through cachedNextBatch.
 //
 // firstShelley alone crosses the Byron/Shelley epoch boundary (see
 // newByronShelleyBoundaryLedger), so processing this one-block batch takes
@@ -633,8 +632,8 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 	}
 }
 
-// TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the fix for
-// #3559 through the same production path as
+// TestByronShelleyBoundarySeedsEpochNonceOnProductionPath pins the multi-era
+// epoch-nonce seeding fix through the same production path as
 // TestByronShelleyBoundaryProcessesFirstShelleyBlockWithPParams: without the
 // post-Byron nonce seeding in applyBoundaryEraTransitions (ledger/state.go),
 // calculateEpochNonce returns a nil nonce for any rollover whose source era is
@@ -642,8 +641,8 @@ func TestByronShelleyBoundaryClosesReadResultDoneOnEpochRolloverFailure(
 // persisted with no nonce at all. That existing test only asserts on era,
 // pparams, and tip, so it still passes with the nonce-seeding block deleted;
 // this test asserts on the nonce itself, in all three places a caller can
-// observe it — the in-memory current epoch, the epoch cache, and the
-// persisted database row — and fails without the fix.
+// observe it — the in-memory current epoch, the epoch cache, and the persisted
+// database row — and fails without the fix.
 func TestByronShelleyBoundarySeedsEpochNonceOnProductionPath(t *testing.T) {
 	t.Parallel()
 

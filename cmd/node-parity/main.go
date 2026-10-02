@@ -14,8 +14,7 @@
 
 // node-parity compares Dingo's and a reference cardano-node's ledger state
 // (protocol parameters, stake distribution, and the whole UTxO set) over
-// their node-to-client LocalStateQuery interfaces, on preview or preprod
-// (blinklabs-io/dingo#1900).
+// their node-to-client LocalStateQuery interfaces, on preview or preprod.
 //
 // It does not start, stop, or manage either node: point it at two
 // already-running, already-synced NtC listeners with --dingo-addr and
@@ -116,7 +115,7 @@ at a time.`,
 	)
 	rootCmd.PersistentFlags().StringVar(
 		&globalFlags.metricsAddr, "metrics-addr", defaultMetricsAddr,
-		"address to serve Prometheus /metrics on for 'watch' (empty disables it; unused by 'check')",
+		"address to serve Prometheus /metrics on for 'watch' and 'from-genesis' (empty disables it; unused by 'check')",
 	)
 	rootCmd.PersistentFlags().Uint64Var(
 		&globalFlags.atSlot, "at-slot", 0,
@@ -129,6 +128,7 @@ at a time.`,
 
 	rootCmd.AddCommand(checkCommand())
 	rootCmd.AddCommand(watchCommand())
+	rootCmd.AddCommand(fromGenesisCommand())
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		logger.Error(err.Error())
@@ -165,7 +165,7 @@ func requireAddrs() error {
 }
 
 // requireAtPoint validates --at-slot/--at-hash: both-or-neither, since a
-// historical point (blinklabs-io/dingo#382) needs both the slot and the
+// historical point needs both the slot and the
 // hash to be unambiguous across a fork/rollback (see Tip.point). Returns
 // nil, nil when neither flag was set, meaning "live-tip-agreement mode" --
 // Check's existing default behavior.
@@ -199,8 +199,7 @@ func requireAtPoint() (*nodeparity.Tip, error) {
 // command (rootCmd.PersistentFlags()), inherited by every subcommand
 // including 'watch', but only 'check' (via requireAtPoint) has any
 // historical-point mode to apply them to -- 'watch' silently accepted and
-// ignored them otherwise, with no error or warning that they had no effect
-// (blinklabs-io/dingo#4183 review).
+// ignored them otherwise, with no error or warning that they had no effect.
 func rejectAtPointFlags(commandName string) error {
 	if globalFlags.atSlot == 0 && globalFlags.atHash == "" {
 		return nil

@@ -28,33 +28,19 @@ func (d *Database) DeleteGovernanceProposalsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().DeleteGovernanceProposalsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete governance proposals after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().DeleteGovernanceProposalsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete governance proposals after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // DeleteGovernanceVotesAfterSlot removes governance votes added after the
@@ -64,33 +50,19 @@ func (d *Database) DeleteGovernanceVotesAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.governanceStore().DeleteGovernanceVotesAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete governance votes after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().DeleteGovernanceVotesAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete governance votes after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetGovernanceProposal returns a governance proposal by transaction hash and action index
@@ -140,9 +112,30 @@ func (d *Database) GetActiveGovernanceProposals(
 	return proposals, nil
 }
 
-// GetExpiringGovernanceProposals returns proposals whose expires_epoch is
-// strictly less than the given epoch and that have not yet been enacted,
-// expired, or soft-deleted.
+// GetGovernanceProposalSet returns the Conway proposals set: every proposal
+// not yet enacted, dropped, or soft-deleted.
+func (d *Database) GetGovernanceProposalSet(
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetGovernanceProposalSet(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get governance proposal set: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
+// GetExpiringGovernanceProposals returns unratified proposals whose
+// expires_epoch is strictly less than the given epoch and that have not yet
+// been enacted, expired, or soft-deleted.
 func (d *Database) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
@@ -189,7 +182,7 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 // expired_epoch is strictly below the given epoch and whose deposit has not
 // yet been returned. Used at epoch start, before marking any new proposals
 // expired, to return the deposit and finalize proposals expired as of a prior
-// boundary (dingo#4411).
+// boundary.
 func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 	epoch uint64,
 	txn *Txn,
@@ -308,24 +301,15 @@ func (d *Database) SetGovernanceProposal(
 	if proposal == nil {
 		return errors.New("proposal cannot be nil")
 	}
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer txn.Release()
-	}
-	if err := d.governanceStore().SetGovernanceProposal(
-		proposal,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to set governance proposal: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("failed to commit governance proposal: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetGovernanceProposal(
+			proposal,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to set governance proposal: %w", err)
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // ClearGovernanceProposalRatification moves a proposal back to the active,
@@ -337,32 +321,20 @@ func (d *Database) ClearGovernanceProposalRatification(
 	transitionSlot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer txn.Release()
-	}
-	if err := d.governanceStore().ClearGovernanceProposalRatification(
-		txHash,
-		actionIndex,
-		transitionSlot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to clear governance proposal ratification: %w",
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().ClearGovernanceProposalRatification(
+			txHash,
+			actionIndex,
+			transitionSlot,
+			txn.Metadata(),
+		); err != nil {
 			return fmt.Errorf(
-				"failed to commit proposal ratification clear: %w",
+				"failed to clear governance proposal ratification: %w",
 				err,
 			)
 		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetChildGovernanceProposals returns all active proposals whose parent is
@@ -416,22 +388,13 @@ func (d *Database) SetGovernanceVote(
 	if vote == nil {
 		return errors.New("vote cannot be nil")
 	}
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer txn.Release()
-	}
-	if err := d.governanceStore().SetGovernanceVote(
-		vote,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to set governance vote: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("failed to commit governance vote: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().SetGovernanceVote(
+			vote,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to set governance vote: %w", err)
 		}
-	}
-	return nil
+		return nil
+	})
 }

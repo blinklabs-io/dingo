@@ -36,10 +36,20 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
-COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
+# Slice exactly the first 7 chars of the full commit SHA. `git rev-parse
+# --short=7` only sets a 7-char minimum and lengthens the abbreviation on an
+# ambiguous prefix -- more likely under the release job's fetch-depth: 0 full
+# history -- which would diverge from the Homebrew formula bump. The formula
+# slices the first 7 of github.sha the same way, so both paths stamp an
+# identical, deterministic version.CommitHash.
+COMMIT_HASH ?= $(shell git rev-parse HEAD | cut -c1-7)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 BUILD_TAGS ?= dingo_extra_plugins
+CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
+# bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
+NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
@@ -77,21 +87,19 @@ format: mod-tidy ## Run mod-tidy, then format code
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-# golangci-lint covers one module for one GOOS per run. The loop reaches every
-# nested module, and the GOOS=windows run reaches files behind
-# `//go:build windows`, which the host build excludes. CI runs the same scopes
-# in the `lint` job of .github/workflows/go-test.yml and of
-# .github/workflows/publish.yml; internal/docsparity's
+# golangci-lint covers one module per run. The loop reaches every nested
+# module. CI runs the same scopes in the `lint` jobs of
+# .github/workflows/go-test.yml and .github/workflows/publish.yml;
+# internal/docsparity's
 # TestLintCoversEveryGoModule fails until every go.mod has a step in both.
 lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	GOOS=windows golangci-lint run ./...
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) -exclude-test-files ./...
+	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
 	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
@@ -183,7 +191,7 @@ test-devnet: ## Run the default all-Dingo DevNet integration tests
 # Build our program binaries
 # Depends on GO_FILES to determine when rebuild is needed
 $(BINARIES): mod-tidy $(GO_FILES)
-	CGO_ENABLED=0 \
+	CGO_ENABLED=$(CGO_ENABLED) \
 	go build \
 		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \

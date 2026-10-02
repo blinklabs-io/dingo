@@ -23,7 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -35,9 +35,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// productionValidateVerifyConfig mirrors the generic VRF/KES portion of
-// NewLedgerState's pipeline wiring. Dingo adds OpCert verification after the
-// generic stage succeeds.
+// productionValidateVerifyConfig mirrors the generic header-crypto portion of
+// NewLedgerState's pipeline wiring. Dingo adds OpCert KES-period expiry after
+// the generic VRF/KES/OpCert-signature stage succeeds.
 var productionValidateVerifyConfig = lcommon.VerifyConfig{
 	SkipBodyHashValidation:    true,
 	SkipTransactionValidation: true,
@@ -374,10 +374,10 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 		name   string
 		mutate func(*LedgerState, models.Block)
 		// wantOk records whether the block should still decode despite the
-		// wrong nonce configured below. Issue #3528: a coarse
-		// ValidateHistorical=false historical-sync toggle must not exempt
-		// header VRF/KES/OpCert crypto from validation -- only a slot a
-		// Mithril certificate already covers may skip it.
+		// wrong nonce configured below. A coarse ValidateHistorical=false
+		// historical-sync toggle must not exempt header VRF/KES/OpCert crypto
+		// from validation -- only a slot a Mithril certificate already covers
+		// may skip it.
 		wantOk bool
 	}{
 		{

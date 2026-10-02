@@ -48,19 +48,18 @@ type stakeDistributionEntry = struct {
 // snapshot GetPoolDistr2 (queryShelleyPoolDistr2) answers from.
 //
 // These are two genuinely different real cardano-node queries, confirmed
-// against cardano-ledger source (blinklabs-io/dingo#4152): GetPoolDistr2
-// answers from SnapShot.ssStakeMarkPoolDistr, the frozen "set" snapshot
-// leader election actually uses (dingo's own praos.StakeSnapshotEpoch,
-// PoolStakeDistribution below), but GetStakeDistribution answers from
-// poolsByTotalStakeFraction, which explicitly reads currentSnapshot --
-// cardano-ledger's own doc comment for it: "we do not want to use one of
-// the regular snapshots, but rather the most recent ledger state." Routing
-// both queries through PoolStakeDistribution's mark[epoch-1] snapshot (as
-// this function used to) made GetStakeDistribution silently omit any pool
-// that registered or first delegated after that snapshot was captured --
-// confirmed live against a real Preview cardano-node: 36 real pools
-// reported by cardano-node were completely absent from dingo's reply for
-// no reason other than this snapshot lag.
+// against cardano-ledger source: GetPoolDistr2 answers from
+// SnapShot.ssStakeMarkPoolDistr, the frozen "set" snapshot leader election
+// actually uses (dingo's own praos.StakeSnapshotEpoch, PoolStakeDistribution
+// below), but GetStakeDistribution answers from poolsByTotalStakeFraction,
+// which explicitly reads currentSnapshot -- cardano-ledger's own doc comment
+// for it: "we do not want to use one of the regular snapshots, but rather the
+// most recent ledger state." Routing both queries through
+// PoolStakeDistribution's mark[epoch-1] snapshot (as this function used to)
+// made GetStakeDistribution silently omit any pool that registered or first
+// delegated after that snapshot was captured -- confirmed live against a real
+// Preview cardano-node: 36 real pools reported by cardano-node were completely
+// absent from dingo's reply for no reason other than this snapshot lag.
 //
 // Unlike GetPoolDistr2, this query has no pool filter on the wire, so
 // every pool holding live stake is reported.
@@ -69,11 +68,11 @@ type stakeDistributionEntry = struct {
 // TotalActiveStake, the sum of delegated stake): a real cardano-node's
 // GetStakeDistribution reply uses total circulating supply as its
 // denominator instead, confirmed against real cardano-node's raw wire bytes
-// -- see totalCirculatingSupply's doc comment (blinklabs-io/dingo#3824) for
+// -- see totalCirculatingSupply's doc comment for
 // the full story and why GetPoolDistr2 must not make the same change. That
-// denominator logic is unchanged by this function's #4152 fix -- only the
-// numerator (which pools, and how much stake each holds) moved off the
-// mark snapshot.
+// denominator logic is unchanged by this function's move to the mark snapshot
+// -- only the numerator (which pools, and how much stake each holds) moved off
+// the mark snapshot.
 //
 // at is Query's pinned point (unpinned = live). A pinned at reads the
 // reserves row in effect as of at.Slot (GetNetworkStateAsOfSlot) and
@@ -100,9 +99,12 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 		}
 		targetSlot = tip.Point.Slot
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, errEpochNotResolved(at)
 	}
 
 	calc := snapshot.NewCalculator(ls.db)
@@ -152,8 +154,8 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 	// A pinned caller's VRF lookup must be bounded to the same slot its
 	// stake and circulation were reconstructed at -- otherwise a pool that
 	// re-registers with a new VRF key between the pinned slot and now would
-	// have its historical stake paired with a key it did not yet hold
-	// (blinklabs-io/dingo#4237). Left nil for a live query, which keeps
+	// have its historical stake paired with a key it did not yet hold.
+	// Left nil for a live query, which keeps
 	// poolVrfKeyHashes' unbounded "latest registration" behavior.
 	var vrfAsOfSlot *uint64
 	if at.pinned() {
@@ -179,7 +181,7 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 			// a pool holding stake with no registration on record cannot be
 			// given a VRF key hash, and a zero one reads as a real key. Omit
 			// it and log/count it rather than fail the whole query over one
-			// pool (blinklabs-io/dingo#2997, blinklabs-io/dingo#4152).
+			// pool.
 			ls.metrics.incPoolStakeDistributionOmittedPool()
 			ls.config.Logger.Warn(
 				"omitting pool with live stake but no registration",

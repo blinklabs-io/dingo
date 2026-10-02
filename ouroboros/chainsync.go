@@ -410,7 +410,7 @@ func intersectPointsHaveRealPoint(points []ocommon.Point) bool {
 // never from the primary chain tip directly. An empty point list can also mean
 // the primary chain is ahead of the ledger on a fork that does not descend
 // from the applied ledger tip; seeding from that raw chain tip would advertise
-// unapplied fork state and break the primary-chain ancestor invariant (#2309).
+// unapplied fork state and break the primary-chain ancestor invariant.
 // The ledger returns hasRollbackAnchor=false for that case, so it stays
 // origin-only exactly as before.
 //
@@ -719,6 +719,10 @@ func (o *Ouroboros) resyncChainsyncClientWithPointsAfterStop(
 			"chainsync client not available: %s",
 			connId.String(),
 		)
+	}
+	if o.chainsyncState != nil {
+		// The peer is not responsible for the restart round trip.
+		o.chainsyncState.PatiencePause(connId)
 	}
 	if err := cs.Client.Stop(); err != nil {
 		return fmt.Errorf(
@@ -1263,6 +1267,27 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		blockSlot := v.SlotNumber()
 		blockHash := v.Hash().Bytes()
 		point := ocommon.NewPoint(blockSlot, blockHash)
+		// Genesis Limit on Patience: the peer is charged up to the header's
+		// network arrival, not for this node's decoding, admission waits,
+		// verification, or ledger backpressure below. A header that clears
+		// verification resumes the leak when the callback returns.
+		patienceGrant := false
+		if o.chainsyncState != nil {
+			o.chainsyncState.PatienceMessageArrived(
+				ctx.ConnectionId,
+				arrivalTime,
+			)
+			defer func() {
+				if patienceGrant {
+					o.chainsyncState.PatienceHeaderAccepted(
+						ctx.ConnectionId,
+						v.BlockNumber(),
+						point.Slot == tip.Point.Slot &&
+							bytes.Equal(point.Hash, tip.Point.Hash),
+					)
+				}
+			}()
+		}
 		// Extract VRF output from block header once for chain
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
@@ -1350,13 +1375,13 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// Genesis chain-selection density or corroboration. Without this
 		// gate, an untrusted peer-reported header could steer fork selection
 		// using data that has not passed the same checks as the applied
-		// chain (dingo #3517). This runs for every ingress-eligible peer, not
+		// chain. This runs for every ingress-eligible peer, not
 		// only the one currently apply-eligible: a competing candidate's
 		// headers never reach the ledger's own chainsync header-queue
 		// verification, since that only runs for headers actually applied.
 		//
 		// Verification is skipped only for a slot an imported Mithril
-		// snapshot already covers (issue #3528); a coarse bulk
+		// snapshot already covers; a coarse bulk
 		// historical/catch-up loading toggle no longer exempts it, so a
 		// Mithril-restored bootstrap is unaffected but ordinary fast sync is
 		// not. A deferred result (local state has not caught up to this
@@ -1398,6 +1423,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
+		patienceGrant = ingressEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -2120,7 +2146,7 @@ func (o *Ouroboros) decodeChainsyncHeader(
 // Every chainsync-connected peer delivers a header for each new point at
 // roughly the same time, so -- like blockfetchClientBlockRaw -- the decode is
 // keyed by content hash and shared across connections instead of repeated
-// once per connection. See #489.
+// once per connection.
 func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	ctx ochainsync.CallbackContext,
 	blockType uint,
@@ -2136,9 +2162,15 @@ func (o *Ouroboros) chainsyncClientRollForwardRaw(
 	}
 	arrivalTime := arrivalNow()
 	key := hashDecodeInput(blockType, blockData)
-	header, err := decodeWithPanicSafeMetrics(
+	cacheBytes := decodeCacheChargeForRaw(len(blockData))
+	if !hasCborArrayEnvelope(blockData) {
+		cacheBytes = int(^uint(0) >> 1)
+	}
+	header, err := decodeWithPanicSafeMetricsSized(
 		o.headerDecodeCache,
 		key,
+		cacheBytes,
+		true,
 		func() (gledger.BlockHeader, error) {
 			return o.decodeChainsyncHeader(blockType, blockData)
 		},

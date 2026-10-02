@@ -34,6 +34,9 @@ func (p *PeerGovernor) LoadPeerSnapshot(
 		return 0
 	}
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
+	p.mu.Lock()
+	p.peerSnapshotRelays = relays
+	p.mu.Unlock()
 	added := p.addLedgerRelaysContext(ctx, relays, 0)
 	p.config.Logger.Info(
 		"loaded peer snapshot",
@@ -85,14 +88,6 @@ func poolRelayFromSnapshotAccessPoint(
 		IPv6: &ipCopy,
 		Port: accessPoint.Port,
 	}, true
-}
-
-// addLedgerRelays fills the configured ledger-peer target. extraAdds permits a
-// bounded emergency overfill after the target is already satisfied.
-//
-//nolint:unused // Kept as a context-free test helper for existing snapshot tests.
-func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay, extraAdds int) int {
-	return p.addLedgerRelaysContext(context.Background(), relays, extraAdds)
 }
 
 func (p *PeerGovernor) addLedgerRelaysContext(

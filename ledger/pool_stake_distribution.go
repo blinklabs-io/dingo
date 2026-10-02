@@ -41,8 +41,7 @@ import (
 const stakeSnapshotRetentionEpochs = 3
 
 // checkAsOfEpochRecency rejects a historical epoch already outside the pool
-// mark-snapshot retention window, or ahead of the live epoch
-// (blinklabs-io/dingo#382).
+// mark-snapshot retention window, or ahead of the live epoch.
 //
 // The window is checked on the derived mark-snapshot epoch
 // (praos.StakeSnapshotEpoch(targetEpoch), i.e. targetEpoch-1), not on
@@ -53,7 +52,17 @@ const stakeSnapshotRetentionEpochs = 3
 // off by the same one-epoch shift: at liveEpoch 6, targetEpoch 3 resolves
 // to snapshot epoch 2, which the floor (6-3=3) has already pruned, but
 // 6-3=3 is not > 3 so the un-shifted comparison wrongly accepted it.
-func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
+//
+// apiStorageMode skips the retention-window check entirely (matching
+// cleanupOldSnapshots' own API-mode carve-out, added alongside this
+// parameter): pool-stake snapshots are never pruned in that mode, so
+// there is no floor to reject against. The ahead-of-live-epoch check
+// above still applies regardless of storage mode -- that is a real
+// ordering violation, not a pruning question.
+func checkAsOfEpochRecency(
+	targetEpoch, liveEpoch uint64,
+	apiStorageMode bool,
+) error {
 	if targetEpoch > liveEpoch {
 		return fmt.Errorf(
 			"%w: as-of epoch %d is ahead of the live epoch (%d)",
@@ -61,6 +70,9 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			targetEpoch,
 			liveEpoch,
 		)
+	}
+	if apiStorageMode {
+		return nil
 	}
 	if liveEpoch < stakeSnapshotRetentionEpochs {
 		// cleanupOldSnapshots itself does nothing below this floor (its own
@@ -80,6 +92,79 @@ func checkAsOfEpochRecency(targetEpoch, liveEpoch uint64) error {
 			deleteBeforeEpoch,
 			liveEpoch,
 		)
+	}
+	return nil
+}
+
+// verifyStakeDistributionRetentionOnly checks the same retention floors
+// PoolStakeDistribution enforces, without materializing anything
+// PoolStakeDistribution actually reads: VerifyPointQueryable previously
+// called PoolStakeDistribution(nil, at, txn) -- the unfiltered form --
+// purely to see whether it returned an error, discarding the result. That
+// reads the whole mark-snapshot via markStakeByPool and runs
+// totalCirculatingSupply's as-of-slot reconstruction, real work on every
+// pinned Acquire that a client issuing GetPoolDistr2 afterward then pays
+// for a second time, and one that never asks for stake distribution at all
+// (e.g. GetEpochNo) pays for once with nothing to show for it.
+//
+// Two independent floors, not one: checkAsOfEpochRecency covers the
+// mark-snapshot pruning window, but PoolStakeDistribution (both directly,
+// and via queryShelleyStakeDistribution) also calls totalCirculatingSupply
+// with asOfSlot=at.Slot for a pinned at, which separately requires a
+// network_state row at or before that slot -- rejecting with
+// ErrHistoricalStateUnavailable when none exists (see that function's doc
+// comment). Checking only the epoch floor accepts a point both
+// GetPoolDistr2 and GetStakeDistribution still reject, because no
+// network_state row happened to cover that slot even though the epoch
+// itself was recent enough -- reopening the bare "handleQuery returns that
+// error, connection drops" failure this whole change exists to close.
+// Checking only that a covering row exists (not reading genesis config or
+// computing a value) keeps this as cheap as the epoch check.
+//
+// The network_state floor is gated on the exact same condition
+// totalCirculatingSupply itself gates its GetNetworkStateAsOfSlot read on:
+// an unconditional gate would reject a point every real query would have
+// happily answered whenever ls.config.CardanoNodeConfig is nil or its
+// ShelleyGenesis carries no MaxLovelaceSupply -- totalCirculatingSupply
+// itself never reaches GetNetworkStateAsOfSlot in that case, falling back
+// to totalActiveStake instead, so requiring a network_state row here
+// unconditionally would be stricter than what PoolStakeDistribution
+// actually needs.
+func (ls *LedgerState) verifyStakeDistributionRetentionOnly(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errEpochNotResolved(at)
+	}
+	liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+	if err != nil {
+		return err
+	}
+	if err := checkAsOfEpochRecency(
+		targetEpoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+	); err != nil {
+		return err
+	}
+	if at.pinned() && ls.circulatingSupplyGenesis() != nil {
+		metaTxn := txn.Metadata()
+		state, err := ls.db.Metadata().GetNetworkStateAsOfSlot(at.Slot, metaTxn)
+		if err != nil {
+			return err
+		}
+		if state == nil {
+			return fmt.Errorf(
+				"%w: circulating supply as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
 	}
 	return nil
 }
@@ -119,8 +204,8 @@ type PoolStakeDistribution struct {
 	// TotalCirculatingSupply is genesis MaxLovelaceSupply minus the live
 	// reserves pot, clamped the same way as TotalActiveStake. It is a
 	// different total from TotalActiveStake -- see totalCirculatingSupply's
-	// doc comment (blinklabs-io/dingo#3824) for why GetStakeDistribution, and
-	// only GetStakeDistribution, needs this one instead.
+	// doc comment for why GetStakeDistribution, and only GetStakeDistribution,
+	// needs this one instead.
 	TotalCirculatingSupply uint64
 	// Pools is ordered by PoolKeyHash. Callers that place this in a repeated
 	// protobuf field or any other ordered encoding depend on that: without it
@@ -152,18 +237,18 @@ type PoolStakeDistribution struct {
 // fraction is unaffected by the omission.
 //
 // at pins the distribution to the historical point instead of
-// live-right-now (blinklabs-io/dingo#382): unpinned means live (the
-// existing default). A pinned at resolves to the epoch that governed that
-// slot and uses that epoch's mark snapshot instead of the live tip's --
-// this is a real historical reconstruction, not an approximation, because
-// the mark snapshot is already persisted per-epoch for leader election.
-// checkAsOfEpochRecency rejects a historical epoch already outside the
-// mark-snapshot retention window (ledger/snapshot's pool-snapshot pruning),
-// since those rows are physically gone. at.Slot ahead of the transaction
-// tip is rejected directly (not just by epoch): GetEpochBySlot can resolve
-// a future slot within the live epoch to that same live epoch, which would
-// otherwise let a future-slot pin silently pass as "live epoch, therefore
-// fine" despite naming a point that has not happened yet.
+// live-right-now: unpinned means live (the existing default). A pinned at
+// resolves to the epoch that governed that slot and uses that epoch's mark
+// snapshot instead of the live tip's -- this is a real historical
+// reconstruction, not an approximation, because the mark snapshot is already
+// persisted per-epoch for leader election. checkAsOfEpochRecency rejects a
+// historical epoch already outside the mark-snapshot retention window
+// (ledger/snapshot's pool-snapshot pruning), since those rows are physically
+// gone. at.Slot ahead of the transaction tip is rejected directly (not just by
+// epoch): GetEpochBySlot can resolve a future slot within the live epoch to
+// that same live epoch, which would otherwise let a future-slot pin silently
+// pass as "live epoch, therefore fine" despite naming a point that has not
+// happened yet.
 //
 // txn reuses an already-open transaction (Query's point-validation
 // transaction, when called through it) rather than opening a fresh one, so
@@ -181,6 +266,11 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// one, or a distribution belonging to an epoch other than the one this
 	// query resolved.
 	if txn == nil {
+		// A read opened before the boundary job writes mark[epoch] never
+		// sees it.
+		if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
+			return nil, err
+		}
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
@@ -200,16 +290,23 @@ func (ls *LedgerState) PoolStakeDistribution(
 			tip.Point.Slot,
 		)
 	}
-	epoch, err := ls.resolveAsOfEpoch(txn, at)
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errEpochNotResolved(at)
+	}
 	if at.pinned() {
-		liveEpoch, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+		// Unpinned, so always found=true (see resolveAsOfEpoch's doc
+		// comment) -- not checked here.
+		liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
 		if err != nil {
 			return nil, err
 		}
-		if err := checkAsOfEpochRecency(epoch, liveEpoch); err != nil {
+		if err := checkAsOfEpochRecency(
+			epoch, liveEpoch, ls.db.StorageMode() == types.StorageModeAPI,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -304,8 +401,8 @@ func (ls *LedgerState) PoolStakeDistribution(
 	// The VRF key hash lives on the pool registration rather than the
 	// snapshot, so it is fetched in bulk rather than per pool. Unbounded
 	// (nil): this snapshot's own pinning behavior is pre-existing and
-	// unchanged by blinklabs-io/dingo#4237's fix to the separate
-	// GetStakeDistribution path -- out of scope here.
+	// unchanged by the separate GetStakeDistribution path's move to live stake
+	// -- out of scope here.
 	vrfByPool, err := ls.poolVrfKeyHashes(keyHashes, nil, metaTxn)
 	if err != nil {
 		return nil, err
@@ -336,19 +433,20 @@ func (ls *LedgerState) PoolStakeDistribution(
 			// Failing instead would cost far more. An error here does not fail
 			// one query: it aborts the LocalStateQuery protocol, the node drops
 			// the connection, and cardano-cli reports only a closed bearer --
-			// the exact opaque failure #2997 was filed for. Worse, the
-			// unfiltered form of this query covers every pool in the snapshot,
-			// so one unregistered pool anywhere on the chain would break
-			// leadership-schedule for every operator rather than for the one
-			// pool concerned. The same reasoning keeps chainDepStateLabNonce
-			// serving a slightly stale value instead of aborting.
+			// the exact opaque failure operators reported for cardano-cli
+			// leadership-schedule. Worse, the unfiltered form of this query
+			// covers every pool in the snapshot, so one unregistered pool
+			// anywhere on the chain would break leadership-schedule for every
+			// operator rather than for the one pool concerned. The same
+			// reasoning keeps chainDepStateLabNonce serving a slightly stale
+			// value instead of aborting.
 			//
-			// Also counted on a metric (blinklabs-io/dingo#4152), not just
-			// logged: a WARN line is easy to miss in normal operation, and
-			// this specific omission is what let a real cross-node
-			// comparison against cardano-node go unnoticed until a manual
-			// diff was run. A rising or persistently nonzero value here is
-			// visible to an operator's existing alerting without one.
+			// Also counted on a metric, not just logged: a WARN line is easy to
+			// miss in normal operation, and this specific omission is what let
+			// a real cross-node comparison against cardano-node go unnoticed
+			// until a manual diff was run. A rising or persistently nonzero
+			// value here is visible to an operator's existing alerting without
+			// one.
 			ls.metrics.incPoolStakeDistributionOmittedPool()
 			ls.config.Logger.Warn(
 				"omitting pool with snapshot stake but no registration",
@@ -406,7 +504,7 @@ func stakeFraction(stake, total uint64) *cbor.Rat {
 // asOfSlot pins that same resolution to a historical slot instead
 // (registeredPoolVrfKeyHashAsOfSlot), for a pinned caller: a pool that
 // re-registers with a new VRF key after asOfSlot must still be reported with
-// the key it held at that slot, not its current one (blinklabs-io/dingo#4237).
+// the key it held at that slot, not its current one.
 // Pass nil for a live lookup -- the caller's own targetSlot equals the current
 // tip, but registeredPoolVrfKeyHash's unbounded "latest registration" behavior
 // is kept for that case rather than routed through the slot-bounded path, so

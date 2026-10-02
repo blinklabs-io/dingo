@@ -357,7 +357,7 @@ func TransactionWitnessTables() []string {
 // actually runs. The predicate column must stay indexed through bulk load:
 // unindexed, each of these deletes degrades into a full scan of a table that
 // grows with every transaction written, which makes historical backfill
-// quadratic (issue #3253).
+// quadratic.
 func TransactionWitnessCleanupSQL(table string) string {
 	return "DELETE FROM " + table + " WHERE transaction_id = ?"
 }

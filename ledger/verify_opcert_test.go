@@ -169,8 +169,8 @@ func TestVerifyOpCertHeaderCrypto_Valid(t *testing.T) {
 }
 
 // TestVerifyOpCertHeaderCrypto_TamperedColdSignature verifies a flipped
-// cold-key signature is now rejected at header verification — this is the
-// behavior gap issue #2608 closes.
+// cold-key signature is now rejected at header verification — this closes the
+// behavior gap in operational-certificate verification.
 func TestVerifyOpCertHeaderCrypto_TamperedColdSignature(t *testing.T) {
 	t.Parallel()
 
@@ -207,8 +207,8 @@ func TestVerifyOpCertHeaderCrypto_ExpiredKESPeriod(t *testing.T) {
 // TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroFailsClosed verifies a
 // missing genesis KES-evolution limit is treated as a configuration failure
 // rather than silently falling back to the lighter future-cert-only guard
-// VerifyBlock already ran (which never rejects an expired opcert). Issue
-// #3528: fail closed on missing validation configuration instead of letting
+// VerifyBlock already ran (which never rejects an expired opcert). Fail
+// closed on missing validation configuration instead of letting
 // an expired opcert through unchecked.
 func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroFailsClosed(
 	t *testing.T,
@@ -260,10 +260,29 @@ func TestValidateOpCertCounter(t *testing.T) {
 		wantErr      string
 	}{
 		{
-			name:         "first sighting accepts any counter",
+			name:         "first sighting uses zero baseline under praos",
 			found:        false,
-			candidate:    7,
+			candidate:    0,
 			enforceNoGap: true,
+		},
+		{
+			name:         "first sighting allows one rotation under praos",
+			found:        false,
+			candidate:    1,
+			enforceNoGap: true,
+		},
+		{
+			name:         "first sighting rejects skipped rotations under praos",
+			found:        false,
+			candidate:    2,
+			enforceNoGap: true,
+			wantErr:      "skips ahead",
+		},
+		{
+			name:         "first sighting accepts large counter under tpraos",
+			found:        false,
+			candidate:    490,
+			enforceNoGap: false,
 		},
 		{
 			name:         "equal to last seen",
@@ -462,7 +481,11 @@ func TestValidateLeiosAnnouncementHeaderRunsCryptoBeforeOCINClassification(
 
 	bad := createTestBlock(t, [32]byte{0xD5}, 0, tamperOpCertSig)
 	staleness, err = ls.ValidateLeiosAnnouncementHeader(bad.block.Header())
-	require.ErrorContains(t, err, "cold-key signature")
+	require.ErrorContains(
+		t,
+		err,
+		"operational certificate cold signature invalid",
+	)
 	require.Equal(
 		t,
 		LeiosAnnouncementFreshOCIN,

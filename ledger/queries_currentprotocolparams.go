@@ -36,7 +36,7 @@ import (
 // change recorded, or one pruned by DeletePParamsAfterSlot after a
 // rollback) returns ErrHistoricalStateUnavailable rather than silently
 // answering with a live value that may no longer match what was true at
-// that point (blinklabs-io/dingo#382).
+// that point.
 //
 // Takes the whole QueryPoint, not a bare slot -- see resolveAsOfEpoch's
 // doc comment for why a bare uint64 would silently mistreat a real point
@@ -57,7 +57,7 @@ import (
 // current era's object): transitionToEraFrom persists newPParams verbatim
 // into the pparams row, so a historical epoch whose fabricated PlutusV2
 // cost model had not yet been replaced by real data carries that same
-// fabrication in its persisted CBOR (blinklabs-io/dingo#382 review).
+// fabrication in its persisted CBOR.
 func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	at QueryPoint,
 	txn *database.Txn,
@@ -74,9 +74,12 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		txn = ls.db.Transaction(false)
 		defer txn.Release()
 	}
-	targetEpoch, err := ls.resolveAsOfEpoch(txn, at)
+	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
 	if err != nil {
 		return nil, err
+	}
+	if !found {
+		return nil, errEpochNotResolved(at)
 	}
 	liveEpoch := snapshot.currentEpoch.EpochId
 	if targetEpoch == liveEpoch {
@@ -142,8 +145,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	// one, while the cleared-epoch marker knows which epoch really
 	// confirmed real data. Only fall back to the heuristic for the
 	// genuinely ambiguous case: no confirmation recorded at all, or
-	// targetEpoch predates the one that confirmed it (blinklabs-io/dingo#382
-	// review).
+	// targetEpoch predates the one that confirmed it.
 	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
 		ls.db, txn,
 	)

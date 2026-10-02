@@ -55,3 +55,42 @@ func LoadCardanoNodeConfigWithFallback(
 	}
 	return cfg, nil
 }
+
+// AlonzoLovelacePerUtxoWord returns Alonzo genesis' lovelacePerUTxOWord, or
+// zero when it is unavailable. It is nil-safe on every hop -- a nil config, a
+// config whose Alonzo genesis never loaded, and a path that resolves to
+// neither a file nor an embedded network config all return zero, which
+// database.Config documents as "not supplied".
+//
+// It exists because every database.Config construction site must carry this
+// value: database.New repairs a pre-gouroboros-v0.205.7 Alonzo
+// protocol-parameter row in place from it, and a site that omits it makes the
+// same database unrepairable and demands a resync. Sites that already hold a
+// loaded config pass it as c; the rest pass nil and let this load one.
+func AlonzoLovelacePerUtxoWord(
+	c *CardanoNodeConfig,
+	cfgPath, network string,
+) uint64 {
+	if c == nil {
+		if network == "" && cfgPath == "" {
+			return 0
+		}
+		if cfgPath == "" {
+			cfgPath = EmbeddedConfigPath(network)
+		}
+		loaded, err := LoadCardanoNodeConfigWithFallback(
+			cfgPath,
+			network,
+			EmbeddedConfigFS,
+		)
+		if err != nil || loaded == nil {
+			return 0
+		}
+		c = loaded
+	}
+	genesis := c.AlonzoGenesis()
+	if genesis == nil {
+		return 0
+	}
+	return genesis.LovelacePerUtxoWord
+}

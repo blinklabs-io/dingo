@@ -44,8 +44,8 @@ func newTestDatabaseSourceDB(t *testing.T) *database.Database {
 
 // sourceSQLDB reaches into the metadata store's underlying SQLite file so
 // the test can seed rows directly via raw SQL, mirroring
-// ledger/snapshot/calculator_test.go's snapshotSQLDB helper. Post-#3054 (the
-// metadata store rewrite to sqlc-generated sqlstore), the metadata store
+// ledger/snapshot/calculator_test.go's snapshotSQLDB helper. With the
+// metadata store rewrite to sqlc-generated sqlstore, the metadata store
 // no longer exposes an ORM handle, so this reaches through
 // dbtest.RawSQLiteMetadata instead and wraps it in the same testDB seeding
 // helper dingo_db_test.go uses. The name is kept (rather than renamed to
@@ -178,7 +178,7 @@ func TestDatabaseSourceGetPoolEpochDataMap(t *testing.T) {
 	}).Error)
 	blocksProduced := uint64(7)
 	// The param-epoch row owns blocks_produced only; its cost belongs to a
-	// later epoch and must not surface (dingo #3484).
+	// later epoch and must not surface.
 	require.NoError(t, sqlDB.Create(&models.RewardPoolInput{
 		Epoch:          12,
 		PoolKeyHash:    poolKeyHash,
@@ -305,7 +305,7 @@ func TestDatabaseSourceGetRewardAccountOutputs(t *testing.T) {
 
 // TestDatabaseSourceCoreModePruningTiming demonstrates the retention-window
 // property DatabaseSource's doc comment relies on for reward_account_output
-// (the table #3097's per-account parity check will read): it remains fully
+// (the table the per-account parity check will read): it remains fully
 // readable through DatabaseSource until something actually deletes it
 // (ledger/snapshot/rotation.go's cleanupOldSnapshots calls
 // MetadataStore.DeleteRewardStateBeforeEpoch on a rolling window in core
@@ -368,7 +368,7 @@ func TestDatabaseSourceCoreModePruningTiming(t *testing.T) {
 // RewardParitySource must resolve the same field-to-epoch mapping, and only
 // this one runs inside the node — the standalone CLI reads SQLite directly.
 //
-// The two drifted once: dingo #3484 was fixed in DingoDB while
+// The two drifted once: the param-epoch fix landed in DingoDB while
 // DatabaseSource kept reading Margin/FixedCost from the param epoch, so the
 // unit tests passed while a live preview replay still failed at epoch 13.
 func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
@@ -441,7 +441,7 @@ func TestDatabaseSourceGetPoolEpochDataMapTracksChangingPoolParams(
 }
 
 // TestDatabaseSourceReportsRewardsPendingForMissingRow is the DatabaseSource
-// half of the dingo #3857 guard. DingoDB has its own case for this in
+// half of the missing-row grace guard. DingoDB has its own case for this in
 // dingo_db_test.go, and the two derive the applying boundary differently -- one
 // through GetEpoch, the other through raw SQL -- so a divergence between them
 // would otherwise go unnoticed.
@@ -928,10 +928,102 @@ func TestGetPoolsRetiredByEpochImplementationsAgree(t *testing.T) {
 	)
 }
 
+// TestGetRewardSnapshotImplementationsAgree is
+// TestGetPoolsRetiredByEpochImplementationsAgree's counterpart for the
+// zero-stake completeness proof: DatabaseSource (the live in-process observer's
+// path, node_koiosparity.go's NewDatabaseSource) and DingoDB (the standalone
+// CLI's) must read the same reward_snapshot row identically, including the
+// known-zero vs. unknown (NULL, pre-tracking) ExcludedActiveStake
+// distinction and the absent-row case.
+func TestGetRewardSnapshotImplementationsAgree(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dir})
+	require.NoError(t, err)
+	sqlDB := sourceSQLDB(t, db)
+
+	knownZero := types.Uint64(0)
+	knownNonzero := types.Uint64(750_000)
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:               10,
+		SnapshotType:        "mark",
+		TotalActiveStake:    types.Uint64(5_000_000),
+		TotalPoolCount:      111,
+		ExcludedActiveStake: &knownZero,
+	}).Error)
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:               11,
+		SnapshotType:        "mark",
+		TotalActiveStake:    types.Uint64(5_000_000),
+		TotalPoolCount:      108,
+		ExcludedActiveStake: &knownNonzero,
+	}).Error)
+	// No ExcludedActiveStake at all: a snapshot captured before the column
+	// existed.
+	require.NoError(t, sqlDB.Create(&models.RewardSnapshot{
+		Epoch:            12,
+		SnapshotType:     "mark",
+		TotalActiveStake: types.Uint64(5_000_000),
+		TotalPoolCount:   90,
+	}).Error)
+
+	source, err := NewDatabaseSource(db)
+	require.NoError(t, err)
+	dingoDB, err := OpenDingoDB(DingoDBConfig{Plugin: "sqlite", DataDir: dir})
+	require.NoError(t, err)
+	defer dingoDB.Close() //nolint:errcheck
+
+	cases := []struct {
+		name  string
+		epoch uint64
+		want  *DingoRewardSnapshotSummary
+	}{
+		{
+			"known zero exclusion",
+			10,
+			&DingoRewardSnapshotSummary{
+				TotalPoolCount:           111,
+				ExcludedActiveStakeKnown: true,
+			},
+		},
+		{
+			"known nonzero exclusion",
+			11,
+			&DingoRewardSnapshotSummary{
+				TotalPoolCount:           108,
+				ExcludedActiveStake:      750_000,
+				ExcludedActiveStakeKnown: true,
+			},
+		},
+		{
+			"unknown (pre-dingo-#4025) exclusion",
+			12,
+			&DingoRewardSnapshotSummary{TotalPoolCount: 90},
+		},
+		{"no row for this epoch", 13, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fromStore, err := source.GetRewardSnapshot(
+				context.Background(), tc.epoch,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, fromStore, "DatabaseSource")
+
+			fromDingoDB, err := dingoDB.GetRewardSnapshot(
+				context.Background(), tc.epoch,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, fromDingoDB, "DingoDB")
+		})
+	}
+}
+
 // TestDatabaseSourceGetEarliestAvailableEpochNoBoundary covers a
 // non-Mithril, genesis-synced database: no mithril_ledger_slot sync-state
 // row was ever written, so ok must be false and callers must apply no lower
-// bound beyond preStakingThroughEpoch (dingo #4172).
+// bound beyond preStakingThroughEpoch.
 func TestDatabaseSourceGetEarliestAvailableEpochNoBoundary(t *testing.T) {
 	t.Parallel()
 

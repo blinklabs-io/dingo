@@ -51,15 +51,26 @@ type Manager struct {
 	configurationLocked        bool
 
 	// rewardAccountOutputRetentionUnbounded mirrors whether the in-process
-	// Koios parity observer (dingo #3098) is enabled, from node/load
-	// construction. When true, cleanupOldSnapshots retains reward_account_output
-	// without bound in CORE storage mode too, exactly as it already does
-	// unconditionally in API storage mode (dingo #1875) — see
-	// cleanupOldSnapshots's doc comment. Not consensus-affecting: it only
-	// widens local historical retention, so it carries no configurationLocked
-	// gate and may be changed at any time. Default false preserves CORE mode's
-	// existing pruning behavior when the observer is disabled (dingo #4188).
+	// Koios parity observer is enabled, from node/load construction. When true,
+	// cleanupOldSnapshots retains reward_account_output without bound in CORE
+	// storage mode too, exactly as it already does unconditionally in API
+	// storage mode — see cleanupOldSnapshots's doc comment. Not
+	// consensus-affecting: it only widens local historical retention, so it
+	// carries no configurationLocked gate and may be changed at any time.
+	// Default false preserves CORE mode's existing pruning behavior when the
+	// observer is disabled.
 	rewardAccountOutputRetentionUnbounded bool
+
+	// deferRewardStakeInputs makes the authoritative boundary capture stage
+	// the per-credential reward inputs for its caller to write after the
+	// boundary commits, instead of writing them inside the boundary
+	// transaction; see TakeDeferredRewardStakeInputs.
+	deferRewardStakeInputs bool
+	// deferredCaptures are the epochs whose mark snapshot the ledger captures
+	// after the boundary commits, with the stake rows their boundary read for
+	// the pools it retires; guarded by mu.
+	deferredCaptures    map[uint64]*deferredCapture
+	deferredStakeInputs *DeferredRewardStakeInputs
 
 	mu             sync.RWMutex
 	running        bool
@@ -71,7 +82,7 @@ type Manager struct {
 
 	// retentionGuard, when set, runs the pool-stake snapshot prune under the
 	// deferred-header lock so the retention-floor selection and the prune are
-	// atomic with respect to deferred-header admission (issue #3727 race).
+	// atomic with respect to deferred-header admission.
 	// cleanupOldSnapshots passes its default currentEpoch-3 boundary and a
 	// prune closure that deletes+commits pool snapshots below the boundary the
 	// guard hands back (lowered to keep snapshots a queued/deferred header
@@ -125,6 +136,31 @@ func (m *Manager) takeBoundaryDistribution(
 	m.mu.Lock()
 	pending := m.pendingBoundary
 	m.pendingBoundary = nil
+	m.mu.Unlock()
+	if pending == nil || pending.txn != txn {
+		return nil
+	}
+	if pending.newEpoch != evt.NewEpoch ||
+		pending.boundarySlot != evt.BoundarySlot ||
+		pending.snapshotSlot != evt.SnapshotSlot ||
+		pending.expiryEpoch != expiryEpoch {
+		return nil
+	}
+	return pending.distribution
+}
+
+// peekBoundaryDistribution returns the SNAP-point distribution computed for
+// exactly this boundary WITHOUT clearing it, so a caller earlier in the same
+// rollover transaction (governance's same-boundary SPO tally) can read it and
+// leave takeBoundaryDistribution's later persist-time read undisturbed. Same
+// matching rule as takeBoundaryDistribution, minus the consuming clear.
+func (m *Manager) peekBoundaryDistribution(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+	expiryEpoch uint64,
+) *StakeDistribution {
+	m.mu.Lock()
+	pending := m.pendingBoundary
 	m.mu.Unlock()
 	if pending == nil || pending.txn != txn {
 		return nil
@@ -198,6 +234,39 @@ func NewManager(
 		eventBus: eventBus,
 		logger:   logger,
 	}
+}
+
+// DeferredRewardStakeInputs is the per-credential reward basis of one mark
+// snapshot that CaptureEpochBoundarySnapshot staged instead of writing.
+type DeferredRewardStakeInputs struct {
+	txn          *database.Txn
+	Epoch        uint64
+	BoundarySlot uint64
+	Inputs       []*models.RewardStakeInput
+}
+
+// SetDeferRewardStakeInputs makes the authoritative boundary capture stage its
+// reward_stake_input rows for TakeDeferredRewardStakeInputs rather than write
+// them in the boundary transaction. The caller must then write them.
+func (m *Manager) SetDeferRewardStakeInputs(enabled bool) {
+	m.mu.Lock()
+	m.deferRewardStakeInputs = enabled
+	m.mu.Unlock()
+}
+
+// TakeDeferredRewardStakeInputs returns, and clears, the reward inputs the
+// capture staged in txn. ok is false when that capture staged none.
+func (m *Manager) TakeDeferredRewardStakeInputs(
+	txn *database.Txn,
+) (*DeferredRewardStakeInputs, bool) {
+	m.mu.Lock()
+	deferred := m.deferredStakeInputs
+	m.deferredStakeInputs = nil
+	m.mu.Unlock()
+	if deferred == nil || deferred.txn != txn {
+		return nil, false
+	}
+	return deferred, true
 }
 
 // SetDelegatorInactivity mirrors the CIP-0163 reward-account inactivity gate
@@ -278,10 +347,10 @@ func (m *Manager) inactivityPeriod() uint64 {
 }
 
 // SetRewardAccountOutputRetentionUnbounded mirrors whether the in-process
-// Koios parity observer (dingo #3098) is enabled into the snapshot manager's
+// Koios parity observer is enabled into the snapshot manager's
 // cleanup path. When enabled is true, cleanupOldSnapshots retains
 // reward_account_output without bound in CORE storage mode, matching API
-// storage mode's existing unbounded retention (dingo #1875).
+// storage mode's existing unbounded retention.
 //
 // The Koios parity observer validates each closed epoch against Koios only
 // after fetching and comparing over the network, which can fall arbitrarily
@@ -290,7 +359,7 @@ func (m *Manager) inactivityPeriod() uint64 {
 // cleanupOldSnapshots otherwise prunes to. Without this, reward_account_output
 // for an epoch is routinely pruned before the observer ever reads it, and the
 // koios-parity check for that epoch fails permanently with a
-// reward_account_output row that genuinely no longer exists (dingo #4188).
+// reward_account_output row that genuinely no longer exists.
 //
 // Not consensus-affecting — it only widens local historical retention — so
 // unlike SetDelegatorInactivity this is not gated by configurationLocked and
@@ -329,8 +398,7 @@ func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
 // clamps it UP to minBefore, a hard backstop bounding how many historical
 // epochs the pin can ever hold. All of this — plus eviction of deferred
 // headers the apply cursor has passed — happens under one lock so admission
-// cannot interleave (issue #3727). prune must delete AND commit before
-// returning.
+// cannot interleave. prune must delete AND commit before returning.
 type PoolSnapshotRetentionGuard func(
 	defaultBefore uint64,
 	minBefore uint64,
@@ -340,7 +408,7 @@ type PoolSnapshotRetentionGuard func(
 // SetPoolSnapshotRetentionGuard installs the guard cleanupOldSnapshots uses to
 // prune pool snapshots atomically with the deferred-header retention floor, so
 // a snapshot a queued/deferred header still needs is retained beyond the
-// default currentEpoch-3 window until the header resolves (issue #3727). Pass
+// default currentEpoch-3 window until the header resolves. Pass
 // nil to clear it. It should be set before Start; a nil guard (the default)
 // preserves the original pruning behaviour exactly.
 func (m *Manager) SetPoolSnapshotRetentionGuard(g PoolSnapshotRetentionGuard) {
@@ -554,6 +622,22 @@ func (m *Manager) handleEpochTransition(
 	// reserved for the complete read and avoids competing with other cold
 	// query preparations while the read pool is busy. The transaction still
 	// sees a fresh WAL snapshot when it begins.
+	m.mu.Lock()
+	_, deferred := m.deferredCaptures[evt.NewEpoch]
+	m.mu.Unlock()
+	if deferred {
+		m.logger.Debug(
+			"mark snapshot captured by the ledger after the boundary",
+			"component", "snapshot",
+			"epoch", evt.NewEpoch,
+		)
+		m.rotateSnapshots(ctx, evt.NewEpoch)
+		if err := m.cleanupOldSnapshots(ctx, evt.NewEpoch); err != nil {
+			return fmt.Errorf("cleanup old snapshots: %w", err)
+		}
+		return nil
+	}
+
 	preCheckTxn := m.db.Transaction(false)
 	exists, err := m.authoritativeMarkRewardSnapshotExists(
 		evt,
@@ -776,7 +860,10 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		}
 	}
 
-	if err := m.saveSnapshotInTxn(
+	m.mu.RLock()
+	deferStakeInputs := m.deferRewardStakeInputs
+	m.mu.RUnlock()
+	if err := m.saveSnapshotInTxnDeferring(
 		evt.NewEpoch,
 		"mark",
 		distribution,
@@ -789,6 +876,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		// any provisional rows a fallback (event-driven) capture already
 		// wrote for this epoch.
 		false,
+		deferStakeInputs,
 		txn,
 	); err != nil {
 		if m.metrics != nil {
@@ -832,6 +920,309 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	)
 
 	return nil
+}
+
+// CurrentBoundarySPOStakeRows returns the mark[evt.NewEpoch] pool-stake rows
+// governance.ProcessEpoch's RATIFY phase needs for its same-boundary SPO
+// tally (see dingo's governance.stakeEpochFor), with the CIP-1694
+// reward-account auto-vote resolved. It writes nothing: the durable
+// pool_stake_snapshot row for this same epoch is written later in this same
+// rollover transaction, by CaptureEpochBoundarySnapshot, once the new
+// epoch's nonce and post-enactment protocol version exist -- too late for
+// RATIFY, which runs first.
+//
+// It prefers the SNAP-point distribution ComputeEpochBoundarySnapshot already
+// stashed earlier in this same transaction (peeked, not consumed, so
+// CaptureEpochBoundarySnapshot's later take of the same value is
+// undisturbed), falling back to the same historical boundary reconstruction
+// CaptureEpochBoundarySnapshot itself falls back to when nothing is stashed
+// (no ComputeEpochBoundarySnapshot hook installed, or its read failed), and
+// applying the same era-crossing discard rule via boundaryChangesEra.
+//
+// On the peek path this returns byte-for-byte what the later persisted row
+// holds, because both read the one stashed distribution. On the fallback path
+// it does not: the caller runs this at the SNAP point, while
+// CaptureEpochBoundarySnapshot runs its own fallback at the end of the
+// rollover, and the reconstruction counts reward deltas up to and including
+// the boundary slot -- so the persisted row also absorbs the POOLREAP deposit
+// refunds and enactment credits recorded there. The SNAP-point value is the
+// one cardano-ledger's RATIFY consumes, which is why this is called where it
+// is; ledger's TestProcessEpochRollover_SnapStakeReadOrdering locks that
+// position.
+// DeferredEpochBoundarySnapshot is a boundary's mark snapshot prepared on a
+// read transaction, to be written through another.
+type DeferredEpochBoundarySnapshot struct {
+	m        *Manager
+	prepared *preparedSnapshot
+}
+
+type deferredCapture struct {
+	boundarySlot uint64
+	retiring     map[string]struct{}
+	retiringRows []*models.RewardStakeInput
+}
+
+// DeferEpochBoundaryCapture runs in the boundary transaction at the SNAP point,
+// before POOLREAP, when the ledger builds evt.NewEpoch's mark snapshot after
+// the boundary commits. POOLREAP clears the delegations to the pools it
+// retires, so it reads their stake rows now; it also stops the
+// epoch-transition handler capturing a fallback snapshot from later state.
+func (m *Manager) DeferEpochBoundaryCapture(
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) error {
+	m.lockConfiguration()
+	refunds, err := m.db.GetPoolsRetiringAtEpoch(
+		evt.NewEpoch, evt.BoundarySlot, txn,
+	)
+	if err != nil {
+		return fmt.Errorf("get retiring pools: %w", err)
+	}
+	capture := &deferredCapture{
+		boundarySlot: evt.BoundarySlot,
+		retiring:     make(map[string]struct{}, len(refunds)),
+	}
+	pools := make([][]byte, 0, len(refunds))
+	for _, refund := range refunds {
+		key := string(refund.PoolKeyHash)
+		if _, dup := capture.retiring[key]; dup {
+			continue
+		}
+		capture.retiring[key] = struct{}{}
+		pools = append(pools, refund.PoolKeyHash)
+	}
+	if len(pools) > 0 {
+		meta := m.db.Metadata()
+		metaTxn := txn.Metadata()
+		expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+		rows, err := meta.GetLiveStakeInputsForPools(
+			pools, expiryEpoch, metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("get retiring pool stake inputs: %w", err)
+		}
+		pointerRows, err := meta.GetPointerStakeInputsForPools(
+			pools, evt.SnapshotSlot, evt.BoundarySlot, expiryEpoch, metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("get retiring pool pointer inputs: %w", err)
+		}
+		capture.retiringRows, err = mergePointerStakeInputs(rows, pointerRows)
+		if err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.deferredCaptures == nil {
+		m.deferredCaptures = make(map[uint64]*deferredCapture)
+	}
+	for epoch := range m.deferredCaptures {
+		if epoch+2 < evt.NewEpoch {
+			delete(m.deferredCaptures, epoch)
+		}
+	}
+	m.deferredCaptures[evt.NewEpoch] = capture
+	return nil
+}
+
+// DiscardEpochBoundaryCapture forgets the SNAP-point capture
+// DeferEpochBoundaryCapture registered for epoch, for a boundary that captures
+// its mark snapshot itself after all. The epoch-transition handler then takes
+// its fallback capture when the boundary's own capture does not persist.
+func (m *Manager) DiscardEpochBoundaryCapture(epoch uint64) {
+	m.mu.Lock()
+	delete(m.deferredCaptures, epoch)
+	m.mu.Unlock()
+}
+
+// deferredSnapPointRows turns the live rows a committed boundary leaves into
+// the rows its SNAP point read: less each stake credential's PostSnapshot
+// credits, and with the delegations to the pools POOLREAP retired as the SNAP
+// point had them.
+func deferredSnapPointRows(
+	rows []*models.RewardStakeInput,
+	capture *deferredCapture,
+	postSnapshot []*models.AccountRewardDelta,
+) ([]*models.RewardStakeInput, error) {
+	credits := make(map[string]uint64, len(postSnapshot))
+	for _, credit := range postSnapshot {
+		credits[string([]byte{credit.CredentialTag})+
+			string(credit.StakingKey)] += uint64(credit.Amount)
+	}
+	ret := make(
+		[]*models.RewardStakeInput, 0, len(rows)+len(capture.retiringRows),
+	)
+	for _, row := range rows {
+		if row == nil {
+			return nil, errors.New("nil reward stake input")
+		}
+		if _, retired := capture.retiring[string(row.PoolKeyHash)]; retired {
+			continue
+		}
+		credit := credits[string([]byte{row.CredentialTag})+
+			string(row.StakingKey)]
+		if credit > 0 {
+			if uint64(row.Stake) < credit {
+				return nil, fmt.Errorf(
+					"stake %d of %x below its post-snapshot credits %d",
+					row.Stake, row.StakingKey, credit,
+				)
+			}
+			clone := *row
+			clone.Stake = types.Uint64(uint64(row.Stake) - credit)
+			row = &clone
+		}
+		ret = append(ret, row)
+	}
+	for _, row := range capture.retiringRows {
+		clone := *row
+		ret = append(ret, &clone)
+	}
+	return ret, nil
+}
+
+// PrepareEpochBoundarySnapshot builds mark[evt.NewEpoch] from txn, which must
+// observe the committed boundary and nothing later. The SNAP point precedes
+// the boundary's POOLREAP and governance credits, so the stake is the live
+// read less the credits marked PostSnapshot, with the retired pools' rows
+// DeferEpochBoundaryCapture read before POOLREAP cleared them. The persist-time
+// reads (reward inputs, Leios keys, reward-account auto-votes) see the whole
+// committed boundary, as they do when the boundary persists its own snapshot.
+func (m *Manager) PrepareEpochBoundarySnapshot(
+	ctx context.Context,
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) (*DeferredEpochBoundarySnapshot, error) {
+	m.lockConfiguration()
+	m.mu.Lock()
+	capture := m.deferredCaptures[evt.NewEpoch]
+	m.mu.Unlock()
+	if capture == nil || capture.boundarySlot != evt.BoundarySlot {
+		return nil, fmt.Errorf(
+			"no SNAP-point capture for epoch %d at slot %d",
+			evt.NewEpoch, evt.BoundarySlot,
+		)
+	}
+	postSnapshot, err := m.db.Metadata().GetPostSnapshotRewardCredits(
+		evt.BoundarySlot, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get post-snapshot credits: %w", err)
+	}
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+	calculator := NewCalculator(m.db)
+	distribution, err := calculator.calculateAdjustedLiveStakeDistributionInTxn(
+		ctx,
+		txn,
+		evt.SnapshotSlot,
+		evt.BoundarySlot,
+		expiryEpoch,
+		func(
+			rows []*models.RewardStakeInput,
+		) ([]*models.RewardStakeInput, error) {
+			return deferredSnapPointRows(rows, capture, postSnapshot)
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("calculate stake distribution: %w", err)
+	}
+	if _, err := rewardStakeDistribution(distribution); err != nil {
+		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
+	}
+	prepared, err := m.prepareSnapshot(
+		evt.NewEpoch, "mark", distribution, evt, true, true, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("prepare mark snapshot: %w", err)
+	}
+	return &DeferredEpochBoundarySnapshot{m: m, prepared: prepared}, nil
+}
+
+// SPOStakeRows returns the prepared mark rows, with reward-account auto-votes
+// resolved, as CurrentBoundarySPOStakeRows returns them.
+func (d *DeferredEpochBoundarySnapshot) SPOStakeRows() []*models.PoolStakeSnapshot {
+	rows := make([]*models.PoolStakeSnapshot, 0, len(d.prepared.snapshots))
+	for _, row := range d.prepared.snapshots {
+		clone := *row
+		rows = append(rows, &clone)
+	}
+	return rows
+}
+
+// Write writes the prepared snapshot through txn, staging deferred reward
+// stake inputs for txn as CaptureEpochBoundarySnapshot does.
+func (d *DeferredEpochBoundarySnapshot) Write(txn *database.Txn) error {
+	d.m.mu.RLock()
+	deferStakeInputs := d.m.deferRewardStakeInputs
+	d.m.mu.RUnlock()
+	if err := d.m.writePreparedSnapshot(
+		d.prepared, false, deferStakeInputs, txn,
+	); err != nil {
+		return fmt.Errorf("save mark snapshot: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) CurrentBoundarySPOStakeRows(
+	ctx context.Context,
+	txn *database.Txn,
+	evt event.EpochTransitionEvent,
+) ([]*models.PoolStakeSnapshot, error) {
+	m.lockConfiguration()
+	expiryEpoch := m.expiryEpoch(evt.NewEpoch)
+
+	distribution := m.peekBoundaryDistribution(txn, evt, expiryEpoch)
+	if distribution != nil {
+		crossed, err := m.boundaryChangesEra(txn, evt)
+		if err != nil {
+			return nil, err
+		}
+		if crossed {
+			distribution = nil
+		}
+	}
+	if distribution == nil {
+		calculator := NewCalculator(m.db)
+		var err error
+		distribution, err = calculator.calculateHistoricalBoundaryStakeDistributionInTxn(
+			ctx,
+			txn,
+			evt.SnapshotSlot,
+			evt.BoundarySlot,
+			expiryEpoch,
+			m.inactivityPeriod(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("calculate stake distribution: %w", err)
+		}
+	}
+
+	rows := make(
+		[]*models.PoolStakeSnapshot,
+		0,
+		len(distribution.PoolStakes),
+	)
+	for poolKeyHash, stake := range distribution.PoolStakes {
+		rows = append(rows, &models.PoolStakeSnapshot{
+			Epoch:              evt.NewEpoch,
+			SnapshotType:       "mark",
+			PoolKeyHash:        poolKeyHash[:],
+			TotalStake:         types.Uint64(stake),
+			DelegatorCount:     distribution.DelegatorCount[poolKeyHash],
+			CapturedSlot:       distribution.Slot,
+			CalculationVersion: models.RewardStakeCalculationVersion,
+		})
+	}
+	// Reads only the live Pool/Account tables, so this needs no persisted
+	// snapshot rows to exist -- see ResolvePoolRewardAccountAutoVotes's doc
+	// comment. Resolved against the same live state
+	// calculateStakeDistributionInTxn just read, matching CaptureEpochBoundary
+	// Snapshot's own resolveAutoVote=true call for the authoritative capture.
+	if err := m.db.ResolvePoolRewardAccountAutoVotes(rows, txn); err != nil {
+		return nil, fmt.Errorf("resolve reward-account auto-votes: %w", err)
+	}
+	return rows, nil
 }
 
 // calculateSnapshotDistribution computes a snapshot distribution outside the
@@ -1073,7 +1464,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// and it is still persisted below: the reward rounds at the boundaries
 	// into epochs 1, 2 and 3 all resolve against snapshot epoch 0, and without
 	// the row every one of them skips for a missing reward snapshot and the
-	// ADA pots never move (dingo #3381).
+	// ADA pots never move.
 	//
 	// That branch is taken only when the lookup above positively determined
 	// the current epoch to be 0. An undetermined epoch is not a fresh sync.

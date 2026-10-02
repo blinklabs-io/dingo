@@ -16,6 +16,7 @@ package bark
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"testing"
@@ -42,6 +43,26 @@ func TestBarkListenAddrSupportsIPv6(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
+// TestStartOnPortZeroBindsAFreePort asserts Port 0 asks the OS for a free port,
+// which Addr then reports. Two servers started that way must not contend for
+// one fixed port.
+func TestStartOnPortZeroBindsAFreePort(t *testing.T) {
+	t.Parallel()
+
+	addrs := make(map[string]bool)
+	for range 2 {
+		b, err := NewBark(BarkConfig{DB: newTestDB(t), Host: "127.0.0.1"})
+		require.NoError(t, err)
+		require.NoError(t, b.Start(t.Context()))
+		t.Cleanup(func() { _ = b.Stop(context.Background()) })
+		_, port, err := net.SplitHostPort(b.Addr())
+		require.NoError(t, err)
+		require.NotEqual(t, "0", port)
+		addrs[b.Addr()] = true
+	}
+	require.Len(t, addrs, 2)
+}
+
 func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 	t.Parallel()
 
@@ -59,7 +80,6 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 			cfg := BarkConfig{
 				DB:   newTestDB(t),
 				Host: "127.0.0.1",
-				Port: freeTCPPort(t),
 			}
 			if testCase.useTLS {
 				cfg.TlsCertFilePath, cfg.TlsKeyFilePath = writeTestTLSCertKey(t)
@@ -136,6 +156,16 @@ func TestAcquireFailsFastWhilePaused(t *testing.T) {
 // TestPauseDBWaitsForInFlightAcquire verifies PauseDB doesn't return — and
 // therefore a caller closing the database it guards doesn't proceed — until
 // every Acquire holder in flight when it was called has released.
+//
+// The wait is asserted through the gate's own state rather than through
+// elapsed time. sync.RWMutex turns new readers away as soon as a writer is
+// queued, so a PauseDB that is genuinely blocked behind the in-flight holder
+// is observable: Acquire starts failing with ErrDBUnavailable, and cannot
+// start failing for any other reason here. Asserting only that PauseDB had
+// not returned after some interval would equally accept a PauseDB that never
+// touched the gate at all and merely took a while — which is precisely the
+// implementation that would let a live Restore/Truncate close the database
+// under an in-flight Acquire holder.
 func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
 	t.Parallel()
 
@@ -151,9 +181,25 @@ func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
 		close(pauseDone)
 	}()
 
-	testutil.RequireNoReceive(t, pauseDone, 150*time.Millisecond,
-		"PauseDB must wait for the in-flight Acquire to release before "+
-			"closing the pause gate")
+	require.Eventually(t, func() bool {
+		db, release, err := b.Acquire()
+		if err == nil {
+			require.NotNil(t, db)
+			release()
+			return false
+		}
+		return errors.Is(err, ErrDBUnavailable)
+	}, 5*time.Second, time.Millisecond,
+		"PauseDB must take the gate and turn new Acquire calls away while it "+
+			"waits for the in-flight holder to release")
+
+	// Holding a reader makes this deterministic rather than a race with a
+	// timer: PauseDB cannot have completed while release is still unheld.
+	select {
+	case <-pauseDone:
+		t.Fatal("PauseDB returned while an Acquire holder was still in flight")
+	default:
+	}
 
 	release()
 	testutil.RequireReceive(t, pauseDone, time.Second, "PauseDB should "+
@@ -196,7 +242,7 @@ func TestAddrClearsAfterStop(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 	require.Empty(t, b.Addr(), "Addr must be empty before Start is ever called")
@@ -246,7 +292,7 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		db := newTestDB(t)
 		b, err := NewBark(
-			BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+			BarkConfig{DB: db, Host: "127.0.0.1"},
 		)
 		require.NoError(t, err)
 		require.NoError(t, b.Start(context.Background()))
@@ -305,7 +351,7 @@ func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 

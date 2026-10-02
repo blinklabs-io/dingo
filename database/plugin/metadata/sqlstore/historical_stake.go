@@ -5,6 +5,12 @@
 // You may obtain a copy of the License at
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //nolint:rowserrcheck,sqlclosecheck // Cursors are explicitly closed and close errors are propagated before dependent queries.
 package sqlstore
@@ -44,26 +50,35 @@ type historicalWithdrawal struct {
 // historicalRewards evaluates future reward credits only for the selected
 // credentials.  Filters are split into bounded batches so the generated
 // predicate stays below SQLite/PostgreSQL/MySQL parameter limits.
-func historicalRewards(
+func (s *Store) historicalRewards(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
-	return historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
+	return s.historicalRewardsAtBoundary(ctx, db, slot, 0, selected)
 }
 
 // historicalRewardsAtBoundary reconstructs the reward balance observed at an
 // epoch SNAP boundary. Boundary credits marked PostSnapshot are still future
 // credits relative to SNAP and must be removed, while unmarked credits at the
-// boundary are already visible to the snapshot.
-func historicalRewardsAtBoundary(
+// boundary are already visible to the snapshot. A pending round applied at or
+// before that point contributes its credits that are not written yet.
+func (s *Store) historicalRewardsAtBoundary(
 	ctx context.Context,
 	db queryer,
 	slot uint64,
 	boundarySlot uint64,
 	selected map[historicalRewardKey]struct{},
 ) (map[historicalRewardKey]uint64, error) {
+	hasPending, err := pendingRewardCreditOutputsExist(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	visibleAt := slot
+	if boundarySlot > 0 {
+		visibleAt = boundarySlot
+	}
 	keys := make([]historicalRewardKey, 0, len(selected))
 	for key := range selected {
 		keys = append(keys, key)
@@ -90,6 +105,20 @@ func historicalRewardsAtBoundary(
 		)
 		if err != nil {
 			return nil, err
+		}
+		if hasPending {
+			pending, err := s.pendingCreditsForCredentials(
+				ctx, db, visibleAt, batchSelected,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for ref, amount := range pending {
+				if ^uint64(0)-batch[ref] < amount {
+					return nil, errors.New("historical reward credit overflow")
+				}
+				batch[ref] += amount
+			}
 		}
 		maps.Copy(ret, batch)
 	}
@@ -484,7 +513,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -586,7 +615,7 @@ FROM active_delegator_stake`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewards(ctx, db, slot, selected)
+		rewardsByCredential, err := s.historicalRewards(ctx, db, slot, selected)
 		if err != nil {
 			return nil, fmt.Errorf("calculate historical rewards: %w", err)
 		}
@@ -731,7 +760,7 @@ ORDER BY pool_key_hash, credential_tag, staking_key`,
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		rewardsByCredential, err := historicalRewardsAtBoundary(
+		rewardsByCredential, err := s.historicalRewardsAtBoundary(
 			ctx, db, slot, boundarySlot, selected,
 		)
 		if err != nil {
@@ -885,6 +914,24 @@ func byteSliceArgs(values [][]byte) []any {
 	return ret
 }
 
+// activeDelegationSQL resolves, for each credential, which pool its most
+// recent surviving delegation certificate names as of slot.
+//
+// A delegation certificate is not the last word on the delegation: POOLREAP
+// removes the delegations pointing at a pool reaped at an epoch boundary
+// (ClearDelegationsToRetiredPool) and writes no certificate of its own, so a
+// certificate predating a reap that still stands at slot must not put the
+// credential back on that pool if the pool later re-registered and the
+// credential never re-delegated. The active_delegation CTE's NOT EXISTS
+// clause below ports poolReapedAfterDelegation's rollback-path guard
+// (account.go) into this historical-reconstruction path, which had no
+// equivalent guard: live incident, Preview epoch 646/647, pools
+// 2bf19282e11384ccf60c9a3b0f5b6e00e74aed2cbd8bc9837ccc0966 and
+// 881f9bc5415bb7381dc4b6571ab662eff5277d78d778d05614cdf0d4 each retired and
+// later re-registered, and one-time delegators from before the reap who never
+// re-delegated had their stake wrongly resurrected onto the pool by this
+// query, producing a stake-distribution mismatch against Koios of exactly
+// the reaped credentials' stake (dingo node-parity issue, epoch 647).
 func activeDelegationSQL(slot uint64) (string, []any) {
 	args := make(
 		[]any,
@@ -998,7 +1045,52 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
      OR (delegation.added_slot = registration.added_slot
        AND delegation.block_index = registration.block_index
        AND delegation.cert_index >= registration.cert_index))
-)`, args
+   AND NOT EXISTS (
+       SELECT 1
+       FROM pool_retirement rt
+       JOIN pool p ON p.id = rt.pool_id
+       JOIN epoch e ON e.epoch_id = rt.epoch
+       LEFT JOIN certs c ON c.id = rt.certificate_id
+       LEFT JOIN "transaction" t ON t.id = c.transaction_id
+       WHERE p.pool_key_hash = delegation.pool_key_hash
+         AND rt.added_slot <= ?
+         AND e.start_slot > delegation.added_slot
+         AND e.start_slot <= ?
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_registration pr
+             LEFT JOIN certs c2 ON c2.id = pr.certificate_id
+             LEFT JOIN "transaction" t2 ON t2.id = c2.transaction_id
+             WHERE pr.pool_id = rt.pool_id
+               AND pr.added_slot < e.start_slot
+               AND (
+                   pr.added_slot > rt.added_slot
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (pr.added_slot = rt.added_slot
+                       AND COALESCE(t2.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c2.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+         AND NOT EXISTS (
+             SELECT 1
+             FROM pool_retirement rt2
+             LEFT JOIN certs c3 ON c3.id = rt2.certificate_id
+             LEFT JOIN "transaction" t3 ON t3.id = c3.transaction_id
+             WHERE rt2.pool_id = rt.pool_id
+               AND rt2.id <> rt.id
+               AND rt2.added_slot < e.start_slot
+               AND (
+                   rt2.added_slot > rt.added_slot
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) > COALESCE(t.block_index, 0))
+                   OR (rt2.added_slot = rt.added_slot
+                       AND COALESCE(t3.block_index, 0) = COALESCE(t.block_index, 0)
+                       AND COALESCE(c3.cert_index, 0) > COALESCE(c.cert_index, 0))
+               )
+         )
+   )
+)`, append(args, slot, slot)
 }
 
 // historicalExpirationSQL reconstructs each active-delegation credential's
@@ -1031,10 +1123,10 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
 // keyed on consensus chain state, not per-node config. That is a guarantee
 // about rows already written, not about whether a row is written at all:
 // account_withdrawal_witness inserts are separately elided when
-// DelegatorInactivityEnabled is off (issue #2919), which is the same
+// DelegatorInactivityEnabled is off, which is the same
 // network-wide setting this function's caller already requires to match, so
 // it introduces no new divergence. See ARCHITECTURE.md's CIP-0163 section
-// (issue #2920) before adding any other deletion path for these tables.
+// before adding any other deletion path for these tables.
 func historicalExpirationSQL(
 	ctx context.Context,
 	db queryer,
@@ -1162,4 +1254,66 @@ func noHistorySQL(alias string, tables []string) string {
  )`, table, alias, alias)
 	}
 	return ret.String()
+}
+
+// GetEpochBoundaryDelegatedPoolKeyHashes returns every pool key hash the
+// boundary reconstruction attributes stake to at snapshotSlot, whether or not
+// that pool is still registered. It is the historical-path counterpart of
+// GetDelegatedPoolKeyHashes and serves the same sigma_a denominator; see that
+// function for why the denominator must not be enumerated from the active pool
+// set.
+//
+// It reconstructs from the same CTE the stake fetch uses, with the pool
+// predicate relaxed to "has a delegation at all", and applies neither the
+// expiry nor the inactivity gate: the result only widens the set of pools the
+// stake fetch is asked about, and that fetch applies both.
+func (s *Store) GetEpochBoundaryDelegatedPoolKeyHashes(
+	snapshotSlot uint64,
+	boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	if boundarySlot <= snapshotSlot {
+		boundarySlot = 0
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: resolve db: %w",
+			err,
+		)
+	}
+	query, args, err := s.historicalStakeCTE(
+		ctx,
+		db,
+		snapshotSlot,
+		boundarySlot,
+		0,
+		0,
+		"active_delegation.pool_key_hash IS NOT NULL",
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, query+`
+SELECT DISTINCT pool_key_hash FROM active_delegator_stake`, args...)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetEpochBoundaryDelegatedPoolKeyHashes: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+	ret := [][]byte{}
+	for rows.Next() {
+		var hash []byte
+		if err := rows.Scan(&hash); err != nil {
+			return nil, err
+		}
+		if len(hash) == 0 {
+			continue
+		}
+		ret = append(ret, hash)
+	}
+	return ret, rows.Err()
 }

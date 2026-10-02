@@ -196,12 +196,6 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	return v.ValidateTx(tx)
 }
 
-func (v *mockValidator) setFailHash(hash string, fail bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.failHashes[hash] = fail
-}
-
 func (v *mockValidator) setFailAll(fail bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -4044,16 +4038,6 @@ func (v *overlayValidator) removeBaseUtxo(key utxoref.Key) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.baseUtxos, key)
-}
-
-// hexToBlake2b256 converts a hex string to a Blake2b256 hash.
-func hexToBlake2b256(t *testing.T, h string) lcommon.Blake2b256 {
-	t.Helper()
-	var hash lcommon.Blake2b256
-	b, err := hex.DecodeString(h)
-	require.NoError(t, err)
-	copy(hash[:], b)
-	return hash
 }
 
 // buildMockTx builds a mock transaction with the given inputs and outputs.

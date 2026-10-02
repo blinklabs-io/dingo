@@ -14,7 +14,10 @@
 
 package chainselection
 
-import "math"
+import (
+	"math"
+	"math/big"
+)
 
 const defaultGenesisWindowSlots uint64 = 6480
 
@@ -38,26 +41,38 @@ func (m SelectionMode) String() string {
 }
 
 // GenesisWindowSlotsForParams returns the Genesis density window in slots.
-// Shelley-style networks use 3k/f, where k is the security parameter and f is
-// the active slot coefficient.
+// Shelley-style networks use ceil(3k/f), where k is the security parameter and
+// f is the active slot coefficient, matching the reference node's
+// computeStabilityWindow. The division is exact: f must be the genesis
+// rational, because a float64 approximation of a value such as 3/10000 rounds
+// the quotient across an integer boundary and widens the window by one slot.
+// It returns the default window when k is zero or f is nil or not positive,
+// saturates at math.MaxUint64, and does not modify activeSlotsCoeff.
 func GenesisWindowSlotsForParams(
 	securityParam uint64,
-	activeSlotsCoeff float64,
+	activeSlotsCoeff *big.Rat,
 ) uint64 {
 	if securityParam == 0 ||
-		activeSlotsCoeff <= 0 ||
-		math.IsNaN(activeSlotsCoeff) ||
-		math.IsInf(activeSlotsCoeff, 0) {
+		activeSlotsCoeff == nil ||
+		activeSlotsCoeff.Sign() <= 0 {
 		return defaultGenesisWindowSlots
 	}
-	window := math.Ceil(3 * float64(securityParam) / activeSlotsCoeff)
-	if window <= 0 {
-		return defaultGenesisWindowSlots
+	// 3k / (num/denom) = 3k*denom / num, rounded up.
+	numerator := new(big.Int).SetUint64(securityParam)
+	numerator.Mul(numerator, big.NewInt(3))
+	numerator.Mul(numerator, activeSlotsCoeff.Denom())
+	window, remainder := new(big.Int).QuoRem(
+		numerator,
+		activeSlotsCoeff.Num(),
+		new(big.Int),
+	)
+	if remainder.Sign() != 0 {
+		window.Add(window, big.NewInt(1))
 	}
-	if window >= float64(math.MaxUint64) {
+	if !window.IsUint64() {
 		return math.MaxUint64
 	}
-	return uint64(window)
+	return window.Uint64()
 }
 
 // DensityFromIntersection counts candidate blocks in the Genesis window that

@@ -15,6 +15,9 @@
 package ledger
 
 import (
+	"math"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -24,21 +27,24 @@ import (
 )
 
 type stateMetrics struct {
-	blockNum            prometheus.Gauge
-	density             prometheus.Gauge
-	epochNum            prometheus.Gauge
-	slotInEpoch         prometheus.Gauge
-	slotNum             prometheus.Gauge
-	forks               prometheus.Gauge
-	slotClockFallbacks  prometheus.Counter
-	blocksForgedTotal   prometheus.Counter
-	blockForgingLatency prometheus.Histogram
-	forgingEnabled      prometheus.Gauge
-	nodeStartTime       prometheus.Gauge
-	tipGapSlots         prometheus.Gauge
-	shelleyStartTime    prometheus.Gauge
-	epochLengthSlots    prometheus.Gauge
-	shadowGateDecisions *prometheus.CounterVec
+	blockfetchEventMu     sync.Mutex
+	blockfetchEventStarts map[uint64]time.Time
+	blockfetchEventNextID uint64
+	blockNum              prometheus.Gauge
+	density               prometheus.Gauge
+	epochNum              prometheus.Gauge
+	slotInEpoch           prometheus.Gauge
+	slotNum               prometheus.Gauge
+	forks                 prometheus.Gauge
+	slotClockFallbacks    prometheus.Counter
+	blocksForgedTotal     prometheus.Counter
+	blockForgingLatency   prometheus.Histogram
+	forgingEnabled        prometheus.Gauge
+	nodeStartTime         prometheus.Gauge
+	tipGapSlots           prometheus.Gauge
+	shelleyStartTime      prometheus.Gauge
+	epochLengthSlots      prometheus.Gauge
+	shadowGateDecisions   *prometheus.CounterVec
 	// Wall-clock time the ledger apply path spent waiting for a referenced
 	// Leios endorser block, by outcome ("arrived", "timeout", "cancelled" or
 	// "unavailable"). It covers both waits the apply path can take: the
@@ -72,24 +78,115 @@ type stateMetrics struct {
 	// transaction's era ledger-rule validation, including Plutus
 	// evaluation, inside ledgerProcessBlock), and apply (writing a
 	// flushed LedgerDeltaBatch's UTXO and transaction rows to the
-	// metadata store). See dingo_blockfetch_stage_duration_seconds in the
+	// metadata store), and epoch_rollover (the epoch-boundary transaction
+	// in ledgerProcessBlocksFromSource: era transitions, reward
+	// application and the governance tally, during which no block is
+	// applied). See dingo_blockfetch_stage_duration_seconds in the
 	// ouroboros package for the wire-decode stage, which runs before a
 	// block reaches the ledger at all. Together the two metrics answer
 	// "where does per-block processing time go", which no existing
 	// histogram covers end to end.
 	blockStageDuration *prometheus.HistogramVec
+	// epochRolloverDuration is the whole processEpochRollover transaction
+	// body, and epochRolloverPhaseDuration each of its named phases; see
+	// timeRolloverPhase.
+	epochRolloverDuration      prometheus.Histogram
+	epochRolloverPhaseDuration *prometheus.HistogramVec
 	// Pre-materialized observers for the stage label values, so the hot
 	// path does not resolve a label on every block or transaction.
-	blockStageHeaderVerify prometheus.Observer
-	blockStageValidate     prometheus.Observer
-	blockStageApply        prometheus.Observer
+	blockStageHeaderVerify  prometheus.Observer
+	blockStageValidate      prometheus.Observer
+	blockStageApply         prometheus.Observer
+	blockStageEpochRollover prometheus.Observer
+	// Per-stage maximum wall-clock duration ever observed since process
+	// start, each holding math.Float64bits of a seconds value and advanced
+	// by updateMaxDuration's compare-and-swap loop at the same
+	// observeBlockStage call site that records blockStageDuration, so the
+	// two can never drift out of sync with each other.
+	// (blockStageDuration's doc comment above covers what each stage means.)
+	//
+	// These atomics are the metric's only state. They are exported as
+	// dingo_ledger_block_stage_max_duration_seconds by GaugeFunc collectors
+	// that read them at scrape time -- see registerBlockStageMaxDuration --
+	// rather than by Gauges that observeBlockStage pushes into, so there is
+	// no second copy of the value that can fall behind this one.
+	//
+	// A histogram quantile is only an estimate bounded by its bucket edges,
+	// however wide they are; this is the exact worst-ever-seen value, so an
+	// epoch-boundary stall (block application blocked for 25s to over 300s)
+	// shows up exactly on the epoch_rollover stage instead of "somewhere past
+	// the last bucket boundary".
+	//
+	// Deliberately monotonic non-resetting ("worst ever seen"), not a
+	// windowed maximum: a windowed maximum needs a periodic-reset custom
+	// Collector, real complexity for a question -- "did we ever see
+	// something this bad" -- that a simple non-resetting maximum already
+	// answers.
+	blockStageHeaderVerifyMax  atomic.Uint64
+	blockStageValidateMax      atomic.Uint64
+	blockStageApplyMax         atomic.Uint64
+	blockStageEpochRolloverMax atomic.Uint64
+	// Wall-clock time from the start of applying one committed
+	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
+	// commits at most batchSize=50 blocks per transaction) to the moment
+	// updateTipMetrics reflects that chunk's new tip in
+	// cardano_node_metrics_blockNum_int -- the same gauge the "Block apply
+	// rate" Grafana panel (internal/test/devnet/koios-parity/grafana/dashboards/dingo-sync-progress.json,
+	// panel id 3) derives deriv() from.
+	//
+	// Up to batchSize blocks commit and advance blockNum_int together in
+	// one DB transaction, so there is no narrower point at which an
+	// individual block's own application is separately reflected in the
+	// tip: the DB write batches deltas from every block in the chunk into
+	// one deltaBatch.apply call, and the in-memory tip only advances after
+	// that transaction commits. This is a genuine per-batch measurement,
+	// not an approximation of a per-block one -- see
+	// dingo_ledger_block_apply_batch_size below, which records how many
+	// blocks each observation actually covered, so a reader can relate
+	// this metric to the rate panel without assuming false per-block
+	// precision.
+	//
+	// Deliberately not derived from a rate over
+	// cardano_node_metrics_blockNum_int (e.g. a dashboard-side
+	// "1 / clamp_min(deriv(...), 0.001)"): that only derives a rate from a
+	// gauge's slope, cannot give a true percentile, and is not a real
+	// per-observation duration -- unlike this histogram.
+	blockApplyBatchLatency prometheus.Histogram
+	// Exact maximum wall-clock duration blockApplyBatchLatency has ever
+	// observed since process start, advanced by updateMaxDuration's
+	// compare-and-swap loop at the same observeBlockApplyBatch call site
+	// that records blockApplyBatchLatency, so the two cannot drift out of
+	// sync. Exported by a GaugeFunc that reads this atomic at scrape time
+	// (see registerBlockApplyBatchMaxLatency) rather than by a Gauge that
+	// observeBlockApplyBatch pushes into: with a pushed Gauge, two
+	// goroutines can each win the compare-and-swap and land their Set
+	// calls in the other order, leaving the exported value durably behind
+	// the true maximum until some later observation happens to beat the
+	// record again. Reading the atomic directly at scrape time cannot
+	// exhibit that failure.
+	blockApplyBatchMaxLatency atomic.Uint64
+	// Distribution of blocksProcessed for each blockApplyBatchLatency
+	// observation: how many blocks the committed DB-transaction chunk that
+	// observation timed actually contained. Observed at the same call site
+	// as blockApplyBatchLatency, so "latency / batch size" can approximate
+	// a per-block rate comparable to the "Block apply rate" panel without
+	// this metric itself claiming per-block precision it does not have.
+	//
+	// Not a duplicate of commitBatchBlocks below, which observes
+	// len(nextBatch) where ledgerReadChainIterator submits a gathered
+	// batch. That is the read loop's gather size before the apply loop
+	// chunks it; this is the number of blocks a chunk actually applied and
+	// committed, which is lower whenever the chunk skipped blocks (a
+	// Mithril-gap closure, say). Only this one is paired one-to-one with a
+	// latency observation, which is what makes the ratio meaningful.
+	blockApplyBatchSize prometheus.Histogram
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
 	governanceProposalDecodeFailures prometheus.Counter
 	// Incremented when a peer repeatedly asks us to roll back to a point
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
-	// as a metric instead of only a WARN loop. See issue #2728.
+	// as a metric instead of only a WARN loop.
 	unrecoverableRollbacks prometheus.Counter
 	// Incremented when a chainsync peer asks for a rollback we refuse, but
 	// its own advertised tip is a strict ancestor of ours on our primary
@@ -103,35 +200,33 @@ type stateMetrics struct {
 	// connection is the signal noteNonExtendingBlockRejection uses to
 	// recycle it (see nonExtendingBlockFloodRecycles) -- this counter makes
 	// that pattern visible before it crosses the recycle threshold, and
-	// across all connections even when none individually crosses it. See
-	// issue #4272.
+	// across all connections even when none individually crosses it.
 	nonExtendingBlockRejections prometheus.Counter
 	// Incremented each time noteNonExtendingBlockRejection actually recycles
 	// a connection for flooding non-extending blocks (as opposed to every
-	// individual rejection, counted above). See issue #4272.
+	// individual rejection, counted above).
 	nonExtendingBlockFloodRecycles prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
 	// means local ledger validation is diverging from the network (e.g. a
-	// false-positive validation rejection), not a peer/fork problem. See
-	// issue #2939.
+	// false-positive validation rejection), not a peer/fork problem.
 	atTipRecoveryNonConverging prometheus.Counter
 	// Incremented when an at-tip recovery rewind target falls below the
 	// consumed-UTxO prune floor and is clamped to the ledger tip. The sweep
 	// hard-deletes spent rows, and rollback restores them with an UPDATE, so
 	// a rewind past the floor cannot rebuild the live UTxO set it implies. A
 	// rising value means recovery is asking for rewinds deeper than local
-	// history can support. See issue #3766.
+	// history can support.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
-	// pruning another security-parameter window. See issue #3005.
+	// pruning another security-parameter window.
 	replayRecoveryNonConverging prometheus.Counter
 	// Incremented when the cross-fork continuation audit finds a freshly
 	// fetched body spending an input whose producing transaction is not on
 	// the local applied chain. A rising value means a peer is feeding the
-	// node a continuation from a fork it never applied. See issue #3005.
+	// node a continuation from a fork it never applied.
 	continuationInputUnresolved prometheus.Counter
 	// Incremented when the primary-chain/ledger divergence reconciler
 	// cannot resolve one of the ledger's own applied block_nonce points to
@@ -140,8 +235,7 @@ type stateMetrics struct {
 	// manager's block cache no longer retains it either. The reconciler
 	// still rolls the ledger back correctly; only the undo notification for
 	// that block is missing, so a rising value means ledger.tx subscribers
-	// may be carrying stale derived state for an abandoned branch. See
-	// issue #3516.
+	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
@@ -151,7 +245,7 @@ type stateMetrics struct {
 	// block_nonce-keyed search. A rising value means an applied block's
 	// ledger.tx undo event could not even be attempted for lack of a
 	// durable per-block record, not merely because the content was no
-	// longer reachable. See issue #3778.
+	// longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -191,14 +285,14 @@ type stateMetrics struct {
 	// made no tip progress, and to 1 while that count is past the point
 	// where the pipeline is treated as stuck. A deterministic failure (a
 	// rejected canonical block, say) repeats forever, so without this a
-	// wedged node is visible only as a repeating WARN. See issue #3165.
+	// wedged node is visible only as a repeating WARN.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
 	// Set to 1 once the ledger pipeline has stopped retrying altogether.
 	// Unlike pipelineStuck this is terminal: the pipeline goroutine has
 	// returned and nothing will clear it short of a restart, so it is the
 	// signal to alert on for a node that has permanently stopped following
-	// the chain. See issue #3261.
+	// the chain.
 	pipelineHalted prometheus.Gauge
 	// Incremented when validation recovery declares a failure unrepairable
 	// because every rewind target it may legally reach lies inside the
@@ -219,14 +313,13 @@ type stateMetrics struct {
 	// (see poolStakeDistribution's own comment), not a failure, so it
 	// does not abort the query -- but a sustained nonzero value means a
 	// real cross-node comparison tool would see dingo's reply as short by
-	// that many pools, the exact condition blinklabs-io/dingo#4152 found
-	// via cmd/node-parity against a real cardano-node without any other
-	// visible symptom. Making this a metric rather than only the existing
-	// WARN log lets that be caught by an alert instead of requiring a
-	// manual diff to notice again.
+	// that many pools, the exact condition found via cmd/node-parity against a
+	// real cardano-node without any other visible symptom. Making this a metric
+	// rather than only the existing WARN log lets that be caught by an alert
+	// instead of requiring a manual diff to notice again.
 	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
-	// block-processing pipeline (issue #1894), refreshed after every batch
+	// block-processing pipeline, refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
 	// counters because the pipeline itself owns the cumulative totals
 	// (they can only be Set from a periodic snapshot, not incremented
@@ -238,7 +331,7 @@ type stateMetrics struct {
 	blockPipelineQueueDepth       prometheus.Gauge
 	// blockPipelineExpectedEta0Errors/blockPipelineDeferredEpochCacheErrors/
 	// blockPipelineUnexpectedErrors count errors drained from
-	// blockPipeline.Errors() by drainBlockPipelineErrors (issue #1894
+	// blockPipeline.Errors() by drainBlockPipelineErrors (the pipeline
 	// deadlock fix): the eta0 counter tracks errBlockPipelineEta0Unavailable
 	// (no cached Praos nonce yet -- normal on every from-genesis sync, since
 	// it is how Byron-era slots always fail this lookup, but the same
@@ -249,11 +342,7 @@ type stateMetrics struct {
 	// cache advances, per this section's own doc comment); the unexpected
 	// counter tracks everything else reaching errorsChan (decode errors,
 	// non-Byron validation failures, apply-stage invariant violations),
-	// which should stay at 0 in healthy operation; the apply-pending-limit
-	// counter tracks pipeline.ErrPendingLimitExceeded (the apply stage's
-	// out-of-order buffer grew past MaxPendingBlocks because one stage
-	// worker fell behind its siblings -- a load signal, not a block
-	// failure: the item stays buffered and is applied in sequence); the
+	// which should stay at 0 in healthy operation; the
 	// shutdown counter tracks context.Canceled/context.DeadlineExceeded
 	// (BlockPipeline.Stop cancels the pipeline context before draining, so
 	// a stage worker mid-item at shutdown can report the cancellation
@@ -262,10 +351,9 @@ type stateMetrics struct {
 	// incremented directly as each error is drained.
 	blockPipelineExpectedEta0Errors       prometheus.Counter
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
-	blockPipelineApplyPendingLimitErrors  prometheus.Counter
 	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
-	// Per-block composition metrics (issue #4367), all labelled by era
+	// Per-block composition metrics, all labelled by era
 	// (block.Era().Name, e.g. "Babbage", "Conway"). Recorded once per
 	// applied block, right where blocksProcessed is incremented in
 	// ledgerProcessBlocksFromSource, so a spike in
@@ -294,12 +382,29 @@ type stateMetrics struct {
 	utxoCreatedTotal  *prometheus.CounterVec
 	utxoConsumedTotal *prometheus.CounterVec
 	certificatesTotal *prometheus.CounterVec
+	// commitBatchBlocks observes len(nextBatch) each time
+	// ledgerReadChainIterator submits a gathered batch of blocks downstream
+	// for a single DB transaction (batchSize caps it at 50). Added
+	// alongside the premature-flush fix so a future run can
+	// confirm the batch-size distribution actually shifted upward, rather
+	// than relying on re-measuring physical disk I/O.
+	commitBatchBlocks prometheus.Histogram
 }
 
 // The accessors below tolerate an uninitialised stateMetrics. A LedgerState
 // built directly -- as the ledger's own unit tests do -- never calls init, so
 // its metric fields are nil; instrumenting a path that those tests exercise
 // must not turn a metric into a nil dereference.
+
+// observeCommitBatchBlocks records one gathered batch's block count; see
+// commitBatchBlocks. Passes that gather nothing are not observed at all --
+// see the call site in ledgerReadChainIterator.
+func (m *stateMetrics) observeCommitBatchBlocks(blocks int) {
+	if m == nil || m.commitBatchBlocks == nil {
+		return
+	}
+	m.commitBatchBlocks.Observe(float64(blocks))
+}
 
 func (m *stateMetrics) observeLeaderThresholdMargin(margin float64) {
 	if m == nil || m.leaderThresholdMargin == nil {
@@ -340,37 +445,203 @@ const (
 // Stage labels for blockStageDuration. See its field doc comment for what
 // each stage covers.
 const (
-	blockStageHeaderVerify = "header_verify"
-	blockStageValidate     = "validate"
-	blockStageApply        = "apply"
+	blockStageHeaderVerify  = "header_verify"
+	blockStageValidate      = "validate"
+	blockStageApply         = "apply"
+	blockStageEpochRollover = "epoch_rollover"
 )
 
 // observeBlockStage records one sample of wall-clock time spent in the named
-// per-block processing stage. Safe to call before init (or when metrics are
-// disabled), matching the other observe helpers in this file.
+// per-block processing stage, into both blockStageDuration (the histogram)
+// and blockStageMaxDuration (the exact running maximum for that stage) --
+// the same call site feeds both, so they cannot drift out of sync with each
+// other. Safe to call before init (or when metrics are disabled), matching
+// the other observe helpers in this file.
 func (m *stateMetrics) observeBlockStage(stage string, d time.Duration) {
 	if m == nil {
 		return
 	}
 	var obs prometheus.Observer
+	var record *atomic.Uint64
 	switch stage {
 	case blockStageHeaderVerify:
 		obs = m.blockStageHeaderVerify
+		record = &m.blockStageHeaderVerifyMax
 	case blockStageValidate:
 		obs = m.blockStageValidate
+		record = &m.blockStageValidateMax
 	case blockStageApply:
 		obs = m.blockStageApply
+		record = &m.blockStageApplyMax
+	case blockStageEpochRollover:
+		obs = m.blockStageEpochRollover
+		record = &m.blockStageEpochRolloverMax
 	}
-	if obs != nil {
-		obs.Observe(d.Seconds())
+	if obs == nil {
+		// Unknown stage, or metrics were never initialised: neither field
+		// was resolved, so there is nothing to update on either metric.
+		// Gating the running maximum on the histogram observer too is what
+		// keeps the two reporting the same set of samples.
+		return
 	}
+	seconds := d.Seconds()
+	obs.Observe(seconds)
+	updateMaxDuration(record, seconds)
+}
+
+func (m *stateMetrics) beginBlockfetchEvent() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.blockfetchEventMu.Lock()
+	if m.blockfetchEventStarts == nil {
+		m.blockfetchEventStarts = make(map[uint64]time.Time)
+	}
+	m.blockfetchEventNextID++
+	id := m.blockfetchEventNextID
+	m.blockfetchEventStarts[id] = time.Now()
+	m.blockfetchEventMu.Unlock()
+	return id
+}
+
+func (m *stateMetrics) endBlockfetchEvent(id uint64) {
+	if m == nil || id == 0 {
+		return
+	}
+	m.blockfetchEventMu.Lock()
+	delete(m.blockfetchEventStarts, id)
+	m.blockfetchEventMu.Unlock()
+}
+
+func (m *stateMetrics) blockfetchEventInProgressSeconds() float64 {
+	m.blockfetchEventMu.Lock()
+	defer m.blockfetchEventMu.Unlock()
+	if len(m.blockfetchEventStarts) == 0 {
+		return 0
+	}
+	var oldest time.Time
+	for _, started := range m.blockfetchEventStarts {
+		if oldest.IsZero() || started.Before(oldest) {
+			oldest = started
+		}
+	}
+	return time.Since(oldest).Seconds()
+}
+
+// updateMaxDuration performs a lock-free "keep the maximum ever observed"
+// update: it compares observed against the current value of record (an
+// atomic.Uint64 holding math.Float64bits of the running maximum) and
+// compare-and-swaps it in only when observed is strictly larger. On the hot
+// per-block path this costs one atomic load and, in the common case where
+// observed does not beat the record, no write at all -- no lock, no
+// allocation.
+//
+// record is the metric's only state; the exported gauge reads it at scrape
+// time (see registerBlockStageMaxDuration and
+// registerBlockApplyBatchMaxLatency). That is what makes the exported
+// value exactly equal to the record at all times, and it is the reason this
+// does not also push the new value into a Gauge. Pushing would introduce a
+// second copy that can fall behind and stay behind: two goroutines can each
+// win a CAS (say 5s then 10s) and land their Set calls in the other order,
+// leaving the gauge reading 5 while the record holds 10. Nothing recovers
+// that until an observation beats 10 -- an observation of 7 exits at the
+// comparison below without touching the gauge -- so on a metric whose whole
+// purpose is the worst case, the exported value could understate the record
+// for the life of the process.
+func updateMaxDuration(record *atomic.Uint64, observed float64) {
+	for {
+		old := record.Load()
+		if observed <= math.Float64frombits(old) {
+			return
+		}
+		if record.CompareAndSwap(old, math.Float64bits(observed)) {
+			return
+		}
+	}
+}
+
+// blockStageMaxDurationHelp documents
+// dingo_ledger_block_stage_max_duration_seconds. Shared by all three
+// per-stage collectors, which must agree on it: the Prometheus registry
+// rejects two collectors that export the same metric name with different
+// help text.
+const blockStageMaxDurationHelp = "maximum wall-clock duration ever observed for each ledger-owned per-block processing stage (see dingo_ledger_block_stage_duration_seconds), since process start; monotonically non-decreasing, and exact rather than bucket-bounded"
+
+// registerBlockStageMaxDuration exports each stage's running maximum as one
+// series of dingo_ledger_block_stage_max_duration_seconds.
+//
+// One GaugeFunc per stage carrying the stage as a constant label, rather
+// than a single GaugeVec: a GaugeVec's members hold their own copy of the
+// value and must be Set, which is a second place the number lives and can
+// go stale (see updateMaxDuration). A GaugeFunc reads the atomic at scrape
+// time, so the exported value is the record by construction. This is the
+// same pull-based pattern the sqlstore and sqlite metadata plugins already
+// use for values they do not own a copy of.
+func (m *stateMetrics) registerBlockStageMaxDuration(
+	factory promauto.Factory,
+) {
+	for stage, record := range map[string]*atomic.Uint64{
+		blockStageHeaderVerify:  &m.blockStageHeaderVerifyMax,
+		blockStageValidate:      &m.blockStageValidateMax,
+		blockStageApply:         &m.blockStageApplyMax,
+		blockStageEpochRollover: &m.blockStageEpochRolloverMax,
+	} {
+		factory.NewGaugeFunc(
+			prometheus.GaugeOpts{
+				Name:        "dingo_ledger_block_stage_max_duration_seconds",
+				Help:        blockStageMaxDurationHelp,
+				ConstLabels: prometheus.Labels{"stage": stage},
+			},
+			func() float64 {
+				return math.Float64frombits(record.Load())
+			},
+		)
+	}
+}
+
+// observeBlockApplyBatch records one committed DB-transaction chunk's ledger
+// apply latency (see blockApplyBatchLatency's doc comment) and how many
+// blocks that chunk contained (blockApplyBatchSize). The ledger/state.go
+// call site only calls this once a chunk with blockCount > 0 has committed
+// and updateTipMetrics has advanced the tip for it; a chunk that applied no
+// blocks (e.g. one that immediately hit an epoch boundary) is not observed
+// at all. Safe to call before init (or when metrics are disabled), matching
+// the other observe helpers in this file.
+func (m *stateMetrics) observeBlockApplyBatch(blockCount int, d time.Duration) {
+	if m == nil || m.blockApplyBatchLatency == nil {
+		return
+	}
+	seconds := d.Seconds()
+	m.blockApplyBatchLatency.Observe(seconds)
+	updateMaxDuration(&m.blockApplyBatchMaxLatency, seconds)
+	if m.blockApplyBatchSize != nil {
+		m.blockApplyBatchSize.Observe(float64(blockCount))
+	}
+}
+
+// registerBlockApplyBatchMaxLatency exports blockApplyBatchMaxLatency as
+// dingo_ledger_block_apply_batch_max_latency_seconds via a GaugeFunc, so the
+// exported value is read directly from the atomic at scrape time rather than
+// through a second, independently-updated copy. See
+// blockApplyBatchMaxLatency's doc comment and updateMaxDuration for why.
+func (m *stateMetrics) registerBlockApplyBatchMaxLatency(
+	factory promauto.Factory,
+) {
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_apply_batch_max_latency_seconds",
+			Help: "maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start; monotonically non-decreasing and exact rather than bucket-bounded",
+		},
+		func() float64 {
+			return math.Float64frombits(m.blockApplyBatchMaxLatency.Load())
+		},
+	)
 }
 
 // blockComposition summarizes the shape of one applied block: era,
 // transaction count, Plutus script/redeemer presence, UTxO churn, and
 // certificate count. computeBlockComposition derives it once per block so
-// observeBlockComposition never has to walk the block's transactions itself
-// (issue #4367).
+// observeBlockComposition never has to walk the block's transactions itself.
 type blockComposition struct {
 	era          string
 	transactions int
@@ -537,20 +808,6 @@ func (m *stateMetrics) incBlockPipelineDeferredEpochCacheError() {
 	m.blockPipelineDeferredEpochCacheErrors.Inc()
 }
 
-// incBlockPipelineApplyPendingLimitError records a block-processing pipeline
-// apply-stage backpressure signal drained from errorsChan
-// (pipeline.ErrPendingLimitExceeded): more out-of-order blocks were buffered
-// waiting for an earlier sequence number than MaxPendingBlocks allows. The
-// item is still buffered and still applied in sequence, so this is a
-// throughput/scheduling signal rather than a decode, validation, or apply
-// failure.
-func (m *stateMetrics) incBlockPipelineApplyPendingLimitError() {
-	if m == nil || m.blockPipelineApplyPendingLimitErrors == nil {
-		return
-	}
-	m.blockPipelineApplyPendingLimitErrors.Inc()
-}
-
 // incBlockPipelineShutdownError records a block-processing pipeline stage
 // worker reporting its own context cancellation
 // (context.Canceled/context.DeadlineExceeded) rather than an item outcome.
@@ -635,6 +892,13 @@ func (m *stateMetrics) updateBlockPipelineStats(stats pipeline.PipelineStats) {
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	promautoFactory := promauto.With(promRegistry)
+	promautoFactory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_blockfetch_event_in_progress_seconds",
+			Help: "wall-clock time since the oldest active blockfetch event handler began, or zero when no blockfetch event is being handled",
+		},
+		m.blockfetchEventInProgressSeconds,
+	)
 	m.blockNum = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockNum_int",
 		Help: "current block number",
@@ -751,14 +1015,35 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "ledger apply-path waits for a referenced Leios endorser block that ran to a full bound without it arriving: the diffusion window, or the CIP in-flight-fetch grace phase hard bound",
 		},
 	)
+	m.epochRolloverDuration = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_epoch_rollover_duration_seconds",
+			Help: "wall-clock time of the epoch-boundary transaction body, during which no block is applied",
+			// 1ms to ~2.3h: a healthy boundary is sub-second, a stalled one
+			// has been measured at 13m30s on mainnet.
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 24),
+		},
+	)
+	m.epochRolloverPhaseDuration = promautoFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "dingo_ledger_epoch_rollover_phase_duration_seconds",
+			Help:    "wall-clock time of each named phase of the epoch-boundary transaction",
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 27),
+		},
+		[]string{"phase"},
+	)
 	m.blockStageDuration = promautoFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "dingo_ledger_block_stage_duration_seconds",
-			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store)",
-			// 100us to ~3.3s. Block-processing work here ranges from a
-			// single cheap signature check to a Plutus-heavy transaction
-			// or a large multi-block delta-batch flush.
-			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+			Help: "wall-clock time spent in each ledger-owned stage of per-block processing, by stage: header_verify (VRF/KES/signature checks on blockfetch arrival), validate (one transaction's era ledger-rule validation, including Plutus evaluation), apply (writing a flushed delta batch's UTXO and transaction rows to the metadata store), epoch_rollover (the epoch-boundary transaction, including reward application and the governance tally, during which no block is applied)",
+			// 100us to ~419s. Most observations are sub-100ms (a single
+			// cheap signature check, one transaction's validation, one
+			// delta-batch flush), which is why resolution stays fine down
+			// there. The upper end has to resolve epoch_rollover:
+			// epoch-boundary stalls measured block application blocked
+			// for 25s to 318s across preview boundaries, all of which the
+			// old ~3.3s ceiling put in +Inf.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
 		},
 		[]string{"stage"},
 	)
@@ -770,6 +1055,40 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	)
 	m.blockStageApply = m.blockStageDuration.WithLabelValues(
 		blockStageApply,
+	)
+	m.blockStageEpochRollover = m.blockStageDuration.WithLabelValues(
+		blockStageEpochRollover,
+	)
+	m.registerBlockStageMaxDuration(promautoFactory)
+	m.blockApplyBatchLatency = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_latency_seconds",
+			Help: "wall-clock time from the start of applying one committed DB-transaction chunk of blocks to the moment its new tip is reflected in cardano_node_metrics_blockNum_int (the gauge the \"Block apply rate\" panel's deriv() reads), including any Leios endorser-block wait ahead of the DB transaction. Per-batch, not per-block: see dingo_ledger_block_apply_batch_size for how many blocks each observation covers.",
+			// 100us to ~419s. The window contains each block's validate
+			// stage and the chunk's apply stage, plus the Leios
+			// endorser-block wait, the DB commit and the tip lock, so its
+			// range must not be narrower than
+			// dingo_ledger_block_stage_duration_seconds' (see
+			// TestBlockApplyBatchLatencyBucketsCoverBlockStageRange).
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
+		},
+	)
+	m.registerBlockApplyBatchMaxLatency(promautoFactory)
+	m.blockApplyBatchSize = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_size",
+			Help: "number of blocks committed in the DB transaction each dingo_ledger_block_apply_batch_latency_seconds observation timed (ledger/state.go caps this at batchSize=50 blocks per transaction). Distinct from dingo_ledger_commit_batch_blocks, which counts blocks the chain-read loop gathered before submitting them: this counts the blocks the chunk actually applied and committed",
+			// Explicit buckets across the full possible range (1 to
+			// batchSize=50): batch size is a small bounded integer, not a
+			// value that benefits from exponential spacing. Literal
+			// boundaries rather than the batchSize constant, matching
+			// dingo_ledger_commit_batch_blocks: prometheus.NewHistogram
+			// panics on out-of-order boundaries, so interpolating a
+			// constant that a later retune could drop below 40 would turn
+			// a tuning change into a startup panic. A retune leaves these
+			// boundaries stale instead, which is recoverable.
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 40, 50},
+		},
 	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
@@ -947,7 +1266,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineBlocksValidated = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_blocks_validated",
-			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES validate stage; 0 unless blockPipelineValidateEnabled is set",
+			Help: "cumulative blocks that passed the block-processing pipeline's VRF/KES/OpCert validate stage; 0 unless blockPipelineValidateEnabled is set",
 		},
 	)
 	m.blockPipelineDecodeErrors = promautoFactory.NewGauge(
@@ -959,7 +1278,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.blockPipelineValidationErrors = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "dingo_ledger_block_pipeline_validation_errors",
-			Help: "cumulative block-processing pipeline VRF/KES validation failures, including expected Byron-era non-validation",
+			Help: "cumulative block-processing pipeline VRF/KES/OpCert validation failures, including expected Byron-era non-validation",
 		},
 	)
 	m.blockPipelineQueueDepth = promautoFactory.NewGauge(
@@ -979,12 +1298,6 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_block_pipeline_deferred_epoch_cache_errors_total",
 			Help: "block-processing pipeline validate-stage errors drained from errorsChan classified as a transient epoch-cache lag behind an already-committed block; expected to resolve once the epoch cache catches up",
-		},
-	)
-	m.blockPipelineApplyPendingLimitErrors = promautoFactory.NewCounter(
-		prometheus.CounterOpts{
-			Name: "dingo_ledger_block_pipeline_apply_pending_limit_errors_total",
-			Help: "block-processing pipeline apply-stage backpressure signals drained from errorsChan because the out-of-order pending buffer exceeded MaxPendingBlocks; the block is still buffered and applied in sequence, so this reports stage-worker scheduling lag rather than a block failure",
 		},
 	)
 	m.blockPipelineShutdownErrors = promautoFactory.NewCounter(
@@ -1047,5 +1360,18 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "certificates in applied blocks, by era",
 		},
 		[]string{"era"},
+	)
+	m.commitBatchBlocks = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_commit_batch_blocks",
+			Help: "blocks gathered into one batch by the chain-read loop before it is submitted for a single DB transaction; batchSize (50) is the cap. A distribution clustered well below the cap during bulk sync means batches are flushing prematurely (see dingo#4464).",
+			// Explicit buckets rather than exponential/linear: batchSize
+			// caps this at 50, and the values worth distinguishing are
+			// small (the premature-flush symptom) versus close to the cap
+			// (healthy batching), not a smooth curve between them.
+			Buckets: []float64{
+				1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+			},
+		},
 	)
 }

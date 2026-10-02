@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"sort"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -135,46 +136,158 @@ func (m *Manager) saveSnapshotInTxn(
 	checkAuthoritativeMark bool,
 	txn *database.Txn,
 ) error {
+	return m.saveSnapshotInTxnDeferring(
+		epoch, snapshotType, distribution, evt, resolveAutoVote,
+		persistRewardInputs, checkAuthoritativeMark, false, txn,
+	)
+}
+
+// saveSnapshotInTxnDeferring is saveSnapshotInTxn that, with
+// deferStakeInputs, stages the reward_stake_input rows for
+// TakeDeferredRewardStakeInputs instead of writing them.
+func (m *Manager) saveSnapshotInTxnDeferring(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
+	persistRewardInputs bool,
+	checkAuthoritativeMark bool,
+	deferStakeInputs bool,
+	txn *database.Txn,
+) error {
+	prepared, err := m.prepareSnapshot(
+		epoch, snapshotType, distribution, evt, resolveAutoVote,
+		persistRewardInputs, txn,
+	)
+	if err != nil {
+		return err
+	}
+	return m.writePreparedSnapshot(
+		prepared, checkAuthoritativeMark, deferStakeInputs, txn,
+	)
+}
+
+// preparedSnapshot is a snapshot whose rows and reward inputs were built by
+// reads through one transaction, ready to be written through another.
+type preparedSnapshot struct {
+	epoch        uint64
+	snapshotType string
+	distribution *StakeDistribution
+	evt          event.EpochTransitionEvent
+	bundle       *rewardStateBundle
+	snapshots    []*models.PoolStakeSnapshot
+	summary      *models.EpochSummary
+}
+
+// prepareSnapshot does every read saving a snapshot needs, through txn.
+func (m *Manager) prepareSnapshot(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
+	persistRewardInputs bool,
+	txn *database.Txn,
+) (*preparedSnapshot, error) {
 	meta := m.db.Metadata()
 	metaTxn := txn.Metadata()
-
-	authoritative := !checkAuthoritativeMark
-
-	// Build the reward-state bundle before any write so the reward_snapshot
-	// marker can be the first row written. Writing the marker before the
-	// pool-stake snapshots gives the authoritative (epoch-rollover) and fallback
-	// (event-driven) capture paths the same lock-acquisition order
-	// (reward_snapshot, then pool_stake_snapshot, then the reward input rows),
-	// which keeps a concurrent authoritative-vs-fallback capture deadlock-free on
-	// MySQL/Postgres. bundle is nil when reward inputs are disabled for this
-	// call, or skipped because the ended-epoch metadata is not yet available. In
-	// either case there is no durable reward marker or reward-input row to write,
-	// so both the authoritative and fallback capture paths fall through and still
-	// persist the Mark pool-stake snapshot and epoch summary below — the
-	// leader-election data that must be captured on every epoch transition
-	// regardless of reward-input availability.
-	var bundle *rewardStateBundle
+	prepared := &preparedSnapshot{
+		epoch:        epoch,
+		snapshotType: snapshotType,
+		distribution: distribution,
+		evt:          evt,
+	}
 	if persistRewardInputs {
-		var err error
-		bundle, err = m.buildRewardStateInputs(
+		bundle, err := m.buildRewardStateInputs(
 			epoch, snapshotType, distribution, evt, meta, metaTxn,
 		)
 		if err != nil {
-			return fmt.Errorf("build reward state inputs: %w", err)
+			return nil, fmt.Errorf("build reward state inputs: %w", err)
+		}
+		prepared.bundle = bundle
+	}
+	snapshots := make(
+		[]*models.PoolStakeSnapshot,
+		0,
+		len(distribution.PoolStakes),
+	)
+	leiosKeys, err := m.snapshotLeiosKeys(
+		epoch,
+		distribution,
+		evt,
+		meta,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("resolve snapshot Leios keys: %w", err)
+	}
+	for poolKeyHash, stake := range distribution.PoolStakes {
+		delegators := distribution.DelegatorCount[poolKeyHash]
+		leiosKey := leiosKeys[string(poolKeyHash[:])]
+		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		if leiosKey.key != nil {
+			leiosKeyPublic = append([]byte(nil), leiosKey.key.PublicKey...)
+			leiosKeyPossessionProof = append(
+				[]byte(nil), leiosKey.key.PossessionProof...,
+			)
+		}
+		snapshots = append(snapshots, &models.PoolStakeSnapshot{
+			Epoch:                     epoch,
+			SnapshotType:              snapshotType,
+			PoolKeyHash:               poolKeyHash[:], // Convert [28]byte to []byte
+			TotalStake:                types.Uint64(stake),
+			DelegatorCount:            delegators,
+			CapturedSlot:              distribution.Slot,
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: leiosKey.registrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
+		})
+	}
+	if resolveAutoVote {
+		if err := m.db.ResolvePoolRewardAccountAutoVotes(
+			snapshots, txn,
+		); err != nil {
+			return nil, fmt.Errorf(
+				"resolve reward-account auto-votes: %w", err,
+			)
 		}
 	}
+	prepared.snapshots = snapshots
+	prepared.summary = &models.EpochSummary{
+		Epoch:            epoch,
+		TotalActiveStake: types.Uint64(distribution.TotalStake),
+		TotalPoolCount:   distribution.TotalPools,
+		TotalDelegators:  sumDelegators(distribution.DelegatorCount),
+		EpochNonce:       evt.EpochNonce,
+		BoundarySlot:     evt.BoundarySlot,
+		SnapshotReady:    true,
+	}
+	return prepared, nil
+}
 
+// writePreparedSnapshot writes a prepared snapshot through txn.
+func (m *Manager) writePreparedSnapshot(
+	prepared *preparedSnapshot,
+	checkAuthoritativeMark bool,
+	deferStakeInputs bool,
+	txn *database.Txn,
+) error {
+	meta := m.db.Metadata()
+	metaTxn := txn.Metadata()
+	epoch := prepared.epoch
+	snapshotType := prepared.snapshotType
+	bundle := prepared.bundle
+	authoritative := !checkAuthoritativeMark
 	var temporaryFallbackGuardID uint
 	if bundle != nil {
 		bundle.snapshot.Authoritative = authoritative
 		if authoritative {
-			// Authoritative capture: overwrite any provisional row.
 			if err := meta.SaveRewardSnapshot(bundle.snapshot, metaTxn); err != nil {
 				return fmt.Errorf("save reward snapshot: %w", err)
 			}
 		} else {
-			// Fallback capture: claim the marker atomically and bail out if an
-			// authoritative row already occupies it.
 			proceed, err := meta.ClaimFallbackRewardSnapshot(
 				bundle.snapshot, metaTxn,
 			)
@@ -186,11 +299,6 @@ func (m *Manager) saveSnapshotInTxn(
 			}
 		}
 	} else if checkAuthoritativeMark {
-		// No reward bundle means there is no durable reward_snapshot marker to
-		// claim. Temporarily claim the same unique key so a fallback still
-		// serializes against authoritative rollover before replacing Mark rows.
-		// The helper leaves an existing provisional row untouched and returns a
-		// non-zero ID only when this transaction inserted the temporary row.
 		proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
 			epoch,
 			snapshotType,
@@ -205,97 +313,36 @@ func (m *Manager) saveSnapshotInTxn(
 		temporaryFallbackGuardID = guardID
 	}
 
-	// Save pool stake snapshots
-	snapshots := make(
-		[]*models.PoolStakeSnapshot,
-		0,
-		len(distribution.PoolStakes),
-	)
-	leiosKeys, err := m.snapshotLeiosKeys(
-		distribution,
-		evt,
-		meta,
-		metaTxn,
-	)
-	if err != nil {
-		return fmt.Errorf("resolve snapshot Leios keys: %w", err)
-	}
-	for poolKeyHash, stake := range distribution.PoolStakes {
-		delegators := distribution.DelegatorCount[poolKeyHash]
-		leiosKey := leiosKeys[string(poolKeyHash[:])]
-		var leiosKeyPublic, leiosKeyPossessionProof []byte
-		if leiosKey != nil {
-			leiosKeyPublic = append([]byte(nil), leiosKey.PublicKey...)
-			leiosKeyPossessionProof = append(
-				[]byte(nil), leiosKey.PossessionProof...,
-			)
-		}
-		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash[:], // Convert [28]byte to []byte
-			TotalStake:              types.Uint64(stake),
-			DelegatorCount:          delegators,
-			CapturedSlot:            distribution.Slot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
-		})
-	}
-
-	// Freeze the CIP-1694 SPO reward-account auto-vote per pool at
-	// the snapshot boundary so governance ratification at epoch N
-	// reads snapshot-era delegation rather than the live, possibly
-	// re-delegated state. Skipped (rows left Resolved=false) when
-	// the caller is seeding historical epochs where live state does
-	// not match the target boundary.
-	if resolveAutoVote {
-		if err := m.db.ResolvePoolRewardAccountAutoVotes(
-			snapshots, txn,
-		); err != nil {
-			return fmt.Errorf("resolve reward-account auto-votes: %w", err)
-		}
-	}
-
 	if err := meta.DeletePoolStakeSnapshotsForEpoch(
 		epoch, snapshotType, metaTxn,
 	); err != nil {
 		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
 	}
-	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {
+	if err := meta.SavePoolStakeSnapshots(prepared.snapshots, metaTxn); err != nil {
 		return fmt.Errorf("save pool snapshots: %w", err)
 	}
-
-	// Save epoch summary
-	summary := &models.EpochSummary{
-		Epoch:            epoch,
-		TotalActiveStake: types.Uint64(distribution.TotalStake),
-		TotalPoolCount:   distribution.TotalPools,
-		TotalDelegators:  sumDelegators(distribution.DelegatorCount),
-		EpochNonce:       evt.EpochNonce,
-		BoundarySlot:     evt.BoundarySlot,
-		SnapshotReady:    true,
-	}
-
-	if err := meta.SaveEpochSummary(summary, metaTxn); err != nil {
+	if err := meta.SaveEpochSummary(prepared.summary, metaTxn); err != nil {
 		return fmt.Errorf("save epoch summary: %w", err)
 	}
 
-	// Finalize the reward input rows. The reward_snapshot marker was already
-	// written above (SaveRewardSnapshot / ClaimFallbackRewardSnapshot); here we
-	// replace the per-pool and per-credential rows keyed off it.
 	if bundle != nil {
 		if err := m.saveRewardStateInputRows(
-			epoch, bundle, meta, metaTxn,
+			epoch, bundle, deferStakeInputs, meta, metaTxn,
 		); err != nil {
 			return fmt.Errorf("save reward state inputs: %w", err)
 		}
+		if deferStakeInputs {
+			m.mu.Lock()
+			m.deferredStakeInputs = &DeferredRewardStakeInputs{
+				txn:          txn,
+				Epoch:        epoch,
+				BoundarySlot: prepared.evt.BoundarySlot,
+				Inputs:       bundle.stakeInputs,
+			}
+			m.mu.Unlock()
+		}
 	}
 
-	// A no-bundle fallback uses a temporary reward_snapshot row only as a
-	// lockable serialization key. Delete exactly the row this transaction
-	// inserted; the database retains its row/unique-key locks until commit, so a
-	// waiting authoritative upsert cannot pass this capture before then.
 	if temporaryFallbackGuardID != 0 {
 		if err := meta.ReleaseFallbackRewardSnapshotGuard(
 			temporaryFallbackGuardID,
@@ -315,16 +362,25 @@ func (m *Manager) saveSnapshotInTxn(
 // freeze a key one epoch too early. This is the same historical selection used
 // by buildRewardStateInputs for the rest of the snapshotted pool parameters.
 //
-// Missing legacy epoch metadata leaves the affected seats keyless. It must not
-// fall back to current pool state: doing so would make an old snapshot resolve
-// differently after a key rotation.
+// Missing legacy epoch metadata or an imported registration with only a
+// synthetic import slot leaves the key's age unknown. Preserve the key bytes
+// from the registration selected for the snapshot, but do not invent an
+// effective epoch; key lookup will keep it ineligible until its TTL can be
+// established. Never fall back to current pool state, which would make an old
+// snapshot resolve differently after a key rotation.
+type snapshottedLeiosKey struct {
+	key               *lcommon.LeiosKey
+	registrationEpoch *uint64
+}
+
 func (m *Manager) snapshotLeiosKeys(
+	snapshotEpoch uint64,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
-) (map[string]*lcommon.LeiosKey, error) {
-	ret := make(map[string]*lcommon.LeiosKey)
+) (map[string]snapshottedLeiosKey, error) {
+	ret := make(map[string]snapshottedLeiosKey)
 	if distribution == nil || len(distribution.PoolStakes) == 0 {
 		return ret, nil
 	}
@@ -351,21 +407,58 @@ func (m *Manager) snapshotLeiosKeys(
 	if err != nil {
 		return nil, err
 	}
+	epochs, err := meta.GetEpochs(metaTxn)
+	if err != nil {
+		return nil, fmt.Errorf("load epochs for Leios key age: %w", err)
+	}
 	for _, registration := range registrations {
 		if len(registration.LeiosKeyPublic) == 0 ||
 			len(registration.LeiosKeyPossessionProof) == 0 {
 			continue
 		}
-		ret[string(registration.PoolKeyHash)] = &lcommon.LeiosKey{
-			PublicKey: append(
-				[]byte(nil), registration.LeiosKeyPublic...,
-			),
-			PossessionProof: append(
-				[]byte(nil), registration.LeiosKeyPossessionProof...,
-			),
+		registrationEpoch, ageKnown := uint64(0), false
+		if registration.LeiosKeyRegistrationEpoch != nil {
+			registrationEpoch = *registration.LeiosKeyRegistrationEpoch
+			ageKnown = true
+		} else if !registration.LeiosKeyRegistrationAgeUnknown {
+			registrationEpoch, ageKnown = epochForSlot(
+				epochs,
+				registration.AddedSlot,
+			)
+		}
+		var effectiveEpoch *uint64
+		if ageKnown && registrationEpoch != ^uint64(0) {
+			if registration.LeiosKeyRegistrationEpoch == nil {
+				registrationEpoch++ // on-chain pool parameters take effect after POOLREAP
+			}
+			if registrationEpoch > snapshotEpoch {
+				continue
+			}
+			effectiveEpoch = &registrationEpoch
+		}
+		ret[string(registration.PoolKeyHash)] = snapshottedLeiosKey{
+			key: &lcommon.LeiosKey{
+				PublicKey: append(
+					[]byte(nil), registration.LeiosKeyPublic...,
+				),
+				PossessionProof: append(
+					[]byte(nil), registration.LeiosKeyPossessionProof...,
+				),
+			},
+			registrationEpoch: effectiveEpoch,
 		}
 	}
 	return ret, nil
+}
+
+func epochForSlot(epochs []models.Epoch, slot uint64) (uint64, bool) {
+	index := sort.Search(len(epochs), func(i int) bool {
+		return epochs[i].StartSlot > slot
+	})
+	if index == 0 {
+		return 0, false
+	}
+	return epochs[index-1].EpochId, true
 }
 
 // rewardStateBundle is the fully computed reward-state capture for one epoch
@@ -394,15 +487,25 @@ type rewardStateBundle struct {
 // sums the stake of every registered credential that has a delegation
 // (Cardano.Ledger.State.SnapShots.mkSnapShot over
 // Cardano.Ledger.State.Stake.resolveInstantStake) independently of which pools
-// appear in ssStakePoolsSnapShot. Deriving it from the reduced distribution
+// appear in ssStakePoolsSnapShot. Deriving it from a reduced distribution
 // instead shrinks that denominator, which raises sigma_a for every surviving
 // pool, lowers its apparent performance, and under-credits every member and
-// leader reward on the node — a divergence proportional to the excluded pool's
-// share of active stake. It is therefore computed from the full reward-stake
-// distribution. Reward calculation checks the reward_pool_input rows sum to
-// exactly that minus the snapshot's tracked ExcludedActiveStake when it is
-// set (dingo #4025); a snapshot captured before that tracking existed (nil)
-// falls back to checking the rows sum to no more than it.
+// leader reward on the node — a divergence proportional to the missing stake's
+// share of active stake.
+//
+// There are two ways stake goes missing, and they need different repairs. A
+// pool excluded here for degraded registration data is still in the
+// distribution, so the difference is measurable and is recorded as
+// ExcludedActiveStake. A credential whose pool has left the active pool set is
+// not: enumerating the distribution from that set never fetched it, so both the
+// pool rows and a total summed from them are short by the same amount and no
+// check comparing the two can see it. The denominator is therefore taken from
+// the calculator's credential-first count (rewardTotalActiveStake over
+// StakeDistribution.TotalActiveStake), not from the pool buckets, and both
+// kinds of exclusion land in ExcludedActiveStake. Reward calculation checks the
+// reward_pool_input rows sum to exactly TotalActiveStake minus that when it is
+// set; a snapshot captured before that tracking existed (nil) falls back to
+// checking the rows sum to no more than it.
 func (m *Manager) buildRewardStateInputs(
 	epoch uint64,
 	snapshotType string,
@@ -434,12 +537,12 @@ func (m *Manager) buildRewardStateInputs(
 		return nil, err
 	}
 
-	totalActiveStake := sumPoolStakes(rewardDistribution.PoolStakes)
+	totalActiveStake := rewardTotalActiveStake(rewardDistribution)
 	// The full reward-stake distribution's sum minus the post-exclusion
 	// distribution's sum is exactly the stake degraded-pool exclusion removed
 	// from reward_pool_input. Persisting it lets reward calculation verify
 	// the input rows sum to precisely totalActiveStake minus this value
-	// instead of only checking they do not exceed it (dingo #4025); without
+	// instead of only checking they do not exceed it; without
 	// it, a proportionally reduced (rather than merely incomplete) input set
 	// would pass the same non-exceeding bound silently.
 	excludedActiveStake := types.Uint64(
@@ -500,6 +603,10 @@ func rewardStakeDistribution(
 		StakeInputs:    deduped,
 		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
 		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+		// Carried, not recomputed: StakeInputs holds only the credentials of
+		// pools that are still active, so it cannot express the denominator.
+		// The calculator summed every delegated credential.
+		TotalActiveStake: dist.TotalActiveStake,
 	}
 	for _, input := range reward.StakeInputs {
 		if input.Stake == 0 {
@@ -530,6 +637,7 @@ func rewardStakeDistribution(
 func (m *Manager) saveRewardStateInputRows(
 	epoch uint64,
 	bundle *rewardStateBundle,
+	deferStakeInputs bool,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 ) error {
@@ -542,6 +650,9 @@ func (m *Manager) saveRewardStateInputRows(
 
 	if err := meta.SaveRewardPoolInputs(bundle.poolInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward pool inputs: %w", err)
+	}
+	if deferStakeInputs {
+		return nil
 	}
 	if err := meta.SaveRewardStakeInputs(bundle.stakeInputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward stake inputs: %w", err)
@@ -570,9 +681,11 @@ func (m *Manager) saveRewardStateInputRows(
 // The returned distribution is the one actually consumed to build
 // poolInputs/stakeInputs, so its TotalPoolCount and TotalDelegators are safe
 // to use for RewardSnapshot. TotalActiveStake is not derived from this
-// returned, post-exclusion distribution: buildRewardStateInputs computes it
-// from the pre-exclusion rewardDistribution so a degraded pool's delegators
-// keep contributing to the sigma_a denominator.
+// returned, post-exclusion distribution, nor from any pool-bucket sum:
+// buildRewardStateInputs takes it from the pre-exclusion rewardDistribution's
+// credential-first count, so both a degraded pool's delegators and those of a
+// pool no longer in the active set keep contributing to the sigma_a
+// denominator.
 func (m *Manager) rewardInputsSkippingDegradedPools(
 	epoch uint64,
 	distribution *StakeDistribution,
@@ -685,6 +798,24 @@ func excludeRewardInputPool(dist *StakeDistribution, poolKeyHash []byte) bool {
 	dist.StakeInputs = filtered
 	dist.TotalStake = sumPoolStakes(dist.PoolStakes)
 	return true
+}
+
+// rewardTotalActiveStake returns the sigma_a denominator for a reward-stake
+// distribution: the stake of every delegated credential the calculator saw,
+// which includes credentials whose pool has left the active set and is
+// therefore never a key in PoolStakes.
+//
+// The pool-bucket sum is the floor, not the answer. It is used only when the
+// distribution carries no credential-first total -- a value built outside the
+// calculator, or one restored from a capture predating this field -- where it
+// is the best available lower bound and matches the earlier behaviour rather
+// than under-reporting the denominator to zero.
+func rewardTotalActiveStake(dist *StakeDistribution) uint64 {
+	bucketed := sumPoolStakes(dist.PoolStakes)
+	if dist.TotalActiveStake > bucketed {
+		return dist.TotalActiveStake
+	}
+	return bucketed
 }
 
 // sumPoolStakes totals all pool stakes, mirroring sumDelegators. Recomputed
@@ -1062,7 +1193,7 @@ func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 }
 
 // poolSnapshotRetentionMaxDepth bounds how many epochs of pool_stake_snapshot
-// rows the deferred-header retention pin (issue #3727) may ever hold below the
+// rows the deferred-header retention pin may ever hold below the
 // current epoch. It is a safety backstop far larger than any legitimate
 // deferred-header gap (a header awaiting apply needs a snapshot within a few
 // epochs of the apply cursor, and the retention guard additionally evicts
@@ -1084,19 +1215,19 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // is pruned to the same window in CORE storage mode (types.StorageModeCore),
 // matching dingo's original pruning behavior exactly, but retained WITHOUT BOUND
 // in API storage mode (types.StorageModeAPI) so the Blockfrost account
-// reward-history endpoint (GET /accounts/{stake_address}/rewards, dingo #1875)
+// reward-history endpoint (GET /accounts/{stake_address}/rewards)
 // can serve an account's full reward history instead of only the trailing few
-// epochs — the same "silently look empty past the window" failure mode #2987
-// already identified for epoch_summary. reward_account_output is likewise
+// epochs — the same "silently look empty past the window" failure mode that
+// epoch_summary rows once showed. reward_account_output is likewise
 // retained without bound whenever SetRewardAccountOutputRetentionUnbounded(true)
 // has been called (node.go wires this from the koios-parity observer's Enabled
 // config): that observer only validates a closed epoch after fetching and
 // comparing over the network, which can fall arbitrarily far behind chain
 // progression during a from-genesis or catch-up sync, so the fixed 4-epoch
-// window otherwise prunes an epoch's rows before the observer ever reads them
-// (dingo #4188). See rewardstate.DeleteStateBeforeEpoch (core, prunes both
-// tables) and rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes
-// only reward_stake_input) for the implementation and full rationale.
+// window otherwise prunes an epoch's rows before the observer ever reads them.
+// See rewardstate.DeleteStateBeforeEpoch (core, prunes both tables) and
+// rewardstate.DeleteStakeInputBeforeEpoch (API/koios-parity, prunes only
+// reward_stake_input) for the implementation and full rationale.
 //
 // epoch_summary is deliberately NOT pruned. It is a single small row per epoch
 // (aggregate stake/pool/delegator totals plus the epoch nonce and boundary
@@ -1104,7 +1235,7 @@ const poolSnapshotRetentionMaxDepth uint64 = 24
 // thousand rows over a network's lifetime — while making historical epoch
 // aggregates permanently queryable. Pruning it also made a legitimately
 // captured boundary indistinguishable from one that was never captured, which
-// is what made dingo #2987 read as a missing epoch-2 snapshot on a node that
+// is what made it read as a missing epoch-2 snapshot on a node that
 // had in fact captured it correctly 400 epochs earlier.
 func (m *Manager) cleanupOldSnapshots(
 	ctx context.Context,
@@ -1117,70 +1248,88 @@ func (m *Manager) cleanupOldSnapshots(
 
 	deleteBeforeEpoch := currentEpoch - 3
 
-	// Pool-stake snapshots may still be needed below the default window by a
-	// queued/deferred header that validates leader eligibility against an
-	// older epoch's mark snapshot (issue #3727). Pruning them out from under
-	// such a header makes leaderEligibilityStake read the missing rows as a
-	// zero-stake "pool absent" answer, which the reference node never
-	// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
-	// guard holds the deferred-header set stable across both the retention
-	// floor selection and this delete+commit, so no header can be admitted
-	// between the floor read and the prune and lose its snapshot. Only the
-	// pool-snapshot boundary moves; reward-state retention keeps the unchanged
-	// currentEpoch-3 window (deferred header validation reads pool stake, never
-	// reward rows), and runs in a separate transaction outside the guard to
-	// keep the locked section tight.
-	//
-	// prunePoolSnapshots deletes AND commits below the boundary the guard
-	// hands back (its own transaction), so the rows are actually gone before
-	// the guard releases the deferred-header lock.
-	prunePoolSnapshots := func(before uint64) error {
-		if before < deleteBeforeEpoch {
-			m.logger.Info(
-				"retaining historical pool stake snapshots for deferred header validation",
-				"component",
-				"snapshot",
-				"current_epoch",
-				currentEpoch,
-				"default_before_epoch",
-				deleteBeforeEpoch,
-				"pinned_before_epoch",
+	// Pool-stake snapshots are retained without bound in API storage mode,
+	// the same way UTxO's own consumed-row cleanup and reward_account_output
+	// already are (types.StorageModeAPI, ledger/state.go's
+	// cleanupConsumedUtxos and this function's own reward-state section
+	// below): API mode's whole purpose is retaining full history for
+	// historical queries, and a fixed 3-epoch pool-snapshot window
+	// contradicts that for GetStakeDistribution/GetPoolDistr2 pinned to an
+	// older epoch the same way an unbounded UTxO table does for
+	// GetUTxOWhole. VerifyPointQueryable's Acquire-time gate
+	// checks stake retention on every Acquire
+	// regardless of which query type the caller actually intends to ask,
+	// so even removing only UTxO's own window still leaves a historical
+	// Acquire failing at this pool-snapshot floor instead -- there is no
+	// protocol-level way to know in advance which query type a session
+	// will ask, so the whole Acquire is only as long-lived as its
+	// strictest per-query floor.
+	if m.db.StorageMode() != types.StorageModeAPI {
+		// Pool-stake snapshots may still be needed below the default window by a
+		// queued/deferred header that validates leader eligibility against an
+		// older epoch's mark snapshot. Pruning them out from under
+		// such a header makes leaderEligibilityStake read the missing rows as a
+		// zero-stake "pool absent" answer, which the reference node never
+		// intended. So pool-snapshot pruning runs THROUGH the retention guard: the
+		// guard holds the deferred-header set stable across both the retention
+		// floor selection and this delete+commit, so no header can be admitted
+		// between the floor read and the prune and lose its snapshot. Only the
+		// pool-snapshot boundary moves; reward-state retention keeps the unchanged
+		// currentEpoch-3 window (deferred header validation reads pool stake, never
+		// reward rows), and runs in a separate transaction outside the guard to
+		// keep the locked section tight.
+		//
+		// prunePoolSnapshots deletes AND commits below the boundary the guard
+		// hands back (its own transaction), so the rows are actually gone before
+		// the guard releases the deferred-header lock.
+		prunePoolSnapshots := func(before uint64) error {
+			if before < deleteBeforeEpoch {
+				m.logger.Info(
+					"retaining historical pool stake snapshots for deferred header validation",
+					"component",
+					"snapshot",
+					"current_epoch",
+					currentEpoch,
+					"default_before_epoch",
+					deleteBeforeEpoch,
+					"pinned_before_epoch",
+					before,
+				)
+			}
+			poolTxn := m.db.Transaction(true)
+			defer func() { _ = poolTxn.Rollback() }()
+			if err := m.db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
 				before,
-			)
+				poolTxn.Metadata(),
+			); err != nil {
+				return fmt.Errorf("cleanup pool snapshots: %w", err)
+			}
+			return poolTxn.Commit()
 		}
-		poolTxn := m.db.Transaction(true)
-		defer func() { _ = poolTxn.Rollback() }()
-		if err := m.db.Metadata().DeletePoolStakeSnapshotsBeforeEpoch(
-			before,
-			poolTxn.Metadata(),
-		); err != nil {
-			return fmt.Errorf("cleanup pool snapshots: %w", err)
+		// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
+		// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
+		// of pool snapshots so an unresolvable deferred header cannot pin them
+		// without bound. It never rises above the default
+		// window (a header needing a within-window snapshot is unaffected), and the
+		// guard clamps the pinned boundary up to it.
+		minPoolSnapshotDeleteBefore := uint64(0)
+		if currentEpoch > poolSnapshotRetentionMaxDepth {
+			minPoolSnapshotDeleteBefore = currentEpoch - poolSnapshotRetentionMaxDepth
 		}
-		return poolTxn.Commit()
-	}
-	// minPoolSnapshotDeleteBefore is the hard backstop on how far the retention
-	// pin can lower pruning: retain at most poolSnapshotRetentionMaxDepth epochs
-	// of pool snapshots so an unresolvable deferred header cannot pin them
-	// without bound (issue #3727, finding 5). It never rises above the default
-	// window (a header needing a within-window snapshot is unaffected), and the
-	// guard clamps the pinned boundary up to it.
-	minPoolSnapshotDeleteBefore := uint64(0)
-	if currentEpoch > poolSnapshotRetentionMaxDepth {
-		minPoolSnapshotDeleteBefore = currentEpoch - poolSnapshotRetentionMaxDepth
-	}
-	if minPoolSnapshotDeleteBefore > deleteBeforeEpoch {
-		minPoolSnapshotDeleteBefore = deleteBeforeEpoch
-	}
-	if guard := m.poolSnapshotRetentionGuard(); guard != nil {
-		if err := guard(
-			deleteBeforeEpoch,
-			minPoolSnapshotDeleteBefore,
-			prunePoolSnapshots,
-		); err != nil {
+		if minPoolSnapshotDeleteBefore > deleteBeforeEpoch {
+			minPoolSnapshotDeleteBefore = deleteBeforeEpoch
+		}
+		if guard := m.poolSnapshotRetentionGuard(); guard != nil {
+			if err := guard(
+				deleteBeforeEpoch,
+				minPoolSnapshotDeleteBefore,
+				prunePoolSnapshots,
+			); err != nil {
+				return err
+			}
+		} else if err := prunePoolSnapshots(deleteBeforeEpoch); err != nil {
 			return err
 		}
-	} else if err := prunePoolSnapshots(deleteBeforeEpoch); err != nil {
-		return err
 	}
 
 	// Reward-state pruning: unchanged currentEpoch-3 window, separate
@@ -1193,9 +1342,9 @@ func (m *Manager) cleanupOldSnapshots(
 
 	if m.db.StorageMode() == types.StorageModeAPI ||
 		m.RewardAccountOutputRetentionUnbounded() {
-		// API storage mode, or the in-process Koios parity observer enabled
-		// (dingo #4188): retain reward_account_output without bound (see
-		// doc comment above) and prune only reward_stake_input.
+		// API storage mode, or the in-process Koios parity observer enabled:
+		// retain reward_account_output without bound (see doc comment above)
+		// and prune only reward_stake_input.
 		if err := meta.DeleteRewardStakeInputBeforeEpoch(
 			deleteBeforeEpoch,
 			metaTxn,

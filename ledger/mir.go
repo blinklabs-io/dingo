@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -133,8 +134,14 @@ func (ls *LedgerState) applyMIRCerts(
 	if err != nil {
 		return fmt.Errorf("apply MIR certs: %w", err)
 	}
-	availableReserves, reservesOk := boundary.availablePot(mirPotReserves, reserves)
-	availableTreasury, treasuryOk := boundary.availablePot(mirPotTreasury, treasury)
+	availableReserves, reservesOk := boundary.availablePot(
+		mirPotReserves,
+		reserves,
+	)
+	availableTreasury, treasuryOk := boundary.availablePot(
+		mirPotTreasury,
+		treasury,
+	)
 	if boundary.discard != "" {
 		ls.discardMIRBoundary(boundarySlot, boundary.discard)
 		return nil
@@ -536,6 +543,46 @@ func (b *mirBoundary) availablePot(
 		return 0, false
 	}
 	return available - out, true
+}
+
+// mirCertificateCutoff returns the first slot at which a MIR certificate is
+// too late for the epoch containing slot: firstSlot(nextEpoch) minus the
+// Shelley stability window, 3k/f rounded up. It fails rather than fall back to
+// a default window, because a wrong cutoff accepts or rejects blocks the
+// reference does not.
+func (ls *LedgerState) mirCertificateCutoff(slot uint64) (uint64, error) {
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return 0, fmt.Errorf("MIR cutoff epoch for slot %d: %w", slot, err)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return 0, errors.New("MIR cutoff: cardano node config is not set")
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil {
+		return 0, errors.New("MIR cutoff: Shelley genesis is not loaded")
+	}
+	activeSlotsCoeff := shelleyGenesis.ActiveSlotsCoeff.Rat
+	if shelleyGenesis.SecurityParam <= 0 || activeSlotsCoeff == nil ||
+		activeSlotsCoeff.Num().Sign() <= 0 {
+		return 0, errors.New(
+			"MIR cutoff: Shelley genesis has no valid k and active slot coefficient",
+		)
+	}
+	window := new(big.Int).SetInt64(int64(shelleyGenesis.SecurityParam))
+	window.Mul(window, big.NewInt(3))
+	window.Mul(window, activeSlotsCoeff.Denom())
+	window, remainder := window.QuoRem(
+		window, activeSlotsCoeff.Num(), new(big.Int),
+	)
+	if remainder.Sign() != 0 {
+		window.Add(window, big.NewInt(1))
+	}
+	nextEpochStart := epoch.StartSlot + uint64(epoch.LengthInSlots)
+	if !window.IsUint64() || window.Uint64() >= nextEpochStart {
+		return 0, nil
+	}
+	return nextEpochStart - window.Uint64(), nil
 }
 
 func mirRewardSourceHash(pot uint) []byte {

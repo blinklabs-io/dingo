@@ -37,7 +37,36 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
+	// slot-aligned forging loop, so it must finish before the next mainnet
+	// slot.
+	maxKESAgentSignTimeout = time.Second
 )
+
+// ValidateKESKeySources rejects a block producer that names both a local KES
+// signing key file and a KES agent socket: an operator's explicit choice of
+// key source should never be silently discarded in favor of the other.
+func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
+	if kesKeyPath != "" && kesAgentSocket != "" {
+		return errors.New(
+			"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		)
+	}
+	return nil
+}
+
+// ValidateKESAgentSignTimeout accepts zero as the documented default
+// selector, or an explicit positive timeout shorter than one mainnet slot.
+func ValidateKESAgentSignTimeout(timeout time.Duration) error {
+	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
+		return fmt.Errorf(
+			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
+			timeout,
+			maxKESAgentSignTimeout,
+		)
+	}
+	return nil
+}
 
 // AcceptedChainsyncStrategies mirrors
 // chainsync.AcceptedHeaderSyncStrategyNames (the accepted-name list
@@ -499,14 +528,58 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	if c.TokenRegistry.MaxDecompressedBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxDecompressedBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxDecompressedBytes,
+		))
+	}
+	if c.TokenRegistry.MaxArchiveEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxArchiveEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxArchiveEntries,
+		))
+	}
+	if c.TokenRegistry.MaxAcceptedEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxAcceptedEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxAcceptedEntries,
+		))
+	}
+	if c.TokenRegistry.MaxBatchBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxBatchBytes,
+		))
+	}
+	if c.TokenRegistry.MaxEntryBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes < c.TokenRegistry.MaxEntryBytes {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must be at least maxEntryBytes %d)",
+			c.TokenRegistry.MaxBatchBytes,
+			c.TokenRegistry.MaxEntryBytes,
+		))
+	}
+
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		var missing []string
 		if c.ShelleyVRFKey == "" {
 			missing = append(missing, "shelleyVrfKey")
 		}
-		if c.ShelleyKESKey == "" {
+		// The KES signing key is only required when it is local. With a KES
+		// agent socket configured, the key lives with the agent instead --
+		// that is the whole point of the flag -- so requiring both made an
+		// agent-only configuration impossible to start.
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
+		}
+		if err := ValidateKESKeySources(
+			c.ShelleyKESKey,
+			c.ShelleyKESAgentSocket,
+		); err != nil {
+			errs = append(errs, err)
 		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
@@ -517,6 +590,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				missing,
 			))
 		}
+	}
+	if c.ShelleyKESAgentMode != "" &&
+		c.ShelleyKESAgentMode != "serve-key" &&
+		c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	if err := ValidateKESAgentSignTimeout(
+		c.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		errs = append(errs, err)
 	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
@@ -763,7 +849,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// Koios parity observer (dingo #3098): network mirrors the same
+	// Koios parity observer: network mirrors the same
 	// preview/preprod restriction internal/koiosparity.NewObserver enforces
 	// at construction time, checked here too so a bad value fails fast at
 	// config-validation time instead of only once the node reaches

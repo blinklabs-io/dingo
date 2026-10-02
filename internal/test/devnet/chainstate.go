@@ -69,6 +69,10 @@ type ObservedHeader struct {
 	// one without a node-to-client connection, which the mixed
 	// cardano-node topology does not expose.
 	BodySize uint64 `json:"bodySize"`
+	// LeiosAnnouncementHash is set when a Dijkstra header extension names
+	// an endorser block. Scenarios can match it to the separately fetched EB.
+	LeiosAnnouncementHash []byte `json:"leiosAnnouncementHash,omitempty"`
+	LeiosAnnouncementSize uint64 `json:"leiosAnnouncementSize,omitempty"`
 }
 
 // ChainSnapshot is a consistent point-in-time copy of one node's

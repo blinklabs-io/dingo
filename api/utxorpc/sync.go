@@ -22,7 +22,6 @@ import (
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	sync "github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -342,7 +341,7 @@ func (s *syncServiceServer) followTipResponse(
 		}
 	} else {
 		// Forward block - emit Apply action
-		block, err := ledger.NewBlockFromCbor(
+		block, err := models.DecodeBlockCbor(
 			next.Block.Type,
 			next.Block.Cbor,
 		)

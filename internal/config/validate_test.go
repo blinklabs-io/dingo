@@ -71,6 +71,57 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		field  string
+		mutate func(*Config)
+	}{
+		"decompressed bytes": {
+			field: "tokenRegistry.maxDecompressedBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxDecompressedBytes = -1
+			},
+		},
+		"archive entries": {
+			field: "tokenRegistry.maxArchiveEntries",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxArchiveEntries = -1
+			},
+		},
+		"accepted entries": {
+			field: "tokenRegistry.maxAcceptedEntries",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxAcceptedEntries = -1
+			},
+		},
+		"batch bytes": {
+			field: "tokenRegistry.maxBatchBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxBatchBytes = -1
+			},
+		},
+		"batch smaller than entry": {
+			field: "tokenRegistry.maxBatchBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxEntryBytes = 2048
+				cfg.TokenRegistry.MaxBatchBytes = 1024
+			},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			test.mutate(cfg)
+
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+			require.ErrorContains(t, err, test.field)
+		})
+	}
+}
+
 func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
@@ -428,6 +479,64 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESKey = "/keys/kes.skey"
 				c.ShelleyOperationalCertificate = "/keys/node.cert"
 			},
+		},
+		{
+			name: "block producer with KES agent socket instead of local key",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+		},
+		{
+			name: "block producer with local and agent KES keys",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		},
+		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
+			name: "negative KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = -time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "explicit KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 300 * time.Millisecond
+			},
+		},
+		{
+			name: "KES agent sign timeout defaults at zero",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 0
+			},
+		},
+		{
+			name: "KES agent sign timeout at slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "KES agent sign timeout above slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
 		},
 		{
 			name: "no network and no magic",

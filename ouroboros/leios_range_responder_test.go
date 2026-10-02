@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -38,12 +37,12 @@ func newLeiosFetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 	return peer
 }
 
-// TestLeiosFetchBlockRangeRequestIsDeclined is the Dingo-owned half of issue
-// #3623. Dingo registers a BlockRangeRequestFunc but does not serve ranges.
-// gouroboros reads a nil return from that callback as "an async process was
-// started that will send NextBlockAndTxsInRange / LastBlockAndTxsInRange", so
-// returning nil without sending anything left this server holding leios-fetch
-// agency in StateBlockRange forever.
+// TestLeiosFetchBlockRangeRequestIsDeclined is the Dingo-owned half of the
+// backfill stall fix. Dingo registers a BlockRangeRequestFunc but does not
+// serve ranges. gouroboros reads a nil return from that callback as "an async
+// process was started that will send NextBlockAndTxsInRange /
+// LastBlockAndTxsInRange", so returning nil without sending anything left this
+// server holding leios-fetch agency in StateBlockRange forever.
 //
 // A peer in that state is wedged permanently: its protocol send loop waits on
 // agency the state map only returns when the missing response arrives, so it
@@ -75,35 +74,33 @@ func TestLeiosFetchBlockRangeRequestIsDeclined(t *testing.T) {
 	}
 }
 
-// TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs is the absence case for
-// the test above: a request Dingo cannot satisfy but CAN answer must still be
-// answered on the wire, not escalated into a connection error. This keeps the
-// range fix from being read as "decline anything unavailable".
-func TestLeiosFetchUnavailableBlockTxsAnswersNoBlockTxs(t *testing.T) {
+// TestLeiosFetchUnavailableBlockTxsFailsBearer is the absence case for the
+// test above. The leios-fetch protocol has no absence reply for a
+// BlockTxsRequest, so when Dingo's server callback
+// (leiosfetchServerBlockTxsRequest) reports ErrBlockTxsNotFound, gouroboros's
+// server returns the error and fails the bearer, as for the undeclined
+// BlockRangeRequest above.
+func TestLeiosFetchUnavailableBlockTxsFailsBearer(t *testing.T) {
 	t.Parallel()
 
 	o := newOuroboros(OuroborosConfig{EnableLeios: true})
 	peer := newLeiosFetchServerPeer(t, o)
 
 	// No endorser block is stored, so the callback reports
-	// ErrBlockTxsNotFound and the server answers MsgNoBlockTxs.
+	// ErrBlockTxsNotFound and gouroboros's server fails the bearer.
 	peer.send(t, oleiosfetch.ProtocolId, oleiosfetch.NewMsgBlockTxsRequest(
 		ocommon.NewPoint(3623, make([]byte, lcommon.Blake2b256Size)),
 		map[uint16]uint64{0: 1 << 63},
 	))
 
-	segment := peer.readResponse(t, 5*time.Second)
-	require.True(t, segment.IsResponse())
-	require.Equal(t, oleiosfetch.ProtocolId, segment.GetProtocolId())
-	require.Equal(
-		t,
-		[]byte{0x81, oleiosfetch.MessageTypeNoBlockTxs},
-		segment.Payload,
-	)
-	testutil.RequireNoReceive(
-		t,
-		peer.errChan,
-		100*time.Millisecond,
-		"unavailable EB txs must not fail the bearer",
-	)
+	select {
+	case err := <-peer.errChan:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "endorser block")
+	case <-time.After(5 * time.Second):
+		t.Fatal(
+			"leios-fetch BlockTxsRequest for an unavailable endorser block " +
+				"was left pending instead of failing the bearer",
+		)
+	}
 }

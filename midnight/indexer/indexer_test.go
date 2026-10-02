@@ -105,7 +105,8 @@ func setupTestStore(t *testing.T) *testStore {
 	raw, err := sql.Open(
 		"sqlite",
 		"file:"+filepath.Join(dataDir, "metadata.sqlite")+
-			"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+			"?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"+
+			"&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
 	require.NoError(t, raw.Ping())

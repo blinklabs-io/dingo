@@ -14,6 +14,7 @@ type Querier interface {
 	BackfillNodeSettingsNetwork(ctx context.Context, arg BackfillNodeSettingsNetworkParams) (int64, error)
 	ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffchainMetadataFetchParams) (int64, error)
 	ClearSyncState(ctx context.Context) error
+	CountPParamsByEra(ctx context.Context, eraID sql.NullInt64) (int64, error)
 	CountTransactionsByMetadataLabel(ctx context.Context, label sql.NullString) (int64, error)
 	CountTransactionsByPaymentCred(ctx context.Context, paymentKey []byte) (int64, error)
 	CountTransactionsInSlotRange(ctx context.Context, arg CountTransactionsInSlotRangeParams) (int64, error)
@@ -60,13 +61,13 @@ type Querier interface {
 	DeletePoolStakeSnapshotsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeletePoolStakeSnapshotsForEpoch(ctx context.Context, arg DeletePoolStakeSnapshotsForEpochParams) error
 	DeleteProvisionalRewardSnapshot(ctx context.Context, arg DeleteProvisionalRewardSnapshotParams) error
-	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, arg DeleteRewardAccountOutputsAfterSlotParams) error
+	DeleteRewardAccountOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardAccountOutputsBeforeEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAccountOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardAdaPotsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolInputsAfterSlot(ctx context.Context, arg DeleteRewardPoolInputsAfterSlotParams) error
 	DeleteRewardPoolInputsForEpoch(ctx context.Context, epoch int64) error
-	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, arg DeleteRewardPoolOutputsAfterSlotParams) error
+	DeleteRewardPoolOutputsAfterSlot(ctx context.Context, capturedSlot int64) error
 	DeleteRewardPoolOutputsForEpoch(ctx context.Context, epoch int64) error
 	DeleteRewardSeedFailure(ctx context.Context, arg DeleteRewardSeedFailureParams) error
 	DeleteRewardSeedFailuresAfterSlot(ctx context.Context, capturedSlot int64) error
@@ -152,13 +153,14 @@ type Querier interface {
 	GetPParams(ctx context.Context, arg GetPParamsParams) ([]Pparam, error)
 	GetPoolStakeSnapshot(ctx context.Context, arg GetPoolStakeSnapshotParams) (PoolStakeSnapshot, error)
 	GetPoolStakeSnapshotsByEpoch(ctx context.Context, arg GetPoolStakeSnapshotsByEpochParams) ([]PoolStakeSnapshot, error)
-	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]RewardAccountOutput, error)
+	GetRewardAccountOutputs(ctx context.Context, epoch int64) ([]GetRewardAccountOutputsRow, error)
 	GetRewardAdaPots(ctx context.Context, epoch int64) (RewardAdaPot, error)
 	GetRewardPoolInputs(ctx context.Context, epoch int64) ([]RewardPoolInput, error)
 	GetRewardPoolOutputs(ctx context.Context, epoch int64) ([]RewardPoolOutput, error)
 	GetRewardSeedFailure(ctx context.Context, arg GetRewardSeedFailureParams) (string, error)
 	GetRewardSnapshot(ctx context.Context, arg GetRewardSnapshotParams) (RewardSnapshot, error)
 	GetRewardStakeInputs(ctx context.Context, epoch int64) ([]RewardStakeInput, error)
+	GetRewardStakeInputsInPoolKeyHashRange(ctx context.Context, arg GetRewardStakeInputsInPoolKeyHashRangeParams) ([]RewardStakeInput, error)
 	GetScript(ctx context.Context, hash []byte) (Script, error)
 	GetScriptLockedSupply(ctx context.Context) ([]sql.NullString, error)
 	GetSyncState(ctx context.Context, syncKey string) (string, error)
@@ -189,6 +191,7 @@ type Querier interface {
 	InsertNodeSettingsGateIfAbsent(ctx context.Context, arg InsertNodeSettingsGateIfAbsentParams) (int64, error)
 	InsertOffchainMetadataPointer(ctx context.Context, arg InsertOffchainMetadataPointerParams) (int64, error)
 	InsertRewardSnapshot(ctx context.Context, arg InsertRewardSnapshotParams) (int64, error)
+	ListPParamsByEra(ctx context.Context, eraID sql.NullInt64) ([]Pparam, error)
 	// Reconciles the table against a completed snapshot: every row the snapshot
 	// carried was stamped with its timestamp, so anything older was not in the
 	// snapshot and is no longer published upstream.
@@ -229,6 +232,7 @@ type Querier interface {
 	SumTransactionFeesInSlotRange(ctx context.Context, arg SumTransactionFeesInSlotRangeParams) ([]interface{}, error)
 	UpdateDRepActivity(ctx context.Context, arg UpdateDRepActivityParams) (int64, error)
 	UpdateFallbackRewardSnapshot(ctx context.Context, arg UpdateFallbackRewardSnapshotParams) (int64, error)
+	UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error

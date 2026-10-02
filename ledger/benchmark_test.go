@@ -21,20 +21,25 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"slices"
+	"sort"
+	"strconv"
+	"strings"
 	"testing"
-
-	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/byron"
-	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 )
 
 var benchmarkDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -42,13 +47,14 @@ var benchmarkDiscardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 const storageModeBenchmarkStartSlot = 10000
 
 const storageModeBenchmarkSkippedInputHash = "e3ca57e8f323265742a8f4e79ff9af884c9ff8719bd4f7788adaea4c33ba07b6"
-const storageModeBenchmarkSkippedInputIndex = 3
-const blockProcessingBenchmarkFixtureBlockCount = 4096
 
-// Helper functions for benchmark seeding
+const storageModeBenchmarkSkippedInputIndex = 3
+
+const blockProcessingBenchmarkFixtureBlockCount = 4096
 
 // openImmutableTestDB opens the immutable test database
 func openImmutableTestDB(b *testing.B) *immutable.ImmutableDb {
+	b.Helper()
 	immDb, err := immutable.New("../database/immutable/testdata")
 	if err != nil {
 		b.Fatal(err)
@@ -56,34 +62,126 @@ func openImmutableTestDB(b *testing.B) *immutable.ImmutableDb {
 	return immDb
 }
 
-// seedBlocksFromSlots seeds the database with blocks from the specified slots
-func seedBlocksFromSlots(
+// fixturePointsFromSlots resolves each requested slot to the exact point of
+// the first fixture block at or after it, discarding repeats.
+//
+// ImmutableDb.GetBlock compares the stored hash against the point's hash, so
+// a point carrying no hash matches nothing however real its slot is. The
+// fixture's blocks are also 20 slots apart, so most slots hold no block of
+// their own. BlockIterator seeks on slot alone and ignores the hash, which
+// makes it the only way to turn a slot into a point GetBlock will accept.
+func fixturePointsFromSlots(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+	slots []uint64,
+) []ocommon.Point {
+	b.Helper()
+	points := make([]ocommon.Point, 0, len(slots))
+	seen := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		block := firstFixtureBlockFrom(b, immDb, slot)
+		if block == nil {
+			continue
+		}
+		if _, dup := seen[string(block.Hash)]; dup {
+			continue
+		}
+		seen[string(block.Hash)] = struct{}{}
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+	return points
+}
+
+// fixturePointsFrom returns the points of up to count consecutive fixture
+// blocks at or after startSlot.
+func fixturePointsFrom(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	count int,
+) []ocommon.Point {
+	b.Helper()
+	iter, err := immDb.BlocksFromPoint(ocommon.NewPoint(startSlot, nil))
+	if err != nil {
+		b.Fatalf("open fixture iterator at slot %d: %v", startSlot, err)
+	}
+	defer func() { _ = iter.Close() }()
+	points := make([]ocommon.Point, 0, count)
+	for len(points) < count {
+		block, err := iter.Next()
+		if err != nil {
+			b.Fatalf("read fixture block after slot %d: %v", startSlot, err)
+		}
+		if block == nil {
+			break
+		}
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+	if len(points) == 0 {
+		b.Fatalf("fixture holds no block at or after slot %d", startSlot)
+	}
+	return points
+}
+
+// firstFixtureBlockFrom returns the first fixture block at or after slot, or
+// nil when the fixture ends before it.
+func firstFixtureBlockFrom(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+	slot uint64,
+) *immutable.Block {
+	b.Helper()
+	iter, err := immDb.BlocksFromPoint(ocommon.NewPoint(slot, nil))
+	if err != nil {
+		b.Fatalf("open fixture iterator at slot %d: %v", slot, err)
+	}
+	defer func() { _ = iter.Close() }()
+	block, err := iter.Next()
+	if err != nil {
+		b.Fatalf("read fixture block at or after slot %d: %v", slot, err)
+	}
+	return block
+}
+
+// seedBlocksAtPoints stores each fixture block in db, looking it up by its
+// own point, and returns the number stored. Block indexes run sequentially
+// from database.BlockInitialIndex so a benchmark can query the seeded blocks
+// by index.
+//
+// It fails the benchmark when nothing was stored. A query benchmark that
+// times an empty database measures the miss path its NoData twin already
+// covers, and publishes that timing as though the fixture had been read.
+//
+// Seeding writes to the block store only. Accounts, pools, DReps, datums,
+// protocol parameters, nonces and registrations are produced by applying a
+// block, not by storing one, so a RealData benchmark querying one of those
+// tables still measures a miss however many blocks are seeded.
+func seedBlocksAtPoints(
 	b *testing.B,
 	db *database.Database,
 	immDb *immutable.ImmutableDb,
-	slots []uint64,
+	points []ocommon.Point,
 ) int {
+	b.Helper()
 	seeded := 0
-	for _, slot := range slots {
-		point := ocommon.NewPoint(slot, nil)
+	for _, point := range points {
 		block, err := immDb.GetBlock(point)
 		if err != nil {
-			b.Logf("GetBlock error for slot %d: %v", slot, err)
-			continue
+			b.Fatalf("read fixture block at slot %d: %v", point.Slot, err)
 		}
 		if block == nil {
-			// missing block is acceptable in some ranges; skip
-			continue
+			b.Fatalf(
+				"fixture holds no block at slot %d with hash %x",
+				point.Slot,
+				point.Hash,
+			)
 		}
-
-		// Store block in database
 		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
 		if err != nil {
-			continue // Skip problematic blocks
+			b.Fatalf("decode fixture block at slot %d: %v", block.Slot, err)
 		}
-
 		blockModel := models.Block{
-			ID:       block.Slot, // Use slot as ID
+			ID:       database.BlockInitialIndex + uint64(seeded),
 			Slot:     block.Slot,
 			Hash:     block.Hash,
 			Number:   0,
@@ -91,13 +189,148 @@ func seedBlocksFromSlots(
 			PrevHash: ledgerBlock.PrevHash().Bytes(),
 			Cbor:     ledgerBlock.Cbor(),
 		}
-
 		if err := db.BlockCreate(blockModel, nil); err != nil {
-			continue // Skip if block already exists
+			b.Fatalf("store fixture block at slot %d: %v", block.Slot, err)
 		}
 		seeded++
 	}
+	if seeded == 0 {
+		b.Fatal("seeded no blocks; benchmark would time an empty database")
+	}
 	return seeded
+}
+
+type benchmarkUtxoRef struct {
+	txID      []byte
+	outputIdx uint32
+	address   ledger.Address
+}
+
+func seedUtxosAtPoints(
+	b *testing.B,
+	db *database.Database,
+	immDb *immutable.ImmutableDb,
+	points []ocommon.Point,
+	maxRows int,
+) []benchmarkUtxoRef {
+	b.Helper()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	seen := make(map[string]struct{})
+	refs := make([]benchmarkUtxoRef, 0, maxRows)
+	for _, point := range points {
+		block, err := immDb.GetBlock(point)
+		if err != nil {
+			b.Fatalf("read UTxO fixture block at slot %d: %v", point.Slot, err)
+		}
+		if block == nil {
+			b.Fatalf("UTxO fixture block at slot %d not found", point.Slot)
+		}
+		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		if err != nil {
+			b.Fatalf("decode UTxO fixture block at slot %d: %v", block.Slot, err)
+		}
+		for _, tx := range ledgerBlock.Transactions() {
+			for _, produced := range tx.Produced() {
+				model, err := models.UtxoLedgerToModel(produced, point.Slot)
+				if err != nil {
+					b.Fatalf("convert fixture UTxO at slot %d: %v", point.Slot, err)
+				}
+				key := fmt.Sprintf("%x#%d", model.TxId, model.OutputIdx)
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				if len(model.Cbor) == 0 {
+					b.Fatalf("fixture UTxO %s has no output CBOR", key)
+				}
+				if err := db.CreateUtxo(txn, &model); err != nil {
+					b.Fatalf("seed fixture UTxO %s: %v", key, err)
+				}
+				if err := db.Blob().SetUtxo(
+					txn.Blob(),
+					model.TxId,
+					model.OutputIdx,
+					model.Cbor,
+				); err != nil {
+					b.Fatalf("seed fixture UTxO CBOR %s: %v", key, err)
+				}
+				refs = append(refs, benchmarkUtxoRef{
+					txID:      append([]byte(nil), model.TxId...),
+					outputIdx: model.OutputIdx,
+					address:   produced.Output.Address(),
+				})
+				if len(refs) == maxRows {
+					break
+				}
+			}
+			if len(refs) == maxRows {
+				break
+			}
+		}
+		if len(refs) == maxRows {
+			break
+		}
+	}
+	if len(refs) == 0 {
+		b.Fatal("fixture points produced no UTxOs; benchmark would time a miss")
+	}
+	if err := txn.Commit(); err != nil {
+		b.Fatalf("commit fixture UTxOs: %v", err)
+	}
+	return refs
+}
+
+func fixtureEraTransitionPoints(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+) []ocommon.Point {
+	b.Helper()
+	iterator, err := immDb.BlocksFromPoint(ocommon.NewPoint(0, nil))
+	if err != nil {
+		b.Fatalf("open era-transition fixture iterator: %v", err)
+	}
+	defer func() { _ = iterator.Close() }()
+	points := make([]ocommon.Point, 0, 8)
+	seenEras := make(map[uint]struct{})
+	for range 100_000 {
+		block, err := iterator.Next()
+		if err != nil {
+			b.Fatalf("read era-transition fixture: %v", err)
+		}
+		if block == nil {
+			break
+		}
+		if _, seen := seenEras[block.Type]; seen {
+			continue
+		}
+		seenEras[block.Type] = struct{}{}
+		points = append(points, ocommon.NewPoint(block.Slot, block.Hash))
+	}
+	if len(points) < 2 {
+		b.Fatalf(
+			"fixture contains %d era(s); era-transition benchmark needs at least two",
+			len(points),
+		)
+	}
+	return points
+}
+
+// seedBlocksFromSlots seeds db with the fixture block at or after each
+// requested slot and returns the number stored.
+func seedBlocksFromSlots(
+	b *testing.B,
+	db *database.Database,
+	immDb *immutable.ImmutableDb,
+	slots []uint64,
+) int {
+	b.Helper()
+	return seedBlocksAtPoints(
+		b,
+		db,
+		immDb,
+		fixturePointsFromSlots(b, immDb, slots),
+	)
 }
 
 // BenchmarkBlockMemoryUsage benchmarks memory usage per block processed
@@ -196,48 +429,38 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkUtxoLookupByAddressRealData benchmarks UTxO lookup by address against real seeded data
+// BenchmarkUtxoLookupByAddressRealData queries addresses from decoded fixture outputs.
 func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
-	// Set up in-memory database
-	config := &database.Config{
-		DataDir: "", // in-memory
-	}
-	db, err := dbtest.NewDatabase(b, config)
+	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer dbtest.CloseDatabase(db)
-
-	// Seed database with real blocks (sample from different parts of chain)
 	immDb := openImmutableTestDB(b)
-
-	// Sample blocks from different slots to get diverse data (use slots that are more likely to exist)
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000, 200000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d blocks for benchmark", seeded)
-
-	// Create a test address for queries
-	paymentKey := make([]byte, 28)
-	stakeKey := make([]byte, 28)
-	testAddr, err := ledger.NewAddressFromParts(0, 0, paymentKey, stakeKey)
+	refs := seedUtxosAtPoints(
+		b, db, immDb, fixturePointsFrom(b, immDb, 0, 100), 256,
+	)
+	address := refs[0].address
+	got, err := db.UtxosByAddress(
+		[]ledger.Address{address}, database.MaxUtxosByAddressResults, nil,
+	)
 	if err != nil {
-		b.Fatal(err)
+		b.Fatalf("preflight UTxO address lookup: %v", err)
 	}
-
-	// Reset timer after seeding
+	if len(got) == 0 {
+		b.Fatal("fixture address returned no UTxOs; benchmark would time a miss")
+	}
 	b.ResetTimer()
-
-	// Benchmark lookup against real seeded data
 	for b.Loop() {
-		_, err := db.UtxosByAddress(
-			[]ledger.Address{testAddr},
+		if _, err := db.UtxosByAddress(
+			[]ledger.Address{address},
 			database.MaxUtxosByAddressResults,
 			nil,
-		)
-		if err != nil {
-			b.Fatal(err)
+		); err != nil {
+			b.Fatalf("UTxO address lookup: %v", err)
 		}
 	}
+	b.ReportMetric(float64(len(refs)), "utxos")
 }
 
 // BenchmarkUtxoLookupByRefNoData benchmarks UTxO lookup by reference on empty database
@@ -273,44 +496,32 @@ func BenchmarkUtxoLookupByRefNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkUtxoLookupByRefRealData benchmarks UTxO lookup by reference against real seeded data
+// BenchmarkUtxoLookupByRefRealData queries a reference from a decoded fixture output.
 func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
-	// Set up in-memory database
-	config := &database.Config{
-		DataDir: "", // in-memory
-	}
-	db, err := dbtest.NewDatabase(b, config)
+	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer dbtest.CloseDatabase(db)
-
-	// Seed database with real blocks (sample from different parts of chain)
 	immDb := openImmutableTestDB(b)
-
-	// Sample blocks from different slots to get diverse data (use slots that are more likely to exist)
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000, 200000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d blocks for benchmark", seeded)
-
-	// Create a test transaction reference (use a hash from seeded data if possible, otherwise dummy)
-	testTxId := make([]byte, 32) // dummy 32-byte tx ID for now
-	for i := range testTxId {
-		testTxId[i] = byte(i % 256)
+	refs := seedUtxosAtPoints(
+		b, db, immDb, fixturePointsFrom(b, immDb, 0, 100), 256,
+	)
+	ref := refs[0]
+	got, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil)
+	if err != nil {
+		b.Fatalf("preflight UTxO reference lookup: %v", err)
 	}
-	testOutputIdx := uint32(0)
-
-	// Reset timer after seeding
+	if got == nil {
+		b.Fatal("fixture reference returned no UTxO; benchmark would time a miss")
+	}
 	b.ResetTimer()
-
-	// Benchmark lookup against real seeded data
 	for b.Loop() {
-		_, err := db.UtxoByRef(testTxId, testOutputIdx, nil)
-		// Don't fail on "not found" - this is expected for non-existent UTxOs
-		if err != nil && !errors.Is(err, database.ErrUtxoNotFound) {
-			b.Fatal(err)
+		if _, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil); err != nil {
+			b.Fatalf("UTxO reference lookup: %v", err)
 		}
 	}
+	b.ReportMetric(float64(len(refs)), "utxos")
 }
 
 // BenchmarkBlockRetrievalByIndexNoData benchmarks block retrieval by index on empty database
@@ -352,46 +563,12 @@ func BenchmarkBlockRetrievalByIndexRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1), // Sequential IDs for easy querying
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Reset timer after seeding
 	b.ResetTimer()
@@ -453,47 +630,13 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks that contain transactions
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	// Seed database with fixture blocks
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from slots that are likely to have transactions
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{10000, 50000, 100000, 150000, 200000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test transaction hashes (use real-looking hashes)
 	// NOTE: These are synthetic hashes that won't match seeded transactions,
@@ -565,46 +708,12 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test stake keys
 	testStakeKeys := make([][]byte, 10)
@@ -672,46 +781,12 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test pool key hashes
 	testPoolKeyHashes := make([]lcommon.PoolKeyHash, 10)
@@ -779,46 +854,12 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test DRep credentials
 	testDRepCredentials := make([][]byte, 10)
@@ -888,46 +929,12 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test datum hashes
 	testDatumHashes := make([]lcommon.Blake2b256, 10)
@@ -995,46 +1002,12 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test epochs
 	testEpochs := []uint64{1, 10, 50, 100, 200}
@@ -1103,48 +1076,15 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
-
-	// Create test points using real block hashes
+	// Synthetic points: the nonce table is empty, so these measure the miss
+	// path. Seeding a block does not store a nonce for it.
 	testPoints := make([]ocommon.Point, 10)
 	for j := range testPoints {
 		slot := uint64(1000 + j*1000)
@@ -1219,46 +1159,12 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test stake keys
 	testStakeKeys := make([][]byte, 10)
@@ -1332,46 +1238,12 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 	defer dbtest.CloseDatabase(db)
 
 	// Seed database with real blocks
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
+	immDb := openImmutableTestDB(b)
 
-	// Sample blocks from different slots
+	// Sample blocks from across the fixture
 	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-
-	for i, slot := range sampleSlots {
-		point := ocommon.NewPoint(slot, nil)
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
-		}
-		if block == nil {
-			continue
-		}
-
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Logf("Could not parse block: %v", err)
-			continue
-		}
-
-		blockModel := models.Block{
-			ID:       uint64(i + 1),
-			Slot:     block.Slot,
-			Hash:     block.Hash,
-			Number:   0,
-			Type:     uint(ledgerBlock.Type()),
-			PrevHash: ledgerBlock.PrevHash().Bytes(),
-			Cbor:     ledgerBlock.Cbor(),
-		}
-
-		if err := db.BlockCreate(blockModel, nil); err != nil {
-			b.Logf("Could not create block: %v", err)
-			continue
-		}
-	}
+	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
+	b.Logf("Seeded %d fixture blocks", seeded)
 
 	// Create test pool key hashes
 	testPoolKeyHashes := make([]lcommon.PoolKeyHash, 10)
@@ -1399,26 +1271,24 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 // BenchmarkEraTransitionPerformance benchmarks processing blocks across Cardano era transitions
 func BenchmarkEraTransitionPerformance(b *testing.B) {
 	// Open immutable database
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
+	immDb := openImmutableTestDB(b)
+
+	// Sample blocks from different eras across the fixture. Processing them
+	// in slot order naturally spans whatever era transitions it contains.
+	var sampleSlots []uint64
+	for slot := uint64(1); slot <= 200000; slot += 1000 {
+		sampleSlots = append(sampleSlots, slot)
 	}
 
-	// Sample blocks from different eras by trying various slots
-	// This will naturally include era transitions as we process blocks sequentially
 	var blocks []*immutable.Block
 	var currentEra uint = 999 // sentinel value
-
-	// Try slots in order to get blocks from different eras
-	for slot := uint64(1); slot <= 200000; slot += 1000 {
-		point := ocommon.NewPoint(slot, nil)
+	for _, point := range fixturePointsFromSlots(b, immDb, sampleSlots) {
 		block, err := immDb.GetBlock(point)
 		if err != nil {
-			b.Logf("Could not get block at slot %d: %v", slot, err)
-			continue
+			b.Fatalf("read fixture block at slot %d: %v", point.Slot, err)
 		}
 		if block == nil {
-			continue
+			b.Fatalf("fixture block at slot %d not found", point.Slot)
 		}
 
 		// Include this block if it's a different era than the last one we processed
@@ -1430,6 +1300,9 @@ func BenchmarkEraTransitionPerformance(b *testing.B) {
 				break
 			}
 		}
+	}
+	if len(blocks) == 0 {
+		b.Fatal("collected no fixture blocks; benchmark would time an empty loop")
 	}
 
 	// Reset timer after setup
@@ -1451,111 +1324,45 @@ func BenchmarkEraTransitionPerformance(b *testing.B) {
 	}
 }
 
-// BenchmarkEraTransitionPerformanceRealData benchmarks processing blocks across era transitions with database seeding
+// BenchmarkEraTransitionPerformanceRealData reads and decodes stored fixture blocks at era boundaries.
 func BenchmarkEraTransitionPerformanceRealData(b *testing.B) {
-	// Set up in-memory database
-	config := &database.Config{
-		DataDir: "", // in-memory
-	}
-	db, err := dbtest.NewDatabase(b, config)
+	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer dbtest.CloseDatabase(db)
-
-	// Open immutable database
-	immDb, err := immutable.New("../database/immutable/testdata")
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	// Sample blocks from different eras and seed database
-	var blocks []*immutable.Block
-
-	// Use iterator to get blocks from different eras
-	originPoint := ocommon.NewPoint(0, nil)
-	iterator, err := immDb.BlocksFromPoint(originPoint)
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer iterator.Close()
-
-	// Collect blocks from different parts of the chain to test era transitions
-	blockCount := 0
-	maxBlocks := 10 // Collect up to 10 blocks from different eras
-
-	for blockCount < maxBlocks {
-		block, err := iterator.Next()
+	immDb := openImmutableTestDB(b)
+	points := fixtureEraTransitionPoints(b, immDb)
+	seeded := seedBlocksAtPoints(b, db, immDb, points)
+	for _, point := range points {
+		stored, err := database.BlockByPoint(db, point)
 		if err != nil {
-			break
+			b.Fatalf("read seeded block at slot %d: %v", point.Slot, err)
 		}
-		if block == nil {
-			break
-		}
-
-		// Sample blocks at different intervals to get different eras
-		if blockCount == 0 || blockCount == 3 || blockCount == 6 ||
-			blockCount == 9 {
-			blocks = append(blocks, block)
-
-			// Also seed the database with this block
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-			if err != nil {
-				b.Logf("Could not parse block: %v", err)
-				continue
-			}
-
-			blockModel := models.Block{
-				ID:       uint64(len(blocks)),
-				Slot:     block.Slot,
-				Hash:     block.Hash,
-				Number:   0,
-				Type:     uint(ledgerBlock.Type()),
-				PrevHash: ledgerBlock.PrevHash().Bytes(),
-				Cbor:     ledgerBlock.Cbor(),
-			}
-
-			if err := db.BlockCreate(blockModel, nil); err != nil {
-				b.Logf("Could not create block: %v", err)
-				continue
-			}
-		}
-
-		blockCount++
-		if blockCount >= 1000 { // Safety limit
-			break
+		if !bytes.Equal(stored.Hash, point.Hash) {
+			b.Fatalf("seeded block at slot %d has a different hash", point.Slot)
 		}
 	}
-
-	if len(blocks) == 0 {
-		b.Skip("No blocks found in test data")
-	}
-
-	// Reset timer after seeding
 	b.ResetTimer()
-
-	// Benchmark processing blocks across era transitions with database operations
 	for b.Loop() {
-		for _, block := range blocks {
-			ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
+		for _, point := range points {
+			stored, err := database.BlockByPoint(db, point)
 			if err != nil {
-				b.Fatal(err)
+				b.Fatalf("read block at slot %d: %v", point.Slot, err)
 			}
-
-			// Simulate block processing with database operations
+			ledgerBlock, err := ledger.NewBlockFromCbor(
+				uint(stored.Type),
+				stored.Cbor,
+			)
+			if err != nil {
+				b.Fatalf("decode block at slot %d: %v", point.Slot, err)
+			}
 			_ = ledgerBlock.Hash()
 			_ = ledgerBlock.PrevHash()
 			_ = ledgerBlock.Type()
-
-			// Additional database operations that might happen during processing
-			// GetPParams returns empty slice for missing params, not an error
-			res, err := db.Metadata().GetPParams(1, ledger.EraIdShelley, nil)
-			_ = res
-			if err != nil {
-				b.Fatal(err)
-			}
 		}
 	}
+	b.ReportMetric(float64(seeded), "fixture_blocks")
 }
 
 // BenchmarkIndexBuildingTime benchmarks the time to build indexes for new blocks
@@ -1654,23 +1461,27 @@ func BenchmarkRealBlockReading(b *testing.B) {
 		b.Skip("No blocks available in test database")
 	}
 
+	// Five blocks near the tip. GetBlock matches on the full hash, so each
+	// point must carry the block's own hash; the five slots below the tip
+	// hold no block at all, since the fixture's blocks are 20 slots apart.
+	const nearTipSlots = 1000
+	startSlot := uint64(0)
+	if tip.Slot > nearTipSlots {
+		startSlot = tip.Slot - nearTipSlots
+	}
+	testPoints := fixturePointsFrom(b, immDb, startSlot, 5)
+
 	// Reset timer after setup
 	b.ResetTimer()
 
-	// Benchmark reading real blocks (sample a few different slots)
-	testSlots := []uint64{
-		tip.Slot - 4,
-		tip.Slot - 3,
-		tip.Slot - 2,
-		tip.Slot - 1,
-		tip.Slot,
-	} // Last 5 blocks
 	for i := 0; b.Loop(); i++ {
-		slot := testSlots[i%len(testSlots)]
-		point := ocommon.NewPoint(slot, nil) // nil hash means get by slot
-		_, err := immDb.GetBlock(point)
+		point := testPoints[i%len(testPoints)]
+		block, err := immDb.GetBlock(point)
 		if err != nil {
 			b.Fatal(err)
+		}
+		if block == nil {
+			b.Fatalf("fixture block at slot %d not found", point.Slot)
 		}
 	}
 }
@@ -2113,7 +1924,7 @@ func BenchmarkBlockfetchNearTipThroughput(b *testing.B) {
 			Type:  block.Type,
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		// Flush after each block to simulate near-tip behavior where
@@ -2178,7 +1989,7 @@ func BenchmarkBlockfetchNearTipThroughputPredecoded(b *testing.B) {
 		}
 		blockIdx++
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
@@ -2312,7 +2123,7 @@ func BenchmarkBlockfetchNearTipQueuedHeaderPredecoded(b *testing.B) {
 			Type:  uint(block.Type()),
 		}
 
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatalf("handleEventBlockfetchBlock failed: %v", err)
 		}
 		if err := ledgerState.flushPendingBlockfetchBlocksDeferred(nil); err != nil {
@@ -2467,7 +2278,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	b.ResetTimer()
 
 	for b.Loop() {
-		if err := ledgerState.handleEventBlockfetchBlockDeferred(evt, nil); err != nil {
+		if err := handleEventBlockfetchBlockDeferred(ledgerState, evt, nil); err != nil {
 			b.Fatal(err)
 		}
 		ledgerState.pendingBlockfetchEvents = ledgerState.pendingBlockfetchEvents[:0]
@@ -2878,14 +2689,43 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	// Open immutable database
 	immDb := openImmutableTestDB(b)
 
-	// Seed database with substantial real data (blocks starting from slot 5)
-	seeded := seedBlocksFromSlots(
+	// Seed the first ten fixture blocks. Requesting ten consecutive slots
+	// instead would resolve onto one block, because the fixture's blocks are
+	// 20 slots apart.
+	seeded := seedBlocksAtPoints(
 		b,
 		db,
 		immDb,
-		[]uint64{5, 6, 7, 8, 9, 10, 11, 12, 13, 14},
+		fixturePointsFrom(b, immDb, 0, 10),
 	)
-	b.Logf("Seeded %d blocks for concurrent queries benchmark", seeded)
+	if seeded != 10 {
+		b.Fatalf("seeded %d blocks; concurrent query benchmark requires 10", seeded)
+	}
+	refs := seedUtxosAtPoints(
+		b,
+		db,
+		immDb,
+		fixturePointsFrom(b, immDb, 0, 100),
+		256,
+	)
+	addresses := make([]ledger.Address, 0, len(refs))
+	for _, ref := range refs {
+		addresses = append(addresses, ref.address)
+	}
+	addressRows, err := db.UtxosByAddress(
+		addresses[:1], database.MaxUtxosByAddressResults, nil,
+	)
+	if err != nil || len(addressRows) == 0 {
+		b.Fatalf("preflight address query returned %d rows: %v", len(addressRows), err)
+	}
+	refRow, err := db.UtxoByRef(refs[0].txID, refs[0].outputIdx, nil)
+	if err != nil || refRow == nil {
+		b.Fatalf("preflight UTxO reference query returned %v: %v", refRow, err)
+	}
+	blockRow, err := db.BlockByIndex(database.BlockInitialIndex, nil)
+	if err != nil || len(blockRow.Hash) == 0 {
+		b.Fatalf("preflight block query returned %v: %v", blockRow, err)
+	}
 
 	// Define different types of queries to run concurrently
 	queryTypes := []string{
@@ -2902,8 +2742,17 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 
 	// Reset timer after setup
 	b.ResetTimer()
+	b.ReportMetric(float64(seeded), "fixture_blocks")
+	b.ReportMetric(float64(len(refs)), "utxos")
 
 	// Run benchmark with concurrent queries
+	queryErrors := make(chan error, 1)
+	recordQueryError := func(err error) {
+		select {
+		case queryErrors <- err:
+		default:
+		}
+	}
 	b.RunParallel(func(pb *testing.PB) {
 		workerID := 0
 		for pb.Next() {
@@ -2911,43 +2760,47 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 
 			switch queryType {
 			case "utxo_address":
-				// Query UTxO by address (using test address)
-				paymentKey := make([]byte, 28) // dummy 28-byte key hash
-				stakeKey := make([]byte, 28)
-				testAddr, err := ledger.NewAddressFromParts(
-					0,
-					0,
-					paymentKey,
-					stakeKey,
-				)
-				if err != nil {
-					b.Fatal(err)
-				}
 				res, err := db.UtxosByAddress(
-					[]ledger.Address{testAddr},
+					[]ledger.Address{addresses[workerID%len(addresses)]},
 					database.MaxUtxosByAddressResults,
 					nil,
 				)
-				_ = res
-				_ = err // Ignore errors for benchmark
+				if err != nil || len(res) == 0 {
+					recordQueryError(
+						fmt.Errorf("address query returned %d rows: %v", len(res), err),
+					)
+					return
+				}
 
 			case "utxo_ref":
-				// Query UTxO by reference (using test hash)
-				testTxId := []byte(
-					"abcd1234567890abcdef1234567890abcdef1234567890abcdef1234567890ab",
-				)
-				_, err := db.UtxoByRef(testTxId, 0, nil)
-				_ = err // Ignore errors for benchmark
+				ref := refs[workerID%len(refs)]
+				res, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil)
+				if err != nil || res == nil {
+					recordQueryError(
+						fmt.Errorf("reference query returned %v: %v", res, err),
+					)
+					return
+				}
 
 			case "block_retrieval":
-				// Query block by index
-				_, err := db.BlockByIndex(uint64(workerID%100), nil)
-				_ = err // Ignore errors for benchmark
+				index := database.BlockInitialIndex + uint64(workerID%seeded)
+				res, err := db.BlockByIndex(index, nil)
+				if err != nil || len(res.Hash) == 0 {
+					recordQueryError(
+						fmt.Errorf("block query returned %v: %v", res, err),
+					)
+					return
+				}
 			}
 
 			workerID++
 		}
 	})
+	select {
+	case err := <-queryErrors:
+		b.Fatal(err)
+	default:
+	}
 
 	// Report queries per second
 	b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "queries/sec")
@@ -3369,4 +3222,190 @@ func BenchmarkStorageModeIngestSteadyState(b *testing.B) {
 			)
 		})
 	}
+}
+
+// epochBoundaryBenchPartialPrecompute commits the first half of the round's
+// pool chunks and stops, as a restart between two chunks would.
+func epochBoundaryBenchPartialPrecompute(
+	b *testing.B,
+	f *epochBoundaryBenchFixture,
+) {
+	epochBoundaryBenchPartialPrecomputeT(b, f)
+}
+
+// epochBoundaryBenchShape is the row-count shape of a synthetic mainnet-like
+// ledger. The defaults follow the mainnet 655->656 boundary: 1,309,350
+// delegators across 2,676 pools and 1,053 DReps.
+type epochBoundaryBenchShape struct {
+	pools             int
+	delegators        int
+	dreps             int
+	utxosPerDelegator int
+	proposals         int
+	drepVotes         int
+	spoVotes          int
+	ccMembers         int
+}
+
+func epochBoundaryBenchShapeFromEnv(tb testing.TB) epochBoundaryBenchShape {
+	tb.Helper()
+	shape := epochBoundaryBenchShape{
+		pools:             2_676,
+		delegators:        1_309_350,
+		dreps:             1_053,
+		utxosPerDelegator: 2,
+		proposals:         40,
+		drepVotes:         400,
+		spoVotes:          300,
+		ccMembers:         7,
+	}
+	envInt := func(name string, dst *int) {
+		raw := os.Getenv(name)
+		if raw == "" {
+			return
+		}
+		v, err := strconv.Atoi(raw)
+		require.NoError(tb, err, name)
+		*dst = v
+	}
+	envInt("DINGO_BENCH_POOLS", &shape.pools)
+	envInt("DINGO_BENCH_DELEGATORS", &shape.delegators)
+	envInt("DINGO_BENCH_DREPS", &shape.dreps)
+	envInt("DINGO_BENCH_UTXOS_PER_DELEGATOR", &shape.utxosPerDelegator)
+	envInt("DINGO_BENCH_PROPOSALS", &shape.proposals)
+	return shape
+}
+
+func reportEpochBoundaryPhases(
+	b *testing.B,
+	label string,
+	body, commit time.Duration,
+	phases []epochBoundaryPhase,
+) {
+	b.Helper()
+	sorted := append([]epochBoundaryPhase(nil), phases...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].duration > sorted[j].duration
+	})
+	var sb strings.Builder
+	fmt.Fprintf(
+		&sb, "%s: whole boundary %.3fs (body %.3fs, commit %.3fs)",
+		label, (body + commit).Seconds(), body.Seconds(), commit.Seconds(),
+	)
+	for _, phase := range sorted {
+		fmt.Fprintf(&sb, "; %s %.3fs", phase.name, phase.duration.Seconds())
+	}
+	b.Log(sb.String())
+	b.ReportMetric((body + commit).Seconds(), "boundary_s")
+	for _, phase := range phases {
+		b.ReportMetric(phase.duration.Seconds(), phase.name+"_s")
+	}
+}
+
+// BenchmarkEpochBoundaryMainnetShape measures the whole epoch boundary --
+// every phase of processEpochRollover plus its commit -- on a mainnet-shaped
+// ledger, with the reward precompute complete, partial and missing. Run it
+// with -benchtime=1x: each sub-benchmark seeds its own database, which takes
+// longer than the boundary it measures. DINGO_BENCH_DELEGATORS and
+// DINGO_BENCH_POOLS scale the shape down for a quick run.
+func BenchmarkEpochBoundaryMainnetShape(b *testing.B) {
+	shape := epochBoundaryBenchShapeFromEnv(b)
+	for _, state := range []string{"complete", "partial", "missing"} {
+		b.Run("precompute="+state, func(b *testing.B) {
+			for range b.N {
+				b.StopTimer()
+				f := newEpochBoundaryBenchFixture(
+					b, shape, os.Getenv("DINGO_BENCH_TEMPLATE_DIR"),
+				)
+				precomputeStart := time.Now()
+				switch state {
+				case "complete":
+					require.NoError(
+						b,
+						f.ls.precomputeStakeRewardsAfterEpochTransition(
+							epochBoundaryBenchPrecomputeEvent(),
+						),
+					)
+				case "partial":
+					epochBoundaryBenchPartialPrecompute(b, f)
+				}
+				b.Logf(
+					"precompute (%s, off the apply path): %.3fs",
+					state, time.Since(precomputeStart).Seconds(),
+				)
+				b.StartTimer()
+				body, commit, phases := f.rollover(b)
+				b.StopTimer()
+				reportEpochBoundaryPhases(
+					b, "precompute="+state, body, commit, phases,
+				)
+				completion := time.Now()
+				f.ls.waitEpochBoundaryBenchBackground()
+				b.Logf(
+					"background completion after the boundary: %.3fs",
+					time.Since(completion).Seconds(),
+				)
+			}
+		})
+	}
+}
+
+func benchmarkTipSnapshotReaders(b *testing.B, ledgerState *LedgerState) {
+	b.Helper()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = ledgerState.Tip()
+			_ = ledgerState.GetCurrentPParams()
+			_ = ledgerState.CurrentEpoch()
+			_ = ledgerState.IsAtTip()
+		}
+	})
+}
+
+// BenchmarkTipSnapshotReadOnly is the baseline: readers only, no concurrent
+// writer. Run with -cpu=1,4,8,16 to see the scaling curve.
+func BenchmarkTipSnapshotReadOnly(b *testing.B) {
+	db, ledgerState := newBatchBenchmarkLedgerState(b, nil)
+	defer dbtest.CloseDatabase(db)
+
+	benchmarkTipSnapshotReaders(b, ledgerState)
+}
+
+// BenchmarkTipSnapshotReadUnderWriter adds a background writer that
+// continuously republishes the consensus/tip snapshots (the same
+// publishSnapshotsLocked call a real per-block writer makes), while readers
+// run concurrently. Run with -cpu=1,4,8,16 to see the scaling curve; per
+// regression, an implementation using a plain RWMutex here would
+// degrade sharply at higher core counts, while the atomic.Pointer
+// implementation should stay close to BenchmarkTipSnapshotReadOnly.
+//
+// The writer runs as fast as possible (deliberately more aggressive than a
+// real per-block cadence) so a reintroduced lock's contention shows up
+// clearly rather than being diluted by a realistic, much lower write rate.
+func BenchmarkTipSnapshotReadUnderWriter(b *testing.B) {
+	db, ledgerState := newBatchBenchmarkLedgerState(b, nil)
+	defer dbtest.CloseDatabase(db)
+
+	done := make(chan struct{})
+	writerStopped := make(chan struct{})
+	go func() {
+		defer close(writerStopped)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				ledgerState.Lock()
+				ledgerState.publishSnapshotsLocked()
+				ledgerState.Unlock()
+			}
+		}
+	}()
+	defer func() {
+		close(done)
+		<-writerStopped
+	}()
+
+	benchmarkTipSnapshotReaders(b, ledgerState)
 }

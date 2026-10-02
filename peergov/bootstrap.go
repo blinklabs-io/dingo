@@ -131,19 +131,6 @@ func (p *PeerGovernor) bootstrapExitSuccessorCountLocked() int {
 	return successorCount
 }
 
-// exitBootstrap marks bootstrap as exited while preserving bootstrap-source
-// classification so recovery remains reachable.
-// Acquires p.mu internally and publishes events after releasing it to avoid deadlock.
-//
-//nolint:unused // Used by tests
-func (p *PeerGovernor) exitBootstrap(reason string) {
-	p.mu.Lock()
-	events := p.exitBootstrapLocked(reason)
-	p.mu.Unlock()
-
-	p.publishPendingEvents(events)
-}
-
 // exitBootstrapLocked exits bootstrap mode and returns pending events.
 // Must be called with p.mu held.
 func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
@@ -199,22 +186,6 @@ func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
 
 	p.updatePeerMetrics()
 	return events
-}
-
-// checkBootstrapRecovery checks if bootstrap peers should be re-enabled.
-// This happens when:
-// - AutoBootstrapRecovery is enabled
-// - Hot peer count < MinHotPeers
-// - No gossip or ledger peers are available as warm candidates
-// Acquires p.mu internally and publishes events after releasing it to avoid deadlock.
-//
-//nolint:unused // Used by tests
-func (p *PeerGovernor) checkBootstrapRecovery() {
-	p.mu.Lock()
-	events := p.checkBootstrapRecoveryLocked()
-	p.mu.Unlock()
-
-	p.publishPendingEvents(events)
 }
 
 // checkBootstrapRecoveryLocked checks if bootstrap peers should be re-enabled

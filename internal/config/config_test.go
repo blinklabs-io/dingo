@@ -71,13 +71,16 @@ func resetGlobalConfig() {
 		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:            DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
 		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
-		// default (issue #3528) so this test-only reset does not silently
+		// default so this test-only reset does not silently
 		// diverge from what an operator actually gets. Unlike the several
 		// fields above left at their zero value on purpose (StorageMode,
 		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
@@ -199,6 +202,9 @@ mithril:
 
 	t.Setenv("DINGO_FORGE_SYNC_TOLERANCE_SLOTS", "321")
 	t.Setenv("DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS", "654")
+	t.Setenv("DINGO_FORGE_EB_MAX_TX_REFS", "777")
+	t.Setenv("DINGO_FORGE_EB_MAX_BYTES", "888888")
+	t.Setenv("DINGO_FORGE_EB_SELECTION_RESERVE", "750ms")
 
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
@@ -244,6 +250,8 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
+			// Unset in the file, so the default survives.
+			LimitOnPatienceEnabled: true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		KoiosParity:   DefaultKoiosParityConfig(),
@@ -272,6 +280,9 @@ mithril:
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:                true,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(777),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(888888),
+		ForgeEBSelectionReserve:            750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -386,6 +397,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
 		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
 		ValidateForgedBlock:                true,
+		ForgeEBMaxTxRefs:                   forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                    forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:            DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -2012,7 +2026,7 @@ func exampleConfigPath() string {
 	)
 }
 
-// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// TestLoad_ExampleConfigParses guards against regressions where
 // a single mis-indented line in dingo.yaml.example (the default config
 // shipped to operators) produced a YAML syntax error on startup with no
 // indication of which field was affected. Any change to dingo.yaml.example

@@ -926,8 +926,9 @@ func parseDropColumnStatement(statement string) (string, string, bool) {
 
 // parseMySQLDropIndexStatement extracts the index and table names from the
 // translated "DROP INDEX <name> ON <table>" MySQL form (see
-// translateSchemaSQLInSchema's `idx_asset_name_hex`/
-// `idx_committee_member_cold_cred_hash` rewrites). SQLite and PostgreSQL keep
+// translateSchemaSQLInSchema's `idx_asset_name_hex`/`idx_asset_amount`/
+// `idx_asset_fingerprint`/`idx_committee_member_cold_cred_hash` rewrites).
+// SQLite and PostgreSQL keep
 // "DROP INDEX IF EXISTS", which those engines already tolerate on replay
 // without reaching this guard at all, so only the MySQL form needs it.
 func parseMySQLDropIndexStatement(statement string) (string, string, bool) {
@@ -952,7 +953,7 @@ func parseMySQLDropIndexStatement(statement string) (string, string, bool) {
 // isSQLiteDDLAlreadyAppliedOnConn's ADD COLUMN handling: it reports whether
 // an ALTER TABLE ... DROP COLUMN expand statement failed only because a
 // previous run of the same expand phase already dropped it. Needed once a
-// migration removes rather than adds a column (dingo#4464 asset.name_hex was
+// migration removes rather than adds a column (asset.name_hex was
 // the first).
 func isSQLiteDropColumnAlreadyAppliedOnConn(
 	ctx context.Context,

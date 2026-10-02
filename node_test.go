@@ -17,33 +17,2672 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/bursa"
+	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mesh"
+	"github.com/blinklabs-io/dingo/api/utxorpc"
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/mempool"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
+	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/kes"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestAPIProviderConfigMergesTopLevelDefault asserts a provider selection
+// with no tls of its own inherits the shared api.tls
+// policy.
+func TestAPIProviderConfigMergesTopLevelDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		apiConfig: internalconfig.APIConfig{
+			TLS: apiconfig.TLSPolicy{
+				Mode:         new("server"),
+				CertFilePath: new("/shared/cert.pem"),
+				KeyFilePath:  new("/shared/key.pem"),
+			},
+		},
+	}
+	selection := plugin.Selection{
+		Provider: "builtin",
+		Config:   map[string]any{"port": uint(3000)},
+	}
+
+	merged, err := cfg.apiProviderConfig(
+		plugin.CapabilityAPIBlockfrost, selection,
+	)
+	require.NoError(t, err)
+
+	tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged.Config)
+	require.NoError(t, err)
+	effective, err := tlsPolicy.Resolve("test")
+	require.NoError(t, err)
+	assert.True(t, effective.Enabled)
+	assert.Equal(t, "/shared/cert.pem", effective.CertFilePath)
+	assert.Equal(t, "/shared/key.pem", effective.KeyFilePath)
+}
+
+// TestAPIProviderConfigProviderOverrideWins asserts an explicit provider
+// field beats the shared top-level default for that field only.
+func TestAPIProviderConfigProviderOverrideWins(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		apiConfig: internalconfig.APIConfig{
+			TLS: apiconfig.TLSPolicy{
+				Mode:         new("server"),
+				CertFilePath: new("/shared/cert.pem"),
+				KeyFilePath:  new("/shared/key.pem"),
+			},
+		},
+	}
+	selection := plugin.Selection{
+		Provider: "builtin",
+		Config: map[string]any{
+			"port": uint(3000),
+			"tls": map[string]any{
+				"certFilePath": "/provider/cert.pem",
+			},
+		},
+	}
+
+	merged, err := cfg.apiProviderConfig(
+		plugin.CapabilityAPIBlockfrost, selection,
+	)
+	require.NoError(t, err)
+
+	tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged.Config)
+	require.NoError(t, err)
+	effective, err := tlsPolicy.Resolve("test")
+	require.NoError(t, err)
+	assert.True(t, effective.Enabled)
+	assert.Equal(t, "/provider/cert.pem", effective.CertFilePath)
+	// keyFilePath falls through to the shared default.
+	assert.Equal(t, "/shared/key.pem", effective.KeyFilePath)
+}
+
+// TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly asserts the legacy root
+// tlsCertFilePath/tlsKeyFilePath compatibility fields feed only UTxORPC's
+// default TLS policy, never Blockfrost's or Mesh's -- promoting them to
+// every API provider would silently switch previously-plaintext listeners
+// to TLS on upgrade for any deployment that had set them (see
+// legacyUtxorpcTLSPolicy's own doc comment).
+func TestLegacyUtxorpcTLSPolicyIsUtxorpcOnly(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		tlsCertFilePath: "/legacy/cert.pem",
+		tlsKeyFilePath:  "/legacy/key.pem",
+	}
+	selection := plugin.Selection{
+		Provider: "builtin",
+		Config:   map[string]any{"port": uint(9090)},
+	}
+
+	for _, tc := range []struct {
+		capability   plugin.Capability
+		wantEnabled  bool
+		wantCertPath string
+	}{
+		{plugin.CapabilityAPIUtxorpc, true, "/legacy/cert.pem"},
+		{plugin.CapabilityAPIBlockfrost, false, ""},
+		{plugin.CapabilityAPIMesh, false, ""},
+	} {
+		merged, err := cfg.apiProviderConfig(tc.capability, selection)
+		require.NoErrorf(t, err, "capability %s", tc.capability)
+		tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged.Config)
+		require.NoErrorf(t, err, "capability %s", tc.capability)
+		effective, err := tlsPolicy.Resolve("test")
+		require.NoErrorf(t, err, "capability %s", tc.capability)
+		assert.Equalf(
+			t, tc.wantEnabled, effective.Enabled,
+			"capability %s", tc.capability,
+		)
+		assert.Equalf(
+			t, tc.wantCertPath, effective.CertFilePath,
+			"capability %s", tc.capability,
+		)
+	}
+}
+
+// TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy asserts the shared
+// api.tls default and any provider-level override both still take
+// precedence over the legacy compatibility fields for UTxORPC, matching
+// the canonical-over-compatibility precedence used elsewhere (e.g.
+// applyAPIPortCompatibilityEnvironment).
+func TestLegacyUtxorpcTLSPolicyYieldsToExplicitPolicy(t *testing.T) {
+	t.Parallel()
+
+	cfg := Config{
+		tlsCertFilePath: "/legacy/cert.pem",
+		tlsKeyFilePath:  "/legacy/key.pem",
+		apiConfig: internalconfig.APIConfig{
+			TLS: apiconfig.TLSPolicy{Mode: new("disabled")},
+		},
+	}
+	selection := plugin.Selection{
+		Provider: "builtin",
+		Config:   map[string]any{"port": uint(9090)},
+	}
+
+	merged, err := cfg.apiProviderConfig(
+		plugin.CapabilityAPIUtxorpc, selection,
+	)
+	require.NoError(t, err)
+	tlsPolicy, err := apiconfig.DecodeTLSPolicy(merged.Config)
+	require.NoError(t, err)
+	effective, err := tlsPolicy.Resolve("test")
+	require.NoError(t, err)
+	assert.False(t, effective.Enabled)
+}
+
+// TestNewRejectsInvalidMergedAPITLSPolicy asserts a partial certificate/
+// key pair in the shared api.tls default is rejected at New(), before any
+// listener starts -- not merely logged or deferred to Start() time.
+func TestNewRejectsInvalidMergedAPITLSPolicy(t *testing.T) {
+	t.Parallel()
+
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	_, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+		WithAPIConfig(internalconfig.APIConfig{
+			TLS: apiconfig.TLSPolicy{
+				Mode:         new("server"),
+				CertFilePath: new("/only/cert.pem"),
+			},
+		}),
+	))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config.tls")
+	assert.Contains(t, err.Error(), "must both be set")
+}
+
+// TestNewAllowsUnauthenticatedPublicAPI verifies the shared Node constructor
+// permits an intentionally public API without requiring authentication.
+func TestNewAllowsUnauthenticatedPublicAPI(t *testing.T) {
+	t.Parallel()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	node, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithBindAddr("0.0.0.0"),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+	))
+
+	require.NoError(t, err)
+	require.NotNil(t, node)
+	t.Cleanup(func() {
+		assert.NoError(t, node.Stop())
+	})
+}
+
+// TestChainsyncConfigCarriesLimitOnPatience pins the composition the live
+// restore/truncate rebuild shares with Run: the configured Limit on Patience
+// and the Genesis gate that decides when it applies.
+func TestChainsyncConfigCarriesLimitOnPatience(t *testing.T) {
+	t.Parallel()
+	n := &Node{config: NewConfig(WithGenesisLimitOnPatience(true, 7, 3))}
+
+	cfg := n.chainsyncConfig()
+	assert.Equal(t, chainsync.PatienceConfig{
+		Enabled:  true,
+		Capacity: 7,
+		Rate:     3,
+	}, cfg.Patience)
+	require.NotNil(t, cfg.PatienceActiveFunc)
+	require.NotNil(t, cfg.ObservedHeaderLimitFunc)
+	assert.False(t, cfg.PatienceActiveFunc(), "no chain selector yet")
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{
+			GenesisMode:        true,
+			GenesisWindowSlots: 30,
+		},
+	)
+	assert.True(t, cfg.PatienceActiveFunc())
+	assert.Equal(t, 30, cfg.ObservedHeaderLimitFunc())
+
+	n.chainSelector = chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	assert.False(t, cfg.PatienceActiveFunc(), "Praos selection")
+}
+
+func TestChainsyncConfigLimitOnPatienceDefaults(t *testing.T) {
+	t.Parallel()
+	n := &Node{config: NewConfig()}
+	assert.Equal(t, chainsync.PatienceConfig{Enabled: true},
+		n.chainsyncConfig().Patience,
+		"enabled by default; zero capacity and rate select package defaults")
+}
+
+// TestLiveTruncateKeepsLimitOnPatience pins that the chainsync state rebuilt
+// by a live truncate uses the configured Limit on Patience rather than the
+// package defaults.
+func TestLiveTruncateKeepsLimitOnPatience(t *testing.T) {
+	t.Parallel()
+	n, points := newLiveLifecycleTestNode(t, 25)
+	require.NotNil(t, n.config.cfg)
+	n.config.cfg.GenesisBootstrap.LimitOnPatienceEnabled = true
+	n.config.cfg.GenesisBootstrap.LimitOnPatienceCapacity = 7
+
+	targetSlot := points[10].Slot
+	_, err := n.Truncate(context.Background(), dblifecycle.TruncateTarget{
+		Slot: &targetSlot,
+	})
+	require.NoError(t, err)
+
+	conn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4001},
+	}
+	require.True(t, n.chainsyncState.AddClientConnId(conn))
+	tc := n.chainsyncState.GetTrackedClient(conn)
+	require.NotNil(t, tc)
+	assert.InDelta(t, 7, tc.Patience.Tokens, 1e-9)
+}
+
+func TestNewInvalidConfigPreservesMetricsRegistry(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		option    ConfigOptionFunc
+		wantError string
+	}{
+		{"storage", WithStorageMode("invalid"), "invalid storage mode"},
+		{"era", WithStartEra("invalid"), "invalid start era"},
+		{"margin", WithMinPoolMargin(10001), "min pool margin"},
+		{"leverage", WithPledgeLeverage(true, 0), "pledge leverage"},
+		{"listeners", func(c *Config) { c.listeners = nil }, "no listeners defined"},
+		{"listener address", WithListeners(ListenerConfig{}), "listener must provide"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := prometheus.NewRegistry()
+			control := prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "caller_registry_control", Help: "Collector owned by the caller.",
+			})
+			registry.MustRegister(control)
+			control.Set(1)
+			before, err := registry.Gather()
+			require.NoError(t, err)
+			baseOptions := []ConfigOptionFunc{
+				WithNetworkMagic(1), WithPrometheusRegistry(registry),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp", ListenAddress: "127.0.0.1:0",
+				}),
+			}
+			for range 2 {
+				cfg := NewConfig(append(baseOptions, tc.option)...)
+				var node *Node
+				require.NotPanics(t, func() { node, err = New(cfg) })
+				require.Nil(t, node)
+				require.ErrorContains(t, err, tc.wantError)
+				after, err := registry.Gather()
+				require.NoError(t, err)
+				require.Len(
+					t,
+					after,
+					len(before),
+					"failed construction changed caller metrics",
+				)
+				assert.Equal(t, before[0], after[0], "caller collector changed")
+			}
+			var node *Node
+			require.NotPanics(
+				t,
+				func() { node, err = New(NewConfig(baseOptions...)) },
+			)
+			require.NoError(t, err)
+			require.NotNil(t, node)
+			t.Cleanup(func() { require.NoError(t, node.Stop()) })
+			after, err := registry.Gather()
+			require.NoError(t, err)
+			require.Greater(
+				t,
+				len(after),
+				len(before),
+				"valid retry must register node metrics",
+			)
+		})
+	}
+}
+
+func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
+	t.Parallel()
+
+	type counts struct {
+		required               int
+		detachable             int
+		chainsync              int
+		connectionRecycle      int
+		ledgerRecycleTranslate int
+	}
+	want := map[string]map[string]counts{
+		"node.go": {
+			"Run": {
+				required:  3,
+				chainsync: 1,
+			},
+			"subscribeChainsyncClientRemoveRequests": {required: 1},
+			"subscribeConnectionEvents": {
+				required:               3,
+				connectionRecycle:      1,
+				ledgerRecycleTranslate: 1,
+			},
+			"subscribeChainSelectorEvents": {
+				required:   8,
+				detachable: 1,
+			},
+		},
+		"node_lifecycle.go": {
+			"reinitializeNetworkingCore": {
+				chainsync:         1,
+				connectionRecycle: 1,
+			},
+		},
+		"node_leios.go": {
+			"initLeiosVoteManager": {required: 2},
+		},
+		"node_koiosparity.go": {
+			"startKoiosParityObserver": {required: 1},
+		},
+	}
+
+	policyHelpers := map[string]string{
+		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
+		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
+		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
+		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
+	}
+	seenPolicyHelpers := make(map[string]bool)
+	for fileName, functions := range want {
+		file, err := parser.ParseFile(
+			token.NewFileSet(),
+			filepath.Clean(fileName),
+			nil,
+			parser.SkipObjectResolution,
+		)
+		require.NoError(t, err)
+
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			wantCounts, isRegistration := functions[fn.Name.Name]
+			got := counts{}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				name := nodeCallName(call.Fun)
+				switch name {
+				case "subscribeRequiredEvent":
+					got.required++
+				case "subscribeDetachableEvent":
+					got.detachable++
+				case "subscribeChainsyncClientRemoveRequests":
+					got.chainsync++
+				case "subscribeConnectionRecycleRequests":
+					got.connectionRecycle++
+				case "subscribeLedgerConnectionRecycleTranslation":
+					got.ledgerRecycleTranslate++
+				case "SubscribeFunc", "SubscribeFuncWithBuffer", "SubscribeFuncStrict":
+					t.Errorf("%s uses unclassified EventBus registration %s", fn.Name.Name, name)
+				case "SubscribeFuncWithBufferPolicy":
+					policy, allowed := policyHelpers[fn.Name.Name]
+					if !allowed {
+						t.Errorf("%s registers an EventBus callback outside a policy helper", fn.Name.Name)
+						return true
+					}
+					seenPolicyHelpers[fn.Name.Name] = true
+					if len(call.Args) != 4 || nodeCallName(call.Args[2]) != policy {
+						t.Errorf("%s must register with %s", fn.Name.Name, policy)
+					}
+				}
+				return true
+			})
+			if isRegistration {
+				require.Equalf(t, wantCounts, got,
+					"subscription classification changed in %s:%s", fileName, fn.Name.Name)
+			}
+		}
+	}
+	for helper := range policyHelpers {
+		require.Truef(t, seenPolicyHelpers[helper],
+			"missing explicit policy implementation %s", helper)
+	}
+}
+
+func nodeCallName(expr ast.Expr) string {
+	switch value := expr.(type) {
+	case *ast.Ident:
+		return value.Name
+	case *ast.SelectorExpr:
+		return value.Sel.Name
+	default:
+		return ""
+	}
+}
+
+func TestCancelForFatalMakesShutdownReturnError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+	want := errors.New("strict parity mismatch")
+
+	n.cancelForFatal(want)
+
+	require.ErrorIs(t, n.waitForShutdown(), want)
+}
+
+func TestParentCancellationRemainsCleanShutdown(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+
+	cancel()
+
+	require.NoError(t, n.waitForShutdown())
+}
+
+func TestFatalDuringStartupOverridesCancellationError(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	n := &Node{ctx: ctx, cancel: cancel}
+	want := errors.New("strict parity mismatch during startup")
+
+	n.cancelForFatal(want)
+
+	require.ErrorIs(t, n.resolveRunError(context.Canceled), want)
+}
+
+func TestLedgerFatalCallbackPreservesShutdownCause(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := &Node{
+		ctx:    ctx,
+		cancel: cancel,
+		config: Config{
+			cfg:    &internalconfig.Config{},
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	callback := n.ledgerStateConfig().FatalErrorFunc
+	want := errors.New("ledger component failure")
+	callback(want)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.ErrorIs(t, n.waitForShutdown(), want)
+	require.ErrorIs(t, n.resolveRunError(context.Canceled), want)
+
+	callback(errors.New("later ledger failure"))
+	require.ErrorIs(t, n.waitForShutdown(), want)
+}
+
+// writeKesAgentFrame/readKesAgentFrame speak the bursa KES agent wire format
+// (4-byte big-endian length prefix + JSON payload) directly, independent of
+// the kesagent package's own unexported framing helpers -- exactly what any
+// other implementation of the protocol (this fake agent included) has to do.
+func writeKesAgentFrame(t testing.TB, conn net.Conn, v any) {
+	t.Helper()
+	payload, err := json.Marshal(v)
+	require.NoError(t, err)
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
+	_, err = conn.Write(hdr[:])
+	require.NoError(t, err)
+	_, err = conn.Write(payload)
+	require.NoError(t, err)
+}
+
+func readKesAgentFrame(conn net.Conn, v any) error {
+	var hdr [4]byte
+	if _, err := readFullFrame(conn, hdr[:]); err != nil {
+		return err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	buf := make([]byte, n)
+	if _, err := readFullFrame(conn, buf); err != nil {
+		return err
+	}
+	return json.Unmarshal(buf, v)
+}
+
+func readFullFrame(conn net.Conn, buf []byte) (int, error) {
+	total := 0
+	for total < len(buf) {
+		n, err := conn.Read(buf[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// devnetOpCertCBOR extracts the raw CBOR bytes backing the devnet opcert
+// text envelope, which is what KeyPush.OpCert carries directly on the wire.
+func devnetOpCertCBOR(t testing.TB) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(devnetKeysDir, "opcert.cert"))
+	require.NoError(t, err)
+	var envelope struct {
+		CborHex string `json:"cborHex"`
+	}
+	require.NoError(t, json.Unmarshal(data, &envelope))
+	raw, err := hex.DecodeString(envelope.CborHex)
+	require.NoError(t, err)
+	return raw
+}
+
+// devnetKESKey parses the devnet KES signing key the fake agent pushes. It
+// reads the envelope bytes rather than calling bursa.LoadKeyFromFile: that
+// function applies bursa's secret-key file policy, which rejects the checked-out
+// fixture under any umask on Unix and rejects the Windows runner's file owner
+// outright. What these cases need is the key material, not a check of how the
+// repository stores it; PoolCredentials.LoadFromFiles remains the path that
+// enforces the policy on an operator's own key.
+func devnetKESKey(t testing.TB) *bursa.LoadedKey {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(devnetKeysDir, "kes.skey"))
+	require.NoError(t, err)
+	key, err := bursa.LoadKeyFromBytes(data)
+	require.NoError(t, err)
+	return key
+}
+
+func newTestNodeForBPWithAgent(
+	t *testing.T,
+	vrf, opcert string,
+	mode string,
+	socketPath string,
+	cardanoCfg *cardano.CardanoNodeConfig,
+) *Node {
+	t.Helper()
+	n := newTestNodeForBP(t, true, vrf, "", opcert, cardanoCfg)
+	n.config.shelleyKESKey = ""
+	n.config.shelleyKESAgentSocket = socketPath
+	n.config.shelleyKESAgentMode = mode
+	return n
+}
+
+// TestValidateBlockProducerStartup_KESAgentServeKeyMode proves
+// validateBlockProducerStartupAtSlot installs credentials sourced entirely
+// from a fake bursa KES agent in serve-key mode, using the real wire
+// protocol against real devnet KES key material.
+func TestValidateBlockProducerStartup_KESAgentServeKeyMode(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		// Keep the connection open for the background Run loop until the
+		// test closes the client.
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+	require.True(t, creds.IsLoaded())
+	require.NotNil(t, n.kesAgentClient)
+}
+
+// TestValidateBlockProducerStartup_KESAgentSignMode proves
+// validateBlockProducerStartupAtSlot installs sign-mode credentials backed by
+// a fake agent that signs real requests with the real devnet KES key,
+// exercising the client's response verification against genuine signatures.
+func TestValidateBlockProducerStartup_KESAgentSignMode(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeSign,
+		})
+		var req kesagent.SignRequest
+		if err := readKesAgentFrame(conn, &req); err != nil {
+			return
+		}
+		sk := &kes.SecretKey{
+			Depth:  kes.CardanoKesDepth,
+			Period: req.Period, // devnet opcert KESPeriod is 0
+			Data:   append([]byte(nil), kesKeyData.SKey...),
+		}
+		sig, signErr := kes.Sign(sk, req.Period, req.Message)
+		if signErr != nil {
+			return
+		}
+		writeKesAgentFrame(t, conn, kesagent.SignResponse{
+			Type:      "sign_response",
+			Period:    req.Period,
+			Signature: sig,
+		})
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeSign,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+	require.True(t, creds.IsLoaded())
+	require.NotNil(t, n.kesAgentClient)
+}
+
+// TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated
+// covers the KES rotation the serve-key background loop exists to handle.
+//
+// Installing a push goes through the same identity/generation-bump path as
+// LoadFromFiles, and that path deliberately clears the validated KES protocol
+// lifetime (opCertValidated, maxKESEvolutions, opCertExpiryKES) so no
+// credential inherits a policy that was never checked against the material
+// now installed. Startup re-establishes it for the first push. A push
+// arriving later -- a KES evolution, an opcert rotation, or a re-push after a
+// reconnect -- is not covered by startup, so the loop re-establishes it
+// itself; without that, credentialGeneration.kesSign refuses every subsequent
+// signature with "operational certificate is not validated" and the node
+// stops forging until it is restarted.
+//
+// OpCertExpiryPeriod is the observable: it returns opCertExpiryKES, the value
+// validatedKESProtocolLifetime requires to be non-zero before kesSign will
+// sign at all. The two assertions are one WaitForCondition because a push is
+// installed and re-validated by a background goroutine, so reading them
+// separately would race the install itself.
+func TestValidateBlockProducerStartup_KESAgentServeKeyRotationStaysValidated(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+	decodedOpCert, err := bursa.DecodeOpCert(opCertCBOR)
+	require.NoError(t, err)
+
+	// The second push carries the same key evolved one KES period forward,
+	// which is what a real agent pushes when the period rolls over. It has to
+	// be genuinely evolved: kesagent.Client self-sign-probes every push
+	// before installing it, so a key that does not actually sign at its
+	// declared period is rejected by the client and never reaches the node.
+	evolved, err := kes.Update(&kes.SecretKey{
+		Depth:  kes.CardanoKesDepth,
+		Period: 0,
+		Data:   append([]byte(nil), kesKeyData.SKey...),
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), evolved.Period)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     decodedOpCert.KESPeriod,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     decodedOpCert.KESPeriod + 1,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: evolved.Data,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+	require.NotZero(
+		t,
+		creds.OpCertExpiryPeriod(),
+		"startup must leave a validated KES protocol lifetime",
+	)
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			return creds.GetKESPeriod() == 1 &&
+				creds.OpCertExpiryPeriod() != 0
+		},
+		5*time.Second,
+		"rotated KES key must be installed and still carry a validated KES protocol lifetime",
+	)
+}
+
+// TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails covers
+// the cleanup an agent-backed startup owes when a later step rejects the
+// credentials.
+//
+// The agent is dialled and its serve-key loop is running before the opcert
+// and KES-period checks run, so a rejection there used to return with the
+// client still connected and the loop still installing pushes into
+// credentials the node had refused to start on.
+//
+// Driven by validating against a slot past the operational certificate's
+// expiry: the agent's push installs normally and the KES-period check is what
+// fails, which is exactly the ordering the cleanup exists for.
+func TestValidateBlockProducerStartup_KESAgentClosedWhenValidationFails(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		_, _ = conn.Read(make([]byte, 1))
+	}()
+
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		cardanoCfg,
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	// slotsPerKESPeriod 129600 x maxKESEvolutions 62 is the first slot past
+	// the certificate's protocol lifetime.
+	_, err = n.validateBlockProducerStartupAtSlot(62 * 129600)
+	require.Error(t, err)
+	require.Nil(
+		t, n.kesAgentClient,
+		"a startup rejected after the agent was dialled must not leave its "+
+			"client and serve-key loop running",
+	)
+}
+
+func TestValidateBlockProducerStartupForClock_KESAgentDeferredPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		_, _ = conn.Read(make([]byte, 1))
+	}()
+
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	registry := prometheus.NewRegistry()
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	creds, err := n.validateBlockProducerStartupForClock(0, false)
+	require.NoError(t, err)
+	require.True(t, creds.IsLoaded())
+	require.NotZero(t, creds.OpCertExpiryPeriod())
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		metricFamilyNames(families),
+		"dingo_kes_agent_connected",
+	)
+}
+
+func TestValidateBlockProducerStartup_KESAgentPinsLocalColdKey(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+	localEnvelope, err := os.ReadFile(opcert)
+	require.NoError(t, err)
+	var envelope struct {
+		Type        string `json:"type"`
+		Description string `json:"description"`
+		CborHex     string `json:"cborHex"`
+	}
+	require.NoError(t, json.Unmarshal(localEnvelope, &envelope))
+	localCBOR, err := hex.DecodeString(envelope.CborHex)
+	require.NoError(t, err)
+	localCBOR[len(localCBOR)-1] ^= 0xff
+	envelope.CborHex = hex.EncodeToString(localCBOR)
+	mismatchedEnvelope, err := json.Marshal(envelope)
+	require.NoError(t, err)
+	mismatchedOpCert := filepath.Join(t.TempDir(), "opcert.cert")
+	require.NoError(
+		t,
+		os.WriteFile(mismatchedOpCert, mismatchedEnvelope, 0o600),
+	)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+	}()
+
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		mismatchedOpCert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.ErrorContains(t, err, "cold key does not match local")
+	require.Nil(t, n.kesAgentClient)
+}
+
+func TestKESAgentMetricsRegisteredOncePerNode(t *testing.T) {
+	t.Parallel()
+
+	registry := prometheus.NewRegistry()
+	n := &Node{config: Config{promRegistry: registry}}
+	first := n.kesAgentClientMetrics()
+	second := n.kesAgentClientMetrics()
+	require.Same(t, first, second)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+}
+
+func metricFamilyNames(families []*dto.MetricFamily) map[string]struct{} {
+	names := make(map[string]struct{}, len(families))
+	for _, family := range families {
+		names[family.GetName()] = struct{}{}
+	}
+	return names
+}
+
+// TestKESAgentStartupWiresClientMetrics covers the wiring rather than the
+// collector: kesagent.NewMetrics runs only from kesAgentClientMetrics, and
+// that is reached only from the two kesagent.Config literals in
+// node_forging.go, so a registry holding dingo_kes_agent_* after startup is
+// evidence the literal passes Metrics. TestKESAgentMetricsRegisteredOncePerNode
+// calls the helper itself and therefore cannot see a Config literal that
+// leaves Metrics nil. Serve-key additionally reads dingo_kes_agent_connected,
+// which only the client sets on a completed handshake.
+func TestKESAgentStartupWiresClientMetrics(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+	kesKeyData := devnetKESKey(t)
+	opCertCBOR := devnetOpCertCBOR(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		writeKesAgentFrame(t, conn, kesagent.Hello{
+			Protocol: kesagent.ProtocolID,
+			Mode:     kesagent.ModeServeKey,
+		})
+		writeKesAgentFrame(t, conn, kesagent.KeyPush{
+			Type:       "key_push",
+			Period:     0,
+			Depth:      kes.CardanoKesDepth,
+			KESSignKey: kesKeyData.SKey,
+			KESVKey:    kesKeyData.VKey,
+			OpCert:     opCertCBOR,
+		})
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
+	}()
+
+	registry := prometheus.NewRegistry()
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeServeKey,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+	require.Equal(t, 1.0, gaugeValue(t, families, "dingo_kes_agent_connected"))
+}
+
+// TestKESAgentSignModeStartupWiresClientMetrics is the sign-mode half of the
+// same class: node_forging.go carries exactly two kesagent.Config literals,
+// and each needs its own Metrics field.
+func TestKESAgentSignModeStartupWiresClientMetrics(t *testing.T) {
+	t.Parallel()
+
+	vrf, _, opcert := devnetCredPaths(t)
+
+	testutil.SkipIfBlockProducerUnsupported(t)
+	sockPath := testutil.UnixSocketPath(t)
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	registry := prometheus.NewRegistry()
+	n := newTestNodeForBPWithAgent(
+		t,
+		vrf,
+		opcert,
+		kesagent.ModeSign,
+		sockPath,
+		shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour)),
+	)
+	n.config.promRegistry = registry
+	t.Cleanup(n.closeKESAgentClient)
+
+	_, err = n.validateBlockProducerStartupAtSlot(0)
+	require.NoError(t, err)
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	names := metricFamilyNames(families)
+	for _, name := range []string{
+		"dingo_kes_agent_connected",
+		"dingo_kes_agent_reconnect_failures_total",
+		"dingo_kes_agent_sign_success_total",
+		"dingo_kes_agent_sign_failure_total",
+		"dingo_kes_agent_sign_latency_seconds",
+	} {
+		require.Contains(t, names, name)
+	}
+}
+
+func gaugeValue(
+	t testing.TB,
+	families []*dto.MetricFamily,
+	name string,
+) float64 {
+	t.Helper()
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		require.Len(t, family.GetMetric(), 1)
+		return family.GetMetric()[0].GetGauge().GetValue()
+	}
+	t.Fatalf("metric family %q not gathered", name)
+	return 0
+}
+
+func TestMidnightServerActiveRequiresExplicitEnablement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		storageMode StorageMode
+		config      MidnightConfig
+		want        bool
+	}{
+		{
+			name:        "disabled despite configured default port",
+			storageMode: StorageModeAPI,
+			config:      MidnightConfig{Port: 50051},
+		},
+		{
+			name:        "indexer enabled without server",
+			storageMode: StorageModeAPI,
+			config: MidnightConfig{
+				Enabled: true,
+				Port:    50051,
+			},
+		},
+		{
+			name:        "enabled in api mode",
+			storageMode: StorageModeAPI,
+			config: MidnightConfig{
+				ServerEnabled: true,
+				Port:          50051,
+			},
+			want: true,
+		},
+		{
+			name:        "enabled in core mode",
+			storageMode: StorageModeCore,
+			config: MidnightConfig{
+				ServerEnabled: true,
+				Port:          50051,
+			},
+		},
+		{
+			name:        "enabled with zero port",
+			storageMode: StorageModeAPI,
+			config:      MidnightConfig{ServerEnabled: true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := midnightServerActive(tt.storageMode, tt.config); got != tt.want {
+				t.Fatalf("midnightServerActive() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// nilIterChainProvider satisfies chainsync.ChainProvider without requiring a
+// real database-backed chain. It hands AddClient a nil *chain.ChainIterator,
+// which is enough to register server-side (N2C) client state -- the object
+// under test here is whether that state is released, not the iterator's own
+// Cancel behavior.
+type nilIterChainProvider struct{}
+
+func (nilIterChainProvider) GetChainFromPoint(
+	_ ocommon.Point,
+	_ bool,
+) (*chain.ChainIterator, error) {
+	return nil, nil
+}
+
+func (nilIterChainProvider) StabilityWindow() uint64 { return 0 }
+
+func newHandleConnManagerClosedTestNode(t *testing.T) *Node {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	return &Node{
+		chainsyncState: chainsync.NewStateWithConfig(
+			bus,
+			nilIterChainProvider{},
+			chainsync.DefaultConfig(),
+		),
+	}
+}
+
+func newHandleConnManagerClosedOwnerConn(
+	t *testing.T,
+	o *ouroborosPkg.Ouroboros,
+) *ouroboros.Connection {
+	t.Helper()
+	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{UseNtC: true}})[0]
+	localWire, peerWire := newLeiosNotifyTestConnPair(
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	)
+	t.Cleanup(func() {
+		_ = localWire.Close()
+		_ = peerWire.Close()
+	})
+	type result struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	localResult, peerResult := make(chan result, 1), make(chan result, 1)
+	go func() {
+		conn, err := ouroboros.NewConnection(append(
+			[]ouroboros.ConnectionOptionFunc{
+				ouroboros.WithConnection(localWire),
+			},
+			listener.ConnectionOpts...,
+		)...)
+		localResult <- result{conn: conn, err: err}
+	}()
+	go func() {
+		conn, err := ouroboros.NewConnection(append(
+			[]ouroboros.ConnectionOptionFunc{
+				ouroboros.WithConnection(peerWire),
+				ouroboros.WithServer(true),
+			},
+			listener.ConnectionOpts...,
+		)...)
+		peerResult <- result{conn: conn, err: err}
+	}()
+	local := testutil.RequireReceive(
+		t,
+		localResult,
+		10*time.Second,
+		"owner test local handshake",
+	)
+	peer := testutil.RequireReceive(
+		t,
+		peerResult,
+		10*time.Second,
+		"owner test peer handshake",
+	)
+	t.Cleanup(func() {
+		if local.conn != nil {
+			_ = local.conn.Close()
+		}
+		if peer.conn != nil {
+			_ = peer.conn.Close()
+		}
+	})
+	require.NoError(t, local.err)
+	require.NoError(t, peer.err)
+	require.NotNil(t, peer.conn.ChainSync())
+	require.NotNil(t, peer.conn.ChainSync().Server)
+	return peer.conn
+}
+
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces a
+// leak: NtC connections never received any close notification (the
+// EventBus's ConnectionClosedEventType is intentionally NtN-only), so
+// chainsync.State.RemoveClient -- which cancels the live chain iterator and
+// deletes the per-connection client state -- was never invoked for a closed
+// NtC connection. Without handleConnManagerClosedOwner wired as the connection
+// manager's ConnClosedOwnerFunc, this assertion fails: the client state
+// registered by AddClient is still present after the simulated close.
+func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n := newHandleConnManagerClosedTestNode(t)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
+
+	_, err = n.chainsyncState.AddClient(connId, ocommon.Point{})
+	require.NoError(t, err)
+	_, ok := n.chainsyncState.LookupClient(connId)
+	require.True(t, ok, "precondition: server-side client state registered")
+
+	n.handleConnManagerClosedOwner(conn, true, nil)
+
+	_, ok = n.chainsyncState.LookupClient(connId)
+	require.False(
+		t,
+		ok,
+		"NtC close must release the chainsync server-side client state and its chain iterator",
+	)
+}
+
+// TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
+// connmanager path used for both NtC and NtN. The EventBus path deliberately no
+// longer removes server-side state by connection ID because a delayed event
+// could delete a replacement connection's state.
+func TestHandleConnManagerClosedOwner_NtN_ReleasesState(t *testing.T) {
+	t.Parallel()
+
+	n := newHandleConnManagerClosedTestNode(t)
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
+
+	_, err = n.chainsyncState.AddClient(connId, ocommon.Point{})
+	require.NoError(t, err)
+
+	n.handleConnManagerClosedOwner(conn, false, nil)
+
+	_, ok := n.chainsyncState.LookupClient(connId)
+	require.False(
+		t,
+		ok,
+		"NtN close must release the chainsync server-side client state",
+	)
+}
+
+// TestHandleConnManagerClosed_NilChainsyncState guards the shutdown/restore
+// window (node_lifecycle.go nils n.chainsyncState while rebuilding it) so a
+// late NtC close callback cannot panic.
+func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	require.NotPanics(t, func() {
+		conn, err := ouroboros.NewConnection()
+		require.NoError(t, err)
+		n.handleConnManagerClosedOwner(conn, true, nil)
+	})
+}
+
+// TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
+// half of the wiring. The connection manager's ConnClosedOwnerFunc is
+// the only close notification an NtC connection gets, and it is what wakes a
+// chainsync server callback parked waiting for a certified endorser closure --
+// the protocol's own done channel cannot close while that callback is running.
+// Without the owner-aware release in handleConnManagerClosedOwner the
+// registered waiter survives the close and this fails.
+//
+// The Ouroboros instance is built through the validating constructor with the
+// full dependency set, and the connection is registered with its connection
+// manager, so the waiter passes the liveness check the same way a live serve
+// does.
+func TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
+	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, true)
+}
+
+func TestHandleConnManagerClosedOwner_NtN_ReleasesLeiosServeWaiters(
+	t *testing.T,
+) {
+	t.Parallel()
+	testHandleConnManagerClosedReleasesLeiosServeWaiters(t, false)
+}
+
+func testHandleConnManagerClosedReleasesLeiosServeWaiters(
+	t *testing.T,
+	isNtC bool,
+) {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	n := newHandleConnManagerClosedTestNode(t)
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       bus,
+		LedgerState:    ledgerState,
+		NetworkMagic:   ouroboros_mock.MockNetworkMagic,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(bus, ledgerState),
+		ConnManager:    connManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    bus,
+			ConnManager: connManager,
+		}),
+	})
+	require.NoError(t, err)
+	n.ouroborosRef.Store(o)
+
+	// Register a real node-to-client connection so the waiter carries its
+	// chainsync server owner, as it does in production.
+	conn := newHandleConnManagerClosedOwnerConn(t, o)
+	require.True(t, connManager.AddConnection(conn, isNtC, "127.0.0.1:3002"))
+	connId := conn.Id()
+
+	done, cancel := o.RegisterLeiosServeWaiterForTesting(connId)
+	t.Cleanup(cancel)
+
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"waiter must not be released before the close",
+	)
+
+	n.handleConnManagerClosedOwner(conn, isNtC, nil)
+
+	testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"connection close must release the parked Leios serving wait",
+	)
+}
+
+// TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
+// the NtC-close half of point-pinning: a client
+// that pins a point and then disconnects without a clean Release must not
+// leak its map entry, since NtC closes never reach
+// Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
+// is intentionally NtN-only) and localstatequeryServerRelease is therefore
+// never invoked for it. Without ReleaseLocalStateQueryAcquiredPoint wired
+// into handleConnManagerClosedOwner, this assertion fails: the entry
+// SetLocalStateQueryAcquiredPointForTesting seeded is still present after
+// the simulated close.
+func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	n := newHandleConnManagerClosedTestNode(t)
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: chainManager,
+		Logger:       logger,
+	})
+	require.NoError(t, err)
+	harnessMempool, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       ledgerState,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	o, err := ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
+		Logger:         logger,
+		EventBus:       bus,
+		LedgerState:    ledgerState,
+		Mempool:        &mempool.FIFO{Mempool: harnessMempool},
+		ChainsyncState: chainsync.NewState(bus, ledgerState),
+		ConnManager:    connManager,
+		PeerGov: peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger:      logger,
+			EventBus:    bus,
+			ConnManager: connManager,
+		}),
+	})
+	require.NoError(t, err)
+	n.ouroborosRef.Store(o)
+
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	connId := conn.Id()
+	o.SetLocalStateQueryAcquiredPointForTesting(connId, ledger.QueryPoint{
+		Slot: 100,
+		Hash: []byte{0xAB},
+	})
+	require.True(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"precondition: pinned point recorded",
+	)
+
+	n.handleConnManagerClosedOwner(conn, true, nil)
+
+	require.False(
+		t,
+		o.HasLocalStateQueryAcquiredPointForTesting(connId),
+		"NtC close must release the pinned LocalStateQuery point",
+	)
+}
+
+// TestHandleConnManagerClosedOwner_NilOuroboros guards the same restore window as
+// TestHandleConnManagerClosedOwner_NilChainsyncState for the added ouroboros
+// dereference: n.ouroboros() is nil before Run wires it.
+func TestHandleConnManagerClosedOwner_NilOuroboros(t *testing.T) {
+	t.Parallel()
+
+	n := newHandleConnManagerClosedTestNode(t)
+	require.Nil(t, n.ouroboros())
+	require.NotPanics(t, func() {
+		conn, err := ouroboros.NewConnection()
+		require.NoError(t, err)
+		n.handleConnManagerClosedOwner(conn, true, nil)
+	})
+}
+
+type apiProbeConfig struct {
+	Port uint `yaml:"port"`
+}
+
+type apiLifecycleProbe struct {
+	host     string
+	starts   atomic.Int32
+	stops    atomic.Int32
+	startErr error
+}
+
+func (p *apiLifecycleProbe) instance() plugin.Instance {
+	return plugin.Lifecycle{
+		StartFunc: func(context.Context) error {
+			p.starts.Add(1)
+			return p.startErr
+		},
+		StopFunc: func(context.Context) error {
+			p.stops.Add(1)
+			return nil
+		},
+	}
+}
+
+func registerAPIProbe(
+	t *testing.T,
+	host *plugin.Host,
+	capability plugin.Capability,
+	name string,
+	probe *apiLifecycleProbe,
+) {
+	t.Helper()
+	descriptor := plugin.Descriptor{Capability: capability, Name: name}
+	var err error
+	switch capability {
+	case plugin.CapabilityAPIUtxorpc:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps utxorpc.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	case plugin.CapabilityAPIBlockfrost:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps blockfrost.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	case plugin.CapabilityAPIMesh:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps mesh.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	default:
+		t.Fatalf("unsupported API capability %s", capability)
+	}
+	require.NoError(t, err)
+}
+
+func newAPIPluginRuntimeNode(t *testing.T) *Node {
+	t.Helper()
+	cardanoCfg := newNodeTestCardanoNodeCfg(t)
+	n, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+	))
+	require.NoError(t, err)
+	// New validates the production requirement for at least one listener.
+	// Runtime plugin tests do not need a network socket, so remove it after
+	// validation to keep these tests hermetic in restricted environments.
+	n.config.listeners = nil
+	return n
+}
+
+func selectAPIProbe(
+	n *Node,
+	capability plugin.Capability,
+	name string,
+	port uint,
+) {
+	n.config.pluginSelections[capability] = plugin.Selection{
+		Provider: name,
+		Config:   map[string]any{"port": port},
+	}
+}
+
+// newAPISelectionNode builds a Node whose only plugin selection is sel under
+// the Blockfrost API capability, for exercising apiPluginSelection.
+func newAPISelectionNode(sel plugin.Selection) *Node {
+	return &Node{
+		config: Config{
+			pluginSelections: map[plugin.Capability]plugin.Selection{
+				plugin.CapabilityAPIBlockfrost: sel,
+			},
+		},
+	}
+}
+
+// TestAPIPluginSelectionPortDecoding covers apiPluginSelection's port decoder.
+// The port arrives inside a map[string]any and can be produced by YAML decode
+// (int/float64), the environment compatibility shim (uint64), or an in-code
+// selection (uint), so every accepted numeric type and every guard is checked.
+func TestAPIPluginSelectionPortDecoding(t *testing.T) {
+	t.Parallel()
+
+	t.Run("uses capability default when port absent", func(t *testing.T) {
+		n := newAPISelectionNode(
+			plugin.Selection{Provider: "builtin", Config: map[string]any{}},
+		)
+		_, port, err := n.apiPluginSelection(plugin.CapabilityAPIBlockfrost)
+		require.NoError(t, err)
+		assert.Equal(t, uint(3000), port)
+	})
+
+	t.Run("uses capability default when config is nil", func(t *testing.T) {
+		n := newAPISelectionNode(plugin.Selection{Provider: "builtin"})
+		_, port, err := n.apiPluginSelection(plugin.CapabilityAPIBlockfrost)
+		require.NoError(t, err)
+		assert.Equal(t, uint(3000), port)
+	})
+
+	accepted := []struct {
+		name  string
+		value any
+		want  uint
+	}{
+		{"int", int(3100), 3100},
+		{"uint", uint(3101), 3101},
+		{"uint64", uint64(3102), 3102},
+		{"int64", int64(3103), 3103},
+		{"float64", float64(3104), 3104},
+		{"zero (disables the API)", int(0), 0},
+		{"max port", int(65535), 65535},
+		{"int64 max port", int64(65535), 65535},
+	}
+	for _, tc := range accepted {
+		t.Run("accepts port as "+tc.name, func(t *testing.T) {
+			n := newAPISelectionNode(plugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": tc.value},
+			})
+			_, port, err := n.apiPluginSelection(
+				plugin.CapabilityAPIBlockfrost,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, port)
+		})
+	}
+
+	rejected := []struct {
+		name  string
+		value any
+	}{
+		{"negative int", int(-1)},
+		{"negative int64", int64(-1)},
+		{"negative float64", float64(-1)},
+		{"fractional float64", float64(3000.5)},
+		{"int above 65535", int(65536)},
+		{"uint64 above 65535", uint64(70000)},
+		{"string", "3000"},
+		{"bool", true},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects port as "+tc.name, func(t *testing.T) {
+			n := newAPISelectionNode(plugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": tc.value},
+			})
+			_, _, err := n.apiPluginSelection(
+				plugin.CapabilityAPIBlockfrost,
+			)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestAPIPluginSelectionErrors covers the selection-level guards: an empty
+// provider and a capability absent from the selection map are both errors.
+func TestAPIPluginSelectionErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty provider is rejected", func(t *testing.T) {
+		n := newAPISelectionNode(plugin.Selection{
+			Provider: "",
+			Config:   map[string]any{"port": 3000},
+		})
+		_, _, err := n.apiPluginSelection(plugin.CapabilityAPIBlockfrost)
+		require.Error(t, err)
+	})
+
+	t.Run("missing capability is rejected", func(t *testing.T) {
+		n := &Node{
+			config: Config{
+				pluginSelections: map[plugin.Capability]plugin.Selection{},
+			},
+		}
+		_, _, err := n.apiPluginSelection(plugin.CapabilityAPIBlockfrost)
+		require.Error(t, err)
+	})
+}
+
+// TestAPIPluginSelectionDefaultPortPerCapability verifies each API capability
+// falls back to its own default port when no port is configured.
+func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
+	t.Parallel()
+
+	want := map[plugin.Capability]uint{
+		plugin.CapabilityAPIBlockfrost: 3000,
+		plugin.CapabilityAPIMesh:       8080,
+		plugin.CapabilityAPIUtxorpc:    9090,
+	}
+	for capability, wantPort := range want {
+		n := &Node{
+			config: Config{
+				pluginSelections: map[plugin.Capability]plugin.Selection{
+					capability: {
+						Provider: "builtin",
+						Config:   map[string]any{},
+					},
+				},
+			},
+		}
+		_, port, err := n.apiPluginSelection(capability)
+		require.NoErrorf(t, err, "capability %s", capability)
+		assert.Equalf(t, wantPort, port, "capability %s", capability)
+	}
+}
+
+func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
+	t.Parallel()
+
+	n := newAPIPluginRuntimeNode(t)
+	probes := map[plugin.Capability]*apiLifecycleProbe{
+		plugin.CapabilityAPIUtxorpc:    {},
+		plugin.CapabilityAPIBlockfrost: {},
+		plugin.CapabilityAPIMesh:       {},
+	}
+	for capability, probe := range probes {
+		registerAPIProbe(t, n.pluginHost, capability, "probe", probe)
+		selectAPIProbe(n, capability, "probe", 0)
+	}
+	// Force a deterministic failure after the API startup section so Run
+	// returns without requiring an external shutdown signal. Reaching block
+	// producer validation proves all three zero-port decisions were exercised.
+	n.config.blockProducer = true
+
+	require.ErrorIs(
+		t,
+		n.Run(context.Background()),
+		fs.ErrNotExist,
+	)
+	for capability, probe := range probes {
+		assert.Zero(
+			t,
+			probe.starts.Load(),
+			"capability %s started with port 0",
+			capability,
+		)
+		assert.Zero(
+			t,
+			probe.stops.Load(),
+			"capability %s stopped despite never starting",
+			capability,
+		)
+	}
+}
+
+func TestNodeRunAPIStartupFailureCleansUpStartedProviders(t *testing.T) {
+	t.Parallel()
+
+	n := newAPIPluginRuntimeNode(t)
+	utxorpcProbe := &apiLifecycleProbe{}
+	blockfrostProbe := &apiLifecycleProbe{
+		startErr: errors.New("injected API startup failure"),
+	}
+	meshProbe := &apiLifecycleProbe{}
+	registerAPIProbe(
+		t,
+		n.pluginHost,
+		plugin.CapabilityAPIUtxorpc,
+		"probe",
+		utxorpcProbe,
+	)
+	registerAPIProbe(
+		t,
+		n.pluginHost,
+		plugin.CapabilityAPIBlockfrost,
+		"probe",
+		blockfrostProbe,
+	)
+	registerAPIProbe(
+		t,
+		n.pluginHost,
+		plugin.CapabilityAPIMesh,
+		"probe",
+		meshProbe,
+	)
+	selectAPIProbe(n, plugin.CapabilityAPIUtxorpc, "probe", 19090)
+	selectAPIProbe(n, plugin.CapabilityAPIBlockfrost, "probe", 13000)
+	selectAPIProbe(n, plugin.CapabilityAPIMesh, "probe", 0)
+
+	err := n.Run(context.Background())
+	require.ErrorContains(t, err, "injected API startup failure")
+	assert.Equal(t, int32(1), utxorpcProbe.starts.Load())
+	assert.Equal(t, int32(1), utxorpcProbe.stops.Load())
+	assert.Equal(t, int32(1), blockfrostProbe.starts.Load())
+	assert.Equal(t, int32(1), blockfrostProbe.stops.Load())
+	assert.Zero(t, meshProbe.starts.Load())
+	assert.Zero(t, meshProbe.stops.Load())
+}
+
+func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
+	t.Parallel()
+	for _, bind := range []string{"0.0.0.0", "127.0.0.2"} {
+		t.Run(bind, func(t *testing.T) {
+			n := newAPIPluginRuntimeNode(t)
+			t.Cleanup(func() { require.NoError(t, n.Stop()) })
+			if bind != "0.0.0.0" {
+				WithBindAddr(bind)(&n.config)
+				n.config.syncCompatFields()
+			}
+			probes := map[plugin.Capability]*apiLifecycleProbe{
+				plugin.CapabilityAPIUtxorpc:    {},
+				plugin.CapabilityAPIBlockfrost: {},
+				plugin.CapabilityAPIMesh:       {},
+			}
+			for capability, probe := range probes {
+				registerAPIProbe(
+					t,
+					n.pluginHost,
+					capability,
+					"bind-probe",
+					probe,
+				)
+				selectAPIProbe(n, capability, "bind-probe", 18080)
+			}
+			// Fail after API composition, using lifecycle-only providers:
+			// observe the actual dependency handoff without binding public sockets.
+			n.config.blockProducer = true
+			require.ErrorIs(t, n.Run(context.Background()), fs.ErrNotExist)
+			for capability, probe := range probes {
+				assert.Equal(t, bind, probe.host, "provider %s", capability)
+			}
+		})
+	}
+}
+
+// TestConnectionRecycleSubscriptionsRemainLossless verifies the production
+// wiring of both hops of the connection-recycle stream, not EventBus in
+// isolation: the ledger-to-connmanager translation and the connmanager handler
+// subscription.
+//
+// A recycle request cannot be replayed. Each publisher raises exactly one per
+// connection and then keeps its own "already asked" flag set -- the leios-fetch
+// backfill's markProtocolDead is the clearest case, where a dropped request
+// leaves a connection whose leios-fetch protocol can never answer again in the
+// pool for the rest of its life. Detaching either subscriber
+// under backpressure would silently strip requests out of the stream, so both
+// stay attached until they drain.
+func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Stop()
+
+	started := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseCh) }) }
+	defer release()
+
+	// Enough to fill both hops' buffers, so the ledger-side publisher can only
+	// finish if an event was dropped or a subscriber was detached.
+	const total = 2*event.DefaultSubscriberBuffer + 8
+	allHandled := make(chan struct{})
+	var handled atomic.Int32
+	n := &Node{eventBus: bus}
+	n.subscribeConnectionRecycleRequests(func(evt event.Event) {
+		if _, ok := evt.Data.(connmanager.ConnectionRecycleRequestedEvent); !ok {
+			return
+		}
+		if handled.Add(1) == 1 {
+			close(started)
+			<-releaseCh
+		}
+		if handled.Load() == total {
+			close(allHandled)
+		}
+	})
+	n.subscribeLedgerConnectionRecycleTranslation()
+
+	publishRecycle := func(i int) {
+		bus.Publish(
+			ledger.ConnectionRecycleRequestedEventType,
+			event.NewEvent(
+				ledger.ConnectionRecycleRequestedEventType,
+				ledger.ConnectionRecycleRequestedEvent{
+					Reason: "leios_fetch_request_slot_abandoned_" +
+						strconv.Itoa(i),
+				},
+			),
+		)
+	}
+
+	publishRecycle(0)
+	testutil.RequireReceive(
+		t,
+		started,
+		time.Second,
+		"connmanager recycle handler did not begin",
+	)
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		for i := 1; i < total; i++ {
+			publishRecycle(i)
+		}
+	}()
+
+	// The ordinary EventBus subscriber timeout is five seconds. A regression to
+	// the detaching policy on either hop would let this publish finish at that
+	// bound with the surplus recycle requests discarded.
+	testutil.RequireNoReceive(
+		t,
+		published,
+		event.RemoteDeliverTimeout+time.Second,
+		"a connection-recycle subscription detached instead of retaining the stream",
+	)
+
+	release()
+	testutil.RequireReceive(
+		t,
+		published,
+		10*time.Second,
+		"recycle publisher did not resume after the handler drained",
+	)
+	testutil.RequireReceive(
+		t,
+		allHandled,
+		10*time.Second,
+		"connmanager recycle handler did not receive every retained request",
+	)
+	require.Equal(t, int32(total), handled.Load())
+}
+
+// TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates covers the one
+// piece of the phase 2 gate-enforcement wiring that is reachable without
+// booting a full Node: nodeSettingsGateValues, the assembly function Run
+// calls from both the normal-startup call site and the deferred,
+// post-recovery call site. Testing it here is exactly what makes "factor
+// so both call sites use the same values" a real guarantee rather than an
+// aspiration -- a future edit that changes one call site's inputs without
+// updating this function would be caught here.
+//
+// This does not, and cannot without booting a real Node through Run,
+// exercise the control flow itself: that dbNeedsRecovery defers the call
+// rather than skipping it, and that the deferred call runs immediately
+// after RecoverCommitTimestampConflict and before history expiry, the
+// Midnight indexer, or any network listener starts. Run is a single large
+// method whose body constructs the ledger state, event bus, chain
+// selector, and every network listener as a side effect of reaching that
+// code, so isolating just the recovery-then-enforce sequence would require
+// either duplicating most of Run's setup or refactoring Run to extract a
+// narrower seam -- out of scope for this fix. That gap is a known,
+// explicitly accepted one (see the coordinator's note deferring a
+// DevNet/integration-level test of the real Node.Run wiring), not a gap
+// this test is pretending to close.
+func TestNodeSettingsGateValuesAssemblesLedgerAndGenesisGates(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{
+		config: Config{
+			validateHistorical:         false, // relaxed: taint "on"
+			strictUtxoValidation:       true,  // not relaxed: taint "off"
+			historyExpiry:              HistoryExpiryConfig{Enabled: true},
+			pledgeLeverageEnabled:      true,
+			pledgeLeverage:             3,
+			fullPotRewardsEnabled:      true,
+			delegatorInactivityEnabled: true,
+			delegatorInactivity:        5,
+			minPoolMargin:              10,
+			cardanoNodeConfig: &cardano.CardanoNodeConfig{
+				ByronGenesisHash:    "byronhash",
+				ShelleyGenesisHash:  "shelleyhash",
+				AlonzoGenesisHash:   "alonzohash",
+				ConwayGenesisHash:   "conwayhash",
+				DijkstraGenesisHash: "",
+			},
+		},
+	}
+	values := n.nodeSettingsGateValues()
+
+	require.Equal(
+		t,
+		nodesettings.LatchOn,
+		values["historical_validation_relaxed"],
+	)
+	require.Equal(
+		t,
+		nodesettings.LatchOff,
+		values["strict_utxo_validation_relaxed"],
+	)
+	require.Equal(
+		t,
+		nodesettings.EncodeLatchBool(true, ""),
+		values["history_expiry_active"],
+	)
+	require.Equal(
+		t,
+		nodesettings.EncodeLatchBool(true, "3"),
+		values["pledge_leverage"],
+	)
+	require.Equal(
+		t,
+		nodesettings.EncodeLatchBool(true, ""),
+		values["full_pot_rewards"],
+	)
+	require.Equal(
+		t,
+		nodesettings.EncodeLatchBool(true, "5"),
+		values["delegator_inactivity"],
+	)
+	require.Equal(
+		t,
+		nodesettings.EncodeLatchBool(true, "10"),
+		values["min_pool_margin"],
+	)
+	require.Equal(t, "byronhash", values["byron_genesis_hash"])
+	require.Equal(t, "shelleyhash", values["shelley_genesis_hash"])
+	require.Equal(t, "alonzohash", values["alonzo_genesis_hash"])
+	require.Equal(t, "conwayhash", values["conway_genesis_hash"])
+	// Left empty by the loaded cardano config, so this is passed through
+	// as "" rather than omitted: EnforceNodeSettings's FrozenFillOnce
+	// class treats an empty configured value as "not known yet," not a
+	// mismatch, which is exactly what an era whose hash an older dingo
+	// build didn't know about needs.
+	require.Equal(t, "", values["dijkstra_genesis_hash"])
+}
+
+// TestNodeSettingsGateValuesOmitsGenesisHashesWithoutCardanoConfig covers
+// the guard mirrored from config.go's own nil check
+// (`n.config.CardanoNodeConfig() != nil`): a caller with no loaded cardano
+// config -- true for every gate-enforcement call before the config is
+// parsed, and the reason phase 2 cannot run any earlier than it does --
+// must not synthesize genesis-hash keys at all, matching
+// nodesettings.Evaluate's "absent from configured is skipped" rule rather
+// than passing five empty strings that would incorrectly resolve like a
+// config that loaded but left every hash unset.
+func TestNodeSettingsGateValuesOmitsGenesisHashesWithoutCardanoConfig(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	n := &Node{config: Config{}}
+	values := n.nodeSettingsGateValues()
+
+	for _, gate := range []string{
+		"byron_genesis_hash",
+		"shelley_genesis_hash",
+		"alonzo_genesis_hash",
+		"conway_genesis_hash",
+		"dijkstra_genesis_hash",
+	} {
+		_, present := values[gate]
+		require.False(t, present, "gate %q should be absent, not empty", gate)
+	}
+}
+
+// snapshotMgrSetterCall matches a snapshot-manager configuration call on the
+// node, capturing the setter name.
+var snapshotMgrSetterCall = regexp.MustCompile(
+	`n\.snapshotMgr\.(Set[A-Za-z0-9_]+)\(`,
+)
+
+// koiosParityRetentionWiring matches the retention setter called with the
+// operator's own koios-parity enablement. It binds the argument, not just the
+// setter name: a call wired from any other field would leave the operator's
+// setting ignored exactly as silently as no call at all.
+var koiosParityRetentionWiring = regexp.MustCompile(
+	`n\.snapshotMgr\.SetRewardAccountOutputRetentionUnbounded\(\s*` +
+		`n\.config\.koiosParity\.Enabled,?\s*\)`,
+)
+
+// nodeFuncBodyForSnapshotWiring returns the source of the named function, from
+// its declaration to the next top-level declaration.
+func nodeFuncBodyForSnapshotWiring(
+	t *testing.T,
+	path string,
+	decl string,
+) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	s := string(b)
+	start := strings.Index(s, decl)
+	if start < 0 {
+		t.Fatalf("%s not found in %s", decl, path)
+	}
+	body := s[start+len(decl):]
+	if end := strings.Index(body, "\nfunc "); end >= 0 {
+		body = body[:end]
+	}
+	return body
+}
+
+// TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig pins that a live
+// Restore/Truncate rebuilds the snapshot manager with every option Run()
+// configures. reinitializeBackgroundManagers constructs a second
+// snapshot.Manager by hand, so an option added to Run() alone is silently
+// dropped after a live lifecycle operation and the node keeps running with
+// package defaults instead of the operator's configuration -- which is
+// exactly what happened to SetDelegatorInactivity (see
+// TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
+// and is the same gap retention setter would leave.
+func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
+	t.Parallel()
+
+	runBody := nodeFuncBodyForSnapshotWiring(
+		t,
+		"node.go",
+		"func (n *Node) Run(ctx context.Context) (runErr error) {",
+	)
+	reinitBody := nodeFuncBodyForSnapshotWiring(
+		t,
+		"node_lifecycle.go",
+		"func (n *Node) reinitializeBackgroundManagers(",
+	)
+
+	runSetters := snapshotMgrSetterCall.FindAllStringSubmatch(runBody, -1)
+	if len(runSetters) == 0 {
+		t.Fatal("no n.snapshotMgr setter calls found in Run")
+	}
+	reinitSetters := map[string]struct{}{}
+	for _, m := range snapshotMgrSetterCall.FindAllStringSubmatch(
+		reinitBody,
+		-1,
+	) {
+		reinitSetters[m[1]] = struct{}{}
+	}
+	for _, m := range runSetters {
+		if _, ok := reinitSetters[m[1]]; !ok {
+			t.Errorf(
+				"Run configures the snapshot manager with %s but "+
+					"reinitializeBackgroundManagers does not; a live "+
+					"restore/truncate would silently drop that setting",
+				m[1],
+			)
+		}
+	}
+}
+
+// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
+// wiring itself: both node startup paths must widen reward_account_output
+// retention from the operator's koios-parity enablement. Without the call the
+// node keeps CORE mode's 4-epoch window, and the observer -- whose network
+// -bound epoch validation routinely runs many epochs behind chain progression
+// during a catch-up sync -- reads an epoch's rows only after
+// cleanupOldSnapshots has already deleted them.
+func TestKoiosParityRetentionWiredFromConfigInBothStartupPaths(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		path string
+		decl string
+	}{
+		{
+			path: "node.go",
+			decl: "func (n *Node) Run(ctx context.Context) (runErr error) {",
+		},
+		{
+			path: "node_lifecycle.go",
+			decl: "func (n *Node) reinitializeBackgroundManagers(",
+		},
+	} {
+		body := nodeFuncBodyForSnapshotWiring(t, tc.path, tc.decl)
+		if !koiosParityRetentionWiring.MatchString(body) {
+			t.Errorf(
+				"%s does not call "+
+					"n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded("+
+					"n.config.koiosParity.Enabled); reward_account_output "+
+					"would be pruned to the 4-epoch window with the "+
+					"koios-parity observer enabled",
+				tc.decl,
+			)
+		}
+	}
+}
+
+// forgeCreatedBy and electionCreatedBy identify the goroutines that
+// BlockForger.Start and Election.Start launch. Both Stop calls join their
+// workers, so these lines disappearing is evidence of a join rather than of
+// a cancellation: these tests never cancel the context the components were
+// started with.
+//
+// The match is on the "created by" line rather than on the worker's own
+// entry frame, because two renderings of a live goroutine carry no entry
+// frame at all: one created by `go` but not yet scheduled has an empty
+// stack, and one running on another thread prints "stack unavailable".
+// runtime.Stack emits the "created by" line in every case, so matching it is
+// not a race against the scheduler. Matching the entry frame is: under a
+// loaded test binary the forge loop had reliably not been scheduled by the
+// time the assertion ran.
+//
+// The scan covers every goroutine in the test binary, which is sound because
+// these are the only tests in this package that start a forger or an election;
+// the rest hold an unstarted forging.BlockForger value.
+const (
+	forgeCreatedBy = "created by " +
+		"github.com/blinklabs-io/dingo/ledger/forging.(*BlockForger).Start"
+	electionCreatedBy = "created by " +
+		"github.com/blinklabs-io/dingo/ledger/leader.(*Election).start"
+)
+
+// goroutineStacksContain reports whether any live goroutine's dump mentions
+// marker.
+func goroutineStacksContain(marker string) bool {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Contains(string(buf[:n]), marker)
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+func requireGoroutineGone(t *testing.T, marker string) {
+	t.Helper()
+	require.Eventually(
+		t,
+		func() bool { return !goroutineStacksContain(marker) },
+		10*time.Second,
+		10*time.Millisecond,
+		"goroutine %q never exited; its Stop was not run", marker,
+	)
+}
+
+// newStartupCleanupProducerNode builds the smallest node startBlockProducer
+// needs: a real database, chain manager, ledger state and event bus, plus the
+// devnet credential fixtures.
+func newStartupCleanupProducerNode(t *testing.T) *Node {
+	t.Helper()
+	vrf, kes, opcert := devnetCredPaths(t)
+	// The full devnet config, for the Byron genesis and the genesis hashes
+	// LedgerState.Start needs to build the genesis block. Its own Shelley
+	// genesis is then replaced with one whose system start is recent, so the
+	// devnet opcert fixture (KES period 0) is still current.
+	cardanoCfg, err := cardano.NewCardanoNodeConfigFromFile(
+		filepath.Join("config", "cardano", "devnet", "config.json"),
+	)
+	require.NoError(t, err)
+	// Moved forward in memory rather than rewritten on disk: the fixture's
+	// 2022 system start puts the wall clock about a thousand KES periods past
+	// the devnet opcert fixture, which issue 0 at KES period 0 cannot cover,
+	// and the initial funds and protocol params the genesis block needs stay
+	// exactly as shipped.
+	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	t.Cleanup(eventBus.Close)
+	chainManager, err := chain.NewManager(db, eventBus)
+	require.NoError(t, err)
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:          db,
+		ChainManager:      chainManager,
+		EventBus:          eventBus,
+		CardanoNodeConfig: cardanoCfg,
+		Logger:            logger,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ledgerState.Close() })
+	// Started because Run starts it long before the block-producer section,
+	// and validateBlockProducerStartup reads the slot clock it initializes.
+	require.NoError(t, ledgerState.Start(context.Background()))
+
+	n := &Node{
+		config: Config{
+			logger:                        logger,
+			blockProducer:                 true,
+			shelleyVRFKey:                 vrf,
+			shelleyKESKey:                 kes,
+			shelleyOperationalCertificate: opcert,
+			cardanoNodeConfig:             cardanoCfg,
+			network:                       "devnet",
+			promRegistry:                  prometheus.NewRegistry(),
+		},
+		db:           db,
+		eventBus:     eventBus,
+		chainManager: chainManager,
+		ledgerState:  ledgerState,
+	}
+	// Whatever the outcome, leave no forge loop or election worker behind for
+	// the rest of the package; both Stop calls are idempotent.
+	t.Cleanup(func() {
+		if n.blockForger != nil {
+			n.blockForger.Stop()
+		}
+		if n.leaderElection != nil {
+			_ = n.leaderElection.Stop()
+		}
+	})
+	return n
+}
+
+func newStartupCleanupRunNode(t *testing.T) *Node {
+	t.Helper()
+	vrf, kes, opcert := devnetCredPaths(t)
+	cardanoCfg, err := cardano.NewCardanoNodeConfigFromFile(
+		filepath.Join("config", "cardano", "devnet", "config.json"),
+	)
+	require.NoError(t, err)
+	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
+	n, err := New(NewConfig(
+		WithDatabasePath(t.TempDir()),
+		WithNetwork("devnet"),
+		WithCardanoNodeConfig(cardanoCfg),
+		WithNetworkMagic(cardanoCfg.ShelleyGenesis().NetworkMagic),
+		WithPrometheusRegistry(prometheus.NewRegistry()),
+		WithStorageMode(StorageModeAPI),
+		WithListeners(ListenerConfig{
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:0",
+		}),
+		WithMidnightConfig(MidnightConfig{Port: 0}),
+		WithShutdownTimeout(5*time.Second),
+	))
+	require.NoError(t, err)
+	// Run reaches its block-producer section without binding public sockets.
+	n.config.listeners = nil
+	for _, capability := range []plugin.Capability{
+		plugin.CapabilityAPIUtxorpc,
+		plugin.CapabilityAPIBlockfrost,
+		plugin.CapabilityAPIMesh,
+	} {
+		n.config.pluginSelections[capability] = plugin.Selection{
+			Provider: "unused",
+			Config:   map[string]any{"port": uint(0)},
+		}
+	}
+	n.config.blockProducer = true
+	n.config.shelleyVRFKey = vrf
+	n.config.shelleyKESKey = kes
+	n.config.shelleyOperationalCertificate = opcert
+	n.config.leiosVoteSigningKeyFile = filepath.Join(
+		t.TempDir(),
+		"absent-vote.skey",
+	)
+	n.leiosVoteManager = &leios.VoteManager{}
+	t.Cleanup(func() {
+		if n.blockForger != nil {
+			n.blockForger.Stop()
+		}
+		if n.leaderElection != nil {
+			_ = n.leaderElection.Stop()
+		}
+	})
+	return n
+}
+
+// runStopsLIFO unwinds a startup-cleanup stack the way cleanupFailedStartup
+// does, without cancelling the node context: the components must be stopped by
+// the registered closures, not by context cancellation.
+func runStopsLIFO(stops []func()) {
+	for _, stop := range slices.Backward(stops) {
+		stop()
+	}
+}
+
+// TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail covers the
+// ordering defect in the startup-cleanup stack: initBlockForger returns with
+// the forge loop and the election's workers already running, and
+// enableLeiosVoting runs after it and can fail. With the stop registered after
+// that call, a vote-key failure returned a cleanup stack that never joined
+// either component, leaving the forge loop running while the LIFO rollback
+// closed ledger state, the database and the plugin host.
+func TestStartBlockProducerStopIsRegisteredBeforeLeiosVotingCanFail(
+	t *testing.T,
+) {
+	n := newStartupCleanupProducerNode(t)
+	kesStopped := false
+	n.kesAgentCancel = func() { kesStopped = true }
+	// Non-nil so enableLeiosVoting does not take its no-vote-manager early
+	// return; it fails on the key file below without ever calling into it.
+	n.leiosVoteManager = &leios.VoteManager{}
+	n.config.leiosVoteSigningKeyFile = filepath.Join(
+		t.TempDir(),
+		"absent-vote.skey",
+	)
+
+	ctx := t.Context()
+
+	started, err := n.startBlockProducer(ctx, nil)
+	require.ErrorContains(t, err, "failed to enable leios voting")
+	require.NotNil(t, n.blockForger)
+	require.True(
+		t,
+		n.blockForger.IsRunning(),
+		"forger must be running for this test to mean anything",
+	)
+	require.True(t, goroutineStacksContain(forgeCreatedBy))
+	require.True(
+		t,
+		goroutineStacksContain(electionCreatedBy),
+		"election workers must be running for this test to mean anything",
+	)
+
+	runStopsLIFO(started)
+
+	require.True(t, kesStopped, "startup rollback must stop the KES agent loop")
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
+	require.False(t, n.blockForger.IsRunning())
+	require.Len(
+		t,
+		started,
+		1,
+		"the forger and election stop must be registered before enableLeiosVoting",
+	)
+}
+
+// TestStartBlockProducerStopJoinsBothComponentsOnSuccess is the positive case:
+// a startup that completes registers exactly one stop, and running it joins
+// the forge loop and the election workers, in that order.
+func TestStartBlockProducerStopJoinsBothComponentsOnSuccess(t *testing.T) {
+	n := newStartupCleanupProducerNode(t)
+
+	ctx := t.Context()
+
+	started, err := n.startBlockProducer(ctx, nil)
+	require.NoError(t, err)
+	require.Len(t, started, 1)
+	require.True(t, n.blockForger.IsRunning())
+	require.True(t, goroutineStacksContain(forgeCreatedBy))
+	require.True(
+		t,
+		goroutineStacksContain(electionCreatedBy),
+		"election workers must be running for this test to mean anything",
+	)
+
+	runStopsLIFO(started)
+
+	require.False(t, n.blockForger.IsRunning())
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
+}
+
+func TestNodeRunRegistersBlockProducerStopBeforeLeiosVotingCanFail(
+	t *testing.T,
+) {
+	n := newStartupCleanupRunNode(t)
+	kesStopped := false
+	n.kesAgentCancel = func() { kesStopped = true }
+
+	err := n.Run(context.Background())
+	require.ErrorContains(t, err, "failed to enable leios voting")
+	require.True(
+		t,
+		kesStopped,
+		"Run startup rollback must invoke the registered block producer stop",
+	)
+	require.Nil(t, n.kesAgentCancel)
+	require.NotNil(t, n.blockForger)
+	require.False(t, n.blockForger.IsRunning())
+	requireGoroutineGone(t, forgeCreatedBy)
+	requireGoroutineGone(t, electionCreatedBy)
+}
 
 // TestEffectiveBarkHostDefaultsToLoopbackWhenLifecycleEnabled guards a real
 // P0 gap: bark.go's own empty-Host default is "0.0.0.0" (all interfaces),
@@ -659,6 +3298,148 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 	assert.Nil(t, active)
 }
 
+// TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
+// pipeline-flag regression coverage: it proves that a Config built through the
+// public NewConfig/With... option API -- not a hand-built struct literal --
+// carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
+// into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
+// NewLedgerState. internal/node/node_test.go's
+// TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
+// internal/config.Config -> dingo.Config hop that was the actual defect.
+// Together the two tests span the full path a live serve run takes.
+func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
+	t.Parallel()
+
+	cfg := NewConfig(
+		WithBlockPipelineEnabled(true),
+		WithBlockPipelineValidateEnabled(true),
+	)
+	n := &Node{config: cfg}
+	lsCfg := n.ledgerStateConfig()
+
+	assert.True(
+		t,
+		lsCfg.BlockPipelineEnabled,
+		"expected LedgerStateConfig.BlockPipelineEnabled true; the parallel "+
+			"block decode pipeline never constructs on the serve path "+
+			"otherwise",
+	)
+	assert.True(
+		t,
+		lsCfg.BlockPipelineValidateEnabled,
+		"expected LedgerStateConfig.BlockPipelineValidateEnabled true; the "+
+			"pipeline's parallel VRF/KES validate stage never activates "+
+			"otherwise",
+	)
+}
+
+// The ledger is started, and replays any stored blocks it has not applied,
+// before the node creates Ouroboros networking. ledgerStateConfig therefore
+// hands the ledger callbacks that run while n.ouroboros() is still nil, and
+// each of them must report "unavailable" instead of dereferencing it. A
+// restart after a Musashi shutdown exposed this ordering when
+// EndorserBlockTxsByHash panicked before networking was initialized.
+func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
+	t.Parallel()
+
+	newConfig := func(t *testing.T) ledger.LedgerStateConfig {
+		t.Helper()
+		n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+		require.Nil(t, n.ouroboros())
+		return n.ledgerStateConfig()
+	}
+
+	t.Run("endorser block provider reports unavailable", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var (
+			txs []cbor.RawMessage
+			ok  bool
+		)
+		require.NotPanics(t, func() {
+			txs, ok = cfg.EndorserBlockProvider([]byte("eb-hash"), 660070)
+		})
+		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, txs)
+	})
+
+	t.Run("endorser block fetcher returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			err = cfg.EndorserBlockFetcher(
+				t.Context(), 660070, []byte("eb-hash"),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("blockfetch range request returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			_, err = cfg.BlockfetchRequestRangeFunc(
+				newNodeTestConnId(3001),
+				ocommon.NewPoint(1, []byte("start")),
+				ocommon.NewPoint(2, []byte("end")),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("block decode cache reject is a no-op", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		require.NotPanics(t, func() {
+			cfg.RejectBlockDecodeCacheFunc(7, []byte("raw-block"))
+		})
+	})
+}
+
+// The "not started" answers above apply only while n.ouroboros() is nil. Once
+// networking exists the callbacks must reach it, or the ledger would treat
+// every endorser block as permanently unavailable.
+func TestLedgerStateConfigCallbacksDelegateOnceOuroborosExists(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+	n.ouroborosRef.Store(&ouroborosPkg.Ouroboros{})
+	cfg := n.ledgerStateConfig()
+
+	var err error
+	require.NotPanics(t, func() {
+		err = cfg.EndorserBlockFetcher(t.Context(), 660070, []byte("eb-hash"))
+	})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errOuroborosNotStarted)
+}
+
+func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Musashi prototype trusts certificate without vote manager", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoMusashi.Name,
+			NetworkMagic: ouroboros.NetworkCardanoMusashi.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.NoError(t, validate(0, nil, nil, nil))
+	})
+
+	t.Run("standard network still requires certificate verifier", func(t *testing.T) {
+		n := &Node{config: Config{cfg: &internalconfig.Config{
+			Network:      ouroboros.NetworkCardanoPreview.Name,
+			NetworkMagic: ouroboros.NetworkCardanoPreview.NetworkMagic,
+		}}}
+		validate := n.ledgerStateConfig().ValidateLeiosCertificate
+		require.NotNil(t, validate)
+		require.ErrorContains(t, validate(0, nil, nil, nil), "vote manager is unavailable")
+	})
+}
+
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {
 	t.Parallel()
 
@@ -1144,6 +3925,414 @@ func newChainSelectorSubscriptionTestNode(
 		eventBus:      bus,
 		chainSelector: cs,
 	}
+}
+
+type blockingNodeTestLogHandler struct {
+	entered     chan struct{}
+	release     chan struct{}
+	calls       atomic.Int32
+	once        sync.Once
+	releaseOnce sync.Once
+}
+
+func (h *blockingNodeTestLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *blockingNodeTestLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	h.calls.Add(1)
+	h.once.Do(func() {
+		close(h.entered)
+		<-h.release
+	})
+	return nil
+}
+
+func (h *blockingNodeTestLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *blockingNodeTestLogHandler) unblock() {
+	h.releaseOnce.Do(func() { close(h.release) })
+}
+
+var nodeRequiredSubscriptionGroups = []struct {
+	function string
+	count    int
+}{
+	{function: "Run", count: 3},
+	{function: "subscribeChainsyncClientRemoveRequests", count: 1},
+	{function: "subscribeConnectionEvents", count: 3},
+	{function: "subscribeChainSelectorEvents", count: 8},
+	{function: "initLeiosVoteManager", count: 2},
+	{function: "startKoiosParityObserver", count: 1},
+}
+
+func TestNodeEventSubscriptionClassifications(t *testing.T) {
+	t.Parallel()
+
+	expectedRequired := make(map[string]int, len(nodeRequiredSubscriptionGroups))
+	for _, group := range nodeRequiredSubscriptionGroups {
+		expectedRequired[group.function] = group.count
+	}
+	expectedDetachable := map[string]int{
+		"subscribeChainSelectorEvents": 1,
+	}
+	expectedPolicies := map[string]string{
+		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",
+		"subscribeDetachableEvent":                    "SubscriberBackpressureDetach",
+		"subscribeConnectionRecycleRequests":          "SubscriberBackpressureBlock",
+		"subscribeLedgerConnectionRecycleTranslation": "SubscriberBackpressureBlock",
+	}
+	expectedChainsyncRegistrations := map[string]int{
+		"Run":                        1,
+		"reinitializeNetworkingCore": 1,
+	}
+
+	files, err := filepath.Glob("node*.go")
+	require.NoError(t, err)
+
+	fset := token.NewFileSet()
+	actualRequired := make(map[string]int)
+	actualDetachable := make(map[string]int)
+	actualPolicies := make(map[string]string)
+	actualChainsyncRegistrations := make(map[string]int)
+	var unclassified []string
+	for _, filename := range files {
+		if strings.HasSuffix(filename, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filename, nil, 0)
+		require.NoError(t, err)
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				switch selector.Sel.Name {
+				case "subscribeRequiredEvent":
+					actualRequired[function.Name.Name]++
+				case "subscribeDetachableEvent":
+					actualDetachable[function.Name.Name]++
+				case "subscribeChainsyncClientRemoveRequests":
+					actualChainsyncRegistrations[function.Name.Name]++
+				case "Subscribe", "SubscribeWithBuffer", "SubscribeFunc",
+					"SubscribeFuncWithBuffer", "SubscribeFuncStrict":
+					unclassified = append(
+						unclassified,
+						fmt.Sprintf("%s:%s", filename, function.Name.Name),
+					)
+				case "SubscribeFuncWithBufferPolicy":
+					_, ok := actualPolicies[function.Name.Name]
+					if ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("duplicate policy helper: %s", function.Name.Name),
+						)
+						return true
+					}
+					if len(call.Args) < 3 {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy missing: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					policySelector, ok := call.Args[2].(*ast.SelectorExpr)
+					if !ok {
+						unclassified = append(
+							unclassified,
+							fmt.Sprintf("policy not explicit: %s:%s", filename, function.Name.Name),
+						)
+						return true
+					}
+					actualPolicies[function.Name.Name] = policySelector.Sel.Name
+				}
+				return true
+			})
+		}
+	}
+
+	require.Empty(t, unclassified,
+		"node-owned EventBus function subscriptions must use a policy helper")
+	require.Equal(t, expectedRequired, actualRequired)
+	require.Equal(t, expectedDetachable, actualDetachable)
+	require.Equal(t, expectedPolicies, actualPolicies)
+	require.Equal(t, expectedChainsyncRegistrations, actualChainsyncRegistrations)
+}
+
+func TestNodeRequiredSubscriptionsKeepPublishersBlocked(t *testing.T) {
+	t.Parallel()
+
+	type subscriberCase struct {
+		name        string
+		eventType   event.EventType
+		logger      *blockingNodeTestLogHandler
+		queueFilled chan struct{}
+		published   chan struct{}
+	}
+	var cases []subscriberCase
+	for _, group := range nodeRequiredSubscriptionGroups {
+		for i := range group.count {
+			cases = append(cases, subscriberCase{
+				name: fmt.Sprintf("%s %d", group.function, i+1),
+				eventType: event.EventType(fmt.Sprintf(
+					"node.required.test.%d", len(cases),
+				)),
+				logger: &blockingNodeTestLogHandler{
+					entered: make(chan struct{}),
+					release: make(chan struct{}),
+				},
+				queueFilled: make(chan struct{}),
+				published:   make(chan struct{}),
+			})
+		}
+	}
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() {
+		for _, testCase := range cases {
+			testCase.logger.unblock()
+		}
+		bus.Stop()
+	})
+	n := &Node{eventBus: bus}
+	for _, testCase := range cases {
+		logger := slog.New(testCase.logger)
+		n.subscribeRequiredEvent(testCase.eventType, func(event.Event) {
+			logger.Warn("blocked test subscriber")
+		})
+		bus.Publish(testCase.eventType, event.NewEvent(testCase.eventType, nil))
+		testutil.RequireReceive(
+			t,
+			testCase.logger.entered,
+			time.Second,
+			"required subscriber callback should enter",
+		)
+	}
+
+	for _, testCase := range cases {
+		go func(testCase subscriberCase) {
+			defer close(testCase.published)
+			for i := range event.DefaultSubscriberBuffer + 2 {
+				bus.Publish(
+					testCase.eventType,
+					event.NewEvent(testCase.eventType, nil),
+				)
+				if i == event.DefaultSubscriberBuffer-1 {
+					close(testCase.queueFilled)
+				}
+			}
+		}(testCase)
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for _, testCase := range cases {
+		select {
+		case <-testCase.queueFilled:
+		case <-deadline.C:
+			t.Fatalf("%s subscriber queue did not fill", testCase.name)
+		}
+	}
+
+	allPublished := make(chan struct{})
+	go func() {
+		for _, testCase := range cases {
+			<-testCase.published
+		}
+		close(allPublished)
+	}()
+	select {
+	case <-allPublished:
+		t.Fatal("a required subscriber detached while its handler was stalled")
+	case <-time.After(event.RemoteDeliverTimeout + 250*time.Millisecond):
+	}
+
+	for _, testCase := range cases {
+		testCase.logger.unblock()
+	}
+	select {
+	case <-allPublished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publishers did not resume after required subscribers drained")
+	}
+	for _, testCase := range cases {
+		require.Eventually(t, func() bool {
+			return testCase.logger.calls.Load() == event.DefaultSubscriberBuffer+3
+		}, time.Second, 5*time.Millisecond,
+			"subscriber queue should drain: %s", testCase.name)
+	}
+}
+
+func TestNodeRequiredChainSelectorSubscriberRecoversAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		Logger:        slog.New(loggerHandler),
+		SecurityParam: 1,
+	})
+	referenceConn := newNodeTestConnId(5101)
+	cs.UpdatePeerTip(referenceConn, ochainsync.Tip{
+		Point:       ocommon.NewPoint(10, []byte("reference")),
+		BlockNumber: 1,
+	}, nil)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := newChainSelectorSubscriptionTestNode(t, bus, cs)
+	n.subscribeChainSelectorEvents()
+
+	// The first impossible advertised tip blocks in the real selector callback's
+	// warning logger. Further publications fill the production subscriber queue.
+	stalled := chainselection.PeerTipUpdateEvent{
+		ConnectionId: newNodeTestConnId(5102),
+		Tip: ochainsync.Tip{
+			Point:       ocommon.NewPoint(1000, []byte("untrusted")),
+			BlockNumber: 1000,
+		},
+	}
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+	)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(
+				chainselection.PeerTipUpdateEventType,
+				event.NewEvent(chainselection.PeerTipUpdateEventType, stalled),
+			)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production chain-selector callback queue did not fill")
+	}
+	select {
+	case <-published:
+		t.Fatal("required Node subscription stopped applying back-pressure")
+	case <-time.After(event.RemoteDeliverTimeout + time.Second):
+	}
+	loggerHandler.unblock()
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("required Node subscription did not resume publishing after callback recovery")
+	}
+
+	bus.Publish(
+		chainselection.PeerTipUpdateEventType,
+		event.NewEvent(chainselection.PeerTipUpdateEventType,
+			chainselection.PeerTipUpdateEvent{
+				ConnectionId: referenceConn,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(20, []byte("recovered")),
+					BlockNumber: 2,
+				},
+			}),
+	)
+	require.Eventually(t, func() bool {
+		got := cs.GetPeerTip(referenceConn)
+		return got != nil && got.Tip.BlockNumber == 2
+	}, time.Second, 5*time.Millisecond,
+		"required Node subscription must process events after the callback drains")
+}
+
+func TestNodeChainForkDiagnosticSubscriberDetachesAfterSaturation(t *testing.T) {
+	t.Parallel()
+
+	loggerHandler := &blockingNodeTestLogHandler{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	defer loggerHandler.unblock()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	n := &Node{
+		config:   Config{logger: slog.New(loggerHandler)},
+		eventBus: bus,
+	}
+	n.subscribeChainSelectorEvents()
+
+	const forkEvent = chain.ChainForkEventType
+	fork := event.NewEvent(forkEvent, chain.ChainForkEvent{})
+	bus.Publish(forkEvent, fork)
+	select {
+	case <-loggerHandler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback did not enter the blocking logger")
+	}
+
+	queueFilled := make(chan struct{})
+	published := make(chan struct{})
+	go func() {
+		for i := range event.DefaultSubscriberBuffer + 2 {
+			bus.Publish(forkEvent, fork)
+			if i == event.DefaultSubscriberBuffer-1 {
+				close(queueFilled)
+			}
+		}
+		close(published)
+	}()
+	select {
+	case <-queueFilled:
+	case <-time.After(time.Second):
+		t.Fatal("production fork diagnostic callback queue did not fill")
+	}
+	select {
+	case <-published:
+	case <-time.After(event.RemoteDeliverTimeout + 2*time.Second):
+		t.Fatal("detachable fork diagnostic subscriber held publishers past its timeout")
+	}
+	loggerHandler.unblock()
+	// Detachment preserves events accepted before the timeout, so wait for that
+	// backlog to drain before checking that later publications have no observer.
+	acceptedCallbacks := int32(event.DefaultSubscriberBuffer + 1)
+	require.Eventually(t, func() bool {
+		return loggerHandler.calls.Load() == acceptedCallbacks
+	}, time.Second, 5*time.Millisecond,
+		"accepted diagnostic events should drain after the callback returns")
+	bus.Publish(forkEvent, fork)
+	require.Never(t, func() bool {
+		return loggerHandler.calls.Load() > acceptedCallbacks
+	}, 100*time.Millisecond, 5*time.Millisecond,
+		"detached diagnostic observer must not receive a later event")
 }
 
 // TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:
