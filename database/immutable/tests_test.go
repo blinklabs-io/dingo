@@ -507,6 +507,57 @@ func TestGetBlockFindsExactPointInSingleEntryChunk(t *testing.T) {
 	}
 }
 
+func TestSingleEntryChunkLookupsAtZeroAndNonzeroSlot(t *testing.T) {
+	t.Parallel()
+	for _, slot := range []uint64{0, 777} {
+		t.Run(fmt.Sprintf("slot %d", slot), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			want := pointLookupPoint(slot, 0x77)
+			writePointLookupChunk(t, dir, "00000", []ocommon.Point{want})
+			imm, err := New(dir)
+			if err != nil {
+				t.Fatalf("open immutable DB: %s", err)
+			}
+			start, end, found, err := imm.chunkSlotRange("00000")
+			if err != nil || !found || start != slot || end != slot {
+				t.Fatalf(
+					"chunkSlotRange = (%d, %d, %v, %v), want (%d, %d, true, nil)",
+					start, end, found, err, slot, slot,
+				)
+			}
+			got, err := imm.GetBlock(want)
+			if err != nil {
+				t.Fatalf("exact lookup: %s", err)
+			}
+			if got == nil || got.Slot != slot ||
+				!bytes.Equal(got.Hash, want.Hash) {
+				t.Fatalf("exact lookup = %#v, want slot %d", got, slot)
+			}
+			// Same slot, different hash: located but not a match.
+			got, err = imm.GetBlock(pointLookupPoint(slot, 0xFF))
+			if err != nil || got != nil {
+				t.Fatalf("wrong-hash lookup = (%#v, %v), want (nil, nil)", got, err)
+			}
+			// The slot just after the only block is past the last chunk.
+			_, err = imm.getChunkNamesFromPoint(
+				ocommon.NewPoint(slot+1, nil),
+			)
+			if !errors.Is(err, ErrPointBeyondLastChunk) {
+				t.Fatalf("adjacent-after error = %v, want ErrPointBeyondLastChunk", err)
+			}
+			if slot > 0 {
+				// The slot just before is not in the chunk, but the chunk is
+				// still the first candidate.
+				got, err = imm.GetBlock(pointLookupPoint(slot-1, 0x77))
+				if err != nil || got != nil {
+					t.Fatalf("adjacent-before lookup = (%#v, %v), want (nil, nil)", got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestGetChunkNamesFromPointSkipsEmptyChunks(t *testing.T) {
 	dir := t.TempDir()
 	writePointLookupChunk(t, dir, "00000", nil)
