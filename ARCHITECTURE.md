@@ -2531,7 +2531,10 @@ otherwise.
 `Authorization`) for an authenticated mirror. It is YAML and environment only,
 is redacted from `Config.LogValue`, and the sync removes the headers from a
 redirect that changes scheme or host so a redirect cannot forward the
-credential. A public registry needs none.
+credential, including after a custom redirect callback. Header names reserved
+for transport or sync bookkeeping (`Host`, `Content-Length`, `User-Agent`,
+`Accept`, `If-None-Match`) are rejected. Configuration snapshots copy the
+credential map. A public registry needs none.
 
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup
@@ -8083,7 +8086,9 @@ accepted exactly at the limit and rejected one past it.
 parses the cert state, stake snapshots, active pool distribution and
 governance state, and checks the tip hash width, the epoch, evolving,
 candidate and last-epoch-block nonce widths, the certified opcert and
-block-count pool keys, and the protocol parameters, so a
+block-count pool keys, and both current and previous protocol parameters,
+including historical era conversion. An existing valid historical parameter
+row can stand in for an incompatible previous payload during catch-up, so a
 malformed input fails the import before any phase persists. A parse warning
 on the cert state or stake snapshots is a rejection rather than a log line.
 The phases parse again instead of reusing the result, which keeps those

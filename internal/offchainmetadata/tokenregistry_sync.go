@@ -323,6 +323,10 @@ func validateRegistryHeaders(
 	headers map[string]string,
 ) (map[string]string, error) {
 	for name, value := range headers {
+		switch strings.ToLower(name) {
+		case "user-agent", "accept", "if-none-match", "host", "content-length":
+			return nil, fmt.Errorf("token registry header %q is reserved", name)
+		}
 		if !httpguts.ValidHeaderFieldName(name) {
 			return nil, fmt.Errorf(
 				"token registry header name %q is invalid", name,
@@ -346,15 +350,24 @@ func dropHeadersOnOriginChange(
 	headers map[string]string,
 ) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
-		if len(via) > 0 &&
-			(req.URL.Scheme != via[0].URL.Scheme ||
-				req.URL.Host != via[0].URL.Host) {
-			for name := range headers {
-				req.Header.Del(name)
-			}
+		var originalScheme, originalHost string
+		if len(via) > 0 {
+			originalScheme, originalHost = via[0].URL.Scheme, via[0].URL.Host
 		}
 		if next != nil {
-			return next(req, via)
+			if err := next(req, via); err != nil {
+				return err
+			}
+		}
+		if len(via) > 0 &&
+			(req.URL.Scheme != originalScheme || req.URL.Host != originalHost) {
+			for configuredName := range headers {
+				for name := range req.Header {
+					if strings.EqualFold(name, configuredName) {
+						delete(req.Header, name)
+					}
+				}
+			}
 		}
 		return nil
 	}

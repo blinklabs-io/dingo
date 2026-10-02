@@ -730,3 +730,19 @@ func TestLoadGenesisDocumentsParsesTheHashedBytes(t *testing.T) {
 	require.NotNil(t, c.AlonzoGenesis())
 	require.NotNil(t, c.DijkstraGenesis())
 }
+
+func TestReadHashedGenesisReturnsTransformedBuffer(t *testing.T) {
+	t.Parallel()
+	source := []byte("original")
+	transformed := []byte("hashed and parsed")
+	hash := ""
+	returned, err := readHashedGenesis(
+		func(string) ([]byte, error) { return source, nil },
+		"test",
+		"genesis.json",
+		&hash,
+		func([]byte) ([]byte, error) { return transformed, nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, transformed, returned)
+}

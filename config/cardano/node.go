@@ -331,7 +331,7 @@ func readHashedGenesis(
 		return nil, err
 	}
 	*hash = computed
-	return data, nil
+	return input, nil
 }
 
 func normalizeGenesisLineEndings(data []byte) ([]byte, error) {

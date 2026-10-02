@@ -809,6 +809,47 @@ func validateImportState(cfg ImportConfig) error {
 			}
 		}
 	}
+	if state.Epoch > 0 && len(state.PrevPParamsData) > 0 {
+		previousEpoch := state.Epoch - 1
+		previousEra, known := importedEraForEpoch(state, previousEpoch)
+		if !known {
+			previousEra = state.EraIndex
+		}
+		previous, err := previousPParamsForEra(
+			state.EraIndex,
+			state.PrevPParamsData,
+			previousEra,
+		)
+		if err == nil {
+			err = validatePParamsData(previousEra, previous)
+		}
+		if err != nil {
+			var stored *models.PParams
+			if known {
+				var storedErr error
+				stored, storedErr = storedValidPParams(
+					cfg.Database.Metadata(),
+					nil,
+					previousEpoch,
+					previousEra,
+				)
+				if storedErr != nil {
+					return fmt.Errorf(
+						"checking stored previous protocol parameters for epoch %d: %w",
+						previousEpoch,
+						storedErr,
+					)
+				}
+			}
+			if stored == nil {
+				return fmt.Errorf(
+					"validating previous protocol parameters for epoch %d: %w",
+					previousEpoch,
+					err,
+				)
+			}
+		}
+	}
 	return nil
 }
 

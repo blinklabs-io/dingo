@@ -650,6 +650,7 @@ func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
 		want     string
 	}{
 		{"loopback", "127.0.0.1", "127.0.0.1:12798"},
+		{"default loopback", "", "127.0.0.1:12798"},
 		{"wildcard opt-in", "0.0.0.0", "0.0.0.0:12798"},
 		{"remote address opt-in", "10.0.0.5", "10.0.0.5:12798"},
 	} {

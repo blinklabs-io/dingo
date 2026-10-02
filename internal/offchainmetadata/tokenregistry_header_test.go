@@ -23,11 +23,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// headerRecorder is a registry server that records the Authorization header
-// of every request it serves.
 func headerRecorder(
 	t *testing.T,
 	handler func(w http.ResponseWriter, r *http.Request),
+) (*httptest.Server, func() []string) {
+	return headerRecorderFor(t, "Authorization", handler)
+}
+
+func headerRecorderFor(
+	t *testing.T,
+	header string,
+	handler func(http.ResponseWriter, *http.Request),
 ) (*httptest.Server, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -35,7 +41,7 @@ func headerRecorder(
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
-			seen = append(seen, r.Header.Get("Authorization"))
+			seen = append(seen, r.Header.Get(header))
 			mu.Unlock()
 			handler(w, r)
 		}),
@@ -89,8 +95,8 @@ func TestTokenRegistrySyncSendsNoHeadersByDefault(t *testing.T) {
 func TestTokenRegistrySyncKeepsHeadersOnSameOriginRedirect(t *testing.T) {
 	t.Parallel()
 
-	server, seen := headerRecorder(
-		t,
+	server, seen := headerRecorderFor(
+		t, "X-API-Key",
 		func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/moved" {
 				serveRegistry(t)(w, r)
@@ -99,7 +105,12 @@ func TestTokenRegistrySyncKeepsHeadersOnSameOriginRedirect(t *testing.T) {
 			http.Redirect(w, r, "/moved", http.StatusFound)
 		},
 	)
-	sync := newTestSync(t, newFakeTokenRegistryStore(), server.URL, nil)
+	sync := newTestSync(
+		t,
+		newFakeTokenRegistryStore(),
+		server.URL,
+		func(cfg *TokenRegistryConfig) { cfg.Headers = map[string]string{"X-API-Key": "Bearer " + redactHeader} },
+	)
 
 	_, err := sync.SyncOnce(t.Context())
 
@@ -114,14 +125,19 @@ func TestTokenRegistrySyncKeepsHeadersOnSameOriginRedirect(t *testing.T) {
 func TestTokenRegistrySyncDropsHeadersOnCrossOriginRedirect(t *testing.T) {
 	t.Parallel()
 
-	target, targetSeen := headerRecorder(t, serveRegistry(t))
-	origin, originSeen := headerRecorder(
-		t,
+	target, targetSeen := headerRecorderFor(t, "X-API-Key", serveRegistry(t))
+	origin, originSeen := headerRecorderFor(
+		t, "X-API-Key",
 		func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, target.URL, http.StatusFound)
 		},
 	)
-	sync := newTestSync(t, newFakeTokenRegistryStore(), origin.URL, nil)
+	sync := newTestSync(
+		t,
+		newFakeTokenRegistryStore(),
+		origin.URL,
+		func(cfg *TokenRegistryConfig) { cfg.Headers = map[string]string{"X-API-Key": "Bearer " + redactHeader} },
+	)
 
 	_, err := sync.SyncOnce(t.Context())
 
@@ -137,8 +153,13 @@ func TestNewTokenRegistrySyncRejectsInvalidHeaders(t *testing.T) {
 	t.Parallel()
 
 	for name, headers := range map[string]map[string]string{
-		"name with space": {"Bad Name": redactHeader},
-		"empty name":      {"": redactHeader},
+		"name with space":         {"Bad Name": redactHeader},
+		"empty name":              {"": redactHeader},
+		"reserved user agent":     {"uSeR-aGeNt": redactHeader},
+		"reserved accept":         {"Accept": redactHeader},
+		"reserved etag":           {"If-None-Match": redactHeader},
+		"reserved host":           {"Host": redactHeader},
+		"reserved content length": {"Content-Length": redactHeader},
 		"value with line break": {
 			"Authorization": "Bearer " + redactHeader + "\r\nX-Injected: 1",
 		},
@@ -155,4 +176,32 @@ func TestNewTokenRegistrySyncRejectsInvalidHeaders(t *testing.T) {
 			require.NotContains(t, err.Error(), redactHeader)
 		})
 	}
+}
+
+func TestTokenRegistryRedirectGuardRunsAfterCustomCallback(t *testing.T) {
+	t.Parallel()
+	target, seen := headerRecorderFor(t, "X-API-Key", serveRegistry(t))
+	origin, _ := headerRecorderFor(
+		t,
+		"X-API-Key",
+		func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) },
+	)
+	sync := newTestSync(
+		t,
+		newFakeTokenRegistryStore(),
+		origin.URL,
+		func(cfg *TokenRegistryConfig) {
+			cfg.Headers = map[string]string{"X-API-Key": redactHeader}
+			cfg.HTTPClient = &http.Client{
+				CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+					req.Header.Set("X-API-Key", redactHeader)
+					req.Header["x-api-key"] = []string{redactHeader}
+					return nil
+				},
+			}
+		},
+	)
+	_, err := sync.SyncOnce(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, []string{""}, seen())
 }

@@ -458,13 +458,7 @@ func runMithrilSyncWithRepair(
 	repairRewardState bool,
 ) (err error) {
 	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
-	metricsServer, err := startPrometheusMetricsServerWithHandler(
-		logger,
-		cfg.BindAddr,
-		cfg.MetricsPort,
-		"mithril",
-		metricsHandler,
-	)
+	metricsServer, err := startMithrilMetricsServer(logger, cfg, metricsHandler)
 	if err != nil {
 		metrics.recordError()
 		logger.Warn(

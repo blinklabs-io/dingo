@@ -17,6 +17,7 @@ package cardano
 import (
 	"io/fs"
 	"path"
+	"strings"
 	"testing"
 )
 
@@ -279,8 +280,7 @@ func TestEmbeddedConfigFSCarriesNoSigningKeys(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			switch path.Ext(name) {
-			case ".skey", ".key":
+			if isEmbeddedSigningKey(name) {
 				t.Errorf("embedded config carries signing key %s", name)
 			}
 			return nil
@@ -288,5 +288,27 @@ func TestEmbeddedConfigFSCarriesNoSigningKeys(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("walking the embedded filesystem: %v", err)
+	}
+}
+
+func isEmbeddedSigningKey(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".skey", ".key":
+		return true
+	default:
+		return false
+	}
+}
+func TestEmbeddedSigningKeyGuardMatchesMixedCase(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"producer.skey", "producer.SKEY", "producer.Key", "producer.key"} {
+		if !isEmbeddedSigningKey(name) {
+			t.Errorf("signing key %s bypasses embed guard", name)
+		}
+	}
+	for _, name := range []string{"producer.vkey", "network.json"} {
+		if isEmbeddedSigningKey(name) {
+			t.Errorf("non-signing asset %s rejected", name)
+		}
 	}
 }

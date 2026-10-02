@@ -103,7 +103,11 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 			Database: db,
 			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 			State: &RawLedgerState{
-				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000, 2_000_000}),
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{1_000_000, 2_000_000},
+				),
 				Epoch:               100,
 				EraIndex:            EraConway,
 				EraBounds:           eraBounds,
@@ -532,7 +536,9 @@ func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	require.Equal(t, current, currentRows[0].Cbor)
 }
 
-func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) {
+func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -2849,7 +2855,10 @@ func testGovStateData(
 // partialCertStateData returns the fixture's cert state with a DState whose
 // only credential entry has an undecodable account payload, so ParseCertState
 // returns a result together with a warning.
-func partialCertStateData(t *testing.T, fixture *RawLedgerState) cbor.RawMessage {
+func partialCertStateData(
+	t *testing.T,
+	fixture *RawLedgerState,
+) cbor.RawMessage {
 	t.Helper()
 
 	parts, err := decodeRawArray(fixture.CertStateData)
@@ -2927,6 +2936,11 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			wantErr: "validating protocol parameters",
 		},
 		{
+			name:    "previous protocol parameters",
+			mutate:  func(s *RawLedgerState) { s.PrevPParamsData = garbage },
+			wantErr: "validating previous protocol parameters",
+		},
+		{
 			name: "opcert counter key",
 			mutate: func(s *RawLedgerState) {
 				s.OpCertCounters = map[string]uint64{"short": 1}
@@ -2992,7 +3006,11 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			)
 			nonce := make([]byte, 32)
 			state := &RawLedgerState{
-				UTxOData:            inlineUTxOMap(t, addr, []uint64{1_000_000}),
+				UTxOData: inlineUTxOMap(
+					t,
+					addr,
+					[]uint64{1_000_000},
+				),
 				Epoch:               100,
 				EraIndex:            EraConway,
 				EraBounds:           make([]EraBound, EraConway+1),
@@ -3033,4 +3051,21 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			require.Zero(t, utxos, "a failed import must persist no UTxOs")
 		})
 	}
+}
+
+func TestValidateImportStateRetainsStoredPreviousParameters(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	current, previous := distinctConwayPParams(t)
+	cfg := previewPParamsImportConfig(db, current, previous)
+	cfg.State.Tip = &SnapshotTip{BlockHash: make([]byte, 32)}
+	require.NoError(t, importPParams(t.Context(), cfg))
+	cfg.State.PrevPParamsData = cbor.RawMessage{0xff}
+	require.NoError(
+		t,
+		validateImportState(cfg),
+		"valid stored previous parameters must support catch-up reentry",
+	)
 }

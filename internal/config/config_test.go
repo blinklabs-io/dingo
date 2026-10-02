@@ -2122,3 +2122,25 @@ config:
 		assert.Equal(t, expected, err.Error())
 	})
 }
+
+func TestConfigSnapshotsDoNotShareRegistryCredentials(t *testing.T) {
+	// Not t.Parallel: replaces the process-global configuration.
+	configMu.Lock()
+	previous := globalConfig
+	globalConfig = cloneConfig(previous)
+	globalConfig.TokenRegistry.HeaderSecrets = map[string]string{
+		"X-API-Key": "original",
+	}
+	configMu.Unlock()
+	t.Cleanup(
+		func() { configMu.Lock(); globalConfig = previous; configMu.Unlock() },
+	)
+	snapshot := GetConfig()
+	snapshot.TokenRegistry.HeaderSecrets["X-API-Key"] = "changed"
+	snapshot.TokenRegistry.HeaderSecrets["new"] = "value"
+	require.Equal(
+		t,
+		map[string]string{"X-API-Key": "original"},
+		GetConfig().TokenRegistry.HeaderSecrets,
+	)
+}

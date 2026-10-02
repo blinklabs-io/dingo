@@ -1414,7 +1414,9 @@ func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	require.NoError(t, os.WriteFile(
 		configFile,
-		[]byte("tokenRegistry:\n  headerSecrets:\n    Authorization: Bearer yaml\n"),
+		[]byte(
+			"tokenRegistry:\n  headerSecrets:\n    Authorization: Bearer yaml\n",
+		),
 		0o600,
 	))
 	cfg, err := LoadConfig(configFile)
@@ -1429,6 +1431,8 @@ func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
 	cfg, err = LoadConfig(configFile)
 	require.NoError(t, err)
 	require.Equal(
-		t, "from-env", cfg.TokenRegistry.HeaderSecrets["X-Api-Key"],
+		t,
+		map[string]string{"X-Api-Key": "from-env"},
+		cfg.TokenRegistry.HeaderSecrets,
 	)
 }

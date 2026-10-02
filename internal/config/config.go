@@ -1413,6 +1413,7 @@ func cloneConfig(cfg *Config) *Config {
 		return nil
 	}
 	clone := *cfg
+	clone.TokenRegistry.HeaderSecrets = maps.Clone(cfg.TokenRegistry.HeaderSecrets)
 	clone.BarkBlockDownloadHosts = append(
 		[]string(nil),
 		cfg.BarkBlockDownloadHosts...,
