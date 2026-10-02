@@ -83,6 +83,7 @@ type Node struct {
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
 	chainSelectionMetrics   *chainSelectionMetrics
+	chainSelectorForGauges  atomic.Pointer[chainselection.ChainSelector]
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
 	destinationRegistry     *lifecycle.DestinationRegistry
@@ -1144,6 +1145,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			genesisWindowSlots,
 		),
 	)
+	n.chainSelectorForGauges.Store(n.chainSelector)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
 	// local tip as block zero until the recycler's first tick, leaving a
@@ -1281,6 +1283,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
 		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
 		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncAwaitEagerness:      n.chainsyncAwaitEagerness,
 		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
 		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
 		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
@@ -2027,7 +2030,8 @@ func (n *Node) buildChainSelectorConfig(
 			}
 			return n.chainsyncState.BlockfetchLatency(connId)
 		},
-		OnRollbackRegistration: n.recordRollbackRegistration,
+		OnRollbackRegistration:     n.recordRollbackRegistration,
+		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
 	}
 }
 

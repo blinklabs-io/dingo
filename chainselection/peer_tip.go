@@ -45,9 +45,12 @@ type PeerChainTip struct {
 	// it as a peer implausibly far behind and skip it until its next
 	// MsgRollForward. Cleared by the first delivered header.
 	awaitingFirstHeader bool
-	VRFOutput           []byte // VRF output from tip block for tie-breaking
-	PraosView           PraosTiebreakerView
-	LastUpdated         time.Time
+	// eagernessPaused counts AwaitEagernessLimit calls holding this peer's
+	// header stream at the Limit on Eagerness. Guarded by the selector mutex.
+	eagernessPaused int
+	VRFOutput       []byte // VRF output from tip block for tie-breaking
+	PraosView       PraosTiebreakerView
+	LastUpdated     time.Time
 	// observedSlots is the recent observed slot frontier used for Genesis
 	// density. observedPoints is the same frontier with block hashes, used
 	// for Genesis corroboration (detecting whether other peers report the
@@ -60,6 +63,15 @@ type PeerChainTip struct {
 	// share one time source with the selector. Nil for a PeerChainTip built
 	// by NewPeerChainTip, which then uses time.Now.
 	nowFn func() time.Time
+}
+
+// deliveredAdvertisedTip reports whether the latest delivered header is the
+// tip the peer advertises, so it has nothing further to send.
+func (p *PeerChainTip) deliveredAdvertisedTip() bool {
+	return !p.awaitingFirstHeader &&
+		p.Tip.BlockNumber == p.ObservedTip.BlockNumber &&
+		p.Tip.Point.Slot == p.ObservedTip.Point.Slot &&
+		bytes.Equal(p.Tip.Point.Hash, p.ObservedTip.Point.Hash)
 }
 
 // now returns nowFn(), or time.Now when nowFn is unset.

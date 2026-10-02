@@ -232,6 +232,15 @@ type fakeChainSelector struct {
 	localTip          ochainsync.Tip
 	securityParam     uint64
 	securityParamSets int
+	paused            map[string]bool
+}
+
+func (f *fakeChainSelector) EagernessPaused(
+	connId ouroboros.ConnectionId,
+) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.paused[connId.String()]
 }
 
 func (f *fakeChainSelector) SetLocalTip(tip ochainsync.Tip) {

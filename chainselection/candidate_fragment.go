@@ -92,6 +92,18 @@ func (f CandidateFragment) Points() []ocommon.Point {
 func (f CandidateFragment) Intersect(
 	other CandidateFragment,
 ) (ocommon.Point, bool) {
+	tip, ok := f.intersectTip(other)
+	if !ok {
+		return ocommon.Point{}, false
+	}
+	return clonePoint(tip.Point), true
+}
+
+// intersectTip is Intersect returning the shared entry, which carries the
+// block number. The result aliases the fragment's storage.
+func (f CandidateFragment) intersectTip(
+	other CandidateFragment,
+) (ochainsync.Tip, bool) {
 	i := len(f.entries) - 1
 	j := len(other.entries) - 1
 	for i >= 0 && j >= 0 {
@@ -100,7 +112,7 @@ func (f CandidateFragment) Intersect(
 		switch {
 		case a.Slot == b.Slot:
 			if bytes.Equal(a.Hash, b.Hash) {
-				return clonePoint(a), true
+				return f.entries[i], true
 			}
 			// Same slot, different block: the chains have already diverged
 			// by this point, so any common ancestor lies strictly earlier on
@@ -113,7 +125,7 @@ func (f CandidateFragment) Intersect(
 			j--
 		}
 	}
-	return ocommon.Point{}, false
+	return ochainsync.Tip{}, false
 }
 
 // candidateFragmentFromHistory snapshots a peer's delivered-tip history into

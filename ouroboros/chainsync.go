@@ -1552,6 +1552,24 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
+		// Limit on Eagerness: the tip was observed above, so the limit already
+		// accounts for this header. Waiting here pauses only this peer and
+		// leaves its cursor in place, so the header is delivered, not lost,
+		// once the limit admits it.
+		if o.config.ChainsyncAwaitEagerness != nil {
+			var appliedTip func() ochainsync.Tip
+			if o.ledgerState != nil {
+				appliedTip = o.ledgerState.Tip
+			}
+			if err := o.config.ChainsyncAwaitEagerness(
+				chainsyncAdmissionContext(ctx),
+				ctx.ConnectionId,
+				v.BlockNumber(),
+				appliedTip,
+			); err != nil {
+				return fmt.Errorf("wait for eagerness limit: %w", err)
+			}
+		}
 		// The only target ledger may later publish is paired with this exact
 		// delivered header and its apply-eligibility decision. Do not make
 		// ledger recover it from mutable selector state.
