@@ -182,6 +182,11 @@ func (s *snapshotServer) handleList(
 	}
 	items := make([]CardanoDatabaseSnapshotListItem, 0, len(snapshots))
 	for _, snap := range snapshots {
+		// A verifying client bootstraps from the newest listed snapshot, so
+		// an aggregator lists a snapshot only once it is certified.
+		if s.cfg.Aggregator != nil && snap.CertificateHash == "" {
+			continue
+		}
 		items = append(items, CardanoDatabaseSnapshotListItem{
 			Hash:                    snap.Hash,
 			MerkleRoot:              snap.MerkleRoot,

@@ -83,7 +83,10 @@ type CreateSnapshotConfig struct {
 //
 // Output is deterministic: archive entries are sorted, carry no timestamps or
 // owners, and compression is single-threaded, so two runs over the same
-// directory produce identical bytes and the same artifact hash.
+// directory produce identical bytes and the same artifact hash. When a
+// complete snapshot with that hash is already in the store, nothing is
+// written and the stored snapshot, with any certificate it carries, is
+// returned.
 func CreateSnapshot(
 	ctx context.Context,
 	cfg CreateSnapshotConfig,
@@ -169,6 +172,22 @@ func CreateSnapshot(
 		CreatedAt:          createdAt.UTC().Format(time.RFC3339Nano),
 	}
 	artifact.Hash = artifact.ComputeHash()
+	// The hash covers only the epoch and the immutable merkle root, so an
+	// unchanged database reproduces a snapshot already in the store.
+	// Rewriting its metadata would drop the certificate an aggregator has
+	// since attached to it, so the stored snapshot is returned as it is.
+	existing, err := readSnapshot(ctx, cfg.Store, artifact.Hash)
+	if err == nil {
+		logger.Info(
+			"snapshot already in store",
+			"component", "mithril",
+			"hash", existing.Hash,
+		)
+		return existing, nil
+	}
+	if !errors.Is(err, ErrArtifactNotFound) {
+		return nil, fmt.Errorf("reading existing snapshot: %w", err)
+	}
 
 	for num := range lastNum + 1 {
 		if err := putImmutableArchive(

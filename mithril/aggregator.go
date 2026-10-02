@@ -414,7 +414,17 @@ func (a *Aggregator) handlePending(w http.ResponseWriter, r *http.Request) {
 // aggregator's network awaiting a certificate. The caller holds a.mu.
 func (a *Aggregator) ensureOpen(ctx context.Context) (*openMessage, error) {
 	if a.open != nil {
-		return a.open, nil
+		// Retention may have pruned the open snapshot. Certifying it would
+		// write its metadata back with no archives behind it, so signing
+		// moves on to the next snapshot instead.
+		_, err := readSnapshot(ctx, a.cfg.Store, a.open.snapshot.Hash)
+		switch {
+		case err == nil:
+			return a.open, nil
+		case !errors.Is(err, ErrArtifactNotFound):
+			return nil, err
+		}
+		a.open = nil
 	}
 	snapshot, err := a.oldestUncertified(ctx)
 	if err != nil || snapshot == nil {

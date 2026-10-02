@@ -8303,6 +8303,8 @@ last and is the completion marker: a snapshot without it is not listed and not
 pruned. Output is a function of the directory alone (sorted entries, zero
 timestamps and owners, single-threaded zstd), so a second run reproduces the
 same bytes and hash. `certificate_hash` is empty until the aggregator certifies the snapshot.
+A run whose hash is already complete in the store writes nothing and returns
+the stored snapshot, so a certificate attached to it is kept.
 
 **Storage** is the `ArtifactStore` interface (`Put`, `Open`, `Subdirs`,
 `DeletePrefix`) selected by `mithril.server.artifactStore`: a directory, or an
@@ -8320,6 +8322,8 @@ under any address. Archive downloads use `http.ServeContent`, giving range and
 HEAD support; with `mithril.server.redirectBaseUrl` set they instead redirect
 to that base URL plus the object key. Path segments reaching the store are
 matched against a 64-hex-digit hash and a fixed archive-name pattern first.
+With the aggregator mounted, the list omits snapshots that carry no certificate
+yet, since a verifying client bootstraps from the newest listed one.
 
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
@@ -8329,7 +8333,9 @@ or `POST /register-signatures` with a snapshot awaiting a certificate closes
 registration, orders the signers as the reference key registry does, builds the
 registration Merkle commitment and aggregate verification key, and issues a
 genesis certificate at `epoch-1` signed with the genesis key. The pending
-message binds the oldest uncertified snapshot's digest Merkle root. Each
+message binds the oldest uncertified snapshot's digest Merkle root; if
+retention prunes that snapshot while it is open, signing moves on to the next
+one rather than certifying it. Each
 `POST /register-signatures` single signature is verified (key, lottery wins,
 signer index) before it counts; once the signatures cover `k` distinct lottery
 indices the aggregator selects them as the reference does, builds the batch

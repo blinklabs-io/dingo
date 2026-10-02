@@ -762,3 +762,69 @@ func TestBootstrapRejectsSnapshotCertifiedByAnotherGenesisKey(t *testing.T) {
 	})
 	require.ErrorContains(t, err, "genesis certificate verification failed")
 }
+
+// A verifying client takes the newest listed snapshot, so an aggregator lists
+// only snapshots that already carry a certificate.
+func TestAggregatorListsOnlyCertifiedSnapshots(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	signers := testSigners(4, 100)
+	f.registerAll(signers)
+	certified := f.newSnapshot(2)
+	certHash := f.signUntilCertified(certified.Hash, signers)
+	f.newSnapshot(3)
+
+	items, err := f.client.ListCardanoDatabaseSnapshots(context.Background())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, certified.Hash, items[0].Hash)
+	require.Equal(t, certHash, items[0].CertificateHash)
+}
+
+// Producing a snapshot again from an unchanged database yields the same hash;
+// the certificate it already carries must survive.
+func TestCreateSnapshotKeepsCertificateOfReproducedSnapshot(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	signers := testSigners(4, 100)
+	f.registerAll(signers)
+	db := newCardanoDB(t, 2)
+	snap := f.snapshotOf(db)
+	certHash := f.signUntilCertified(snap.Hash, signers)
+
+	again := f.snapshotOf(db)
+	require.Equal(t, snap.Hash, again.Hash)
+	require.Equal(t, certHash, f.certificateHash(snap.Hash))
+	status, _ := f.pending()
+	require.Equal(t, http.StatusNoContent, status)
+}
+
+// A snapshot pruned while it is open for signing is dropped from signing
+// rather than certified, which would recreate its metadata without archives.
+func TestAggregatorDropsSnapshotPrunedWhileOpen(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	signers := testSigners(4, 100)
+	f.registerAll(signers)
+	older := f.newSnapshot(2)
+	_, stale := f.pending()
+	require.NotNil(t, stale)
+	newer := f.newSnapshot(3)
+	removed, err := PruneSnapshots(context.Background(), f.store, 1)
+	require.NoError(t, err)
+	require.Equal(t, []string{older.Hash}, removed)
+
+	for _, s := range signers {
+		if req, ok := f.signature(s, stale); ok {
+			code, body := f.post("/register-signatures", req)
+			require.Equal(t, http.StatusConflict, code, body)
+		}
+	}
+	require.Equal(t, []string{newer.Hash}, snapshotHashes(t, f.store))
+	_, pc := f.pending()
+	require.NotNil(t, pc)
+	require.Contains(
+		t, string(pc.SignedEntityType), `"immutable_file_number":2`,
+	)
+	f.signUntilCertified(newer.Hash, signers)
+}
