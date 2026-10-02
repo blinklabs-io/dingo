@@ -2593,8 +2593,10 @@ fallback:
   are accepted only when they are HTTPS, credential-free, and hosted by the
   expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
   entry; redirects are disabled and response bodies are capped before buffering,
-  at the largest block the live protocol parameters admit (a 128 KiB default when
-  they give no limit).
+  at the largest block the chain admits for any era (`LedgerState.MaxBlockSize`:
+  the live protocol parameters' header and body limits, or the Byron genesis
+  block size when larger, since Byron history exceeds the later limits; a
+  128 KiB default when neither is known).
   This wrapper can be used with or without local History Expiry. It is
   installed by replacing the database's blob-store reference
   (`Database.SetBlobStore`) after `database.New` has returned, on both the

@@ -2550,8 +2550,10 @@ older than the ledger stability window:
   download URLs before fetching: they must be HTTPS, must not contain embedded
   credentials, and must resolve to the `barkBaseUrl` hostname or a configured
   `barkBlockDownloadHosts` entry; downloads are also size-limited to the
-  largest block the live protocol parameters admit (header plus body limits,
-  `LedgerState.MaxBlockSize`), or a 128 KiB default when that is unknown. Downloaded bytes are then verified locally before any
+  largest block the chain admits for any era (`LedgerState.MaxBlockSize`: the
+  live header plus body limits, or the Byron genesis block size when larger,
+  because Byron main and epoch boundary blocks exceed the later limits), or a
+  128 KiB default when neither is known. Downloaded bytes are then verified locally before any
   caller sees them: the block is decoded (with body-hash validation enabled) and
   its computed hash and slot must match the requested point. The returned
   `types.BlockMetadata` type, height, and previous hash come from the decoded

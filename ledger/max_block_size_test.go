@@ -15,8 +15,10 @@
 package ledger
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
 )
@@ -55,4 +57,43 @@ func TestMaxBlockSizeUnknownWithoutProtocolParameters(t *testing.T) {
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
 	require.Zero(t, ls.MaxBlockSize())
+}
+
+// Blocks served from an archive were admitted under their own era's limits.
+// Byron main blocks of up to 148187 bytes and Byron epoch boundary blocks of
+// about 648 KB exist on mainnet, both far above the Conway limits, so the
+// bound must still admit the Byron genesis block size.
+func TestMaxBlockSizeAdmitsByronHistory(t *testing.T) {
+	t.Parallel()
+
+	nodeConfig := &cardano.CardanoNodeConfig{}
+	require.NoError(t, loadByronGenesisForTest(t, nodeConfig, strings.NewReader(
+		`{"blockVersionData": {"slotDuration": "20000", `+
+			`"maxBlockSize": "2000000", "maxHeaderSize": "2000000"}, `+
+			`"protocolConsts": {"k": 2160, "protocolMagic": 764824073}}`,
+	)))
+	ls := &LedgerState{
+		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+		currentPParams: &conway.ConwayProtocolParameters{
+			MaxBlockBodySize:   90112,
+			MaxBlockHeaderSize: 1100,
+		},
+	}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(2000000), ls.MaxBlockSize())
+
+	ls.currentPParams = &conway.ConwayProtocolParameters{
+		MaxBlockBodySize:   4000000,
+		MaxBlockHeaderSize: 1100,
+	}
+	ls.publishSnapshotsLocked()
+	require.Equal(
+		t,
+		uint64(4000000+1100+blockFramingAllowance),
+		ls.MaxBlockSize(),
+	)
+
+	ls.currentPParams = nil
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(2000000), ls.MaxBlockSize())
 }
