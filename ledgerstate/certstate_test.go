@@ -1599,6 +1599,46 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 	}
 }
 
+func TestParseGovActionStateRequiresThirtyTwoByteAnchorHash(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		hashLen int
+		wantErr bool
+	}{
+		{name: "valid", hashLen: 32},
+		{name: "short", hashLen: 31, wantErr: true},
+		{name: "empty", hashLen: 0, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			anchor := []any{
+				"https://example.invalid/proposal.json",
+				bytes.Repeat([]byte{0x0a}, tc.hashLen),
+			}
+			data, err := cbor.Encode([]any{
+				[]any{bytes.Repeat([]byte{0x01}, 32), uint64(0)},
+				[]any{},
+				[]any{},
+				[]any{},
+				[]any{uint64(0), []byte{}, []any{uint64(6)}, anchor},
+				uint64(0),
+				uint64(0),
+			})
+			require.NoError(t, err)
+			proposal, err := parseGovActionState(data)
+			if tc.wantErr {
+				require.ErrorContains(t, err, "gov action anchor hash")
+				require.Nil(t, proposal)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, anchor[1], proposal.AnchorHash)
+		})
+	}
+}
+
 // TestParseCommitteeVStateRejectsMalformedResignationMap is the same gap at the
 // map level: a committee map whose every value is a malformed resignation must
 // fail the import loudly instead of yielding an empty committee, and must not

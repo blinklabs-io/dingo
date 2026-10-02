@@ -1020,10 +1020,13 @@ func importCertState(
 					"sync` again)", err,
 			)
 		}
-		cfg.Logger.Warn(
-			"cert state parse warnings",
-			"component", "ledgerstate",
-			"warning", err.Error(),
+		// A skipped or partially decoded entry would import an account,
+		// pool or DRep set that differs from the ledger state, and every
+		// stake distribution and reward derived from it would be wrong.
+		return 0, fmt.Errorf(
+			"parsing cert state: %w; the ledger state cannot be "+
+				"imported with skipped or partially decoded entries",
+			err,
 		)
 	}
 	if err := cfg.Database.SetImportedDormantDRepEpochs(
@@ -1668,11 +1671,13 @@ func importSnapShots(
 				err,
 			)
 		}
-		// Non-fatal: some entries skipped during parsing
-		cfg.Logger.Warn(
-			"stake snapshot parse warnings",
-			"component", "ledgerstate",
-			"warning", err.Error(),
+		// A skipped entry drops stake, a delegation or a pool from the
+		// snapshot, which changes the leader schedule and rewards derived
+		// from it.
+		return fmt.Errorf(
+			"parsing stake snapshots: %w; the ledger state cannot be "+
+				"imported with skipped entries",
+			err,
 		)
 	}
 
@@ -1894,17 +1899,20 @@ func seedImportedRewardBasis(
 	for _, snap := range []*ParsedSnapShot{
 		&snapshots.Mark, &snapshots.Set, &snapshots.Go,
 	} {
-		for _, poolKey := range snap.Delegations {
-			if len(poolKey) != credentialHashSize {
-				continue
+		for credHex, poolKey := range snap.Delegations {
+			key, err := lcommon.NewBlake2b224Checked(poolKey)
+			if err != nil {
+				return fmt.Errorf(
+					"seeding imported reward basis: delegation of %s: %w",
+					credHex,
+					err,
+				)
 			}
 			if _, dup := seen[string(poolKey)]; dup {
 				continue
 			}
 			seen[string(poolKey)] = struct{}{}
-			var key lcommon.PoolKeyHash
-			copy(key[:], poolKey)
-			keys = append(keys, key)
+			keys = append(keys, lcommon.PoolKeyHash(key))
 		}
 	}
 	// Seed the ADA pots for the imported epoch alongside the reward
@@ -2197,23 +2205,32 @@ func synthesizeRetiredScheduledPools(
 		return nil
 	}
 
-	poolKeyHashSize := len(lcommon.PoolKeyHash{})
-	vrfKeyHashSize := len(lcommon.VrfKeyHash{})
+	// A malformed entry fails the import: skipping it would leave a pool
+	// the leader schedule elects with no registered VRF key to check its
+	// blocks against.
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(activePoolDistr))
 	for i := range activePoolDistr {
-		if len(activePoolDistr[i].PoolKeyHash) != poolKeyHashSize {
-			cfg.Logger.Warn(
-				"skipping malformed active pool distribution entry",
-				"index", i,
-				"field", "pool_key_hash",
-				"actual_length", len(activePoolDistr[i].PoolKeyHash),
-				"expected_length", poolKeyHashSize,
+		pkh, err := lcommon.NewBlake2b224Checked(
+			activePoolDistr[i].PoolKeyHash,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"active pool distribution entry %d pool key hash: %w",
+				i,
+				err,
 			)
-			continue
 		}
-		var pkh lcommon.PoolKeyHash
-		copy(pkh[:], activePoolDistr[i].PoolKeyHash)
-		keyHashes = append(keyHashes, pkh)
+		if _, err := lcommon.NewBlake2b256Checked(
+			activePoolDistr[i].VrfKeyHash,
+		); err != nil {
+			return fmt.Errorf(
+				"active pool distribution entry %d (pool %x) VRF key hash: %w",
+				i,
+				activePoolDistr[i].PoolKeyHash,
+				err,
+			)
+		}
+		keyHashes = append(keyHashes, lcommon.PoolKeyHash(pkh))
 	}
 	if len(keyHashes) == 0 {
 		return nil
@@ -2243,19 +2260,6 @@ func synthesizeRetiredScheduledPools(
 		default:
 		}
 		pool := activePoolDistr[i]
-		if len(pool.PoolKeyHash) != poolKeyHashSize {
-			continue
-		}
-		if len(pool.VrfKeyHash) != vrfKeyHashSize {
-			cfg.Logger.Warn(
-				"skipping malformed active pool distribution entry",
-				"index", i,
-				"field", "vrf_key_hash",
-				"actual_length", len(pool.VrfKeyHash),
-				"expected_length", vrfKeyHashSize,
-			)
-			continue
-		}
 		if _, ok := present[string(pool.PoolKeyHash)]; ok {
 			continue
 		}
@@ -3166,12 +3170,17 @@ func validateImportedRewardPParams(
 			previousEpoch,
 		)
 	}
+	previousPayload, payloadErr := previousPParamsForEra(
+		cfg.State.EraIndex,
+		[]byte(cfg.State.PrevPParamsData),
+		previousEra,
+	)
 	previousAvailable, err := importedPParamsAvailable(
 		store,
 		txn,
 		previousEpoch,
 		previousEra,
-		[]byte(cfg.State.PrevPParamsData),
+		previousPayload,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -3180,6 +3189,15 @@ func validateImportedRewardPParams(
 		)
 	}
 	if !previousAvailable {
+		if payloadErr != nil {
+			return fmt.Errorf(
+				"%w: historical protocol parameters for epoch %d are unavailable in era %s: %w",
+				errRewardPParamsUnavailable,
+				previousEpoch,
+				EraName(previousEra),
+				payloadErr,
+			)
+		}
 		return fmt.Errorf(
 			"%w: historical protocol parameters for epoch %d are unavailable in era %s",
 			errRewardPParamsUnavailable,
@@ -3300,15 +3318,25 @@ func importPParams(
 	var (
 		previousEpoch uint64
 		previousEra   int
-		previousCbor  = []byte(cfg.State.PrevPParamsData)
+		previousCbor  []byte
 		writePrevious bool
 	)
-	if cfg.State.Epoch > 0 && len(previousCbor) > 0 {
+	if cfg.State.Epoch > 0 && len(cfg.State.PrevPParamsData) > 0 {
 		previousEpoch = cfg.State.Epoch - 1
-		var previousEraKnown bool
+		var (
+			previousEraKnown bool
+			conversionErr    error
+		)
 		previousEra, previousEraKnown = importedEraForEpoch(
 			cfg.State, previousEpoch,
 		)
+		if previousEraKnown {
+			previousCbor, conversionErr = previousPParamsForEra(
+				cfg.State.EraIndex,
+				[]byte(cfg.State.PrevPParamsData),
+				previousEra,
+			)
+		}
 		if !previousEraKnown {
 			cfg.Logger.Warn(
 				"not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
@@ -3317,15 +3345,13 @@ func importPParams(
 				"epoch",
 				previousEpoch,
 			)
-		} else if validationErr := validatePParamsData(
-			previousEra, previousCbor,
-		); validationErr != nil {
+		} else if conversionErr != nil {
 			cfg.Logger.Warn(
-				"not importing historical protocol parameters from snapshot because the payload is incompatible with the epoch's era",
+				"not importing historical protocol parameters from snapshot because they cannot be expressed in the epoch's era",
 				"component", "ledgerstate",
 				"epoch", previousEpoch,
 				"era", EraName(previousEra),
-				"error", validationErr.Error(),
+				"error", conversionErr.Error(),
 			)
 		} else {
 			previousStored, err := storedValidPParams(
@@ -3448,8 +3474,16 @@ func importGovState(
 			govState.PulsingStateParseError,
 		)
 	}
+	if govState.ImportParseError != nil {
+		// A skipped proposal or an undecodable constitution policy hash
+		// would import governance state that differs from the ledger's.
+		return fmt.Errorf(
+			"parsing governance state: %w; the ledger state cannot be "+
+				"imported with skipped entries",
+			govState.ImportParseError,
+		)
+	}
 	if err != nil {
-		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
