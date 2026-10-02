@@ -70,7 +70,7 @@ func (p *PeerGovernor) hotSetDeficitLocked() int {
 // called with p.mu held.
 func (p *PeerGovernor) redialCandidatesLocked() []*Peer {
 	var candidates []*Peer
-	nonRoot := make([]*Peer, 0)
+	nonRoot := make([]*Peer, 0, len(p.peers))
 	eligibleUpstreams := p.countEligibleUpstreamsLocked()
 	warmShortfall := p.hotSetDeficitLocked() >
 		p.countPromotableWarmNonRootPeersLocked()

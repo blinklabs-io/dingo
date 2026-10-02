@@ -40,19 +40,35 @@ const (
 	CapabilityStorageMetadata Capability = "storage.metadata"
 	CapabilityMempool         Capability = "mempool"
 	CapabilityAPIBlockfrost   Capability = "api.blockfrost"
+	CapabilityAPIKupo         Capability = "api.kupo"
 	CapabilityAPIMesh         Capability = "api.mesh"
 	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
 )
 
+// allCapabilities is the single enumeration of the capabilities this platform
+// supports. A Capability constant declared above but absent here is not valid,
+// so Host.Register rejects it at startup rather than letting it drop silently
+// out of configuration and option coverage.
+var allCapabilities = []Capability{
+	CapabilityStorageBlob,
+	CapabilityStorageMetadata,
+	CapabilityMempool,
+	CapabilityAPIBlockfrost,
+	CapabilityAPIKupo,
+	CapabilityAPIMesh,
+	CapabilityAPIUtxorpc,
+}
+
+// AllCapabilities returns every capability supported by this platform, in a
+// stable order. It exists so callers and tests can iterate the set rather than
+// maintaining a second copy of it that can fall out of step with Valid.
+func AllCapabilities() []Capability {
+	return slices.Clone(allCapabilities)
+}
+
 // Valid reports whether c is a capability supported by this platform.
 func (c Capability) Valid() bool {
-	switch c {
-	case CapabilityStorageBlob, CapabilityStorageMetadata, CapabilityMempool,
-		CapabilityAPIBlockfrost, CapabilityAPIMesh, CapabilityAPIUtxorpc:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(allCapabilities, c)
 }
 
 // Descriptor describes a compiled-in provider.

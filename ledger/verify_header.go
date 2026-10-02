@@ -1927,9 +1927,19 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 		if err != nil {
 			return lcommon.Blake2b256{}, false, err
 		}
-		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
-			var hash lcommon.Blake2b256
-			copy(hash[:], vrfKeyHash)
+		// An empty value is a registration row without a VRF key, which is a
+		// miss. Any other wrong length is a malformed stored hash: reading it
+		// as a miss would resolve a different registration's key below.
+		if found && len(vrfKeyHash) > 0 {
+			hash, err := lcommon.NewBlake2b256Checked(vrfKeyHash)
+			if err != nil {
+				return lcommon.Blake2b256{}, false, fmt.Errorf(
+					"VRF key hash at cutoff slot %d for pool %x: %w",
+					cutoffSlot,
+					poolKeyHash[:],
+					err,
+				)
+			}
 			return hash, true, nil
 		}
 		// No registration in force at the cutoff. That is not a gap in
@@ -1951,9 +1961,16 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 		if err != nil {
 			return lcommon.Blake2b256{}, false, err
 		}
-		if found && len(vrfKeyHash) == len(lcommon.Blake2b256{}) {
-			var hash lcommon.Blake2b256
-			copy(hash[:], vrfKeyHash)
+		if found && len(vrfKeyHash) > 0 {
+			hash, err := lcommon.NewBlake2b256Checked(vrfKeyHash)
+			if err != nil {
+				return lcommon.Blake2b256{}, false, fmt.Errorf(
+					"VRF key hash at capture slot %d for pool %x: %w",
+					capturedSlot,
+					poolKeyHash[:],
+					err,
+				)
+			}
 			return hash, true, nil
 		}
 		// Both lookups missed. That is ordinarily the unanswerable gap the
@@ -1982,7 +1999,11 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
 				return lcommon.Blake2b256{}, false, poolErr
 			}
-			if hash, ok := registeredPoolVrfKeyHash(pool); ok {
+			hash, ok, err := registeredPoolVrfKeyHash(pool)
+			if err != nil {
+				return lcommon.Blake2b256{}, false, err
+			}
+			if ok {
 				return hash, true, nil
 			}
 		}
@@ -1998,8 +2019,7 @@ func (ls *LedgerState) electingVrfKeyHashWithCache(
 	if err != nil {
 		return lcommon.Blake2b256{}, false, err
 	}
-	hash, ok := registeredPoolVrfKeyHash(pool)
-	return hash, ok, nil
+	return registeredPoolVrfKeyHash(pool)
 }
 
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations
@@ -2208,25 +2228,46 @@ func (ls *LedgerState) verifyRegisteredVrfKeyWithCache(
 	return nil
 }
 
+// registeredPoolVrfKeyHash resolves the VRF key hash a pool is currently
+// held to: its latest registration's, or the pool row's when that
+// registration carries none. An empty value is absent; any other wrong length
+// is a malformed stored hash and fails, because reading it as absent would
+// silently substitute the fallback key.
 func registeredPoolVrfKeyHash(
 	pool *models.Pool,
-) (lcommon.Blake2b256, bool) {
+) (lcommon.Blake2b256, bool, error) {
 	var vrfHash lcommon.Blake2b256
 	if pool == nil {
-		return vrfHash, false
+		return vrfHash, false, nil
 	}
 	if len(pool.Registration) == 0 {
-		return vrfHash, false
+		return vrfHash, false, nil
 	}
-	if len(pool.Registration[0].VrfKeyHash) == len(vrfHash) {
-		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
-		return vrfHash, true
+	if len(pool.Registration[0].VrfKeyHash) > 0 {
+		hash, err := lcommon.NewBlake2b256Checked(
+			pool.Registration[0].VrfKeyHash,
+		)
+		if err != nil {
+			return vrfHash, false, fmt.Errorf(
+				"registered VRF key hash for pool %x: %w",
+				pool.PoolKeyHash,
+				err,
+			)
+		}
+		return hash, true, nil
 	}
-	if len(pool.VrfKeyHash) != len(vrfHash) {
-		return vrfHash, false
+	if len(pool.VrfKeyHash) == 0 {
+		return vrfHash, false, nil
 	}
-	copy(vrfHash[:], pool.VrfKeyHash)
-	return vrfHash, true
+	hash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
+	if err != nil {
+		return vrfHash, false, fmt.Errorf(
+			"VRF key hash for pool %x: %w",
+			pool.PoolKeyHash,
+			err,
+		)
+	}
+	return hash, true, nil
 }
 
 // registeredPoolVrfKeyHashAsOfSlot is registeredPoolVrfKeyHash's
@@ -2250,22 +2291,30 @@ func registeredPoolVrfKeyHash(
 func registeredPoolVrfKeyHashAsOfSlot(
 	pool *models.Pool,
 	slot uint64,
-) (lcommon.Blake2b256, bool) {
+) (lcommon.Blake2b256, bool, error) {
 	var vrfHash lcommon.Blake2b256
 	if pool == nil {
-		return vrfHash, false
+		return vrfHash, false, nil
 	}
 	for _, reg := range pool.Registration {
 		if reg.AddedSlot > slot {
 			continue
 		}
-		if len(reg.VrfKeyHash) != len(vrfHash) {
-			return vrfHash, false
+		if len(reg.VrfKeyHash) == 0 {
+			return vrfHash, false, nil
 		}
-		copy(vrfHash[:], reg.VrfKeyHash)
-		return vrfHash, true
+		hash, err := lcommon.NewBlake2b256Checked(reg.VrfKeyHash)
+		if err != nil {
+			return vrfHash, false, fmt.Errorf(
+				"VRF key hash for pool %x as of slot %d: %w",
+				pool.PoolKeyHash,
+				slot,
+				err,
+			)
+		}
+		return hash, true, nil
 	}
-	return vrfHash, false
+	return vrfHash, false, nil
 }
 
 // maxKESEvolutions returns the maximum number of KES evolutions allowed before

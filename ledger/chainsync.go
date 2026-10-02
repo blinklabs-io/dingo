@@ -1758,10 +1758,8 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
 ) bool {
-	var (
-		evictable = make(peerHeaderHistoryCandidateHeap, 0)
-		retirable = make(peerHeaderHistoryCandidateHeap, 0)
-	)
+	evictable := make(peerHeaderHistoryCandidateHeap, 0)
+	retirable := make(peerHeaderHistoryCandidateHeap, 0)
 	retirableByKey := make(
 		map[string]*peerHeaderHistoryCandidate,
 		len(ls.peerHeaderHistory),
@@ -7188,10 +7186,7 @@ func (ls *LedgerState) processEpochRollover(
 				)
 			},
 		); err != nil {
-			return nil, fmt.Errorf(
-				"capture SNAP-point pool retirements: %w",
-				err,
-			)
+			return nil, fmt.Errorf("capture SNAP-point pool retirements: %w", err)
 		}
 	} else if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "snap", func() error {

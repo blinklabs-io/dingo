@@ -3301,9 +3301,14 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 	if endedEpoch != nil {
 		poolIDs := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashes))
 		for _, hash := range poolKeyHashes {
-			var poolID lcommon.PoolKeyHash
-			copy(poolID[:], hash)
-			poolIDs = append(poolIDs, poolID)
+			poolID, err := lcommon.NewBlake2b224Checked(hash)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"reward pool input for epoch %d: %w",
+					rewardSnapshotEpoch, err,
+				)
+			}
+			poolIDs = append(poolIDs, lcommon.PoolKeyHash(poolID))
 		}
 		registrations, regErr := meta.GetPoolRegistrationsEffectiveForEpoch(
 			poolIDs,
@@ -4014,13 +4019,17 @@ func (ls *LedgerState) rewardBlockCounts(
 	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
 	poolKeys := make([]lcommon.PoolKeyHash, 0, len(poolInputs))
 	for _, input := range poolInputs {
-		if input == nil ||
-			len(input.PoolKeyHash) != rewards.CredentialHashSize {
+		if input == nil {
 			continue
 		}
-		var poolKey lcommon.PoolKeyHash
-		copy(poolKey[:], input.PoolKeyHash)
-		poolKeys = append(poolKeys, poolKey)
+		poolKey, err := lcommon.NewBlake2b224Checked(input.PoolKeyHash)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf(
+				"reward block-count pool input for epoch %d: %w",
+				performanceEpoch, err,
+			)
+		}
+		poolKeys = append(poolKeys, lcommon.PoolKeyHash(poolKey))
 	}
 	if len(poolKeys) == 0 {
 		return nil, 0, true, nil

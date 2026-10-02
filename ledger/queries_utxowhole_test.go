@@ -152,6 +152,43 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	require.Empty(t, utxos)
 }
 
+func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xA1}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	out := babbage.BabbageTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+	}
+	cborBytes, err := cbor.Encode(&out)
+	require.NoError(t, err)
+	shortTxID := bytes.Repeat([]byte{0xA2}, 31)
+	paddedTxID := append(bytes.Clone(shortTxID), 0)
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      shortTxID,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	require.NoError(t, db.Blob().SetUtxo(
+		txn.Blob(), paddedTxID, 0, cborBytes,
+	))
+	require.NoError(t, txn.Commit())
+
+	ls := newPoolDistr2Ledger(t, db)
+	result, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "blake2b-256")
+}
+
 // TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery covers a live UTxO
 // row whose CBOR cannot be resolved even via recovery (no blob entry and no
 // producer transaction metadata to reconstruct it from): the whole query

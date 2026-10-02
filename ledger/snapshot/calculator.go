@@ -73,11 +73,13 @@ type StakeDistribution struct {
 // the active pools, whose buckets become reward_pool_input, unioned with every
 // pool that still carries a delegation. The union exists only to make
 // TotalActiveStake credential-first; membership of active decides which pools
-// get buckets, so widening the fetch changes no pool's reward.
+// get buckets, so widening the fetch changes no pool's reward. An empty
+// delegated key is no delegation; any other wrong length fails, because
+// dropping it would shrink TotalActiveStake by that pool's delegated stake.
 func stakeFetchPools(
 	active []lcommon.PoolKeyHash,
 	delegated [][]byte,
-) ([][]byte, map[lcommon.PoolKeyHash]struct{}) {
+) ([][]byte, map[lcommon.PoolKeyHash]struct{}, error) {
 	activeSet := make(map[lcommon.PoolKeyHash]struct{}, len(active))
 	fetch := make([][]byte, 0, len(active)+len(delegated))
 	seen := make(map[lcommon.PoolKeyHash]struct{}, len(active)+len(delegated))
@@ -90,18 +92,21 @@ func stakeFetchPools(
 		fetch = append(fetch, append([]byte(nil), poolHash[:]...))
 	}
 	for _, hashBytes := range delegated {
-		if len(hashBytes) != len(lcommon.PoolKeyHash{}) {
+		if len(hashBytes) == 0 {
 			continue
 		}
-		var poolHash lcommon.PoolKeyHash
-		copy(poolHash[:], hashBytes)
+		hash, err := lcommon.NewBlake2b224Checked(hashBytes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("delegated pool key: %w", err)
+		}
+		poolHash := lcommon.PoolKeyHash(hash)
 		if _, ok := seen[poolHash]; ok {
 			continue
 		}
 		seen[poolHash] = struct{}{}
 		fetch = append(fetch, append([]byte(nil), poolHash[:]...))
 	}
-	return fetch, activeSet
+	return fetch, activeSet, nil
 }
 
 // StakeInput is a per-stake-credential snapshot input owned by the snapshot
@@ -352,7 +357,13 @@ func (c *Calculator) calculateAdjustedLiveStakeDistributionInTxn(
 	if err != nil {
 		return nil, fmt.Errorf("get delegated pools: %w", err)
 	}
-	poolKeyHashBytes, activePools := stakeFetchPools(pools, delegatedPools)
+	poolKeyHashBytes, activePools, err := stakeFetchPools(
+		pools,
+		delegatedPools,
+	)
+	if err != nil {
+		return nil, err
+	}
 	for poolHash := range activePools {
 		dist.PoolStakes[poolHash] = 0
 	}
@@ -496,7 +507,13 @@ func (c *Calculator) rewardStakeInputsInTxn(
 	if err != nil {
 		return nil, 0, fmt.Errorf("get delegated pools: %w", err)
 	}
-	poolKeyHashBytes, activePools := stakeFetchPools(pools, delegatedPools)
+	poolKeyHashBytes, activePools, err := stakeFetchPools(
+		pools,
+		delegatedPools,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	// If no pools found, return empty distribution (not an error)
 	if len(poolKeyHashBytes) == 0 {
@@ -611,13 +628,11 @@ func (c *Calculator) getActivePoolsAtSlot(
 	// Convert [][]byte to []lcommon.PoolKeyHash
 	pools := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashBytes))
 	for _, hashBytes := range poolKeyHashBytes {
-		if len(hashBytes) != 28 {
-			// Skip invalid pool key hashes (must be 28 bytes)
-			continue
+		poolHash, err := lcommon.NewBlake2b224Checked(hashBytes)
+		if err != nil {
+			return nil, fmt.Errorf("active pool key at slot %d: %w", slot, err)
 		}
-		var poolHash lcommon.PoolKeyHash
-		copy(poolHash[:], hashBytes)
-		pools = append(pools, poolHash)
+		pools = append(pools, lcommon.PoolKeyHash(poolHash))
 	}
 
 	return pools, nil

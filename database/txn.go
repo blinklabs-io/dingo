@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // PartialCommitError is returned when blob commits but metadata fails.
@@ -83,6 +84,10 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
+	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
+	// transaction's lifetime. Releasing only after the read transaction ends
+	// caps established snapshots as well as callers waiting to construct one.
+	readSnapshotAdmissionHeld bool
 
 	// onFinish holds the callbacks registered through OnFinish, and
 	// onFinishArmed reports whether any were ever registered so the terminal
@@ -161,6 +166,10 @@ func (t *Txn) finishLocked() {
 	t.finished = true
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
+	if t.readSnapshotAdmissionHeld {
+		t.readSnapshotAdmissionHeld = false
+		t.db.releaseReadSnapshotAdmission()
+	}
 }
 
 // releaseBlobPinLocked drops this transaction's pin on the blob store it
@@ -179,6 +188,16 @@ func (t *Txn) releaseBlobPinLocked() {
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
+	return NewTxnContext(context.Background(), db, readWrite)
+}
+
+// NewTxnContext creates a coordinated transaction whose metadata operations
+// are canceled with ctx. Blob operations do not accept contexts, so callers
+// doing long mixed-store scans must also check ctx between blob reads.
+func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	t := &Txn{db: db, readWrite: readWrite}
 	acquireCommitBarrier(t, db.Metadata() != nil)
 	pinBlobStoreForTxn(t, db)
@@ -191,19 +210,10 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		// prevents chainsync FindIntersect and snapshot calculations
 		// from blocking on concurrent block processing.
 		//
-		// context.Background(): NewTxn itself takes no ctx, and none of
-		// its own callers (Database.Transaction and its ~100 call sites
-		// across ledger/api/mempool) have one to offer yet either -- this
-		// is the current propagation boundary between the metadata
-		// store's own ctx-aware Transaction/ReadTransaction and the rest
-		// of the node, not a gap within the metadata store itself.
-		// Threading a real ctx from callers into this boundary is a
-		// separate, distinctly larger change than this metadata-store
-		// specific one.
 		if readWrite {
-			t.metadataTxn = ms.Transaction(context.Background())
+			t.metadataTxn = ms.Transaction(ctx)
 		} else {
-			t.metadataTxn = ms.ReadTransaction(context.Background())
+			t.metadataTxn = ms.ReadTransaction(ctx)
 		}
 		if t.metadataTxn == nil {
 			db.logger.Warn(
@@ -212,6 +222,104 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 		}
 	}
 	return t
+}
+
+// NewReadSnapshotContext creates a coordinated read transaction and returns
+// the metadata tip that anchors it. PauseCommitsContext brackets construction
+// with both the logical destructive-transition barrier and the physical commit
+// barrier, so neither a multi-transaction rollback nor a combined write can
+// change blob data between opening the metadata and blob views. Both holds are
+// released as soon as the views are fixed; they are not held for the lifetime
+// of the read.
+//
+// The metadata store's read-pool connection is reserved BEFORE those holds are
+// taken, when the store supports it (types.ReadReserver). Beginning the read
+// transaction is what waits for that pool, so reserving first keeps an
+// exhausted-pool wait outside both barriers. Admission remains held until the
+// returned transaction finishes and is capped below the pool size: a streamed
+// HTTP response can otherwise occupy every connection for as long as its
+// clients take to read, starving rollback's operational metadata reads. The
+// transaction is still BEGUN inside the barrier, so the commit boundary the
+// two views share is unchanged; a store that does not implement ReadReserver
+// keeps the previous behavior exactly.
+func NewReadSnapshotContext(
+	ctx context.Context,
+	db *Database,
+) (*Txn, ochainsync.Tip, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ms := db.Metadata()
+	var reservation types.ReadReservation
+	admissionHeld := false
+	if reserver, ok := ms.(types.ReadReserver); ok {
+		if err := db.acquireReadSnapshotAdmission(
+			ctx,
+			reserver.ReadSnapshotLimit(),
+		); err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"admit read snapshot: %w",
+				err,
+			)
+		}
+		admissionHeld = true
+		defer func() {
+			if admissionHeld {
+				db.releaseReadSnapshotAdmission()
+			}
+		}()
+		reserved, err := reserver.ReserveRead(ctx)
+		if err != nil {
+			return nil, ochainsync.Tip{}, fmt.Errorf(
+				"reserve metadata read connection for read snapshot: %w",
+				err,
+			)
+		}
+		reservation = reserved
+	}
+	// Release is a no-op once Begin has handed the connection to the
+	// transaction, so this covers every path that gives up before then --
+	// including the barrier acquire below failing on a cancelled ctx.
+	if reservation != nil {
+		defer reservation.Release()
+	}
+
+	resume, err := db.PauseCommitsContext(ctx)
+	if err != nil {
+		return nil, ochainsync.Tip{}, fmt.Errorf(
+			"pause commits for read snapshot: %w",
+			err,
+		)
+	}
+	defer resume()
+
+	t := &Txn{db: db}
+	t.readSnapshotAdmissionHeld = admissionHeld
+	admissionHeld = false
+	pinBlobStoreForTxn(t, db)
+	var tip ochainsync.Tip
+	if ms != nil {
+		if reservation != nil {
+			t.metadataTxn = reservation.Begin()
+		} else {
+			t.metadataTxn = ms.ReadTransaction(ctx)
+		}
+		if t.metadataTxn == nil {
+			return nil, tip, errors.Join(types.ErrNilTxn, t.Rollback())
+		}
+		var err error
+		tip, err = ms.GetTip(t.metadataTxn)
+		if err != nil {
+			return nil, tip, fmt.Errorf(
+				"anchor metadata read snapshot: %w",
+				errors.Join(err, t.Rollback()),
+			)
+		}
+	}
+	if bs := t.blobStore; bs != nil {
+		t.blobTxn = bs.NewTransaction(false)
+	}
+	return t, tip, nil
 }
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
