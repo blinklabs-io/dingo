@@ -212,6 +212,104 @@ func TestCommitPeerTipAdmissionPromotesMatchingPeerCandidates(t *testing.T) {
 	assert.NotContains(t, cs.pendingPeerTipFrontiers, secondConn)
 }
 
+func TestRejectPeerTipAdmissionPrunesMatchingPeerCandidates(t *testing.T) {
+	t.Parallel()
+
+	firstConn := newTestConnectionId(27)
+	secondConn := newTestConnectionId(28)
+	thirdConn := newTestConnectionId(29)
+	localTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-tip")},
+		BlockNumber: 100,
+	}
+	advertisedTip := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 200, Hash: []byte("remote-tip")},
+		BlockNumber: 200,
+	}
+	staged := func(
+		connId ouroboros.ConnectionId,
+		id uint64,
+		slot uint64,
+		hash string,
+	) PeerTipUpdateEvent {
+		return PeerTipUpdateEvent{
+			ConnectionId: connId,
+			AdmissionID:  id,
+			Tip:          advertisedTip,
+			ObservedTip: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+				BlockNumber: slot,
+			},
+		}
+	}
+	newSelector := func() *ChainSelector {
+		cs := NewChainSelector(ChainSelectorConfig{
+			SecurityParam:             2160,
+			DisableEventSubscriptions: true,
+		})
+		cs.SetLocalTip(localTip)
+		return cs
+	}
+
+	t.Run("duplicate copy does not outlive the rejected point", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "bad-header")
+		duplicate := staged(secondConn, 1, 101, "bad-header")
+		unrelated := staged(thirdConn, 1, 102, "other-header")
+		for _, update := range []PeerTipUpdateEvent{first, duplicate, unrelated} {
+			require.True(t, cs.PreparePeerTipAdmission(update))
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		assert.NotContains(t, cs.pendingPeerTips, firstConn)
+		assert.NotContains(t, cs.pendingPeerTips, secondConn,
+			"a duplicate whose publish was suppressed has no resolution of its own")
+		assert.NotContains(t, cs.pendingPeerTipFrontiers, secondConn)
+		assert.Contains(t, cs.pendingPeerTips, thirdConn,
+			"a candidate at a different point is unaffected")
+	})
+
+	t.Run("later headers of the duplicate peer go with it", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "bad-header")
+		before := staged(secondConn, 1, 100, "ok-header")
+		duplicate := staged(secondConn, 2, 101, "bad-header")
+		after := staged(secondConn, 3, 102, "child-header")
+		for _, update := range []PeerTipUpdateEvent{first, before, duplicate, after} {
+			require.True(t, cs.PreparePeerTipAdmission(update))
+		}
+
+		cs.RejectPeerTipAdmission(first)
+
+		require.Len(t, cs.pendingPeerTips[secondConn], 1)
+		assert.Equal(t, uint64(1), cs.pendingPeerTips[secondConn][0].update.AdmissionID,
+			"only the prefix before the rejected point survives")
+	})
+
+	t.Run("an admitted point keeps its copies", func(t *testing.T) {
+		t.Parallel()
+		cs := newSelector()
+		first := staged(firstConn, 1, 101, "good-header")
+		duplicate := staged(secondConn, 1, 101, "good-header")
+		require.True(t, cs.PreparePeerTipAdmission(first))
+		require.True(t, cs.PreparePeerTipAdmission(duplicate))
+		require.True(t, cs.CommitPeerTipAdmission(first))
+
+		retry := staged(thirdConn, 1, 101, "good-header")
+		require.True(t, cs.PreparePeerTipAdmission(retry))
+		cs.RejectPeerTipAdmission(retry)
+
+		for _, connId := range []ouroboros.ConnectionId{firstConn, secondConn} {
+			peerTip := cs.GetPeerTip(connId)
+			require.NotNil(t, peerTip)
+			assert.Equal(t, first.ObservedTip.Point, peerTip.SelectionTip().Point)
+		}
+	})
+}
+
 func TestPreparePeerTipAdmissionPromotesPreviouslyAdmittedPoint(t *testing.T) {
 	t.Parallel()
 

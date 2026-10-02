@@ -1513,6 +1513,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				point,
 				isNew,
 			) {
+			// The staged candidate for this point is not resolved here: it
+			// follows the connection whose copy reaches the ledger.
 			dropReason := "duplicate"
 			if isNew {
 				dropReason = "not ingress driver"

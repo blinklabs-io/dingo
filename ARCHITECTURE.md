@@ -4769,16 +4769,26 @@ it. Dingo implements this as a **corroboration gate**
   state in the roll-forward handler), so the apply decision reflects the header
   currently being admitted rather than a tip update that has not been processed
   yet — an async observation could otherwise let a header slip through in the
-  window before it revoked corroboration. The candidate may contribute to
-  corroboration before ledger admission, but it cannot become a selectable peer
-  frontier until the ledger accepts the header, although it can corroborate an
-  already-admitted peer. Staged peers share the selector's tracked-peer limit,
-  with at most 256 pending header observations per peer. Admission promotes
-  only that header; earlier withheld observations do not enter the committed
-  frontier. Rejection removes the candidate and reevaluates selection before
-  the rejection callback returns; apply-denied headers remain corroboration
-  evidence without steering selection. Ledger admission advances the tracked
-  ChainSync cursor and publishes the accepted peer-tip event. This staged
+  window before it revoked corroboration. A staged candidate cannot become a
+  selectable peer frontier until the ledger accepts a header at its point, but
+  it does count as corroboration evidence before admission: the gate checks the
+  applicant's own staged frontier and counts every other connection's staged
+  frontier, so connections from distinct hosts that stage the same points
+  open the apply gate for each other even when no peer has been admitted yet.
+  Staged peers share the selector's tracked-peer limit, with at most 256
+  pending header observations per peer. A staged candidate resolves with its
+  point rather than with the connection that delivered it, because a header
+  delivered by several connections is published to the ledger once. Admitting
+  the point promotes every staged candidate at that point, including the
+  copies whose publish was suppressed as duplicates and the copies of
+  apply-denied peers, each advancing its peer's frontier to that header only;
+  earlier withheld observations do not enter the committed frontier. Rejecting
+  the point removes the candidate at that point and everything staged after it
+  on every connection, since later headers depend on the rejected prefix, and
+  reevaluates selection before the rejection callback returns. Apply-denied
+  headers that are neither admitted nor rejected stay corroboration evidence
+  without steering selection. Ledger admission advances the tracked ChainSync
+  cursor and publishes the accepted peer-tip event. This staged
   admission path applies when Genesis corroboration is disabled too, so a
   rejected or discarded header cannot advance the selector frontier. The
   roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`

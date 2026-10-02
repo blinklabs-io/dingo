@@ -861,7 +861,10 @@ func (cs *ChainSelector) rebuildPeerTipAdmissionFrontierLocked(
 
 // RejectPeerTipAdmission removes a candidate and later candidate headers from
 // the same peer. Later headers depend on the rejected chain prefix and must be
-// observed again after the peer resynchronizes.
+// observed again after the peer resynchronizes. Staged copies of the same
+// point on other peers are removed the same way: a header the ledger declined
+// is resolved once for the point, so a duplicate whose own publish was
+// suppressed must not remain behind as corroboration evidence.
 func (cs *ChainSelector) RejectPeerTipAdmission(
 	update PeerTipUpdateEvent,
 ) {
@@ -875,41 +878,80 @@ func (cs *ChainSelector) RejectPeerTipAdmission(
 		if update.AdmissionID <= cs.committedPeerTips[update.ConnectionId] {
 			return
 		}
-		pending := cs.pendingPeerTips[update.ConnectionId]
-		for i, candidate := range pending {
-			if candidate.update.AdmissionID == update.AdmissionID {
-				if i == 0 {
-					delete(cs.pendingPeerTips, update.ConnectionId)
-				} else {
-					cs.pendingPeerTips[update.ConnectionId] = append(
-						[]peerTipAdmissionCandidate(nil),
-						pending[:i]...,
-					)
-				}
-				cs.rebuildPeerTipAdmissionFrontierLocked(update.ConnectionId)
-				shouldEvaluate = cs.genesisCorroborationActiveLocked()
-				return
-			}
+		pruned := cs.pruneOwnPendingPeerTipsLocked(update)
+		if cs.pruneMatchingPendingPeerTipsLocked(update) {
+			pruned = true
 		}
-		for i, candidate := range pending {
-			if candidate.update.AdmissionID > update.AdmissionID {
-				if i == 0 {
-					delete(cs.pendingPeerTips, update.ConnectionId)
-				} else {
-					cs.pendingPeerTips[update.ConnectionId] = append(
-						[]peerTipAdmissionCandidate(nil),
-						pending[:i]...,
-					)
-				}
-				cs.rebuildPeerTipAdmissionFrontierLocked(update.ConnectionId)
-				shouldEvaluate = cs.genesisCorroborationActiveLocked()
-				return
-			}
+		if pruned {
+			shouldEvaluate = cs.genesisCorroborationActiveLocked()
 		}
 	}()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
+}
+
+// pruneOwnPendingPeerTipsLocked drops the rejected candidate, or the first
+// later one when it is already gone, together with everything staged after it
+// on the same connection. Must be called with cs.mutex held.
+func (cs *ChainSelector) pruneOwnPendingPeerTipsLocked(
+	update PeerTipUpdateEvent,
+) bool {
+	pending := cs.pendingPeerTips[update.ConnectionId]
+	for i, candidate := range pending {
+		if candidate.update.AdmissionID >= update.AdmissionID {
+			cs.truncatePendingPeerTipsLocked(update.ConnectionId, i)
+			return true
+		}
+	}
+	return false
+}
+
+// pruneMatchingPendingPeerTipsLocked removes staged candidates at the rejected
+// point, and everything staged after them, from every other connection. A
+// point another connection already got admitted is left alone: its staged
+// copies were committed with it. Must be called with cs.mutex held.
+func (cs *ChainSelector) pruneMatchingPendingPeerTipsLocked(
+	update PeerTipUpdateEvent,
+) bool {
+	if cs.admittedPeerTipPointLocked(update) {
+		return false
+	}
+	point := update.ObservedTip.Point
+	pruned := false
+	for connId, pending := range cs.pendingPeerTips {
+		if connId == update.ConnectionId {
+			continue
+		}
+		for i, candidate := range pending {
+			candidatePoint := candidate.update.ObservedTip.Point
+			if candidatePoint.Slot == point.Slot &&
+				bytes.Equal(candidatePoint.Hash, point.Hash) {
+				cs.truncatePendingPeerTipsLocked(connId, i)
+				pruned = true
+				break
+			}
+		}
+	}
+	return pruned
+}
+
+// truncatePendingPeerTipsLocked keeps the first n staged candidates of a
+// connection and rebuilds its staged frontier. Must be called with cs.mutex
+// held.
+func (cs *ChainSelector) truncatePendingPeerTipsLocked(
+	connId ouroboros.ConnectionId,
+	n int,
+) {
+	if n == 0 {
+		delete(cs.pendingPeerTips, connId)
+	} else {
+		cs.pendingPeerTips[connId] = append(
+			[]peerTipAdmissionCandidate(nil),
+			cs.pendingPeerTips[connId][:n]...,
+		)
+	}
+	cs.rebuildPeerTipAdmissionFrontierLocked(connId)
 }
 
 // CommitPeerTipAdmission promotes an admitted candidate into normal peer
