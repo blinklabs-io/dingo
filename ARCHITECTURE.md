@@ -12597,14 +12597,20 @@ read and a record that does not match degrades to the VRF-only reading rather
 than mapping a field onto the wrong parameter. Note that a snapshot's owner
 set lists only the owners holding stake in it, not every owner the
 registration names; the omitted ones contribute nothing to owner stake, so the
-reward basis is unaffected. If an imported basis fails reconciliation or lacks
-the historical protocol parameters needed to consume it, ledgerstate persists
-the failure reason in `reward_seed_failure` in the same metadata transaction as
-the import. A later reward boundary reads that marker when its reward snapshot
-is absent and reports the imported seeding failure; a genuinely missing import
-has no marker and is reported as a missing basis. Successful seeding clears the
-marker, and rollback removes markers above its slot, so the message cannot
-outlive the imported state it describes.
+reward basis is unaffected. If an imported basis is empty, fails
+reconciliation, or lacks the historical protocol parameters needed to consume
+it, the import fails with `errImportedRewardBasisUnusable`, naming the epoch
+and snapshot: continuing would cross that epoch's boundary with no reward
+round, leaving its rewards uncredited and the pots unmoved. In the first
+epoch of an era the go round reads the previous era's epoch, while the hard
+fork translated the snapshot's prevPParams to the new era; the import stores
+the ledger's input-free downgrade of it under the previous era
+(`downgradeConwayPParams`, `downgradeDijkstraPParams`), which keeps every
+reward input startStep reads. Only a step with no such downgrade -- Babbage to
+Alonzo needs `d` and `extraEntropy` -- still fails. `reward_seed_failure` is no
+longer written by the import; a later reward boundary still reads a marker a
+database written by an older version carries when its reward snapshot is
+absent, and successful seeding clears it.
 
 Registration history is the fallback, for a snapshot whose pool entries are
 the compact pool-distr shape carrying only a VRF key. It is resolved per epoch
@@ -12672,13 +12678,13 @@ persisting a partial reward share. That rejection reports every incomplete
 pool and its delegated stake deterministically.
 
 Each epoch's derived basis is gated before it is written
-(`rewardInputBundle.validate`), and a basis that does not reconcile is dropped
-with a warning rather than persisted. The gate is mandatory, not defensive:
-the ledger validates the same invariants when it reads the basis, and on that
-path a failure returns an error rather than skipping the round, so an unusable
-row would turn a missing reward round into a node that cannot cross an epoch
-boundary at all. Dropping leaves the round to be skipped and counted as
-before, which is the conservative direction. Both skips are logged at WARN and counted by
+(`rewardInputBundle.validate`), and a basis that does not reconcile fails the
+import rather than being persisted or dropped. The gate is mandatory, not
+defensive: the ledger validates the same invariants when it reads the basis,
+and on that path a failure returns an error rather than skipping the round, so
+an unusable row would turn a missing reward round into a node that cannot cross
+an epoch boundary at all, while a dropped basis would skip the round and leave
+its rewards uncredited. Skipped rounds on the live path are logged at WARN and counted by
 `dingo_ledger_skipped_stake_reward_rounds_total`; a nonzero counter on a
 Mithril-bootstrapped node explains a stake shortfall, and a rising one on any
 node is a live divergence from the network. At Debug level the
@@ -13723,18 +13729,42 @@ validator is left unclamped, so when the feature is active and any pool in the
 epoch's snapshot is below the floor, reuse is conservatively bypassed for that
 whole epoch's snapshot and the fresh authoritative calculation is used.
 
-CIP-50 pledge-leverage rewards are an optional, consensus-affecting feature gate
-that defaults off. When `LedgerStateConfig.PledgeLeverageEnabled` is set (from
-operator config, not derived from the network), a pool's reward-eligible stake
-`sigma'` in `optimalPoolRewardChecked` (`ledger/rewards`) is additionally capped
-at `L` times its pledge, so `sigma' = min(sigma, z0, L*p)`; a zero-pledge pool
-then earns nothing. `L` is threaded from config onto `rewards.Parameters` at the
-single `LedgerState.rewardParameters` chokepoint (`applyPledgeLeverageConfig`),
-so the boundary-apply and precompute paths compute identical rewards. Disabled,
-the term is nil and the formula is byte-for-byte the pre-CIP-50 calculation.
-Because it changes reward amounts and therefore ADA pots and reward accounts, it
-must be enabled only on a network where every node also enables it (a devnet or
-custom network); enabling it off-consensus forks the node.
+CIP-50 pledge leverage uses the enacted Dijkstra `maxPledgeLeverage` protocol
+parameter. `rewardParameters` normally reads it from the performance epoch's
+protocol parameters, matching cardano-ledger's previous-epoch reward inputs.
+For the first Dijkstra reward round, it reads the upgraded value from the
+calculation epoch's Dijkstra parameters while all other reward inputs remain
+from the Conway performance epoch. A nil value (including the Dijkstra genesis
+default) leaves the original formula unchanged; otherwise
+`optimalPoolRewardChecked` computes
+`sigma' = min(sigma, z0, L*p)`. A zero-pledge pool then earns nothing. This
+single parameter path feeds both boundary application and asynchronous reward
+precomputation. The operator setting remains an experimental override only for
+pre-Dijkstra local networks, where the protocol parameter does not exist.
+
+With a positive `a0`, `L = 0` or a very small `L` makes `maxPool'` negative,
+and, as in cardano-ledger, that pool's leader reward is negative while its
+members get nothing (`rewards.PoolReward.LeaderRewardDeficit`). Owed to an
+unregistered reward account, the negative amount is charged to the treasury
+and returned to reserves with the undistributed pot, matching
+`applyRUpdFiltered`'s `frTotalUnregistered` and `completeRupd`'s `deltaR2`.
+Owed to a registered one, the update cannot be applied, because
+cardano-ledger's `compactCoinOrError` fails that boundary: `applyStakeRewards`
+returns an `errHaltLedgerPipeline` error wrapping
+`rewards.ErrNegativeLeaderReward`, before writing anything, and calls
+`FatalErrorFunc`. The CIP-0163 account-inactivity guard judges every reward
+account owed a negative leader reward, which has no account output, alongside
+the credited ones, and suppresses the halt for an expired one exactly as it
+suppresses crediting it. Per-pool history stores the negative magnitude in
+`reward_pool_output.leader_reward_deficit`, while the unsigned reward fields
+remain zero. The per-pool precompute declines such a round, as does the
+single-pass precompute, and reuse of persisted outputs rejects it; the
+boundary always calculates it fresh with the single-pass calculation.
+
+Stored Dijkstra parameters use the era decoder's `NonNegativeInterval`
+validation for `maxPledgeLeverage`, matching cardano-ledger. The governance
+update rules may impose a narrower range, but reward calculations use the
+enacted value directly, including zero.
 
 After an epoch-transition event, ledger precomputes the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. The calculation
