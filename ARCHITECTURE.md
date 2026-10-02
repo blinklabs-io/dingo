@@ -8296,7 +8296,9 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
 Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
-remote scraping requires setting `metricsBindAddr`), pprof on `debugPort`
+remote scraping requires setting `metricsBindAddr`, which the container image
+does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
+scrapers reach it), pprof on `debugPort`
 when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The three API

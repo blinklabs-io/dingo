@@ -156,7 +156,8 @@
 # Address for the unauthenticated Prometheus listener. This is deliberately
 # independent of bindAddr and stays on loopback by default. Set a wildcard or
 # remote-reachable address only when scrapers need it and an external network
-# control protects the endpoint.
+# control protects the endpoint. The container image sets
+# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
 # CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
 # metricsBindAddr: "127.0.0.1"
 
