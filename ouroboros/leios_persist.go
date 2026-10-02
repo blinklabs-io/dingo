@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"sync"
@@ -68,6 +69,8 @@ var leiosPersistMaxQueueBytes = 256 << 20 // 256 MiB
 // Package-level var (not const) so tests can shrink it instead of running a
 // real multi-second timeout.
 var leiosPersistShutdownDrainTimeout = 5 * time.Second
+
+const leiosPersistGCInterval = time.Hour
 
 // ErrLeiosPersistDrainUnconfirmed is returned by
 // PauseLeiosPersistWriterForLiveLifecycleOp when its bounded wait gave up
@@ -141,6 +144,7 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if o.leiosDatabase() == nil {
 		return
 	}
+	o.startLeiosPersistenceGC(0, false)
 	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
 	// The caller's transaction slices, not a copy: they are only measured
 	// here, and are cloned below if and only if the job is admitted.
@@ -358,6 +362,120 @@ func (o *Ouroboros) startLeiosPersistWriter() {
 	go o.leiosPersistLoop()
 }
 
+// startLeiosPersistenceGC starts the optional pruning worker independently of
+// the persistence writer. initialMaxSlot is supplied after the startup
+// watermark scan so enabling GC does not repeat that full scan immediately.
+func (o *Ouroboros) startLeiosPersistenceGC(
+	initialMaxSlot uint64,
+	initialMaxKnown bool,
+) {
+	if o.config.LeiosPersistenceRetentionSlots == 0 ||
+		o.leiosDatabase() == nil {
+		return
+	}
+	o.leiosPersistGCOnce.Do(func() {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		o.leiosPersistGCMu.Lock()
+		o.leiosPersistGCStop = stop
+		o.leiosPersistGCDone = done
+		o.leiosPersistGCStarted.Store(true)
+		o.leiosPersistGCMu.Unlock()
+		go o.leiosPersistGCLoop(stop, done, initialMaxSlot, initialMaxKnown)
+	})
+}
+
+func (o *Ouroboros) leiosPersistGCLoop(
+	stop <-chan struct{},
+	done chan<- struct{},
+	initialMaxSlot uint64,
+	initialMaxKnown bool,
+) {
+	defer close(done)
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-watcherDone:
+		}
+	}()
+	defer func() {
+		close(watcherDone)
+		cancel()
+	}()
+
+	var initialMax *uint64
+	if initialMaxKnown {
+		initialMax = &initialMaxSlot
+	}
+	o.runLeiosPersistenceGC(ctx, initialMax)
+
+	ticker := time.NewTicker(leiosPersistGCInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			o.runLeiosPersistenceGC(ctx, nil)
+		}
+	}
+}
+
+func (o *Ouroboros) runLeiosPersistenceGC(
+	ctx context.Context,
+	knownMaxSlot *uint64,
+) {
+	retention := o.config.LeiosPersistenceRetentionSlots
+	if retention == 0 || ctx.Err() != nil {
+		return
+	}
+	db := o.leiosDatabase()
+	if db == nil {
+		return
+	}
+	var maxSlot uint64
+	if knownMaxSlot != nil {
+		maxSlot = *knownMaxSlot
+	} else {
+		var err error
+		maxSlot, err = db.MaxLeiosEBSlotContext(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				o.config.Logger.Warn(
+					"failed to scan persisted leios endorser blocks for pruning",
+					"error", err,
+				)
+			}
+			return
+		}
+	}
+	if maxSlot <= retention {
+		return
+	}
+	beforeSlot := maxSlot - retention
+	deleted, err := db.PruneLeiosEBBeforeSlot(ctx, beforeSlot)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			o.config.Logger.Warn(
+				"failed to prune persisted leios endorser blocks",
+				"before_slot", beforeSlot,
+				"error", err,
+			)
+		}
+		return
+	}
+	if deleted > 0 {
+		o.config.Logger.Debug(
+			"pruned persisted leios endorser blocks",
+			"before_slot", beforeSlot,
+			"deleted_keys", deleted,
+		)
+	}
+}
+
 func (o *Ouroboros) leiosPersistLoop() {
 	defer close(o.leiosPersistDone)
 	for {
@@ -410,12 +528,18 @@ func (o *Ouroboros) drainLeiosPersist() {
 	}
 }
 
-// StopLeiosPersistWriter stops the background persistence writer and waits, up
-// to leiosPersistShutdownDrainTimeout, for it to drain queued writes and exit.
-// Safe to call when the writer never started (no endorser block was ever
-// fetched) and idempotent across multiple calls.
+// StopLeiosPersistWriter stops the background persistence and GC workers,
+// sharing one bounded wait across both. Safe when neither worker started and
+// idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {
-	o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout)
+	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
+}
+
+func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	writerStopped := o.stopLeiosPersistWriter(time.Until(deadline))
+	gcStopped := o.stopLeiosPersistenceGC(time.Until(deadline))
+	return writerStopped && gcStopped
 }
 
 // stopLeiosPersistWriter closes the stop channel and waits for the writer to
@@ -448,6 +572,31 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 			"network",
 			"timeout",
 			drainTimeout,
+		)
+		return false
+	}
+}
+
+func (o *Ouroboros) stopLeiosPersistenceGC(drainTimeout time.Duration) bool {
+	if !o.leiosPersistGCStarted.Load() {
+		return true
+	}
+	o.leiosPersistGCMu.Lock()
+	stop := o.leiosPersistGCStop
+	done := o.leiosPersistGCDone
+	o.leiosPersistGCStopOnce.Do(func() { close(stop) })
+	o.leiosPersistGCMu.Unlock()
+	timer := time.NewTimer(drainTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		o.leiosPersistGCStarted.Store(false)
+		return true
+	case <-timer.C:
+		o.config.Logger.Warn(
+			"timed out waiting for leios persistence GC to stop",
+			"component", "network",
+			"timeout", drainTimeout,
 		)
 		return false
 	}
@@ -497,11 +646,14 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // reinitializeAndResume in that case; it must escalate to a supervised
 // restart instead, the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
-	if !o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout) {
+	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed
 	}
 	o.leiosPersistOnce = sync.Once{}
 	o.leiosPersistStopOnce = sync.Once{}
 	o.leiosPersistStarted.Store(false)
+	o.leiosPersistGCOnce = sync.Once{}
+	o.leiosPersistGCStopOnce = sync.Once{}
+	o.leiosPersistGCStarted.Store(false)
 	return nil
 }

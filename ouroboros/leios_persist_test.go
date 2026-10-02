@@ -15,10 +15,12 @@
 package ouroboros
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
 
+	databaseTypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -657,6 +659,59 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	t.Cleanup(second.StopLeiosPersistWriter)
 
 	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
+}
+
+func TestLeiosPersistenceGCRetainsConfiguredSlotWindow(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	txs := []cbor.RawMessage{mustCbor(t, "tx")}
+	oldHash := make([]byte, 32)
+	boundaryHash := make([]byte, 32)
+	newHash := make([]byte, 32)
+	oldHash[0], boundaryHash[0], newHash[0] = 1, 2, 3
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldHash},
+		{slot: 20, hash: boundaryHash},
+		{slot: 30, hash: newHash},
+	} {
+		require.NoError(t, db.SetLeiosEB(
+			record.slot,
+			record.hash,
+			[]byte("manifest"),
+			txs,
+		))
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+	_, err := db.GetLeiosEBManifest(oldHash, 10)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 20, hash: boundaryHash},
+		{slot: 30, hash: newHash},
+	} {
+		_, err := db.GetLeiosEBManifest(record.hash, record.slot)
+		require.NoError(t, err)
+	}
+}
+
+func TestLeiosPersistenceGCPausesBeforeLiveDatabaseReplacement(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	o.startLeiosPersistenceGC(0, false)
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	require.False(t, o.leiosPersistGCStarted.Load())
 }
 
 // TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently verifies that

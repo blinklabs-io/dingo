@@ -463,6 +463,24 @@ func TestBuildDingoConfigWiresForgeEBCaps(t *testing.T) {
 	}
 }
 
+func TestBuildDingoConfigWiresLeiosPersistenceRetention(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+	built := buildDingoConfig(
+		&config.Config{LeiosPersistenceRetentionSlots: 12345},
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+	require.Equal(t, uint64(12345), built.LeiosPersistenceRetentionSlots())
+}
+
 // TestBuildDingoConfigPreservesExplicitZeroForgeEBCaps carries the
 // zero-means-disabled contract through the composition path: an operator
 // who wrote 0 must not have it replaced by the default on the way to the

@@ -207,3 +207,113 @@ func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(900), got)
 }
+
+func TestPruneLeiosEBBeforeSlotRetainsBoundaryAndUnknownLegacySlots(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	d := newTestDB(t)
+	txs := []cbor.RawMessage{mustCborForLeiosTest(t, "tx")}
+	oldCurrent := randomHash(t)
+	boundaryCurrent := randomHash(t)
+	newCurrent := randomHash(t)
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldCurrent},
+		{slot: 20, hash: boundaryCurrent},
+		{slot: 30, hash: newCurrent},
+	} {
+		require.NoError(t, d.SetLeiosEB(
+			record.slot,
+			record.hash,
+			[]byte("manifest"),
+			txs,
+		))
+	}
+
+	oldLegacy := randomHash(t)
+	newLegacy := randomHash(t)
+	malformedLegacy := randomHash(t)
+	writeLegacyLeiosEB(t, d, 19, oldLegacy, []byte("old"), txs)
+	writeLegacyLeiosEB(t, d, 21, newLegacy, []byte("new"), txs)
+
+	// An unreadable legacy manifest has no safe retention slot. Its paired
+	// transaction list must be preserved with it rather than treated as an
+	// orphan.
+	blob := d.Blob()
+	malformedTxn := d.BlobTxn(true)
+	defer malformedTxn.Rollback() //nolint:errcheck
+	malformedTxs, err := cbor.Encode(txs)
+	require.NoError(t, err)
+	require.NoError(t, blob.Set(
+		malformedTxn.Blob(),
+		types.LegacyLeiosEBManifestKey(malformedLegacy),
+		[]byte{1, 2, 3},
+	))
+	require.NoError(t, blob.Set(
+		malformedTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(malformedLegacy),
+		malformedTxs,
+	))
+	require.NoError(t, malformedTxn.Commit())
+
+	// Legacy transaction bodies with no manifest are safe to remove as an
+	// orphan.
+	orphanLegacy := randomHash(t)
+	orphanTxn := d.BlobTxn(true)
+	defer orphanTxn.Rollback() //nolint:errcheck
+	require.NoError(t, blob.Set(
+		orphanTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(orphanLegacy),
+		malformedTxs,
+	))
+	require.NoError(t, orphanTxn.Commit())
+
+	deleted, err := d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, err)
+	require.Equal(t, 5, deleted)
+
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldCurrent},
+		{slot: 19, hash: oldLegacy},
+	} {
+		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
+		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
+		require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+	}
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 20, hash: boundaryCurrent},
+		{slot: 30, hash: newCurrent},
+		{slot: 21, hash: newLegacy},
+	} {
+		_, err := d.GetLeiosEBManifest(record.hash, record.slot)
+		require.NoError(t, err)
+		_, err = d.GetLeiosEBTxs(record.hash, record.slot)
+		require.NoError(t, err)
+	}
+
+	readTxn := d.BlobTxn(false)
+	defer readTxn.Release()
+	_, err = blob.Get(
+		readTxn.Blob(),
+		types.LegacyLeiosEBTxsKey(malformedLegacy),
+	)
+	require.NoError(t, err)
+	_, err = blob.Get(readTxn.Blob(), types.LegacyLeiosEBTxsKey(orphanLegacy))
+	require.ErrorIs(t, err, types.ErrBlobKeyNotFound)
+
+	// The same cutoff is safe to apply repeatedly after its first sweep.
+	deleted, err = d.PruneLeiosEBBeforeSlot(t.Context(), 20)
+	require.NoError(t, err)
+	require.Zero(t, deleted)
+}

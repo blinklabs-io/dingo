@@ -633,6 +633,33 @@ func TestLoad_LoggingFromYAML(t *testing.T) {
 	}
 }
 
+func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+
+	defaults, err := LoadConfig("")
+	require.NoError(t, err)
+	assert.Zero(t, defaults.LeiosPersistenceRetentionSlots)
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(
+		"leiosPersistenceRetentionSlots: 7200\n",
+	), 0o600))
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "3600")
+
+	fromEnv, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(3600), fromEnv.LeiosPersistenceRetentionSlots)
+
+	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	fromYAML, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(7200), fromYAML.LeiosPersistenceRetentionSlots)
+}
+
 // defaultMithrilBackendAtInit captures the production default before
 // any test mutates or resets globalConfig.
 var defaultMithrilBackendAtInit = globalConfig.Mithril.Backend

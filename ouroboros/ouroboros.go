@@ -313,6 +313,15 @@ type Ouroboros struct {
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
 	leiosPersistDropped  atomic.Uint64
+	// The optional blob-store GC has its own worker so full prefix scans never
+	// stall persistence writes. It is paused with the writer before live storage
+	// replacement and restarted after the next persisted endorser block.
+	leiosPersistGCOnce     sync.Once
+	leiosPersistGCStopOnce sync.Once
+	leiosPersistGCStarted  atomic.Bool
+	leiosPersistGCMu       sync.Mutex
+	leiosPersistGCStop     chan struct{}
+	leiosPersistGCDone     chan struct{}
 	// leiosPersistAfterReserve, when non-nil, runs between the byte
 	// reservation and the payload copy. Tests use it to unwind or to stall
 	// inside that window, which allocation failure alone would reach only
@@ -393,6 +402,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosPersistenceRetentionSlots optionally prunes historical-serving
+	// Leios endorser-block records older than this many slots behind the
+	// highest persisted endorser block. Zero retains all history.
+	LeiosPersistenceRetentionSlots uint64
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
 	// server waits for a certifying ranking block's endorser block transaction
 	// closure to become available before closing the connection. When 0 (the

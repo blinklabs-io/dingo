@@ -881,6 +881,9 @@ func buildDingoConfig(
 		),
 		dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
 		// Leios voting (experimental)
+		dingo.WithLeiosPersistenceRetentionSlots(
+			cfg.LeiosPersistenceRetentionSlots,
+		),
 		dingo.WithLeiosVoteSigningKeyFile(
 			cfg.LeiosVoteSigningKeyFile,
 		),

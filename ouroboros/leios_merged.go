@@ -1055,6 +1055,7 @@ func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
 		return
 	}
 	o.advanceLeiosVerifiedEbSlot(slot)
+	o.startLeiosPersistenceGC(slot, true)
 }
 
 // bindLeiosEndorserBlockSlot reconciles a cached (slot, hash) occurrence

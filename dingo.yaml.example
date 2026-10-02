@@ -557,6 +557,18 @@
 # Can be overridden with DINGO_LEIOS_VOTE_SIGNING_KEY_FILE.
 # leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
 
+# Optional retention for persisted Leios endorser-block history used by
+# leios-fetch to serve historical blocks after the in-memory cache expires.
+# Zero or unset retains all history. A positive value keeps records from the
+# highest persisted endorser-block slot back through this many slots; older
+# manifests and transaction bodies are pruned at startup and hourly. This does
+# not remove already-applied ledger state, but historical serving and a later
+# rollback/replay that needs pruned data then depend on a connected peer. Each
+# sweep scans the Leios blob-key prefix; object-store backends also pay listing
+# and delete request costs.
+# Can be overridden with DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS.
+# leiosPersistenceRetentionSlots: 0
+
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
 #
