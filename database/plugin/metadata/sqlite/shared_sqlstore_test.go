@@ -534,11 +534,42 @@ func TestSharedSQLStoreDrepParity(t *testing.T) {
 		models.NewStakeCredentialRef(0, bytes.Repeat([]byte{0x51}, 28)),
 		models.NewStakeCredentialRef(1, bytes.Repeat([]byte{0x50}, 28)),
 	}, state.Delegators)
-	require.Len(t, state.Dreps, 5)
+	firstSeenSlots := map[string]uint64{
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x41}, 28)): 12,
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 21,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x44}, 28)): 22,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x45}, 28)): 23,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x46}, 28)): 24,
+	}
+	lastRegistrationSlots := map[string]uint64{
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x41}, 28)): 0,
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 21,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x44}, 28)): 0,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x45}, 28)): 44,
+		models.DrepDepositKey(0, bytes.Repeat([]byte{0x46}, 28)): 24,
+	}
+	gotDrepSlots := make(map[string]uint64, len(state.Dreps))
+	gotDrepLastRegistrationSlots := make(map[string]uint64, len(state.Dreps))
+	for _, drep := range state.Dreps {
+		key := models.DrepDepositKey(drep.CredentialTag, drep.Credential)
+		gotDrepSlots[key] = drep.FirstSeenSlot
+		gotDrepLastRegistrationSlots[key] = drep.LastRegistrationSlot
+	}
+	require.Equal(t, firstSeenSlots, gotDrepSlots)
+	require.Equal(t, lastRegistrationSlots, gotDrepLastRegistrationSlots)
 	require.Len(t, state.Deposits, 3)
-	require.Len(t, state.VotingPowerBatch, 1)
-	require.Len(t, state.LiveStake, 1)
-	require.Len(t, state.LiveStakeAfterRebuild, 1)
+	require.Equal(t, map[string]uint64{
+		models.DrepDepositKey(1, bytes.Repeat([]byte{0x42}, 28)): 700,
+	}, state.VotingPowerBatch)
+	wantLiveStake := []*models.RewardStakeInput{{
+		PoolKeyHash:   []byte("pool-a"),
+		StakingKey:    bytes.Repeat([]byte{0x51}, 28),
+		CredentialTag: 0,
+		Stake:         types.Uint64(500),
+		Registered:    true,
+	}}
+	require.Equal(t, wantLiveStake, state.LiveStake)
+	require.Equal(t, wantLiveStake, state.LiveStakeAfterRebuild)
 }
 
 func exerciseDrepStore(t *testing.T, store drepStore) drepState {
@@ -2245,13 +2276,17 @@ func TestSharedSQLStorePoolParity(t *testing.T) {
 	state := exercisePoolStore(t, store)
 	require.NotNil(t, state.Pool)
 	require.NotNil(t, state.ByVRF)
-	require.Len(t, state.Pools, 1)
+	require.Equal(t, 1, len(state.Pools))
+	require.Equal(t, bytes.Repeat([]byte{0x91}, 28), state.Pools[0].PoolKeyHash)
 	require.Nil(t, state.Missing)
 	require.Equal(t, uint64(3), state.Sequence)
 	require.True(t, state.SequenceSet)
 	require.Equal(t, uint64(2), state.HistoricalSequence)
 	require.True(t, state.HistoricalSequenceSet)
-	require.Len(t, state.Issuers, 2)
+	require.Equal(t, []models.PoolOpCertSequence{
+		{PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), ID: 1, Sequence: 2, Slot: 20},
+		{PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), ID: 2, Sequence: 3, Slot: 21},
+	}, state.Issuers)
 	require.Equal(t, uint64(2), state.Total)
 	require.Equal(t, map[string]uint64{
 		string(bytes.Repeat([]byte{0x91}, 28)): 2,
@@ -2268,7 +2303,9 @@ func TestSharedSQLStorePoolParity(t *testing.T) {
 	require.Equal(t, map[string]uint64{
 		string(bytes.Repeat([]byte{0x91}, 28)): 1,
 	}, state.DelegatorMap)
-	require.Len(t, state.Retiring, 1)
+	require.Equal(t, []models.PoolRetiringRow{{
+		PoolKeyHash: bytes.Repeat([]byte{0x91}, 28), Epoch: 5,
+	}}, state.Retiring)
 }
 
 func exercisePoolStore(t *testing.T, store poolStore) poolState {
@@ -2800,7 +2837,14 @@ func TestSharedSQLStoreSnapshotParity(t *testing.T) {
 	require.NotNil(t, state.latest)
 	require.Equal(t, types.Uint64(888), state.latest.TotalActiveStake)
 	require.Equal(t, uint64(22), state.latest.BoundarySlot)
-	require.Len(t, state.remaining, 2)
+	remainingStakeByPool := make(map[string]types.Uint64, len(state.remaining))
+	for _, snapshot := range state.remaining {
+		remainingStakeByPool[string(snapshot.PoolKeyHash)] = snapshot.TotalStake
+	}
+	require.Equal(t, map[string]types.Uint64{
+		"pool-a": types.Uint64(20),
+		"pool-b": types.Uint64(30),
+	}, remainingStakeByPool)
 }
 
 func exerciseSnapshotStore(t *testing.T, store snapshotStore) snapshotState {
@@ -5732,7 +5776,14 @@ func TestSharedSQLStoreUtxoReadParity(t *testing.T) {
 	require.Equal(t, uint64(70), state.scriptLocked)
 	require.Len(t, state.byAsset, 1)
 	require.Equal(t, []byte("tx-live"), state.byAsset[0].TxId)
-	require.Len(t, state.iterated, 2)
+	iteratedAmounts := make(map[string]types.Uint64, len(state.iterated))
+	for _, utxo := range state.iterated {
+		iteratedAmounts[string(utxo.TxId)] = utxo.Amount
+	}
+	require.Equal(t, map[string]types.Uint64{
+		"tx-live":   types.Uint64(100),
+		"tx-script": types.Uint64(70),
+	}, iteratedAmounts)
 }
 
 // TestGetUtxosByAddressEmptyPatterns proves an empty patterns slice returns
