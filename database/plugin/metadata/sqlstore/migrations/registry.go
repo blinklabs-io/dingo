@@ -349,6 +349,9 @@ func rewardCreditRoundBackfill(
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
 	}
+	if rounds == nil {
+		rounds = make([]models.RewardCreditRound, 0)
+	}
 	start := 0
 	if batch.Cursor != "" {
 		parsed, err := strconv.Atoi(batch.Cursor)
