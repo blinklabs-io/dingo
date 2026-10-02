@@ -1062,8 +1062,11 @@ type sqlTxn struct {
 	release  func()
 	beginErr error
 
-	mu       sync.Mutex
-	finished bool
+	mu              sync.Mutex
+	finished        bool
+	batchBefore     map[*transactionBatchAccumulator]rowBatch
+	batchSavepoints map[string]map[*transactionBatchAccumulator]rowBatch
+	savepointOrder  []string
 }
 
 func (t *sqlTxn) Commit() error {
@@ -1080,7 +1083,16 @@ func (t *sqlTxn) Commit() error {
 	if t.tx == nil {
 		return nil
 	}
-	return t.tx.Commit()
+	err := t.tx.Commit()
+	if err != nil {
+		t.restoreBatches(t.batchBefore)
+	}
+	for accumulator := range t.batchBefore {
+		accumulator.resetStatement()
+	}
+	t.batchBefore = nil
+	t.batchSavepoints = nil
+	return err
 }
 
 func (t *sqlTxn) Rollback() error {
@@ -1094,6 +1106,9 @@ func (t *sqlTxn) Rollback() error {
 	}
 	t.finished = true
 	defer t.releaseConnection()
+	t.restoreBatches(t.batchBefore)
+	t.batchBefore = nil
+	t.batchSavepoints = nil
 	if t.tx == nil {
 		return nil
 	}
@@ -1144,6 +1159,27 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.owner.dialect.QuoteIdentifier(name)
 	if _, err := t.tx.ExecContext(context.Background(), statement); err != nil {
 		return fmt.Errorf("%s: %w", operation, err)
+	}
+	switch operation {
+	case "SAVEPOINT":
+		if t.batchSavepoints == nil {
+			t.batchSavepoints = make(map[string]map[*transactionBatchAccumulator]rowBatch)
+		}
+		checkpoint := make(map[*transactionBatchAccumulator]rowBatch)
+		for accumulator := range t.batchBefore {
+			checkpoint[accumulator] = accumulator.rows.clone()
+		}
+		t.batchSavepoints[name] = checkpoint
+		t.savepointOrder = append(t.savepointOrder, name)
+	case "ROLLBACK TO SAVEPOINT":
+		t.restoreBatches(t.batchSavepoints[name])
+		for i := len(t.savepointOrder) - 1; i >= 0; i-- {
+			if t.savepointOrder[i] == name {
+				t.savepointOrder = t.savepointOrder[:i+1]
+				break
+			}
+			delete(t.batchSavepoints, t.savepointOrder[i])
+		}
 	}
 	return nil
 }
@@ -1209,4 +1245,30 @@ func (s *Store) UpdatePlannerStats() error {
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
 	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+}
+
+func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.finished {
+		return types.ErrNilTxn
+	}
+	if t.batchBefore == nil {
+		t.batchBefore = make(map[*transactionBatchAccumulator]rowBatch)
+	}
+	if _, exists := t.batchBefore[accumulator]; exists {
+		return nil
+	}
+	t.batchBefore[accumulator] = accumulator.rows.clone()
+	for _, checkpoint := range t.batchSavepoints {
+		checkpoint[accumulator] = accumulator.rows.clone()
+	}
+	return nil
+}
+
+func (t *sqlTxn) restoreBatches(checkpoint map[*transactionBatchAccumulator]rowBatch) {
+	for accumulator, rows := range checkpoint {
+		accumulator.Reset()
+		accumulator.rows = rows.clone()
+	}
 }

@@ -409,9 +409,17 @@ Migration `v30` (`reward-account-output-folded`, integer version 30) adds the
 per-output marker that keeps reward credits from being counted again after
 they are written into `account.reward`.
 
+Migration `v31` (`reward-credit-round-table`, integer version 31) moves pending
+reward-credit round state from the metadata JSON list into an indexed table.
+
 Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
 `leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
 rounds retain the magnitude of negative leader rewards.
+
+Migration `v33` (`committee-hot-authorization-prune-order`, integer version
+33) adds a tagged cold-credential index ordered by descending `added_slot` and
+`certificate_id`. Batched pruning can select superseded rows in order without
+sorting the full authorization history for that credential.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -729,6 +737,13 @@ flowchart LR
     Blob --> KV
 ```
 
+`dingo load` from an `http://` or `https://` ImmutableDB root keeps a download
+cache under `<databasePath>/immutable-download`. `staging/` holds chunk triads
+in flight, each file written as `<name>.part` and renamed when complete;
+`ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
+`ready/` once a later chunk holding a block is copied, so the cache keeps the
+chunk holding the chain tip, which the next run resumes from.
+
 ## SQL Conventions
 
 - Table and column names are the snake_case names declared by versioned SQL DDL.
@@ -1034,6 +1049,25 @@ which query paths it also serves. `SetTransaction` clears `key_witness`,
 b-tree descent with a full scan of a table the same import is still growing,
 which makes historical backfill quadratic rather than merely slower.
 
+On the batched path (`SetTransactionBatched` and
+`SetTransactionBatchedHistorical`, used by API backfill), the clearing
+delete runs at once but the API-mode detail rows -- `key_witness`,
+`witness_scripts`, `redeemer`, `plutus_data`, `address_transaction`,
+`transaction_metadata_label`, and `datum` -- wait in the batch accumulator.
+`FlushBatch` writes them as multi-row INSERTs, each bounded by the dialect's
+bind-parameter limit, inside the caller's transaction. Until then a re-applied
+transaction's flushed rows are cleared but its replacement rows are not yet
+visible; nothing reads these tables inside a batch window, and the window
+commits only after the flush. A write that fails queues nothing, and
+re-applying a transaction inside a window replaces its queued rows. Caller-owned transaction rollback automatically restores the accumulator
+queue to its pre-transaction checkpoint; rollback to a savepoint restores
+that savepoint's queue. Rows queued by earlier committed transactions remain
+available. A failed SQL commit also restores the initial queue. `SetTransaction`
+builds the same rows and writes them before it returns. UTxO spends and
+certificate rows stay per statement: a later transaction in the same window
+reads them for double-spend detection, live-stake deltas, and certificate
+state.
+
 Those seven indexes are named in `deferred.Retained`, and every drop and
 rebuild path creates any of them that is absent before touching the manifest.
 That includes the critical rebuild: it is the last step before `serve` clears
@@ -1326,7 +1360,7 @@ updates preserve the previous activity and expiry epochs.
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Rows written before this rule keep the proposal's slot until the database is resynced. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
-| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
+| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity and newest-first prune order, tagged hot identity, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 ### Off-chain Metadata Cache

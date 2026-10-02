@@ -2936,6 +2936,13 @@ Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `le
 
 ### Database Models
 
+SQLStore batch accumulators stage API detail rows until `FlushBatch`. The SQL
+transaction owns queue checkpoints for each attached accumulator: rollback or a
+failed commit restores its initial queue, and savepoint rollback restores the
+queue at that savepoint. Transaction-scoped insert statements close when their
+SQL transaction finishes, including the implicit transaction path.
+
+
 Key models in `database/models/`:
 
 | Model | Purpose |
@@ -8017,6 +8024,33 @@ The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
+
+`dingo load` also reads an ImmutableDB served over HTTP(S). A source that
+parses as an `http://` or `https://` URL with a host, whether from the
+positional argument, `immutableDbPath`, or `DINGO_IMMUTABLE_DB_PATH`, selects
+the remote root; anything else is a local directory and loads as before. The
+root serves `tip.json` (`slot`, `block_no`, and `hash` in hex) and `NNNNN.chunk`,
+`NNNNN.primary` and `NNNNN.secondary` per chunk, the layout a Genesis Sync
+Accelerator CDN publishes. `copyBlocksRemote` in `internal/node` downloads up
+to four chunks ahead, resuming a partial file with a range request and
+retrying a failed one, and hands chunks to the existing `copyBlocksDirect`
+only in chunk order, so the ledger replays a contiguous prefix while later
+chunks download. Loading stops after the chunk that reaches the `tip.json`
+slot, whose hash must then match the loaded block, or at the first chunk the
+root does not publish; a chunk whose `.chunk` exists without its indexes is an
+error. The downloader lives in `internal/node` rather than reusing the
+`mithril` one because `mithril` imports `internal/node`.
+
+Trust: remote chunk files carry no signature or digest, and a remote root is
+trusted exactly as a local ImmutableDB is. `dingo load` decodes every block and
+`Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
+or reordered chunk fails the load. The replay is a trusted replay that skips
+body-hash checks, so it does not detect a root serving a self-consistent
+alternative history or altered block bodies. Load only from a root you trust.
+The blob-only copy that follows a Mithril ledger-state import
+(`LoadBlobsWithDB`) reads only the local ImmutableDB whose digests the Mithril
+certificate covers and never takes a remote root. To bootstrap without trusting
+a file source, use Mithril or peer sync.
 
 When serving a database marked for legacy Mithril reward-state repair, startup
 runs a v2 certified catch-up before exposing the node. The catch-up verifies
