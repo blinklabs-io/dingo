@@ -3642,10 +3642,11 @@ func TestPullRequestPipelineRunsBlockPipelineDevnet(t *testing.T) {
 	}
 }
 
-// TestLintAnalyzersAreAdvisory checks that nilaway and modernize cannot fail
-// `make lint`, and that the contributor instructions say so. Both tools have
-// an unrepaired baseline on main; a failing nilaway also stops make before
-// modernize runs, so a gate here would report one tool and hide the other.
+// TestLintAnalyzersAreAdvisory checks that findings from nilaway and modernize
+// cannot fail `make lint` while a run that never analyzed anything still does,
+// and that the contributor instructions say so. Both tools have an unrepaired
+// baseline on main; a failing nilaway also stops make before modernize runs,
+// so a gate here would report one tool and hide the other.
 func TestLintAnalyzersAreAdvisory(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
@@ -3669,8 +3670,16 @@ func TestLintAnalyzersAreAdvisory(t *testing.T) {
 				continue
 			}
 			found = true
-			if !strings.HasPrefix(line, "-") {
-				t.Errorf("make lint runs %s as a gate: %q", tool, line)
+			// Exit 3 is the go/analysis status for "diagnostics reported".
+			// Any other failure (a missing binary, a package that does not
+			// load) means the analysis never ran and must fail the target.
+			if strings.HasPrefix(line, "-") ||
+				!strings.HasSuffix(line, "|| [ $$? -eq 3 ]") {
+				t.Errorf(
+					"make lint must tolerate only %s's findings exit (3): %q",
+					tool,
+					line,
+				)
 			}
 		}
 		if !found {

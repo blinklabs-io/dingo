@@ -97,13 +97,15 @@ lint: import-boundaries ## Run import-boundaries and golangci-lint (gates), then
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	# The two analyzers below are advisory: the leading "-" prints their
-	# findings without failing the target, because main carries an unrepaired
-	# baseline for both and a failing first tool would stop make before the
-	# second ran. Test fixtures establish preconditions with testify assertions
-	# that NilAway cannot track across calls, so only production code is analyzed.
-	-nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
-	-modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+	# The two analyzers below are advisory: main carries an unrepaired baseline
+	# for both, so their findings are printed without failing the target. Exit
+	# 3 is the go/analysis status for "diagnostics reported"; any other failure
+	# (a missing binary, a package that does not load) means nothing was
+	# analyzed and still fails. Test fixtures establish preconditions with
+	# testify assertions that NilAway cannot track across calls, so only
+	# production code is analyzed.
+	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./... || [ $$? -eq 3 ]
+	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES) || [ $$? -eq 3 ]
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
