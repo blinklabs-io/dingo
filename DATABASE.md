@@ -443,7 +443,7 @@ The Go model `models.Block` has `TableName() == "block"`, but it is not migrated
 Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `PinBlob()`, `SetBlobStore()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`. `Blob()`, `PinBlob()`, and `SetBlobStore()` are the only readers and writer of the installed blob store; see "Storage provider ownership" for the pin/drain rules that make replacement safe.
-- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason.
+- `database.CborCache()` returns the `TieredCborCache`. Its cold-path entry points `ResolveUtxoCbor(txId, outputIdx, txn ...*Txn)` and `ResolveTxCbor(txn *Txn, txHash)` take the database transaction, not a bare `types.Txn` handle: an optional transaction makes uncommitted writes visible, and the cold read has to run against the store that transaction was opened on rather than whichever store is installed when the resolve happens. A resolve through a read-write transaction populates the shared hot UTxO cache only when a fresh read snapshot holds the identical stored value, so a UTxO row staged by the open transaction (and therefore subject to rollback) never reaches the shared cache while rows committed before the transaction began are still cached. `Database.ResolveUtxoCborWithRecovery(txId, outputIdx, txn)` wraps `ResolveUtxoCbor` for a caller that only has a bare ref (not a `*models.Utxo` already loaded via `GetUtxo`) and must not silently treat a recoverable missing blob as absent: on `types.ErrBlobKeyNotFound` it falls back to the same producing-block reconstruction `loadCbor` performs for `UtxoByRef`/`IterateLiveUtxos`, returning `ErrUtxoCborUnavailable` only once that recovery itself confirms the CBOR cannot be rebuilt. `ledger.queryShelleyUtxoWhole` (answering `GetUTxOWhole`) uses this rather than the bare cache call for exactly that reason.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata. `Txn.BlobStore()` returns the blob store the transaction was opened on — the store its `Blob()` handle belongs to, and the one every blob call inside the transaction must use.
 - `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the
   compatibility composition of the SQL-facing capabilities. New components
@@ -2348,7 +2348,14 @@ The blob transaction boundary depends on `LeiosApplyEndorserBlockTxs`:
   to 50 blocks. Keeping large EB blobs out of that transaction avoids Badger's
   per-transaction size limit (`ErrTxnTooBig`) during dense backlogs. The blob
   is idempotent, and transaction ledger effects remain associated with the
-  ranking block for rollback.
+  ranking block for rollback. The shared transaction's snapshot predates that
+  commit, so `SetGenesisCbor` warms the block LRU with the committed blob and
+  `applyEndorserBlock` calls `Txn.MarkBlockCborCommittedSeparately(slot, hash)`
+  on the shared transaction. When a later offset read in that transaction
+  misses the LRU, `ResolveUtxoCbor` reads the marked block through a fresh
+  blob read transaction instead of the stale snapshot, which also keeps the
+  block key out of the shared transaction's conflict-detection read set. The
+  mark is dropped when the transaction finishes.
 - **CIP-conformant path (`true`):** the blob remains in the shared transaction.
   A later block in the same chunk may spend an EB-produced output and must be
   able to read the blob through read-your-writes; a separately committed blob

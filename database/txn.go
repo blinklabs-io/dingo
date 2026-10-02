@@ -84,6 +84,9 @@ type Txn struct {
 	readWrite      bool
 	afterCommit    []func()
 	dispatching    bool
+	// separatelyCommittedBlocks lets blob reads bypass this transaction's stale
+	// snapshot; it is guarded by lock.
+	separatelyCommittedBlocks map[blockKey]struct{}
 	// readSnapshotAdmissionHeld keeps one coordinated snapshot slot for this
 	// transaction's lifetime. Releasing only after the read transaction ends
 	// caps established snapshots as well as callers waiting to construct one.
@@ -164,6 +167,7 @@ func (t *Txn) releaseCommitBarrierLocked() {
 // (which cancellableBarrier panics on). Callers must hold t.lock.
 func (t *Txn) finishLocked() {
 	t.finished = true
+	t.separatelyCommittedBlocks = nil
 	t.releaseCommitBarrierLocked()
 	t.releaseBlobPinLocked()
 	if t.readSnapshotAdmissionHeld {
@@ -513,6 +517,36 @@ func (t *Txn) IsCommitted() bool {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	return t.committed
+}
+
+// MarkBlockCborCommittedSeparately marks a block written outside this
+// transaction so reads can use a fresh blob snapshot if the shared cache misses.
+func (t *Txn) MarkBlockCborCommittedSeparately(slot uint64, hash [32]byte) {
+	if t == nil {
+		return
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return
+	}
+	if t.separatelyCommittedBlocks == nil {
+		t.separatelyCommittedBlocks = make(map[blockKey]struct{})
+	}
+	t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}] = struct{}{}
+}
+
+func (t *Txn) blockCborCommittedSeparately(slot uint64, hash [32]byte) bool {
+	if t == nil {
+		return false
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	if t.finished {
+		return false
+	}
+	_, ok := t.separatelyCommittedBlocks[blockKey{slot: slot, hash: hash}]
+	return ok
 }
 
 // AfterCommit registers fn to run after this transaction commits durably.
