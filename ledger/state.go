@@ -1783,16 +1783,26 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 				pipeline.WithValidateWorkers(workerCount),
 				pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
 				pipeline.WithSlotsPerKesPeriod(ls.SlotsPerKESPeriod()),
-				pipeline.WithVerifyConfig(lcommon.VerifyConfig{
-					SkipBodyHashValidation:    true,
-					SkipTransactionValidation: true,
-					SkipStakePoolValidation:   true,
-				}),
+				pipeline.WithVerifyConfig(blockPipelineVerifyConfig()),
 			)
 		}
 		ls.blockPipeline = pipeline.NewBlockPipeline(pipelineOpts...)
 	}
 	return ls, nil
+}
+
+// blockPipelineVerifyConfig scopes gouroboros' generic validate stage to the
+// header crypto. The stage is given no protocol parameters or ledger state,
+// so every body rule it could run -- including the block-wide limits and the
+// Conway reference-script total -- belongs to the ledger apply path, which
+// has both.
+func blockPipelineVerifyConfig() lcommon.VerifyConfig {
+	return lcommon.VerifyConfig{
+		SkipBodyHashValidation:    true,
+		SkipTransactionValidation: true,
+		SkipStakePoolValidation:   true,
+		SkipBlockLimitsValidation: true,
+	}
 }
 
 func cloneSnapshotBytes(value []byte) []byte {
