@@ -101,6 +101,9 @@ type PaymentParams struct {
 	// Change is the lovelace amount to return to ChangeAddr.
 	Change uint64
 
+	// Fee is the transaction fee. Zero means MinFee.
+	Fee uint64
+
 	// WitnessKeys holds the Ed25519 signing keys to include as VKey witnesses.
 	// When non-empty, the transaction body is signed and witnesses are included.
 	WitnessKeys []*UTxOKey
@@ -168,10 +171,14 @@ func BuildPayment(p PaymentParams) (txBytes []byte, txID string, err error) {
 		return nil, "", errors.New("payment: outputs total overflow")
 	}
 	expectedTotal += p.Change
-	if MinFee > math.MaxUint64-expectedTotal {
+	fee := p.Fee
+	if fee == 0 {
+		fee = MinFee
+	}
+	if fee > math.MaxUint64-expectedTotal {
 		return nil, "", errors.New("payment: outputs plus fee overflow")
 	}
-	expectedTotal += MinFee
+	expectedTotal += fee
 	if totalInput != expectedTotal {
 		return nil, "", fmt.Errorf(
 			"payment: inputs total %d does not equal outputs+fee %d",
@@ -187,7 +194,7 @@ func BuildPayment(p PaymentParams) (txBytes []byte, txID string, err error) {
 	body := txBody{
 		Inputs:  inputSet,
 		Outputs: outputs,
-		Fee:     MinFee,
+		Fee:     fee,
 	}
 
 	// Always encode the body so we can compute the Cardano transaction ID

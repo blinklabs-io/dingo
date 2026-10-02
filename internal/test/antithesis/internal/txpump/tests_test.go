@@ -326,7 +326,7 @@ func TestReconcileWalletObservesMonitorBeforeLSQ(t *testing.T) {
 		ouroboros.WithLocalStateQueryConfig(lsqConfig),
 		ouroboros.WithLocalTxMonitorConfig(monitorConfig),
 	)
-	snapshot, presence, err := client.ReconcileWallet([][]byte{addressBytes}, nil)
+	snapshot, presence, err := client.ReconcileWallet([][]byte{addressBytes}, nil, true)
 	require.NoError(t, err)
 	require.Empty(t, presence)
 	require.Len(t, snapshot, 1)
@@ -519,4 +519,98 @@ func TestSubmitDelegationWaitsForPendingRegistration(t *testing.T) {
 		t.Fatal("no transaction may be submitted while the registration is pending")
 	default:
 	}
+}
+
+// TestSubmitPaymentRebuiltFromRestoredInputGetsNewID reproduces a payment
+// rebuilt after a rollback restores its input: with the send amount pinned by
+// a small balance and dust change folded in, only the fee varies, and it must
+// keep the rebuilt transaction from repeating the earlier ID.
+func TestSubmitPaymentRebuiltFromRestoredInputGetsNewID(t *testing.T) {
+	key := testSigningKey(0x78)
+	input := UTxO{TxHash: fmt.Sprintf("%064x", 1), Amount: 1_250_000, SigningKey: key}
+	submitted := make(chan []byte, 2)
+	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+			submitted <- tx.Raw.Content.([]byte)
+			return nil
+		},
+	))
+	client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+
+	ids := make([]string, 0, 2)
+	for range 2 {
+		pump := testPump(time.Now().Add(-time.Second), time.Second)
+		pump.wallet.Add(input, UTxO{TxHash: fmt.Sprintf("%064x", 2), Amount: 1_250_000, SigningKey: key})
+		require.True(t, pump.submitPayment(client, 1))
+		select {
+		case raw := <-submitted:
+			ids = append(ids, deriveTestTxID(raw))
+		case <-time.After(5 * time.Second):
+			t.Fatal("submission callback was not reached")
+		}
+	}
+	require.NotEqual(t, ids[0], ids[1])
+}
+
+// TestReconcileWalletWithoutPendingCheckKeepsReservations covers the
+// cardano-node fallback: the mempool is never queried, a pending transaction
+// whose output is in the snapshot counts as confirmed (absent), and any other
+// stays present so its inputs remain reserved.
+func TestReconcileWalletWithoutPendingCheckKeepsReservations(t *testing.T) {
+	address, err := ledger.NewAddress(
+		"addr_test1vrk294czhxhglflvxla7vxj2cjz7wyrdpxl3fj0vych5wws77xuc7",
+	)
+	require.NoError(t, err)
+	addressBytes, err := address.Bytes()
+	require.NoError(t, err)
+	queryCount := 0
+	lsqConfig := localstatequery.NewConfig(
+		localstatequery.WithAcquireFunc(func(
+			localstatequery.CallbackContext,
+			localstatequery.AcquireTarget,
+			bool,
+		) error {
+			return nil
+		}),
+		localstatequery.WithQueryFunc(func(
+			localstatequery.CallbackContext,
+			localstatequery.QueryWrapper,
+		) (any, error) {
+			queryCount++
+			if queryCount == 1 {
+				return 6, nil // Conway current era
+			}
+			return localstatequery.UTxOsResult{
+				Results: map[localstatequery.UtxoId]ledger.BabbageTransactionOutput{
+					{Hash: ledger.NewBlake2b256([]byte{0x33}), Idx: 0}: {
+						OutputAddress: address,
+						OutputAmount:  ledger.MaryTransactionOutputValue{Amount: 5_000_000},
+					},
+				},
+			}, nil
+		}),
+		localstatequery.WithReleaseFunc(func(localstatequery.CallbackContext) error {
+			return nil
+		}),
+	)
+	var mempoolQueried atomic.Bool
+	monitorConfig := localtxmonitor.NewConfig(
+		localtxmonitor.WithGetMempoolFunc(func(localtxmonitor.CallbackContext) (uint64, uint32, []localtxmonitor.TxAndEraId, error) {
+			mempoolQueried.Store(true)
+			return 0, 100, nil, nil
+		}),
+	)
+	client := newProtocolTestClient(t,
+		ouroboros.WithLocalStateQueryConfig(lsqConfig),
+		ouroboros.WithLocalTxMonitorConfig(monitorConfig),
+	)
+	pending := fmt.Sprintf("%064x", 7)
+	confirmed := ledger.NewBlake2b256([]byte{0x33}).String()
+	snapshot, presence, err := client.ReconcileWallet(
+		[][]byte{addressBytes}, []string{pending, confirmed}, false,
+	)
+	require.NoError(t, err)
+	require.Len(t, snapshot, 1)
+	require.Equal(t, map[string]bool{pending: true, confirmed: false}, presence)
+	require.False(t, mempoolQueried.Load(), "the mempool must not be queried")
 }

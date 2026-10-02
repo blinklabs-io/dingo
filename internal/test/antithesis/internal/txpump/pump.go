@@ -103,6 +103,7 @@ func (p *Pump) Run(ctx context.Context) error {
 
 		batchSize := IntRange(p.cfg.TxCountMin, p.cfg.TxCountMax)
 
+		onFallback := false
 		client, err := p.dialPrimary()
 		if err != nil {
 			p.logger.Error(
@@ -122,14 +123,19 @@ func (p *Pump) Run(ctx context.Context) error {
 				}
 				continue
 			}
+			onFallback = true
 		}
 
 		ids := p.wallet.PendingIDs()
 		addresses := p.wallet.SigningAddresses()
 		if len(addresses) > 0 {
+			// The fallback is a cardano-node, where the mempool cannot be
+			// queried (see ReconcileWallet), so pending reservations are kept
+			// until a batch on the primary observes them.
 			snapshot, presence, reconcileErr := client.ReconcileWallet(
 				addresses,
 				ids,
+				!onFallback,
 			)
 			if reconcileErr != nil {
 				p.logger.Warn(
@@ -364,7 +370,12 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 	//nolint:gosec
 	sendAmount := uint64(IntRange(int(minSendAmount), int(upper)))
 
-	required := sendAmount + MinFee
+	// With little spendable balance the send amount is pinned (to
+	// minSendAmount, or to the whole input once dust change is folded in), so
+	// a payment rebuilt from the same inputs after a rollback would repeat the
+	// earlier transaction ID unless the fee varies; see jitteredFee.
+	fee := jitteredFee(MinFee)
+	required := sendAmount + fee
 	inputs, change, err := p.wallet.SelectCoins(required)
 	if err != nil {
 		p.logger.Warn(
@@ -409,6 +420,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) bool {
 		ChangeAddr:  addr,
 		SendAmount:  sendAmount,
 		Change:      change,
+		Fee:         fee,
 		WitnessKeys: witnessKeys,
 	}
 
@@ -733,7 +745,7 @@ func (p *Pump) submitPlutusUnlock(client *NodeClient, batchSize int, locked UTxO
 
 // maxFeeJitter bounds the random fee overpayment added to deterministic
 // workload transactions.
-const maxFeeJitter uint64 = 9_999
+const maxFeeJitter uint64 = 999_999
 
 // jitteredFee overpays base by a random amount below maxFeeJitter lovelace.
 // Certificate and Plutus transactions are otherwise fully determined by their

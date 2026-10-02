@@ -34,7 +34,7 @@ const plutusV3 uint = 2
 
 // plutusLockAmount is the lovelace locked at the script address. It leaves
 // change above the minimum output after the unlock fee.
-const plutusLockAmount uint64 = 2_000_000
+const plutusLockAmount uint64 = 3_000_000
 
 // plutusUnlockFee covers the unlock transaction's size and script execution.
 const plutusUnlockFee uint64 = 400_000

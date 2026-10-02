@@ -16,6 +16,7 @@ package analysis
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -40,9 +41,15 @@ type fileState struct {
 	nodeID   string
 	identity string
 	offset   int64
-	modTime  time.Time
+	// consumed holds the bytes just before offset as of the last read. An
+	// append-only log never changes them; a process that truncates and
+	// rewrites its log in place does, even when the new content is longer.
+	consumed []byte
 	warned   bool
 }
+
+// consumedFingerprintLen bounds how many already-read bytes identify a log.
+const consumedFingerprintLen = 256
 
 type ingestionStats struct {
 	nodeFiles      map[string]struct{}
@@ -292,14 +299,14 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 	a.files[path] = state
 	state.warned = false
 
-	// Detect file truncation (e.g. a logger restarting in place) and reset.
-	if err == nil && (info.Size() < state.offset ||
-		(!state.modTime.IsZero() && !info.ModTime().Equal(state.modTime) && info.Size() <= state.offset)) {
+	// Detect a log truncated or rewritten in place (e.g. a logger restarting
+	// with O_TRUNC) and read it again from the start. Modification time is
+	// not evidence: a restarting entrypoint touches its log before appending,
+	// and replaying the unchanged content would count every event twice.
+	if state.offset > 0 && ((err == nil && info.Size() < state.offset) ||
+		!bytes.Equal(state.consumed, readConsumed(f, state.offset))) {
 		a.logger.Info("log file truncated, resetting offset", "path", path)
 		state.offset = 0
-	}
-	if err == nil {
-		state.modTime = info.ModTime()
 	}
 
 	if state.offset > 0 {
@@ -348,10 +355,20 @@ func (a *Analyzer) readFile(path, role, nodeID string) bool {
 		}
 	}
 	state.offset += bytesRead
+	state.consumed = readConsumed(f, state.offset)
 	if role == "node" {
 		a.ingestion.nodeBytes += bytesRead
 	}
 	return true
+}
+
+// readConsumed returns up to consumedFingerprintLen bytes of f ending at
+// offset.
+func readConsumed(f *os.File, offset int64) []byte {
+	start := max(offset-consumedFingerprintLen, 0)
+	buf := make([]byte, offset-start)
+	n, _ := f.ReadAt(buf, start)
+	return buf[:n]
 }
 
 func fileIdentity(info os.FileInfo) string {
@@ -458,15 +475,18 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		)
 	}
 
-	// Safety 4: Chain quality — once we have enough blocks, no single node
-	// should hold more than 60% of forged blocks (checks all configured pools,
-	// not just observed ones, so nodes that forged 0 blocks are also checked).
+	// Chain quality: once enough blocks exist, production is sometimes
+	// spread so that no pool holds more than 60% of forged blocks (every
+	// configured pool is checked, including ones that forged nothing). This
+	// is not a safety invariant: every pool is honest, and while fault
+	// injection pauses, partitions or slows the other pools, one producer
+	// legitimately forges most blocks.
 	if snap.TotalBlocksForged >= a.cfg.MinBlocksSample {
 		for i := 1; i <= a.cfg.Pools; i++ {
 			nodeID := fmt.Sprintf("p%d", i)
 			count := snap.BlocksByNode[nodeID]
 			share := float64(count) / float64(snap.TotalBlocksForged)
-			Always(share <= 0.6, "chain-quality", map[string]interface{}{
+			Sometimes(share <= 0.6, "chain-quality", map[string]interface{}{
 				"node_id":     nodeID,
 				"share":       share,
 				"block_count": count,
