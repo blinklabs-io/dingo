@@ -648,6 +648,9 @@ func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
 	// each append so the test does not depend on wall-clock scheduling.
 	const numAdded = 100
 	added := make(chan struct{})
+	// Releases the producer if a require below fails before it is drained.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
 	var addWG sync.WaitGroup
 	addWG.Go(func() {
 		defer close(added)
@@ -661,7 +664,11 @@ func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
 			}
 			m.transactions = append(m.transactions, tx)
 			m.Unlock()
-			added <- struct{}{}
+			select {
+			case added <- struct{}{}:
+			case <-stop:
+				return
+			}
 		}
 	})
 
@@ -3142,56 +3149,45 @@ func TestMempool_TTL_RemoveExpiredTransactions_EmptyMempool(
 }
 
 func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
-	// Use a generous TTL (500ms) relative to the total refresh
-	// window (6 × 30ms = 180ms) so the test is not flaky under
-	// CI load.
-	m := newTestMempoolWithTTL(t, 500*time.Millisecond, 20*time.Millisecond)
+	// The background cleanup interval is far longer than the test, so removal
+	// only happens through the explicit removeExpiredTransactions calls.
+	m := newTestMempoolWithTTL(t, time.Hour, time.Hour)
 	defer m.Stop(context.Background())
 
-	// Add a transaction that will expire soon
-	m.Lock()
-	m.consumersMutex.Lock()
-	tx := &MempoolTransaction{
-		Hash:     "refresh-tx",
-		Cbor:     []byte("refresh-cbor"),
-		Type:     uint(conway.EraIdConway),
-		LastSeen: time.Now(),
+	// Both transactions start well past the TTL; only one is refreshed.
+	add := func(hash string) {
+		m.Lock()
+		m.consumersMutex.Lock()
+		tx := &MempoolTransaction{
+			Hash:     hash,
+			Cbor:     []byte(hash + "-cbor"),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-2 * time.Hour),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.consumersMutex.Unlock()
+		m.Unlock()
 	}
-	m.transactions = append(m.transactions, tx)
-	m.txByHash[tx.Hash] = tx
-	m.currentSizeBytes += int64(len(tx.Cbor))
-	m.metrics.txsInMempool.Inc()
-	m.consumersMutex.Unlock()
+	add("refresh-tx")
+	add("stale-tx")
+
+	m.Lock()
+	m.txByHash["refresh-tx"].LastSeen = time.Now()
 	m.Unlock()
 
-	// Keep refreshing LastSeen so the transaction never expires
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		for range 6 {
-			// Deliberately pace refreshes across multiple cleanup ticks while
-			// keeping every refresh inside the transaction TTL.
-			time.Sleep(30 * time.Millisecond)
-			m.Lock()
-			if existingTx := m.txByHash["refresh-tx"]; existingTx != nil {
-				existingTx.LastSeen = time.Now()
-			}
-			m.Unlock()
-		}
-	}()
+	m.removeExpiredTransactions()
 
-	<-refreshDone
-
-	// The transaction should still be in the mempool because
-	// we kept refreshing it
 	m.RLock()
-	assert.Equal(
-		t, 1, len(m.transactions),
-		"refreshed transaction should still be present",
-	)
-	_, exists := m.txByHash["refresh-tx"]
-	assert.True(t, exists, "refreshed transaction should be in hash map")
-	m.RUnlock()
+	defer m.RUnlock()
+	require.Len(t, m.transactions, 1)
+	assert.Equal(t, "refresh-tx", m.transactions[0].Hash,
+		"refreshed transaction should still be present")
+	assert.Contains(t, m.txByHash, "refresh-tx")
+	assert.NotContains(t, m.txByHash, "stale-tx",
+		"an unrefreshed transaction past the TTL should be removed")
 }
 
 func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {

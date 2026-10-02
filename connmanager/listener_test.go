@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -147,7 +148,6 @@ type toggleMockListener struct {
 	successCount  atomic.Int32
 	errorCount    atomic.Int32
 	successSignal chan struct{} // signaled after each successful accept
-	errorSignal   chan struct{} // signals that errorCount changed
 	connCh        chan net.Conn // channel to provide mock connections
 	acceptEntered chan struct{} // signaled when Accept() is entered
 }
@@ -158,7 +158,6 @@ func newToggleMockListener() *toggleMockListener {
 		acceptErr:     errors.New("simulated accept error"),
 		timestamps:    make([]time.Time, 0),
 		successSignal: make(chan struct{}, 100),
-		errorSignal:   make(chan struct{}, 1),
 		connCh:        make(chan net.Conn, 100),
 		acceptEntered: make(chan struct{}, 100),
 	}
@@ -180,10 +179,6 @@ func (m *toggleMockListener) Accept() (net.Conn, error) {
 	}
 	if m.errorEnabled.Load() {
 		m.errorCount.Add(1)
-		select {
-		case m.errorSignal <- struct{}{}:
-		default:
-		}
 		return nil, m.acceptErr
 	}
 	// Try to get a connection from the channel, or wait for close
@@ -244,26 +239,23 @@ func (m *toggleMockListener) WaitForSuccess(timeout time.Duration) bool {
 	}
 }
 
-// WaitForErrors waits until at least minErrors have occurred since the baseline,
-// or until timeout expires. Returns the number of errors observed.
+// WaitForErrors waits until at least minErrors have occurred since the baseline
+// and returns the number observed.
 func (m *toggleMockListener) WaitForErrors(
+	t *testing.T,
 	baseline int,
 	minErrors int,
 	timeout time.Duration,
 ) int {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for {
-		current := int(m.errorCount.Load()) - baseline
-		if current >= minErrors {
-			return current
-		}
-		select {
-		case <-m.errorSignal:
-		case <-timer.C:
-			return int(m.errorCount.Load()) - baseline
-		}
-	}
+	t.Helper()
+	observed := func() int { return int(m.errorCount.Load()) - baseline }
+	testutil.WaitForCondition(
+		t,
+		func() bool { return observed() >= minErrors },
+		timeout,
+		"accept errors did not reach the expected count",
+	)
+	return observed()
 }
 
 // WaitForAcceptEntered waits for Accept() to be called, or until timeout expires.
@@ -700,6 +692,7 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 		},
 	}
 
+	start := time.Now()
 	cm := NewConnectionManager(cfg)
 	err := cm.Start(context.Background())
 	require.NoError(t, err)
@@ -709,15 +702,18 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 		return mockLn.AcceptCount() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
 
-	// Deliberate observation window: exercise several backoff intervals and
-	// compare the retry count with the tight-loop failure mode.
-	// With backoff starting at 10ms, we expect roughly:
-	// - First call: immediate
-	// - Second call: after 10ms (first error)
-	// - Third call: after 20ms
-	// - Fourth call: after 40ms
-	// So in 100ms we should see around 4-5 calls
-	time.Sleep(100 * time.Millisecond)
+	// Reaching the fourth Accept takes at least the first three backoffs
+	// (10ms + 20ms + 40ms); a tight retry loop would get there immediately.
+	// Load can only lengthen the wait, so the lower bound cannot flake.
+	testutil.WaitForCondition(t, func() bool {
+		return mockLn.AcceptCount() >= 4
+	}, 5*time.Second, "accept should be retried with backoff")
+	assert.GreaterOrEqual(
+		t,
+		time.Since(start),
+		50*time.Millisecond,
+		"retries should be spaced by the exponential backoff",
+	)
 
 	// Stop the connection manager
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -730,8 +726,8 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	acceptCount := mockLn.AcceptCount()
 	t.Logf("Accept was called %d times", acceptCount)
 
-	// With exponential backoff, we expect around 3-5 calls in 100ms
-	// Be generous to account for test timing variations
+	// The loop is stopped right after the fourth Accept, so a few more calls
+	// at most; a tight loop would have run far past this bound by then.
 	assert.Less(t, acceptCount, 20, "backoff should limit accept calls")
 	assert.Greater(
 		t,
@@ -771,7 +767,7 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	// Phase 1: Wait for errors to accumulate (proves backoff is being applied)
-	phase1Errors := mockLn.WaitForErrors(0, 3, 5*time.Second)
+	phase1Errors := mockLn.WaitForErrors(t, 0, 3, 5*time.Second)
 	require.GreaterOrEqual(
 		t,
 		phase1Errors,
