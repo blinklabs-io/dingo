@@ -1413,3 +1413,137 @@ func TestValidateMinPoolMargin(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateMithrilSigner(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	file := func(name string) string {
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte("key"), 0o600))
+		return path
+	}
+	kesKey := file("kes.skey")
+	opCert := file("op.cert")
+	coldVKey := file("cold.vkey")
+	enabled := func(c *Config) {
+		c.Mithril.Signer = MithrilSignerConfig{
+			Enabled:         true,
+			KESKey:          kesKey,
+			OperationalCert: opCert,
+			ColdVKey:        coldVKey,
+			STMKey:          filepath.Join(dir, "stm.key"),
+		}
+	}
+	tests := []struct {
+		name    string
+		modify  func(c *Config)
+		wantErr string
+	}{
+		{name: "enabled and complete", modify: func(*Config) {}},
+		{
+			name: "disabled ignores missing settings",
+			modify: func(c *Config) {
+				c.Mithril.Signer = MithrilSignerConfig{}
+			},
+		},
+		{
+			name: "missing settings",
+			modify: func(c *Config) {
+				c.Mithril.Signer.KESKey = ""
+				c.Mithril.Signer.STMKey = ""
+			},
+			wantErr: "missing required settings: [kesKey stmKey]",
+		},
+		{
+			name: "key file does not exist",
+			modify: func(c *Config) {
+				c.Mithril.Signer.ColdVKey = filepath.Join(dir, "absent")
+			},
+			wantErr: "invalid mithril.signer.coldVkey",
+		},
+		{
+			name: "https endpoint",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "https://aggregator.example/aggregator"
+			},
+		},
+		{
+			name: "endpoint without host",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "https:///aggregator"
+			},
+			wantErr: "mithril.signer.aggregatorEndpoint: must be a URL with a host",
+		},
+		{
+			name: "endpoint is not a URL",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "aggregator.example"
+			},
+			wantErr: "mithril.signer.aggregatorEndpoint",
+		},
+		{
+			name: "plain http endpoint",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "http://aggregator.example"
+			},
+			wantErr: "must use https",
+		},
+		{
+			name: "plain http endpoint with insecure http allowed",
+			modify: func(c *Config) {
+				c.Mithril.AllowInsecureHTTP = true
+				c.Mithril.Signer.AggregatorEndpoint = "http://aggregator.example"
+			},
+		},
+		{
+			name: "block producer sharing the key files",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "vrf.skey"
+				c.ShelleyKESKey = kesKey
+				c.ShelleyOperationalCertificate = dir + "/./op.cert"
+			},
+		},
+		{
+			name: "block producer with a different KES key",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "vrf.skey"
+				c.ShelleyKESKey = "/other/kes.skey"
+				c.ShelleyOperationalCertificate = opCert
+			},
+			wantErr: "mithril.signer.kesKey",
+		},
+		{
+			name: "block producer with a different operational certificate",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "vrf.skey"
+				c.ShelleyKESKey = kesKey
+				c.ShelleyOperationalCertificate = "/other/op.cert"
+			},
+			wantErr: "mithril.signer.operationalCert",
+		},
+		{
+			name: "different key files without a block producer",
+			modify: func(c *Config) {
+				c.ShelleyKESKey = "/other/kes.skey"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			enabled(cfg)
+			tt.modify(cfg)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

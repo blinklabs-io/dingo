@@ -48,11 +48,13 @@ type stmAggregateSignature struct {
 }
 
 type stmSingleSignatureWithRegisteredParty struct {
-	Sig      stmSingleSignature
+	Sig      STMSingleSignature
 	RegParty stmClosedRegistrationEntry
 }
 
-type stmSingleSignature struct {
+// STMSingleSignature is one signer's individual signature together with the
+// lottery indexes it won and its position in the closed registration.
+type STMSingleSignature struct {
 	Sigma       []byte   `json:"sigma"`
 	Indexes     []uint64 `json:"indexes"`
 	SignerIndex uint64   `json:"signer_index"`
@@ -383,7 +385,7 @@ func parseSTMClosedRegistrationEntryBytes(
 	}, nil
 }
 
-func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
+func parseSTMSingleSignatureBytes(raw []byte) (*STMSingleSignature, error) {
 	if len(raw) < 8 {
 		return nil, fmt.Errorf(
 			"single signature payload too short: need >= 8, got %d",
@@ -423,7 +425,7 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &stmSingleSignature{
+	return &STMSingleSignature{
 		Sigma:       sigma,
 		Indexes:     indexes,
 		SignerIndex: signerIndex,
@@ -492,12 +494,7 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 	return ret, nil
 }
 
-func verifySTMConcatenationProof(
-	msg []byte,
-	avk *stmAggregateVerificationKey,
-	sig *stmAggregateSignature,
-	params ProtocolParameters,
-) error {
+func validateSTMParameters(params ProtocolParameters) error {
 	if params.K == 0 {
 		return errors.New("invalid protocol parameter K=0")
 	}
@@ -509,6 +506,18 @@ func verifySTMConcatenationProof(
 			"invalid protocol parameter phi_f=%f (must be in (0, 1])",
 			params.PhiF,
 		)
+	}
+	return nil
+}
+
+func verifySTMConcatenationProof(
+	msg []byte,
+	avk *stmAggregateVerificationKey,
+	sig *stmAggregateSignature,
+	params ProtocolParameters,
+) error {
+	if err := validateSTMParameters(params); err != nil {
+		return err
 	}
 	msgp := stmConcatenateWithMessage(avk, msg)
 	sigs := make([]bls12381.G1Affine, 0, len(sig.Signatures))

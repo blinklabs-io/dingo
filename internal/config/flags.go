@@ -902,6 +902,41 @@ var flagSpecs = []flagSpec{
 		"mithril-allow-insecure-http",
 		"allow plain-HTTP Mithril aggregator/artifact URLs (local dev/test only)",
 	),
+	boolFlag(
+		"Mithril.Signer.Enabled",
+		"mithril-signer-enabled",
+		"run the Mithril signer",
+	),
+	stringFlag(
+		"Mithril.Signer.KESKey",
+		"mithril-signer-kes-key",
+		"",
+		"Mithril signer KES signing key file (must match the block producer's when both run)",
+	),
+	stringFlag(
+		"Mithril.Signer.OperationalCert",
+		"mithril-signer-operational-cert",
+		"",
+		"Mithril signer operational certificate file (must match the block producer's when both run)",
+	),
+	stringFlag(
+		"Mithril.Signer.ColdVKey",
+		"mithril-signer-cold-vkey",
+		"",
+		"Mithril signer cold verification key file",
+	),
+	stringFlag(
+		"Mithril.Signer.STMKey",
+		"mithril-signer-stm-key",
+		"",
+		"file holding the Mithril signer's own signing key, created on first start",
+	),
+	stringFlag(
+		"Mithril.Signer.AggregatorEndpoint",
+		"mithril-signer-aggregator-endpoint",
+		"",
+		"Mithril aggregator the signer registers with and submits to",
+	),
 
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(

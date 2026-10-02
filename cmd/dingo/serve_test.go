@@ -408,3 +408,12 @@ func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
 		"dev mode's preflight open must have already latched api, not core",
 	)
 }
+
+func TestNodeServicesFollowTheConfiguration(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	require.Empty(t, nodeServices(cfg))
+
+	cfg.Mithril.Signer.Enabled = true
+	require.Len(t, nodeServices(cfg), 1)
+}

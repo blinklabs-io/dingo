@@ -252,10 +252,27 @@ func loadPoolCredentialsFromFiles(
 	loaded.vrfSKey = vrfSKey
 	loaded.vrfVKey = vrfVKey
 
+	if err := loadKESCredentialsFromFiles(
+		loaded,
+		kesSKeyPath,
+		opCertPath,
+	); err != nil {
+		return nil, err
+	}
+	return loaded, nil
+}
+
+// loadKESCredentialsFromFiles fills the KES key, operational certificate and
+// pool ID of loaded from their files. The caller zeroizes loaded on error.
+func loadKESCredentialsFromFiles(
+	loaded *loadedPoolCredentials,
+	kesSKeyPath string,
+	opCertPath string,
+) error {
 	// Load KES signing key
 	kesKey, err := loadSecretKeyFromFile(kesSKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load KES signing key: %w", err)
+		return fmt.Errorf("failed to load KES signing key: %w", err)
 	}
 	loaded.kesSKey = &kes.SecretKey{
 		Depth:  kes.CardanoKesDepth,
@@ -263,7 +280,7 @@ func loadPoolCredentialsFromFiles(
 		Data:   kesKey.SKey,
 	}
 	if len(kesKey.SKey) != kes.CardanoKesSecretKeySize {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"invalid KES key size: expected %d, got %d",
 			kes.CardanoKesSecretKeySize,
 			len(kesKey.SKey),
@@ -274,7 +291,7 @@ func loadPoolCredentialsFromFiles(
 	// Load operational certificate
 	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return fmt.Errorf(
 			"failed to load operational certificate: %w",
 			err,
 		)
@@ -294,12 +311,11 @@ func loadPoolCredentialsFromFiles(
 
 	// Validate that OpCert KES vkey matches the loaded KES key
 	if !bytes.Equal(loaded.kesVKey, loaded.opCert.KESVKey) {
-		return nil, errors.New(
+		return errors.New(
 			"KES verification key mismatch: loaded key does not match OpCert KES vkey",
 		)
 	}
-
-	return loaded, nil
+	return nil
 }
 
 func (pc *PoolCredentials) clearUnsafe() {
@@ -335,6 +351,25 @@ func (pc *PoolCredentials) LoadFromFiles(
 		kesSKeyPath,
 		opCertPath,
 	)
+	return pc.installLoaded(loaded, err, nil)
+}
+
+// LoadKESFromFiles loads the KES signing key and operational certificate
+// without a VRF key, for credentials that sign but never forge (the Mithril
+// signer). It installs through the same generation path as LoadFromFiles, so
+// ValidateKESPeriod, ValidateAgainstLedger and KESSign apply unchanged; the
+// VRF accessors report no key.
+func (pc *PoolCredentials) LoadKESFromFiles(
+	kesSKeyPath string,
+	opCertPath string,
+) (retErr error) {
+	loaded := &loadedPoolCredentials{}
+	defer func() {
+		if retErr != nil {
+			loaded.zeroize()
+		}
+	}()
+	err := loadKESCredentialsFromFiles(loaded, kesSKeyPath, opCertPath)
 	return pc.installLoaded(loaded, err, nil)
 }
 
