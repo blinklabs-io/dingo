@@ -2039,7 +2039,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos(ctx)
 	// Load epoch info from DB
-	//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
+	//nolint:contextcheck // loadEpochs reads through txn; only the bounded startup lab-nonce heal opens its own transaction
 	err := ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
 		return ls.loadEpochs(txn)
 	}, true)
@@ -7231,7 +7231,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			rolloverStart := time.Now()
 			ls.fenceRewardPrecompute()
 			// Execute transaction WITHOUT holding ls.Lock()
-			//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
+			//nolint:contextcheck // TranslateRatifiedGovActions reads only through txn, which carries ctx
 			err := ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id

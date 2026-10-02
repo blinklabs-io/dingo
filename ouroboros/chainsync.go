@@ -2082,6 +2082,7 @@ func (o *Ouroboros) instrumentChainsyncFindIntersect(
 		start := time.Now()
 		p, t, err := fn(ctx, points)
 		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		// The instrumented callback's error passes through unchanged.
 		return p, t, err
 	}
 }
