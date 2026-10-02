@@ -587,7 +587,7 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 	t.Helper()
 	types := make([]byte, 0, count)
 	for range count {
-		segment := f.peer.readResponse(t, 5*time.Second)
+		segment := f.peer.readResponse(t, testutil.AsyncWait)
 		require.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
 		require.GreaterOrEqual(t, len(segment.Payload), 2)
 		types = append(types, segment.Payload[1])
@@ -2329,7 +2329,7 @@ func TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
 			blockfetch.NewMsgRequestRange(start, end),
 		)
 
-		segment := peer.readResponse(t, 5*time.Second)
+		segment := peer.readResponse(t, testutil.AsyncWait)
 		assert.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
 		assert.Equal(
 			t,
