@@ -557,7 +557,7 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 // TestChainBlockBeforeSlotBinarySearchBoundaries exercises the binary-search
 // boundary logic across a multi-block chain (testBlocks have slots 0, 20, 40,
 // 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
-// It guards the #2771 change from the linear backward walk to a binary search.
+// It pins the binary search that replaced a linear backward walk.
 func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -1382,7 +1382,7 @@ func TestChainHeaderRange(t *testing.T) {
 
 // TestChainHeaderRangeNonPositiveCount ensures HeaderRange returns zero-value
 // points instead of panicking on an out-of-range slice index when count is
-// zero or negative (issue #3531).
+// zero or negative.
 func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
 	t.Parallel()
 
@@ -1423,8 +1423,7 @@ func TestChainHeaderRangeNonPositiveCount(t *testing.T) {
 // TestChainRollbackInvalidHeaderTargetPreservesQueue rolls back to a point
 // that falls between two queued headers and matches neither. The rollback
 // must fail without deleting any of the queued headers that a naive scan
-// would have already pruned by the time it discovers the target is invalid
-// (issue #3531).
+// would have already pruned by the time it discovers the target is invalid.
 func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 	t.Parallel()
 
@@ -1471,7 +1470,7 @@ func TestChainRollbackInvalidHeaderTargetPreservesQueue(t *testing.T) {
 // TestChainRollbackToQueuedHeaderSucceeds rolls back to a point that exactly
 // matches a queued header. Only the headers after the matched one should be
 // discarded; the matched header itself stays queued and the chain tip moves
-// to it (issue #3531).
+// to it.
 func TestChainRollbackToQueuedHeaderSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -1562,6 +1561,55 @@ func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(
 	}
 	if !c.FirstVerifiedHeaderMatchesPoint(point) {
 		t.Fatal("verified header should satisfy verified match")
+	}
+}
+
+func TestChainQueuedVerifiedHeaderMatchesPointFindsNonHeadHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	if err := c.AddVerifiedBlockHeader(testBlocks[0]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddVerifiedBlockHeader(testBlocks[1]); err != nil {
+		t.Fatalf("unexpected error adding verified header: %s", err)
+	}
+	if err := c.AddBlockHeader(testBlocks[2]); err != nil {
+		t.Fatalf("unexpected error adding unverified header: %s", err)
+	}
+	pointOf := func(h *MockBlock) ocommon.Point {
+		return ocommon.NewPoint(h.SlotNumber(), h.Hash().Bytes())
+	}
+
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[0])) {
+		t.Fatal("verified head header should match")
+	}
+	if !c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[1])) {
+		t.Fatal("verified non-head header should match its own point")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(pointOf(testBlocks[2])) {
+		t.Fatal("unverified queued header must not match")
+	}
+	wrongSlot := ocommon.NewPoint(
+		testBlocks[1].SlotNumber()+1,
+		testBlocks[1].Hash().Bytes(),
+	)
+	if c.QueuedVerifiedHeaderMatchesPoint(wrongSlot) {
+		t.Fatal("point with matching hash but different slot must not match")
+	}
+	if c.QueuedVerifiedHeaderMatchesPoint(
+		ocommon.NewPoint(
+			testBlocks[3].SlotNumber(),
+			testBlocks[3].Hash().Bytes(),
+		),
+	) {
+		t.Fatal("header that is not queued must not match")
 	}
 }
 
@@ -2041,6 +2089,51 @@ func TestPointAtDepthNoDatabase(t *testing.T) {
 	}
 }
 
+func TestTipRelationUsesTheActivePrimaryChain(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	primary := cm.PrimaryChain()
+	for _, block := range testBlocks[:4] {
+		if err := primary.AddBlock(block, nil); err != nil {
+			t.Fatalf("unexpected error adding primary block: %s", err)
+		}
+	}
+
+	tip, depth, ancestor, err := primary.TipRelation(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected tip relation error: %s", err)
+	}
+	if !ancestor || depth != 2 || !reflect.DeepEqual(tip.Point, blockPoint(testBlocks[3])) {
+		t.Fatalf("unexpected ancestor relation: tip=%v depth=%d ancestor=%t", tip, depth, ancestor)
+	}
+
+	fork, err := cm.NewChain(blockPoint(testBlocks[1]))
+	if err != nil {
+		t.Fatalf("unexpected error creating fork: %s", err)
+	}
+	forkBlock := &MockBlock{
+		MockBlockNumber: 3,
+		MockSlot:        31,
+		MockHash:        testHashPrefix + "00aa",
+		MockPrevHash:    testBlocks[1].MockHash,
+	}
+	if err := fork.AddBlock(forkBlock, nil); err != nil {
+		t.Fatalf("unexpected error adding fork block: %s", err)
+	}
+
+	_, _, ancestor, err = primary.TipRelation(blockPoint(forkBlock))
+	if err != nil {
+		t.Fatalf("unexpected fork relation error: %s", err)
+	}
+	if ancestor {
+		t.Fatal("a retained competing-fork block must not be reported as an ancestor")
+	}
+}
+
 func TestInMemoryForkPointEnumerationConcurrentWithForkCreation(t *testing.T) {
 	t.Parallel()
 
@@ -2500,7 +2593,7 @@ func TestRewindPrimaryChainToPointPrunesPersistentTail(t *testing.T) {
 	}
 }
 
-// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers issue #3516's
+// TestRewindPrimaryChainToPointRejectsOverLimitRewind covers the
 // rollback-depth bound: RewindPrimaryChainToPoint must reject a rewind whose
 // depth exceeds the configured security parameter K, and must leave the
 // chain and every block it holds untouched when it does, so NtC clients stay
@@ -2558,7 +2651,7 @@ func TestRewindPrimaryChainToPointRejectsOverLimitRewind(t *testing.T) {
 }
 
 // TestRewindPrimaryChainToPointSignalsRollback covers the other half of
-// issue #3516: a rewind within the security parameter must publish
+// the contract: a rewind within the security parameter must publish
 // ChainRollbackEvent exactly once and wake/mark any chain iterator with the
 // rollback, the same signal downstream NtC consumers rely on for a live
 // Chain.Rollback.
@@ -2653,8 +2746,8 @@ func TestRewindPrimaryChainToPointSignalsRollback(t *testing.T) {
 // callers rewinding the same persistent primary chain to the same point.
 // Racing to different points is expected to leave the loser observing that
 // its target is no longer on the chain (the earlier caller already pruned
-// it) — that is the existing not-on-chain contract, not a #3516 concern.
-// What #3516 requires here is that every concurrent caller targeting the
+// it) — that is the existing not-on-chain contract, not a rollback-depth
+// concern. What is required here is that every concurrent caller targeting the
 // same still-resolvable point gets the same outcome (an idempotent success)
 // with no corruption or deadlock; run with -race to catch any lock-ordering
 // regression reintroduced around the shared rollback path.
@@ -2755,8 +2848,8 @@ func TestChainRollbackRequiresSecurityParamConfigured(t *testing.T) {
 	}
 }
 
-// TestChainRollbackUnboundedSkipsSecurityParamCheck covers issue #3516's
-// review: RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
+// TestChainRollbackUnboundedSkipsSecurityParamCheck covers that
+// RewindPrimaryChainAtStartup (backed by Chain.RollbackUnbounded)
 // must succeed with no security parameter configured at all, since
 // NewLedgerState reconciles the primary chain against the ledger's own
 // applied tip before node.go's ChainManager.SetLedger has run. Routing that
@@ -4856,7 +4949,7 @@ func mockBlockPoint(b *MockBlock) ocommon.Point {
 	}
 }
 
-// buildAbandonedForkChain sets up the exact state that precedes the #3005
+// buildAbandonedForkChain sets up the exact state that precedes the
 // cross-fork splice:
 //
 //	index 1: testBlocks[0]        (shared ancestor)
@@ -4973,7 +5066,7 @@ func assertChainPrevHashContiguous(t *testing.T, c *chain.Chain) {
 	}
 }
 
-// TestRollbackRejectsPointNotOnChain covers the root cause of issue #3005.
+// TestRollbackRejectsPointNotOnChain covers the cross-fork splice failure.
 //
 // Chain.rollbackLocked resolves the rollback point through
 // ChainManager.blockByPoint, which answers from the retained block cache before
@@ -5079,7 +5172,7 @@ func TestRollbackToRetainedPointDoesNotSpliceChain(t *testing.T) {
 // tip it does not hold.
 //
 // It must be refused as "point not found", never as an over-K rollback: issue
-// #3035 was a node permanently denying every peer because this case was
+// A node was permanently denying every peer because this case was
 // misclassified as exceeding the security parameter. Not-on-chain re-intersects
 // and recovers; over-K does not.
 func TestRollbackRejectsPointAheadOfTip(t *testing.T) {
@@ -5582,7 +5675,7 @@ type originContinuityCase struct {
 // originContinuityCases covers both directions: a chain emptied back to origin
 // must still accept the network's genuine first block, and must reject a block
 // from further along the chain -- which is what a peer whose chainsync cursor
-// survived the rollback offers next (issue #4202).
+// survived the rollback offers next.
 //
 // The chain package does not know the network's genesis hash, so the anchor
 // available at origin is the block number, and the only value that leaves no
@@ -5717,7 +5810,7 @@ func assertOriginResult(
 // TestAddBlockHeaderAfterRollbackToOriginRequiresFirstBlock is the reported
 // defect: a rollback to origin empties the chain mid-run, and the next roll
 // forward from a peer whose chainsync cursor is still ahead must not be
-// accepted as the chain's first block (issue #4202).
+// accepted as the chain's first block.
 func TestAddBlockHeaderAfterRollbackToOriginRequiresFirstBlock(t *testing.T) {
 	t.Parallel()
 
@@ -5864,7 +5957,7 @@ func assertStillAtOriginWithQueuedHeader(t *testing.T, c *chain.Chain) {
 // sequence rollback-to-origin -> AddBlockHeader(first header) ->
 // AddRawBlocks(same hash, block number 2) must still be rejected: accepting it
 // would delete the queued header and persist block number 2 as the chain's
-// first block, leaving the missing prefix of issue #4202. The variant with no
+// first block, leaving the missing prefix. The variant with no
 // header queued is covered by
 // TestAddRawBlockAfterRollbackToOriginRequiresFirstBlock.
 func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
@@ -5968,7 +6061,7 @@ func TestAddBlockAfterRollbackToOriginUsesQueuedHeaderBlockNumber(t *testing.T) 
 // chain anchored at block number 1 stays self-consistent forever. Block 2
 // chains onto block 1 and is accepted, and nothing downstream ever notices that
 // block 0 is missing -- the chain is permanently short its first block, which
-// is the same truncated prefix issue #4202 reports.
+// is the same truncated prefix described by this test.
 //
 // Both halves are asserted here: the number-1 first block is rejected, and the
 // number-2 block that would have cemented the short chain is rejected too,
@@ -6163,7 +6256,7 @@ func rollbackPoint() ocommon.Point {
 // c.tipBlockIndex, so without the barrier it fails its very first iteration
 // with "remove block at index 5: block not found". Chain.batchCommitMutex
 // closes this window for the batch transactions the chain owns and left it open
-// here (issue #4005).
+// here.
 func TestRollbackWaitsForUncommittedCallerTransaction(t *testing.T) {
 	db, c := callerTxnChain(t)
 	txn := addOnCallerTxn(t, db, c)
@@ -6477,7 +6570,7 @@ func pendingCommitHash(label string) []byte {
 // opens its own transaction, which cannot see another transaction's
 // uncommitted writes -- and rollbackLocked's removal loop failed its first
 // iteration with "remove block at index N: block not found" at an index the
-// chain legitimately held. That is issue #3979, observed on CI as an
+// chain legitimately held. That is, observed on CI as an
 // intermittent failure of
 // ledger.TestWindowedRewindConvergesWhilePrimaryChainExtends, whose appender
 // goroutine and windowed rewind are the same pairing.

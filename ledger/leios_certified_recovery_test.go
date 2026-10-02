@@ -189,8 +189,9 @@ func newLeiosRecoveryLedgerState(
 }
 
 // TestEnsureReferencedEndorserBlocksRetriesUntilCertifiedEbArrives is the
-// dingo #3552 recovery path: an endorser block that is unavailable on the first
-// by-point attempt but arrives on a later one must let the chunk through.
+// from-genesis certified-EB recovery path: an endorser block that is
+// unavailable on the first by-point attempt but arrives on a later one must let
+// the chunk through.
 //
 // Before the fix the only retry was a whole pipeline restart -- the fetch made
 // at most one attempt per pass, and on the zero-wait path it made none at all --

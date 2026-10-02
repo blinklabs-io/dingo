@@ -149,7 +149,7 @@ func poolPositionPredicate(
 //
 // A nil `charged` means the era's deposit function could not compute an
 // amount, and a nil return carries that through so the column stores NULL
-// rather than an authoritative zero (dingo #3829). A carried-forward amount
+// rather than an authoritative zero. A carried-forward amount
 // may also be unknown when both deposit columns on the earlier row are NULL;
 // preserve that absence rather than turning unknown into zero.
 func poolRegistrationDepositHeld(
@@ -1606,7 +1606,7 @@ ORDER BY item.added_slot ASC, tx.block_index ASC, c.cert_index ASC`,
 // built from a stake snapshot captured at an earlier boundary, and a block's
 // header carries the key registered at that capture. Validating a header
 // against the current registration rejects every block the pool makes for the
-// rest of the epoch it rotated in (issue #3842).
+// rest of the epoch it rotated in.
 //
 // The selection is the same latest-certificate-wins ordering
 // GetActivePoolKeyHashesAtSlot uses -- later added_slot, then later block
@@ -2370,20 +2370,40 @@ ORDER BY p.id DESC`,
 				registration.ID,
 			)
 		}
+		operator, err := lcommon.NewBlake2b224Checked(registration.PoolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations operator (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
+		vrfKeyHash, err := lcommon.NewBlake2b256Checked(registration.VrfKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations VRF key hash (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
+		rewardAccount, err := lcommon.NewBlake2b224Checked(
+			registration.RewardAccount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations reward account (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
 		certificate := lcommon.PoolRegistrationCertificate{
-			CertType: uint(lcommon.CertificateTypePoolRegistration),
-			Operator: lcommon.PoolKeyHash(
-				lcommon.NewBlake2b224(registration.PoolKeyHash),
-			),
-			VrfKeyHash: lcommon.VrfKeyHash(
-				lcommon.NewBlake2b256(registration.VrfKeyHash),
-			),
-			Pledge: uint64(registration.Pledge),
-			Cost:   uint64(registration.Cost),
-			Margin: lcommon.GenesisRat{Rat: registration.Margin.Rat},
-			RewardAccount: lcommon.AddrKeyHash(
-				lcommon.NewBlake2b224(registration.RewardAccount),
-			),
+			CertType:      uint(lcommon.CertificateTypePoolRegistration),
+			Operator:      lcommon.PoolKeyHash(operator),
+			VrfKeyHash:    lcommon.VrfKeyHash(vrfKeyHash),
+			Pledge:        uint64(registration.Pledge),
+			Cost:          uint64(registration.Cost),
+			Margin:        lcommon.GenesisRat{Rat: registration.Margin.Rat},
+			RewardAccount: lcommon.AddrKeyHash(rewardAccount),
 		}
 		if len(registration.LeiosKeyPublic) > 0 {
 			certificate.LeiosKey = &lcommon.LeiosKey{
@@ -2392,9 +2412,18 @@ ORDER BY p.id DESC`,
 			}
 		}
 		for _, owner := range registration.Owners {
+			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"get pool registrations owner key hash (registration id=%d, owner id=%d): %w",
+					registration.ID,
+					owner.ID,
+					err,
+				)
+			}
 			certificate.PoolOwners = append(
 				certificate.PoolOwners,
-				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+				lcommon.AddrKeyHash(ownerKeyHash),
 			)
 		}
 		for _, relay := range registration.Relays {
@@ -2613,7 +2642,7 @@ WHERE ret.epoch = ?
 // it matches every retirement effective up to and including epoch rather than
 // only the one landing on it, and returns bare key hashes because no deposit
 // refund is being applied. See MetadataStore's doc comment for why the parity
-// checker needs the wider comparison (dingo #3925).
+// checker needs the wider comparison.
 //
 // "Same resolution" includes the synthetic-retirement key every
 // latest-retirement query in the tree shares. A reconcile retirement

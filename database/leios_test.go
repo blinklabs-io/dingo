@@ -25,7 +25,7 @@ import (
 )
 
 // writeLegacyLeiosEB writes a manifest (and, if txsRaw is non-nil, a
-// transaction list) directly under the pre-issue-#3513 hash-only blob keys,
+// transaction list) directly under the legacy hash-only blob keys,
 // bypassing SetLeiosEB entirely -- simulating data persisted by a node
 // running before the key format changed to (slot, hash).
 func writeLegacyLeiosEB(
@@ -167,8 +167,7 @@ func mustCborForLeiosTest(t *testing.T, value any) cbor.RawMessage {
 // prefix scan, in particular the legacy one: SetLeiosEB only ever writes
 // current-format "em"+hash+slot keys, so the branch that reads the slot out
 // of the first eight value bytes -- the path that exists solely for nodes
-// upgrading across the issue #3513 key change -- was otherwise unexercised
-// (chrisguiney review).
+// upgrading across the key format change -- was otherwise unexercised.
 func TestMaxLeiosEBSlotReadsCurrentAndLegacyRecords(t *testing.T) {
 	t.Parallel()
 

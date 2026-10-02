@@ -1320,7 +1320,7 @@ func (m *VoteManager) ValidateDijkstraCertificate(
 // database reads, N committee sorts, and N x committee-size proof-of-
 // possession pairing verifications at roughly 0.75ms each, of which N-1
 // results were then discarded by the install-time double check. Coalescing
-// makes the cost independent of peer count. See dingo #3661.
+// makes the cost independent of peer count.
 func (m *VoteManager) committeeAndParamsForEpoch(
 	epoch uint64,
 ) (*epochEntry, error) {

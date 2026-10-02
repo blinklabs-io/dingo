@@ -29,7 +29,7 @@ import (
 )
 
 // TestGetPoolEpochDataMapReportsRewardsPending covers the standalone source's
-// half of dingo #3852. The in-process source resolves the applying boundary
+// SQL-source half. The in-process source resolves the applying boundary
 // from the ledger tip; DingoDB reads the same two values out of SQL, and if it
 // does not, every pre-boundary forfeiture is still reported as a value_mismatch
 // no matter what the comparison does with the flag.
@@ -347,7 +347,7 @@ func TestGetPoolEpochDataMapAlignsRewardScheduleEpochs(t *testing.T) {
 // ParamsPresent left false rather than silently defaulting to a
 // zero-value BlocksProduced that ComparePoolEpoch could mistake for a real
 // (and wrong) value. FixedCost/Margin are stake-epoch fields and so are
-// unaffected by the param-epoch row's absence (dingo #3484).
+// unaffected by the param-epoch row's absence.
 func TestGetPoolEpochDataMapMissingParamEpochRow(t *testing.T) {
 	t.Parallel()
 
@@ -461,7 +461,7 @@ func TestGetEpochDataStakeEpochOffset(t *testing.T) {
 // DatabaseSource's equivalent test (source_test.go's
 // TestDatabaseSourceGetRewardAccountOutputs): both RewardParitySource
 // implementations must return the same committed reward_account_output rows
-// for an epoch, since #3097's per-account parity check will read either one
+// for an epoch, since the per-account parity check will read either one
 // interchangeably.
 func TestDingoDBGetRewardAccountOutputs(t *testing.T) {
 	t.Parallel()
@@ -503,9 +503,10 @@ func TestPoolKeyHashRoundTrip(t *testing.T) {
 }
 
 // TestGetPoolEpochDataMapTracksChangingPoolParams reproduces the preview
-// pools that exposed dingo #3484. Both fields are constant for the great
-// majority of pools, so a wrong epoch alignment is invisible until a pool
-// actually changes its margin or cost; these two did, at preview epoch 13.
+// pools that exposed reading Margin/FixedCost from the wrong epoch. Both fields
+// are constant for the great majority of pools, so a wrong epoch alignment is
+// invisible until a pool actually changes its margin or cost; these two did, at
+// preview epoch 13.
 //
 // Observed values, with Koios epoch 13 as the reporting epoch K:
 //
@@ -709,7 +710,7 @@ func TestGetPoolEpochDataMapSpendableMemberAbsentWhenEpochPruned(t *testing.T) {
 // TestDingoDBGetEarliestAvailableEpochNoBoundary covers a non-Mithril,
 // genesis-synced database: no mithril_ledger_slot row was ever written, so
 // ok must be false and callers must apply no lower bound beyond
-// preStakingThroughEpoch (dingo #4172).
+// preStakingThroughEpoch.
 func TestDingoDBGetEarliestAvailableEpochNoBoundary(t *testing.T) {
 	t.Parallel()
 

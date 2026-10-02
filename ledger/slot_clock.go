@@ -50,6 +50,11 @@ type SlotClockConfig struct {
 	// node — only sustained or large drifts indicate a real timing problem.
 	// Default: 500ms.
 	ClockTolerance time.Duration
+	// OnBehindHorizon, when set, is called with the wall-clock slot each time
+	// a tick is skipped because era history does not yet reach that slot. It
+	// lets wall-clock-derived metrics stay live while ticks are paused, and
+	// carries no epoch information.
+	OnBehindHorizon func(wallSlot uint64)
 }
 
 // DefaultSlotClockConfig returns the default configuration
@@ -507,6 +512,9 @@ func (sc *SlotClock) run(
 							"the current slot",
 						"slot", actualSlot,
 					)
+				}
+				if sc.config.OnBehindHorizon != nil {
+					sc.config.OnBehindHorizon(actualSlot)
 				}
 				logger.Debug(
 					"skipping slot tick past era horizon",

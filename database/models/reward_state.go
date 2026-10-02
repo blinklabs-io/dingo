@@ -65,7 +65,7 @@ type RewardSnapshot struct {
 	// verify reward_pool_input's stake sum against TotalActiveStake exactly
 	// instead of only checking it does not exceed the total, closing a gap
 	// where a proportionally reduced (rather than merely incomplete) input
-	// set passed the same bound silently (dingo #4025). Nil means the
+	// set passed the same bound silently. Nil means the
 	// snapshot predates this tracking: the exclusion, if any, is unknown, so
 	// only the non-exceeding bound can still be checked.
 	ExcludedActiveStake *types.Uint64
@@ -170,6 +170,8 @@ type RewardPoolOutput struct {
 	OptimalReward       types.Uint64
 	TotalReward         types.Uint64
 	LeaderReward        types.Uint64
+	// LeaderRewardDeficit preserves the magnitude of a negative leader reward.
+	LeaderRewardDeficit types.Uint64
 	MemberRewardTotal   types.Uint64
 	OwnerStake          types.Uint64
 	Undistributed       types.Uint64

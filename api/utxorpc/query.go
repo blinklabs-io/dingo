@@ -257,7 +257,7 @@ func (s *queryServiceServer) ReadParams(
 
 	// GetCurrentPParamsForReporting omits any synthetic (not-yet-real)
 	// PlutusV2 cost model from this reporting reply, matching what a real
-	// cardano-node reports -- see blinklabs-io/dingo#3825.
+	// cardano-node reports.
 	protoParams := s.utxorpc.config.LedgerState.GetCurrentPParamsForReporting()
 	if protoParams == nil {
 		// Byron carries no protocol-parameter CBOR, so a genuine Byron
@@ -692,6 +692,17 @@ func (s *queryServiceServer) ReadData(
 	resp := &query.ReadDataResponse{}
 
 	for _, key := range keys {
+		if len(key) != lcommon.Blake2b256Size {
+			return nil, connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf(
+					"datum key %x is %d bytes, want %d",
+					key,
+					len(key),
+					lcommon.Blake2b256Size,
+				),
+			)
+		}
 		datum, err := s.utxorpc.config.LedgerState.Datum(key)
 		if err != nil {
 			if errors.Is(err, database.ErrDatumNotFound) {

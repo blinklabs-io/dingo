@@ -107,7 +107,7 @@ func previewBabbageProtocolParams(t *testing.T) *babbage.BabbageProtocolParamete
 // the reference evaluator sees one signatory; rendering both makes the spending
 // validator take 621 extra CEK steps and 16 extra builtin calls, for 16359467
 // CPU and 62240 memory over the declared budget, which rejects a block the
-// network accepted and wedges a preview replay. See blinklabs-io/dingo#3935.
+// network accepted and wedges a preview replay.
 //
 // The declared budget is an external oracle: cardano-node computed it with the
 // reference evaluator. Equality in both directions catches an overcharge, which
@@ -675,7 +675,7 @@ func newConwayValidityOutcomeTx(
 	}
 }
 
-// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic covers blinklabs-io/dingo#3962:
+// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic covers:
 // real cardano-ledger rejects a transaction using a PlutusV2 script outright,
 // at the UTXOW level before any script evaluation runs, whenever PlutusV2 has
 // no real cost model configured yet (NoCostModel, the formal rule "languages
@@ -742,7 +742,7 @@ func TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 			},
 			// A real (non-synthetic) PlutusV2 cost model, same as production
 			// carries once an on-chain update lands. requiredCostModel
-			// (issue #3528) fails closed on a missing entry, so this must be
+			// fails closed on a missing entry, so this must be
 			// populated for the "not synthetic" case to actually reach
 			// evaluation instead of being rejected before it ever does.
 			CostModels: map[uint][]int64{

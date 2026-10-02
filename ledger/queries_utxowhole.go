@@ -46,17 +46,15 @@ import (
 // neither is lock contention, which is why more workers stop helping
 // past a point (24 workers, like an earlier 32-worker trial, measured
 // worse than 16): badger's own per-lookup block-index seek cost
-// dominates over any further parallelism this pool can extract. See
-// blinklabs-io/dingo#4082 for the full sweep data.
+// dominates over any further parallelism this pool can extract.
 //
 // That sweep predates each worker holding a blob-only transaction instead
-// of a full one (blinklabs-io/dingo#1900 review): at the metadata read
-// pool's default size (DatabaseWorkers = 5), every trial from 8 workers up
-// was actually saturating at 5 concurrent metadata connections regardless
-// of this constant, so the 16-vs-8 gap above may partly reflect that
-// contention rather than pure disk-I/O parallelism. Worth re-sweeping now
-// that the worker transaction no longer takes a metadata connection at
-// all on the common path.
+// of a full one: at the metadata read pool's default size (DatabaseWorkers =
+// 5), every trial from 8 workers up was actually saturating at 5 concurrent
+// metadata connections regardless of this constant, so the 16-vs-8 gap above
+// may partly reflect that contention rather than pure disk-I/O parallelism.
+// Worth re-sweeping now that the worker transaction no longer takes a metadata
+// connection at all on the common path.
 const utxoWholeResolveWorkers = 16
 
 // queryShelleyUtxoWhole answers GetUTxOWhole: every UTxO live as of right
@@ -66,7 +64,7 @@ const utxoWholeResolveWorkers = 16
 // regardless of what point was Acquired, unlike GetStakeDistribution and
 // GetPoolDistr2's own pinning support and unlike a real cardano-node, which
 // genuinely pins its whole reply for the rest of the LocalStateQuery
-// session (blinklabs-io/dingo#382). That made this the one comparison
+// session. That made this the one comparison
 // field cmd/node-parity's periodic full checks reported as "diverged" on
 // essentially every run that took long enough for the live tip to move
 // during the walk -- confirmed live against a real Preview cardano-node:
@@ -78,14 +76,13 @@ const utxoWholeResolveWorkers = 16
 // Dingo does not impose an additional limit here, but callers on a
 // mainnet-scale chain should expect this to be slow and to return a large
 // reply. This exists primarily to support LocalStateQuery-based tooling
-// (e.g. the devnet cross-node ledger-state comparison,
-// blinklabs-io/dingo#1900) rather than as a query aimed at a busy chain. A
-// pinned at is slower still: IterateUtxosAsOf has no indexed shortcut for
-// "added_slot <= X" against an X near the live tip (it matches nearly
-// every row ever created, live or already spent), unlike IterateLiveUtxos'
-// indexed deleted_slot = 0 filter -- accepted deliberately rather than left
-// unfixed, since a wrong answer is worse than a slow one for a tool whose
-// whole purpose is catching real ledger divergence.
+// (e.g. the devnet cross-node ledger-state comparison)
+// rather than as a query aimed at a busy chain. A pinned at is slower still:
+// IterateUtxosAsOf has no indexed shortcut for "added_slot <= X" against an X
+// near the live tip (it matches nearly every row ever created, live or already
+// spent), unlike IterateLiveUtxos' indexed deleted_slot = 0 filter -- accepted
+// deliberately rather than left unfixed, since a wrong answer is worse than a
+// slow one for a tool whose whole purpose is catching real ledger divergence.
 //
 // Resolves every live UTxO's CBOR across a worker pool rather than
 // IterateLiveUtxos' inline per-row loadCbor: on a chain whose live UTxOs
@@ -98,8 +95,8 @@ const utxoWholeResolveWorkers = 16
 //
 // Measured against a real Preview node (3.17M live UTxOs): the
 // row-at-a-time path took roughly 5 minutes and exceeded gouroboros' NtC
-// mux read timeout (120s) before completing; see blinklabs-io/dingo#1900's
-// node-parity tool, which is what surfaced this. An 8-worker pool measured
+// mux read timeout (120s) before completing; the node-parity tool surfaced
+// this. An 8-worker pool measured
 // ~127s -- real, but still over the ceiling. Two further tuning attempts
 // (grouping lookups by originating block via the batch resolve API;
 // avoiding hot-cache writes for entries this one-shot query never
@@ -126,21 +123,22 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// too would retain the same 32-byte hash and index twice per entry --
 	// 80 bytes/entry instead of UtxoRef's 36, about 140MB of pure
 	// duplication at the 3.17M live UTxOs measured against a real Preview
-	// node (chrisguiney review). Holding the full live set in memory at
+	// node. Holding the full live set in memory at
 	// all (rather than a bounded window) is a further, larger memory cost
-	// this doc comment already tracks as future work -- see the linked
-	// issue's "streaming the reply" note -- deliberately not attempted
+	// this doc comment already tracks as future work (streaming the reply) --
+	// deliberately not attempted
 	// here: IterateLiveUtxoRefs'/IterateUtxoRefsAsOf's enumeration
 	// transaction would have to stay open for the whole resolve phase
 	// instead of the current brief enumeration pass, holding one more
-	// connection from the same scarce metadata pool this PR's
-	// worker-side blob-only-txn fix exists to stop starving (wolf31o2
-	// review).
+	// connection from the same scarce metadata pool the
+	// worker-side blob-only-txn design exists to stop starving.
 	var live []database.UtxoRef
 	collect := func(u *models.Utxo) error {
-		var ref database.UtxoRef
-		copy(ref.TxId[:], u.TxId)
-		ref.OutputIdx = u.OutputIdx
+		txID, err := ledger.NewBlake2b256Checked(u.TxId)
+		if err != nil {
+			return fmt.Errorf("utxo ref tx id: %w", err)
+		}
+		ref := database.UtxoRef{TxId: txID, OutputIdx: u.OutputIdx}
 		live = append(live, ref)
 		return nil
 	}
@@ -149,7 +147,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		// correctly: a row spent between at.Slot and the floor may
 		// already be hard-deleted, and IterateUtxosAsOf has no way to
 		// distinguish that from a row that was never live at at.Slot at
-		// all (blinklabs-io/dingo#382 review) -- same reasoning
+		// all -- same reasoning
 		// queryShelleyUtxoByTxIn's identical check documents.
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
@@ -177,7 +175,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// sequential implementation did (its resolve loop ran inside
 	// IterateLiveUtxos' Txn.Do, whose recover converts a panic to
 	// ErrTxnPanic). Precedent: callRewardPrecompute
-	// (ledger/reward_calculation.go) (chrisguiney review).
+	// (ledger/reward_calculation.go).
 	//
 	// The recovered error wraps database.ErrTxnPanic via NewTxnPanicError,
 	// not a bare fmt.Errorf, so it matches the same sentinel the
@@ -210,7 +208,8 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		// confirms the CBOR is unrecoverable (ErrUtxoCborUnavailable), this
 		// is still a live row GetUTxOWhole's contract can't omit -- main
 		// fails the whole query on that sentinel rather than silently
-		// returning a short set, since #1900's cross-node comparison would
+		// returning a short set, since a cross-node comparison against a
+		// Haskell node would
 		// otherwise read a dropped row as a ledger divergence rather than a
 		// storage fault.
 		cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
@@ -236,8 +235,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// full resolve cost (and full peak memory) for every other row before
 	// returning the error it already had at the first one -- the previous
 	// sequential implementation aborted its whole traversal on the first
-	// failure, via the error it returned from IterateLiveUtxos' callback
-	// (chrisguiney review).
+	// failure, via the error it returned from IterateLiveUtxos' callback.
 	done := make(chan struct{})
 	workerCount := min(utxoWholeResolveWorkers, len(live))
 	var wg sync.WaitGroup
@@ -255,7 +253,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			// 5 by default) for this whole worker's lifetime, well past
 			// utxoWholeResolveWorkers workers deep -- starving every other
 			// concurrent metadata reader in the node for the resolve
-			// phase's entire duration (blinklabs-io/dingo#1900 review).
+			// phase's entire duration.
 			txn := ls.db.BlobTxn(false)
 			defer txn.Release()
 			for ref := range jobs {
@@ -302,8 +300,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// would give up the parallelism this pool exists for, and every
 	// resolve failure is still reported (just possibly naming a different
 	// one of several unresolvable rows across runs), so nothing is lost
-	// except which specific ref is named first (blinklabs-io/dingo#1900
-	// review).
+	// except which specific ref is named first.
 	var firstErr error
 	for r := range results {
 		if r.err != nil {
