@@ -455,7 +455,7 @@ func TestRunRegistersWithKESBoundVerificationKey(t *testing.T) {
 		lcommon.Blake2b224Hash(s.keys.coldVKeyBytes),
 	).String()
 	assert.Equal(t, map[string]any{
-		"epoch":                      float64(testEpoch),
+		"epoch":                      float64(testEpoch + 1),
 		"party_id":                   wantPartyID,
 		"verification_key":           wantVK,
 		"verification_key_signature": wantKESSignature,
@@ -464,6 +464,23 @@ func TestRunRegistersWithKESBoundVerificationKey(t *testing.T) {
 	}, got)
 	assert.Equal(t, wantPartyID, s.PartyID())
 	assert.True(t, strings.HasPrefix(s.PartyID(), "pool1"))
+}
+
+// The aggregator opens its registration round for the epoch after the
+// current one, the epoch the registration is recorded at, and rejects a
+// registration naming any other epoch.
+func TestRunRegistersForTheOpenRegistrationRound(t *testing.T) {
+	t.Parallel()
+	s := newTestSigner(t, testOptions{ownIsCurrent: true})
+	s.start(t)
+
+	got := testutil.RequireReceive(
+		t,
+		s.stub.registrations,
+		testWait,
+		"registration",
+	)
+	assert.Equal(t, float64(testEpoch+1), got["epoch"])
 }
 
 func TestRunSubmitsStakeDistributionSignature(t *testing.T) {

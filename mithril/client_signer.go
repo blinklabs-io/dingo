@@ -129,8 +129,9 @@ func (c *Client) GetRegisteredSigners(
 	return &ret, nil
 }
 
-// RegisterSigner registers a signer with the aggregator during epoch.
-// Corresponds to POST /register-signer.
+// RegisterSigner registers a signer in the aggregator's registration round
+// for epoch, the epoch after the current one at which the aggregator records
+// the registration. Corresponds to POST /register-signer.
 func (c *Client) RegisterSigner(
 	ctx context.Context,
 	epoch uint64,

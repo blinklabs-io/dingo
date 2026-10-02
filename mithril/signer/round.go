@@ -55,6 +55,9 @@ func (s *Signer) round(ctx context.Context) error {
 // register submits the signer's STM verification key, bound to the pool by a
 // KES signature at the current KES period. A key registered in epoch N signs
 // from epoch N+2.
+//
+// The aggregator records a registration made in epoch N at epoch N+1, opens
+// its registration round for that epoch, and rejects one naming any other.
 func (s *Signer) register(ctx context.Context, epoch uint64) error {
 	slot, err := s.cfg.Slot()
 	if err != nil {
@@ -93,7 +96,7 @@ func (s *Signer) register(ctx context.Context, epoch uint64) error {
 	if err != nil {
 		return err
 	}
-	if err := s.cfg.Client.RegisterSigner(ctx, epoch, mithril.AggregatorSigner{
+	if err := s.cfg.Client.RegisterSigner(ctx, epoch+1, mithril.AggregatorSigner{
 		PartyID:                  s.partyID,
 		VerificationKey:          encodedVK,
 		VerificationKeySignature: encodedKESSignature,

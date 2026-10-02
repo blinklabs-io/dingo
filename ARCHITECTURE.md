@@ -8045,7 +8045,9 @@ first start and persisted; it is separate from the KES key.
 
 `signer.Run` is one loop. Each round reads `/epoch-settings`; once per epoch it
 registers the STM verification key with its proof of possession, bound to the
-pool by a KES signature at the current relative KES period, and then signs the
+pool by a KES signature at the current relative KES period, in the
+aggregator's registration round (the next epoch, at which the aggregator
+records the registration), and then signs the
 epoch's Mithril stake distribution. The message is rebuilt locally from the
 aggregator's signer sets and stake (`/signers/registered/{epoch}`) and
 protocol configuration: the commitment to the next epoch's signers, the next

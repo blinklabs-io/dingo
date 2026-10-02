@@ -103,7 +103,7 @@ func TestServiceRegistersWithAggregator(t *testing.T) {
 	)
 	require.NoError(t, err)
 	got := testutil.RequireReceive(t, registrations, testWait, "registration")
-	assert.Equal(t, float64(testEpoch), got["epoch"])
+	assert.Equal(t, float64(testEpoch+1), got["epoch"])
 	assert.Equal(t, float64(testRelativeKESPeriod), got["kes_period"])
 	assert.Contains(t, got["party_id"], "pool1")
 	stop()
@@ -215,7 +215,7 @@ func TestNodeRunsTheSigner(t *testing.T) {
 	go func() { done <- node.Run(ctx) }()
 
 	got := testutil.RequireReceive(t, registrations, testWait, "registration")
-	assert.Equal(t, float64(testEpoch), got["epoch"])
+	assert.Equal(t, float64(testEpoch+1), got["epoch"])
 	assert.Contains(t, got["party_id"], "pool1")
 
 	require.NoError(t, node.Stop())
