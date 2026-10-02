@@ -8484,6 +8484,11 @@ when `Stop` returns, and the address is rebindable afterwards.
 
 ### Blockfrost API (`api/blockfrost/`)
 
+The latest-block transaction list validates `count`, `page`, and `order`
+with the shared pagination rules. It pages transaction hashes in block-index
+order, reverses that order for descending requests, and reports pagination
+totals for the whole block. Empty or out-of-range pages return an empty array.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or
