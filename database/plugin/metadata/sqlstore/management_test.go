@@ -406,7 +406,7 @@ func TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner(
 }
 
 // TestGetPoolByVrfKeyHashPreservesActiveKeyDuringDeferredReRegistration is
-// the regression test for issue #4352: a pool re-registering with a new VRF
+// the regression test for this case: a pool re-registering with a new VRF
 // key mid-epoch must not free its old key before the epoch boundary, because
 // cardano-ledger defers a re-registration through psFutureStakePoolParams
 // until then.
@@ -587,7 +587,7 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 }
 
 // TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey is the
-// regression test for the PV11+ follow-up to #4352: after pool P cycles
+// regression test for the PV11+ follow-up case: after pool P cycles
 // A -> B -> C within one epoch, a later reuse of B (the superseded, no
 // longer pending value) must still be rejected, because psVRFKeyHashes
 // retains every key placed in psFutureStakePoolParams during the epoch, not
@@ -596,7 +596,7 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 // this same pool as the claimant and PoolCurrentState disagrees with the
 // requested key, so this method must report P as claiming B even though B
 // is neither P's effective (pre-boundary) key nor its current pending one.
-// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins dingo#4466: only a
+// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins that only a
 // pool's latest same-epoch registration reserves its key, not every key the
 // pool cycled through during the epoch.
 func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
@@ -694,8 +694,8 @@ func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 	require.Equal(t, poolKey, got.PoolKeyHash)
 }
 
-// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers dingo#4466's
-// "preserve rollback ... behavior" criterion: the fix ranks whatever
+// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers the
+// rollback-preservation criterion: the fix ranks whatever
 // pool_registration rows currently exist, so rolling back the superseding
 // registration (C) must make the previously-superseded key (B) the pool's
 // latest pending key again, not leave it incorrectly free.
@@ -773,8 +773,8 @@ func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
 }
 
 // TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction covers
-// dingo#4466's "cover one transaction and separate same-epoch transactions"
-// criterion. Every other test in this file writes each of P's re-
+// the one-transaction case (as against separate same-epoch transactions).
+// Every other test in this file writes each of P's re-
 // registrations through its own auto-committed call (mirroring cert-by-cert
 // application as blocks arrive on the live chain). This variant writes all
 // three -- A, then A -> B, then B -> C -- through one shared, explicitly
@@ -853,7 +853,7 @@ func TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction(
 }
 
 // TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey covers
-// dingo#4466's two-step case: with only one same-epoch re-registration (A ->
+// the two-step case: with only one same-epoch re-registration (A ->
 // B, no superseding C yet), B is still the pool's latest pending key and
 // must remain reserved alongside the still-effective A.
 func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
@@ -908,7 +908,7 @@ func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
 }
 
 // TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration
-// is the regression test for a human reviewer finding on this PR:
+// is the regression test for this case:
 // activePoolOrNil checked retirement against the live database tip, not
 // against epochStartSlot. A pool that retires and later submits a fresh
 // registration for a DIFFERENT key un-retires via that new registration
@@ -916,8 +916,7 @@ func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
 // re-registration, since the pool had left psStakePools). Checking
 // retirement against "now" let that pool's stale, pre-retirement
 // registration for its OLD key still resolve as active, reporting the old
-// key in use when the pool no longer holds it -- this PR's own bug class,
-// reintroduced.
+// key in use when the pool no longer holds it.
 func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration(
 	t *testing.T,
 ) {

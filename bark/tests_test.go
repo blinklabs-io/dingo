@@ -122,7 +122,6 @@ func TestBarkConnectLimitRejectsOversizedDecompressedMessageBeforeAuth(
 		Lifecycle:                       newTestLifecycleService(t),
 		SnapshotDir:                     t.TempDir(),
 		Host:                            "127.0.0.1",
-		Port:                            freeTCPPort(t),
 		TlsCertFilePath:                 serverCertPath,
 		TlsKeyFilePath:                  serverKeyPath,
 		TlsClientCAFilePath:             clientCAPath,
@@ -160,7 +159,6 @@ func TestBarkConnectLimitRejectsOversizedCompressedWireMessage(t *testing.T) {
 	b, err := NewBark(BarkConfig{
 		DB:   newTestDB(t),
 		Host: "127.0.0.1",
-		Port: freeTCPPort(t),
 	})
 	require.NoError(t, err)
 	require.NoError(t, b.Start(t.Context()))
@@ -442,7 +440,6 @@ func TestTLSServerReusesPreloadedCertAfterFilesChange(t *testing.T) {
 	b, err := NewBark(BarkConfig{
 		DB:              db,
 		Host:            "127.0.0.1",
-		Port:            freeTCPPort(t),
 		TlsCertFilePath: certPath,
 		TlsKeyFilePath:  keyPath,
 	})

@@ -1465,15 +1465,14 @@ func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
 }
 
 // TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply is the
-// apply-path regression for the d=1 / genesis-overlay defer (issue #3717 review,
-// wolf, verify_header.go ~560). A header at a d=1 overlay slot is deferred at
-// header-verification time because the in-memory protocol parameters (and the
-// active genesis delegation) can still describe the previous epoch while
-// blockfetch verifies ahead of apply. The classifier verdict alone is not the
-// safety property; what makes the defer safe is that the STATEFUL genesis-
-// delegate check re-runs at apply with allowStateDefer=false. This drives a
-// deferred genesis-overlay header through verifyDeferredBlockHeaderState (the
-// apply path, state.go) and proves:
+// apply-path regression for the d=1 / genesis-overlay defer. A header at a d=1
+// overlay slot is deferred at header-verification time because the in-memory
+// protocol parameters (and the active genesis delegation) can still describe
+// the previous epoch while blockfetch verifies ahead of apply. The classifier
+// verdict alone is not the safety property; what makes the defer safe is that
+// the STATEFUL genesis- delegate check re-runs at apply with
+// allowStateDefer=false. This drives a deferred genesis-overlay header through
+// verifyDeferredBlockHeaderState (the apply path, state.go) and proves:
 //
 //   - a header from the WRONG issuer at a d=1 overlay slot is REJECTED at apply
 //     (headerValidationError), so it cannot be adopted with the check skipped;
@@ -2181,7 +2180,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotUsesPoolThreshold(
 }
 
 // TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine pins the
-// consensus-sensitive scoping of the deferral (issue #3727, finding 4). A
+// consensus-sensitive scoping of the deferral. A
 // leader-stake snapshot reported unavailable is only recoverable while the
 // apply cursor is still BEHIND the header's slot (the mark snapshot has not
 // been produced yet) -> defer. Once the cursor has caught up, a still-empty
@@ -2295,7 +2294,7 @@ func TestVerifyBlockHeaderState_UnavailableSnapshotRecoverableVsGenuine(
 
 // TestOldestRequiredSnapshotEpoch covers the retention-floor provider the
 // snapshot manager consults to keep a deferred header's required snapshot from
-// being pruned (issue #3727). The floor is the minimum over all outstanding
+// being pruned. The floor is the minimum over all outstanding
 // deferred headers of StakeSnapshotEpoch(epochOf(slot)); with none deferred it
 // reports no pin.
 func TestOldestRequiredSnapshotEpoch(t *testing.T) {
@@ -2361,7 +2360,7 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 	// snapshot epoch yet. While ANY deferred slot is unmappable the provider
 	// must signal retain-all (floor 0, ok true) so cleanup prunes nothing --
 	// otherwise the snapshot this header will need once the cache advances
-	// could be pruned now, looping the header on defer (issue #3727, gap 2).
+	// could be pruned now, looping the header on defer.
 	ls.markDeferredHeaderValidation(
 		ocommon.Point{Slot: 9_999_999, Hash: []byte{0xFF}},
 	)
@@ -3924,8 +3923,9 @@ func TestVerifyBlockLeaderEligibility_DenominatorExcludesUndelegatedStake(
 		"a canonical block from the only delegated-to pool must be accepted")
 }
 
-// TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation is
-// #3626/#3794 in a unit test.
+// TestVerifyBlockLeaderEligibility_DenominatorExcludesReapedDelegation pins
+// the reaped-pool delegation exclusion from the leader-eligibility
+// denominator in a unit test.
 //
 // cardano-ledger's POOLREAP domain-restricts the delegation map by the reaped
 // pools (delegations ⋫ retired, Shelley spec Fig. 41), so a reaped pool's
@@ -4049,24 +4049,24 @@ func hexPoolSet(hashes [][]byte) []string {
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_SerializesAdmission is the
-// regression guard for the deferred-header admission <-> retention-floor race
-// (issue #3727, gap 1). PrunePoolSnapshotsWithRetentionFloor must hold the
-// deferred-header set stable across BOTH the floor computation and the prune,
-// so a header admitted concurrently cannot slip in between the floor read and
-// the prune and have its still-needed snapshot deleted under a stale boundary.
-// The prune sees a floor computed from the set as it was when the guard took
-// the lock, and a concurrent markDeferredHeaderValidation blocks until release.
-// TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic replaces the former
-// _SerializesAdmission test, whose contract (hold deferredHeaderValidationMu
-// across prune) is exactly the lock-order inversion that deadlocks the node
-// (issue #3717). The invariant that survives the fix is narrower but sufficient:
-// the eviction + floor read happen under ONE lock hold, so the boundary handed
-// to prune is a coherent read of the deferred set as it stood when the guard
-// took the lock -- never a mix. prune then runs with the lock RELEASED. A header
-// admitted during prune is NOT pinned by this pass; it is picked up by the next
-// cleanup pass, because the retention floor is a lower-watermark recomputed every
-// pass. That next-pass recovery is the deliberate trade for never inverting the
-// lock order.
+// regression guard for the deferred-header admission <-> retention-floor race.
+// PrunePoolSnapshotsWithRetentionFloor must hold the deferred-header set stable
+// across BOTH the floor computation and the prune, so a header admitted
+// concurrently cannot slip in between the floor read and the prune and have its
+// still-needed snapshot deleted under a stale boundary. The prune sees a floor
+// computed from the set as it was when the guard took the lock, and a
+// concurrent markDeferredHeaderValidation blocks until release.
+// TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic replaces the
+// former _SerializesAdmission test, whose contract (hold
+// deferredHeaderValidationMu across prune) is exactly the lock-order inversion
+// that deadlocks the node. The invariant that survives the fix is narrower but
+// sufficient: the eviction + floor read happen under ONE lock hold, so the
+// boundary handed to prune is a coherent read of the deferred set as it stood
+// when the guard took the lock -- never a mix. prune then runs with the lock
+// RELEASED. A header admitted during prune is NOT pinned by this pass; it is
+// picked up by the next cleanup pass, because the retention floor is a
+// lower-watermark recomputed every pass. That next-pass recovery is the
+// deliberate trade for never inverting the lock order.
 func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 	t *testing.T,
 ) {
@@ -4162,7 +4162,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_FloorReadIsAtomic(
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock is the lock-order
-// inversion regression guard for wolf31o2's blocking review on PR #3717. Unlike
+// inversion regression guard. Unlike
 // the other guard tests -- which pass a stub prune that opens no transaction and
 // so cannot catch the bug -- this passes a REAL prune that opens the single
 // sqlite write connection via db.Transaction(true), exactly as
@@ -4266,7 +4266,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll is the
-// regression guard for the unmappable-deferred-slot case (issue #3727, gap 2).
+// regression guard for the unmappable-deferred-slot case.
 // While a deferred header's slot cannot yet be mapped to an epoch, the guard
 // must retain ALL pool snapshots (prune boundary 0) so the snapshot the header
 // will need once the epoch cache advances is not pruned in the meantime and the
@@ -4385,7 +4385,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_UnmappableRetainsAll(
 }
 
 // TestRepopulateDeferredHeaderValidation is the restart-durability regression
-// guard (issue #3727, finding 3). Deferred-header markers persisted before a
+// guard. Deferred-header markers persisted before a
 // restart must be reloaded into the in-memory set so the retention floor
 // covers them on the first post-restart cleanup, instead of the set starting
 // empty and the needed snapshot being pruned.
@@ -4431,13 +4431,13 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 }
 
 // TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError is the
-// regression guard for the swallowed marker-scan failure (issue #3727, P1
-// re-review). If the persisted-marker scan fails at startup and the error is
-// swallowed, the in-memory deferred set stays empty, the retention floor does
-// not cover pre-restart deferred headers, and the first post-restart cleanup
-// can prune a snapshot one of them needs -- after which stateful verification
-// hard-rejects the missing snapshot instead of deferring. repopulate MUST
-// surface the error so LedgerState.Start aborts rather than run unpinned.
+// regression guard for the swallowed marker-scan failure. If the
+// persisted-marker scan fails at startup and the error is swallowed, the
+// in-memory deferred set stays empty, the retention floor does not cover
+// pre-restart deferred headers, and the first post-restart cleanup can prune a
+// snapshot one of them needs -- after which stateful verification hard-rejects
+// the missing snapshot instead of deferring. repopulate MUST surface the error
+// so LedgerState.Start aborts rather than run unpinned.
 func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
 	t *testing.T,
 ) {
@@ -4461,7 +4461,7 @@ func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
 }
 
 // TestDeletePersistedDeferredMarkers_SkipsReAdmitted is the regression guard
-// for the evicted-marker delete racing a re-defer (issue #3727, P2 re-review).
+// for the evicted-marker delete racing a re-defer.
 // deletePersistedDeferredMarkers runs after eviction released the in-memory
 // pin, so between eviction and the delete the same point can be re-deferred and
 // re-persisted (it is still ahead of the lagging apply cursor). Deleting the
@@ -4509,7 +4509,7 @@ func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor is the
-// unbounded-retention-leak guard (issue #3727, finding 5). A deferred header
+// unbounded-retention-leak guard. A deferred header
 // the apply cursor has already passed is abandoned (a canonical one would have
 // been consumed at apply); the retention guard must evict it so it stops
 // pinning its snapshot, and delete its persisted marker.
@@ -4560,8 +4560,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin proves a deferred
-// header that RESOLVES releases its pool-snapshot pin so the floor rises (issue
-// #3727, finding 5).
+// header that RESOLVES releases its pool-snapshot pin so the floor rises.
 func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 	t *testing.T,
 ) {
@@ -4611,8 +4610,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin(
 
 // TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention proves the
 // hard backstop: even a live (ahead-of-cursor) deferred header needing a very
-// old snapshot cannot lower pruning past minBefore, so retention is bounded
-// (issue #3727, finding 5).
+// old snapshot cannot lower pruning past minBefore, so retention is bounded.
 func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 	t *testing.T,
 ) {
@@ -4653,17 +4651,16 @@ func TestPrunePoolSnapshotsWithRetentionFloor_DepthCapBoundsRetention(
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader is the
-// regression guard for the evicted-point re-adoption bypass (issue #3717
-// review). Eviction drops the durable sync_state marker along with the
-// in-memory entry, and that marker is the only thing that makes
-// deferredHeaderValidationRequired return true at apply. A point merely BEHIND
-// the tip is still re-adoptable -- chain selection can roll back and switch to
-// its fork -- so evicting it there means the block later applies with
-// required == false, verifyDeferredBlockHeaderState returns nil, and it is
-// adopted with its stateful leader-eligibility check never run. Eviction must
-// therefore fire only beyond the rollback horizon (tip minus the stability
-// window): a header inside the horizon keeps both its entry and its marker,
-// while one past it is still evicted so its snapshot pin is released.
+// regression guard for the evicted-point re-adoption bypass. Eviction drops the
+// durable sync_state marker along with the in-memory entry, and that marker is
+// the only thing that makes deferredHeaderValidationRequired return true at
+// apply. A point merely BEHIND the tip is still re-adoptable -- chain selection
+// can roll back and switch to its fork -- so evicting it there means the block
+// later applies with required == false, verifyDeferredBlockHeaderState returns
+// nil, and it is adopted with its stateful leader-eligibility check never run.
+// Eviction must therefore fire only beyond the rollback horizon (tip minus the
+// stability window): a header inside the horizon keeps both its entry and its
+// marker, while one past it is still evicted so its snapshot pin is released.
 func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 	t *testing.T,
 ) {
@@ -4792,8 +4789,8 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 }
 
 // TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates proves a
-// failed restore of a re-admitted marker is NOT swallowed (issue #3717 review,
-// wolf, chainsync.go review). If the delete of a stale marker succeeds but the
+// failed restore of a re-admitted marker is NOT swallowed. If the delete of a
+// stale marker succeeds but the
 // point is re-deferred during the delete and its marker cannot be re-persisted,
 // the durable retention pin is lost: a restart would miss it, the snapshot could
 // be pruned, and the stateful header check skipped. The failure must therefore
@@ -4956,7 +4953,7 @@ func TestGenesisOverlayUnresolvablePParamsDefers(t *testing.T) {
 // while the persisted epoch row written by processEpochRollover uses
 // calculateEpochNonce. Disagreement means peer headers verifying
 // against one nonce while we recompute another — the freeze pattern
-// in #2128.
+// seen when cached and calculated nonces diverge.
 func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(
 	t *testing.T,
 ) {
@@ -5263,7 +5260,7 @@ func TestHeaderVerificationEpochDefersAtHardForkBoundary(t *testing.T) {
 }
 
 // TestEpochNonceUsesCarriedLastEpochBlockNonce verifies the cardano-ledger
-// epoch-nonce assembly (#2734): the epoch nonce mixes the frozen candidate with
+// epoch-nonce assembly: the epoch nonce mixes the frozen candidate with
 // the CARRIED last-block-of-previous-epoch nonce
 // (prevEpoch.LastEpochBlockNonce == cardano praosStateLastEpochBlockNonce),
 // NOT the hash of the last block of the epoch being closed. The closing epoch's
@@ -5397,7 +5394,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 	// The carried lab stored for the NEXT boundary is the PARENT hash of the
 	// closing epoch's last block (prevHashToNonce(lastBlock.prevHash) ==
 	// hashAtPreCut, the post-cutoff block's PrevHash), NOT the last block's own
-	// hash — a one-block Praos lag (#2734 eta_1349 root cause).
+	// hash — a one-block Praos lag ( eta_1349 root cause).
 	require.Equal(
 		t,
 		hex.EncodeToString(hashAtPreCut),
@@ -5425,7 +5422,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 }
 
 // TestEpochNonceGenesisEdgeUsesNeutralLab pins the from-genesis initialization
-// of the carried lastEpochBlockNonce (#2734). When the initial epoch is created
+// of the carried lastEpochBlockNonce. When the initial epoch is created
 // (no prior nonce), the epoch/evolving/candidate nonces are the genesis nonce
 // but the carried lab is Neutral (nil) — NOT the genesis nonce. cardano-ledger
 // initializes praosStateLastEpochBlockNonce to NeutralNonce at genesis
@@ -5497,7 +5494,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 		hex.EncodeToString(rCandidate),
 		"initial candidate nonce is the genesis nonce",
 	)
-	// The key #2734 assertion: the carried lab is Neutral (nil), NOT the genesis
+	// The key assertion: the carried lab is Neutral (nil), NOT the genesis
 	// nonce, so the first from-genesis boundary uses the identity.
 	require.Empty(
 		t,
@@ -5650,7 +5647,7 @@ func TestComputeEpochNonceForSlotFoldsExtraEntropy(t *testing.T) {
 }
 
 // TestEpochNonce_SnapshotTipPastCutoff covers the one Mithril-bootstrap
-// shape the existing #2128 suite does not: a snapshot whose tip slot lies
+// shape the existing suite does not: a snapshot whose tip slot lies
 // PAST the candidate-freeze cutoff of its epoch. In that shape the imported
 // epoch row carries CandidateNonce != EvolvingNonce — psCandidateNonce
 // froze at the cutoff (before the tip) while psEvolvingNonce kept rolling
@@ -5920,7 +5917,7 @@ func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 // header with an internally-invalid VRF proof is a definite (non-deferred)
 // failure, even while local ledger state has not caught up to the header's
 // slot. An invalid header must never be counted toward Genesis density
-// regardless of local sync state (dingo #3517).
+// regardless of local sync state.
 func TestValidateChainSelectionHeaderCryptoRejectsTamperedProof(
 	t *testing.T,
 ) {
@@ -6016,7 +6013,7 @@ func TestValidateChainSelectionHeaderCryptoDefersOnUnpublishedNonce(
 // ShouldVerifyChainSelectionHeaderCrypto shares the same Mithril exemption as
 // the ledger's own chainsync header-queue gate (shouldEnforceBlockPipelineCrypto),
 // so a competing peer's header is exempt under exactly the same condition the
-// applied chain already is. Issue #3528: a coarse ValidateHistorical=false
+// applied chain already is.: a coarse ValidateHistorical=false
 // historical-sync toggle must not exempt header crypto -- only a slot a
 // Mithril certificate already covers may skip it, regardless of
 // validationEnabled.

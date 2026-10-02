@@ -44,7 +44,6 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		// that goroutine is free to apply the post-rollback chain the
 		// moment the truncation lands. emitRollbackTransactionEvents is
 		// called from the rollback path instead, before the truncation.
-		// See blinklabs-io/dingo#2287.
 	}
 }
 
@@ -132,7 +131,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // events, and applying a block's transactions out of order -- or applying a
 // rollback's undo after the redo that followed it -- leaves that state wrong
 // in ways no later event corrects. PublishAsync cannot be used here because
-// the shared worker pool reorders (blinklabs-io/dingo#2287).
+// the shared worker pool reorders.
 //
 // This stays asynchronous rather than becoming a PublishBlocking like
 // publishBlockEvent: the forward path calls it from a database AfterCommit
@@ -355,7 +354,7 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 
 // reconciliationUndoBlocks returns the blocks the ledger itself applied
 // between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
-// for the primary-chain/ledger divergence reconciler (issue #3516).
+// for the primary-chain/ledger divergence reconciler.
 //
 // It deliberately does not reuse readBlocksAboveSlot: that helper reads
 // whatever the primary chain's blob store currently holds above a slot,
@@ -400,9 +399,9 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // blocks already has no era-agnostic durable record of applied points to
 // resolve an ancestor from, let alone build undo events for. Closing that
 // would mean adding an era-agnostic applied-block record the rest of the
-// reconciler doesn't have either -- out of scope for issue #3516, which
-// bounds and correctly sources this rewind's data, not the reconciler's
-// pre-existing era coverage. Tracked separately as issue #3778.
+// reconciler doesn't have either -- out of scope here, since the rewind bound
+// and its data sourcing are separate from the reconciler's pre-existing era
+// coverage, and remains a known gap.
 //
 // Because such a block has no row to iterate over at all, this cannot name
 // it the way an unresolvable block is named -- but it can detect that one
@@ -416,9 +415,8 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // counted via reconciliationUndoMissingRecord, distinctly from
 // reconciliationUndoUnresolved, so an operator can tell "we know what's
 // missing but can't reach it" apart from "we don't even have a record of
-// it existing" (wolf31o2 review, PR #3611). Skipped when ancestor's own
-// block cannot be resolved (e.g., after a restart) rather than reporting a
-// false gap from a missing baseline.
+// it existing". Skipped when ancestor's own block cannot be resolved (e.g.,
+// after a restart) rather than reporting a false gap from a missing baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,

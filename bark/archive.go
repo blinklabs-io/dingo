@@ -151,8 +151,8 @@ func (r blockRefRequest) resolved(
 //
 //   - hash and slot together already are the blob store's block key, so
 //     they need no index lookup at all. Going through the hash index
-//     instead would also refuse a block written before that index existed
-//     (#1915), which is exactly the historical range an archive serves.
+//     instead would also refuse a block written before that index existed,
+//     which is exactly the historical range an archive serves.
 //   - a hash alone is the only identifier unique across forks, and it
 //     resolves through an O(1) hash-index read.
 //   - a slot alone needs a bounded prefix scan of that one slot.

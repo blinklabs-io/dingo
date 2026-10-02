@@ -185,8 +185,7 @@ func GetPraosTiebreakerView(
 }
 
 // byronBlockKind classifies a Byron header by its concrete Go type; Byron
-// headers carry no common Type() method to switch on instead
-// (blinklabs-io/dingo#4413).
+// headers carry no common Type() method to switch on instead.
 func byronBlockKind(header ledger.BlockHeader) ByronBlockKind {
 	switch header.(type) {
 	case *byron.ByronEpochBoundaryBlockHeader:

@@ -142,8 +142,7 @@ const (
 	// so the same hash can be a live, independently required occurrence at
 	// more than one slot at once, and a hash-only key would let the second
 	// occurrence's persist silently overwrite the first, making it
-	// unavailable for historical re-serving once its in-memory entry expires
-	// (issue #3513 review).
+	// unavailable for historical re-serving once its in-memory entry expires.
 	LeiosEBManifestKeyPrefix = "em"
 	// LeiosEBTxsKeyPrefix is the key prefix for storing the raw endorser-block
 	// transaction bodies (the CBOR-in-CBOR wrapped tx list from leios-fetch
@@ -183,7 +182,7 @@ func LeiosEBTxsKey(hash []byte, slot uint64) []byte {
 	return key
 }
 
-// LegacyLeiosEBManifestKey builds the pre-issue-#3513 blob key for a Leios
+// LegacyLeiosEBManifestKey builds the legacy blob key for a Leios
 // endorser-block manifest: "em" + hash(32), with no slot. That format could
 // only ever hold one occurrence per hash, so its value carried the slot
 // itself as an 8-byte big-endian prefix ahead of the manifest CBOR (unlike
@@ -199,7 +198,7 @@ func LegacyLeiosEBManifestKey(hash []byte) []byte {
 	return key
 }
 
-// LegacyLeiosEBTxsKey builds the pre-issue-#3513 blob key for the raw
+// LegacyLeiosEBTxsKey builds the legacy blob key for the raw
 // transaction bodies of a Leios endorser block: "et" + hash(32), with no
 // slot. Superseded by LeiosEBTxsKey; see LegacyLeiosEBManifestKey.
 func LegacyLeiosEBTxsKey(hash []byte) []byte {

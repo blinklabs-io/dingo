@@ -655,7 +655,7 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 // subscriber's buffer can hold does not leak goroutines. This is a regression
 // test for MEM-06 where publishWithTimeout spawned goroutines that could never
 // complete when a subscriber's channel buffer was full. Publish now
-// backpressures instead of dropping (#2932), so the subscriber is drained
+// backpressures instead of dropping, so the subscriber is drained
 // concurrently and the assertion is that repeatedly hitting the full-buffer
 // path spawns no per-event goroutines.
 // Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
@@ -719,7 +719,7 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 
 // TestPublishAsyncNoGoroutineLeak verifies that PublishAsync with a slow
 // subscriber does not leak goroutines. The async workers call Publish
-// internally, which previously used publishWithTimeout. Since #2932 the async
+// internally, which previously used publishWithTimeout. The async
 // queue backpressures instead of dropping, so the subscriber is drained
 // concurrently.
 // Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
@@ -787,8 +787,8 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 
 // TestPublishBlocksOnFullBufferAndLosesNothing verifies that when a
 // subscriber's channel buffer is full, Publish backpressures the producer and
-// every event is eventually delivered. Regression test for
-// blinklabs-io/dingo#2932, which replaced the drop-on-full behavior this test
+// every event is eventually delivered. Regression test for the
+// change that replaced the drop-on-full behavior this test
 // previously asserted.
 func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 	t.Parallel()
@@ -1055,11 +1055,11 @@ func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
 	require.ErrorIs(t, err, event.ErrEventBusStopped)
 }
 
-// TestSubscribeUsesSmallDefaultBuffer is the regression test for #2106.
-// Subscribe / SubscribeFunc must allocate the small default buffer; only
-// callers that explicitly opt in via the *WithBuffer variants should pay
-// the EventQueueSize allocation. Verified by capacity, since cap on a
-// receive-only channel reports the underlying buffer size.
+// TestSubscribeUsesSmallDefaultBuffer is the regression test for the default
+// buffer size. Subscribe / SubscribeFunc must allocate the small default
+// buffer; only callers that explicitly opt in via the *WithBuffer variants
+// should pay the EventQueueSize allocation. Verified by capacity, since cap on
+// a receive-only channel reports the underlying buffer size.
 func TestSubscribeUsesSmallDefaultBuffer(t *testing.T) {
 	t.Parallel()
 
