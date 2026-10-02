@@ -278,6 +278,19 @@ func BlockIDByPointLocal(
 ) (uint64, error) {
 	txn := db.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
+	return BlockIDByPointLocalTxn(txn, point)
+}
+
+// BlockIDByPointLocalTxn is the transaction-scoped form of
+// BlockIDByPointLocal. It keeps point validation in the same blob snapshot as
+// the caller's other chain reads.
+func BlockIDByPointLocalTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (uint64, error) {
+	if txn == nil {
+		return 0, types.ErrNilTxn
+	}
 	if txn.Blob() == nil {
 		return 0, types.ErrNilTxn
 	}
@@ -312,6 +325,245 @@ func BlockIDByPointLocal(
 		)
 	}
 	return metadata.ID, nil
+}
+
+// BlockPointBySlotTxn returns the canonical point at slot without loading
+// block CBOR. Retained history-expiry tombstones are valid because their bp
+// keys, metadata, and canonical block-index entries remain present.
+func BlockPointBySlotTxn(txn *Txn, slot uint64) (ocommon.Point, error) {
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{Prefix: prefix})
+	if it == nil {
+		return ocommon.Point{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	var (
+		ret     ocommon.Point
+		retID   uint64
+		matched bool
+	)
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if len(key) != types.BlockBlobKeySize {
+			continue
+		}
+		point, err := BlockBlobKeyToPoint(key)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		id, err := BlockIDByPointLocalTxn(txn, point)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if id == 0 {
+			continue
+		}
+		matches, err := canonicalPointForID(txn, point, id)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		if !matches {
+			continue
+		}
+		if !matched || id > retID {
+			ret = point
+			retID = id
+			matched = true
+		}
+	}
+	if err := it.Err(); err != nil {
+		return ocommon.Point{}, err
+	}
+	if !matched {
+		return ocommon.Point{}, models.ErrBlockNotFound
+	}
+	return ret, nil
+}
+
+// BlockPointAtOrAfterSlotTxn returns the oldest canonical point whose slot is
+// at least slot, using only retained keys and metadata. It therefore remains
+// usable after local block CBOR expires.
+//
+// Iteration is forward, which matters on the cloud blob plugins: the s3 and
+// gcs stores implement a reverse iterator by listing every key under the
+// prefix into a temporary file before the seek runs (listKeysToFile), while a
+// forward iterator bounds the same listing server-side with StartAfter /
+// StartOffset. A forward seek therefore costs one bounded listing rather than
+// a full enumeration of the block keyspace.
+//
+// The scan length is data dependent -- it steps over any non-canonical block
+// stored between slot and the first canonical one -- so it honors ctx, unlike
+// BlockPointBySlotTxn whose key prefix pins it to a single slot.
+func BlockPointAtOrAfterSlotTxn(
+	ctx context.Context,
+	txn *Txn,
+	slot uint64,
+) (ocommon.Point, error) {
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	store := txn.BlobStore()
+	if store == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobKeyPrefix)
+	it := store.NewIterator(txn.Blob(), types.BlobIteratorOptions{
+		Prefix: prefix,
+	})
+	if it == nil {
+		return ocommon.Point{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	seek := slices.Concat(
+		prefix,
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return ocommon.Point{}, err
+		}
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if len(key) != types.BlockBlobKeySize {
+			continue
+		}
+		point, err := BlockBlobKeyToPoint(key)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		if point.Slot < slot {
+			continue
+		}
+		id, err := BlockIDByPointLocalTxn(txn, point)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if id == 0 {
+			continue
+		}
+		matches, err := canonicalPointForID(txn, point, id)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		if matches {
+			return point, nil
+		}
+	}
+	if err := it.Err(); err != nil {
+		return ocommon.Point{}, err
+	}
+	return ocommon.Point{}, models.ErrBlockNotFound
+}
+
+// BlockPointAtOrBeforeSlotBoundedTxn returns the newest canonical point whose
+// slot is at most slot, searching the ordered block index from
+// BlockInitialIndex up to highestID. It reads only index entries and the small
+// per-block metadata object, never block CBOR, so it remains usable after
+// local block CBOR expires.
+//
+// It takes the bound rather than resolving one because resolving the highest
+// indexed block needs a reverse iterator of its own
+// (ResolveBlockNumberBoundTxn); a caller holding a chain tip already knows the
+// bound as a single key read (BlockIDByPointLocalTxn).
+//
+// The search is a binary search rather than a reverse scan of the block
+// keyspace because slots increase with the internal block index -- the same
+// property blockKeyByNumberBoundedTxn relies on for heights -- and because a
+// reverse blob iterator lists every key under its prefix on the s3 and gcs
+// plugins before the seek runs. A reverse at-or-before lookup on those stores
+// therefore costs one full listing of the block keyspace per call, which is
+// unbounded work inside an HTTP request; this costs O(log n) key reads on
+// every plugin.
+func BlockPointAtOrBeforeSlotBoundedTxn(
+	txn *Txn,
+	slot uint64,
+	highestID uint64,
+) (ocommon.Point, error) {
+	if txn == nil || txn.Blob() == nil {
+		return ocommon.Point{}, types.ErrNilTxn
+	}
+	if txn.BlobStore() == nil {
+		return ocommon.Point{}, types.ErrBlobStoreUnavailable
+	}
+	if highestID < BlockInitialIndex {
+		return ocommon.Point{}, models.ErrBlockNotFound
+	}
+	var (
+		best    ocommon.Point
+		matched bool
+	)
+	lo, hi := BlockInitialIndex, highestID
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		// At or after mid, not exactly mid: a probe landing in a gap of a
+		// sparse (Mithril bootstrap/drain-imported) ID space must seek
+		// forward to the next indexed block rather than fail.
+		entry, err := blockIndexEntryAtOrAfterTxn(txn, mid)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				hi = mid - 1
+				continue
+			}
+			return ocommon.Point{}, err
+		}
+		if entry.id > hi {
+			hi = mid - 1
+			continue
+		}
+		point, err := BlockBlobKeyToPoint(entry.blockKey)
+		if err != nil {
+			return ocommon.Point{}, err
+		}
+		if point.Slot <= slot {
+			best, matched = point, true
+			// entry.id, not mid+1: the seek forward may have landed above
+			// mid, and re-probing (mid, entry.id) only finds it again.
+			lo = entry.id + 1
+			continue
+		}
+		hi = mid - 1
+	}
+	if !matched {
+		return ocommon.Point{}, models.ErrBlockNotFound
+	}
+	return best, nil
+}
+
+func canonicalPointForID(txn *Txn, point ocommon.Point, id uint64) (bool, error) {
+	if id == 0 {
+		return false, nil
+	}
+	indexed, err := txn.DB().BlockPointByIndex(id, txn)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return indexed.Slot == point.Slot && bytes.Equal(indexed.Hash, point.Hash), nil
 }
 
 func BlockByHash(db *Database, hash []byte) (models.Block, error) {
