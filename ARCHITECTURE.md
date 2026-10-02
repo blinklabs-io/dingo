@@ -4752,8 +4752,9 @@ remote address to peer governance's deny list for ten minutes (`DenyPeer`),
 closes the connection if it is still open, logs whether the deny was applied,
 and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
 or not a connection was left to close.
-The disconnector does not implement the Limit on Eagerness; it only removes
-sparse peers from the candidate set that cap is measured across.
+Forks held at the Limit on Eagerness are resolved by the same pass (see
+Limit on Eagerness); the disconnector itself does not apply the cap, and only
+removes peers from the candidate set that cap is measured across.
 
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
@@ -5021,9 +5022,33 @@ out would release the cap with no new evidence. The header's sender
 always counts as a candidate, even when stale, and a header from an untracked
 peer is admitted, so a lone peer is never held back. The limit does not hold
 back a rollback. Two candidates that both run more than `k` past their fork
-point each pause at the limit; the pause ends when either candidate is
-dropped or goes stale. The pause is not charged against the Limit on
-Patience.
+point each pause at the limit, and neither is dropped for being silent: see
+the standoff rule below. A held header's wait happens inside the roll-forward
+callback after the peer was charged up to the header's arrival, so the Limit
+on Patience does not charge it.
+
+A held peer delivers no headers, so two forks that are both held cannot show
+the window-wide density the Genesis Density Disconnector compares, and the
+limit would not move. The disconnector therefore also resolves this standoff
+(`eagernessStandoffDisconnectsLocked`), in the same pass and through the same
+`OnGenesisDensityDisconnect` callback, with `EagernessStandoff` set. For each
+pair of held forks it counts the blocks each delivered in
+`(intersection, min(head slots)]`, which is exact for both because every
+header up to a head was delivered. The fork with fewer blocks is disconnected,
+which removes it from the candidate set and moves the limit. Equal counts fall
+to the selector's transport order (connection priority, incumbent, blockfetch
+latency, connection ID). A fork that is still streaming is not held and
+decides nothing, a held peer that is a prefix of another is not a fork, and a
+peer is reported once, so the last candidate is never removed. The decision
+does not depend on which peer the chainsync client treats as primary.
+
+The stall recycler is coherent with this: `ChainSelector.EagernessPaused`
+marks a stalled chainsync client the selector is holding, and the recycler
+neither schedules nor performs a recycle or removal for it. Without the
+standoff rule that exemption would stall the node; with it, a held peer leaves
+only by losing the density comparison, or by its competitor going away. A
+held peer is not exempt from the standoff comparison, only from the stall
+timer.
 
 The limit is exported as the `dingo_chainselection_loe_block_number` and
 `dingo_chainselection_loe_intersection_slot` gauges (0 while inactive).

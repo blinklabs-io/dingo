@@ -173,8 +173,12 @@ func (n *Node) onGenesisDensityDisconnect(
 	// A connection ID without a remote address cannot be denied, so the log
 	// reports whether the deny happened rather than implying it.
 	denied := n.peerGov != nil && d.ConnectionId.RemoteAddr != nil
+	msg := "disconnecting peer serving a provably sparser chain"
+	if d.EagernessStandoff {
+		msg = "disconnecting the sparser of forks held at the limit on eagerness"
+	}
 	n.config.logger.Warn(
-		"disconnecting peer serving a provably sparser chain",
+		msg,
 		"connection_id", d.ConnectionId.String(),
 		"dominating_connection_id", d.DominatingConnectionId.String(),
 		"intersection_slot", d.Intersection.Slot,

@@ -1966,6 +1966,34 @@ func TestRollForwardChargesPatienceOnlyUntilArrival(t *testing.T) {
 	require.InDelta(t, 61, tc.Patience.Tokens, 1e-9)
 }
 
+// A header held at the Limit on Eagerness waits inside the callback, after
+// the peer was charged up to the header's arrival. The wait is this node's
+// own, so an hour of it must not drain the bucket.
+func TestRollForwardEagernessWaitIsNotChargedToPatience(t *testing.T) {
+	t.Parallel()
+	f := newPatienceRollForwardFixture(t, true)
+	waited := false
+	f.o.config.ChainsyncAwaitEagerness = func(
+		context.Context,
+		ouroboros.ConnectionId,
+		uint64,
+		func() ochainsync.Tip,
+	) error {
+		waited = true
+		f.now = f.now.Add(time.Hour)
+		return nil
+	}
+
+	f.now = f.now.Add(40 * time.Second)
+	f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+
+	require.True(t, waited, "the eagerness wait must be consulted")
+	tc := f.state.GetTrackedClient(f.conn)
+	require.NotNil(t, tc)
+	require.False(t, tc.Patience.Exhausted)
+	require.InDelta(t, 61, tc.Patience.Tokens, 1e-9)
+}
+
 func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 	t.Parallel()
 	t.Run("verification failure", func(t *testing.T) {

@@ -73,8 +73,8 @@ func (cs *ChainSelector) EagernessLimit() EagernessLimit {
 // recorded point is the one piece of state this method writes, under its own
 // mutex, so it is safe under the read lock.
 //
-// localTip is the applied tip the no-overlap-yet limit is measured from. include
-// names a peer that counts as a candidate even when it is stale or
+// localTip is the applied tip the no-overlap-yet limit is measured from.
+// include names a peer that counts as a candidate even when it is stale or
 // ineligible, so a header's own sender is never held back by a candidate set
 // that has dropped it. Pass nil for the selection view.
 func (cs *ChainSelector) computeEagernessLimitLocked(
@@ -266,12 +266,12 @@ const eagernessPollInterval = 100 * time.Millisecond
 // connId is not a tracked peer, or when the header is within the limit.
 //
 // appliedTip, when non-nil, supplies the applied ledger tip that the limit is
-// measured from before the candidates have shared a point and is re-read on every check. A running node gives
-// the selector its local tip only at startup and then on the stall recycler's
-// tick, which would hold a paused peer for the length of that interval; nil
-// uses the selector's own local tip. The
-// sender counts as a candidate even when stale, so a lone peer is never held
-// back by the limit that its own fragment defines.
+// measured from before the candidates have shared a point, and is re-read on
+// every check. A running node gives the selector its local tip only at
+// startup and then on the stall recycler's tick, which would hold a paused
+// peer for the length of that interval; nil uses the selector's own local
+// tip. The sender counts as a candidate even when stale, so a lone peer is
+// never held back by the limit that its own fragment defines.
 //
 // The caller's chainsync callback blocks here, which stops that peer's header
 // stream without discarding a header: the peer's cursor stays put and the
@@ -323,6 +323,15 @@ func (cs *ChainSelector) pauseEagerness(
 		peerTip.eagernessPaused--
 		cs.mutex.Unlock()
 	}
+}
+
+// EagernessPaused reports whether connId's header stream is currently held at
+// the Limit on Eagerness.
+func (cs *ChainSelector) EagernessPaused(connId ouroboros.ConnectionId) bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	peerTip, ok := cs.peerTips[connId]
+	return ok && peerTip.eagernessPaused > 0
 }
 
 func (cs *ChainSelector) withinEagernessLimit(

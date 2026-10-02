@@ -43,6 +43,11 @@ type GenesisDensityDisconnect struct {
 	// MaxDensity is the most blocks ConnectionId could still have in the
 	// window: what it delivered plus every slot it has not yet covered.
 	MaxDensity uint64
+	// EagernessStandoff is true when both peers were held at the Limit on
+	// Eagerness and ConnectionId lost the comparison of the blocks each
+	// delivered after Intersection. DominatingDensity and MaxDensity are then
+	// those block counts, and WindowSlots is the span they were counted over.
+	EagernessStandoff bool
 }
 
 // fragmentWindowBounds returns the lower and upper bound on the number of
@@ -100,12 +105,7 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 	cs.lastGenesisDensityEval = now
 
 	window := cs.genesisWindowSlotsLocked()
-	type candidate struct {
-		connId   ouroboros.ConnectionId
-		fragment CandidateFragment
-		points   []ocommon.Point
-	}
-	candidates := make([]candidate, 0, len(cs.peerTips))
+	candidates := make([]densityCandidate, 0, len(cs.peerTips))
 	for connId, peerTip := range cs.peerTips {
 		if _, done := cs.genesisDensityDisconnected[connId]; done ||
 			!cs.peerCanCorroborateLocked(connId, peerTip) {
@@ -115,10 +115,11 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 		if fragment.Len() == 0 {
 			continue
 		}
-		candidates = append(candidates, candidate{
+		candidates = append(candidates, densityCandidate{
 			connId:   connId,
 			fragment: fragment,
 			points:   fragment.Points(),
+			held:     peerTip.eagernessPaused > 0,
 		})
 	}
 
@@ -168,6 +169,95 @@ func (cs *ChainSelector) genesisDensityDisconnectsLocked() []GenesisDensityDisco
 				MaxDensity:             maxDensity,
 			})
 			break
+		}
+	}
+	return append(out, cs.eagernessStandoffDisconnectsLocked(candidates)...)
+}
+
+// densityCandidate is one live candidate's fragment as the disconnector
+// compares it.
+type densityCandidate struct {
+	connId   ouroboros.ConnectionId
+	fragment CandidateFragment
+	points   []ocommon.Point
+	// held is true while the peer's header stream is paused at the Limit on
+	// Eagerness.
+	held bool
+}
+
+// eagernessStandoffDisconnectsLocked resolves forks that are all held at the
+// Limit on Eagerness. A held peer delivers no further headers, so two forks
+// that both run more than k past their fork point can never show the
+// window-wide density the provable comparison above needs, and the limit would
+// stay put until something unrelated dropped one of them.
+//
+// Upstream densityDisconnect settles this by removing the losing peer, which
+// moves the Limit on Eagerness fragment. Here the loser is the fork with fewer
+// blocks in the slots both have delivered, (intersection, min(head slots)]:
+// every header up to a head is delivered, so that count is exact for both. The
+// same count decides which fork the selector prefers, and equal counts fall to
+// the selector's transport order, so the survivor is the peer chain selection
+// already favours rather than whichever the stall recycler reaches first.
+// Only forks are compared; a held peer that is a prefix of another is merely
+// behind. A fork that is still streaming is not held and decides nothing.
+func (cs *ChainSelector) eagernessStandoffDisconnectsLocked(
+	candidates []densityCandidate,
+) []GenesisDensityDisconnect {
+	var out []GenesisDensityDisconnect
+	for i := range candidates {
+		for j := i + 1; j < len(candidates); j++ {
+			a, b := candidates[i], candidates[j]
+			if !a.held || !b.held {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[a.connId]; done {
+				continue
+			}
+			if _, done := cs.genesisDensityDisconnected[b.connId]; done {
+				continue
+			}
+			intersection, ok := a.fragment.Intersect(b.fragment)
+			if !ok ||
+				intersection.Slot == a.fragment.HeadPoint().Slot ||
+				intersection.Slot == b.fragment.HeadPoint().Slot {
+				continue
+			}
+			compared := min(
+				a.fragment.HeadPoint().Slot,
+				b.fragment.HeadPoint().Slot,
+			)
+			countA, _ := fragmentWindowBounds(
+				a.points, intersection.Slot, compared,
+			)
+			countB, _ := fragmentWindowBounds(
+				b.points, intersection.Slot, compared,
+			)
+			winner, loser := a, b
+			winnerCount, loserCount := countA, countB
+			switch {
+			case countB > countA:
+				winner, loser = b, a
+				winnerCount, loserCount = countB, countA
+			case countA == countB &&
+				cs.compareTransportLocked(a.connId, b.connId, true) ==
+					ChainBBetter:
+				winner, loser = b, a
+			}
+			if cs.genesisDensityDisconnected == nil {
+				cs.genesisDensityDisconnected = make(
+					map[ouroboros.ConnectionId]struct{},
+				)
+			}
+			cs.genesisDensityDisconnected[loser.connId] = struct{}{}
+			out = append(out, GenesisDensityDisconnect{
+				ConnectionId:           loser.connId,
+				DominatingConnectionId: winner.connId,
+				Intersection:           intersection,
+				WindowSlots:            compared - intersection.Slot,
+				DominatingDensity:      winnerCount,
+				MaxDensity:             loserCount,
+				EagernessStandoff:      true,
+			})
 		}
 	}
 	return out

@@ -605,6 +605,68 @@ func TestTickRecyclesStalledActiveConnection(t *testing.T) {
 	assert.Contains(t, st.lastRecycled, connId.String())
 }
 
+// A peer held at the Limit on Eagerness sends no headers because the selector
+// paused it, so its silence is not a stall. Recycling the primary for it would
+// release the other fork by role instead of density. The control case, the
+// same stalled client without the hold, is recycled.
+func TestTickDoesNotRecycleStalledClientHeldAtEagernessLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		active  uint
+		held    bool
+		wantEvt string
+	}{
+		{"held primary", 1, true, ""},
+		{"held non-primary", 2, true, ""},
+		{"unheld primary", 1, false, "stalled_active_connection"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			connId := testConnId(1)
+			other := testConnId(2)
+			active := testConnId(tc.active)
+			ledger := &fakeLedger{tip: testTip(100, 50), atTip: true}
+			state := &fakeChainsyncState{
+				tracked: []chainsync.TrackedClient{
+					stalledClient(connId, false),
+					stalledClient(other, false),
+				},
+				activeConn: &active,
+			}
+			sel := &fakeChainSelector{paused: map[string]bool{}}
+			if tc.held {
+				sel.paused[connId.String()] = true
+			}
+			pub := newFakePublisher()
+			r, _ := newTestRecycler(t, ledger, state, sel, pub, Config{})
+
+			now := time.Now()
+			st := newTestTickState(100, now)
+			st.recycleAt[connId.String()] = now.Add(-time.Second)
+
+			runTickWith(r, st, LiveComponents{
+				Ledger:         ledger,
+				ChainsyncState: state,
+				ChainSelector:  sel,
+			}, now, 100)
+
+			recycled := pub.byType(connmanager.ConnectionRecycleRequestedEventType)
+			removed := pub.byType(chainsync.ClientRemoveRequestedEventType)
+			if tc.wantEvt == "" {
+				assert.Empty(t, recycled, "a held client must not be recycled")
+				assert.Empty(t, removed, "a held client must not be removed")
+				assert.NotContains(t, st.recycleAt, connId.String())
+				return
+			}
+			require.Len(t, recycled, 1)
+			evt, ok := recycled[0].evt.Data.(connmanager.ConnectionRecycleRequestedEvent)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantEvt, evt.Reason)
+		})
+	}
+}
+
 func TestTickRemovesStalledNonPrimaryConnection(t *testing.T) {
 	connId := testConnId(1)
 	other := testConnId(2)

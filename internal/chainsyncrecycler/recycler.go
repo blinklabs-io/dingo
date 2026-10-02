@@ -74,6 +74,9 @@ type ChainSelector interface {
 	SetSecurityParam(k uint64)
 	GetBestPeer() *ouroboros.ConnectionId
 	GetPeerTip(connId ouroboros.ConnectionId) *chainselection.PeerChainTip
+	// EagernessPaused reports whether the selector is holding the peer's
+	// header stream at the Limit on Eagerness.
+	EagernessPaused(connId ouroboros.ConnectionId) bool
 }
 
 // EventPublisher publishes the recovery requests the recycler decides on.
@@ -444,14 +447,26 @@ func (r *Recycler) tick(
 		len(trackedClients),
 	)
 	eligibleCount := 0
+	recyclable := make([]chainsync.TrackedClient, 0, len(trackedClients))
 	for _, conn := range trackedClients {
 		connKey := conn.ConnId.String()
-		trackedByID[connKey] = conn
-		if conn.Status != chainsync.ClientStatusStalled {
-			delete(st.recycleAt, connKey)
-		}
 		if !conn.ObservabilityOnly {
 			eligibleCount++
+		}
+		// The selector paused this peer at the Limit on Eagerness, which is
+		// why it sent nothing. Closing it for that would pick the fork to
+		// release by whether it happened to be primary; the selector resolves
+		// the standoff by density instead.
+		if conn.Status == chainsync.ClientStatusStalled &&
+			live.ChainSelector != nil &&
+			live.ChainSelector.EagernessPaused(conn.ConnId) {
+			delete(st.recycleAt, connKey)
+			continue
+		}
+		trackedByID[connKey] = conn
+		recyclable = append(recyclable, conn)
+		if conn.Status != chainsync.ClientStatusStalled {
+			delete(st.recycleAt, connKey)
 		}
 	}
 	// Prune expired cooldown entries so this map does not grow without bound
@@ -472,7 +487,7 @@ func (r *Recycler) tick(
 		effectivePlateau,
 		effectiveCooldown,
 	)
-	r.scheduleStalledRecycles(now, st, trackedClients, effectiveGrace)
+	r.scheduleStalledRecycles(now, st, recyclable, effectiveGrace)
 	r.processDueRecycles(
 		now,
 		st,
