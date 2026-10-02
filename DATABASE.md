@@ -2209,9 +2209,10 @@ cache expires and the Ouroboros provider's cache-miss reload path. The GC does
 not delete ordinary ledger blocks, UTxOs, or already-applied Leios effects. A
 later rollback/replay that needs a pruned endorser block must refetch it from a
 Leios peer; downstream requests outside the configured window have the same
-peer dependency. Every sweep is a full Leios-key prefix listing; on S3 and GCS
-it also incurs object-listing and per-key delete requests, so retention remains
-opt-in.
+peer dependency. Hourly sweeps list manifests to find the highest persisted
+slot, then list the shared Leios prefix to select deletion candidates. On S3
+and GCS this means two paginated listings plus per-key delete requests, so
+retention remains opt-in.
 
 `Database.BlockPointByIndex` resolves a `bi` entry by parsing its `bp` value
 directly into the canonical slot and hash. It deliberately does not load the

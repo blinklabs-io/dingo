@@ -111,13 +111,12 @@ func (d *Database) GetLeiosEBManifest(
 //
 // COST. The full prefix scan is inherent, not an oversight: the current key
 // layout is "em"+hash+slot, so keys sort by hash and no bounded reverse seek
-// can find the maximum slot. The scan runs synchronously from newOuroboros at
-// startup. On badger it is key-only -- the iterator options leave
-// PrefetchValues false and only the legacy branch copies a value -- while on
-// the S3 and GCS blob plugins the same call is a paginated object listing
-// over the whole prefix, with no deadline on the startup path. Ordering the
-// keys by slot, or maintaining the maximum as its own record, is what would
-// make it bounded.
+// can find the maximum slot. It runs at startup to restore the watermark and
+// hourly when GC computes its cutoff. On Badger it is key-only -- iterator
+// options leave PrefetchValues false and only the legacy branch copies a
+// value -- while S3 and GCS perform a paginated listing over the prefix.
+// Ordering keys by slot or maintaining the maximum as its own record would
+// make the scan bounded.
 func (d *Database) MaxLeiosEBSlot() (uint64, error) {
 	return d.MaxLeiosEBSlotContext(context.Background())
 }

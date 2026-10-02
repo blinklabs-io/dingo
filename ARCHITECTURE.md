@@ -3297,9 +3297,11 @@ ordinary ledger block history and already-applied UTxO effects are unaffected.
 The Ouroboros provider also reloads EBs from these keys on a cache miss, so a
 later rollback/replay that needs pruned data must refetch it from a Leios peer;
 downstream requests outside the configured window have the same peer
-dependency. Each sweep scans the Leios blob-key prefix, including on object
-stores, so the cost is opt-in. The GC worker does not share the persistence
-writer's queue and cannot stall its write drain. Live Restore/Truncate stops
+dependency. Hourly sweeps list manifests to find the highest persisted slot,
+then scan the shared Leios prefix for deletion candidates. On object stores
+this means two paginated listings plus per-key deletes, so the cost is opt-in.
+The GC worker does not share the persistence writer's queue and cannot stall
+its write drain. Live Restore/Truncate stops
 and joins both workers before storage replacement; if either worker cannot
 stop within the bounded drain window, the live operation does not proceed
 against the old database. Partial cloud-store deletes are safe to retry on the
