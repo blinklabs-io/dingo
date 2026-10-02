@@ -8279,14 +8279,15 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 `internal/node.Run` starts three auxiliary HTTP listeners, binding each with
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
-Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
-the health listener on `healthPort` (default `12799`, `0` disables).
+Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
+remote scraping requires setting `metricsBindAddr`), pprof on `debugPort`
+when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The three API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
 `docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
-and metrics listeners already use, rather than the API listeners' own
+listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
 or an ECS/ALB target-group check reaches the container from outside, and
@@ -8367,8 +8368,9 @@ The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these three providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost or Mesh.
 The three API listeners use the root `bindAddr`, whose default is
-`0.0.0.0`. `debugBindAddr` remains the separate pprof
-listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
+`0.0.0.0`. `metricsBindAddr` and `debugBindAddr` remain the separate
+Prometheus and pprof listener settings, both defaulting to loopback.
+`corsAllowedOrigins` remains a root-level, operator-chosen
 CORS setting shared by the API providers.
 
 ### API listener lifecycle (`internal/apilistener`)

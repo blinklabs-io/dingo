@@ -43,6 +43,7 @@ func validTestConfig() *Config {
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		ShutdownTimeout:      DefaultShutdownTimeout,
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
@@ -282,6 +283,18 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			// metricsPort binds metricsBindAddr, not bindAddr, so a
+			// loopback metrics listener may share a port with a listener
+			// on a different specific address.
+			name: "metrics bind address distinct from bindAddr may share a port",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.MetricsBindAddr = "127.0.0.1"
+				c.HealthPort = c.MetricsPort
+			},
+		},
+		{
 			// Two spellings of one IPv6 literal name one listener. A
 			// string comparison lets them past validation, and the
 			// health listener is then one of two servers racing for the
@@ -319,10 +332,11 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			name: "mesh shares bind address with metrics for collision checks",
+			name: "mesh and metrics on the same bind address collide",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
 				c.BindAddr = "127.0.0.2"
+				c.MetricsBindAddr = "127.0.0.2"
 				c.MetricsPort = APIPluginPort(c.Plugins.API.Mesh)
 			},
 			wantErr: "is assigned to both",

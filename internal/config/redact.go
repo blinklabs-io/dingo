@@ -186,6 +186,7 @@ var logPlainConfigFields = []string{
 	"MaxTrustedLocalNtCConns",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
+	"MetricsBindAddr",
 	"MetricsPort",
 	"Midnight.AuthTokenAssetName",
 	"Midnight.AuthTokenPolicyID",

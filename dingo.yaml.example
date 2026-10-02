@@ -147,8 +147,15 @@
 # CLI: --metrics-port
 # metricsPort: 12798
 
+# Address for the unauthenticated Prometheus listener. This is deliberately
+# independent of bindAddr and stays on loopback by default. Set a wildcard or
+# remote-reachable address only when scrapers need it and an external network
+# control protects the endpoint.
+# CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
+# metricsBindAddr: "127.0.0.1"
+
 # TCP port for the liveness/readiness probe listener. 0 disables it.
-# Binds bindAddr, like the relay and metrics listeners: a kubelet or
+# Binds bindAddr, like the relay listener: a kubelet or
 # load-balancer probe reaches the container from
 # outside, so loopback would fail those closed.
 #

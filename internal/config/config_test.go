@@ -46,6 +46,7 @@ func resetGlobalConfig() {
 		HealthPort:                       DefaultHealthPort,
 		HealthReadyGapSlots:              DefaultHealthReadyGapSlots,
 		DebugBindAddr:                    DefaultDebugBindAddr,
+		MetricsBindAddr:                  DefaultMetricsBindAddr,
 		PrivateBindAddr:                  "127.0.0.1",
 		PrivatePort:                      3002,
 		RelayPort:                        3001,
@@ -93,10 +94,20 @@ func resetGlobalConfig() {
 
 func unsetDebugBindAddrEnv(t *testing.T) {
 	t.Helper()
-	// Preserve the caller's environment while ensuring config tests that
-	// exercise defaults or YAML precedence do not inherit this override.
-	t.Setenv("DINGO_DEBUG_BIND_ADDR", "")
-	require.NoError(t, os.Unsetenv("DINGO_DEBUG_BIND_ADDR"))
+	unsetEnv(t, "DINGO_DEBUG_BIND_ADDR")
+}
+
+func unsetMetricsBindAddrEnv(t *testing.T) {
+	t.Helper()
+	unsetEnv(t, "DINGO_METRICS_BIND_ADDR")
+}
+
+// unsetEnv preserves the caller's environment while ensuring config tests
+// that exercise defaults or YAML precedence do not inherit an override.
+func unsetEnv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	require.NoError(t, os.Unsetenv(key))
 }
 
 // unsetForgeGateEnv clears the forge-gate overrides so tests that assert the
@@ -230,6 +241,7 @@ mithril:
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          8000,
 		RelayPort:            4000,
@@ -364,6 +376,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		HealthPort:           DefaultHealthPort,
 		HealthReadyGapSlots:  DefaultHealthReadyGapSlots,
 		DebugBindAddr:        DefaultDebugBindAddr,
+		MetricsBindAddr:      DefaultMetricsBindAddr,
 		PrivateBindAddr:      "127.0.0.1",
 		PrivatePort:          3002,
 		RelayPort:            3001,

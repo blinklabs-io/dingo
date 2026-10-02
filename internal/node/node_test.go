@@ -640,6 +640,35 @@ func TestPprofDebugServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 }
 
+func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		bindAddr string
+		want     string
+	}{
+		{"loopback", "127.0.0.1", "127.0.0.1:12798"},
+		{"wildcard opt-in", "0.0.0.0", "0.0.0.0:12798"},
+		{"remote address opt-in", "10.0.0.5", "10.0.0.5:12798"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// BindAddr stays wildcard to show the metrics listener does
+			// not inherit it.
+			srv := newMetricsServer(&config.Config{
+				BindAddr:        "0.0.0.0",
+				MetricsBindAddr: tc.bindAddr,
+				MetricsPort:     12798,
+			})
+			if srv.Addr != tc.want {
+				t.Fatalf("metrics address = %q, want %q", srv.Addr, tc.want)
+			}
+		})
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 

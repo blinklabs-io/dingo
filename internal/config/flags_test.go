@@ -288,6 +288,53 @@ func TestDebugBindAddressExplicitOverridePrecedence(t *testing.T) {
 	require.Equal(t, "0.0.0.0:6060", cfg.DebugListenAddress())
 }
 
+func TestMetricsBindAddressDefaultsToLoopback(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	cfg.ApplyDefaults()
+	require.Equal(t, "0.0.0.0", cfg.BindAddr)
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+	require.Equal(t, "127.0.0.1:12798", cfg.MetricsListenAddress())
+
+	// A manually built or explicitly empty value must not fall back to the
+	// public wildcard bind.
+	cfg.MetricsBindAddr = ""
+	cfg.ApplyDefaults()
+	require.Equal(t, DefaultMetricsBindAddr, cfg.MetricsBindAddr)
+}
+
+func TestMetricsBindAddressExplicitOverridePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	unsetMetricsBindAddrEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("metricsBindAddr: 10.0.0.5\nmetricsPort: 9100\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "10.0.0.5:9100", cfg.MetricsListenAddress())
+
+	t.Setenv("DINGO_METRICS_BIND_ADDR", "127.0.0.3")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.3", cfg.MetricsBindAddr)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--metrics-bind-addr=0.0.0.0",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, "0.0.0.0:9100", cfg.MetricsListenAddress())
+}
+
 func TestFullPotRewardsEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
