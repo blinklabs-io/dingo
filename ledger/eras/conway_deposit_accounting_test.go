@@ -15,9 +15,11 @@
 package eras
 
 import (
-	"bytes"
+	"crypto/ed25519"
 	"math/big"
 	"testing"
+
+	"github.com/blinklabs-io/gouroboros/cbor"
 
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -60,7 +62,7 @@ func depositTestTx(
 		OutputIndex: 0,
 	}
 	addr := lcommon.Address{}
-	return &conway.ConwayTransaction{
+	tx := &conway.ConwayTransaction{
 		TxIsValid: isValid,
 		Body: conway.ConwayTransactionBody{
 			TxInputs: conway.NewConwayTransactionInputSet(
@@ -79,14 +81,31 @@ func depositTestTx(
 				Certificate: cert,
 			}},
 		},
-	}, input
+	}
+	key := depositTestSigningKey()
+	hash := tx.Hash()
+	tx.WitnessSet.VkeyWitnesses = cbor.NewSetType(
+		[]lcommon.VkeyWitness{
+			{
+				Vkey:      key.Public().(ed25519.PublicKey),
+				Signature: ed25519.Sign(key, hash[:]),
+			},
+		},
+		false,
+	)
+	return tx, input
+}
+func depositTestSigningKey() ed25519.PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	seed[0] = 0x77
+	return ed25519.NewKeyFromSeed(seed)
 }
 
 func depositTestCred() lcommon.Credential {
 	return lcommon.Credential{
 		CredType: lcommon.CredentialTypeAddrKeyHash,
-		Credential: lcommon.NewBlake2b224(
-			bytes.Repeat([]byte{0x77}, lcommon.AddressHashSize),
+		Credential: lcommon.Blake2b224Hash(
+			depositTestSigningKey().Public().(ed25519.PublicKey),
 		),
 	}
 }
@@ -126,7 +145,9 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 			supplied: 1_000_000,
 			build: func(amount int64) lcommon.Certificate {
 				return &lcommon.RegistrationDrepCertificate{
-					CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+					CertType: uint(
+						lcommon.CertificateTypeRegistrationDrep,
+					),
 					DrepCredential: depositTestCred(),
 					Amount:         amount,
 				}
@@ -180,10 +201,12 @@ func TestValidateTxConwayDepositsComeFromProtocolParameters(t *testing.T) {
 				ls.skipPhase2Validation = true
 				ls.addUtxo(in, newTestOutput(depositTestInput))
 				err := ValidateTxConway(tx, 0, ls, depositTestPparams())
-				var notConserved shelley.ValueNotConservedUtxoError
-				var incorrect conway.CertificateDepositIncorrectError
-				assert.NotErrorAs(t, err, &notConserved)
-				assert.NotErrorAs(t, err, &incorrect)
+				if isValid {
+					require.NoError(t, err)
+				} else {
+					var invalid lcommon.InvalidIsValidFlagError
+					require.ErrorAs(t, err, &invalid)
+				}
 			})
 		}
 	}

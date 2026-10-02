@@ -16,6 +16,7 @@ package eras
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -42,7 +43,8 @@ const (
 // account as registered, which mockLedgerState does not model.
 type phase2DepositLedgerState struct {
 	*mockLedgerState
-	drep *lcommon.DRepRegistration
+	drep            *lcommon.DRepRegistration
+	stakeRegistered bool
 }
 
 func (s phase2DepositLedgerState) DRepRegistration(
@@ -53,6 +55,12 @@ func (s phase2DepositLedgerState) DRepRegistration(
 		return s.drep, nil
 	}
 	return nil, nil
+}
+
+func (s phase2DepositLedgerState) IsStakeCredentialRegistered(
+	_ lcommon.Credential,
+) bool {
+	return s.stakeRegistered
 }
 
 func (s phase2DepositLedgerState) IsRewardAccountRegistered(
@@ -77,6 +85,7 @@ func phase2DepositFailingScript(t *testing.T) lcommon.PlutusV3Script {
 }
 
 type phase2DepositShape struct {
+	isValid   bool
 	certs     []lcommon.CertificateWrapper
 	proposals []conway.ConwayProposalProcedure
 	// delta is added to the script input to give the single output amount:
@@ -85,15 +94,28 @@ type phase2DepositShape struct {
 	delta int64
 }
 
-// newPhase2DepositTx builds an isValid=false Conway transaction that spends a
-// UTxO locked by a script that fails, with valid collateral, and whose body
-// balances under the amounts described by shape.
+// newPhase2DepositTx builds a transaction with a script whose outcome matches
+// shape.isValid, valid collateral, and a body balanced under shape amounts.
 func newPhase2DepositTx(
 	t *testing.T,
 	shape phase2DepositShape,
 ) (*conway.ConwayTransaction, *mockLedgerState, *conway.ConwayProtocolParameters, lcommon.Credential) {
 	t.Helper()
 	plutusScript := phase2DepositFailingScript(t)
+	if shape.isValid {
+		flat, err := syn.Encode(
+			&syn.Program[syn.DeBruijn]{
+				Version: [3]uint32{1, 1, 0},
+				Term: &syn.Lambda[syn.DeBruijn]{
+					Body: &syn.Constant{Con: &syn.Unit{}},
+				},
+			},
+		)
+		require.NoError(t, err)
+		scriptBytes, err := cbor.Encode(flat)
+		require.NoError(t, err)
+		plutusScript = lcommon.PlutusV3Script(scriptBytes)
+	}
 	scriptInput := shelley.NewShelleyTransactionInput(
 		"f228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee88",
 		0,
@@ -138,9 +160,12 @@ func newPhase2DepositTx(
 		MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
 		MaxTxSize:                  16_384,
 		MaxValueSize:               5_000,
-		MaxTxExUnits:               lcommon.ExUnits{Steps: 1_000_000, Memory: 1_000_000},
-		CollateralPercentage:       150,
-		MaxCollateralInputs:        3,
+		MaxTxExUnits: lcommon.ExUnits{
+			Steps:  1_000_000,
+			Memory: 1_000_000,
+		},
+		CollateralPercentage: 150,
+		MaxCollateralInputs:  3,
 		ExecutionCosts: lcommon.ExUnitPrice{
 			MemPrice:  &cbor.Rat{Rat: big.NewRat(1, 1)},
 			StepPrice: &cbor.Rat{Rat: big.NewRat(1, 1)},
@@ -149,10 +174,12 @@ func newPhase2DepositTx(
 			2: defaultMachineCostModel(t, lang.LanguageVersionV3),
 		},
 	}
-	outputAmount := int64(phase2DepositScriptInput-phase2DepositFee) + shape.delta
+	outputAmount := int64(
+		phase2DepositScriptInput-phase2DepositFee,
+	) + shape.delta
 	require.Positive(t, outputAmount)
 	tx := &conway.ConwayTransaction{
-		TxIsValid: false,
+		TxIsValid: shape.isValid,
 		Body: conway.ConwayTransactionBody{
 			TxInputs: conway.NewConwayTransactionInputSet(
 				[]shelley.ShelleyTransactionInput{scriptInput},
@@ -160,7 +187,9 @@ func newPhase2DepositTx(
 			TxOutputs: []babbage.BabbageTransactionOutput{{
 				OutputAddress: newTestKeyAddress(t),
 				// #nosec G115 -- checked positive above
-				OutputAmount: mary.MaryTransactionOutputValue{Amount: uint64(outputAmount)},
+				OutputAmount: mary.MaryTransactionOutputValue{
+					Amount: uint64(outputAmount),
+				},
 			}},
 			TxFee: phase2DepositFee,
 			TxCollateral: cbor.NewSetType(
@@ -180,8 +209,11 @@ func newPhase2DepositTx(
 			WsRedeemers: conway.ConwayRedeemers{
 				Redeemers: map[lcommon.RedeemerKey]lcommon.RedeemerValue{
 					{Tag: lcommon.RedeemerTagSpend, Index: 0}: {
-						Data:    datum,
-						ExUnits: lcommon.ExUnits{Steps: 1_000_000, Memory: 1_000_000},
+						Data: datum,
+						ExUnits: lcommon.ExUnits{
+							Steps:  1_000_000,
+							Memory: 1_000_000,
+						},
 					},
 				},
 			},
@@ -261,7 +293,9 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 					certs: []lcommon.CertificateWrapper{{
 						Type: uint(lcommon.CertificateTypeRegistration),
 						Certificate: &lcommon.RegistrationCertificate{
-							CertType:        uint(lcommon.CertificateTypeRegistration),
+							CertType: uint(
+								lcommon.CertificateTypeRegistration,
+							),
 							StakeCredential: keyCred(t),
 							Amount:          int64(amount),
 						},
@@ -280,7 +314,9 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 					certs: []lcommon.CertificateWrapper{{
 						Type: uint(lcommon.CertificateTypeRegistrationDrep),
 						Certificate: &lcommon.RegistrationDrepCertificate{
-							CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+							CertType: uint(
+								lcommon.CertificateTypeRegistrationDrep,
+							),
 							DrepCredential: keyCred(t),
 							Amount:         int64(amount),
 						},
@@ -300,7 +336,9 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 					certs: []lcommon.CertificateWrapper{{
 						Type: uint(lcommon.CertificateTypeDeregistrationDrep),
 						Certificate: &lcommon.DeregistrationDrepCertificate{
-							CertType:       uint(lcommon.CertificateTypeDeregistrationDrep),
+							CertType: uint(
+								lcommon.CertificateTypeDeregistrationDrep,
+							),
 							DrepCredential: keyCred(t),
 							Amount:         int64(amount),
 						},
@@ -320,8 +358,10 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 						PPDeposit:       amount,
 						PPRewardAccount: rewardAddr(t, keyCred(t)),
 						PPGovAction: conway.ConwayGovAction{
-							Type:   uint(lcommon.GovActionTypeInfo),
-							Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
+							Type: uint(lcommon.GovActionTypeInfo),
+							Action: &lcommon.InfoGovAction{
+								Type: uint(lcommon.GovActionTypeInfo),
+							},
 						},
 					}},
 					delta: -int64(amount),
@@ -330,9 +370,14 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 		},
 	}
 	for _, v := range variants {
-		run := func(t *testing.T, amount uint64) error {
-			tx, base, params, cred := newPhase2DepositTx(t, v.shape(t, amount))
-			ls := phase2DepositLedgerState{mockLedgerState: base}
+		run := func(t *testing.T, amount uint64, isValid bool) error {
+			shape := v.shape(t, amount)
+			shape.isValid = isValid
+			tx, base, params, cred := newPhase2DepositTx(t, shape)
+			ls := phase2DepositLedgerState{
+				mockLedgerState: base,
+				stakeRegistered: len(shape.proposals) > 0,
+			}
 			if v.drepDeposit != nil {
 				ls.drep = &lcommon.DRepRegistration{
 					Credential: cred,
@@ -343,7 +388,7 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 		}
 		t.Run(v.name+" understated", func(t *testing.T) {
 			t.Parallel()
-			err := run(t, v.understated)
+			err := run(t, v.understated, false)
 			var notConserved shelley.ValueNotConservedUtxoError
 			require.ErrorAs(t, err, &notConserved)
 			shortfall := new(big.Int).Sub(
@@ -358,7 +403,12 @@ func TestValidateTxConwayPhase2InvalidDepositAccounting(t *testing.T) {
 		})
 		t.Run(v.name+" required", func(t *testing.T) {
 			t.Parallel()
-			require.NoError(t, run(t, v.required))
+			for _, isValid := range []bool{false, true} {
+				t.Run(
+					fmt.Sprint(isValid),
+					func(t *testing.T) { t.Parallel(); require.NoError(t, run(t, v.required, isValid)) },
+				)
+			}
 		})
 	}
 }
