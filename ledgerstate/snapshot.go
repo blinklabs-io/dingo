@@ -1167,11 +1167,13 @@ func ParseSnapShots(data cbor.RawMessage) (*ParsedSnapShots, error) {
 		))
 	}
 
+	// The fee field is absent from older encodings. When present it is the
+	// fee pot a reward round adds, so an undecodable value is reported
+	// rather than read as zero.
 	var fee uint64
 	if len(ss) > 3 {
 		if _, err := cbor.Decode(ss[3], &fee); err != nil {
-			// Fee might be optional or zero, don't fail
-			fee = 0
+			warnings = append(warnings, fmt.Errorf("decoding fee: %w", err))
 		}
 	}
 

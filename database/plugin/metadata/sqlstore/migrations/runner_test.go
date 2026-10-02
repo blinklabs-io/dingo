@@ -504,8 +504,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 adds two, and later migrations add fourteen.
-	const shippedAddColumns = 20
+	// v2 adds four columns, v5 adds two, and later migrations add fifteen.
+	const shippedAddColumns = 21
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -519,6 +519,9 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		"bigint":  {},
 		"integer": {},
 		"text":    {},
+		// MySQL's translation of TEXT NOT NULL DEFAULT '0'; information_schema
+		// reports it as varchar.
+		"varchar": {},
 	}
 	for _, dialect := range []struct {
 		name string

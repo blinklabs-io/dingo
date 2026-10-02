@@ -67,6 +67,7 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 )
 
@@ -193,8 +194,13 @@ var schemaVersions = []struct {
 	},
 	{
 		Version: 32,
-		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Name:    rewardLeaderDeficitSchemaRelease,
 		Dir:     "v32",
+	},
+	{
+		Version: 33,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v33",
 	},
 }
 
