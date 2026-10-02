@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -392,4 +393,41 @@ func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, n,
 		"already-raw UTxO should not be counted as materialized")
+}
+
+type cancelAfterPruneReadStore struct {
+	metadata.MetadataStore
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterPruneReadStore) GetLiveUtxosBySlot(slot uint64, txn types.Txn) ([]models.UtxoId, error) {
+	refs, err := s.MetadataStore.GetLiveUtxosBySlot(slot, txn)
+	if err == nil {
+		s.cancel()
+	}
+	return refs, err
+}
+func TestPruneBlockCancellationAfterMetadataReadPreservesBlob(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	slot := uint64(100)
+	txID := randomHash(t)
+	hash, cbor := seedPrunableBlock(t, db, slot, txID, map[uint32][]byte{0: []byte("live-utxo")})
+	seedUtxoMetadata(t, db, txID, 0, slot, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	original := db.metadata
+	db.metadata = cancelAfterPruneReadStore{MetadataStore: original, cancel: cancel}
+	n, err := db.PruneBlock(ctx, slot, hash)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Zero(t, n)
+	txn := db.BlobTxn(false)
+	got, _, err := db.Blob().GetBlock(txn.Blob(), slot, hash)
+	txn.Release()
+	require.NoError(t, err)
+	require.Equal(t, cbor, got)
+	db.metadata = original
+	n, err = db.PruneBlock(t.Context(), slot, hash)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
 }

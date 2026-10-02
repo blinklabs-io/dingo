@@ -63,10 +63,14 @@ func (a *meshDatabaseAdapter) BlockByIndex(ctx context.Context,
 			models.ErrBlockNotFound,
 		)
 	}
-	return a.db.BlockByIndex(
-		height+database.BlockInitialIndex,
-		nil,
-	)
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
+	block, err := a.db.BlockByIndex(height+database.BlockInitialIndex, nil)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return models.Block{}, cancelErr
+	}
+	return block, err
 }
 
 func (a *meshDatabaseAdapter) GetTransactionByHash(ctx context.Context,

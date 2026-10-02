@@ -7497,3 +7497,26 @@ func TestIsFirstOnHeaderChain(t *testing.T) {
 		}
 	})
 }
+
+func TestCancelledRawBatchRestoresChainState(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	cm, err := chain.NewManager(t.Context(), db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+	tipBefore := c.Tip()
+	var origin common.Blake2b256
+	blocks := generateTestChain(t, 1, origin, 20, 20, 2)
+	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
+	for _, b := range blocks {
+		rawBlocks = append(rawBlocks, chain.RawBlock{Slot: b.SlotNumber(), Hash: b.Hash().Bytes(), BlockNumber: b.BlockNumber(), Type: uint(b.Type()), PrevHash: b.PrevHash().Bytes(), Cbor: b.Cbor()})
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	err = c.AddRawBlocksWithCallback(ctx, rawBlocks, func(chain.RawBlock, *database.Txn) error { cancel(); return nil })
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, tipBefore, c.Tip())
+	_, err = c.BlockByPoint(t.Context(), ocommon.NewPoint(rawBlocks[0].Slot, rawBlocks[0].Hash), nil)
+	require.Error(t, err)
+	require.NoError(t, c.AddRawBlocks(t.Context(), rawBlocks))
+}

@@ -74,3 +74,16 @@ func TestDatabaseOwnTransactionsHonorCancelledContext(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseStartupSettingsHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, db.checkCommitTimestamp(ctx), context.Canceled)
+	require.ErrorIs(t, db.CheckNodeSettings(ctx), context.Canceled)
+	require.ErrorIs(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(ctx), context.Canceled)
+	require.NoError(t, db.checkCommitTimestamp(t.Context()))
+	require.NoError(t, db.CheckNodeSettings(t.Context()))
+	require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(t.Context()))
+}

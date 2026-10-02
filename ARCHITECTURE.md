@@ -163,24 +163,24 @@ Two gaps in that propagation are deliberate:
   instead, by the PostgreSQL/MySQL providers' statement/lock timeout
   configuration (`StatementTimeout`/`LockTimeout` in
   `database/plugin/metadata/{postgres,mysql}/provider.go`).
-- A handful of methods that take no `txn` parameter at all -- the
-  `SettingsStore` family, `HasDeferredIndexesPending`,
-  `FindUnspentMidnightAssetCreates`/`FindUnspentMidnightRegistrations` --
-  remain on `context.Background()`. Giving them a `ctx` means changing their
-  exported signatures and every external caller (`node.go`,
-  `internal/settingsresolve`, `database/commit_timestamp.go`,
-  `database/lifecycle/snapshot.go`, `bark/blob.go`,
-  `midnight/indexer/indexer.go`), which reaches outside `sqlstore`'s own
-  package boundary.
+- Methods without a transaction or context parameter, including
+  `HasDeferredIndexesPending` and the Midnight indexer find methods, use
+  `context.Background()`. Startup settings and gate methods in `SettingsStore`
+  accept the caller context directly.
+
 
 `database.Database`'s own API carries the caller's `ctx` the rest of the way:
 `Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
 `NewMetadataOnlyTxn` pass it into the metadata store's `Transaction`/
-`ReadTransaction`, and every facade method that can open its own metadata transaction
+`ReadTransaction`, and context-aware facade methods that can open their own metadata transaction
 (the block lookups such as `BlockByPoint` and `BlocksRecent`, and the domain
 methods that open one when called with a nil `txn`) takes `ctx` as its first
 parameter. A cancelled caller therefore cancels the metadata-store transaction
-underneath it. `golangci-lint`'s `contextcheck` is enabled for the whole
+underneath it. HTTP and RPC adapters pass request contexts into these methods.
+Node listener providers retain the node lifecycle context. Mandatory recovery
+and after-commit persistence use `context.WithoutCancel` to finish repair after
+the initiating request ends. Blob providers have no context API; batch loops
+check cancellation between operations. `golangci-lint`'s `contextcheck` is enabled for the whole
 module; a function that holds a `ctx` and must still detach from it (a loop
 bound to the node lifecycle, a literal-nil `ctx` fallback) says why in a
 `//nolint:contextcheck` comment.

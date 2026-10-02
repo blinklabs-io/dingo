@@ -429,7 +429,13 @@ func (a *NodeAdapter) resolveBlockRangeBound(ctx context.Context,
 	}
 	idx := pos.Block + database.BlockInitialIndex
 
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	block, err := a.ledgerState.Database().BlockByIndex(idx, nil)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return nil, false, cancelErr
+	}
 	switch {
 	case err == nil:
 		txIndex := uint32(0)

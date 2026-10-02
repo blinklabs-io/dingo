@@ -96,7 +96,14 @@ func (a *databaseAdapter) BlockByNumber(ctx context.Context, number uint64) (mod
 			models.ErrBlockNotFound,
 		)
 	}
-	return a.db.BlockByIndex(number+database.BlockInitialIndex, nil)
+	if err := ctx.Err(); err != nil {
+		return models.Block{}, err
+	}
+	block, err := a.db.BlockByIndex(number+database.BlockInitialIndex, nil)
+	if cancelErr := ctx.Err(); cancelErr != nil {
+		return models.Block{}, cancelErr
+	}
+	return block, err
 }
 
 func (a *databaseAdapter) BlocksRecent(ctx context.Context, count int) ([]models.Block, error) {

@@ -198,3 +198,19 @@ func TestMeshDatabaseAdapterBlockIndexOverflow(t *testing.T) {
 
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
+
+func TestMeshAdapterHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
+	db := newAdapterDatabase(t)
+	adapter := &meshDatabaseAdapter{db: db}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := adapter.BlockByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockByIndex(ctx, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.GetTransactionByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.GetTransactionsByBlockHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+}

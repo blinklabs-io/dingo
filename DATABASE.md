@@ -463,6 +463,11 @@ Use the Go APIs when code runs inside Dingo:
   - `StakeSnapshotStore` — epoch-boundary pool stake snapshots, the epoch
     summaries computed from them, and historical per-boundary stake.
 
+`SettingsStore` commit-timestamp reads and node settings/gate reads and writes
+accept `context.Context`. Startup, recovery checks, and snapshot callers pass
+that context through to SQL, including conditional gate insertion transactions.
+
+
   Accounts, pools, rewards and live stake, protocol parameters, block nonces,
   datums and scripts, assets, treasury/reserves and donations, Midnight
   indexer state, sync state, and backfill checkpoints remain composed while

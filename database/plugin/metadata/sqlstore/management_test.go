@@ -1084,3 +1084,25 @@ func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, persisted)
 }
+
+func TestSettingsOperationsHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	s := newManagementTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := s.GetCommitTimestamp(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.GetNodeSettings(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.GetNodeSettingsGates(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, s.SetNodeSettings(ctx, &types.NodeSettings{}), context.Canceled)
+	require.ErrorIs(t, s.SetNodeSettingsGates(ctx, nodesettings.Values{"cancel_probe": "1"}, 0, 0), context.Canceled)
+	_, err = s.InsertNodeSettingsGateIfAbsent(ctx, "cancel_probe", "1", 0, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = s.InsertNodeSettingsGatesIfAbsent(ctx, nodesettings.Values{"cancel_probe": "1"}, 0, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	gates, err := s.GetNodeSettingsGates(t.Context())
+	require.NoError(t, err)
+	require.NotContains(t, gates, "cancel_probe")
+}

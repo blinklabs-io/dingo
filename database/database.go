@@ -303,6 +303,9 @@ func New(
 	config *Config,
 	stores Stores,
 ) (*Database, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if config == nil {
 		config = DefaultConfig
 	}

@@ -46,3 +46,19 @@ func TestBlockByNumber_ResolvesInsertedBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, blk.Hash, got.Hash)
 }
+
+func TestMidnightBlockAdapterHonorsCancelledContext(t *testing.T) {
+	t.Parallel()
+	db := newTestDatabase(t)
+	adapter := server.NewDatabase(db)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := adapter.BlockByHash(ctx, make([]byte, 32))
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockByNumber(ctx, 0)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlocksRecent(ctx, 1)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = adapter.BlockBeforeSlot(ctx, 1)
+	require.ErrorIs(t, err, context.Canceled)
+}

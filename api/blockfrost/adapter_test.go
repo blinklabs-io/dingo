@@ -1078,3 +1078,21 @@ func TestUtxoDatumAndScriptRefNone(t *testing.T) {
 	assert.Nil(t, inlineDatum)
 	assert.Nil(t, referenceScriptHash)
 }
+
+func TestBlockfrostAdaptersHonorCancelledContext(t *testing.T) {
+	t.Parallel()
+	adapter, raw, db := newDBBackedAdapter(t)
+	stakeAddr, _ := seedStakeCredentialUtxos(t, adapter, raw, db, 0)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, _, err := adapter.PoolsList(ctx, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountUTXOs(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountRewardHistory(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountWithdrawals(ctx, stakeAddr, PaginationParams{})
+	require.ErrorIs(t, err, context.Canceled)
+	_, _, err = adapter.AccountTransactions(ctx, stakeAddr, AccountTransactionsParams{})
+	require.ErrorIs(t, err, context.Canceled)
+}
