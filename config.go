@@ -1752,6 +1752,15 @@ func WithBarkClientCAFilePath(path string) ConfigOptionFunc {
 	}
 }
 
+// WithBarkArchiveMaxConcurrentFetches bounds how many Bark ArchiveService
+// FetchBlock requests are served at once. Zero selects Bark's default.
+func WithBarkArchiveMaxConcurrentFetches(limit int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.BarkArchiveMaxConcurrentFetches = limit
+		c.barkArchiveMaxConcurrentFetches = limit
+	}
+}
+
 // WithBarkOperatorCertificateFingerprints sets the SHA-256 client certificate
 // fingerprints authorized to invoke destructive DatabaseService RPCs.
 func WithBarkOperatorCertificateFingerprints(
