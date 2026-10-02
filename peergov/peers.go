@@ -83,11 +83,24 @@ func (p *PeerGovernor) resolveMultiHost(
 	filter bool,
 ) (string, bool) {
 	pickIP := func(ips []net.IP) net.IP {
-		if filter {
-			hasV4, hasV6 := p.supportedDialFamilies()
-			ips = filterDialFamilies(ips, hasV4, hasV6)
+		if !filter {
+			if len(ips) > 0 {
+				return ips[0]
+			}
+			return nil
 		}
-		return ips[0]
+		hasV4, hasV6 := p.supportedDialFamilies()
+		for _, ip := range ips {
+			if !IsRoutableIP(ip) {
+				continue
+			}
+			if (hasV4 || hasV6) &&
+				!((ip.To4() != nil && hasV4) || (ip.To4() == nil && hasV6)) {
+				continue
+			}
+			return ip
+		}
+		return nil
 	}
 	records, err := lookupSRV(ctx, host)
 	if err == nil {
@@ -98,16 +111,20 @@ func (p *PeerGovernor) resolveMultiHost(
 			if record == nil || record.Port == 0 {
 				continue
 			}
-			target := strings.TrimSuffix(record.Target, ".")
-			if target == "" {
+			target := record.Target
+			if target == "" || target == "." {
 				continue
 			}
 			ips, err := lookup(ctx, target)
 			if err != nil || len(ips) == 0 {
 				continue
 			}
+			ip := pickIP(ips)
+			if ip == nil {
+				continue
+			}
 			return net.JoinHostPort(
-				pickIP(ips).String(),
+				ip.String(),
 				strconv.FormatUint(uint64(record.Port), 10),
 			), true
 		}
@@ -119,8 +136,15 @@ func (p *PeerGovernor) resolveMultiHost(
 			defaultCardanoPort,
 		), false
 	}
+	ip := pickIP(ips)
+	if ip == nil {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
 	return net.JoinHostPort(
-		pickIP(ips).String(),
+		ip.String(),
 		defaultCardanoPort,
 	), true
 }
@@ -440,9 +464,7 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 		resolved, ok := p.resolveMultiHost(
 			ctx,
 			host,
-			func(_ context.Context, h string) ([]net.IP, error) {
-				return lookupIP(h)
-			},
+			lookupIPAddr,
 			false,
 		)
 		if !ok {
@@ -648,6 +670,12 @@ func (p *PeerGovernor) resolveDialAddress(
 	if net.ParseIP(host) != nil {
 		return address
 	}
+	if port == multiHostPort {
+		resolveCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+		defer cancel()
+		target, _ := p.resolveMultiHost(resolveCtx, host, lookupIPAddr, false)
+		return target
+	}
 	// Bound the fresh resolution so a hung or slow resolver cannot wedge the
 	// dial loop, and cancel it if the governor is shutting down.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
@@ -716,23 +744,41 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 	// hung or slow resolver cannot wedge the dial loop.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
-	ips, err := lookupIPAddr(lookupCtx, host)
-	if err != nil {
-		return "", err
-	}
-	if len(ips) == 0 {
-		return "", errors.New("no addresses returned for ledger relay hostname")
-	}
-	// Filter to the address families this host can actually dial before
-	// picking the one record that gets locked in forever; an unfiltered
-	// pick could permanently pin the peer to an unreachable family (e.g. an
-	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
-	// re-resolution would otherwise self-correct on the next try.
-	hasV4, hasV6 := p.supportedDialFamilies()
-	ips = filterDialFamilies(ips, hasV4, hasV6)
-	resolved := net.JoinHostPort(ips[0].String(), port)
-	if !isRoutableAddr(resolved) {
-		return "", ErrUnroutableAddress
+	var resolved string
+	originalHost, originalPort, originalErr := net.SplitHostPort(peer.Address)
+	if originalErr == nil && originalPort == multiHostPort {
+		var ok bool
+		resolved, ok = p.resolveMultiHost(
+			lookupCtx,
+			originalHost,
+			lookupIPAddr,
+			true,
+		)
+		if !ok {
+			return "", errors.New(
+				"no usable addresses returned for MultiHost ledger relay",
+			)
+		}
+	} else {
+		ips, err := lookupIPAddr(lookupCtx, host)
+		if err != nil {
+			return "", err
+		}
+		if len(ips) == 0 {
+			return "", errors.New("no addresses returned for ledger relay hostname")
+		}
+		// Filter to the address families this host can actually dial before
+		// picking the one record that gets locked in forever; an unfiltered
+		// pick could permanently pin the peer to an unreachable family (e.g. an
+		// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+		// re-resolution would otherwise self-correct on the next try.
+		hasV4, hasV6 := p.supportedDialFamilies()
+		ips = filterDialFamilies(ips, hasV4, hasV6)
+		resolved = net.JoinHostPort(ips[0].String(), port)
+		if !isRoutableAddr(resolved) {
+			return "", ErrUnroutableAddress
+		}
+
 	}
 
 	p.mu.Lock()

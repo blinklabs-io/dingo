@@ -20,6 +20,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpdateBlockFetchObservationAndScore(t *testing.T) {
@@ -521,7 +523,11 @@ func TestStakeWeight_LogScaling(t *testing.T) {
 	small := at(10_000_000) - at(1_000)
 	large := at(100_000_000) - at(10_000_000)
 	if large >= small {
-		t.Fatalf("10M->100M delta %v must be below 1k->10M delta %v", large, small)
+		t.Fatalf(
+			"10M->100M delta %v must be below 1k->10M delta %v",
+			large,
+			small,
+		)
 	}
 	if got := stakeScoreFor(math.MaxUint64); got < 0 || got > 1 {
 		t.Fatalf("stake score %v outside [0,1]", got)
@@ -546,4 +552,13 @@ func TestStakeWeight_SumOfWeightsIsOne(t *testing.T) {
 	if math.Abs(sum-1.0) > 1e-9 {
 		t.Fatalf("weights sum to %v, want 1.0", sum)
 	}
+}
+
+func TestKnownZeroStakeHasLowerScoreThanUnknownStake(t *testing.T) {
+	t.Parallel()
+	unknown := &Peer{}
+	known := &Peer{StakeKnown: true}
+	unknown.UpdateBlockFetchObservation(100, true)
+	known.UpdateBlockFetchObservation(100, true)
+	require.Less(t, known.PerformanceScore, unknown.PerformanceScore)
 }

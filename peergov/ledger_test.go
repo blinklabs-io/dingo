@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -506,7 +507,7 @@ func TestAddLedgerPeerContextRejectsCancellationDuringResolution(t *testing.T) {
 
 	added := make(chan bool, 1)
 	go func() {
-		added <- pg.addLedgerPeerContext(ctx, "relay.example.com:3001", 0)
+		added <- pg.addLedgerPeerContext(ctx, "relay.example.com:3001", 0, false)
 	}()
 
 	select {
@@ -715,8 +716,8 @@ func TestResolveAddress_SRVResolvesTargetAndPort(t *testing.T) {
 			"pool.example.com": {{Target: "relay1.example.com.", Port: 6000}},
 		},
 		map[string][]net.IP{
-			"relay1.example.com": {net.ParseIP("44.0.1.1")},
-			"pool.example.com":   {net.ParseIP("44.0.9.9")},
+			"relay1.example.com.": {net.ParseIP("44.0.1.1")},
+			"pool.example.com":    {net.ParseIP("44.0.9.9")},
 		},
 	)
 	pg := discardGovernor()
@@ -729,13 +730,37 @@ func TestResolveAddress_SRVResolvesTargetAndPort(t *testing.T) {
 			"pool.example.com:0",
 		),
 	)
+	assert.Equal(
+		t,
+		"44.0.1.1:6000",
+		pg.resolveDialAddress(context.Background(), "pool.example.com:0"),
+	)
+	target, err := pg.resolveLedgerDialTarget(
+		context.Background(),
+		&Peer{
+			Address:           "pool.example.com:0",
+			NormalizedAddress: "pool.example.com:3001",
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "44.0.1.1:6000", target)
+
 }
 
 // Not t.Parallel: swaps the package-level resolver seams.
 func TestResolveAddress_SRVFallbackToARecord(t *testing.T) {
-	stubSRV(t, nil, map[string][]net.IP{
-		"pool.example.com": {net.ParseIP("44.0.9.9")},
-	})
+	stubSRV(
+		t,
+		map[string][]*net.SRV{
+			"pool.example.com": {
+				{Target: "dead.example.com.", Port: 6000},
+				{Target: "also-dead.example.com.", Port: 6001},
+			},
+		},
+		map[string][]net.IP{
+			"pool.example.com": {net.ParseIP("44.0.9.9")},
+		},
+	)
 	pg := discardGovernor()
 	assert.Equal(t, "44.0.9.9:3001", pg.resolveAddress("pool.example.com:0"))
 	assert.Equal(
@@ -761,7 +786,7 @@ func TestResolveAddress_SRVSkipsUnresolvableTarget(t *testing.T) {
 			},
 		},
 		map[string][]net.IP{
-			"alive.example.com": {net.ParseIP("44.0.2.2")},
+			"alive.example.com.": {net.ParseIP("44.0.2.2")},
 		},
 	)
 	pg := discardGovernor()
@@ -806,7 +831,7 @@ func TestDiscoverLedgerPeers_MultiHostRelayUsesSRV(t *testing.T) {
 		map[string][]*net.SRV{
 			"pool.example.com": {{Target: "relay.example.com.", Port: 6000}},
 		},
-		map[string][]net.IP{"relay.example.com": {net.ParseIP("44.0.7.7")}},
+		map[string][]net.IP{"relay.example.com.": {net.ParseIP("44.0.7.7")}},
 	)
 	pg := newStakeDiscoveryGovernor(
 		[]PoolRelay{{
@@ -837,4 +862,104 @@ func TestResolveLedgerDiscoveryAddress_MultiHostNegativeCacheUsesDefaultPort(
 	second := pg.resolveLedgerDiscoveryAddress(ctx, "dead.example.com:0")
 	assert.Equal(t, "dead.example.com:3001", first)
 	assert.Equal(t, "dead.example.com:3001", second)
+}
+
+// Not t.Parallel: swaps resolver seams.
+func TestMultiHostSRVUnusableTargetsFallBackToHostname(t *testing.T) {
+	stubSRV(
+		t,
+		map[string][]*net.SRV{
+			"pool.example.com": {{Target: "private.example.com.", Port: 6000}},
+		},
+		map[string][]net.IP{
+			"private.example.com.": {net.ParseIP("127.0.0.1")},
+			"pool.example.com":     {net.ParseIP("44.0.9.9")},
+		},
+	)
+	pg := discardGovernor()
+	assert.Equal(
+		t,
+		"44.0.9.9:3001",
+		pg.resolveLedgerDiscoveryAddress(
+			context.Background(),
+			"pool.example.com:0",
+		),
+	)
+	assert.Equal(t, "127.0.0.1:6000", pg.resolveAddress("pool.example.com:0"))
+	assert.Equal(
+		t,
+		"127.0.0.1:6000",
+		pg.resolveDialAddress(context.Background(), "pool.example.com:0"),
+	)
+}
+
+func TestLedgerRediscoveryUpdatesRetainedPeerStake(t *testing.T) {
+	t.Parallel()
+	pg := discardGovernor()
+	require.NoError(
+		t,
+		pg.AddPeer("44.0.9.9:3001", PeerSourceTopologyPublicRoot),
+	)
+	require.False(
+		t,
+		pg.addLedgerPeerContext(
+			context.Background(),
+			"44.0.9.9:3001",
+			123,
+			true,
+		),
+	)
+	require.Equal(t, uint64(123), pg.peers[0].StakeLovelace)
+	require.True(t, pg.peers[0].StakeKnown)
+	require.False(
+		t,
+		pg.addLedgerPeerContext(context.Background(), "44.0.9.9:3001", 0, true),
+	)
+	require.Zero(t, pg.peers[0].StakeLovelace)
+	require.True(t, pg.peers[0].StakeKnown)
+}
+
+// Not t.Parallel: swaps the package-level DNS resolver seams.
+func TestLedgerDiscoveryDeduplicatesDNSBeforeAdmission(t *testing.T) {
+	stubSRV(t, nil, nil)
+	lookups := 0
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
+		lookups++
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	pg := discardGovernor()
+	relays := []PoolRelay{
+		{Hostname: "same.example.com", Port: 3001},
+		{Hostname: "Same.Example.com", Port: 3001},
+	}
+	require.Zero(t, pg.addLedgerRelaysContext(context.Background(), relays, 1))
+	require.Equal(t, 1, lookups)
+}
+
+func TestLedgerDiscoveryOffersOneAddressPerRelayBeforeAlternates(t *testing.T) {
+	t.Parallel()
+	pg := discardGovernor()
+	pg.config.LedgerPeerTarget = 2
+	ipv4 := net.ParseIP("44.0.0.1")
+	ipv6 := net.ParseIP("2001:4860:4860::8888")
+	other := net.ParseIP("44.0.0.2")
+	relays := []PoolRelay{
+		{IPv4: &ipv4, IPv6: &ipv6, Port: 3001, Stake: math.MaxUint64},
+		{IPv4: &other, Port: 3001},
+	}
+	require.Equal(
+		t,
+		2,
+		pg.addLedgerRelaysContext(context.Background(), relays, 0),
+	)
+	var addresses []string
+	for _, peer := range pg.peers {
+		addresses = append(addresses, peer.Address)
+	}
+	require.Contains(
+		t,
+		addresses,
+		"44.0.0.2:3001",
+		"dual-stack relay must not fill both admissions",
+	)
 }

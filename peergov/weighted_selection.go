@@ -39,16 +39,28 @@ func weightedSample(relays []PoolRelay, n int) []PoolRelay {
 	count := len(relays)
 	n = min(n, count)
 
-	// Clamp each weight so the running total cannot overflow uint64 no matter
-	// how large the registered stake values are.
-	limit := uint64(math.MaxUint64) / uint64(count)
+	// Keep exact weights whenever their sum fits; otherwise scale every
+	// weight together, preserving proportions rather than clipping whales.
 	weights := make([]uint64, count)
 	tree := make([]uint64, count+1)
 	var total uint64
-	for i, relay := range relays {
-		w := min(max(relay.Stake, minSampleWeight), limit)
-		weights[i] = w
-		total += w
+	for shift := uint(0); ; shift++ {
+		total = 0
+		overflow := false
+		for i, relay := range relays {
+			w := max(relay.Stake>>shift, minSampleWeight)
+			if math.MaxUint64-total < w {
+				overflow = true
+				break
+			}
+			weights[i] = w
+			total += w
+		}
+		if !overflow {
+			break
+		}
+	}
+	for i, w := range weights {
 		tree[i+1] += w
 		if parent := (i + 1) + ((i + 1) & -(i + 1)); parent <= count {
 			tree[parent] += tree[i+1]

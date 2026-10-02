@@ -306,3 +306,18 @@ func TestEndToEnd_WeightedDiscoveryAndScoring(t *testing.T) {
 	}
 	assert.Greater(t, highest.PerformanceScore, lowest.PerformanceScore)
 }
+
+func TestWeightedSamplePreservesLargeWeightsWhenTotalFits(t *testing.T) {
+	t.Parallel()
+	relays := []PoolRelay{
+		{Hostname: "large", Stake: 3 * (math.MaxUint64 / 4)},
+		{Hostname: "small", Stake: math.MaxUint64 / 8},
+	}
+	firstLarge := 0
+	for range 10000 {
+		if weightedSample(relays, 1)[0].Hostname == "large" {
+			firstLarge++
+		}
+	}
+	assert.InDelta(t, 6.0/7.0, float64(firstLarge)/10000, 0.03)
+}

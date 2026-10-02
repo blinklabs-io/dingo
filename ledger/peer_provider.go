@@ -37,8 +37,10 @@ type PoolRelay struct {
 	IPv6     *net.IP
 	Port     uint
 	// Stake is the delegated stake, in lovelace, of the pool owning the
-	// relay. Zero means unknown.
+	// relay. StakeKnown reports whether the lookup succeeded.
 	Stake uint64
+	// StakeKnown distinguishes a successful zero-stake lookup from absent data.
+	StakeKnown bool
 	// IsMultiHost marks a MultiHostName relay: a hostname with no port,
 	// whose port comes from an SRV record.
 	IsMultiHost bool
@@ -153,10 +155,12 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 
 	result := make([]PoolRelay, 0, len(relays))
 	for _, relay := range relays {
+		_, known := stakes[string(relay.PoolKeyHash)]
 		pr := PoolRelay{
-			Hostname: relay.Hostname,
-			Port:     relay.Port,
-			Stake:    stakes[string(relay.PoolKeyHash)],
+			Hostname:   relay.Hostname,
+			Port:       relay.Port,
+			Stake:      stakes[string(relay.PoolKeyHash)],
+			StakeKnown: known && err == nil,
 			// The relay row stores no relay type, so a hostname with no port
 			// is treated as MultiHostName. A SingleHostName registered with
 			// a null port matches too; its SRV lookup finds nothing and it
@@ -236,6 +240,7 @@ func copyPoolRelays(relays []PoolRelay) []PoolRelay {
 			Hostname:    r.Hostname,
 			Port:        r.Port,
 			Stake:       r.Stake,
+			StakeKnown:  r.StakeKnown,
 			IsMultiHost: r.IsMultiHost,
 		}
 		if r.IPv4 != nil {

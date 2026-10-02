@@ -98,15 +98,38 @@ func (p *PeerGovernor) addLedgerRelaysContext(
 	// denied, unroutable or already known, so the walk below must be able to
 	// continue past it until the deficit is filled.
 	added := 0
-	for _, relay := range weightedSample(relays, len(relays)) {
-		for _, addr := range relay.Addresses() {
+	ordered := weightedSample(relays, len(relays))
+	addresses := make([][]string, len(ordered))
+	maxAddresses := 0
+	for i, relay := range ordered {
+		addresses[i] = relay.Addresses()
+		maxAddresses = max(maxAddresses, len(addresses[i]))
+	}
+	seen := make(map[string]struct{})
+	// Offer one address per relay before a dual-stack relay gets an alternate.
+	for round := 0; round < maxAddresses; round++ {
+		for i, relay := range ordered {
+			if round >= len(addresses[i]) {
+				continue
+			}
+			addr := addresses[i][round]
+			normalized := p.normalizeAddress(addr)
+			if _, duplicate := seen[normalized]; duplicate {
+				continue
+			}
+			seen[normalized] = struct{}{}
 			if err := ctx.Err(); err != nil {
 				return added
 			}
 			if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
 				return added
 			}
-			if p.addLedgerPeerContext(ctx, addr, relay.Stake) {
+			if p.addLedgerPeerContext(
+				ctx,
+				addr,
+				relay.Stake,
+				relay.StakeKnown,
+			) {
 				added++
 			}
 		}

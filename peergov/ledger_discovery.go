@@ -394,7 +394,7 @@ func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
 //
 //nolint:unused // Kept as a context-free test helper for existing peer tests.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
-	return p.addLedgerPeerContext(context.Background(), address, 0)
+	return p.addLedgerPeerContext(context.Background(), address, 0, false)
 }
 
 // addLedgerPeerContext adds a ledger peer for a relay whose pool has the given
@@ -404,6 +404,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	ctx context.Context,
 	address string,
 	stake uint64,
+	stakeKnown bool,
 ) bool {
 	if err := ctx.Err(); err != nil {
 		return false
@@ -415,7 +416,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// entries for an unresolvable hostname are keyed on exactly the
 	// lock-free normalized form, which is what makes the dead-hostname case
 	// answerable here.
-	if p.ledgerPeerRejectedWithoutDNS(address) {
+	if p.ledgerPeerRejectedWithoutDNS(address, stake, stakeKnown) {
 		return false
 	}
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
@@ -493,6 +494,10 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		// fresh relay list (normalized the same way), without re-resolving
 		// every candidate.
 		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = hostnameNormalized
+		if stakeKnown || stake > 0 {
+			existingPeer.StakeLovelace = stake
+			existingPeer.StakeKnown = true
+		}
 		p.mu.Unlock()
 		return false
 	}
@@ -527,6 +532,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		EMAAlpha:          p.config.EMAAlpha,
 		FirstSeen:         time.Now(),
 		StakeLovelace:     stake,
+		StakeKnown:        stakeKnown || stake > 0,
 	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
@@ -566,7 +572,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 // Only rejection is decided here: a peer is never added without a
 // resolution, so a candidate that survives this check still goes through the
 // full post-resolution deny and exists checks under the lock.
-func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
+func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(
+	address string,
+	stake uint64,
+	stakeKnown bool,
+) bool {
 	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -594,6 +604,10 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 		// see that function's existingPeer branch for why keying on the
 		// candidate's hostname form instead would be wrong.
 		p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)] = hostnameNormalized
+		if stakeKnown || stake > 0 {
+			peer.StakeLovelace = stake
+			peer.StakeKnown = true
+		}
 		return true
 	}
 	return false

@@ -204,6 +204,9 @@ func (p *Peer) UpdatePeerScore() {
 	}
 
 	stakeScore := stakeScoreFor(p.StakeLovelace)
+	if p.StakeKnown && p.StakeLovelace == 0 {
+		stakeScore = 0
+	}
 
 	// Total weight for normalization
 	totalWeight := defaultLatencyWeight + defaultSuccessWeight + defaultStabilityWeight +

@@ -79,9 +79,10 @@ type PoolRelay struct {
 	Port uint
 
 	// Stake is the total delegated stake, in lovelace, of the pool that owns
-	// this relay. Zero means unknown or unregistered; weighted sampling gives
-	// such a relay a floor weight so it stays discoverable.
+	// this relay. Weighted sampling gives zero stake a floor weight.
 	Stake uint64
+	// StakeKnown distinguishes a successful zero-stake lookup from absent data.
+	StakeKnown bool
 
 	// IsMultiHost marks a MultiHostName relay: a DNS name with no port, whose
 	// port is published in an SRV record. Addresses emits port 0 for it.

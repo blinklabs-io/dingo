@@ -575,7 +575,10 @@ func TestPoolRelayProviderCloseUnsubscribes(t *testing.T) {
 // seedStakedPools registers two active pools: the first has a single-host
 // relay and a MultiHostName relay (hostname, no port) and 700 lovelace
 // delegated; the second has one relay and no delegation.
-func seedStakedPools(t *testing.T, db *database.Database) (poolA, poolB []byte) {
+func seedStakedPools(
+	t *testing.T,
+	db *database.Database,
+) (poolA, poolB []byte) {
 	t.Helper()
 	poolA = bytes.Repeat([]byte{0xa1}, 28)
 	poolB = bytes.Repeat([]byte{0xb2}, 28)
@@ -648,8 +651,10 @@ func TestPoolRelayProviderPopulatesStake(t *testing.T) {
 
 	require.Equal(t, uint64(700), relayByPort(t, relays, 3001).Stake)
 	require.Zero(t, relayByPort(t, relays, 3002).Stake)
+	foundMulti := false
 	for _, r := range relays {
 		if r.Hostname == "multi.example.com" {
+			foundMulti = true
 			// Both relays of the staked pool carry its stake.
 			require.Equal(t, uint64(700), r.Stake)
 			require.True(t, r.IsMultiHost)
@@ -658,6 +663,12 @@ func TestPoolRelayProviderPopulatesStake(t *testing.T) {
 		}
 		require.False(t, r.IsMultiHost)
 	}
+	require.True(t, foundMulti, "registered MultiHostName relay is missing")
+	require.True(
+		t,
+		relayByPort(t, relays, 3002).StakeKnown,
+		"successful zero-stake lookup must remain known",
+	)
 }
 
 func TestPoolRelayProviderStakeLookupFailureIsNonFatal(t *testing.T) {

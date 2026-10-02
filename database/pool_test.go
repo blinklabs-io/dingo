@@ -560,5 +560,6 @@ func TestDatabaseGetStakeByPoolsWrapper(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, stakes, string(pool))
 	require.Zero(t, stakes[string(pool)])
+	require.Contains(t, delegators, string(pool))
 	require.Zero(t, delegators[string(pool)])
 }
