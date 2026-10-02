@@ -539,8 +539,7 @@ func ImportLedgerState(
 	// equally absent from the reconcile key set, so reconcile tombstones a
 	// still-live one and leaves an already-spent one untouched either way.
 	// Either shape leaves the row permanently wrong, and the next real
-	// replay of the block that spends it halts with "utxo not found"
-	// (dingo#4770).
+	// replay of the block that spends it halts with "utxo not found".
 	//
 	// Roll the row back entirely instead of patching its deleted_slot:
 	// UtxosDeleteRolledback (the same primitive deleteBlobBlocksAboveSlot
@@ -556,8 +555,9 @@ func ImportLedgerState(
 	// at -- corrupting reward/leader-stake inputs instead of only failing the
 	// halt this exists to fix. Run before reconcile, so reconcile's live-row
 	// scan never has to reason about a post-anchor row it cannot correctly
-	// judge either way; run on every import, not only Reconcile: true, since
-	// the legacy reward-repair shape hits the identical gap.
+	// judge either way. The rollback is unconditional because it is
+	// idempotent and a no-op on a fresh database, which has no post-anchor
+	// rows.
 	if err := cfg.Database.UtxosDeleteRolledback(slot, nil); err != nil {
 		return fmt.Errorf(
 			"rolling back post-anchor-created UTxOs: %w",

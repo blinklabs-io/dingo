@@ -699,8 +699,8 @@ WHERE tx_id = ? AND output_idx = ?
 	// settled pre-anchor spend. Clear it, scoped to this exact (tx_id,
 	// output_idx) reference only -- never a table-wide unspend -- so a later
 	// replay of the real post-anchor spending block finds the output live
-	// instead of failing with "utxo not found" (dingo#4770). Mirrors the
-	// columns SetUtxosNotDeletedAfterSlot's rollback path clears.
+	// instead of failing with "utxo not found". Mirrors the columns
+	// SetUtxosNotDeletedAfterSlot's rollback path clears.
 	//
 	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
 	// conflict path) are also reached by database/transaction.go's

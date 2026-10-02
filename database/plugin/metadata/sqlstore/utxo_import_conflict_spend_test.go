@@ -156,9 +156,9 @@ func TestImportUtxosLeavesSettledPreAnchorSpendAlone(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, spentBefore, "precondition: settled spend is not live")
 
-	// B: created at slot 100 (its anchor), then spent post-anchor at 150 --
-	// exactly the dingo#4770 shape, seeded here only so the re-import below
-	// actually conflicts and the new clause has a row to act on.
+	// B: created at slot 100 (its anchor), then spent post-anchor at 150,
+	// seeded so the re-import below conflicts and the clear has a row to
+	// act on.
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
 		TxId: liveTxID, OutputIdx: 0, AddedSlot: 100, Amount: 2_000_000,
 	}}, nil))
@@ -205,10 +205,9 @@ func mustGetUtxo(
 }
 
 // TestImportUtxosConflictWithDeletedIncomingLeavesSpendAlone covers the other
-// side of the DeletedSlot == 0 gate added for dingo#4770: a conflicting
-// import whose own incoming row is itself not live (DeletedSlot != 0, e.g. a
-// gap-closure re-import of an output already known consumed) must not clear
-// an existing spend either. Only an incoming row that declares the output
+// side of the DeletedSlot == 0 gate: a conflicting import whose own incoming
+// row is itself not live (DeletedSlot != 0, e.g. a gap-closure re-import of an
+// output already known consumed) must not clear an existing spend either. Only an incoming row that declares the output
 // live triggers the clear.
 func TestImportUtxosConflictWithDeletedIncomingLeavesSpendAlone(t *testing.T) {
 	t.Parallel()

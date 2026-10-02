@@ -923,11 +923,9 @@ whenever the incoming row itself declares the output live (`DeletedSlot == 0`).
 This is scoped to the conflicting row only, never a table-wide unspend: an
 output the snapshot declares live could only have been spent locally *after*
 its anchor, because a row genuinely spent at or before the anchor would not
-appear in the snapshot's live set to conflict with in the first place. Before
-this, a local chain that spent such an output after bootstrapping from an
-earlier anchor kept the row marked spent forever across a later catch-up or
-repair re-import of that same output as live, and the first later block that
-actually spent it failed with "utxo not found," halting the ledger pipeline.
+appear in the snapshot's live set to conflict with in the first place. A
+conflicting snapshot-live row is therefore made live, so a replayed post-anchor
+spend of that output applies instead of failing with "utxo not found."
 This is independent of, and narrower than, the reconcile pass above:
 reconcile only tombstones rows *absent* from a newer snapshot's live
 set and never touches a conflicting row's `deleted_slot`, so it does not
@@ -970,10 +968,10 @@ halt this exists to fix. Scoped by `added_slot`, not `deleted_slot`: a row
 the anchor could have judged (created at or before it) is left exactly as
 the snapshot and reconcile leave it, whether live or already correctly
 spent, even if its `deleted_slot` is well after the anchor. This runs on
-every import, not only `Reconcile: true`, since the legacy reward-repair
-shape hits the identical gap. An unspent post-anchor row is rolled back the
-same way as a spent one: left live, it would be counted toward any mark
-snapshot taken before replay reaches its creation slot.
+every import, not only `Reconcile: true`; it is idempotent and a no-op on a
+fresh database, which has no post-anchor rows. An unspent post-anchor row is
+rolled back the same way as a spent one: left live, it would be counted toward
+any mark snapshot taken before replay reaches its creation slot.
 
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
