@@ -70,7 +70,7 @@ var governanceStoreMethods = []string{
 	"GetCommitteeHotAuthorizationsSince",
 	"IsCommitteeMemberResigned",
 	"GetResignedCommitteeMembers",
-	"GetCommitteeActiveCount",
+	"GetCommitteeAuthorizedCount",
 	"SetCommitteeMembers",
 	"SetCommitteeQuorum",
 	"ClearCommitteeQuorum",

@@ -1050,7 +1050,7 @@ GROUP BY cold_credential_tag, cold_credential`
 	return ret, nil
 }
 
-func (s *Store) GetCommitteeActiveCount(
+func (s *Store) GetCommitteeAuthorizedCount(
 	txn types.Txn,
 ) (int, error) {
 	members, err := s.GetActiveCommitteeMembers(txn)
