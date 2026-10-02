@@ -373,6 +373,10 @@ func recoverUtxoCbor(
 	txId []byte,
 	outputIdx uint32,
 ) ([]byte, error) {
+	txHash, err := lcommon.NewBlake2b256Checked(txId)
+	if err != nil {
+		return nil, fmt.Errorf("utxo recovery transaction id: %w", err)
+	}
 	block, err := utxoRecoveryBlockForTx(db, txn, txId)
 	if err != nil {
 		return nil, err
@@ -407,9 +411,7 @@ func recoverUtxoCbor(
 	indexer := NewBlockIndexer(block.Slot, block.Hash)
 	offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 	if indexErr == nil {
-		var txHashArray [32]byte
-		copy(txHashArray[:], txId)
-		ref := UtxoRef{TxId: txHashArray, OutputIdx: outputIdx}
+		ref := UtxoRef{TxId: txHash, OutputIdx: outputIdx}
 		if offset, ok := offsets.UtxoOffsets[ref]; ok {
 			if repairErr := repairUtxoBlob(
 				db, txn, txId, outputIdx, &offset,
