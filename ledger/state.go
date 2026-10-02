@@ -2540,7 +2540,10 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if pool == nil {
 		return [32]byte{}, false, nil
 	}
-	registeredVrfHash, ok := registeredPoolVrfKeyHash(pool)
+	registeredVrfHash, ok, err := registeredPoolVrfKeyHash(pool)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
 	if !ok {
 		return [32]byte{}, false, nil
 	}
