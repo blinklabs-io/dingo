@@ -3533,7 +3533,10 @@ func jobSteps(t *testing.T, workflow, name string, job any) []map[string]any {
 	return steps
 }
 
-var fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+var (
+	fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
+	buildTagsRe     = regexp.MustCompile(`(?m)^BUILD_TAGS \?= (\S+)$`)
+)
 
 // TestGovulncheckRunsThroughPinnedAction checks that CI reaches govulncheck
 // through a commit-pinned action instead of fetching and executing an
@@ -3541,6 +3544,12 @@ var fullSHAActionRe = regexp.MustCompile(`@[0-9a-f]{40}$`)
 func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
+
+	tags := buildTagsRe.FindStringSubmatch(readRepoFile(t, root, "Makefile"))
+	if tags == nil {
+		t.Fatal("Makefile does not set BUILD_TAGS")
+	}
+	wantGoflags := "-tags=" + tags[1]
 
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		job, ok := pipelineJobs(t, root, workflow)["govulncheck"]
@@ -3564,6 +3573,33 @@ func TestGovulncheckRunsThroughPinnedAction(t *testing.T) {
 			found = true
 			if !fullSHAActionRe.MatchString(uses) {
 				t.Errorf("%s: %s is not pinned to a full commit SHA", workflow, uses)
+			}
+			// The action has no build-tags input, so GOFLAGS is the only
+			// route for the tags `make govulncheck` scans with; without it
+			// CI silently skips every tag-gated package.
+			env, _ := step["env"].(map[string]any)
+			if got := env["GOFLAGS"]; got != wantGoflags {
+				t.Errorf(
+					"%s: govulncheck GOFLAGS is %v, want %q to match make govulncheck",
+					workflow,
+					got,
+					wantGoflags,
+				)
+			}
+			with, _ := step["with"].(map[string]any)
+			for input, want := range map[string]string{
+				"go-package": "./...",
+				"work-dir":   ".",
+			} {
+				if got, set := with[input]; set && got != want {
+					t.Errorf(
+						"%s: govulncheck %s is %v, make govulncheck scans %q",
+						workflow,
+						input,
+						got,
+						want,
+					)
+				}
 			}
 		}
 		if !found {
