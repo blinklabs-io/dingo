@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
