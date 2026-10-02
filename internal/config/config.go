@@ -86,6 +86,7 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultDebugBindAddr               = "127.0.0.1"
+	DefaultMetricsBindAddr             = "127.0.0.1"
 	DefaultMetadataPlugin              = "sqlite"
 	DefaultEvictionWatermark           = 0.0
 	DefaultRejectionWatermark          = 1.0
@@ -453,6 +454,13 @@ type TokenRegistryConfig struct {
 	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT"`
 	// UserAgent is sent with the registry request.
 	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
+	// HeaderSecrets are sent as headers with every registry request, for
+	// mirrors that need authentication (for example Authorization). They are
+	// credentials: they are redacted from rendered configuration, dropped from
+	// a redirect to another origin, and have no CLI flag, which would expose
+	// them in the process list. The environment form is comma-separated
+	// name:value pairs.
+	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
 	// MaxDecompressedBytes bounds all expanded tar content.
@@ -633,7 +641,12 @@ type Config struct {
 	// fingerprints may invoke destructive methods.
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
 	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort                         uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
+	// MetricsBindAddr is the interface used by the unauthenticated
+	// Prometheus listener. It defaults to loopback independently of
+	// BindAddr; operators must set this field explicitly to expose
+	// metrics on a wildcard or remote-scrape address.
+	MetricsBindAddr string `yaml:"metricsBindAddr"                     envconfig:"DINGO_METRICS_BIND_ADDR"`
+	MetricsPort     uint   `yaml:"metricsPort"                                                                                  split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -644,7 +657,7 @@ type Config struct {
 	// (/readyz) probes on a listener of their own, so an operator can
 	// expose them to an orchestrator or load balancer without also
 	// exposing Prometheus metrics, pprof, or any API. It binds BindAddr,
-	// the same address the relay and metrics listeners use and distinct
+	// the same address the relay listener uses and distinct
 	// from the API listeners' own bind address: a probe is operational
 	// surface, not API surface. 0 disables the listener.
 	HealthPort uint `yaml:"healthPort"                          envconfig:"DINGO_HEALTH_PORT"`
@@ -943,7 +956,7 @@ type APIPluginsConfig struct {
 //
 // bindAddr, debugBindAddr, and corsAllowedOrigins deliberately
 // stay at the Config root rather than moving under this section: bindAddr is
-// not API-specific (the relay/NtN and metrics listeners use it too),
+// not API-specific (the relay/NtN listener uses it too),
 // debugBindAddr controls the separate pprof listener, and corsAllowedOrigins
 // already applies uniformly to all three API providers
 // today with no override need identified, so
@@ -1250,6 +1263,7 @@ func newDefaultConfig() *Config {
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
 		DebugBindAddr:                       DefaultDebugBindAddr,
+		MetricsBindAddr:                     DefaultMetricsBindAddr,
 		DebugPort:                           0,
 		HealthPort:                          DefaultHealthPort,
 		HealthReadyGapSlots:                 DefaultHealthReadyGapSlots,
@@ -1650,6 +1664,9 @@ func (c *Config) ApplyDefaults() {
 	if c.DebugBindAddr == "" {
 		c.DebugBindAddr = DefaultDebugBindAddr
 	}
+	if c.MetricsBindAddr == "" {
+		c.MetricsBindAddr = DefaultMetricsBindAddr
+	}
 	if c.ShelleyKESAgentSocket != "" && c.ShelleyKESAgentMode == "" {
 		c.ShelleyKESAgentMode = "serve-key"
 	}
@@ -1736,6 +1753,18 @@ func (c *Config) DebugListenAddress() string {
 	return net.JoinHostPort(
 		host,
 		strconv.FormatUint(uint64(c.DebugPort), 10),
+	)
+}
+
+// MetricsListenAddress returns the Prometheus TCP listen address.
+func (c *Config) MetricsListenAddress() string {
+	host := c.MetricsBindAddr
+	if host == "" {
+		host = DefaultMetricsBindAddr
+	}
+	return net.JoinHostPort(
+		host,
+		strconv.FormatUint(uint64(c.MetricsPort), 10),
 	)
 }
 

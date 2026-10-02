@@ -125,6 +125,7 @@ var sentinelSecrets = []string{
 	"SENTINEL-MITHRIL-KEY",
 	"SENTINEL-S3-SECRET-KEY",
 	"SENTINEL-TOKEN-REGISTRY-PASSWORD",
+	"SENTINEL-TOKEN-REGISTRY-HEADER",
 	"SENTINEL-IPFS-PASSWORD",
 	"SENTINEL-PG-PASSWORD",
 	"SENTINEL-DSN-PASSWORD",
@@ -168,6 +169,9 @@ func sentinelSecretConfig() *Config {
 			SourceURL: "https://reg:SENTINEL-TOKEN-REGISTRY-PASSWORD" +
 				"@registry.example/registry.tar.gz" +
 				"?apiKey='prefix'SENTINEL-TOKEN-REGISTRY-PASSWORD",
+			HeaderSecrets: map[string]string{
+				"Authorization": "Bearer SENTINEL-TOKEN-REGISTRY-HEADER",
+			},
 		},
 		OffchainMetadata: OffchainMetadataConfig{
 			IPFSGatewayURL: "https://ipfs:SENTINEL-IPFS-PASSWORD" +

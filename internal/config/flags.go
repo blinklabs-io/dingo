@@ -172,6 +172,12 @@ var flagSpecs = []flagSpec{
 		"private bind address",
 	),
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
+	stringFlag(
+		"MetricsBindAddr",
+		"metrics-bind-addr",
+		"",
+		"metrics bind address (wildcard exposure requires an explicit override)",
+	),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
 	stringFlag(
 		"DebugBindAddr",

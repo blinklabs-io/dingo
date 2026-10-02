@@ -184,6 +184,21 @@ func serveAuxiliaryListenerOn(
 	}
 }
 
+// newMetricsServer builds the Prometheus listener on its own dedicated
+// mux so pprof or other handlers registered on DefaultServeMux are never
+// exposed.
+func newMetricsServer(cfg *config.Config) *http.Server {
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	return &http.Server{
+		Addr:              cfg.MetricsListenAddress(),
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 60 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+}
+
 func newPprofDebugServer(cfg *config.Config) *http.Server {
 	if cfg.DebugPort == 0 {
 		return nil
@@ -438,26 +453,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Metrics listener with dedicated mux to avoid exposing
-	// pprof or other handlers registered on DefaultServeMux.
-	metricsMux := http.NewServeMux()
-	metricsMux.Handle("/metrics", promhttp.Handler())
-	metricsAddr := net.JoinHostPort(
-		cfg.BindAddr,
-		strconv.FormatUint(uint64(cfg.MetricsPort), 10),
-	)
+	metricsServer := newMetricsServer(cfg)
 	logger.Info(
-		"serving prometheus metrics on "+metricsAddr,
+		"serving prometheus metrics on "+metricsServer.Addr,
 		"component",
 		"node",
 	)
-	metricsServer := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           metricsMux,
-		ReadHeaderTimeout: 60 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
 	debugServer := newPprofDebugServer(cfg)
@@ -705,6 +706,7 @@ func buildDingoConfig(
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
+				Headers:   cfg.TokenRegistry.HeaderSecrets,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
 				MaxDecompressedBytes: cfg.TokenRegistry.
 					MaxDecompressedBytes,

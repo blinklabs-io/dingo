@@ -152,6 +152,7 @@ type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
 	UserAgent             string
+	Headers               map[string]string
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
@@ -827,6 +828,7 @@ func (c *Config) syncCompatFields() {
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
+		Headers:               c.cfg.TokenRegistry.HeaderSecrets,
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
@@ -1072,7 +1074,7 @@ func WithCardanoNodeConfig(
 	}
 }
 
-// WithBindAddr specifies the IP address used by relay, metrics, and public
+// WithBindAddr specifies the IP address used by relay and public
 // Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1845,6 +1847,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
+			HeaderSecrets:         cfg.Headers,
 			MaxBytes:              cfg.MaxBytes,
 			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
@@ -2000,7 +2003,7 @@ func (c *Config) MetadataPlugin() string {
 	return c.cfg.Plugins.Storage.Metadata.Provider
 }
 
-// BindAddr returns the IP address for relay and metrics listeners.
+// BindAddr returns the IP address for relay and public API listeners.
 func (c *Config) BindAddr() string {
 	return c.cfg.BindAddr
 }

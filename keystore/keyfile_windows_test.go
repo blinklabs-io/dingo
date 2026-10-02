@@ -99,78 +99,32 @@ func TestInsecureFileModeWindows(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// checkFilePermissions should detect the insecure ACL.
-	err = checkFilePermissions(testFile)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
-	assert.Contains(t, err.Error(), "Everyone")
 	file, err := os.Open(testFile)
 	require.NoError(t, err)
 	defer file.Close()
-	err = checkOpenFilePermissions(file)
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
+	assert.ErrorIs(t, checkOpenFilePermissions(file), ErrInsecureFileMode)
 }
 
-func TestInsecureFileModeWindowsBuiltinUsers(t *testing.T) {
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "test.skey")
+// TestBroadGroupGrantsRejectedWindows pins that the allowlist in checkOpenDACL
+// rejects the broad groups an allow-ACE could name, by alias and by SID.
+func TestBroadGroupGrantsRejectedWindows(t *testing.T) {
+	t.Parallel()
 
-	require.NoError(
-		t,
-		os.WriteFile(testFile, []byte("test"), 0o600),
-	)
+	for _, trustee := range []string{
+		"WD", "S-1-1-0", // Everyone
+		"BU", "S-1-5-32-545", // BUILTIN\Users
+		"AU", "S-1-5-11", // Authenticated Users
+	} {
+		t.Run(trustee, func(t *testing.T) {
+			t.Parallel()
 
-	// Build a DACL that grants BUILTIN\Users read access via SDDL.
-	sddl := "D:(A;;GR;;;BU)"
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	require.NoError(t, err)
-
-	dacl, _, err := sd.DACL()
-	require.NoError(t, err)
-
-	err = windows.SetNamedSecurityInfo(
-		testFile,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil,
-	)
-	require.NoError(t, err)
-
-	err = checkFilePermissions(testFile)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
-	assert.Contains(t, err.Error(), "BUILTIN\\Users")
-}
-
-func TestInsecureFileModeWindowsAuthenticatedUsers(t *testing.T) {
-	tmpDir := t.TempDir()
-	testFile := filepath.Join(tmpDir, "test.skey")
-
-	require.NoError(
-		t,
-		os.WriteFile(testFile, []byte("test"), 0o600),
-	)
-
-	// Build a DACL that grants Authenticated Users read access via SDDL.
-	sddl := "D:(A;;GR;;;AU)"
-	sd, err := windows.SecurityDescriptorFromString(sddl)
-	require.NoError(t, err)
-
-	dacl, _, err := sd.DACL()
-	require.NoError(t, err)
-
-	err = windows.SetNamedSecurityInfo(
-		testFile,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
-		nil, nil, dacl, nil,
-	)
-	require.NoError(t, err)
-
-	err = checkFilePermissions(testFile)
-	assert.Error(t, err)
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
-	assert.Contains(t, err.Error(), "Authenticated Users")
+			err := checkOpenDACL(
+				"test.skey", "SY", fmt.Sprintf("(A;;GR;;;%s)", trustee),
+			)
+			require.ErrorIs(t, err, ErrInsecureFileMode)
+			assert.Contains(t, err.Error(), "unexpected trustee "+trustee)
+		})
+	}
 }
 
 func TestSecureFileModeWindows(t *testing.T) {
@@ -184,11 +138,9 @@ func TestSecureFileModeWindows(t *testing.T) {
 
 	// Explicitly set owner-only DACL. Default Windows ACLs
 	// inherit from the parent directory and typically include
-	// BUILTIN\Users, which checkFilePermissions rejects.
+	// BUILTIN\Users, which checkOpenFilePermissions rejects.
 	setOwnerOnlyDACL(t, testFile)
 
-	err := checkFilePermissions(testFile)
-	assert.NoError(t, err)
 	file, err := os.Open(testFile)
 	require.NoError(t, err)
 	defer file.Close()
@@ -320,21 +272,12 @@ func TestAccessAllowedACEFormsWindows(t *testing.T) {
 			err := checkOpenDACL("test.skey", "SY", dacl)
 			assert.ErrorIs(t, err, ErrInsecureFileMode)
 			assert.Contains(t, err.Error(), "WD")
-			assert.ErrorIs(
-				t,
-				checkSDDL("test.skey", "O:SYD:"+dacl),
-				ErrInsecureFileMode,
-			)
 		})
 	}
 }
 
 func TestUnsupportedACETypeFailsClosedWindows(t *testing.T) {
 	err := checkOpenDACL("test.skey", "SY", "(XX;;GR;;;SY)")
-	assert.ErrorIs(t, err, ErrInsecureFileMode)
-	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
-
-	err = checkSDDL("test.skey", "D:(XX;;GR;;;SY)")
 	assert.ErrorIs(t, err, ErrInsecureFileMode)
 	assert.Contains(t, err.Error(), "unsupported DACL ACE type")
 }

@@ -1,6 +1,12 @@
 # Example config file for dingo
 # No settings are required. Uncomment a setting only to override its in-code
 # default.
+#
+# Keep a local copy that holds credentials (token registry headers, API keys)
+# outside the repository, or name it dingo.yaml, which git ignores. Key files
+# (*.skey, *.key, *.pem), .env and credentials.json are ignored too. Production
+# key paths are never embedded in the binary; set them with shelleyVrfKey,
+# shelleyKesKey and shelleyOperationalCertificate.
 
 # Public bind address for the Dingo server
 # CLI: --bind-addr
@@ -147,8 +153,16 @@
 # CLI: --metrics-port
 # metricsPort: 12798
 
+# Address for the unauthenticated Prometheus listener. This is deliberately
+# independent of bindAddr and stays on loopback by default. Set a wildcard or
+# remote-reachable address only when scrapers need it and an external network
+# control protects the endpoint. The container image sets
+# DINGO_METRICS_BIND_ADDR=0.0.0.0, which takes precedence over this setting.
+# CLI: --metrics-bind-addr  Env: DINGO_METRICS_BIND_ADDR
+# metricsBindAddr: "127.0.0.1"
+
 # TCP port for the liveness/readiness probe listener. 0 disables it.
-# Binds bindAddr, like the relay and metrics listeners: a kubelet or
+# Binds bindAddr, like the relay listener: a kubelet or
 # load-balancer probe reaches the container from
 # outside, so loopback would fail those closed.
 #
@@ -328,6 +342,14 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_USER_AGENT
   # CLI: --token-registry-user-agent
   # userAgent: ""
+  # Extra HTTP headers sent with every registry request, for a mirror that
+  # needs authentication. The values are credentials: they are redacted from
+  # logged configuration and are not sent to another origin after a redirect.
+  # There is no CLI flag, since arguments are visible in the process list.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_HEADER_SECRETS
+  # (comma-separated name:value pairs)
+  # headerSecrets:
+  #   Authorization: "Bearer <token>"
   # Cap on the compressed registry download. 0 uses the default (768MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes

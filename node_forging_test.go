@@ -855,7 +855,7 @@ func TestValidateBlockProducerLedger_SyncedTipUnobservedCounterUsesZeroBaseline(
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
 // Path is relative to this file (top-level dingo package).
-const devnetKeysDir = "config/cardano/devnet/keys"
+const devnetKeysDir = "internal/test/devnet/testdata/keys"
 
 func devnetCredPaths(t testing.TB) (vrf, kes, opcert string) {
 	t.Helper()

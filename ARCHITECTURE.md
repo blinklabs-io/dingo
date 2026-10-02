@@ -2527,6 +2527,12 @@ variables, or `--token-registry-*` CLI flags. An empty source URL selects by
 network: the Cardano Foundation registry for mainnet, the IOG testnet registry
 otherwise.
 
+`tokenRegistry.headerSecrets` adds request headers (for example
+`Authorization`) for an authenticated mirror. It is YAML and environment only,
+is redacted from `Config.LogValue`, and the sync removes the headers from a
+redirect that changes scheme or host so a redirect cannot forward the
+credential. A public registry needs none.
+
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup
 path and the live storage-restart path in `node_lifecycle.go` call, so the two
@@ -8073,6 +8079,16 @@ respectively to bound stack depth against
 adversarial nesting. `cbor_decode_test.go` proves each of these boundaries is
 accepted exactly at the limit and rejected one past it.
 
+`ImportLedgerState` runs `validateImportState` before the UTxO phase. It
+parses the cert state, stake snapshots, active pool distribution and
+governance state, and checks the tip hash width, the epoch, evolving,
+candidate and last-epoch-block nonce widths, the certified opcert and
+block-count pool keys, and the protocol parameters, so a
+malformed input fails the import before any phase persists. A parse warning
+on the cert state or stake snapshots is a rejection rather than a log line.
+The phases parse again instead of reusing the result, which keeps those
+structures out of memory during the UTxO import.
+
 For Conway governance, ledger-state import persists active proposals, the
 per-purpose previous governance action IDs, and the ratified action IDs from
 `ConwayGovState.cgsDRepPulsingState`'s completed `RatifyState.rsEnacted` list.
@@ -8279,14 +8295,17 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 `internal/node.Run` starts three auxiliary HTTP listeners, binding each with
 `bindAuxiliaryListener` and serving it with `serveAuxiliaryListenerOn` (bind
 or serve failures are logged, never fatal):
-Prometheus metrics on `metricsPort`, pprof on `debugPort` when enabled, and
-the health listener on `healthPort` (default `12799`, `0` disables).
+Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
+remote scraping requires setting `metricsBindAddr`, which the container image
+does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
+scrapers reach it), pprof on `debugPort`
+when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The three API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
 `docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
-and metrics listeners already use, rather than the API listeners' own
+listener already uses, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
 or an ECS/ALB target-group check reaches the container from outside, and
@@ -8367,8 +8386,9 @@ The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
 RPC-only TLS compatibility input among these three providers; Midnight also
 uses the pair directly. They are not promoted to Blockfrost or Mesh.
 The three API listeners use the root `bindAddr`, whose default is
-`0.0.0.0`. `debugBindAddr` remains the separate pprof
-listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
+`0.0.0.0`. `metricsBindAddr` and `debugBindAddr` remain the separate
+Prometheus and pprof listener settings, both defaulting to loopback.
+`corsAllowedOrigins` remains a root-level, operator-chosen
 CORS setting shared by the API providers.
 
 ### API listener lifecycle (`internal/apilistener`)

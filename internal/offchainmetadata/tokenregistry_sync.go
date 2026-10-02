@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/net/http/httpguts"
 )
 
 const (
@@ -152,6 +154,9 @@ type TokenRegistryConfig struct {
 	UserAgent      string
 	Interval       time.Duration
 	RequestTimeout time.Duration
+	// Headers are sent with every registry request, for mirrors that need
+	// authentication. They are dropped from a redirect to another origin.
+	Headers map[string]string
 	// MaxBytes caps the compressed download; MaxDecompressedBytes caps all
 	// expanded tar content; MaxEntryBytes caps one mapping. MaxArchiveEntries
 	// counts every tar header, while MaxAcceptedEntries bounds parsed rows and
@@ -183,6 +188,7 @@ type TokenRegistrySync struct {
 	store                TokenRegistryStore
 	client               *http.Client
 	sourceURL            string
+	headers              map[string]string
 	userAgent            string
 	interval             time.Duration
 	maxBytes             int64
@@ -251,6 +257,15 @@ func NewTokenRegistrySync(
 	if client.Timeout <= 0 || client.Timeout > timeout {
 		client.Timeout = timeout
 	}
+	headers, err := validateRegistryHeaders(cfg.Headers)
+	if err != nil {
+		return nil, err
+	}
+	if len(headers) > 0 {
+		client.CheckRedirect = dropHeadersOnOriginChange(
+			client.CheckRedirect, headers,
+		)
+	}
 	userAgent := cfg.UserAgent
 	if userAgent == "" {
 		userAgent = defaultTokenRegistryUserAgent
@@ -284,6 +299,7 @@ func NewTokenRegistrySync(
 		store:                cfg.Store,
 		client:               client,
 		sourceURL:            sourceURL,
+		headers:              headers,
 		userAgent:            userAgent,
 		interval:             interval,
 		maxBytes:             maxBytes,
@@ -298,6 +314,50 @@ func NewTokenRegistrySync(
 		now:                  time.Now,
 		syncSlot:             make(chan struct{}, 1),
 	}, nil
+}
+
+// validateRegistryHeaders returns a copy of headers, rejecting any that could
+// not be sent. The error names the header, never its value, which is a
+// credential.
+func validateRegistryHeaders(
+	headers map[string]string,
+) (map[string]string, error) {
+	for name, value := range headers {
+		if !httpguts.ValidHeaderFieldName(name) {
+			return nil, fmt.Errorf(
+				"token registry header name %q is invalid", name,
+			)
+		}
+		if !httpguts.ValidHeaderFieldValue(value) {
+			return nil, fmt.Errorf(
+				"token registry header %q has an invalid value", name,
+			)
+		}
+	}
+	return maps.Clone(headers), nil
+}
+
+// dropHeadersOnOriginChange removes the configured headers from a redirect
+// that leaves the origin of the original request. The client already strips
+// Authorization when the domain changes, but not across ports or from https
+// to http, and never a differently named credential header.
+func dropHeadersOnOriginChange(
+	next func(*http.Request, []*http.Request) error,
+	headers map[string]string,
+) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) > 0 &&
+			(req.URL.Scheme != via[0].URL.Scheme ||
+				req.URL.Host != via[0].URL.Host) {
+			for name := range headers {
+				req.Header.Del(name)
+			}
+		}
+		if next != nil {
+			return next(req, via)
+		}
+		return nil
+	}
 }
 
 // defaultTokenRegistryURL picks the registry for a network. Only mainnet has
@@ -536,6 +596,9 @@ func (s *TokenRegistrySync) SyncOnce(
 			operation: "build token registry request",
 			cause:     err,
 		}
+	}
+	for name, value := range s.headers {
+		req.Header.Set(name, value)
 	}
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set("Accept", "application/gzip")
