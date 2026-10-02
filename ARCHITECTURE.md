@@ -1849,12 +1849,20 @@ paths, where the point is to report before the goroutine unwinds.
   connection publishes it to `ledger.blockfetch` in FIFO order. The shared
   muxer's read loop, which the receive goroutine serves, keeps draining the
   socket, including keep-alive pongs, however far behind the ledger falls.
-  The forward queue is unbounded. The gouroboros in-flight byte budget does
-  not bound it, since that budget is released when a range finishes
-  arriving, and the ledger's per-connection limit of an active and a
-  pre-queued range does not either, since `blockfetchRequestRangeCleanup`
-  releases requests on timeout, rollback and fork restart while they may
-  still be streaming and a retry can redispatch on the same connection.
+  The gouroboros in-flight byte budget does not bound the forward queue,
+  since that budget is released when a range finishes arriving, and the
+  ledger's per-connection limit of an active and a pre-queued range does not
+  either, since `blockfetchRequestRangeCleanup` releases requests on timeout,
+  rollback and fork restart while they may still be streaming and a retry
+  can redispatch on the same connection. The queue is therefore bounded per
+  connection at twice the in-flight byte budget and twice the events of the
+  ranges that budget admits. Waiting for space would stall the receive
+  goroutine again, so an event that would exceed either bound terminates
+  the connection instead: the queued events not yet taken by the forwarder
+  are discarded, the connection is closed off the receive goroutine, later
+  events for it are dropped until its close is handled, and the ledger's
+  close handling releases its requests for refetch elsewhere.
+  `dingo_blockfetch_forward_overflow_total` counts those closes,
   `dingo_blockfetch_inflight_bytes`/`_inflight_blocks` gauge the backlog
   across connections, and `dingo_blockfetch_stage_duration_seconds{stage=
   "enqueue"|"ledger_publish"}` separates the receive path's hand-off time

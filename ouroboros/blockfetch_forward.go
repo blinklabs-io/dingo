@@ -22,6 +22,22 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
+// blockfetchForwardMaxBytes bounds the block bytes one connection's forward
+// queue may hold. The ledger requests at most an active and a pre-queued range
+// per connection and the gouroboros in-flight byte budget admits
+// blockfetchMaxInFlightBytes of outstanding ranges, so twice that budget is
+// headroom a peer reaches only when requests released by the ledger keep
+// streaming while the ledger is stalled.
+const blockfetchForwardMaxBytes = 2 * blockfetchMaxInFlightBytes
+
+// blockfetchForwardMaxEvents bounds the event count of one connection's
+// forward queue, which the byte bound alone does not limit for ranges of
+// small blocks: twice the blocks and BatchDone markers of the ranges the
+// in-flight byte budget admits.
+const blockfetchForwardMaxEvents = 2 *
+	(blockfetchMaxInFlightBytes / ledger.BlockfetchMaxRangeBytes) *
+	(ledger.BlockfetchBatchSize + 1)
+
 // blockfetchQueuedEvent is one blockfetch event (a decoded Block or a
 // terminal BatchDone) received from a peer but not yet handed to the ledger.
 type blockfetchQueuedEvent struct {
@@ -37,6 +53,10 @@ type blockfetchForwardState struct {
 	queue   []blockfetchQueuedEvent
 	bytes   int
 	running bool
+	// overflowed is set when an enqueue would exceed the queue bounds. The
+	// connection is then being closed, and every later event for it is
+	// dropped until HandleConnClosedEvent removes this state.
+	overflowed bool
 }
 
 // enqueueBlockfetchEvent hands a blockfetch event (Block or BatchDone) to
@@ -53,16 +73,20 @@ type blockfetchForwardState struct {
 // mutex and returns. Events for one connection reach the ledger in the order
 // they were enqueued.
 //
-// The queue itself is unbounded; its length is whatever has been received on
-// the connection and not yet consumed by the ledger. The gouroboros in-flight
-// byte budget (blockfetchMaxInFlightBytes) does not bound it, because that
+// The gouroboros in-flight byte budget does not bound the queue, because that
 // budget is released when gouroboros finishes receiving a range, which does
-// not wait for the ledger. The ledger tracks at most an active and a pre-queued range
-// per connection, but blockfetchRequestRangeCleanup releases tracked requests
-// on timeout, rollback and fork restart while they may still be streaming,
-// and a retry can redispatch on the same connection, so the backlog is not
-// limited to a fixed number of ranges. dingo_blockfetch_inflight_bytes and
-// dingo_blockfetch_inflight_blocks report it.
+// not wait for the ledger. Nor does the ledger's limit of an active and a
+// pre-queued range per connection: blockfetchRequestRangeCleanup releases
+// tracked requests on timeout, rollback and fork restart while they may still
+// be streaming, and a retry can redispatch on the same connection. The queue
+// is therefore bounded here, by blockfetchForwardMaxBytes and
+// blockfetchForwardMaxEvents. Waiting for space would reintroduce the stall
+// described above, so an event that would exceed either bound instead
+// terminates the connection: the event and every queued event not yet taken
+// by the forwarder are discarded, the connection is closed off the receive
+// goroutine, and later events for it are dropped. The ledger then handles the
+// close as it does any other, releasing the connection's requests so they are
+// fetched again elsewhere.
 func (o *Ouroboros) enqueueBlockfetchEvent(
 	connId ouroboros.ConnectionId,
 	evt event.Event,
@@ -83,6 +107,41 @@ func (o *Ouroboros) enqueueBlockfetchEvent(
 		st = &blockfetchForwardState{}
 		o.blockfetchForward[connId] = st
 	}
+	if st.overflowed {
+		o.blockfetchForwardMu.Unlock()
+		return
+	}
+	maxBytes, maxEvents := o.blockfetchForwardLimits()
+	if st.bytes+size > maxBytes || len(st.queue)+1 > maxEvents {
+		queuedBytes, queuedEvents := st.bytes, len(st.queue)
+		var discardedBytes int
+		for _, qe := range st.queue {
+			discardedBytes += qe.bytes
+		}
+		discardedEvents := len(st.queue)
+		st.queue = nil
+		st.bytes -= discardedBytes
+		st.overflowed = true
+		o.blockfetchForwardMu.Unlock()
+		o.addBlockfetchInFlight(-discardedBytes, -discardedEvents)
+		if o.blockfetchMetrics != nil {
+			o.blockfetchMetrics.forwardOverflows.Inc()
+		}
+		o.config.Logger.Warn(
+			"blockfetch: forward queue limit reached, closing connection",
+			"connection_id", connId.String(),
+			"queued_bytes", queuedBytes,
+			"queued_events", queuedEvents,
+			"max_bytes", maxBytes,
+			"max_events", maxEvents,
+		)
+		if o.blockfetchForwardClose != nil {
+			go o.blockfetchForwardClose(connId)
+		} else {
+			go o.blockfetchForwardCloseLive(connId)
+		}
+		return
+	}
 	st.queue = append(st.queue, blockfetchQueuedEvent{evt: evt, bytes: size})
 	st.bytes += size
 	startWorker := !st.running
@@ -96,32 +155,38 @@ func (o *Ouroboros) enqueueBlockfetchEvent(
 		)
 	}
 	if startWorker {
+		run := func(connId ouroboros.ConnectionId) {
+			o.runBlockfetchForwarder(connId, st)
+		}
 		if o.blockfetchForwardSpawn != nil {
-			o.blockfetchForwardSpawn(connId, o.runBlockfetchForwarder)
+			o.blockfetchForwardSpawn(connId, run)
 		} else {
-			go o.runBlockfetchForwarder(connId)
+			go run(connId)
 		}
 	}
 }
 
-// runBlockfetchForwarder publishes connId's queued blockfetch events in FIFO
-// order, one at a time, and returns once the queue is empty, so an idle
-// connection holds no goroutine.
+// runBlockfetchForwarder publishes the queued blockfetch events of st, the
+// forward state of connId, in FIFO order, one at a time, and returns once the
+// queue is empty, so an idle connection holds no goroutine.
 //
-// At most one forwarder runs per connection, which is what preserves FIFO
-// order: running is set only by the enqueue that finds it clear, and cleared
-// only here, under blockfetchForwardMu, at the same point this goroutine
-// observes an empty queue and returns.
-func (o *Ouroboros) runBlockfetchForwarder(connId ouroboros.ConnectionId) {
+// At most one forwarder runs per state, which is what preserves FIFO order:
+// running is set only by the enqueue that finds it clear, and cleared only
+// here, under blockfetchForwardMu, at the same point this goroutine observes
+// an empty queue and returns. The forwarder drains the state it was started
+// for rather than re-reading the map, so a state replaced after a close
+// cannot gain a second forwarder.
+func (o *Ouroboros) runBlockfetchForwarder(
+	connId ouroboros.ConnectionId,
+	st *blockfetchForwardState,
+) {
 	for {
 		o.blockfetchForwardMu.Lock()
-		st := o.blockfetchForward[connId]
-		if st == nil || len(st.queue) == 0 {
-			if st != nil {
-				st.running = false
-				if st.bytes == 0 {
-					delete(o.blockfetchForward, connId)
-				}
+		if len(st.queue) == 0 {
+			st.running = false
+			if st.bytes == 0 && !st.overflowed &&
+				o.blockfetchForward[connId] == st {
+				delete(o.blockfetchForward, connId)
 			}
 			o.blockfetchForwardMu.Unlock()
 			return
@@ -147,6 +212,51 @@ func (o *Ouroboros) runBlockfetchForwarder(connId ouroboros.ConnectionId) {
 		o.blockfetchForwardMu.Unlock()
 		o.addBlockfetchInFlight(-qe.bytes, -1)
 	}
+}
+
+// blockfetchForwardLimits returns the per-connection forward queue bounds in
+// bytes and events.
+func (o *Ouroboros) blockfetchForwardLimits() (int, int) {
+	maxBytes := blockfetchForwardMaxBytes
+	if o.blockfetchForwardMaxBytes > 0 {
+		maxBytes = o.blockfetchForwardMaxBytes
+	}
+	maxEvents := blockfetchForwardMaxEvents
+	if o.blockfetchForwardMaxEvents > 0 {
+		maxEvents = o.blockfetchForwardMaxEvents
+	}
+	return maxBytes, maxEvents
+}
+
+// releaseBlockfetchForwardOverflow removes connId's forward state once the
+// connection has closed, if that state overflowed, so a later connection with
+// the same ConnectionId is not left dropping its events. A state that did not
+// overflow is left to its forwarder, which removes it once drained.
+func (o *Ouroboros) releaseBlockfetchForwardOverflow(
+	connId ouroboros.ConnectionId,
+) {
+	o.blockfetchForwardMu.Lock()
+	defer o.blockfetchForwardMu.Unlock()
+	if st, ok := o.blockfetchForward[connId]; ok && st.overflowed {
+		delete(o.blockfetchForward, connId)
+	}
+}
+
+// blockfetchForwardCloseLive closes connId through connManager. This is the
+// production value of the Ouroboros.blockfetchForwardClose seam.
+func (o *Ouroboros) blockfetchForwardCloseLive(connId ouroboros.ConnectionId) {
+	if o.connManager == nil {
+		return
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	o.closeBlockfetchConnection(
+		conn,
+		connId.String(),
+		"blockfetch forward queue limit reached",
+	)
 }
 
 // addBlockfetchInFlight adjusts the aggregate in-flight blockfetch gauges.

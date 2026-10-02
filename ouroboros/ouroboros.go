@@ -151,6 +151,14 @@ type Ouroboros struct {
 	// forwarder inside its publish.
 	blockfetchForwardSpawn         func(ouroboros.ConnectionId, func(ouroboros.ConnectionId))
 	blockfetchForwardBeforePublish func(ouroboros.ConnectionId, event.Event)
+	// blockfetchForwardMaxBytes and blockfetchForwardMaxEvents override the
+	// per-connection forward queue bounds when positive; tests lower them.
+	// blockfetchForwardClose, when set, replaces blockfetchForwardCloseLive
+	// for a connection whose queue reached a bound; tests set it to observe
+	// the close.
+	blockfetchForwardMaxBytes  int
+	blockfetchForwardMaxEvents int
+	blockfetchForwardClose     func(ouroboros.ConnectionId)
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -508,6 +516,9 @@ type blockfetchMetrics struct {
 	// connection_id, whose series would grow without bound with reconnects.
 	inFlightBytes  prometheus.Gauge
 	inFlightBlocks prometheus.Gauge
+	// forwardOverflows counts connections closed because their forward
+	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
+	forwardOverflows prometheus.Counter
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -707,6 +718,12 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 		prometheus.GaugeOpts{
 			Name: "dingo_blockfetch_inflight_blocks",
 			Help: "aggregate count of blockfetch events (blocks and batch-done markers) received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.forwardOverflows = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_forward_overflow_total",
+			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
 		},
 	)
 }
@@ -1023,6 +1040,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
+	o.releaseBlockfetchForwardOverflow(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)

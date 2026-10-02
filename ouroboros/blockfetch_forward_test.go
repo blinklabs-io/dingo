@@ -22,9 +22,11 @@ import (
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros_conn "github.com/blinklabs-io/gouroboros/connection"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -340,4 +342,221 @@ func TestBlockfetchForwardKeepsPerConnectionOrderUnderStall(t *testing.T) {
 			connId.String(),
 		)
 	}
+}
+
+// blockfetchForwardOverflowFixture holds a connection's first publish inside
+// its forwarder, so every later event stays queued, and records the
+// connections closed for reaching a forward queue bound.
+type blockfetchForwardOverflowFixture struct {
+	o       *Ouroboros
+	ch      <-chan event.Event
+	connId  ouroboros_conn.ConnectionId
+	entered chan struct{}
+	release func()
+	closed  chan ouroboros_conn.ConnectionId
+}
+
+func newBlockfetchForwardOverflowFixture(
+	t *testing.T,
+) *blockfetchForwardOverflowFixture {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { stopEventBusBounded(t, bus) })
+	_, ch := bus.SubscribeWithBufferPolicy(
+		ledger.BlockfetchEventType,
+		64,
+		event.SubscriberBackpressureBlock,
+	)
+	f := &blockfetchForwardOverflowFixture{
+		o: newOuroboros(OuroborosConfig{
+			EventBus:     bus,
+			PromRegistry: prometheus.NewRegistry(),
+		}),
+		ch:      ch,
+		connId:  testConnId(),
+		entered: make(chan struct{}),
+		closed:  make(chan ouroboros_conn.ConnectionId, 4),
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	f.release = func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(f.release)
+	var holdOnce sync.Once
+	f.o.blockfetchForwardBeforePublish = func(
+		ouroboros_conn.ConnectionId,
+		event.Event,
+	) {
+		holdOnce.Do(func() {
+			close(f.entered)
+			<-release
+		})
+	}
+	f.o.blockfetchForwardClose = func(connId ouroboros_conn.ConnectionId) {
+		f.closed <- connId
+	}
+	return f
+}
+
+// deliver runs fn as a blockfetch receive callback and fails the test if it
+// does not return within blockfetchForwardTestBound.
+func (f *blockfetchForwardOverflowFixture) deliver(
+	t *testing.T,
+	fn func() error,
+) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(blockfetchForwardTestBound):
+		t.Fatal("blockfetch receive callback blocked on the forward queue")
+	}
+}
+
+func (f *blockfetchForwardOverflowFixture) block(
+	t *testing.T,
+	block gledger.Block,
+) {
+	t.Helper()
+	ctx := blockfetch.CallbackContext{ConnectionId: f.connId, RequestId: 1}
+	f.deliver(t, func() error {
+		return f.o.blockfetchClientBlock(ctx, uint(block.Type()), block)
+	})
+}
+
+func (f *blockfetchForwardOverflowFixture) overflows() float64 {
+	return promtestutil.ToFloat64(f.o.blockfetchMetrics.forwardOverflows)
+}
+
+func (f *blockfetchForwardOverflowFixture) inFlight() (float64, float64) {
+	return promtestutil.ToFloat64(f.o.blockfetchMetrics.inFlightBytes),
+		promtestutil.ToFloat64(f.o.blockfetchMetrics.inFlightBlocks)
+}
+
+// TestBlockfetchForwardEventLimitClosesConnection pins the overflow contract
+// of the per-connection forward queue: while the forwarder is held inside a
+// publish, enqueues up to the event bound are accepted, the enqueue that
+// would exceed it returns without blocking, discards the queued events,
+// closes the connection, and every later event for the connection is dropped
+// until the close is handled, after which the connection id is usable again.
+func TestBlockfetchForwardEventLimitClosesConnection(t *testing.T) {
+	t.Parallel()
+
+	f := newBlockfetchForwardOverflowFixture(t)
+	f.o.blockfetchForwardMaxEvents = 3
+	blocks, err := testfixtures.GenerateConwayChain(5)
+	require.NoError(t, err)
+
+	f.block(t, blocks[0])
+	testutil.RequireReceive(
+		t,
+		f.entered,
+		blockfetchForwardTestBound,
+		"forwarder did not reach its first publish",
+	)
+	for _, block := range blocks[1:4] {
+		f.block(t, block)
+	}
+	require.Equal(t, float64(0), f.overflows(),
+		"events within the bound must be queued, not rejected")
+	inBytes, inBlocks := f.inFlight()
+	require.Equal(t, float64(4), inBlocks)
+
+	f.block(t, blocks[4])
+	require.Equal(t, float64(1), f.overflows(),
+		"the enqueue exceeding the event bound must overflow the queue")
+	require.Equal(t, f.connId, testutil.RequireReceive(
+		t,
+		f.closed,
+		blockfetchForwardTestBound,
+		"overflowed connection was not closed",
+	))
+	inBytes, inBlocks = f.inFlight()
+	require.Equal(t, float64(1), inBlocks,
+		"queued events must be discarded, leaving only the one in publish")
+	require.Equal(t, float64(len(blocks[0].Cbor())), inBytes)
+
+	f.deliver(t, func() error {
+		return f.o.blockfetchClientRangeDone(
+			blockfetch.CallbackContext{ConnectionId: f.connId, RequestId: 1},
+			nil,
+		)
+	})
+	_, inBlocks = f.inFlight()
+	require.Equal(t, float64(1), inBlocks,
+		"an event for an overflowed connection must be dropped")
+	require.Equal(t, float64(1), f.overflows(),
+		"a dropped event must not count as a second overflow")
+
+	f.release()
+	evt := testutil.RequireReceive(
+		t,
+		f.ch,
+		blockfetchForwardTestBound,
+		"held event was not delivered",
+	)
+	e, ok := evt.Data.(ledger.BlockfetchEvent)
+	require.True(t, ok)
+	require.Equal(t, blocks[0].Hash().String(), e.Block.Hash().String())
+	require.Eventually(t, func() bool {
+		_, n := f.inFlight()
+		return n == 0
+	}, blockfetchForwardTestBound, 5*time.Millisecond)
+	select {
+	case evt := <-f.ch:
+		t.Fatalf("discarded event reached the ledger: %+v", evt.Data)
+	default:
+	}
+
+	f.o.HandleConnClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{ConnectionId: f.connId},
+	))
+	f.block(t, blocks[1])
+	evt = testutil.RequireReceive(
+		t,
+		f.ch,
+		blockfetchForwardTestBound,
+		"event after the close was not delivered",
+	)
+	e, ok = evt.Data.(ledger.BlockfetchEvent)
+	require.True(t, ok)
+	require.Equal(t, blocks[1].Hash().String(), e.Block.Hash().String())
+}
+
+// TestBlockfetchForwardByteLimitClosesConnection pins the byte bound: an
+// enqueue that would take the queued bytes past it overflows the queue even
+// when the event bound has room.
+func TestBlockfetchForwardByteLimitClosesConnection(t *testing.T) {
+	t.Parallel()
+
+	f := newBlockfetchForwardOverflowFixture(t)
+	blocks, err := testfixtures.GenerateConwayChain(3)
+	require.NoError(t, err)
+	f.o.blockfetchForwardMaxBytes = len(blocks[0].Cbor()) +
+		len(blocks[1].Cbor())
+
+	f.block(t, blocks[0])
+	testutil.RequireReceive(
+		t,
+		f.entered,
+		blockfetchForwardTestBound,
+		"forwarder did not reach its first publish",
+	)
+	f.block(t, blocks[1])
+	require.Equal(t, float64(0), f.overflows(),
+		"bytes up to the bound must be queued, not rejected")
+	f.block(t, blocks[2])
+	require.Equal(t, float64(1), f.overflows(),
+		"the enqueue exceeding the byte bound must overflow the queue")
+	require.Equal(t, f.connId, testutil.RequireReceive(
+		t,
+		f.closed,
+		blockfetchForwardTestBound,
+		"overflowed connection was not closed",
+	))
+	inBytes, inBlocks := f.inFlight()
+	require.Equal(t, float64(1), inBlocks)
+	require.Equal(t, float64(len(blocks[0].Cbor())), inBytes)
 }
