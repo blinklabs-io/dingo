@@ -154,7 +154,8 @@
 #
 #   GET /health, GET /healthz  -> liveness. 200 whenever the process is up
 #     and serving, independent of sync state, unless the slot clock ticked
-#     and then stayed silent for five minutes (a wedged event loop). This is
+#     and then stayed silent for five minutes (a wedged event loop; a clock
+#     paused behind the era-history horizon is not silent). This is
 #     what the container HEALTHCHECK probes: an orchestrator answers an
 #     unhealthy container by replacing it, and a node in initial sync is
 #     legitimately not useful for hours without needing to be killed.

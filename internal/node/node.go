@@ -61,8 +61,10 @@ func reloadOnSignal(
 			if err := reload(); err != nil {
 				logger.Error(
 					"block producer credential reload failed; keeping the loaded credentials",
-					"component", "node",
-					"error", err,
+					"component",
+					"node",
+					"error",
+					err,
 				)
 			}
 		}

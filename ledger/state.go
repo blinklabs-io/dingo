@@ -586,6 +586,12 @@ type FatalErrorFunc func(err error)
 // the node's readiness probe reads it. Optional; nil disables the report.
 type ReportTipGapFunc func(gapSlots uint64)
 
+// ReportSlotClockAliveFunc is called each slot the slot clock pauses its
+// ticks because era history does not reach the wall-clock slot. The clock is
+// running and has nothing to emit, so a liveness heartbeat fed from the ticks
+// can tell that pause from a stopped clock. Optional; nil disables the report.
+type ReportSlotClockAliveFunc func()
+
 // GetActiveConnectionFunc is a callback to retrieve the currently active
 // chainsync connection ID for chain selection purposes.
 type GetActiveConnectionFunc func() *ouroboros.ConnectionId
@@ -675,6 +681,7 @@ type LedgerStateConfig struct {
 	GenesisSelectionStateFunc   GenesisSelectionStateFunc
 	FatalErrorFunc              FatalErrorFunc
 	ReportTipGapFunc            ReportTipGapFunc
+	ReportSlotClockAliveFunc    ReportSlotClockAliveFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
@@ -3080,7 +3087,7 @@ func (ls *LedgerState) publishWallClockMetrics(
 // pauses ticks because era history has not reached the wall-clock slot, which
 // is exactly when the node is furthest behind. It deliberately does not report
 // to ReportTipGapFunc, so /readyz keeps reporting "no chain tip yet" until a
-// real tick arrives.
+// real tick arrives; it reports to ReportSlotClockAliveFunc instead.
 func (ls *LedgerState) handleBehindHorizon(wallSlot uint64) {
 	consensusState, tipState := ls.loadStateSnapshots()
 	ls.publishWallClockMetrics(
@@ -3088,6 +3095,9 @@ func (ls *LedgerState) handleBehindHorizon(wallSlot uint64) {
 		tipState.currentTip.Point.Slot,
 		consensusState.currentEpoch.LengthInSlots,
 	)
+	if ls.config.ReportSlotClockAliveFunc != nil {
+		ls.config.ReportSlotClockAliveFunc()
+	}
 }
 
 // handleSlotTicks processes slot tick notifications from the slot clock.

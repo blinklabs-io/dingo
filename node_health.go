@@ -41,7 +41,8 @@ type nodeHealth struct {
 	generation  uint64
 	tipGapSlots uint64
 	tipGapKnown bool
-	// lastTick is when the slot-tick loop last reported. It is the node's
+	// lastTick is when the slot-tick loop last reported, or the slot clock
+	// last reported a pause behind the era-history horizon. It is the node's
 	// heartbeat for liveness and is cleared with the gap.
 	lastTick time.Time
 }
@@ -65,6 +66,22 @@ func (h *nodeHealth) recordTipGap(generation uint64, gapSlots uint64) {
 	}
 	h.tipGapSlots = gapSlots
 	h.tipGapKnown = true
+	h.lastTick = time.Now()
+}
+
+// recordSlotClockAlive refreshes the liveness heartbeat while the slot clock
+// pauses its ticks behind the era-history horizon, without touching the tip
+// gap. It never starts a heartbeat that no tick has: liveness stays
+// unconstrained until the first tick.
+func (h *nodeHealth) recordSlotClockAlive(generation uint64) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if generation != h.generation || h.lastTick.IsZero() {
+		return
+	}
 	h.lastTick = time.Now()
 }
 
@@ -135,34 +152,72 @@ func blockProducerReadiness(forger forgerReadiness) error {
 	return nil
 }
 
-// withLifecycleGates runs fn only if no startup, live restore/truncate or
-// shutdown is in progress. Those are the only writers of the components the
-// readiness checks read (the database and the block forger), and each holds
-// its gate for the whole replacement, so a probe that cannot take the gates
-// has found a node that is not ready by definition, and one that can reads a
-// settled component. TryLock keeps the probe from ever waiting on them.
-func (n *Node) withLifecycleGates(fn func() error) error {
+// errLifecycleBusy reports that a startup, shutdown, or live restore or
+// truncate holds the lifecycle gates, so the components they replace cannot
+// be read safely.
+var errLifecycleBusy = errors.New("node lifecycle operation in progress")
+
+// tryLifecycleGates takes the startup and live lifecycle gates without
+// waiting, or reports which operation holds them. Startup, live
+// restore/truncate and shutdown are the only writers of the database, ledger
+// and forging components, and each holds its gate for the whole replacement.
+func (n *Node) tryLifecycleGates() (release func(), err error) {
 	if !n.startupLifecycleMu.TryLock() {
-		return errors.New("node is starting or shutting down")
+		return nil, fmt.Errorf(
+			"%w: node is starting or shutting down", errLifecycleBusy,
+		)
 	}
-	defer n.startupLifecycleMu.Unlock()
 	if !n.liveLifecycleMu.TryLock() {
-		return errors.New("database restore or truncate in progress")
+		n.startupLifecycleMu.Unlock()
+		return nil, fmt.Errorf(
+			"%w: database restore or truncate in progress", errLifecycleBusy,
+		)
 	}
-	defer n.liveLifecycleMu.Unlock()
-	return fn()
+	return func() {
+		n.liveLifecycleMu.Unlock()
+		n.startupLifecycleMu.Unlock()
+	}, nil
+}
+
+// checkSettledComponents runs capture under the lifecycle gates to read the
+// components a probe checks, then runs the check capture returns after the
+// gates are released. A probe that cannot take the gates has found a node
+// that is not ready by definition.
+//
+// The check must not run under the gates: the chain-switch and chainsync
+// callback handlers TryLock liveLifecycleMu and drop their work when it is
+// held, so a probe waiting on a slow database read would make them drop
+// events on a healthy node. A component replaced after the release fails its
+// check (a closed database refuses the read, a stopped forger is not running),
+// which is the right answer for a node in mid-replacement.
+func (n *Node) checkSettledComponents(
+	capture func() (check func() error, err error),
+) error {
+	release, err := n.tryLifecycleGates()
+	if err != nil {
+		return err
+	}
+	check, err := capture()
+	release()
+	if err != nil {
+		return err
+	}
+	return check()
 }
 
 // DatabaseReady reports why the metadata database cannot serve, or nil.
 func (n *Node) DatabaseReady() error {
-	return n.withLifecycleGates(func() error {
-		if n.db == nil {
-			return errors.New("database is not open")
+	return n.checkSettledComponents(func() (func() error, error) {
+		db := n.db
+		if db == nil {
+			return nil, errors.New("database is not open")
 		}
-		if _, err := n.db.GetTip(nil); err != nil {
-			return fmt.Errorf("database read failed: %w", err)
-		}
-		return nil
+		return func() error {
+			if _, err := db.GetTip(nil); err != nil {
+				return fmt.Errorf("database read failed: %w", err)
+			}
+			return nil
+		}, nil
 	})
 }
 
@@ -172,11 +227,12 @@ func (n *Node) BlockProducerReady() error {
 	if !n.config.blockProducer {
 		return nil
 	}
-	return n.withLifecycleGates(func() error {
-		if n.blockForger == nil {
-			return errors.New("block forger is not initialized")
+	return n.checkSettledComponents(func() (func() error, error) {
+		forger := n.blockForger
+		if forger == nil {
+			return nil, errors.New("block forger is not initialized")
 		}
-		return blockProducerReadiness(n.blockForger)
+		return func() error { return blockProducerReadiness(forger) }, nil
 	})
 }
 

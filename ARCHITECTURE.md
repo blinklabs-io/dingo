@@ -7103,7 +7103,9 @@ refusal leaves the loaded credentials untouched: loading into the live set
 instead would fail closed on a bad file and stop a healthy producer. A
 successful reload logs the old and new counter and certificate KES period.
 Credentials sourced from a KES agent are rotated through the agent, and a
-reload against them is refused.
+reload against them is refused. A reload is also refused while startup,
+shutdown, or a live restore or truncate holds the lifecycle gates, since those
+replace the ledger state and the live credentials the reload reads.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -8343,15 +8345,18 @@ onto a port an operator exposes for probing.
 
 | Path | Semantics |
 |------|-----------|
-| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered, independent of sync state. The one exception is a wedged event loop: once the slot clock has ticked, 503 if it then stays silent for five minutes. A node that has not ticked yet (database open, Mithril bootstrap, ledger startup) is live. |
+| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered, independent of sync state. The one exception is a wedged event loop: once the slot clock has ticked, 503 if it then stays silent for five minutes. A clock that pauses its ticks because era history does not reach the wall-clock slot reports each paused slot and is not silent. A node that has not ticked yet (database open, Mithril bootstrap, ledger startup) is live. |
 | `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot **and** the database answers a read (not ready during startup, live restore or truncate, and shutdown); for a node configured as a block producer, also when the forger is running and its credentials could sign at the current slot (operational certificate loaded, validated and inside its KES window). 503 otherwise, with the first failing condition as the body's `reason`. |
 
 The checks beyond the tip gap are supplied by `Node.EventLoopResponsive`,
 `Node.DatabaseReady` and `Node.BlockProducerReady` through
 `health.Check`, and `nodeHealthChecks` marks only the first as a liveness
-check. The database and forger readings are taken under the node's lifecycle
+check. The database and forger pointers are read under the node's lifecycle
 gates with `TryLock`, so a probe never waits on a restore and a gate held by
-one reads as not ready.
+one reads as not ready. The gates are released before the database read and
+the forger check run: the chain-switch and chainsync callback handlers
+`TryLock` `liveLifecycleMu` and drop their work when it is held, so a probe
+must not hold it across I/O.
 
 The separation is a deliberate operational contract, not two names for one
 check. An orchestrator answers a liveness failure by *restarting* and a

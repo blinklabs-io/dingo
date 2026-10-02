@@ -284,3 +284,39 @@ func TestQuiesceZeroizesTheLiveCredentialsAfterTheirUsers(t *testing.T) {
 		"a reload arriving after teardown must not resurrect the keys",
 	)
 }
+
+// TestReloadBlockProducerCredentialsRefusesDuringALifecycleOperation pins that
+// the signal-driven reload does not read the ledger state or the live
+// credentials while startup, shutdown, or a live restore or truncate is
+// replacing them: it runs on its own goroutine, and a restore nils
+// n.ledgerState under liveLifecycleMu.
+func TestReloadBlockProducerCredentialsRefusesDuringALifecycleOperation(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	gates := map[string]func(*Node) *sync.Mutex{
+		"startup or shutdown": func(n *Node) *sync.Mutex {
+			return &n.startupLifecycleMu
+		},
+		"live restore or truncate": func(n *Node) *sync.Mutex {
+			return &n.liveLifecycleMu
+		},
+	}
+	for name, gate := range gates {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := newReloadTestNode(t, 1)
+			r.rotateTo(t, 2, nil)
+			mu := gate(r.Node)
+			mu.Lock()
+			defer mu.Unlock()
+			require.ErrorIs(
+				t,
+				r.ReloadBlockProducerCredentials(),
+				errLifecycleBusy,
+			)
+			r.requireLiveCounter(t, 1)
+		})
+	}
+}

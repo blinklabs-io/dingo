@@ -137,3 +137,29 @@ func TestBlockProducerReadyOnlyConstrainsBlockProducers(t *testing.T) {
 		require.ErrorContains(t, n.BlockProducerReady(), "restore or truncate")
 	})
 }
+
+// TestReadinessChecksRunOutsideTheLifecycleGates pins that a probe holds the
+// lifecycle gates only to read the components it checks. The chain-switch and
+// chainsync callback handlers TryLock liveLifecycleMu and drop their work when
+// it is held, so a check that ran under the gates, such as a database read
+// waiting behind a long write, would make a healthy node drop those events.
+func TestReadinessChecksRunOutsideTheLifecycleGates(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	var liveFree, startupFree bool
+	err := n.checkSettledComponents(func() (func() error, error) {
+		return func() error {
+			if liveFree = n.liveLifecycleMu.TryLock(); liveFree {
+				n.liveLifecycleMu.Unlock()
+			}
+			if startupFree = n.startupLifecycleMu.TryLock(); startupFree {
+				n.startupLifecycleMu.Unlock()
+			}
+			return nil
+		}, nil
+	})
+	require.NoError(t, err)
+	require.True(t, liveFree, "the check ran holding liveLifecycleMu")
+	require.True(t, startupFree, "the check ran holding startupLifecycleMu")
+}

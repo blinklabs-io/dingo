@@ -489,8 +489,18 @@ func (n *Node) blockProducerContext() context.Context {
 // ReloadBlockProducerCredentials re-reads the VRF, KES and operational
 // certificate files, validates them exactly as startup does, and swaps them
 // into the running block producer. Any failure leaves the loaded credentials
-// in place and forging uninterrupted.
+// in place and forging uninterrupted. It is refused while startup, shutdown,
+// or a live restore or truncate is in progress.
 func (n *Node) ReloadBlockProducerCredentials() error {
+	// The reload reads n.ledgerState and the live credentials, both of which
+	// those operations replace, from its own goroutine. Holding the gates for
+	// the whole reload is acceptable where a probe's would not be: it runs
+	// once per operator-initiated rotation, not on every probe interval.
+	release, err := n.tryLifecycleGates()
+	if err != nil {
+		return err
+	}
+	defer release()
 	slot, supported, err := n.blockProducerStartupClock()
 	if err != nil {
 		return err
