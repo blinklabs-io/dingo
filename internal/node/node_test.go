@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -1347,5 +1348,33 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 			name,
 			reason,
 		)
+	}
+}
+
+// TestBuildDingoConfigWiresTokenRegistryHeaders pins the composition step a
+// loaded header secret takes on its way to the registry sync.
+func TestBuildDingoConfigWiresTokenRegistryHeaders(t *testing.T) {
+	t.Parallel()
+
+	headers := map[string]string{"Authorization": "Bearer wired"}
+	cfg := &config.Config{
+		TokenRegistry: config.TokenRegistryConfig{HeaderSecrets: headers},
+	}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	if got := built.TokenRegistry().HeaderSecrets; !maps.Equal(got, headers) {
+		t.Fatalf("token registry headers = %v, want %v", got, headers)
 	}
 }
