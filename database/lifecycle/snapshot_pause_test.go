@@ -40,6 +40,7 @@ var errInjectedBackup = errors.New("injected backup failure")
 type backupHooks struct {
 	blob     func(ctx context.Context, w io.Writer) error
 	metadata func(ctx context.Context, dstPath string) error
+	read     func() error
 }
 
 type hookedBlobStore struct {
@@ -57,6 +58,15 @@ func (s hookedBlobStore) Backup(ctx context.Context, w io.Writer) error {
 type hookedMetadataStore struct {
 	metadata.MetadataStore
 	hooks *backupHooks
+}
+
+func (s hookedMetadataStore) GetCommitTimestamp() (int64, error) {
+	if s.hooks.read != nil {
+		if err := s.hooks.read(); err != nil {
+			return 0, err
+		}
+	}
+	return s.MetadataStore.GetCommitTimestamp()
 }
 
 func (s hookedMetadataStore) BackupTo(ctx context.Context, dst string) error {
@@ -246,7 +256,7 @@ func TestSnapshotReleasesBarrierOnCancellation(t *testing.T) {
 	}
 	db := newHookedDB(t, nil, hooks)
 	dir := filepath.Join(t.TempDir(), "snap")
-	ctx, cancel := context.WithCancel(t.Context())
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
 	errCh := make(chan error, 1)
@@ -350,4 +360,45 @@ func TestSnapshotReusesMetricsForWrappedRegistry(t *testing.T) {
 		}
 	}
 	require.Equal(t, uint64(2), count)
+}
+
+func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
+	t.Parallel()
+	db := newHookedDB(t, nil, &backupHooks{blob: func(ctx context.Context, _ io.Writer) error {
+		<-ctx.Done()
+		return nil
+	}})
+	dir := filepath.Join(t.TempDir(), "snapshot")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, dir)
+	requireBarrierReleased(t, db)
+}
+
+func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	hooks := &backupHooks{}
+	db := newHookedDB(t, nil, hooks)
+	hooks.read = func() error {
+		<-release
+		close(finished)
+		return nil
+	}
+	dir := filepath.Join(t.TempDir(), "snapshot")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
+	close(release)
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("snapshot state reader did not exit")
+	}
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, dir)
+	requireBarrierReleased(t, db)
 }

@@ -493,6 +493,16 @@ CI.
 
 ## Database Lifecycle (Snapshot, Restore, Truncate)
 
+`WithMaxCommitPause` bounds the interval beginning after the commit barrier is
+acquired, including tip, timestamp, and gate reads. Expiry returns
+`ErrCommitPauseExceeded` and removes the partial snapshot, even when a backup
+provider returns success after its deadline. Providers must observe cancellation
+promptly; the barrier remains held until active backups return. Metrics
+`dingo_snapshot_commit_pause_seconds{result="ok|failed|exceeded"}` and
+`dingo_snapshot_bytes_written_total{store="blob|metadata"}` report pause outcomes
+and successfully written backup bytes.
+
+
 `database/lifecycle/` (package `lifecycle`) implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point, shared by the offline `dingo database` CLI commands and, for truncate, the live ledger rollback path. It is a pure library over `*database.Database` — no CLI, config, or node-composition knowledge — with node-facing orchestration in `internal/dblifecycle` (`Service` for the CLI, `Manager` for automatic epoch-boundary snapshots).
 
 **Backup-capable plugin interfaces.** Two new optional interfaces, checked via type assertion the same way `plugin.LoggerSetter` is (`database/plugin/log.go`):

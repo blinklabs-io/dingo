@@ -232,13 +232,18 @@ func seedScaleBlocks(
 	payload := make([]byte, blockBytes)
 	// Bounded by bytes: a Badger transaction has a size budget that a fixed
 	// block count would exceed at large block sizes.
-	perTxn := max(scaleBlobTxnBytes/blockBytes, 1)
+	perTxn := min(max(scaleBlobTxnBytes/blockBytes, 1), 1000)
 	for lo := from; lo < to; lo += perTxn {
 		hi := min(lo+perTxn, to)
 		txn := store.NewTransaction(true)
 		for i := lo; i < hi; i++ {
 			// Distinct bytes per block keep Badger's compression honest.
-			binary.BigEndian.PutUint64(payload, uint64(i)) // #nosec G115 -- non-negative benchmark index
+			rng := rand.New(rand.NewPCG(uint64(i), uint64(i)+1)) // #nosec G115 -- non-negative benchmark index
+			for offset := 0; offset < len(payload); offset += 8 {
+				var chunk [8]byte
+				binary.LittleEndian.PutUint64(chunk[:], rng.Uint64())
+				copy(payload[offset:], chunk[:])
+			}
 			if err := store.SetBlock(
 				txn, uint64(i)*20, scaleTxID(i), payload,
 				uint64(i)+1, 1, uint64(i)+1, nil,

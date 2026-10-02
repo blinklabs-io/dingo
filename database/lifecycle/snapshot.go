@@ -25,8 +25,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // File synchronization failures cannot be induced reliably on a healthy
@@ -239,9 +241,46 @@ func Snapshot(
 	if maxPause > 0 {
 		backupCtx, cancelBackup = context.WithTimeout(ctx, maxPause)
 	}
-	tip, tipErr := db.GetTip(nil)
-	commitTimestamp, commitTimestampErr := db.Metadata().GetCommitTimestamp()
-	gates, gatesErr := db.Metadata().GetNodeSettingsGates()
+	defer cancelBackup()
+	type snapshotState struct {
+		tip             ochainsync.Tip
+		commitTimestamp int64
+		gates           nodesettings.Values
+		err             error
+	}
+	stateReady := make(chan snapshotState, 1)
+	go func() {
+		var state snapshotState
+		state.tip, state.err = db.GetTip(nil)
+		if state.err == nil && backupCtx.Err() == nil {
+			state.commitTimestamp, state.err = db.Metadata().GetCommitTimestamp()
+		}
+		if state.err == nil && backupCtx.Err() == nil {
+			state.gates, state.err = db.Metadata().GetNodeSettingsGates()
+		}
+		stateReady <- state
+	}()
+	var state snapshotState
+	select {
+	case state = <-stateReady:
+	case <-backupCtx.Done():
+		pauseExceeded = maxPause > 0 && ctx.Err() == nil
+		if pauseExceeded {
+			return Manifest{}, fmt.Errorf("%w (%s): %w", ErrCommitPauseExceeded, maxPause, backupCtx.Err())
+		}
+		return Manifest{}, backupCtx.Err()
+	}
+	if state.err != nil {
+		return Manifest{}, fmt.Errorf("read snapshot state: %w", state.err)
+	}
+	if err := backupCtx.Err(); err != nil {
+		pauseExceeded = maxPause > 0 && ctx.Err() == nil
+		if pauseExceeded {
+			return Manifest{}, fmt.Errorf("%w (%s): %w", ErrCommitPauseExceeded, maxPause, err)
+		}
+		return Manifest{}, err
+	}
+	tip, commitTimestamp, gates := state.tip, state.commitTimestamp, state.gates
 
 	var backupErr, metadataErr error
 	var backupWG sync.WaitGroup
@@ -256,10 +295,9 @@ func Snapshot(
 	}()
 	backupWG.Wait()
 
-	// Decided before resume(): a backup that merely finished near the limit
-	// is not a violation, only one the limit actually cancelled.
-	pauseExceeded = maxPause > 0 && ctx.Err() == nil &&
-		backupCtx.Err() != nil && (backupErr != nil || metadataErr != nil)
+	// A provider may return success despite ignoring cancellation. Measure
+	// completion against the deadline rather than relying on its error.
+	pauseExceeded = maxPause > 0 && ctx.Err() == nil && time.Since(pauseStart) >= maxPause
 	cancelBackup()
 	releaseBarrier()
 	if logger != nil {
@@ -275,24 +313,10 @@ func Snapshot(
 		return Manifest{}, fmt.Errorf(
 			"%w (%s): %w",
 			ErrCommitPauseExceeded, maxPause,
-			errors.Join(backupErr, metadataErr, tipErr, commitTimestampErr, gatesErr),
+			errors.Join(context.DeadlineExceeded, backupErr, metadataErr),
 		)
 	}
-	if tipErr != nil {
-		return Manifest{}, fmt.Errorf("get tip: %w", tipErr)
-	}
-	if commitTimestampErr != nil {
-		return Manifest{}, fmt.Errorf(
-			"get commit timestamp: %w",
-			commitTimestampErr,
-		)
-	}
-	if gatesErr != nil {
-		return Manifest{}, fmt.Errorf(
-			"get node settings gates: %w",
-			gatesErr,
-		)
-	}
+
 	if backupErr != nil {
 		return Manifest{}, fmt.Errorf("backup blob store: %w", backupErr)
 	}

@@ -2720,6 +2720,13 @@ Interfaces:
 
 ### Database Lifecycle (Snapshot, Restore, Truncate)
 
+`lifecycle.WithMaxCommitPause` starts its deadline after acquiring the commit
+barrier and covers snapshot-state reads and both backups. A stalled state read
+releases the barrier at cancellation; its read goroutine finishes independently.
+Backup cancellation retains the barrier until both providers return, preserving
+cross-store consistency even when a provider observes cancellation late.
+
+
 `database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `lifecycle.SnapshotToCloud` additionally mirrors it there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation, and `lifecycle.Restore` accepts that same URI as its source, downloading into a temp directory first — this is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
 
 #### Recoverable remote live restore
