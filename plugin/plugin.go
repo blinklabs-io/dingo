@@ -123,6 +123,10 @@ type Host struct {
 	// concurrent Resolve can detect that the capability it just started is
 	// being torn down and unwind its own instance instead of leaking it.
 	stopping map[Capability]int
+	// stopCapabilityWG tracks StopCapability teardown that has already removed
+	// its providers from started, so Stop can wait for it. Add happens under mu
+	// while stopped is false; Stop sets stopped under mu before it Waits.
+	stopCapabilityWG sync.WaitGroup
 }
 
 // NewHost returns an empty plugin host.
@@ -406,7 +410,8 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; subsequent calls return the first call's result.
+// idempotent; subsequent calls return the first call's result. It also waits
+// for StopCapability teardown already in flight.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -431,6 +436,16 @@ func (h *Host) Stop(ctx context.Context) error {
 	h.started = nil
 	h.mu.Unlock()
 	err := stopReverse(ctx, started)
+	capabilitiesDone := make(chan struct{})
+	go func() {
+		h.stopCapabilityWG.Wait()
+		close(capabilitiesDone)
+	}()
+	select {
+	case <-capabilitiesDone:
+	case <-ctx.Done():
+		err = errors.Join(err, ctx.Err())
+	}
 	h.mu.Lock()
 	h.stopErr = err
 	close(h.stopDone)
@@ -457,6 +472,7 @@ func (h *Host) StopCapability(
 	// that completes while stopReverse runs unwinds its own instance instead
 	// of appending it behind our back.
 	h.stopping[capability]++
+	h.stopCapabilityWG.Add(1)
 	selected := make([]startedInstance, 0, 1)
 	remaining := make([]startedInstance, 0, len(h.started))
 	for _, item := range h.started {
@@ -469,6 +485,7 @@ func (h *Host) StopCapability(
 	h.started = remaining
 	h.mu.Unlock()
 	err := stopReverse(ctx, selected)
+	h.stopCapabilityWG.Done()
 	h.mu.Lock()
 	h.stopping[capability]--
 	if h.stopping[capability] <= 0 {

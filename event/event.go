@@ -184,11 +184,26 @@ type EventBus struct {
 	handlerProgressInterval time.Duration
 }
 
-// NewEventBus creates a new EventBus with async worker pool
+// NewEventBus creates a new EventBus with async worker pool. It panics if
+// the bus metrics cannot be registered on promRegistry; use TryNewEventBus to
+// receive that error instead.
 func NewEventBus(
 	promRegistry prometheus.Registerer,
 	logger *slog.Logger,
 ) *EventBus {
+	e, err := TryNewEventBus(promRegistry, logger)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// TryNewEventBus is NewEventBus returning a metrics registration error. On
+// error nothing is left registered and no goroutine is started.
+func TryNewEventBus(
+	promRegistry prometheus.Registerer,
+	logger *slog.Logger,
+) (*EventBus, error) {
 	e := &EventBus{
 		subscribers: make(
 			map[EventType]map[EventSubscriberId]Subscriber,
@@ -202,7 +217,9 @@ func NewEventBus(
 		handlerProgressInterval: handlerProgressWarnInterval,
 	}
 	if promRegistry != nil {
-		e.initMetrics(promRegistry)
+		if err := e.initMetrics(promRegistry); err != nil {
+			return nil, fmt.Errorf("register event bus metrics: %w", err)
+		}
 	}
 	// Start async worker pool
 	for range AsyncWorkerPoolSize {
@@ -211,7 +228,7 @@ func NewEventBus(
 	}
 	e.asyncWg.Add(1)
 	go e.handlerProgressWatchdog(e.stopCh)
-	return e
+	return e, nil
 }
 
 // asyncWorker processes events from the async queue
@@ -1425,6 +1442,30 @@ func (e *EventBus) Stop() {
 // cannot be reused.
 func (e *EventBus) Close() {
 	e.shutdown(false)
+}
+
+// CloseContext is Close bounded by ctx. Close waits for every in-flight
+// SubscribeFunc handler to return, so a handler that never returns would hold
+// it forever. When ctx ends first, CloseContext stops waiting and returns an
+// error wrapping ctx.Err() that names the event types whose handlers are
+// still running. The abandoned Close keeps running in its own goroutine and
+// finishes once those handlers return.
+func (e *EventBus) CloseContext(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		e.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf(
+			"event bus close abandoned with handlers still running for %v: %w",
+			e.runningHandlerTypes(),
+			ctx.Err(),
+		)
+	}
 }
 
 func (e *EventBus) shutdown(restart bool) {

@@ -367,7 +367,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 			})
 			iter := &stubBlockfetchIterator{steps: test.steps}
 			server := &stubBlockfetchBatchServer{}
-			conn := &stubBlockfetchConnection{errChan: make(chan error)}
+			conn := &stubBlockfetchConnection{done: make(chan struct{})}
 			err := node.blockfetchServerSendBatch(
 				testConnId().String(),
 				test.steps[0].result.Point,
@@ -1488,13 +1488,13 @@ func (i *stubBlockfetchIterator) Cancel() {
 }
 
 type stubBlockfetchConnection struct {
-	errChan    chan error
+	done       chan struct{}
 	closeCalls int
 	closeErr   error
 }
 
-func (c *stubBlockfetchConnection) ErrorChan() chan error {
-	return c.errChan
+func (c *stubBlockfetchConnection) Done() <-chan struct{} {
+	return c.done
 }
 
 func (c *stubBlockfetchConnection) Close() error {
@@ -1654,7 +1654,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1687,7 +1687,7 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	iter := &stubBlockfetchIterator{}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1734,7 +1734,7 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1804,7 +1804,7 @@ func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
 	steps := sparseBlockfetchSteps(testMaxBlocks, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 	require.Greater(
@@ -1863,7 +1863,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
 	steps := sparseBlockfetchSteps(testMaxBlocks+1, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 
@@ -1961,7 +1961,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	}
 	server := &stubBlockfetchDrainBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2008,7 +2008,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		drainResults: []bool{true, false},
 	}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2043,7 +2043,7 @@ func TestReportBlockfetchServerAsyncError_ClosesConnection(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 	o.reportBlockfetchServerAsyncError(
@@ -2068,7 +2068,7 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	conn := &stubBlockfetchConnection{
-		errChan:  make(chan error),
+		done:     make(chan struct{}),
 		closeErr: errors.New("close failed"),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
