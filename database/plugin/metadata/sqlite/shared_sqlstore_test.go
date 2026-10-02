@@ -2334,7 +2334,9 @@ type rewardState struct {
 func TestSharedSQLStoreRewardStateParity(t *testing.T) {
 	t.Parallel()
 	store, _ := newSharedSQLStore(t)
-	_ = exerciseRewardStore(t, store)
+	state := exerciseRewardStore(t, store)
+	require.Len(t, state.poolOutputs, 1)
+	require.Equal(t, types.Uint64(7), state.poolOutputs[0].LeaderRewardDeficit)
 }
 
 func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
@@ -2511,6 +2513,7 @@ func exerciseRewardStore(t *testing.T, store rewardStore) rewardState {
 				OptimalReward:       100,
 				TotalReward:         90,
 				LeaderReward:        10,
+				LeaderRewardDeficit: 7,
 				MemberRewardTotal:   80,
 				OwnerStake:          20,
 				Undistributed:       5,

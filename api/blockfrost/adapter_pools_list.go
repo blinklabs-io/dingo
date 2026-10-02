@@ -90,8 +90,11 @@ func (a *NodeAdapter) PoolsList(
 
 	ret := make([]string, 0, end-start)
 	for _, pkh := range poolKeyHashes[start:end] {
-		poolID := lcommon.PoolId(lcommon.NewBlake2b224(pkh))
-		ret = append(ret, poolID.String())
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(pkh)
+		if err != nil {
+			return nil, 0, fmt.Errorf("active pool key hash: %w", err)
+		}
+		ret = append(ret, lcommon.PoolId(poolKeyHash).String())
 	}
 	return ret, total, nil
 }

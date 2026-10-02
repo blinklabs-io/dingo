@@ -99,9 +99,9 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 		)
 	}
 
-	pkhs := make([]lcommon.PoolKeyHash, 0, len(pkhBytes))
-	for _, b := range pkhBytes {
-		pkhs = append(pkhs, lcommon.PoolKeyHash(lcommon.NewBlake2b224(b)))
+	pkhs, err := poolKeyHashesFromActivePoolBytes(pkhBytes)
+	if err != nil {
+		return nil, err
 	}
 	pools, err := ls.db.GetPools(context.Background(), pkhs, txn)
 	if err != nil {
@@ -109,6 +109,23 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	}
 
 	return assembleLedgerPeerSnapshot(slot, stakeByPool, pools, peerKind), nil
+}
+
+func poolKeyHashesFromActivePoolBytes(
+	poolKeyHashBytes [][]byte,
+) ([]lcommon.PoolKeyHash, error) {
+	poolKeyHashes := make([]lcommon.PoolKeyHash, 0, len(poolKeyHashBytes))
+	for _, raw := range poolKeyHashBytes {
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(raw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"GetLedgerPeerSnapshot active pool key: %w",
+				err,
+			)
+		}
+		poolKeyHashes = append(poolKeyHashes, lcommon.PoolKeyHash(poolKeyHash))
+	}
+	return poolKeyHashes, nil
 }
 
 // emptyLedgerPeerSnapshot builds a well-formed empty snapshot at the given
@@ -121,7 +138,7 @@ func emptyLedgerPeerSnapshot(
 	slot olocalstatequery.WithOriginSlot,
 ) olocalstatequery.LedgerPeerSnapshotResult {
 	return olocalstatequery.LedgerPeerSnapshotResult{
-		Version: 0,
+		Version: 0, // LedgerPeerSnapshotV1
 		Slot:    slot,
 		Pools:   []olocalstatequery.PoolLedgerPeers{},
 	}

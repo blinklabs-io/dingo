@@ -1213,7 +1213,10 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		)
 		for _, byPool := range []map[string]uint64{mark, set, snapshotGo} {
 			for hash := range byPool {
-				key := ledger.NewBlake2b224([]byte(hash))
+				key, err := lcommon.NewBlake2b224Checked([]byte(hash))
+				if err != nil {
+					return nil, fmt.Errorf("pool stake snapshot: %w", err)
+				}
 				if _, ok := poolSnapshots[key]; ok {
 					continue
 				}
@@ -1647,7 +1650,7 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return stakePoolsResult(keyHashes), nil
+	return stakePoolsResult(keyHashes)
 }
 
 // queryShelleyDRepState answers GetDRepState: the registration state of the
@@ -1655,7 +1658,9 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 // the Haskell ledger's "empty set means all" semantics). cardano-cli issues
 // this while balancing a transaction, so leaving it unhandled tears down the
 // connection. The result is a bare CBOR map of stake credential -> {expiry
-// epoch, optional anchor, deposit}.
+// epoch, optional anchor, deposit}. A malformed stored credential fails the
+// whole query: returning a map that silently omits one active DRep would
+// claim to be the complete state for this point.
 func (ls *LedgerState) queryShelleyDRepState(
 	creds []lcommon.Credential,
 ) (any, error) {
@@ -1741,13 +1746,21 @@ func (ls *LedgerState) queryShelleyDRepState(
 				return nil, err
 			}
 		}
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("drep state: %w", err)
+		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
-			Bytes: ledger.NewBlake2b224(drep.Credential),
+			Bytes: credential,
+		}
+		anchor, err := drepAnchor(drep)
+		if err != nil {
+			return nil, err
 		}
 		result[key] = olocalstatequery.DRepStateEntry{
 			Expiry:     drep.ExpiryEpoch,
-			Anchor:     drepAnchor(drep),
+			Anchor:     anchor,
 			Deposit:    deposit,
 			Delegators: delegators,
 		}
@@ -1840,11 +1853,15 @@ func (ls *LedgerState) allDRepDelegators() (
 				Tag: uint8(account.DrepType),
 				Key: account.Drep,
 			}.MapKey()
+			credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+			if err != nil {
+				return nil, fmt.Errorf("drep delegator: %w", err)
+			}
 			ret[drepKey] = append(
 				ret[drepKey],
 				olocalstatequery.StakeCredential{
 					Tag:   uint64(ref.Tag),
-					Bytes: ledger.NewBlake2b224(ref.Key),
+					Bytes: credential,
 				},
 			)
 		}
@@ -1932,9 +1949,13 @@ func (ls *LedgerState) drepDelegators(
 	}
 	out := make([]olocalstatequery.StakeCredential, len(refs))
 	for i, ref := range refs {
+		credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+		if err != nil {
+			return nil, fmt.Errorf("drep delegator: %w", err)
+		}
 		out[i] = olocalstatequery.StakeCredential{
 			Tag:   uint64(ref.Tag),
-			Bytes: ledger.NewBlake2b224(ref.Key),
+			Bytes: credential,
 		}
 	}
 	return out, nil
@@ -1942,13 +1963,19 @@ func (ls *LedgerState) drepDelegators(
 
 // drepAnchor maps a stored DRep's anchor metadata to the wire type, or nil
 // when the DRep has no anchor.
-func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
+func drepAnchor(drep *models.Drep) (*lcommon.GovAnchor, error) {
 	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
-		return nil
+		return nil, nil
 	}
-	anchor := &lcommon.GovAnchor{Url: drep.AnchorURL}
-	copy(anchor.DataHash[:], drep.AnchorHash)
-	return anchor
+	dataHash, err := lcommon.NewBlake2b256Checked(drep.AnchorHash)
+	if err != nil {
+		return nil, fmt.Errorf("drep anchor: %w", err)
+	}
+	anchor := &lcommon.GovAnchor{
+		Url:      drep.AnchorURL,
+		DataHash: dataHash,
+	}
+	return anchor, nil
 }
 
 // stakePoolsResult builds the GetStakePools wire result from a list of pool
@@ -1957,15 +1984,17 @@ func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
 // strict about both: a plain (untagged) array fails to decode with "expected
 // tag", and an unsorted set fails with "Canonicity violation while decoding
 // Set". The hashes are therefore emitted in ascending byte order.
-func stakePoolsResult(keyHashes [][]byte) []any {
+func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 	slices.SortFunc(keyHashes, bytes.Compare)
 	poolIds := make(cbor.Set, 0, len(keyHashes))
 	for _, kh := range keyHashes {
-		var id ledger.PoolId
-		copy(id[:], kh)
-		poolIds = append(poolIds, id)
+		hash, err := lcommon.NewBlake2b224Checked(kh)
+		if err != nil {
+			return nil, fmt.Errorf("stake pool id: %w", err)
+		}
+		poolIds = append(poolIds, ledger.PoolId(hash))
 	}
-	return []any{poolIds}
+	return []any{poolIds}, nil
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(
@@ -1989,8 +2018,12 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 		if err != nil {
 			return nil, err
 		}
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+		if err != nil {
+			return nil, fmt.Errorf("utxo by address tx id: %w", err)
+		}
 		utxoId := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Hash: txId,
 			Idx:  int(utxo.OutputIdx),
 		}
 		ret[utxoId] = txOut
@@ -2089,7 +2122,11 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		}
 		rewards[cred] = balance
 		if len(account.Pool) > 0 {
-			delegations[cred] = ledger.NewBlake2b224(account.Pool)
+			poolId, err := lcommon.NewBlake2b224Checked(account.Pool)
+			if err != nil {
+				return nil, fmt.Errorf("delegation pool id: %w", err)
+			}
+			delegations[cred] = poolId
 		}
 	}
 	return []any{[]any{delegations, rewards}}, nil
@@ -2281,8 +2318,17 @@ func (ls *LedgerState) governanceProposalState(
 			err,
 		)
 	}
-	anchor := lcommon.GovAnchor{Url: proposal.AnchorURL}
-	copy(anchor.DataHash[:], proposal.AnchorHash)
+	dataHash, err := lcommon.NewBlake2b256Checked(proposal.AnchorHash)
+	if err != nil {
+		return olocalstatequery.GovActionState{}, fmt.Errorf(
+			"governance proposal anchor: %w",
+			err,
+		)
+	}
+	anchor := lcommon.GovAnchor{
+		Url:      proposal.AnchorURL,
+		DataHash: dataHash,
+	}
 	procedure, err := cbor.Encode([]any{
 		proposal.Deposit,
 		rewardAccount,
@@ -2323,11 +2369,26 @@ func (ls *LedgerState) governanceProposalState(
 		choice := lcommon.Vote(vote.Vote)
 		switch vote.VoterType {
 		case models.VoterTypeCC:
-			state.CommitteeVotes[stakeCredentialFromVote(vote)] = choice
+			cred, err := stakeCredentialFromVote(vote)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, err
+			}
+			state.CommitteeVotes[cred] = choice
 		case models.VoterTypeDRep:
-			state.DRepVotes[stakeCredentialFromVote(vote)] = choice
+			cred, err := stakeCredentialFromVote(vote)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, err
+			}
+			state.DRepVotes[cred] = choice
 		case models.VoterTypeSPO:
-			state.SPOVotes[ledger.NewBlake2b224(vote.VoterCredential)] = choice
+			spoId, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
+			if err != nil {
+				return olocalstatequery.GovActionState{}, fmt.Errorf(
+					"governance vote: %w",
+					err,
+				)
+			}
+			state.SPOVotes[spoId] = choice
 		default:
 			return olocalstatequery.GovActionState{}, fmt.Errorf(
 				"unsupported governance voter type: %d",
@@ -2340,11 +2401,18 @@ func (ls *LedgerState) governanceProposalState(
 
 func stakeCredentialFromVote(
 	vote *models.GovernanceVote,
-) olocalstatequery.StakeCredential {
+) (olocalstatequery.StakeCredential, error) {
+	credential, err := lcommon.NewBlake2b224Checked(vote.VoterCredential)
+	if err != nil {
+		return olocalstatequery.StakeCredential{}, fmt.Errorf(
+			"governance vote: %w",
+			err,
+		)
+	}
 	return olocalstatequery.StakeCredential{
 		Tag:   uint64(vote.VoterCredentialTag),
-		Bytes: ledger.NewBlake2b224(vote.VoterCredential),
-	}
+		Bytes: credential,
+	}, nil
 }
 
 // queryShelleyUtxoByTxIn answers GetUTxOByTxIn: the live outputs named by
@@ -2416,8 +2484,12 @@ func (ls *LedgerState) queryShelleyUtxoByTxIn(
 		if err != nil {
 			return nil, err
 		}
+		txId, err := lcommon.NewBlake2b256Checked(utxo.TxId)
+		if err != nil {
+			return nil, fmt.Errorf("utxo by tx in tx id: %w", err)
+		}
 		utxoId := olocalstatequery.UtxoId{
-			Hash: ledger.NewBlake2b256(utxo.TxId),
+			Hash: txId,
 			Idx:  int(utxo.OutputIdx),
 		}
 		ret[utxoId] = txOut

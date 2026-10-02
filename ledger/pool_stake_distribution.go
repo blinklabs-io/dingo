@@ -385,12 +385,9 @@ func (ls *LedgerState) PoolStakeDistribution(
 		return nil, err
 	}
 
-	keyHashes := make([]lcommon.PoolKeyHash, 0, len(stakeByPool))
-	for hash := range stakeByPool {
-		keyHashes = append(
-			keyHashes,
-			lcommon.PoolKeyHash(lcommon.NewBlake2b224([]byte(hash))),
-		)
+	keyHashes, err := poolKeyHashesFromStakeByPool(stakeByPool)
+	if err != nil {
+		return nil, err
 	}
 	// Sorted before the VRF lookup so both the reported order and the
 	// omission warnings below are a function of the snapshot alone rather than
@@ -468,6 +465,23 @@ func (ls *LedgerState) PoolStakeDistribution(
 	return dist, nil
 }
 
+func poolKeyHashesFromStakeByPool(
+	stakeByPool map[string]uint64,
+) ([]lcommon.PoolKeyHash, error) {
+	keyHashes := make([]lcommon.PoolKeyHash, 0, len(stakeByPool))
+	for hash := range stakeByPool {
+		keyHash, err := lcommon.NewBlake2b224Checked([]byte(hash))
+		if err != nil {
+			return nil, fmt.Errorf(
+				"pool stake distribution snapshot pool key: %w",
+				err,
+			)
+		}
+		keyHashes = append(keyHashes, lcommon.PoolKeyHash(keyHash))
+	}
+	return keyHashes, nil
+}
+
 // stakeFraction expresses a pool's share of the active stake. A snapshot with
 // no stake at all — which is the state a chain is in before its first snapshot
 // is taken — yields zero rather than dividing by it.
@@ -526,15 +540,29 @@ func (ls *LedgerState) poolVrfKeyHashes(
 	for _, pool := range pools {
 		var vrfKeyHash lcommon.Blake2b256
 		var ok bool
+		var err error
 		if asOfSlot != nil {
-			vrfKeyHash, ok = registeredPoolVrfKeyHashAsOfSlot(&pool, *asOfSlot)
+			vrfKeyHash, ok, err = registeredPoolVrfKeyHashAsOfSlot(
+				&pool,
+				*asOfSlot,
+			)
 		} else {
-			vrfKeyHash, ok = registeredPoolVrfKeyHash(&pool)
+			vrfKeyHash, ok, err = registeredPoolVrfKeyHash(&pool)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("pool stake distribution: %w", err)
 		}
 		if !ok {
 			continue
 		}
-		pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(pool.PoolKeyHash))
+		poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"pool stake distribution registered pool key: %w",
+				err,
+			)
+		}
+		pkh := lcommon.PoolKeyHash(poolKeyHash)
 		out[pkh] = ledger.Blake2b256(vrfKeyHash)
 	}
 	return out, nil

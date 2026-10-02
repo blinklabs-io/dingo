@@ -159,11 +159,18 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	cfg := ImportConfig{
 		Database: db,
 		State: &RawLedgerState{
-			Epoch: epoch,
-			Fees:  stateFees,
+			Epoch:         epoch,
+			Fees:          stateFees,
+			EraIndex:      EraConway,
+			EraBoundEpoch: epoch,
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	current, previous := distinctConwayPParams(t)
+	cfg.State.PParamsData = current
+	cfg.State.PrevPParamsData = previous
+	cfg.State.EraBounds = previewEraBounds()
+	cfg.State.EraBounds[EraConway] = EraBound{Epoch: epoch, Slot: anchorSlot}
 	snapshots := &ParsedSnapShots{Fee: snapshotFee}
 
 	require.NoError(

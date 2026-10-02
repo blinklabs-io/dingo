@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -52,7 +53,10 @@ func (d *Database) GetDatum(
 		txn = d.Transaction(ctx, false)
 		defer txn.Release()
 	}
-	tmpHash := lcommon.NewBlake2b256(hash)
+	tmpHash, err := lcommon.NewBlake2b256Checked(hash)
+	if err != nil {
+		return nil, fmt.Errorf("datum hash: %w", err)
+	}
 	ret, err := d.metadata.GetDatum(tmpHash, txn.Metadata())
 	if err != nil {
 		return nil, err

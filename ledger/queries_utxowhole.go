@@ -135,9 +135,11 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	// worker-side blob-only-txn design exists to stop starving.
 	var live []database.UtxoRef
 	collect := func(u *models.Utxo) error {
-		var ref database.UtxoRef
-		copy(ref.TxId[:], u.TxId)
-		ref.OutputIdx = u.OutputIdx
+		txID, err := ledger.NewBlake2b256Checked(u.TxId)
+		if err != nil {
+			return fmt.Errorf("utxo ref tx id: %w", err)
+		}
+		ref := database.UtxoRef{TxId: txID, OutputIdx: u.OutputIdx}
 		live = append(live, ref)
 		return nil
 	}

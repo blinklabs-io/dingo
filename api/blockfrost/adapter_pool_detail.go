@@ -77,12 +77,14 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	if pool.RewardAccountCredentialTag == 1 {
 		rewardCredType = uint(lcommon.CredentialTypeScriptHash)
 	}
+	rewardAccountHash, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+	if err != nil {
+		return PoolDetailInfo{}, fmt.Errorf("pool reward account: %w", err)
+	}
 	rewardAccount, err := stakeAddressFromCredential(
 		lcommon.Credential{
-			CredType: rewardCredType,
-			Credential: lcommon.CredentialHash(
-				lcommon.NewBlake2b224(pool.RewardAccount),
-			),
+			CredType:   rewardCredType,
+			Credential: lcommon.CredentialHash(rewardAccountHash),
 		},
 		networkID,
 	)
@@ -97,12 +99,14 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	owners := make([]string, 0, len(reg.Owners))
 	ownerKeyHashes := make([][]byte, 0, len(reg.Owners))
 	for _, owner := range reg.Owners {
+		ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+		if err != nil {
+			return PoolDetailInfo{}, fmt.Errorf("pool owner key hash: %w", err)
+		}
 		addr, err := stakeAddressFromCredential(
 			lcommon.Credential{
-				CredType: uint(lcommon.CredentialTypeAddrKeyHash),
-				Credential: lcommon.CredentialHash(
-					lcommon.NewBlake2b224(owner.KeyHash),
-				),
+				CredType:   uint(lcommon.CredentialTypeAddrKeyHash),
+				Credential: lcommon.CredentialHash(ownerKeyHash),
 			},
 			networkID,
 		)
