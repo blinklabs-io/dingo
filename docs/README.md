@@ -23,7 +23,7 @@ current branch.
 | How do I run Dingo locally against a single-node devnet? | [Local DevNet helper](devnet.md) |
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
-| How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
+| How do I exercise archive and history-expiry behavior? | [Dingo archive node demo](https://github.com/blinklabs-io/cardano-compose-stacks/tree/main/dingo-archive-demo) |
 | How do I install the Grafana dashboards? | [Dashboards](dashboards/README.md) |
 
 Contributor rules live in [`AGENTS.md`](../AGENTS.md) and
