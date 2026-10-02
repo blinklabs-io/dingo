@@ -794,24 +794,34 @@ func TestPredefinedDRepAmountIncludesActiveProposalDeposit(t *testing.T) {
 	adapter, _, db := newDBBackedAdapter(t)
 	returnStakeCred := []byte{4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4}
 
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: returnStakeCred,
-		DrepType:   models.DrepTypeAlwaysNoConfidence,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        []byte("proposal-tx-hash-32-bytes-long2"),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		Deposit:       75,
-		ReturnAddress: depositReturnAddress(t, returnStakeCred),
-		AnchorURL:     "https://example.invalid/deposit",
-		AnchorHash:    []byte("anchor-hash-32-bytes-long-valu2"),
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: returnStakeCred,
+			DrepType:   models.DrepTypeAlwaysNoConfidence,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        []byte("proposal-tx-hash-32-bytes-long2"),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				Deposit:       75,
+				ReturnAddress: depositReturnAddress(t, returnStakeCred),
+				AnchorURL:     "https://example.invalid/deposit",
+				AnchorHash:    []byte("anchor-hash-32-bytes-long-valu2"),
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	drepType := models.DrepTypeAlwaysNoConfidence
 	info, err := adapter.DRep(DRepCredential{
@@ -832,30 +842,40 @@ func TestDRepsListAmountsIncludeActiveProposalDeposit(t *testing.T) {
 	drepCred := []byte{5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5}
 	returnStakeCred := []byte{6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6}
 
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		Credential: drepCred,
 		Active:     true,
 		AddedSlot:  1,
 	}))
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
-		StakingKey: returnStakeCred,
-		Drep:       drepCred,
-		DrepType:   models.DrepTypeAddrKeyHash,
-		AddedSlot:  1,
-		Active:     true,
-	}))
-	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
-		TxHash:        []byte("proposal-tx-hash-32-bytes-long3"),
-		ActionIndex:   0,
-		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
-		ProposedEpoch: 0,
-		ExpiresEpoch:  100,
-		Deposit:       30,
-		ReturnAddress: depositReturnAddress(t, returnStakeCred),
-		AnchorURL:     "https://example.invalid/deposit",
-		AnchorHash:    []byte("anchor-hash-32-bytes-long-valu3"),
-		AddedSlot:     1,
-	}, nil))
+	require.NoError(
+		t,
+		db.CreateAccount(context.Background(), nil, &models.Account{
+			StakingKey: returnStakeCred,
+			Drep:       drepCred,
+			DrepType:   models.DrepTypeAddrKeyHash,
+			AddedSlot:  1,
+			Active:     true,
+		}),
+	)
+	require.NoError(
+		t,
+		db.SetGovernanceProposal(
+			context.Background(),
+			&models.GovernanceProposal{
+				TxHash:        []byte("proposal-tx-hash-32-bytes-long3"),
+				ActionIndex:   0,
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: 0,
+				ExpiresEpoch:  100,
+				Deposit:       30,
+				ReturnAddress: depositReturnAddress(t, returnStakeCred),
+				AnchorURL:     "https://example.invalid/deposit",
+				AnchorHash:    []byte("anchor-hash-32-bytes-long-valu3"),
+				AddedSlot:     1,
+			},
+			nil,
+		),
+	)
 
 	items, total, err := adapter.DReps(DRepListParams{
 		Pagination: PaginationParams{

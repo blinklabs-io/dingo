@@ -106,7 +106,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -127,10 +127,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.DRepInactivityPeriod = 20
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return backfill.processBlockGovernanceLevel(
+			context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			100,
@@ -139,7 +140,13 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
@@ -154,7 +161,7 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 	credentialBytes := bytes.Repeat([]byte{0xBC}, 28)
 	var credentialHash lcommon.CredentialHash
 	copy(credentialHash[:], credentialBytes)
-	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+	require.NoError(t, db.CreateDrep(context.Background(), nil, &models.Drep{
 		CredentialTag:     0,
 		Credential:        credentialBytes,
 		AddedSlot:         10,
@@ -178,10 +185,11 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 		ConwayProtocolParameters: conwayPParams,
 	}
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return backfill.processBlockGovernanceLevel(
+			context.Background(),
 			tx,
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			100,
@@ -190,7 +198,13 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 		)
 	}))
 
-	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
+	drep, err := db.GetDrepByCredential(
+		context.Background(),
+		0,
+		credentialBytes,
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
@@ -292,10 +306,11 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 		},
 	}
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		if err := backfill.processBlockTxsBatched(
+			context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
 			12,
@@ -324,7 +339,12 @@ func TestBackfillProcessBlockTxsBatchedStoresDijkstraSubtransaction(
 	rootUtxo, err := db.Metadata().GetUtxo(rootHash.Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.Nil(t, rootUtxo)
-	proposalRow, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	proposalRow, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), proposalRow.TxHash)
 }
@@ -339,7 +359,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	db := newTestDB(t)
 	backfill := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	stakeKey := bytes.Repeat([]byte{0x42}, 28)
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -396,10 +416,10 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 	)
 	require.NoError(t, err)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := backfill.processBlockTxsBatched(
+		if err := backfill.processBlockTxsBatched(context.Background(),
 			[]lcommon.Transaction{tx},
 			point,
 			12,
@@ -415,7 +435,7 @@ func TestBackfillProcessBlockTxsBatchedLeavesSnapshotBalanceForDirectDeposit(
 		}
 		return db.FlushBatch(acc, txn)
 	}))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), uint64(account.Reward))
 }

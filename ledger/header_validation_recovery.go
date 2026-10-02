@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -157,7 +158,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// the pre-check would leave the race this gate exists for still able to
 	// send the rejected header back round the pipeline.
 	if ls.yieldedToChainSelection(
-		ls.chain.ValidateRollback(rewindPoint),
+		ls.chain.ValidateRollback(context.Background(), rewindPoint),
 		validationErr,
 		rewindPoint,
 		"pre-check",
@@ -206,6 +207,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		// the rejected block left above it; a repeat of the same failure at
 		// the same tip reuses what that repair restored.
 		if err := ls.rollbackWithBlocks(
+			context.Background(),
 			rewindPoint,
 			nil,
 			!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
@@ -318,11 +320,19 @@ func (ls *LedgerState) recoveryRewindTargetPrecedes(
 	if bytes.Equal(rewindPoint.Hash, failing.Hash) || ls.db == nil {
 		return false
 	}
-	rewindBlock, err := database.BlockByPoint(ls.db, rewindPoint)
+	rewindBlock, err := database.BlockByPoint(
+		context.Background(),
+		ls.db,
+		rewindPoint,
+	)
 	if err != nil {
 		return false
 	}
-	failingBlock, err := database.BlockByPoint(ls.db, failing)
+	failingBlock, err := database.BlockByPoint(
+		context.Background(),
+		ls.db,
+		failing,
+	)
 	if err != nil {
 		return false
 	}

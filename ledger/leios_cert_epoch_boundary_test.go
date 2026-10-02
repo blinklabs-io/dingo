@@ -142,7 +142,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 	blocks = append(blocks, announcer, certifier)
 
 	db := newTestDB(t)
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
 	for _, blk := range blocks {
@@ -155,7 +155,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 			Cbor:        blk.Cbor(),
 		})
 	}
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), rawBlocks))
 
 	startEra := eras.DijkstraEraDesc
 	params := dijkstraTestProtocolParameters()

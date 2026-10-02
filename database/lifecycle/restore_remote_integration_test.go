@@ -307,6 +307,7 @@ func openRemoteIntegrationDatabase(
 	)
 	require.NoError(t, err)
 	db, err := database.New(
+		context.Background(),
 		&database.Config{
 			DataDir:        t.TempDir(),
 			StorageMode:    types.StorageModeCore,
@@ -370,7 +371,7 @@ func populateRemoteIntegrationDatabase(
 	marker string,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Rollback() //nolint:errcheck
 	block := testBlock(1, hashByte)
 	require.NoError(t, db.BlockCreate(block, txn))

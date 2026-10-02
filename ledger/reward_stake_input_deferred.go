@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,7 +143,10 @@ func clearRewardStakeInputsPending(
 // takeDeferredRewardStakeInputs hands the reward_stake_input rows the
 // boundary capture staged in txn to a background writer that starts once txn
 // commits.
-func (ls *LedgerState) takeDeferredRewardStakeInputs(txn *database.Txn) error {
+func (ls *LedgerState) takeDeferredRewardStakeInputs(
+	ctx context.Context,
+	txn *database.Txn,
+) error {
 	hook := ls.epochBoundaryDeferredStakeInputsHook()
 	if hook == nil {
 		return nil
@@ -159,6 +163,7 @@ func (ls *LedgerState) takeDeferredRewardStakeInputs(txn *database.Txn) error {
 	generation := ls.rewardInputGeneration.Load()
 	txn.AfterCommit(func() {
 		ls.queueDeferredRewardStakeInputs(
+			ctx,
 			epoch, boundarySlot, inputs, generation,
 		)
 	})
@@ -166,6 +171,7 @@ func (ls *LedgerState) takeDeferredRewardStakeInputs(txn *database.Txn) error {
 }
 
 func (ls *LedgerState) queueDeferredRewardStakeInputs(
+	ctx context.Context,
 	epoch uint64,
 	boundarySlot uint64,
 	inputs []*models.RewardStakeInput,
@@ -195,6 +201,7 @@ func (ls *LedgerState) queueDeferredRewardStakeInputs(
 		backoff := deferredStakeInputRetryMin
 		for {
 			err := ls.writeDeferredRewardStakeInputs(
+				ctx,
 				epoch, boundarySlot, inputs, generation,
 			)
 			if err == nil {
@@ -238,6 +245,7 @@ func (ls *LedgerState) waitUnlessClosed(d time.Duration) bool {
 // that deleted the snapshot: its entry stays pending and a later reader
 // rebuilds the rows.
 func (ls *LedgerState) writeDeferredRewardStakeInputs(
+	ctx context.Context,
 	epoch uint64,
 	boundarySlot uint64,
 	inputs []*models.RewardStakeInput,
@@ -251,7 +259,7 @@ func (ls *LedgerState) writeDeferredRewardStakeInputs(
 		final := end == len(inputs)
 		stop := false
 		ls.rewardPrecomputeWriteMu.Lock()
-		txn := ls.db.Transaction(true)
+		txn := ls.db.Transaction(ctx, true)
 		err := txn.Do(func(txn *database.Txn) error {
 			if ls.rewardInputRollbackActive.Load() != 0 ||
 				ls.rewardInputGeneration.Load() != generation {
@@ -397,7 +405,7 @@ func (ls *LedgerState) completePendingRewardStakeInputs(newEpoch uint64) error {
 	if ls.rewardInputRollbackActive.Load() != 0 {
 		return nil
 	}
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		return ls.ensureRewardStakeInputsReady(txn, epochs.snapshot)
 	})

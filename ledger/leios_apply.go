@@ -156,6 +156,7 @@ func endorserBlockTxIds(rawTxs []cbor.RawMessage) ([][]byte, error) {
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
 // instead of committing a partial endorser-block application.
 func (ls *LedgerState) applyEndorserBlock(
+	ctx context.Context,
 	txn *database.Txn,
 	rbPoint ocommon.Point,
 	rbBlockNumber uint64,
@@ -206,7 +207,11 @@ func (ls *LedgerState) applyEndorserBlock(
 	// CIP path compacts the block to transactions that still need UTxO apply;
 	// the Musashi path keeps the blob intact for serving while using the indexes
 	// to suppress duplicate ledger effects.
-	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(txs, txn)
+	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(
+		ctx,
+		txs,
+		txn,
+	)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -287,7 +292,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	// block removes these effects.
 	if !ls.config.LeiosApplyEndorserBlockTxs {
 		delta.skipConsumedInputRecovery = true
-		if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
+		if err := delta.applyWithoutRecordingDonations(ctx, ls, txn); err != nil {
 			return 0, 0, &leiosEndorserBlockStorageError{
 				err: fmt.Errorf(
 					"apply endorser block transactions: %w",
@@ -301,7 +306,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	// CIP-conformant path: apply the endorser transactions as a delta recorded
 	// under the ranking block's point (so a rollback removes them), with offsets
 	// pointing into the endorser-block blob.
-	if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
+	if err := delta.applyWithoutRecordingDonations(ctx, ls, txn); err != nil {
 		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("apply endorser block transactions: %w", err),
 		}
@@ -310,6 +315,7 @@ func (ls *LedgerState) applyEndorserBlock(
 }
 
 func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
+	ctx context.Context,
 	txs []lcommon.Transaction,
 	txn *database.Txn,
 ) ([]int, error) {
@@ -320,7 +326,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	for i, tx := range txs {
 		hashes[i] = tx.Hash().Bytes()
 	}
-	existing, err := ls.db.GetTransactionsByHashes(hashes, txn)
+	existing, err := ls.db.GetTransactionsByHashes(ctx, hashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
@@ -502,7 +508,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// trigger certified endorser-block work, including during replay. Resolve a
 	// parent announcement from this batch before falling back to persisted data.
 	for _, block := range blocks {
-		if err := ls.validateDijkstraLeiosCertificate(block, annByHash); err != nil {
+		if err := ls.validateDijkstraLeiosCertificate(ctx, block, annByHash); err != nil {
 			return fmt.Errorf("validate Dijkstra Leios certificate: %w", err)
 		}
 	}
@@ -524,7 +530,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			if ls.db == nil {
 				continue
 			}
-			parent, err := ls.BlockByHash([]byte(info.prevHash))
+			parent, err := ls.BlockByHash(ctx, []byte(info.prevHash))
 			if err != nil {
 				continue
 			}
@@ -1144,6 +1150,7 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 }
 
 func (ls *LedgerState) validateDijkstraLeiosCertificate(
+	ctx context.Context,
 	block ledger.Block,
 	batchAnnouncements map[string]leiosEbRef,
 ) error {
@@ -1185,6 +1192,7 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 		ebSlot, announced = batchAnnouncement.slot, true
 	} else {
 		_, ebSlot, _, announced, err = ls.leiosCertifiedAnnouncementFromParent(
+			ctx,
 			block.PrevHash().Bytes(),
 		)
 		if err != nil {
@@ -1345,6 +1353,7 @@ func leiosAnnouncementFromBlockCbor(
 // content-addressed and the same hash can legitimately recur at a different
 // slot.
 func (ls *LedgerState) leiosEndorserBlockForApply(
+	ctx context.Context,
 	block ledger.Block,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
 	if ls.config.LeiosApplyEndorserBlockTxs {
@@ -1363,7 +1372,10 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 	if !present || !certified {
 		return lcommon.Blake2b256{}, 0, 0, false, nil
 	}
-	return ls.leiosCertifiedAnnouncementFromParent(block.PrevHash().Bytes())
+	return ls.leiosCertifiedAnnouncementFromParent(
+		ctx,
+		block.PrevHash().Bytes(),
+	)
 }
 
 // leiosCertifiedAnnouncementFromParent resolves the endorser block a certifying
@@ -1372,6 +1384,7 @@ func (ls *LedgerState) leiosEndorserBlockForApply(
 // the same reference from a retained parent hash alone, without holding the
 // certifying block, and cannot drift from what apply selects.
 func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
+	ctx context.Context,
 	prevHash []byte,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
 	if ls.db == nil {
@@ -1379,7 +1392,7 @@ func (ls *LedgerState) leiosCertifiedAnnouncementFromParent(
 			"resolve certifying block parent: database unavailable",
 		)
 	}
-	parent, perr := ls.BlockByHash(prevHash)
+	parent, perr := ls.BlockByHash(ctx, prevHash)
 	if perr != nil {
 		return lcommon.Blake2b256{}, 0, 0, false, fmt.Errorf(
 			"resolve certifying block parent: %w",

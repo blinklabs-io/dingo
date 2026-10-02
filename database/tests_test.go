@@ -65,7 +65,7 @@ func BenchmarkTransactionCreate(b *testing.B) {
 
 	b.ResetTimer() // Reset timer after setup
 	for b.Loop() {
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		if err := txn.Commit(); err != nil {
 			b.Fatal(err)
 		}
@@ -452,7 +452,7 @@ func TestGenesisTransactionMetadataErrorWithShortHashes(t *testing.T) {
 					} else {
 						blockHash = blockHash[:length:length]
 					}
-					txn := db.Transaction(true)
+					txn := db.Transaction(context.Background(), true)
 					defer txn.Rollback() //nolint:errcheck
 					// Keep the blob handle live while the metadata handle fails. This
 					// reaches the genesis metadata error wrapper without writing outputs.
@@ -460,6 +460,7 @@ func TestGenesisTransactionMetadataErrorWithShortHashes(t *testing.T) {
 					var err error
 					require.NotPanics(t, func() {
 						err = db.SetGenesisTransaction(
+							context.Background(),
 							txHash,
 							blockHash,
 							nil,
@@ -493,11 +494,12 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -510,6 +512,7 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 		BatchedTxIngestOpts{},
 	))
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,
@@ -555,8 +558,9 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 
 	// Batch 1: ingest and flush the producer so its output is committed.
 	acc1 := db.NewBatchAccumulator()
-	txn1 := db.Transaction(true)
+	txn1 := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -589,8 +593,9 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	// Batch 2: a fresh accumulator (empty in-flight index) ingests the
 	// consumer; the spend must resolve via the metadata store.
 	acc2 := db.NewBatchAccumulator()
-	txn2 := db.Transaction(true)
+	txn2 := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,
@@ -632,11 +637,12 @@ func TestSetTransactionBatched_MissingProducerNotFabricated(t *testing.T) {
 	candidate := findBatchedCrossBlockSpendCandidate(t)
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,
@@ -673,10 +679,11 @@ func ingestSameBatchProducerConsumer(
 ) {
 	t.Helper()
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -685,6 +692,7 @@ func ingestSameBatchProducerConsumer(
 		acc, txn, BatchedTxIngestOpts{},
 	))
 	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		context.Background(),
 		candidate.consumerTx,
 		candidate.consumerPoint,
 		candidate.consumerIdx,
@@ -820,7 +828,7 @@ func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
 			Amount:    1_000_000,
 		})
 	}
-	seedTxn := db.MetadataTxn(true)
+	seedTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, seedTxn.Do(func(txn *Txn) error {
 		return db.Metadata().ImportUtxos(seedInputs, txn.Metadata())
 	}))
@@ -854,13 +862,16 @@ func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
 	// must come from persisted transaction/certificate positions, not insertion
 	// order or SQLite row IDs.
 	require.NoError(t, db.SetGapBlockTransaction(
+		context.Background(),
 		late, point, 5, nil, gapOffsets(late), nil,
 	))
 	require.NoError(t, db.SetGapBlockTransaction(
+		context.Background(),
 		early, point, 2, nil, gapOffsets(early), nil,
 	))
 	// Reprocessing the same gap transaction must not duplicate its certificate.
 	require.NoError(t, db.SetGapBlockTransaction(
+		context.Background(),
 		late, point, 5, nil, gapOffsets(late), nil,
 	))
 
@@ -872,7 +883,13 @@ func TestSetGapBlockTransactionPersistsPositionedCertificates(t *testing.T) {
 	require.Equal(t, uint(lcommon.CertificateTypeStakeDelegation), gotTx.Certificates[0].CertType)
 
 	history, err := db.GetAccountDelegationHistoryByCredential(
-		0, stakeKey.Bytes(), 0, 0, "asc", nil,
+		context.Background(),
+		0,
+		stakeKey.Bytes(),
+		0,
+		0,
+		"asc",
+		nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, history, 2)
@@ -953,6 +970,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 	require.NoError(
 		t,
 		db.SetGapBlockTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -983,7 +1001,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 		)
 	}
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(
 		t,
 		txn.Do(func(txn *Txn) error {
@@ -1035,6 +1053,7 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	require.NoError(
 		t,
 		db.SetTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -1086,13 +1105,14 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
 
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
 	defer txn.Rollback() //nolint:errcheck
 
 	require.NoError(
 		t,
 		db.SetTransactionBatched(
+			context.Background(),
 			candidate.producerTx,
 			candidate.producerPoint,
 			candidate.producerIdx,
@@ -1107,6 +1127,7 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	require.NoError(
 		t,
 		db.SetTransactionBatched(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			candidate.consumerIdx,
@@ -1254,7 +1275,7 @@ func storeBlockOffsetsOnly(t *testing.T, db *Database, block models.Block) {
 	t.Helper()
 
 	offsets := mustBlockOffsets(t, block)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(
 		t,
 		txn.Do(func(txn *Txn) error {
@@ -1716,7 +1737,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 			})
 		}
 		if len(seeded) > 0 {
-			txn := db.MetadataTxn(true)
+			txn := db.MetadataTxn(context.Background(), true)
 			require.NoError(
 				t,
 				txn.Do(func(txn *Txn) error {
@@ -1737,6 +1758,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 		require.NoError(
 			t,
 			db.SetGapBlockTransaction(
+				context.Background(),
 				producer.tx,
 				producer.point,
 				0,
@@ -1780,6 +1802,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 	require.NoError(
 		t,
 		db.SetGapBlockTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -2181,7 +2204,7 @@ func TestPhase1SkippedOnRecoveryPathButCatchesMismatchOnceReCheckable(
 	// ledgerState-driven recovery run (recovery repairs the commit
 	// timestamp, an orthogonal concern from the blob_plugin gate this
 	// checks).
-	checkErr := reopened.CheckNodeSettings()
+	checkErr := reopened.CheckNodeSettings(context.Background())
 	require.True(
 		t,
 		errors.As(checkErr, &settingsErr),
@@ -2293,6 +2316,7 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
 		require.True(t, candidate.consumerTx.IsValid())
 		require.NoError(t, db.SetTransaction(
+			context.Background(),
 			candidate.consumerTx,
 			candidate.consumerPoint,
 			0,
@@ -2312,21 +2336,25 @@ func TestSetTransactionStoresEpochZeroProposals(t *testing.T) {
 		stagedProducer(t, db, candidate)
 		require.True(t, candidate.producerTx.IsValid())
 		acc := db.NewBatchAccumulator()
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		defer txn.Release()
 		defer txn.Rollback() //nolint:errcheck
-		require.NoError(t, db.SetTransactionBatchedWithOpts(
-			candidate.producerTx,
-			candidate.producerPoint,
-			candidate.producerIdx,
-			0,
-			updates,
-			nil,
-			mustBlockOffsets(t, candidate.producerBlock),
-			acc,
-			txn,
-			BatchedTxIngestOpts{},
-		))
+		require.NoError(
+			t,
+			db.SetTransactionBatchedWithOpts(
+				context.Background(),
+				candidate.producerTx,
+				candidate.producerPoint,
+				candidate.producerIdx,
+				0,
+				updates,
+				nil,
+				mustBlockOffsets(t, candidate.producerBlock),
+				acc,
+				txn,
+				BatchedTxIngestOpts{},
+			),
+		)
 		require.NoError(t, db.FlushBatch(acc, txn))
 		require.NoError(t, txn.Commit())
 		requireStored(t, db)
@@ -2738,7 +2766,11 @@ func newTestDatabaseWithHostRunMode(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
-	db, dbErr := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
+	db, dbErr := New(
+		context.Background(),
+		config,
+		Stores{Blob: blobStore, Metadata: metadataStore},
+	)
 	if db == nil || (dbErr != nil && !keepOnError) {
 		_ = host.Stop(context.Background())
 		return nil, dbErr
@@ -2875,8 +2907,9 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	// metadata.SetTransactionBatched call is forced to fail.
 	_ = stagedProducer(t, db, candidate)
 	acc := db.NewBatchAccumulator()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	batchErr := db.SetTransactionBatched(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -2902,8 +2935,9 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	// --- Path 2: block (transaction.go: SetTransaction) ---
 	// Non-batched form uses the same setup, but the wrap-site prefix is
 	// "block idx" instead of "batch idx".
-	txn2 := db.Transaction(true)
+	txn2 := db.Transaction(context.Background(), true)
 	blockErr := db.SetTransaction(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -2928,8 +2962,9 @@ func TestSetTransactionMetadataErrorWrap_ProductionPaths(t *testing.T) {
 	// --- Path 3: metadata-only (transaction.go: SetTransactionMetadataOnly) ---
 	// Simpler path — no offsets or consumed-input recovery — but must still
 	// produce the "metadata only" phrasing plus tx hash / block idx / slot.
-	txn3 := db.Transaction(true)
+	txn3 := db.Transaction(context.Background(), true)
 	metaErr := db.SetTransactionMetadataOnly(
+		context.Background(),
 		candidate.producerTx,
 		candidate.producerPoint,
 		candidate.producerIdx,
@@ -3114,7 +3149,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 
 		for _, p := range candidate.producers {
 			storeBlockOffsetsOnly(t, db, p.block)
-			metaTxn := db.MetadataTxn(true)
+			metaTxn := db.MetadataTxn(context.Background(), true)
 			producer := p
 			require.NoError(t, metaTxn.Do(func(txn *Txn) error {
 				return db.Metadata().SetGapBlockTransaction(
@@ -3149,6 +3184,7 @@ func TestSetTransactionZeroProducedOutputsLogging(t *testing.T) {
 		}
 		logs.Reset()
 		require.NoError(t, db.SetTransactionWithOpts(
+			context.Background(),
 			tx,
 			candidate.consumerPoint,
 			0,

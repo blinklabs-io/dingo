@@ -84,7 +84,7 @@ func (ls *LedgerState) queryShelleyStakeDistribution(
 	txn *database.Txn,
 ) (any, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 	metaTxn := txn.Metadata()

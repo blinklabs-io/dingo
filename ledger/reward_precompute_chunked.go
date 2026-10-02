@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -202,7 +203,7 @@ func (ls *LedgerState) resolveStakeRewardPrecomputeRound(
 ) (*stakeRewardPrecomputeRound, bool, error) {
 	var round *stakeRewardPrecomputeRound
 	var ok bool
-	readTxn := ls.db.Transaction(false)
+	readTxn := ls.db.Transaction(context.Background(), false)
 	err := readTxn.Do(func(txn *database.Txn) error {
 		var err error
 		round, ok, err = ls.resolveStakeRewardPrecomputeRoundInTxn(
@@ -534,7 +535,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 	defer ls.rewardPrecomputeWriteMu.Unlock()
 
 	done := false
-	writeTxn := ls.db.Transaction(true)
+	writeTxn := ls.db.Transaction(context.Background(), true)
 	err := writeTxn.Do(func(txn *database.Txn) error {
 		if ls.rewardInputRollbackActive.Load() != 0 ||
 			ls.rewardInputGeneration.Load() != round.generation ||

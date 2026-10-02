@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"path/filepath"
@@ -96,7 +97,7 @@ func loadBlocksFromImmutable(
 		}
 
 		// Add block to chain
-		if err := c.AddBlock(block, nil); err != nil {
+		if err := c.AddBlock(context.Background(), block, nil); err != nil {
 			t.Fatalf(
 				"failed to add block to chain at slot %d: %v",
 				immBlock.Slot,
@@ -130,7 +131,7 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain manager: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestRollbackToSecurityParamDepth(t *testing.T) {
 		rollbackIndex,
 	)
 
-	err = c.Rollback(rollbackPoint)
+	err = c.Rollback(context.Background(), rollbackPoint)
 	if err != nil {
 		t.Fatalf(
 			"rollback to K blocks should succeed, but got error: %v",
@@ -240,7 +241,7 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain manager: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestRollbackBeyondSecurityParam(t *testing.T) {
 		hex.EncodeToString(fakePoint.Hash),
 	)
 
-	err = c.Rollback(fakePoint)
+	err = c.Rollback(context.Background(), fakePoint)
 	if err == nil {
 		t.Fatal(
 			"rollback to non-existent point should fail, but succeeded",
@@ -355,7 +356,7 @@ func TestRollbackStateRestoration(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain manager: %v", err)
 	}
@@ -406,7 +407,7 @@ func TestRollbackStateRestoration(t *testing.T) {
 		midpointIndex,
 	)
 
-	err = c.Rollback(midpointPoint)
+	err = c.Rollback(context.Background(), midpointPoint)
 	if err != nil {
 		t.Fatalf("rollback to midpoint failed: %v", err)
 	}
@@ -441,7 +442,7 @@ func TestRollbackStateRestoration(t *testing.T) {
 	}
 
 	// Verify the rollback point block is still accessible
-	block, err := c.BlockByPoint(midpointPoint, nil)
+	block, err := c.BlockByPoint(context.Background(), midpointPoint, nil)
 	if err != nil {
 		t.Errorf(
 			"rollback point block should still be accessible, "+
@@ -502,7 +503,7 @@ func TestRollbackStateRestoration(t *testing.T) {
 			t.Fatalf("failed to decode block: %v", err)
 		}
 
-		if err := c.AddBlock(decodedBlock, nil); err != nil {
+		if err := c.AddBlock(context.Background(), decodedBlock, nil); err != nil {
 			t.Fatalf("failed to add block after rollback: %v", err)
 		}
 		blocksAdded++
@@ -545,7 +546,7 @@ func TestRollbackToOrigin(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain manager: %v", err)
 	}
@@ -588,7 +589,7 @@ func TestRollbackToOrigin(t *testing.T) {
 		Hash: []byte{},
 	}
 
-	err = c.Rollback(originPoint)
+	err = c.Rollback(context.Background(), originPoint)
 	if err != nil {
 		t.Fatalf("rollback to origin failed: %v", err)
 	}
@@ -627,7 +628,7 @@ func TestChainIteratorAfterRollback(t *testing.T) {
 	defer dbtest.CloseDatabase(db)
 
 	// Create chain manager with database
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	if err != nil {
 		t.Fatalf("failed to create chain manager: %v", err)
 	}
@@ -686,7 +687,7 @@ func TestChainIteratorAfterRollback(t *testing.T) {
 		midpointPoint.Slot,
 	)
 
-	err = c.Rollback(midpointPoint)
+	err = c.Rollback(context.Background(), midpointPoint)
 	if err != nil {
 		t.Fatalf("rollback failed: %v", err)
 	}

@@ -633,7 +633,7 @@ func newAltTestChainContext(tipSlot uint64) *forgerTestChainContext {
 	}
 }
 
-func (c *forgerTestChainContext) TipPredecessor() (
+func (c *forgerTestChainContext) TipPredecessor(_ context.Context) (
 	ocommon.Point,
 	ochainsync.Tip,
 	bool,
@@ -4063,6 +4063,7 @@ func TestBuildBlockForSlotReportsBothTheAbortAndTheSupersededSlot(
 
 	leiosState := &forgeLeiosState{}
 	_, _, _, err := forger.buildBlockForSlot(
+		context.Background(),
 		10,
 		0,
 		leiosState,

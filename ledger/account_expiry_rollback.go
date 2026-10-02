@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"context"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 )
@@ -31,11 +33,13 @@ import (
 // inside the rollback's write transaction, after RestoreAccountStateAtSlot has
 // restored the remaining account fields.
 func (ls *LedgerState) recomputeAccountExpirationsAfterRollback(
+	ctx context.Context,
 	txn *database.Txn,
 	rollbackSlot uint64,
 	affectedRefs []models.StakeCredentialRef,
 ) error {
 	return database.RecomputeAccountExpirationsAfterTruncate(
+		ctx,
 		ls.db,
 		txn,
 		ls.config.DelegatorInactivityEnabled,

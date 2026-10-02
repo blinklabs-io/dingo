@@ -231,7 +231,7 @@ func (a *NodeAdapter) accountHistoryBlockInfo(
 	blockHashKey := hex.EncodeToString(blockHash)
 	blockHeight, ok := blockNumbers[blockHashKey]
 	if !ok {
-		block, err := a.ledgerState.BlockByHash(blockHash)
+		block, err := a.ledgerState.BlockByHash(context.Background(), blockHash)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf(
 				"get block %x for account history: %w",
@@ -278,7 +278,10 @@ func (a *NodeAdapter) LatestBlock() (
 	BlockInfo, error,
 ) {
 	tip := a.ledgerState.Tip()
-	block, err := a.ledgerState.BlockByHash(tip.Point.Hash)
+	block, err := a.ledgerState.BlockByHash(
+		context.Background(),
+		tip.Point.Hash,
+	)
 	if err != nil {
 		return BlockInfo{}, err
 	}
@@ -300,7 +303,7 @@ func (a *NodeAdapter) BlockByHashOrNumber(
 			)
 		}
 		var getErr error
-		block, getErr = a.ledgerState.BlockByHash(hash)
+		block, getErr = a.ledgerState.BlockByHash(context.Background(), hash)
 		if getErr != nil {
 			if errors.Is(getErr, models.ErrBlockNotFound) {
 				return BlockInfo{}, fmt.Errorf(
@@ -709,7 +712,7 @@ func (a *NodeAdapter) EpochProtocolParams(
 	// epoch-rollover commit landing between them can't surface a
 	// row whose era_id disagrees with the era chosen by GetEpoch.
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	epochRow, err := db.GetEpoch(epoch, txn)
 	if err != nil {
@@ -1091,7 +1094,7 @@ func (a *NodeAdapter) populateAssetOnchainMetadata(
 	assetName []byte,
 ) error {
 	metadataCbor, err := a.ledgerState.Database().
-		GetTransactionMetadataByHash(initialMintTxHash, nil)
+		GetTransactionMetadataByHash(context.Background(), initialMintTxHash, nil)
 	if err != nil {
 		return fmt.Errorf(
 			"get initial mint tx %x metadata for asset %s%x: %w",
@@ -1138,7 +1141,7 @@ func (a *NodeAdapter) AssetAddresses(
 		)
 	}
 	utxos, err := a.ledgerState.Database().
-		UtxosByAssets(policyIDBytes, assetName, nil)
+		UtxosByAssets(context.Background(), policyIDBytes, assetName, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get asset UTxOs for %s%x: %w",
@@ -1317,7 +1320,11 @@ func (a *NodeAdapter) predefinedDRep(
 	// AlwaysNoConfidence.
 	if drepType == models.DrepTypeAlwaysNoConfidence {
 		_, depositPower, err := governance.ActiveProposalDepositDRepPower(
-			db, nil, a.ledgerState.CurrentEpoch(), 0,
+			context.Background(),
+			db,
+			nil,
+			a.ledgerState.CurrentEpoch(),
+			0,
 		)
 		if err != nil {
 			return DRepInfo{}, fmt.Errorf(
@@ -1390,6 +1397,7 @@ func (a *NodeAdapter) drepByCredentialTag(
 ) (DRepInfo, error) {
 	db := a.ledgerState.Database()
 	drep, err := db.GetDrepByCredential(
+		context.Background(),
 		credentialTag,
 		credential.Hash,
 		true,
@@ -1412,7 +1420,13 @@ func (a *NodeAdapter) drepByCredentialTag(
 	hasScript := credentialTag == 1
 	// expiryEpoch 0: this point-in-time API query is not gated by the
 	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
-	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, 0, nil)
+	power, err := db.GetDRepVotingPower(
+		context.Background(),
+		credentialTag,
+		credential.Hash,
+		0,
+		nil,
+	)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get drep voting power %x: %w",
@@ -1425,7 +1439,11 @@ func (a *NodeAdapter) drepByCredentialTag(
 	// account delegating to this DRep, matching the deposit-inclusive tally
 	// ledger/governance.LoadDRepVotingState uses for ratification (CIP-1694).
 	drepDepositPower, _, err := governance.ActiveProposalDepositDRepPower(
-		db, nil, currentEpoch, 0,
+		context.Background(),
+		db,
+		nil,
+		currentEpoch,
+		0,
 	)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
@@ -1528,7 +1546,7 @@ func (a *NodeAdapter) DReps(
 	db := a.ledgerState.Database()
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	meta := db.Metadata()
 
@@ -1703,7 +1721,13 @@ func (a *NodeAdapter) DReps(
 		// (CIP-1694). AlwaysAbstain never gains
 		// deposit power, so typePowers' AlwaysAbstain entry is untouched.
 		depositRefPower, depositNoConfidencePower, depositErr := governance.
-			ActiveProposalDepositDRepPower(db, txn, currentEpoch, 0)
+			ActiveProposalDepositDRepPower(
+				context.Background(),
+				db,
+				txn,
+				currentEpoch,
+				0,
+			)
 		if depositErr != nil {
 			return fmt.Errorf(
 				"get active proposal deposit voting power: %w", depositErr,
@@ -1859,7 +1883,7 @@ func (a *NodeAdapter) latestBlockData(
 	lcommon.Block,
 	error,
 ) {
-	block, err := a.ledgerState.BlockByHash(hash)
+	block, err := a.ledgerState.BlockByHash(context.Background(), hash)
 	if err != nil {
 		return models.Block{}, nil, fmt.Errorf(
 			"get block by hash %x: %w",
@@ -2027,7 +2051,7 @@ func (a *NodeAdapter) PoolsRetiring(
 	params PaginationParams,
 ) ([]PoolRetiringInfo, int, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	rows, err := db.Metadata().GetRetiringPools(
@@ -2074,7 +2098,7 @@ func (a *NodeAdapter) PoolMetadata(
 	}
 
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	pool, err := db.Metadata().GetPool(
@@ -2173,7 +2197,7 @@ func (a *NodeAdapter) PoolsExtended() (
 	[]PoolExtendedInfo, error,
 ) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	poolKeyHashes, err := db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
@@ -2254,7 +2278,7 @@ func (a *NodeAdapter) PoolsExtended() (
 		return nil, fmt.Errorf("get total circulation: %w", err)
 	}
 
-	pools, err := db.GetPools(poolHashes, txn)
+	pools, err := db.GetPools(context.Background(), poolHashes, txn)
 	if err != nil {
 		return nil, fmt.Errorf("get pools: %w", err)
 	}
@@ -2385,10 +2409,11 @@ func (a *NodeAdapter) Account(
 	db := a.ledgerState.Database()
 	var account *models.Account
 	var pendingReward uint64
-	readTxn := db.Transaction(false)
+	readTxn := db.Transaction(context.Background(), false)
 	if err := readTxn.Do(func(txn *database.Txn) error {
 		var err error
 		account, err = db.GetAccountByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			true,
@@ -2424,7 +2449,7 @@ func (a *NodeAdapter) Account(
 		poolID = &pool
 	}
 	controlledAmount, err := a.ledgerState.Database().
-		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
+		GetControlledAmountByCredential(context.Background(), credentialTag, stakeKey, nil)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf(
 			"get controlled amount: %w",
@@ -2453,6 +2478,7 @@ func (a *NodeAdapter) Account(
 	}
 
 	sums, err := db.GetAccountSumsByCredential(
+		context.Background(),
 		credentialTag,
 		stakeKey,
 		nil,
@@ -2535,6 +2561,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 	}
 	if _, err := a.ledgerState.Database().
 		GetAccountByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			true,
@@ -2543,7 +2570,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		return nil, 0, err
 	}
 	total, err := a.ledgerState.Database().
-		CountAddressesByCredential(credentialTag, stakeKey, nil)
+		CountAddressesByCredential(context.Background(), credentialTag, stakeKey, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count associated addresses: %w",
@@ -2554,6 +2581,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 
 	rows, err := a.ledgerState.Database().
 		GetAddressesByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			params.Count,
@@ -2610,6 +2638,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 
 	if _, err := a.ledgerState.Database().
 		GetAccountByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			true,
@@ -2620,6 +2649,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
 		CountAccountDelegationHistoryByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			nil,
@@ -2635,6 +2665,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	}
 	rows, err := a.ledgerState.Database().
 		GetAccountDelegationHistoryByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			params.Count,
@@ -2701,6 +2732,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 
 	if _, err := a.ledgerState.Database().
 		GetAccountByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			true,
@@ -2711,6 +2743,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
 		CountAccountRegistrationHistoryByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			nil,
@@ -2726,6 +2759,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	}
 	rows, err := a.ledgerState.Database().
 		GetAccountRegistrationHistoryByCredential(
+			context.Background(),
 			credentialTag,
 			stakeKey,
 			params.Count,
@@ -2806,10 +2840,11 @@ func (a *NodeAdapter) AccountRewardHistory(
 		return nil, 0, err
 	}
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	if _, err := db.GetAccountByCredential(
+		context.Background(),
 		credentialTag,
 		stakeKey,
 		true,
@@ -2823,6 +2858,7 @@ func (a *NodeAdapter) AccountRewardHistory(
 	// page: with two independent nil-txn reads, a client paging through
 	// history at a boundary could see a row twice or miss one.
 	total, err := db.CountRewardAccountOutputsByCredential(
+		context.Background(),
 		credentialTag,
 		stakeKey,
 		txn,
@@ -2837,6 +2873,7 @@ func (a *NodeAdapter) AccountRewardHistory(
 		return []AccountRewardHistoryInfo{}, total, nil
 	}
 	rows, err := db.GetRewardAccountOutputsByCredential(
+		context.Background(),
 		credentialTag,
 		stakeKey,
 		params.Count,
@@ -3244,12 +3281,14 @@ func (a *NodeAdapter) exactAddressBalance(
 		return ret, err
 	}
 
-	candidates, err := a.ledgerState.Database().UtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{pattern},
-		},
-		txn,
-	)
+	candidates, err := a.ledgerState.Database().
+		UtxosByAddressWithOrdering(
+			context.Background(),
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+			},
+			txn,
+		)
 	if err != nil {
 		return ret, fmt.Errorf("get exact address UTxOs: %w", err)
 	}
@@ -3331,7 +3370,7 @@ func (a *NodeAdapter) Address(
 	// Read every query from one snapshot so a block committed
 	// mid-request cannot mix two chain states in the response.
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	// Full addresses use exact matching so UTxOs at other address
@@ -3366,12 +3405,13 @@ func (a *NodeAdapter) Address(
 			// address carrying the payment credential.
 			var txCount int
 			txCount, err = db.CountTransactionsByPaymentCred(
+				context.Background(),
 				addr.PaymentKeyHash().Bytes(),
 				txn,
 			)
 			hasTransactions = txCount > 0
 		} else {
-			hasTransactions, err = db.HasTransactionsByAddress(addr, txn)
+			hasTransactions, err = db.HasTransactionsByAddress(context.Background(), addr, txn)
 		}
 		if err != nil {
 			return AddressInfo{}, fmt.Errorf(
@@ -3456,7 +3496,7 @@ func (a *NodeAdapter) AddressUTXOs(
 	// total and the returned page describe the same snapshot: two
 	// separate (nil-txn) calls could otherwise straddle a concurrent
 	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(false)
+	txn := a.ledgerState.Database().Transaction(context.Background(), false)
 	defer txn.Release()
 
 	// Exact-address matching requires decoding output CBOR (see
@@ -3465,12 +3505,14 @@ func (a *NodeAdapter) AddressUTXOs(
 	// references (no assets, no full rows) for that pass, and materialize
 	// full UTxO data via UtxosByRefs for just the requested page, instead
 	// of loading the address's entire UTxO history in full.
-	refs, err := a.ledgerState.Database().MatchingUtxoRefsByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{
-			AddressPatterns: []models.UtxoAddressPattern{pattern},
-		},
-		txn,
-	)
+	refs, err := a.ledgerState.Database().
+		MatchingUtxoRefsByAddressWithOrdering(
+			context.Background(),
+			&models.UtxoWithOrderingQuery{
+				AddressPatterns: []models.UtxoAddressPattern{pattern},
+			},
+			txn,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3570,7 +3612,8 @@ func (a *NodeAdapter) orderedUtxosByRefs(
 	if len(refs) == 0 {
 		return []models.UtxoWithOrdering{}, nil
 	}
-	utxos, err := a.ledgerState.Database().UtxosByRefs(refs, txn)
+	utxos, err := a.ledgerState.Database().
+		UtxosByRefs(context.Background(), refs, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -3698,7 +3741,10 @@ func (a *NodeAdapter) AddressTransactions(
 		blockHashKey := hex.EncodeToString(tx.BlockHash)
 		blockHeight, ok := blockNumbers[blockHashKey]
 		if !ok {
-			block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+			block, err := a.ledgerState.BlockByHash(
+				context.Background(),
+				tx.BlockHash,
+			)
 			if err != nil {
 				return nil, 0, fmt.Errorf(
 					"get block for transaction %x: %w",
@@ -3736,7 +3782,11 @@ func (a *NodeAdapter) MetadataTransactions(
 ) ([]MetadataTransactionJSONInfo, int, error) {
 	db := a.ledgerState.Database()
 
-	total, err := db.CountTransactionsByMetadataLabel(label, nil)
+	total, err := db.CountTransactionsByMetadataLabel(
+		context.Background(),
+		label,
+		nil,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count transactions by metadata label %d: %w",
@@ -3746,6 +3796,7 @@ func (a *NodeAdapter) MetadataTransactions(
 	}
 
 	txs, err := db.GetTransactionsByMetadataLabel(
+		context.Background(),
 		label,
 		params.Count,
 		(params.Page-1)*params.Count,
@@ -3790,7 +3841,11 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 ) ([]MetadataTransactionCBORInfo, int, error) {
 	db := a.ledgerState.Database()
 
-	total, err := db.CountTransactionsByMetadataLabel(label, nil)
+	total, err := db.CountTransactionsByMetadataLabel(
+		context.Background(),
+		label,
+		nil,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count transactions by metadata label %d: %w",
@@ -3800,6 +3855,7 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 	}
 
 	txs, err := db.GetTransactionsByMetadataLabel(
+		context.Background(),
 		label,
 		params.Count,
 		(params.Page-1)*params.Count,
@@ -4868,7 +4924,7 @@ func (a *NodeAdapter) decodedTransactionByHash(
 			ErrTransactionNotFound,
 		)
 	}
-	block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+	block, err := a.ledgerState.BlockByHash(context.Background(), tx.BlockHash)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, models.Block{}, nil, fmt.Errorf(
@@ -5477,7 +5533,7 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	slot uint64,
 ) (lcommon.ProtocolParameters, error) {
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 	epoch, err := db.GetEpochBySlot(slot, txn)
 	if err != nil {

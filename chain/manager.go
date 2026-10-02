@@ -15,6 +15,7 @@
 package chain
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -78,6 +79,7 @@ func (cm *ChainManager) nextHeaderSeq() uint64 {
 }
 
 func NewManager(
+	ctx context.Context,
 	db *database.Database,
 	eventBus *event.EventBus,
 	promRegistry ...prometheus.Registerer,
@@ -113,7 +115,7 @@ func NewManager(
 		}
 		cm.rollbackPointNotOnChain = registered
 	}
-	if err := cm.loadPrimaryChain(); err != nil {
+	if err := cm.loadPrimaryChain(ctx); err != nil {
 		return nil, err
 	}
 	return cm, nil
@@ -197,7 +199,10 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 }
 
 // NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients
-func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
+func (cm *ChainManager) NewChain(
+	ctx context.Context,
+	point ocommon.Point,
+) (*Chain, error) {
 	primaryChain, err := cm.primaryChain()
 	if err != nil {
 		return nil, err
@@ -209,7 +214,7 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 	if cm.primaryChainLocked() != primaryChain {
 		return nil, errors.New("primary chain changed during fork creation")
 	}
-	intersectBlock, err := cm.blockByPoint(point, nil)
+	intersectBlock, err := cm.blockByPoint(ctx, point, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +242,7 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 
 // NewChainFromIntersect creates a new Chain that forks the primary chain at the latest common point.
 func (cm *ChainManager) NewChainFromIntersect(
+	ctx context.Context,
 	points []ocommon.Point,
 ) (*Chain, error) {
 	primaryChain, err := cm.primaryChain()
@@ -271,7 +277,7 @@ func (cm *ChainManager) NewChainFromIntersect(
 				continue
 			}
 			// Lookup block in database
-			intersectBlock, err = cm.blockByPoint(point, txn)
+			intersectBlock, err = cm.blockByPoint(ctx, point, txn)
 			if err != nil {
 				if errors.Is(err, models.ErrBlockNotFound) {
 					continue
@@ -313,15 +319,17 @@ func (cm *ChainManager) NewChainFromIntersect(
 }
 
 func (cm *ChainManager) BlockByPoint(
+	ctx context.Context,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
-	return cm.blockByPoint(point, txn)
+	return cm.blockByPoint(ctx, point, txn)
 }
 
 func (cm *ChainManager) blockByPoint(
+	ctx context.Context,
 	point ocommon.Point,
 	txn *database.Txn,
 ) (models.Block, error) {
@@ -336,7 +344,7 @@ func (cm *ChainManager) blockByPoint(
 		var tmpBlock models.Block
 		var err error
 		if txn == nil {
-			tmpBlock, err = database.BlockByPoint(cm.db, point)
+			tmpBlock, err = database.BlockByPoint(ctx, cm.db, point)
 		} else {
 			tmpBlock, err = database.BlockByPointTxn(txn, point)
 		}
@@ -352,6 +360,7 @@ func (cm *ChainManager) blockByPoint(
 }
 
 func (cm *ChainManager) blockByHash(
+	ctx context.Context,
 	blockHash []byte,
 ) (models.Block, error) {
 	// Check in-memory cache (block cache has its own locking).
@@ -364,7 +373,7 @@ func (cm *ChainManager) blockByHash(
 	// which only holds rolled-back primary blocks and ephemeral
 	// non-primary blocks).
 	if cm.db != nil {
-		blk, err := database.BlockByHash(cm.db, blockHash)
+		blk, err := database.BlockByHash(ctx, cm.db, blockHash)
 		if err != nil {
 			if errors.Is(err, models.ErrBlockNotFound) {
 				return models.Block{}, models.ErrBlockNotFound
@@ -381,6 +390,7 @@ func (cm *ChainManager) blockByHash(
 // storage is protected by the manager lock here, and callers that need a
 // chain-level read lock acquire it before entering this helper.
 func (cm *ChainManager) blockByIndexLocked(
+	ctx context.Context,
 	blockIndex uint64,
 	txn *database.Txn,
 ) (models.Block, error) {
@@ -403,7 +413,7 @@ func (cm *ChainManager) blockByIndexLocked(
 	// internal chain reconciliation paths do.
 	if primaryChain := cm.primaryChainLocked(); primaryChain != nil &&
 		!primaryChain.persistent {
-		return primaryChain.blockByIndexLocked(blockIndex)
+		return primaryChain.blockByIndexLocked(ctx, blockIndex)
 	}
 	return models.Block{}, models.ErrBlockNotFound
 }
@@ -422,7 +432,7 @@ func (cm *ChainManager) blockAtOrAfterIndex(
 	return block, err
 }
 
-func (cm *ChainManager) loadPrimaryChain() error {
+func (cm *ChainManager) loadPrimaryChain(ctx context.Context) error {
 	persistent := (cm.db != nil)
 	chain := &Chain{
 		id:         primaryChainId,
@@ -431,7 +441,7 @@ func (cm *ChainManager) loadPrimaryChain() error {
 		persistent: persistent,
 	}
 	if persistent {
-		recentBlocks, err := database.BlocksRecent(cm.db, 1)
+		recentBlocks, err := database.BlocksRecent(ctx, cm.db, 1)
 		if err != nil {
 			return err
 		}
@@ -470,13 +480,14 @@ func (cm *ChainManager) loadPrimaryChain() error {
 // rather than silently pruning without a bound. RewindPrimaryChainAtStartup
 // is for that case.
 func (cm *ChainManager) RewindPrimaryChainToPoint(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
 	primaryChain, err := cm.persistentPrimaryChain()
 	if err != nil {
 		return err
 	}
-	return primaryChain.Rollback(point)
+	return primaryChain.Rollback(ctx, point)
 }
 
 // RewindPrimaryChainAtStartup prunes the persistent primary chain back to
@@ -491,13 +502,14 @@ func (cm *ChainManager) RewindPrimaryChainToPoint(
 // SecurityParamConfigured to check readiness first) for anything reachable from
 // chainsync.
 func (cm *ChainManager) RewindPrimaryChainAtStartup(
+	ctx context.Context,
 	point ocommon.Point,
 ) error {
 	primaryChain, err := cm.persistentPrimaryChain()
 	if err != nil {
 		return err
 	}
-	return primaryChain.RollbackUnbounded(point)
+	return primaryChain.RollbackUnbounded(ctx, point)
 }
 
 // SecurityParamConfigured reports whether SetLedger has configured the

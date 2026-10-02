@@ -779,7 +779,10 @@ func (s *queryServiceServer) ReadTx(
 	}
 
 	// Find the block blob to decode and extract the transaction.
-	block, err := s.utxorpc.config.LedgerState.BlockByHash(txRecord.BlockHash)
+	block, err := s.utxorpc.config.LedgerState.BlockByHash(
+		ctx,
+		txRecord.BlockHash,
+	)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, connect.NewError(

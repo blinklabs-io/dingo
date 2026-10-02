@@ -16,6 +16,7 @@ package blockfrost
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -112,7 +113,7 @@ func newMalformedHashAdapter(
 	if seed != nil {
 		seed(db)
 	}
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -157,7 +158,7 @@ func TestBlockfrostRejectsMalformedStoredHashes(t *testing.T) {
 	}
 	createAccount := func(pool []byte) func(*database.Database) {
 		return func(db *database.Database) {
-			require.NoError(t, db.CreateAccount(nil, &models.Account{
+			require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 				StakingKey: stakingKey,
 				Pool:       pool,
 				Active:     true,

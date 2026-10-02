@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -114,7 +115,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 	txn *database.Txn,
 ) (any, error) {
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 
@@ -152,10 +153,10 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 			return nil, err
 		}
-		if err := ls.db.IterateUtxoRefsAsOf(at.Slot, txn, collect); err != nil {
+		if err := ls.db.IterateUtxoRefsAsOf(context.Background(), at.Slot, txn, collect); err != nil {
 			return nil, err
 		}
-	} else if err := ls.db.IterateLiveUtxoRefs(txn, collect); err != nil {
+	} else if err := ls.db.IterateLiveUtxoRefs(context.Background(), txn, collect); err != nil {
 		return nil, err
 	}
 
@@ -213,6 +214,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 		// otherwise read a dropped row as a ledger divergence rather than a
 		// storage fault.
 		cborBytes, err := ls.db.ResolveUtxoCborWithRecovery(
+			context.Background(),
 			ref.TxId[:],
 			ref.OutputIdx,
 			txn,
@@ -248,7 +250,7 @@ func (ls *LedgerState) queryShelleyUtxoWhole(
 			// metadata, only ResolveUtxoCborWithRecovery's rare recovery
 			// fallback does, and it opens its own metadata-capable
 			// transaction on demand for that branch. A full
-			// Database.Transaction(false) here would hold a metadata read
+			// Database.Transaction(context.Background(), false) here would hold a metadata read
 			// connection from the shared pool (sized by DatabaseWorkers,
 			// 5 by default) for this whole worker's lifetime, well past
 			// utxoWholeResolveWorkers workers deep -- starving every other

@@ -140,7 +140,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 			Logger:      discard,
 		})
 		require.NoError(t, err)
-		block, err := database.BlockByHash(db, wrongHash)
+		block, err := database.BlockByHash(context.Background(), db, wrongHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot)
 		status, err := db.GetSyncState("sync_status", nil)
@@ -203,7 +203,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		block, err := database.BlockByHash(db, anchorHash)
+		block, err := database.BlockByHash(context.Background(), db, anchorHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 1000, block.Slot,
 			"repair must retain the existing chain anchor")
@@ -368,7 +368,7 @@ func TestSyncCatchUpDispatch(t *testing.T) {
 		pending, err := RewardStateRepairPending(db)
 		require.NoError(t, err)
 		require.False(t, pending)
-		block, err := database.BlockByHash(db, firstHash)
+		block, err := database.BlockByHash(context.Background(), db, firstHash)
 		require.NoError(t, err)
 		require.EqualValues(t, 999, block.Slot)
 		checkpoint, err := db.Metadata().GetBackfillCheckpoint("metadata", nil)
@@ -472,7 +472,7 @@ func TestDecideCatchUp(t *testing.T) {
 	}
 	modeOf := func(t *testing.T) syncMode {
 		t.Helper()
-		mode, err := determineSyncMode(db)
+		mode, err := determineSyncMode(context.Background(), db)
 		require.NoError(t, err)
 		return mode
 	}
@@ -720,7 +720,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Type:     6,
 		}, nil))
 		require.NoError(
-			t, verifyCatchupIntersection(db, testImmutable(t), discard),
+			t, verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard),
 		)
 	})
 
@@ -736,7 +736,7 @@ func TestVerifyCatchupIntersection(t *testing.T) {
 			Number:   1,
 			Type:     6,
 		}, nil))
-		err := verifyCatchupIntersection(db, testImmutable(t), discard)
+		err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 		require.Error(t, err)
 		require.ErrorContains(t, err, "diverges")
 	})
@@ -796,7 +796,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 				bytes.Repeat([]byte{0xcd}, 32),
 				99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -811,7 +811,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -829,7 +829,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 			require.NoError(t, db.BlockCreate(catchupTestBlock(
 				artSlot+5000, aheadHash, wrong, 99,
 			), nil))
-			err := verifyCatchupIntersection(db, testImmutable(t), discard)
+			err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
 			require.ErrorContains(t, err, "diverges")
@@ -841,7 +841,7 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		require.NoError(t, db.BlockCreate(catchupTestBlock(
 			artSlot+5000, aheadHash, artHash, 99,
 		), nil))
-		err := verifyCatchupIntersection(db, testImmutable(t), discard)
+		err := verifyCatchupIntersection(context.Background(), db, testImmutable(t), discard)
 		require.ErrorIs(t, err, errCatchUpLocalAhead)
 	})
 }
@@ -865,6 +865,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
+			context.Background(),
 			db, testImmutable(t), 42, false, discard,
 		)
 		require.NoError(t, err)
@@ -882,6 +883,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
+				context.Background(),
 				db, testImmutable(t), 42, false, discard,
 			)
 			require.NoError(t, err)
@@ -905,6 +907,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 				artSlot+5000, aheadHash, artHash, 99,
 			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
+				context.Background(),
 				db, testImmutable(t), 43, true, discard,
 			)
 			require.NoError(t, err)
@@ -928,6 +931,7 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 			artSlot, wrong, bytes.Repeat([]byte{0x01}, 32), 98,
 		), nil))
 		_, err := verifyCatchupBeforeImport(
+			context.Background(),
 			db, testImmutable(t), 42, false, discard,
 		)
 		require.Error(t, err)

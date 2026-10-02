@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -168,9 +169,10 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(block ledger.Block) error {
 		snapshot.prevEraPParams != nil {
 		pp = snapshot.prevEraPParams
 	}
-	return ls.db.Transaction(false).Do(func(txn *database.Txn) error {
-		lv := &LedgerView{txn: txn, ls: ls}
-		err := validateBlockReferenceScripts(block, pp, lv)
-		return storageFaultOrErr(lv, err)
-	})
+	return ls.db.Transaction(context.Background(), false).
+		Do(func(txn *database.Txn) error {
+			lv := &LedgerView{txn: txn, ls: ls}
+			err := validateBlockReferenceScripts(block, pp, lv)
+			return storageFaultOrErr(lv, err)
+		})
 }

@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,7 +103,7 @@ func seedUtxoMetadata(
 	addedSlot, deletedSlot uint64,
 ) {
 	t.Helper()
-	mdTxn := db.MetadataTxn(true)
+	mdTxn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, mdTxn.Do(func(txn *Txn) error {
 		return db.Metadata().CreateUtxo(txn.Metadata(), &models.Utxo{
 			TxId:        txId,
@@ -150,7 +151,7 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	blobTxn.Release()
 
 	// Prune the block.
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "exactly one live UTxO should be materialized")
 
@@ -205,7 +206,7 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 	})
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	_, err := db.PruneBlock(slot, hash)
+	_, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 
 	// Snapshot cold-extraction count to prove the resolver does NOT have to
@@ -247,13 +248,13 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 	})
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	recent, err := BlocksRecent(db, 1)
+	recent, err := BlocksRecent(context.Background(), db, 1)
 	require.NoError(t, err)
 	require.Len(t, recent, 1)
 	blockID := recent[0].ID
 	require.NotZero(t, blockID, "block id must be set before prune")
 
-	_, err = db.PruneBlock(slot, hash)
+	_, err = db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 
 	// BlockByIndex is the path the chain iterator walks. After prune the
@@ -271,7 +272,7 @@ func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 			"silent chain-tip dead end issue #2104 describes")
 
 	// BlockByHash exercises the parallel hash-keyed path; same handoff.
-	_, err = BlockByHash(db, hash)
+	_, err = BlockByHash(context.Background(), db, hash)
 	assert.ErrorIs(t, err, types.ErrHistoryExpired,
 		"BlockByHash must also reach the history-expired handoff post-prune")
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound)
@@ -308,7 +309,7 @@ func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 	seedUtxoMetadata(t, db, txId, 1, slot, 150)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 2, n,
 		"API mode must materialize both live and retained spent UTxOs")
@@ -352,7 +353,7 @@ func TestPruneBlock_CoreModeLeavesSpentUtxos(t *testing.T) {
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 	seedUtxoMetadata(t, db, txId, 1, slot, 150)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n,
 		"core mode must materialize only the live UTxO at the slot")
@@ -387,7 +388,7 @@ func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
 	}))
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 
-	n, err := db.PruneBlock(slot, hash)
+	n, err := db.PruneBlock(context.Background(), slot, hash)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n,
 		"already-raw UTxO should not be counted as materialized")

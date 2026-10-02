@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"math"
 
@@ -69,11 +70,12 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 	newEpoch uint64,
 ) error {
 	if txn == nil {
-		return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
-			return ls.applyIntraEraHardForkRule(
-				txn, newMajor, boundarySlot, newEpoch,
-			)
-		})
+		return ls.db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return ls.applyIntraEraHardForkRule(
+					txn, newMajor, boundarySlot, newEpoch,
+				)
+			})
 	}
 	switch newMajor {
 	case 3:
@@ -120,7 +122,11 @@ func (ls *LedgerState) applyIntraEraHardForkRule(
 			"component", "ledger",
 		)
 	case 10:
-		n, err := ls.db.ClearDanglingDRepDelegations(boundarySlot, txn)
+		n, err := ls.db.ClearDanglingDRepDelegations(
+			context.Background(),
+			boundarySlot,
+			txn,
+		)
 		if err != nil {
 			return fmt.Errorf(
 				"pv10 clear dangling DRep delegations at slot %d: %w",

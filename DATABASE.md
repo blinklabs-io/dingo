@@ -1647,7 +1647,7 @@ The eviction and the floor read happen under one lock hold, so the boundary
 handed to `prune` is a coherent read of the deferred set — never a mix of pre-
 and post-eviction state. The lock is then **released before `prune` runs**, and
 this is a correctness requirement, not just an optimization: `prune` opens the
-single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(true)`,
+single SQLite write connection (`SetMaxOpenConns(1)`) via `Transaction(ctx, true)`,
 and block apply holds that connection *before* taking `deferredHeaderValidationMu`
 (`ledgerProcessBlock` → `verifyDeferredBlockHeaderState` →
 `consumeDeferredHeaderValidation`, all inside its write txn). Holding the mutex
@@ -3205,7 +3205,7 @@ live UTxO history, while the CBOR-decode-only candidate scan remains
 unavoidable for the total.
 
 Both `AccountUTXOs` and `AddressUTXOs` open one read `Txn`
-(`Database.Transaction(false)`) and pass it to both their count/scan call
+(`Database.Transaction(ctx, false)`) and pass it to both their count/scan call
 and their page-fetch call, rather than leaving each to open its own
 (`Transaction`/`ReadTransaction` begin the underlying SQL transaction
 eagerly, so the shared `Txn` fixes a single snapshot at that point). Two

@@ -35,7 +35,7 @@ import (
 // RPC server. Using this interface keeps the server and service handlers free
 // of a direct *ledger.LedgerState dependency.
 type UtxorpcLedgerState interface {
-	BlockByHash(hash []byte) (models.Block, error)
+	BlockByHash(ctx context.Context, hash []byte) (models.Block, error)
 	CardanoNodeConfig() *cardano.CardanoNodeConfig
 	Datum(hash []byte) (*models.Datum, error)
 	EvaluateTx(
@@ -50,7 +50,10 @@ type UtxorpcLedgerState interface {
 	GetCurrentPParams() lcommon.ProtocolParameters
 	GetCurrentPParamsForReporting() lcommon.ProtocolParameters
 	GetEpochs() ([]models.Epoch, error)
-	GetIntersectPoint(points []ocommon.Point) (*ocommon.Point, error)
+	GetIntersectPoint(
+		ctx context.Context,
+		points []ocommon.Point,
+	) (*ocommon.Point, error)
 	GetPParamsForEpoch(
 		epoch uint64,
 		era eras.EraDesc,

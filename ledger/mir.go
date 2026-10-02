@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -111,6 +112,7 @@ func (ls *LedgerState) applyMIRCerts(
 	epochEraID uint,
 ) error {
 	effects, err := ls.db.GetMIRCertsInSlotRange(
+		context.Background(),
 		epochStartSlot, boundarySlot, txn,
 	)
 	if err != nil {
@@ -435,7 +437,12 @@ func (ls *LedgerState) registeredMIRAccounts(
 	if len(refs) == 0 {
 		return nil, nil
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, txn)
+	accounts, err := ls.db.GetAccountsByCredential(
+		context.Background(),
+		refs,
+		false,
+		txn,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("get MIR reward accounts: %w", err)
 	}
@@ -459,6 +466,7 @@ func (ls *LedgerState) applyMIRCredits(
 ) (appliedReserves, appliedTreasury uint64, err error) {
 	for _, credit := range credits {
 		credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
+			context.Background(),
 			ls.db,
 			txn,
 			credit.credentialTag,

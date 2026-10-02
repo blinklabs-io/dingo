@@ -864,6 +864,7 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
+	ctx context.Context,
 	txn *database.Txn,
 	point ocommon.Point,
 	block gledger.Block,
@@ -875,7 +876,7 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	if !required {
 		return nil
 	}
-	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
+	if err := ls.verifyBlockHeaderStateWithEpochAdvance(ctx, block, true, false); err != nil {
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -1917,7 +1918,7 @@ func (ls *LedgerState) headerAlreadyOnPrimaryChain(
 	if e.Point.Slot > localTip.Point.Slot {
 		return false
 	}
-	block, err := ls.blockByHash(e.Point.Hash)
+	block, err := ls.blockByHash(context.Background(), e.Point.Hash)
 	if errors.Is(err, models.ErrBlockNotFound) {
 		// Blocks written before the hash index was introduced still have an
 		// exact point key and metadata. Probe that local path without allowing
@@ -1996,7 +1997,7 @@ func (ls *LedgerState) findPeerForkPath(
 		// lock-held walk over mostly-unpersisted peer-header hashes stays cheap
 		// for current stores. Blocks persisted before the hash index was added
 		// may still miss until the operator backfills the index.
-		ancestorBlock, err := ls.blockByHash(prevHash)
+		ancestorBlock, err := ls.blockByHash(context.Background(), prevHash)
 		switch {
 		case err == nil && ancestorBlock.Slot <= localTipSlot:
 			point := ocommon.NewPoint(
@@ -2121,11 +2122,14 @@ func genesisForkPathDensity(
 	)
 }
 
-func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
+func (ls *LedgerState) blockByHash(
+	ctx context.Context,
+	hash []byte,
+) (models.Block, error) {
 	if ls.lookupBlockByHash != nil {
 		return ls.lookupBlockByHash(hash)
 	}
-	return database.BlockByHash(ls.db, hash)
+	return database.BlockByHash(ctx, ls.db, hash)
 }
 
 func netAddrString(addr net.Addr) string {
@@ -2989,7 +2993,11 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	ls.RLock()
 	currentTip := ls.currentTip
 	ls.RUnlock()
-	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	resolved, err := ls.resolveRollbackTarget(
+		context.Background(),
+		point,
+		currentTip,
+	)
 	if err != nil {
 		return false
 	}
@@ -3005,7 +3013,7 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 	if err != nil || belowPruneFloor {
 		return false
 	}
-	return ls.chain.ValidateRollback(point) == nil
+	return ls.chain.ValidateRollback(context.Background(), point) == nil
 }
 
 // clearRollbackHistoryForPoint removes per-connection loop-detector records
@@ -3074,7 +3082,11 @@ func (ls *LedgerState) localTipPraosView(
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
 		return praos.PraosTiebreakerView{}
 	}
-	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
+	block, err := database.BlockByHash(
+		context.Background(),
+		ls.db,
+		localTip.Point.Hash,
+	)
 	if err != nil {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Debug(
@@ -3249,6 +3261,7 @@ func markPeerHeaderHistoryPathUnavailable(
 // the retained history instead of repeatedly walking the same suffix while
 // chainsyncMutex is held.
 func (ls *LedgerState) findPeerForkPathCached(
+	ctx context.Context,
 	e ChainsyncEvent,
 	initialPrevHash []byte,
 	expectedAncestor ocommon.Point,
@@ -3321,7 +3334,7 @@ func (ls *LedgerState) findPeerForkPathCached(
 			return &entry.ancestor, path, nil
 		}
 
-		ancestorBlock, err := ls.blockByHash(prevHash)
+		ancestorBlock, err := ls.blockByHash(ctx, prevHash)
 		switch {
 		case err == nil && ancestorBlock.Slot <= expectedAncestor.Slot:
 			ancestor := ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash)
@@ -3390,6 +3403,7 @@ func (ls *LedgerState) findPeerForkPathCached(
 }
 
 func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
+	ctx context.Context,
 	connId ouroboros.ConnectionId,
 	point ocommon.Point,
 ) (int, error) {
@@ -3409,6 +3423,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 			continue
 		}
 		ancestorPoint, forkPath, err := ls.findPeerForkPathCached(
+			ctx,
 			recordEvent,
 			record.prevHash,
 			point,
@@ -3438,7 +3453,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 			if evt.Point.Slot <= cutoffSlot {
 				continue
 			}
-			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
+			if err := ls.chain.AddBlockHeader(ctx, evt.BlockHeader); err != nil {
 				// clearQueuedHeaders (and the headerPipelineConnId write
 				// below) mutate a field every other mutator guards with
 				// chainsyncBlockfetchMutex -- take it here too, scoped
@@ -3469,6 +3484,7 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 // history was replayed and whether connection closure should be skipped because
 // the primary chain tip is already past the completed rollback point.
 func (ls *LedgerState) RecoverAfterLocalRollback(
+	ctx context.Context,
 	connIds []ouroboros.ConnectionId,
 	point ocommon.Point,
 ) LocalRollbackRecoveryResult {
@@ -3525,6 +3541,7 @@ func (ls *LedgerState) RecoverAfterLocalRollback(
 
 	for _, connId := range preferredConnIds {
 		headerCount, err := ls.recoverPeerHeaderHistoryFromPointLocked(
+			ctx,
 			connId,
 			point,
 		)
@@ -3721,9 +3738,12 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	)
 	var err error
 	if headerCryptoVerified {
-		err = ls.chain.AddVerifiedBlockHeader(e.BlockHeader)
+		err = ls.chain.AddVerifiedBlockHeader(
+			context.Background(),
+			e.BlockHeader,
+		)
 	} else {
-		err = ls.chain.AddBlockHeader(e.BlockHeader)
+		err = ls.chain.AddBlockHeader(context.Background(), e.BlockHeader)
 	}
 	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
@@ -4122,9 +4142,12 @@ func (ls *LedgerState) addForkPathHeader(
 ) error {
 	if incomingCryptoVerified &&
 		pointMatches(forkEvent.Point, incomingPoint) {
-		return ls.chain.AddVerifiedBlockHeader(forkEvent.BlockHeader)
+		return ls.chain.AddVerifiedBlockHeader(
+			context.Background(),
+			forkEvent.BlockHeader,
+		)
 	}
-	return ls.chain.AddBlockHeader(forkEvent.BlockHeader)
+	return ls.chain.AddBlockHeader(context.Background(), forkEvent.BlockHeader)
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -4243,7 +4266,10 @@ func (ls *LedgerState) tryResolveFork(
 			return false, nil
 		}
 	}
-	ancestorBlock, err := ls.blockByHash(ancestorPoint.Hash)
+	ancestorBlock, err := ls.blockByHash(
+		context.Background(),
+		ancestorPoint.Hash,
+	)
 	if err != nil {
 		return false, fmt.Errorf(
 			"failed to reload common ancestor block %s: %w",
@@ -4551,6 +4577,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
 		} else {
 			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
+				context.Background(),
 				e.Block,
 				true,
 				true,
@@ -5631,6 +5658,7 @@ func (ls *LedgerState) flushPendingBlockfetchBlocksDeferred(
 		// every chain mutation, so no rollback can interleave between the
 		// two.
 		evt, addBlockErr := ls.chain.AddBlockWithPointDeferredIf(
+			context.Background(),
 			pendingEvent.Block,
 			pendingEvent.Point,
 			nil,
@@ -5802,7 +5830,7 @@ func genesisStakeDelegations(
 	return ret, nil
 }
 
-func (ls *LedgerState) createGenesisBlock() error {
+func (ls *LedgerState) createGenesisBlock(ctx context.Context) error {
 	// Get the Byron genesis hash to use as the synthetic block hash.
 	// This mirrors how the Shelley epoch nonce uses the Shelley genesis hash.
 	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
@@ -5832,7 +5860,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 			// only this branch, so the backfill has to run here too --
 			// a node already synced from genesis is exactly the one
 			// missing its committee rows.
-			if err := ls.ensureGenesisCommittee(nil); err != nil {
+			if err := ls.ensureGenesisCommittee(ctx, nil); err != nil {
 				return err
 			}
 			return ls.ensureGenesisNetworkState()
@@ -5859,7 +5887,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		)
 	}
 
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	err = txn.Do(func(txn *database.Txn) error {
 		// Record genesis UTxOs
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
@@ -5992,6 +6020,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if !bootstrappedFromMithril {
 			for txHashArray, utxos := range txUtxos {
 				if err := ls.db.SetGenesisTransaction(
+					ctx,
 					txHashArray[:],
 					genesisHash[:],
 					utxos,
@@ -6134,7 +6163,7 @@ func (ls *LedgerState) createGenesisBlock() error {
 		// The Conway genesis committee is seated from the Chang hard fork
 		// and any of its members not yet touched by a later UpdateCommittee
 		// action must be recognized for hot-key authorization/resignation.
-		if err := ls.ensureGenesisCommittee(txn); err != nil {
+		if err := ls.ensureGenesisCommittee(ctx, txn); err != nil {
 			return err
 		}
 
@@ -6198,12 +6227,15 @@ func (ls *LedgerState) ensureGenesisConstitution(txn *database.Txn) error {
 // before inserting makes this safe to call on every startup: a credential a
 // later UpdateCommittee has since re-elected or removed already has a row, so
 // its real history is left alone instead of being reverted to genesis state.
-func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
+func (ls *LedgerState) ensureGenesisCommittee(
+	ctx context.Context,
+	txn *database.Txn,
+) error {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
 	if conwayGenesis == nil || len(conwayGenesis.Committee.Members) == 0 {
 		return nil
 	}
-	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(txn)
+	existing, err := ls.db.GetCommitteeMembersIncludeDeleted(ctx, txn)
 	if err != nil {
 		return fmt.Errorf("get existing committee members: %w", err)
 	}
@@ -6260,7 +6292,7 @@ func (ls *LedgerState) ensureGenesisCommittee(txn *database.Txn) error {
 		}
 		return int(a.ColdCredentialTag) - int(b.ColdCredentialTag)
 	})
-	if err := ls.db.SetCommitteeMembers(newMembers, txn); err != nil {
+	if err := ls.db.SetCommitteeMembers(ctx, newMembers, txn); err != nil {
 		return fmt.Errorf("set genesis committee members: %w", err)
 	}
 	ls.config.Logger.Info(
@@ -6737,6 +6769,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// Praos epoch VRF-failing; the same shape repeats at
 	// Babbage→Conway when this rule is broken.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
+		context.Background(),
 		txn,
 		currentEpoch.EraId,
 		prevEvolvingNonce,
@@ -6766,6 +6799,7 @@ func (ls *LedgerState) calculateEpochNonce(
 	// the epoch being closed (a one-block Praos lag), NOT the last block's own
 	// hash. See epochLabNonce.
 	labNonceToSave, err := ls.epochLabNonce(
+		context.Background(),
 		txn,
 		currentEpoch.StartSlot,
 		epochEndSlot,
@@ -7239,6 +7273,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, "pparam_updates", func() error {
 			var err error
 			newPParams, plutusV2CostModelWritten, err = ls.db.ComputeAndApplyPParamUpdates(
+				context.Background(),
 				epochStartSlot,
 				currentEpoch.EpochId+1, // Target epoch for updates
 				currentEra.Id,
@@ -7375,7 +7410,7 @@ func (ls *LedgerState) processEpochRollover(
 					if err != nil {
 						return err
 					}
-					_, err = plan.Apply(decision, txn)
+					_, err = plan.Apply(context.Background(), decision, txn)
 					return err
 				}
 				deferredPlan = plan
@@ -7825,7 +7860,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	}
 	err := hook(txn, evt)
 	if err == nil {
-		err = ls.takeDeferredRewardStakeInputs(txn)
+		err = ls.takeDeferredRewardStakeInputs(context.Background(), txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
@@ -7849,7 +7884,10 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	return nil
 }
 
-func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
+func (ls *LedgerState) cleanupBlockNoncesBefore(
+	ctx context.Context,
+	startSlot uint64,
+) {
 	if startSlot == 0 {
 		return
 	}
@@ -7863,7 +7901,7 @@ func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
 	)
 	ls.Lock()
 	defer ls.Unlock()
-	txn := ls.db.Transaction(true)
+	txn := ls.db.Transaction(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		return ls.db.DeleteBlockNoncesBeforeSlotWithoutCheckpoints(startSlot, txn)
 	}); err != nil {

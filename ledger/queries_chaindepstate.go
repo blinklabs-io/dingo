@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -162,7 +163,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
 	// snapshots.
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	tip, current, err := ls.epochAtTip(txn)
@@ -195,6 +196,7 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		// describes it at the tip. Recomputed here through the same function
 		// the consensus path uses at a boundary, stopped at the tip.
 		candidate, evolving, err := ls.computeCandidateNonceAsOf(
+			context.Background(),
 			txn,
 			current.EraId,
 			current.EvolvingNonce,
@@ -388,7 +390,7 @@ func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 	map[lcommon.Blake2b224]uint64,
 	error,
 ) {
-	sequences, err := ls.db.LatestPoolOpCertSequences(txn)
+	sequences, err := ls.db.LatestPoolOpCertSequences(context.Background(), txn)
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -62,9 +63,13 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 	abandonedPoint := fixture.currentTip.Point
 
 	// Abandon the block at slot 20 and replace its index with a fork block.
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
 	forkHash := testHashBytes("splice-fork-block")
 	require.NoError(t, ls.chain.AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{
 			{
 				Slot:        21,
@@ -81,7 +86,11 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 	// The abandoned block is still resolvable by point, and still claims the
 	// block index the fork block now holds. That is the precondition for the
 	// splice.
-	cached, err := ls.chain.BlockByPoint(abandonedPoint, nil)
+	cached, err := ls.chain.BlockByPoint(
+		context.Background(),
+		abandonedPoint,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), cached.ID)
 
@@ -97,7 +106,11 @@ func TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain(t *testing.T) {
 		ls.chain.Tip(),
 		"rollback to an abandoned fork block must leave the chain tip alone",
 	)
-	tipBlock, err := ls.chain.BlockByPoint(ls.chain.Tip().Point, nil)
+	tipBlock, err := ls.chain.BlockByPoint(
+		context.Background(),
+		ls.chain.Tip().Point,
+		nil,
+	)
 	require.NoError(t, err)
 	assert.True(
 		t,
@@ -118,8 +131,12 @@ func TestValidateRollbackRejectsAbandonedForkPoint(t *testing.T) {
 	ls := fixture.ls
 	abandonedPoint := fixture.currentTip.Point
 
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
 	require.NoError(t, ls.chain.AddRawBlocks(
+		context.Background(),
 		[]chain.RawBlock{
 			{
 				Slot:        21,
@@ -659,28 +676,38 @@ func lateProducerFixture(
 			),
 		},
 	}
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        producerBlock.slot,
-		Hash:        producerHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
-	if !producerOnChain {
-		// Abandon it and let a replacement take the block index it held.
-		// The blob store is append-only, so the abandoned block stays
-		// resolvable by hash.
-		require.NoError(t, ls.chain.Rollback(fixture.currentTip.Point))
-		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-			Slot:        31,
-			Hash:        testHashBytes("late-replacement-block"),
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        producerBlock.slot,
+			Hash:        producerHash,
 			BlockNumber: fixture.currentTip.BlockNumber + 1,
 			Type:        1,
 			PrevHash:    fixture.currentTip.Point.Hash,
 			Cbor:        []byte{0x80},
-		}}))
+		}}),
+	)
+	if !producerOnChain {
+		// Abandon it and let a replacement take the block index it held.
+		// The blob store is append-only, so the abandoned block stays
+		// resolvable by hash.
+		require.NoError(
+			t,
+			ls.chain.Rollback(context.Background(), fixture.currentTip.Point),
+		)
+		require.NoError(
+			t,
+			ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+				Slot:        31,
+				Hash:        testHashBytes("late-replacement-block"),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			}}),
+		)
 		retained, err := ls.chain.BlockByPoint(
+			context.Background(),
 			ocommon.NewPoint(producerBlock.slot, producerHash),
 			nil,
 		)
@@ -808,16 +835,26 @@ func TestContinuationAuditCarryForwardRejectsAbandonedForkPoint(t *testing.T) {
 	require.True(t, ok)
 
 	// Abandon the fork point and let a replacement take its block index.
-	require.NoError(t, ls.chain.Rollback(fixture.ancestorTip.Point))
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        21,
-		Hash:        testHashBytes("carry-forward-fork-block"),
-		BlockNumber: fixture.ancestorTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.ancestorTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
-	retained, err := ls.chain.BlockByPoint(abandonedPoint, nil)
+	require.NoError(
+		t,
+		ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
+	)
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        21,
+			Hash:        testHashBytes("carry-forward-fork-block"),
+			BlockNumber: fixture.ancestorTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
+	retained, err := ls.chain.BlockByPoint(
+		context.Background(),
+		abandonedPoint,
+		nil,
+	)
 	require.NoError(t, err)
 	indexed, err := ls.db.BlockPointByIndex(retained.ID, nil)
 	require.NoError(t, err)
@@ -1273,11 +1310,11 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		} else {
 			require.NoError(
 				t,
-				fixture.ls.chain.Rollback(fixture.ancestorTip.Point),
+				fixture.ls.chain.Rollback(context.Background(), fixture.ancestorTip.Point),
 			)
 			require.NoError(
 				t,
-				fixture.ls.chain.AddRawBlocks([]chain.RawBlock{{
+				fixture.ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
 					Slot:        fixture.currentTip.Point.Slot + 5,
 					Hash:        testHashBytes("reconcile-audit-fork"),
 					BlockNumber: fixture.currentTip.BlockNumber + 1,
@@ -1300,7 +1337,10 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		fixture := divergedLedger(t, false)
 		ls := fixture.ls
 
-		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+		require.NoError(
+			t,
+			ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+		)
 
 		require.Equal(t, fixture.ancestorTip, ls.chain.Tip())
 		assert.Nil(t, ls.continuationAudit.Load())
@@ -1315,7 +1355,10 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 
 		// The reconciliation lands after the rewind's post-descent tip
 		// read, so the rewind reports nothing truncated.
-		require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+		require.NoError(
+			t,
+			ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()),
+		)
 		ls.settleAuditAfterRewind(
 			prior,
 			gen,
@@ -1337,7 +1380,7 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 		armed := ls.continuationAudit.Load()
 		chainTip := ls.chain.Tip()
 
-		err := ls.reconcilePrimaryChainTipWithLedgerTip()
+		err := ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 
 		require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
 		require.Equal(t, chainTip, ls.chain.Tip())
@@ -1358,6 +1401,7 @@ func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
 
 	fixture := newChainsyncRollbackFixture(t)
 	oldBlock, err := database.BlockByPoint(
+		context.Background(),
 		fixture.ls.db,
 		fixture.currentTip.Point,
 	)
@@ -1371,7 +1415,7 @@ func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
 	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
 	chainTip := fixture.ls.chain.Tip()
 
-	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip(context.Background())
 	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
 	require.Equal(t, chainTip, fixture.ls.chain.Tip())
 
@@ -1652,14 +1696,17 @@ func TestContinuationAuditStopsWhenItsWindowIsReplacedMidBody(t *testing.T) {
 	// redirection accepts it as a producer.
 	const bodySlot = 30
 	bodyHash := testHashBytes("mid-body-rearm-block")
-	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
-		Slot:        bodySlot,
-		Hash:        bodyHash,
-		BlockNumber: fixture.currentTip.BlockNumber + 1,
-		Type:        1,
-		PrevHash:    fixture.currentTip.Point.Hash,
-		Cbor:        []byte{0x80},
-	}}))
+	require.NoError(
+		t,
+		ls.chain.AddRawBlocks(context.Background(), []chain.RawBlock{{
+			Slot:        bodySlot,
+			Hash:        bodyHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		}}),
+	)
 
 	// Two transactions, the second spending the first's output: the only
 	// producer this body needs is itself.

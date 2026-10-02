@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -45,7 +46,7 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	pkh := lcommon.PoolKeyHash(poolKeyHash)
 
 	db := a.ledgerState.Database()
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	pool, err := db.Metadata().GetPool(pkh, true, txn.Metadata())

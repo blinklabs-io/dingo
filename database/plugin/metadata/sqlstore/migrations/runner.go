@@ -149,7 +149,7 @@ func (r *Runner) runMigration(
 		}
 		restoreSQLiteForeignKeys = func() error {
 			restoreCtx, cancel := context.WithTimeout(
-				context.Background(),
+				context.WithoutCancel(ctx),
 				sqlitePragmaRestoreTimeout,
 			)
 			defer cancel()

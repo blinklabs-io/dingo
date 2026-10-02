@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -238,7 +239,7 @@ func benchmarkStorageBackend(
 	}
 
 	for i := range 10 {
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		key := fmt.Appendf(nil, "block-%d", i)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
@@ -258,7 +259,7 @@ func benchmarkStorageBackend(
 
 	for b.Loop() {
 		// Process 10 blocks of data
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
 			txn.Rollback()
@@ -314,7 +315,7 @@ func benchmarkTestLoad(
 	}
 
 	for i := range 200 {
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		key := fmt.Appendf(nil, "block-%d", i)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
@@ -334,7 +335,7 @@ func benchmarkTestLoad(
 
 	for b.Loop() {
 		// Load first 200 blocks
-		txn := db.Transaction(false)
+		txn := db.Transaction(context.Background(), false)
 		blob := txn.DB().Blob()
 		if blob == nil || txn.Blob() == nil {
 			txn.Rollback()

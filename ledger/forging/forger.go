@@ -406,7 +406,9 @@ type BlockBroadcaster interface {
 // declines the contested slot rather than falling back to the live tip, which
 // would produce a block whose parent slot equals its own.
 type AlternativeChainContextProvider interface {
-	TipPredecessor() (parent ocommon.Point, tip ochainsync.Tip, ok bool)
+	TipPredecessor(
+		ctx context.Context,
+	) (parent ocommon.Point, tip ochainsync.Tip, ok bool)
 }
 
 // SiblingBlockAdopter offers a locally forged block that competes with the
@@ -1089,7 +1091,7 @@ func (f *BlockForger) checkAndForge(ctx context.Context) error {
 }
 
 // checkAndForgeProduction implements production mode forging.
-func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
+func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	forgeStartTime := time.Now()
 
 	// Get current slot from slot clock
@@ -1687,7 +1689,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		if f.metrics != nil {
 			f.metrics.slotBattlesTotal.Inc()
 		}
-		blockCtx, ok := f.alternativeBlockContext(currentSlot)
+		blockCtx, ok := f.alternativeBlockContext(ctx, currentSlot)
 		if !ok {
 			// Nothing to build the alternative on. Record the battle
 			// being declined rather than dropping the slot silently.
@@ -1895,6 +1897,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// instead of abandoning the slot on the first abort.
 	leiosState.data = leiosBlockData
 	block, blockCbor, stats, err := f.buildBlockForSlot(
+		ctx,
 		currentSlot,
 		kesPeriod,
 		&leiosState,
@@ -2650,6 +2653,7 @@ func isTipGateRefusal(err error) bool {
 // unapplied_rival_at_leader_slot is counted outright rather than from the
 // schedule.
 func (f *BlockForger) tipGatesRefuseSlot(
+	ctx context.Context,
 	slot uint64,
 	entry forgeTipGates,
 	blockCtx **BlockContext,
@@ -2734,7 +2738,7 @@ func (f *BlockForger) tipGatesRefuseSlot(
 		// Re-resolve the explicit context for the rival currently at the
 		// tip. The entry gate may have seen a different tip, or this may be
 		// the first contest during this forge cycle.
-		context, ok := f.alternativeBlockContext(slot)
+		context, ok := f.alternativeBlockContext(ctx, slot)
 		if !ok {
 			if !*slotBattleCounted && f.metrics != nil {
 				f.metrics.slotBattlesTotal.Inc()
@@ -2925,6 +2929,7 @@ func (f *BlockForger) slotSelectionDeadline(slot uint64) (time.Time, bool) {
 // function; entry supplies the inputs that are read once per cycle, the
 // endorser-block watermark and the upstream sync reading.
 func (f *BlockForger) buildBlockForSlot(
+	ctx context.Context,
 	slot uint64,
 	kesPeriod uint64,
 	leiosState *forgeLeiosState,
@@ -2997,6 +3002,7 @@ func (f *BlockForger) buildBlockForSlot(
 		// one reading guaranteed to have gone stale; building anyway
 		// would sign a block the entry gates would have refused.
 		if tipErr := f.tipGatesRefuseSlot(
+			ctx,
 			slot,
 			entry,
 			blockCtx,
@@ -3083,6 +3089,7 @@ func (f *BlockForger) buildBlockForSlot(
 		// preceding selection pass all run inside the window a peer block
 		// can land in -- on either tip.
 		if tipErr := f.tipGatesRefuseSlot(
+			ctx,
 			slot,
 			entry,
 			blockCtx,
@@ -3606,6 +3613,7 @@ func (f *BlockForger) validateForgedBlockSafe(
 // below it. Declining costs one block; guessing a parent here costs a
 // signature over a block no peer will accept.
 func (f *BlockForger) alternativeBlockContext(
+	ctx context.Context,
 	slot uint64,
 ) (BlockContext, bool) {
 	// A durable fence is a precondition for contesting a slot at all,
@@ -3634,7 +3642,7 @@ func (f *BlockForger) alternativeBlockContext(
 	if _, ok := f.blockBuilder.(AlternativeBlockBuilder); !ok {
 		return BlockContext{}, false
 	}
-	parent, tip, ok := f.chainContext.TipPredecessor()
+	parent, tip, ok := f.chainContext.TipPredecessor(ctx)
 	if !ok {
 		return BlockContext{}, false
 	}

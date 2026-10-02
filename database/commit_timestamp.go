@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"strconv"
@@ -510,7 +511,7 @@ func (d *Database) evaluateAndPersistGates(
 // checkCommitTimestamp fails, so a startup that takes the recovery path
 // never runs phase 1 on its own -- see node.go's dbNeedsRecovery handling,
 // which calls this explicitly once RecoverCommitTimestampConflict succeeds.
-func (d *Database) CheckNodeSettings() error {
+func (d *Database) CheckNodeSettings(ctx context.Context) error {
 	// This check is part of phase 1 rather than init directly because the
 	// commit-timestamp recovery path re-enters here after init returned early.
 	// It must run before ordinary first-fill gates so an unclassified legacy
@@ -522,7 +523,7 @@ func (d *Database) CheckNodeSettings() error {
 	if err := d.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
 		return err
 	}
-	if err := d.checkAlonzoPParamsUnit(); err != nil {
+	if err := d.checkAlonzoPParamsUnit(ctx); err != nil {
 		return err
 	}
 	configured, err := d.phase1GateValues()

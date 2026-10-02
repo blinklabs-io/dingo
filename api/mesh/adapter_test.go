@@ -72,6 +72,7 @@ func newAdapterDatabase(t *testing.T) *database.Database {
 	require.NoError(t, err)
 
 	db, err := database.New(
+		context.Background(),
 		&database.Config{DataDir: dataDir, Logger: logger},
 		database.Stores{
 			Blob: blobStore, Metadata: metadataStore,

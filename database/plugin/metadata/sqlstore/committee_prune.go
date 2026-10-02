@@ -254,7 +254,9 @@ WHERE id IN (
 func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	ctx context.Context,
 ) error {
-	tip, err := s.GetTip(nil)
+	tipTxn := s.ReadTransaction(ctx)
+	defer tipTxn.Rollback()      //nolint:errcheck
+	tip, err := s.GetTip(tipTxn) //nolint:contextcheck // tipTxn carries ctx
 	if err != nil {
 		return fmt.Errorf("read tip for committee hot maintenance: %w", err)
 	}

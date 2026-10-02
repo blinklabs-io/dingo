@@ -50,9 +50,9 @@ func newReplayTestLedger(
 	pparams lcommon.ProtocolParameters,
 ) *LedgerState {
 	t.Helper()
-	cm, err := chain.NewManager(db, nil)
+	cm, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{{
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(context.Background(), []chain.RawBlock{{
 		Slot:        block.SlotNumber(),
 		Hash:        block.Hash().Bytes(),
 		BlockNumber: block.BlockNumber(),
@@ -268,7 +268,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				inputIds := [][]byte{f.spendTxId, f.collateralTxId}
 				before := make([]*models.Utxo, 0, len(inputIds))
 				for _, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(id, 0, nil)
+					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
 					require.NoError(t, err)
 					before = append(before, utxo)
 				}
@@ -279,7 +279,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				if tc.witnessDatum {
 					require.NoError(t, err)
 					require.Equal(t, block.Hash().Bytes(), tip.Point.Hash)
-					_, err = f.db.UtxoByRef(f.spendTxId, 0, nil)
+					_, err = f.db.UtxoByRef(context.Background(), f.spendTxId, 0, nil)
 					require.ErrorIs(t, err, types.ErrUtxoNotFound)
 					return
 				}
@@ -288,7 +288,7 @@ func TestLedgerReplayRejectsMissingRequiredSpendingDatumBeforeStateMutation(
 				require.Equal(t, f.script.Hash(), missing.ScriptHash)
 				require.Equal(t, ochainsync.Tip{}, tip)
 				for i, id := range inputIds {
-					utxo, err := f.db.UtxoByRef(id, 0, nil)
+					utxo, err := f.db.UtxoByRef(context.Background(), id, 0, nil)
 					require.NoError(t, err)
 					require.Equal(t, before[i], utxo)
 				}

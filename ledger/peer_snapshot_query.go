@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -59,7 +60,7 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 func (ls *LedgerState) queryLedgerPeerSnapshot(
 	peerKind olocalstatequery.LedgerPeerKind,
 ) (any, error) {
-	txn := ls.db.Transaction(false)
+	txn := ls.db.Transaction(context.Background(), false)
 	defer txn.Release()
 
 	// Read the tip from the same read transaction as the pool/stake data so
@@ -102,7 +103,7 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	if err != nil {
 		return nil, err
 	}
-	pools, err := ls.db.GetPools(pkhs, txn)
+	pools, err := ls.db.GetPools(context.Background(), pkhs, txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get pools: %w", err)
 	}

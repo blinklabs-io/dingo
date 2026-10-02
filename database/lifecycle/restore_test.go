@@ -313,6 +313,7 @@ func openRemoteTestDatabase(
 	require.NoError(t, err)
 	require.NoError(t, metadataStore.Start(context.Background()))
 	db, err := database.New(
+		context.Background(),
 		&database.Config{Network: "preview"},
 		database.Stores{Blob: blobStore, Metadata: metadataStore},
 	)

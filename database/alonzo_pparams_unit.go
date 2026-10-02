@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -30,7 +31,7 @@ type alonzoPParamsEraStore interface {
 	HasPParamsForEra(uint, types.Txn) (bool, error)
 }
 
-func (d *Database) checkAlonzoPParamsUnit() error {
+func (d *Database) checkAlonzoPParamsUnit(ctx context.Context) error {
 	gates, err := d.Metadata().GetNodeSettingsGates()
 	if err != nil {
 		return fmt.Errorf(
@@ -52,7 +53,7 @@ func (d *Database) checkAlonzoPParamsUnit() error {
 		// The lossy value is recomputable from Alonzo genesis for a row the
 		// pre-v0.205.7 era transition wrote, so a resync is the fallback
 		// rather than the first answer. See repairAlonzoPParamsUnit.
-		repaired, err := d.repairAlonzoPParamsUnit()
+		repaired, err := d.repairAlonzoPParamsUnit(ctx)
 		if repaired {
 			return nil
 		}
@@ -186,7 +187,7 @@ func (e errAlonzoPParamsUnitUnrepairable) Error() string {
 // carries a non-nil error: an errAlonzoPParamsUnitUnrepairable carries the
 // reason the repair could not be applied, and any other error is a store
 // failure. It never returns (false, nil).
-func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
+func (d *Database) repairAlonzoPParamsUnit(ctx context.Context) (bool, error) {
 	word := d.config.AlonzoLovelacePerUtxoWord
 	if word == 0 {
 		return false, errAlonzoPParamsUnitUnrepairable{
@@ -286,7 +287,7 @@ func (d *Database) repairAlonzoPParamsUnit() (bool, error) {
 		repairs = append(repairs, repair{id: row.ID, cbor: corrected})
 	}
 	if len(repairs) > 0 {
-		if err := d.Transaction(true).Do(func(txn *Txn) error {
+		if err := d.Transaction(ctx, true).Do(func(txn *Txn) error {
 			for _, item := range repairs {
 				if err := store.UpdatePParamsCbor(
 					item.id,

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -229,34 +230,38 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 	poolKeyHash := bytes.Repeat([]byte{0x87}, 28)
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKeyHash))
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.BlockCreate(models.Block{
-			Slot:     preCutoffSlot,
-			Hash:     preCutoffHash,
-			PrevHash: bytes.Repeat([]byte{0x88}, 32),
-			Cbor:     []byte{0x80},
-			Number:   1,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.BlockCreate(models.Block{
-			Slot:     tipSlot,
-			Hash:     tipHash,
-			PrevHash: preCutoffHash,
-			Cbor:     []byte{0x80},
-			Number:   2,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.SetBlockNonce(
-			preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
-		); err != nil {
-			return err
-		}
-		return db.SetBlockNonce(tipHash, tipSlot, tipNonce, false, txn)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.BlockCreate(models.Block{
+					Slot:     preCutoffSlot,
+					Hash:     preCutoffHash,
+					PrevHash: bytes.Repeat([]byte{0x88}, 32),
+					Cbor:     []byte{0x80},
+					Number:   1,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.BlockCreate(models.Block{
+					Slot:     tipSlot,
+					Hash:     tipHash,
+					PrevHash: preCutoffHash,
+					Cbor:     []byte{0x80},
+					Number:   2,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.SetBlockNonce(
+					preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
+				); err != nil {
+					return err
+				}
+				return db.SetBlockNonce(tipHash, tipSlot, tipNonce, false, txn)
+			}),
+	)
 
 	require.NoError(t, db.Metadata().SetEpoch(
 		epochStart,                  // slot
@@ -270,7 +275,16 @@ func TestQueryShelleyDebugChainDepState_TPraosEraUsesTPraosLayout(
 		uint(epochLength),           // lengthInSlots
 		nil,                         // txn
 	))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, preCutoffSlot, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(
+			context.Background(),
+			pkh,
+			3,
+			preCutoffSlot,
+			nil,
+		),
+	)
 	require.NoError(t, db.SetTip(
 		ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, tipHash)},
 		nil,
@@ -415,38 +429,42 @@ func TestQueryShelleyDebugChainDepState_NoncesTrackTipNotEpochCheckpoint(
 	preCutoffHash := bytes.Repeat([]byte{0x75}, 32)
 	tipHash := bytes.Repeat([]byte{0x76}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.BlockCreate(models.Block{
-			Slot:     preCutoffSlot,
-			Hash:     preCutoffHash,
-			PrevHash: bytes.Repeat([]byte{0x77}, 32),
-			Cbor:     []byte{0x80},
-			Number:   1,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.BlockCreate(models.Block{
-			Slot:     tipSlot,
-			Hash:     tipHash,
-			PrevHash: preCutoffHash,
-			Cbor:     []byte{0x80},
-			Number:   2,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		// The evolving nonce as of each block, which is what the ledger
-		// records per block and what consensus folds forward.
-		if err := db.SetBlockNonce(
-			preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
-		); err != nil {
-			return err
-		}
-		return db.SetBlockNonce(
-			tipHash, tipSlot, tipNonce, false, txn,
-		)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.BlockCreate(models.Block{
+					Slot:     preCutoffSlot,
+					Hash:     preCutoffHash,
+					PrevHash: bytes.Repeat([]byte{0x77}, 32),
+					Cbor:     []byte{0x80},
+					Number:   1,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.BlockCreate(models.Block{
+					Slot:     tipSlot,
+					Hash:     tipHash,
+					PrevHash: preCutoffHash,
+					Cbor:     []byte{0x80},
+					Number:   2,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				// The evolving nonce as of each block, which is what the ledger
+				// records per block and what consensus folds forward.
+				if err := db.SetBlockNonce(
+					preCutoffHash, preCutoffSlot, preCutoffNonce, false, txn,
+				); err != nil {
+					return err
+				}
+				return db.SetBlockNonce(
+					tipHash, tipSlot, tipNonce, false, txn,
+				)
+			}),
+	)
 
 	require.NoError(t, db.Metadata().SetEpoch(
 		epochStart,                  // slot
@@ -545,36 +563,40 @@ func TestQueryShelleyDebugChainDepState_NoncesStopAtTipNotAtStoredBlocks(
 	tipHash := bytes.Repeat([]byte{0x57}, 32)
 	beyondHash := bytes.Repeat([]byte{0x58}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		for _, blk := range []struct {
-			slot     uint64
-			hash     []byte
-			prevHash []byte
-			number   uint64
-			nonce    []byte
-		}{
-			{earlySlot, earlyHash, bytes.Repeat([]byte{0x59}, 32), 1, earlyNonce},
-			{tipSlot, tipHash, earlyHash, 2, tipNonce},
-			{beyondSlot, beyondHash, tipHash, 3, beyondNonce},
-		} {
-			if err := db.BlockCreate(models.Block{
-				Slot:     blk.slot,
-				Hash:     blk.hash,
-				PrevHash: blk.prevHash,
-				Cbor:     []byte{0x80},
-				Number:   blk.number,
-				Type:     conway.BlockTypeConway,
-			}, txn); err != nil {
-				return err
-			}
-			if err := db.SetBlockNonce(
-				blk.hash, blk.slot, blk.nonce, false, txn,
-			); err != nil {
-				return err
-			}
-		}
-		return nil
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				for _, blk := range []struct {
+					slot     uint64
+					hash     []byte
+					prevHash []byte
+					number   uint64
+					nonce    []byte
+				}{
+					{earlySlot, earlyHash, bytes.Repeat([]byte{0x59}, 32), 1, earlyNonce},
+					{tipSlot, tipHash, earlyHash, 2, tipNonce},
+					{beyondSlot, beyondHash, tipHash, 3, beyondNonce},
+				} {
+					if err := db.BlockCreate(models.Block{
+						Slot:     blk.slot,
+						Hash:     blk.hash,
+						PrevHash: blk.prevHash,
+						Cbor:     []byte{0x80},
+						Number:   blk.number,
+						Type:     conway.BlockTypeConway,
+					}, txn); err != nil {
+						return err
+					}
+					if err := db.SetBlockNonce(
+						blk.hash, blk.slot, blk.nonce, false, txn,
+					); err != nil {
+						return err
+					}
+				}
+				return nil
+			}),
+	)
 
 	require.NoError(t, db.Metadata().SetEpoch(
 		epochStart,                  // slot
@@ -646,39 +668,43 @@ func TestQueryShelleyDebugChainDepState_LabNonceTracksTipParent(t *testing.T) {
 
 	// Two blocks inside the epoch, so the tip's parent is a block of this
 	// epoch rather than the carried value by coincidence.
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.BlockCreate(models.Block{
-			Slot:     1100,
-			Hash:     parentHash,
-			PrevHash: grandparentHash,
-			Cbor:     []byte{0x80},
-			Number:   1,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		if err := db.BlockCreate(models.Block{
-			Slot:     1200,
-			Hash:     tipHash,
-			PrevHash: parentHash,
-			Cbor:     []byte{0x80},
-			Number:   2,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		// A synced node records each block's evolving nonce as it applies it.
-		// Without the rows the nonce fold falls back to re-decoding block
-		// CBOR, which these placeholder bodies cannot satisfy.
-		if err := db.SetBlockNonce(
-			parentHash, 1100, bytes.Repeat([]byte{0x35}, 32), false, txn,
-		); err != nil {
-			return err
-		}
-		return db.SetBlockNonce(
-			tipHash, 1200, bytes.Repeat([]byte{0x36}, 32), false, txn,
-		)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.BlockCreate(models.Block{
+					Slot:     1100,
+					Hash:     parentHash,
+					PrevHash: grandparentHash,
+					Cbor:     []byte{0x80},
+					Number:   1,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				if err := db.BlockCreate(models.Block{
+					Slot:     1200,
+					Hash:     tipHash,
+					PrevHash: parentHash,
+					Cbor:     []byte{0x80},
+					Number:   2,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				// A synced node records each block's evolving nonce as it applies it.
+				// Without the rows the nonce fold falls back to re-decoding block
+				// CBOR, which these placeholder bodies cannot satisfy.
+				if err := db.SetBlockNonce(
+					parentHash, 1100, bytes.Repeat([]byte{0x35}, 32), false, txn,
+				); err != nil {
+					return err
+				}
+				return db.SetBlockNonce(
+					tipHash, 1200, bytes.Repeat([]byte{0x36}, 32), false, txn,
+				)
+			}),
+	)
 	require.NoError(t, db.Metadata().SetEpoch(
 		1000,       // slot
 		1,          // epoch
@@ -744,35 +770,47 @@ func TestQueryShelleyDebugChainDepState_LabNonceWithoutHashIndex(t *testing.T) {
 	parentHash := bytes.Repeat([]byte{0x52}, 32)
 	tipHash := bytes.Repeat([]byte{0x53}, 32)
 
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		if err := db.BlockCreate(models.Block{
-			Slot:     1200,
-			Hash:     tipHash,
-			PrevHash: parentHash,
-			Cbor:     []byte{0x80},
-			Number:   1,
-			Type:     conway.BlockTypeConway,
-		}, txn); err != nil {
-			return err
-		}
-		return db.SetBlockNonce(
-			tipHash, 1200, bytes.Repeat([]byte{0x37}, 32), false, txn,
-		)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				if err := db.BlockCreate(models.Block{
+					Slot:     1200,
+					Hash:     tipHash,
+					PrevHash: parentHash,
+					Cbor:     []byte{0x80},
+					Number:   1,
+					Type:     conway.BlockTypeConway,
+				}, txn); err != nil {
+					return err
+				}
+				return db.SetBlockNonce(
+					tipHash, 1200, bytes.Repeat([]byte{0x37}, 32), false, txn,
+				)
+			}),
+	)
 	// Drop the hash-index entry, leaving the block blob in place: the state a
 	// block written before the index existed is in.
-	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-		return db.Blob().Delete(
-			txn.Blob(), dbtypes.BlockHashIndexKey(tipHash),
-		)
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), true).
+			Do(func(txn *database.Txn) error {
+				return db.Blob().Delete(
+					txn.Blob(), dbtypes.BlockHashIndexKey(tipHash),
+				)
+			}),
+	)
 	// The block must still be unreachable by hash, or the test proves nothing.
-	require.NoError(t, db.Transaction(false).Do(func(txn *database.Txn) error {
-		_, err := database.BlockByHashTxn(txn, tipHash)
-		require.ErrorIs(t, err, models.ErrBlockNotFound,
-			"fixture must reproduce the index miss")
-		return nil
-	}))
+	require.NoError(
+		t,
+		db.Transaction(context.Background(), false).
+			Do(func(txn *database.Txn) error {
+				_, err := database.BlockByHashTxn(txn, tipHash)
+				require.ErrorIs(t, err, models.ErrBlockNotFound,
+					"fixture must reproduce the index miss")
+				return nil
+			}),
+	)
 
 	require.NoError(t, db.Metadata().SetEpoch(
 		1000, 1, nil, nil, nil, carriedLab, 0, 1, 1000, nil,
@@ -1014,7 +1052,10 @@ func TestQueryShelleyDebugChainDepState_ReportsOpCertCounters(t *testing.T) {
 		},
 		nil,
 	))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 1, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 5, 1, nil),
+	)
 
 	ls := newChainDepStateLedger(t, db)
 
@@ -1067,7 +1108,10 @@ func TestQueryShelleyDebugChainDepState_CountersOutliveRegistration(
 		gone[i] = 0xC0
 	}
 	gonePkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(gone))
-	require.NoError(t, db.UpdatePoolOpCertSequence(gonePkh, 7, 1, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), gonePkh, 7, 1, nil),
+	)
 
 	ls := newChainDepStateLedger(t, db)
 
@@ -1113,9 +1157,18 @@ func TestQueryShelleyDebugChainDepState_HighestCounterPerPool(t *testing.T) {
 	// Rotated certificates, recorded newest-slot-last so a query returning the
 	// last row rather than the maximum would still pass; the middle rotation is
 	// the highest, so ordering by slot cannot stand in for the maximum.
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 2, 10, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 9, 20, nil))
-	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 4, 30, nil))
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 2, 10, nil),
+	)
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 9, 20, nil),
+	)
+	require.NoError(
+		t,
+		db.UpdatePoolOpCertSequence(context.Background(), pkh, 4, 30, nil),
+	)
 
 	ls := newChainDepStateLedger(t, db)
 

@@ -16,6 +16,7 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -139,6 +140,7 @@ func EnactProposal(
 
 	case *lcommon.NoConfidenceGovAction:
 		if err := ctx.DB.SoftDeleteAllCommitteeMembers(
+			context.Background(),
 			ctx.Slot, ctx.Txn,
 		); err != nil {
 			return nil, fmt.Errorf("no confidence: %w", err)
@@ -147,6 +149,7 @@ func EnactProposal(
 		// to Conway genesis until a subsequent UpdateCommittee enacts
 		// a new positive threshold.
 		if err := ctx.DB.ClearCommitteeQuorum(
+			context.Background(),
 			ctx.Slot, ctx.Txn,
 		); err != nil {
 			return nil, fmt.Errorf("no confidence: clear quorum: %w", err)
@@ -185,6 +188,7 @@ func EnactProposal(
 	// account when the proposal is finalized (enactment here, or
 	// expiry in the EpochInput expiry path).
 	if err := refundProposalDeposit(
+		context.Background(),
 		ctx.DB, ctx.Txn, proposal, ctx.Slot,
 	); err != nil {
 		return nil, fmt.Errorf("refund proposal deposit: %w", err)
@@ -197,6 +201,7 @@ func EnactProposal(
 	proposal.EnactedEpoch = &enactedEpoch
 	proposal.EnactedSlot = &enactedSlot
 	if err := ctx.DB.SetGovernanceProposal(
+		context.Background(),
 		proposal, ctx.Txn,
 	); err != nil {
 		return nil, fmt.Errorf("mark proposal enacted: %w", err)
@@ -300,6 +305,7 @@ func applyTreasuryWithdrawal(
 			return fmt.Errorf("treasury withdrawal reward account: %w", err)
 		}
 		credited, err := CreditRegisteredRewardAccountAfterSnapshot(
+			context.Background(),
 			ctx.DB,
 			ctx.Txn,
 			credentialTag,
@@ -357,6 +363,7 @@ func treasuryWithdrawalTotal(
 // of SNAP a boundary credit falls on is a consensus decision per boundary rule,
 // and a caller that has not made it cannot pick correctly.
 func CreditRegisteredRewardAccountAfterSnapshot(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	credentialTag uint8,
@@ -366,6 +373,7 @@ func CreditRegisteredRewardAccountAfterSnapshot(
 	sourceHash []byte,
 ) (bool, error) {
 	return creditRegisteredRewardAccount(
+		ctx,
 		db, txn, credentialTag, stakeCredential, amount, slot, sourceHash, true,
 	)
 }
@@ -377,6 +385,7 @@ func CreditRegisteredRewardAccountAfterSnapshot(
 // credit is left unstamped, exactly like the delayed reward update, so an
 // epoch-boundary stake reconstruction retains it.
 func CreditRegisteredRewardAccountBeforeSnapshot(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	credentialTag uint8,
@@ -386,6 +395,7 @@ func CreditRegisteredRewardAccountBeforeSnapshot(
 	sourceHash []byte,
 ) (bool, error) {
 	return creditRegisteredRewardAccount(
+		ctx,
 		db,
 		txn,
 		credentialTag,
@@ -410,6 +420,7 @@ func CreditRegisteredRewardAccountBeforeSnapshot(
 // boundary as separate journal rows and makes a crash-replayed boundary
 // idempotent. Pass nil when no per-event discriminator is available.
 func creditRegisteredRewardAccount(
+	ctx context.Context,
 	db *database.Database,
 	txn *database.Txn,
 	credentialTag uint8,
@@ -424,6 +435,7 @@ func creditRegisteredRewardAccount(
 		credit = db.AddPostSnapshotAccountRewardByCredential
 	}
 	err := credit(
+		ctx,
 		credentialTag,
 		stakeCredential,
 		amount,
@@ -506,7 +518,10 @@ func applyUpdateCommittee(
 ) error {
 	var continuingTermStart map[string]uint64
 	if len(a.CredEpochs) > 0 {
-		existing, err := ctx.DB.GetCommitteeMembers(ctx.Txn)
+		existing, err := ctx.DB.GetCommitteeMembers(
+			context.Background(),
+			ctx.Txn,
+		)
 		if err != nil {
 			return fmt.Errorf("get existing committee members: %w", err)
 		}
@@ -539,11 +554,13 @@ func applyUpdateCommittee(
 		)
 	}
 	if err := ctx.DB.SoftDeleteCommitteeMembers(
+		context.Background(),
 		removeCredentials, ctx.Slot, ctx.Txn,
 	); err != nil {
 		return fmt.Errorf("remove members: %w", err)
 	}
 	if err := ctx.DB.SetCommitteeQuorum(
+		context.Background(),
 		a.Quorum.Rat, ctx.Slot, ctx.Txn,
 	); err != nil {
 		return fmt.Errorf("set committee quorum: %w", err)
@@ -592,7 +609,7 @@ func applyUpdateCommittee(
 		}
 		return members[i].ColdCredentialTag < members[j].ColdCredentialTag
 	})
-	return ctx.DB.SetCommitteeMembers(members, ctx.Txn)
+	return ctx.DB.SetCommitteeMembers(context.Background(), members, ctx.Txn)
 }
 
 // decodeGovAction re-hydrates the GovAction value from its CBOR form.

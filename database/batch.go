@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -145,6 +146,7 @@ type inFlightProducerLookup interface {
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.
 func (d *Database) SetTransactionBatched(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -156,6 +158,7 @@ func (d *Database) SetTransactionBatched(
 	txn *Txn,
 ) (retErr error) {
 	return d.SetTransactionBatchedWithOpts(
+		ctx,
 		tx, point, idx, updateEpoch, pparamUpdates,
 		certDeposits, offsets, acc, txn,
 		BatchedTxIngestOpts{},
@@ -165,6 +168,7 @@ func (d *Database) SetTransactionBatched(
 // SetTransactionBatchedWithOpts is the option-aware form of
 // SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
 func (d *Database) SetTransactionBatchedWithOpts(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	idx uint32,
@@ -181,7 +185,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 	owned := false
 	if txn == nil {
-		txn = d.Transaction(true)
+		txn = d.Transaction(ctx, true)
 		owned = true
 		defer func() {
 			if txn == nil {

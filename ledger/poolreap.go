@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 
@@ -59,6 +60,7 @@ func (ls *LedgerState) applyPoolRetirements(
 	boundarySlot uint64,
 ) error {
 	refunds, err := ls.db.GetPoolsRetiringAtEpoch(
+		context.Background(),
 		newEpoch, boundarySlot, txn,
 	)
 	if err != nil {
@@ -74,6 +76,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		// The reward account on a pool registration is the 28-byte stake
 		// credential hash, the same form AddAccountReward looks up.
 		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
+			context.Background(),
 			ls.db,
 			txn,
 			refund.RewardAccountCredentialTag,

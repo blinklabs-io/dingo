@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -71,7 +72,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		)}, nil
 	}
 	if txn == nil {
-		txn = ls.db.Transaction(false)
+		txn = ls.db.Transaction(context.Background(), false)
 		defer txn.Release()
 	}
 	targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)

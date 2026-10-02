@@ -468,6 +468,7 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 
 	conwayPParams := testGapConwayProtocolParameters()
 	err = processGapBlockTransactions(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -481,6 +482,7 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	require.NoError(t, err)
 
 	proposal, err := db.GetGovernanceProposal(
+		context.Background(),
 		proposalTxHash.Bytes(),
 		0,
 		nil,
@@ -495,7 +497,7 @@ func TestProcessGapBlockTransactionsProcessesGovernance(
 	assert.Equal(t, proposalProcedure.PPAnchor.Url, proposal.AnchorURL)
 	assert.Equal(t, proposalProcedure.PPAnchor.DataHash[:], proposal.AnchorHash)
 
-	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
+	votes, err := db.GetGovernanceVotes(context.Background(), proposal.ID, nil)
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
@@ -600,6 +602,7 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 		},
 	}
 	require.NoError(t, processGapBlockTransactions(
+		context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -611,10 +614,20 @@ func TestProcessGapBlockTransactionsProcessesDijkstraSubtransactionGovernance(
 		&pparams.ConwayProtocolParameters,
 	))
 
-	got, err := db.GetGovernanceProposal(childHash.Bytes(), 0, nil)
+	got, err := db.GetGovernanceProposal(
+		context.Background(),
+		childHash.Bytes(),
+		0,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Equal(t, childHash.Bytes(), got.TxHash)
-	rootProposal, err := db.GetGovernanceProposal(rootHash.Bytes(), 0, nil)
+	rootProposal, err := db.GetGovernanceProposal(
+		context.Background(),
+		rootHash.Bytes(),
+		0,
+		nil,
+	)
 	require.ErrorIs(t, err, models.ErrGovernanceProposalNotFound)
 	require.Nil(t, rootProposal)
 	childUtxo, err := db.Metadata().GetUtxo(childHash.Bytes(), 0, nil)
@@ -639,7 +652,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 	defer dbtest.CloseDatabase(db)
 
 	stakeKey := testGapHash28("dijkstra-gap-deposit")
-	require.NoError(t, db.CreateAccount(nil, &models.Account{
+	require.NoError(t, db.CreateAccount(context.Background(), nil, &models.Account{
 		StakingKey:    stakeKey,
 		CredentialTag: 0,
 		AddedSlot:     1,
@@ -677,7 +690,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 		},
 	}
 	pparams := &dijkstra.DijkstraProtocolParameters{}
-	require.NoError(t, processGapBlockTransactions(
+	require.NoError(t, processGapBlockTransactions(context.Background(),
 		db,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		point,
@@ -688,7 +701,7 @@ func TestProcessGapBlockTransactionsLeavesSnapshotBalanceForDirectDeposit(
 		pparams,
 		&pparams.ConwayProtocolParameters,
 	))
-	account, err := db.GetAccountByCredential(0, stakeKey, false, nil)
+	account, err := db.GetAccountByCredential(context.Background(), 0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(5), uint64(account.Reward))
 }
@@ -826,7 +839,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 150))
+	require.NoError(t, deleteBlobBlocksAboveSlot(context.Background(), db, 150))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
@@ -834,7 +847,7 @@ func TestDeleteBlobBlocksAboveSlot(t *testing.T) {
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 
 	// Idempotent re-run is a no-op.
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 150))
+	require.NoError(t, deleteBlobBlocksAboveSlot(context.Background(), db, 150))
 	remaining, err = loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
 	require.Len(t, remaining, 1)
@@ -876,7 +889,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 		require.NoError(t, db.BlockCreate(b, nil))
 	}
 
-	require.NoError(t, deleteBlobBlocksAboveSlot(db, 200))
+	require.NoError(t, deleteBlobBlocksAboveSlot(context.Background(), db, 200))
 
 	remaining, err := loadGapBlocksFromBlob(db, 0, 1000)
 	require.NoError(t, err)
@@ -884,7 +897,7 @@ func TestDeleteBlobBlocksAboveSlotKeepsBoundaryTip(t *testing.T) {
 	assert.Equal(t, uint64(100), remaining[0].Slot)
 	assert.Equal(t, uint64(200), remaining[1].Slot)
 
-	recent, err := database.BlocksRecent(db, 1)
+	recent, err := database.BlocksRecent(context.Background(), db, 1)
 	require.NoError(t, err)
 	require.Len(t, recent, 1)
 	assert.Equal(t, uint64(200), recent[0].Slot)

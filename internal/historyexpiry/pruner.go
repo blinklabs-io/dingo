@@ -63,8 +63,11 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 	}
 }
 
-func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
-	if _, err := p.db.PruneBlock(next.Slot, next.Hash); err != nil {
+func (p *Pruner) pruneBlock(
+	ctx context.Context,
+	next *database.BlobBlockResult,
+) error {
+	if _, err := p.db.PruneBlock(ctx, next.Slot, next.Hash); err != nil {
 		return fmt.Errorf("history expiry: %w", err)
 	}
 	return nil
@@ -115,7 +118,7 @@ func (p *Pruner) prune(ctx context.Context) {
 				return
 			}
 
-			if err := p.pruneBlock(next); err != nil {
+			if err := p.pruneBlock(ctx, next); err != nil {
 				p.logger.Error(
 					"history expiry: failed to expire block",
 					"error",

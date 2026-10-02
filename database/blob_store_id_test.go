@@ -74,7 +74,11 @@ func newTestDatabaseAt(
 		_ = host.Stop(context.Background())
 		return nil, err
 	}
-	db, err := New(config, Stores{Blob: blobStore, Metadata: metadataStore})
+	db, err := New(
+		context.Background(),
+		config,
+		Stores{Blob: blobStore, Metadata: metadataStore},
+	)
 	if err != nil {
 		_ = host.Stop(context.Background())
 		return nil, err
@@ -161,7 +165,7 @@ func TestBlobStoreIDMismatchIsFatal(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, closeTestDatabase(db))
 
-	_, err = New(&Config{
+	_, err = New(context.Background(), &Config{
 		DataDir:     metaDir,
 		StorageMode: "core",
 		Network:     "preprod",

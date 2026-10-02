@@ -16,6 +16,7 @@ package database
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -164,7 +165,10 @@ VALUES (X'80', 10, NULL, ?)`, alonzo.EraIdAlonzo)
 				0,
 			))
 			if !tt.keepAlonzo && !tt.nullEpochRow {
-				require.NoError(t, db.DeletePParamsAfterSlot(0, nil))
+				require.NoError(
+					t,
+					db.DeletePParamsAfterSlot(context.Background(), 0, nil),
+				)
 			}
 
 			require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery())
@@ -214,7 +218,7 @@ func TestRecoveryPhase1RechecksAlonzoPParamsUnit(t *testing.T) {
 
 	require.ErrorContains(
 		t,
-		reopened.CheckNodeSettings(),
+		reopened.CheckNodeSettings(context.Background()),
 		"legacy byte units",
 	)
 }
@@ -246,7 +250,7 @@ func TestCheckNodeSettingsRepairsStrandedLegacyMarker(t *testing.T) {
 	))
 	// Model a crash after rollback's metadata truncate committed but before
 	// the recovery path could rewrite the conservative marker.
-	require.NoError(t, db.DeletePParamsAfterSlot(0, nil))
+	require.NoError(t, db.DeletePParamsAfterSlot(context.Background(), 0, nil))
 	require.NoError(t, closeTestDatabase(db))
 
 	reopened, err := newTestDatabase(t, cfg)

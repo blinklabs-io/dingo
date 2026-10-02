@@ -56,7 +56,7 @@ func TestTxnAfterCommitRunsOnCommit(t *testing.T) {
 
 	db := openTestDB(t)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	var order []int
 	txn.AfterCommit(func() { order = append(order, 1) })
 	txn.AfterCommit(func() { order = append(order, 2) })
@@ -77,7 +77,7 @@ func TestTxnAfterCommitSkippedOnRollback(t *testing.T) {
 
 	db := openTestDB(t)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	fired := false
 	txn.AfterCommit(func() { fired = true })
 
@@ -93,7 +93,7 @@ func TestTxnAfterCommitSkippedOnReadOnly(t *testing.T) {
 
 	db := openTestDB(t)
 
-	txn := db.Transaction(false)
+	txn := db.Transaction(context.Background(), false)
 	fired := false
 	txn.AfterCommit(func() { fired = true })
 
@@ -164,7 +164,7 @@ func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Commit())
 
 	fired := false
@@ -177,7 +177,7 @@ func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	var order []int
 	txn.AfterCommit(func() {
 		order = append(order, 1)
@@ -198,7 +198,7 @@ func TestTxnAfterCommitPanicIsContained(t *testing.T) {
 	t.Parallel()
 
 	db := openTestDB(t)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 
 	var ran []string
 	txn.AfterCommit(func() { ran = append(ran, "a") })
@@ -343,7 +343,7 @@ func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 	store := &mockBlobStore{syncErr: syncErr}
 	db := newSyncBarrierTestDB(t, store)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 	err := txn.Commit()
 	require.ErrorIs(t, err, types.ErrPartialCommit)
@@ -358,7 +358,7 @@ func TestFailedBlobSyncDoesNotBlockTheNextWriter(t *testing.T) {
 	store.syncErr = nil
 	next := make(chan *Txn, 1)
 	go func() {
-		next <- db.Transaction(true)
+		next <- db.Transaction(context.Background(), true)
 	}()
 	nextTxn := testutil.RequireReceive(
 		t,
@@ -396,7 +396,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Commit())
 				return txn
@@ -408,7 +408,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.MetadataTxn(true)
+				txn := db.MetadataTxn(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Commit())
 				return txn
@@ -420,7 +420,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(false)
+				txn := db.Transaction(context.Background(), false)
 				require.NoError(t, txn.Commit())
 				return txn
 			},
@@ -431,7 +431,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				require.NoError(t, txn.Rollback())
 				return txn
@@ -443,7 +443,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				return newSyncBarrierTestDB(t, &mockBlobStore{})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				txn.Release()
 				return txn
 			},
@@ -457,7 +457,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, injected)
@@ -477,7 +477,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, injected)
@@ -493,7 +493,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				})
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 				err := txn.Commit()
 				require.ErrorIs(t, err, types.ErrPartialCommit)
@@ -513,7 +513,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				}
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				err := txn.Commit()
 				require.ErrorIs(t, err, types.ErrPartialCommit)
 				require.ErrorIs(t, err, injected)
@@ -531,7 +531,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				}
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.MetadataTxn(true)
+				txn := db.MetadataTxn(context.Background(), true)
 				err := txn.Commit()
 				require.ErrorIs(t, err, injected)
 				require.ErrorContains(t, err, "metadata commit failed")
@@ -554,7 +554,7 @@ func TestTerminalTxnPathsReleaseCommitBarrierExactlyOnce(t *testing.T) {
 				}
 			},
 			run: func(t *testing.T, db *Database) *Txn {
-				txn := db.Transaction(true)
+				txn := db.Transaction(context.Background(), true)
 				require.ErrorIs(
 					t,
 					txn.Commit(),
@@ -598,7 +598,7 @@ func TestCommitBarrierSurvivesConcurrentFailingCommits(t *testing.T) {
 	for range writers {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			txn := db.Transaction(true)
+			txn := db.Transaction(context.Background(), true)
 			defer txn.Release()
 			// The commit result is not asserted here: only one writer at
 			// a time holds the metadata write connection, so the others
@@ -1099,7 +1099,7 @@ func benchmarkCombinedCommit(b *testing.B, sync bool) {
 	for i := range b.N {
 		slot := uint64(i) + 1
 		hash := bytes.Repeat([]byte{byte(i), byte(i >> 8)}, 16)
-		txn := db.Transaction(true)
+		txn := db.Transaction(context.Background(), true)
 		if err := blobStore.SetBlock(
 			txn.Blob(), slot, hash, body, slot, 6, slot, hash,
 		); err != nil {
@@ -1192,7 +1192,7 @@ func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
 	store := &mockBlobStore{}
 	db := newSyncBarrierTestDB(t, store)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 	require.NoError(t, txn.Commit())
 
@@ -1224,7 +1224,7 @@ func TestCommitDoesNotSyncMetadataOnlyTransaction(t *testing.T) {
 	store := &mockBlobStore{}
 	db := newSyncBarrierTestDB(t, store)
 
-	txn := db.MetadataTxn(true)
+	txn := db.MetadataTxn(context.Background(), true)
 	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 	require.NoError(t, txn.Commit())
 
@@ -1248,7 +1248,7 @@ func TestCommitFailedBlobSyncDoesNotCommitMetadata(t *testing.T) {
 	store := &mockBlobStore{syncErr: syncErr}
 	db := newSyncBarrierTestDB(t, store)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
 
 	err := txn.Commit()

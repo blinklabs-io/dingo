@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 
@@ -103,6 +104,7 @@ func DelegatorInactivityActivationEpoch(
 // deeper) so both apply the exact same CIP-0163 bookkeeping regardless of
 // which path performs the truncation.
 func RecomputeAccountExpirationsAfterTruncate(
+	ctx context.Context,
 	d *Database,
 	txn *Txn,
 	delegatorInactivityEnabled bool,
@@ -137,7 +139,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 	// remain reset to 0 instead of being reconstructed from its surviving
 	// pre-activation witness.
 	if activated && activationEpoch > rollbackEpoch.EpochId {
-		resetRefs, resetErr := d.ResetAccountExpirationActivation(txn)
+		resetRefs, resetErr := d.ResetAccountExpirationActivation(ctx, txn)
 		if resetErr != nil {
 			return fmt.Errorf(
 				"reset delegator-inactivity activation stamp: %w",
@@ -157,6 +159,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 		return nil
 	}
 	lastWitness, err := d.AccountLastWitnessSlots(
+		ctx,
 		affectedRefs,
 		rollbackSlot,
 		txn,
@@ -177,6 +180,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 	var activationMembership map[string]struct{}
 	if clampApplies {
 		activationMembership, err = d.AccountInactivityActivationMembership(
+			ctx,
 			affectedRefs,
 			txn,
 		)
@@ -225,7 +229,7 @@ func RecomputeAccountExpirationsAfterTruncate(
 		byExpiration[expiration] = append(byExpiration[expiration], ref)
 	}
 	for expiration, refs := range byExpiration {
-		if err := d.RenewAccountExpirations(refs, expiration, txn); err != nil {
+		if err := d.RenewAccountExpirations(ctx, refs, expiration, txn); err != nil {
 			return fmt.Errorf(
 				"stamp rollback expiration %d: %w",
 				expiration,

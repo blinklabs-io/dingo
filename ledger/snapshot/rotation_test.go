@@ -671,7 +671,10 @@ func TestRotateSnapshotsPreservesCapturedLeiosKeyAcrossPoolRotation(
 			LeiosKeyPublic:          append([]byte(nil), public...),
 			LeiosKeyPossessionProof: append([]byte(nil), proof...),
 		}
-		require.NoError(t, db.ImportPool(nil, pool, registration))
+		require.NoError(
+			t,
+			db.ImportPool(context.Background(), nil, pool, registration),
+		)
 	}
 	importPool(50, oldPublic, oldProof)
 
@@ -767,7 +770,10 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 		LeiosKeyPossessionProof:        append([]byte(nil), proof...),
 		LeiosKeyRegistrationAgeUnknown: true,
 	}
-	require.NoError(t, db.ImportPool(nil, pool, registration))
+	require.NoError(
+		t,
+		db.ImportPool(context.Background(), nil, pool, registration),
+	)
 
 	var poolHash lcommon.PoolKeyHash
 	copy(poolHash[:], poolKeyHash)

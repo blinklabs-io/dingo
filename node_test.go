@@ -1352,7 +1352,7 @@ func newHandleConnManagerClosedOwnerConn(
 	o *ouroborosPkg.Ouroboros,
 ) *ouroboros.Connection {
 	t.Helper()
-	listener := o.ConfigureListeners([]connmanager.ListenerConfig{{UseNtC: true}})[0]
+	listener := o.ConfigureListeners(context.Background(), []connmanager.ListenerConfig{{UseNtC: true}})[0]
 	localWire, peerWire := newLeiosNotifyTestConnPair(
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 		&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
@@ -1523,7 +1523,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -1607,7 +1607,7 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -2477,7 +2477,7 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
 	t.Cleanup(eventBus.Close)
-	chainManager, err := chain.NewManager(db, eventBus)
+	chainManager, err := chain.NewManager(context.Background(), db, eventBus)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:          db,
@@ -2744,7 +2744,7 @@ VALUES (?, 0, '0', '0', '0', TRUE, 75)`,
 			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
 	require.NoError(t, err)
@@ -4533,7 +4533,7 @@ func TestBackfillRewardLiveStakeSkipsScanWhenConfigured(t *testing.T) {
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	require.NoError(t, n.backfillRewardLiveStake())
+	require.NoError(t, n.backfillRewardLiveStake(context.Background()))
 
 	// Still needed: the scan was skipped, so no rebuild happened.
 	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
@@ -4572,7 +4572,7 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 			skipRewardLiveStakeBackfillCheck: true,
 		},
 	}
-	err = n.backfillRewardLiveStake()
+	err = n.backfillRewardLiveStake(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
 }

@@ -4166,6 +4166,7 @@ func TestConfigureListeners_UntrustedNtCListenerSkipsRelaxedTimeout(
 	}
 
 	configured := o.ConfigureListeners(
+		context.Background(),
 		[]connmanager.ListenerConfig{trustedListener, untrustedListener},
 	)
 	assert.Len(t, configured, 2)
@@ -4184,17 +4185,20 @@ func TestConfigureListenersClassifiesSuppliedListenerByBoundAddress(t *testing.T
 	t.Parallel()
 
 	o := &Ouroboros{config: OuroborosConfig{}}
-	configured := o.ConfigureListeners([]connmanager.ListenerConfig{{
-		Listener: &listenerWithAddress{
-			addr: &net.TCPAddr{
-				IP:   net.ParseIP("192.0.2.10"),
-				Port: 3002,
+	configured := o.ConfigureListeners(
+		context.Background(),
+		[]connmanager.ListenerConfig{{
+			Listener: &listenerWithAddress{
+				addr: &net.TCPAddr{
+					IP:   net.ParseIP("192.0.2.10"),
+					Port: 3002,
+				},
 			},
-		},
-		ListenNetwork: "tcp",
-		ListenAddress: "127.0.0.1:3002",
-		UseNtC:        true,
-	}})
+			ListenNetwork: "tcp",
+			ListenAddress: "127.0.0.1:3002",
+			UseNtC:        true,
+		}},
+	)
 
 	assert.Len(t, configured, 1)
 	assert.False(t, configured[0].TrustedLocal)
@@ -4226,13 +4230,16 @@ func TestConfigureListeners_NormalizesTCPListenAddressToNumeric(t *testing.T) {
 		config: OuroborosConfig{},
 	}
 
-	configured := o.ConfigureListeners([]connmanager.ListenerConfig{
-		{
-			ListenNetwork: "tcp",
-			ListenAddress: "localhost:0",
-			UseNtC:        true,
+	configured := o.ConfigureListeners(
+		context.Background(),
+		[]connmanager.ListenerConfig{
+			{
+				ListenNetwork: "tcp",
+				ListenAddress: "localhost:0",
+				UseNtC:        true,
+			},
 		},
-	})
+	)
 	assert.Len(t, configured, 1)
 	assert.NotEqual(
 		t,

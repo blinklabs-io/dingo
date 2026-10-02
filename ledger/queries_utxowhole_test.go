@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -64,9 +65,9 @@ func seedBabbageUtxo(
 	require.NoError(t, err)
 
 	txId := bytes.Repeat([]byte{txIdSeed}, 32)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txId,
 		OutputIdx: outputIdx,
 		AddedSlot: 100,
@@ -170,9 +171,9 @@ func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
 	require.NoError(t, err)
 	shortTxID := bytes.Repeat([]byte{0xA2}, 31)
 	paddedTxID := append(bytes.Clone(shortTxID), 0)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer txn.Release()
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      shortTxID,
 		OutputIdx: 0,
 		AddedSlot: 100,
@@ -215,8 +216,8 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 	// recover from -- ResolveUtxoCborWithRecovery must confirm this as
 	// ErrUtxoCborUnavailable rather than reconstructing it.
 	unrecoverableTxId := bytes.Repeat([]byte{0xC3}, 32)
-	txn := db.Transaction(true)
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	txn := db.Transaction(context.Background(), true)
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      unrecoverableTxId,
 		OutputIdx: 0,
 		AddedSlot: 100,
@@ -405,9 +406,9 @@ func TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt(
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
 	txIdOld := seedBabbageUtxo(t, db, 0xA1, 0, addr, 1_000_000)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	txIdNew := bytes.Repeat([]byte{0xB2}, 32)
-	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), txn, &models.Utxo{
 		TxId:      txIdNew,
 		OutputIdx: 0,
 		AddedSlot: 500,
@@ -461,6 +462,7 @@ func TestQueryShelleyUtxoWhole_PinnedPointIncludesUtxoSpentAfterIt(
 	// seedBabbageUtxo always creates its row at AddedSlot 100.
 	txId := seedBabbageUtxo(t, db, 0xC1, 0, addr, 5_000_000)
 	require.NoError(t, db.MarkUtxosDeletedAtSlot(
+		context.Background(),
 		nil,
 		[]dbtypes.UtxoKey{{TxId: txId, OutputIdx: 0}},
 		500,

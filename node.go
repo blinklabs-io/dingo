@@ -369,6 +369,7 @@ func validateAPIProviderSecurityPolicy(
 		return fmt.Errorf("%s.tls: %w", configPath, err)
 	}
 	if _, err := tlsPolicy.Resolve(configPath + ".tls"); err != nil {
+		// Resolve already prefixes its errors with the config path.
 		return err
 	}
 	return nil
@@ -508,7 +509,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.warnIfTracingMisconfigured()
 	if n.config.tracing {
 		if err := n.setupTracing(ctx); err != nil {
-			return err
+			return fmt.Errorf("failed to set up tracing: %w", err)
 		}
 	}
 	n.ctx, n.cancel = context.WithCancel(ctx)
@@ -595,7 +596,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		},
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve storage plugins: %w", err)
 	}
 
 	// Load database
@@ -623,7 +624,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			n.config.cardanoNodeConfig, "", n.config.network,
 		),
 	}
-	db, err := database.New(dbConfig, stores)
+	db, err := database.New(ctx, dbConfig, stores)
 	if db == nil {
 		if err != nil {
 			n.config.logger.Error(
@@ -631,7 +632,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				"error",
 				err,
 			)
-			return err
+			return fmt.Errorf("failed to create database: %w", err)
 		}
 		n.config.logger.Error(
 			"failed to create database",
@@ -695,6 +696,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	// Load chain manager
 	cm, err := chain.NewManager(
+		ctx,
 		n.db,
 		n.eventBus,
 		n.config.promRegistry,
@@ -780,11 +782,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Recovery changes both the ledger tip and blob contents. Complete it
 	// before starting background maintenance that reads or prunes either store.
 	if dbNeedsRecovery {
-		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
+		if err := n.ledgerState.RecoverCommitTimestampConflict(ctx); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
-		if err := n.enforceRecoveredNodeSettings(); err != nil {
-			return err
+		if err := n.enforceRecoveredNodeSettings(ctx); err != nil {
+			return fmt.Errorf(
+				"failed to enforce recovered node settings: %w",
+				err,
+			)
 		}
 	}
 
@@ -832,8 +837,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		})
 	}
 
-	if err := n.backfillRewardLiveStake(); err != nil {
-		return err
+	if err := n.backfillRewardLiveStake(ctx); err != nil {
+		return fmt.Errorf("failed to backfill reward live stake: %w", err)
 	}
 
 	// Create and start the Midnight indexer before LedgerState.Start so that
@@ -1012,7 +1017,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
-			return err
+			return fmt.Errorf("failed to capture genesis snapshot: %w", err)
 		}
 	}
 	if err := n.snapshotMgr.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1174,11 +1179,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			Logger:   n.config.logger,
 			EventBus: n.eventBus,
 			ListenersProvider: func() []connmanager.ListenerConfig {
-				return n.ouroboros().ConfigureListeners(n.config.listeners)
+				return n.ouroboros().ConfigureListeners(ctx, n.config.listeners)
 			},
 			OutboundSourcePort: n.config.outboundSourcePort,
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
-				return n.ouroboros().OutboundConnOpts()
+				return n.ouroboros().OutboundConnOpts(ctx)
 			},
 			PromRegistry:            n.config.promRegistry,
 			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
@@ -1298,7 +1303,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// construction. reinitializeNetworkingCore does the same after its
 	// rebuild.
 	if err := n.attachLeiosHandlers(ouro); err != nil {
-		return err
+		return fmt.Errorf("failed to attach Leios handlers: %w", err)
 	}
 	n.ouroborosRef.Store(ouro)
 	// The asynchronous Leios endorser-block persistence writer, the EventBus
@@ -1381,7 +1386,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	})
 	// Start listeners
 	if err := n.connManager.Start(n.ctx); err != nil { //nolint:contextcheck
-		return err
+		return fmt.Errorf("failed to start connection manager: %w", err)
 	}
 	// A caller-supplied net.Listener (e.g. a test harness binding an
 	// OS-assigned port up front) is single-use: Stop always closes every
@@ -1414,7 +1419,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityAPIUtxorpc,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to select UTxO RPC API plugin: %w", err)
 	}
 	if n.config.storageMode.IsAPI() && utxorpcPort > 0 {
 		err = plugin.ResolveProvider(
@@ -1504,7 +1509,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 				Logger:   n.config.logger,
 				Metadata: n.db.Metadata(),
 				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
-					block, err := database.BlockByHash(n.db, hash)
+					block, err := database.BlockByHash(ctx, n.db, hash)
 					if err != nil {
 						if errors.Is(err, models.ErrBlockNotFound) {
 							return 0, false, nil
@@ -1546,7 +1551,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityAPIBlockfrost,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to select Blockfrost API plugin: %w", err)
 	}
 	if n.config.storageMode.IsAPI() && blockfrostPort > 0 {
 		adapter, err := blockfrost.NewNodeAdapter(
@@ -1580,7 +1585,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityAPIMesh,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to select Mesh API plugin: %w", err)
 	}
 	if n.config.storageMode.IsAPI() && meshPort > 0 {
 		var genesisHash string
@@ -1684,7 +1689,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		var err error
 		started, err = n.startBlockProducer(n.ctx, started)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to start block producer: %w", err)
 		}
 	}
 
@@ -2167,9 +2172,9 @@ func (n *Node) nodeSettingsGateValues() nodesettings.Values {
 // phase 2 is deliberately deferred until storage is consistent. Both normal
 // startup and live restore/truncate reinitialization call this helper so
 // neither recovery route can resume against an incompatible database.
-func (n *Node) enforceRecoveredNodeSettings() error {
+func (n *Node) enforceRecoveredNodeSettings(ctx context.Context) error {
 	n.config.logger.Info("running deferred node settings phase 1 check")
-	if err := n.db.CheckNodeSettings(); err != nil {
+	if err := n.db.CheckNodeSettings(ctx); err != nil {
 		return fmt.Errorf("node settings phase 1: %w", err)
 	}
 	n.config.logger.Info("running deferred node settings gate enforcement")
@@ -2205,7 +2210,7 @@ func (n *Node) enforceRecoveredNodeSettings() error {
 // by an older accounting version. It fails closed because such a database
 // cannot be safely reconstructed, and no cost argument justifies disabling
 // it, so it runs on every startup whether or not the scan is skipped.
-func (n *Node) backfillRewardLiveStake() error {
+func (n *Node) backfillRewardLiveStake(ctx context.Context) error {
 	// Both probes are read-only, so they run on the read-only metadata
 	// connection and the writer stays idle. Only a genuine rebuild needs the
 	// writer, which is opened separately below. Holding the writer open across
@@ -2216,7 +2221,7 @@ func (n *Node) backfillRewardLiveStake() error {
 		staleSnapshots bool
 		staleEpochs    []uint64
 	)
-	if err := n.db.MetadataTxn(false).Do(func(txn *database.Txn) error {
+	if err := n.db.MetadataTxn(ctx, false).Do(func(txn *database.Txn) error {
 		if n.config.skipRewardLiveStakeBackfillCheck {
 			n.config.logger.Warn(
 				"skipping reward_live_stake backfill consistency check",
@@ -2255,13 +2260,13 @@ func (n *Node) backfillRewardLiveStake() error {
 		}
 		return nil
 	}); err != nil {
-		return err
+		return fmt.Errorf("failed to probe reward live stake state: %w", err)
 	}
 	// Both call sites run before ledger processing can advance the chain, so
 	// nothing can write reward_live_stake between the probe above and the
 	// rebuild below.
 	if needed {
-		if err := n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
+		if err := n.db.MetadataTxn(ctx, true).Do(func(txn *database.Txn) error {
 			tip, err := n.db.GetTip(txn)
 			if err != nil {
 				return fmt.Errorf(
@@ -2273,12 +2278,12 @@ func (n *Node) backfillRewardLiveStake() error {
 				"rebuilding reward live stake aggregate",
 				"slot", tip.Point.Slot,
 			)
-			if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
+			if err := n.db.RebuildRewardLiveStake(ctx, tip.Point.Slot, txn); err != nil {
 				return fmt.Errorf("backfill reward live stake: %w", err)
 			}
 			return nil
 		}); err != nil {
-			return err
+			return fmt.Errorf("failed to rebuild reward live stake: %w", err)
 		}
 	}
 	if staleSnapshots {

@@ -177,10 +177,11 @@ func leiosApplyTestApplyEndorserBlock(
 ) (int, error) {
 	t.Helper()
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			rbPoint,
 			rbBlockNumber,
@@ -453,7 +454,7 @@ func leiosApplyTestApplyRankingDelta(
 		ebHash,
 	)
 	require.NoError(t, err)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
 		delta := NewLedgerDelta(
 			rbPoint,
@@ -463,7 +464,11 @@ func leiosApplyTestApplyRankingDelta(
 		defer delta.Release()
 		delta.Offsets = offsets
 		delta.addTransaction(tx, 0)
-		return delta.applyWithoutRecordingDonations(ls, txn)
+		return delta.applyWithoutRecordingDonations(
+			context.Background(),
+			ls,
+			txn,
+		)
 	})
 }
 
@@ -573,10 +578,11 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	const ebSlot = uint64(200)
 	ebHash := leiosApplyTestEbHash(0x22)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x33),
 			1,
@@ -610,10 +616,11 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	const ebSlot = uint64(300)
 	ebHash := leiosApplyTestEbHash(0x44)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x55),
 			1,
@@ -642,10 +649,11 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	appliedFirst := -1
 	appliedSameTxnDuplicate := -1
 	appliedSecondUnique := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		appliedFirst, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x81),
 			1,
@@ -657,6 +665,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 			return err
 		}
 		appliedSameTxnDuplicate, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x83),
 			2,
@@ -668,6 +677,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 			return err
 		}
 		appliedSecondUnique, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x85),
 			3,
@@ -691,10 +701,11 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	)
 
 	appliedCommittedDuplicate := -1
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		appliedCommittedDuplicate, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x87),
 			4,
@@ -723,10 +734,11 @@ func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	const ebSlot = uint64(400)
 	ebHash := leiosApplyTestEbHash(0x66)
 	applied := -1
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, _, err = ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			leiosApplyTestRankingPoint(0x77),
 			1,
@@ -799,9 +811,10 @@ func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
 	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
 
 	rbPoint := leiosApplyTestRankingPoint(0x79)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		applied, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			rbPoint,
 			1,
@@ -835,9 +848,10 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	firstPoint := leiosApplyTestRankingPoint(0x91)
 	replayPoint := leiosApplyTestRankingPoint(0x93)
 
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			firstPoint,
 			1,
@@ -848,9 +862,10 @@ func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 		return err
 	}))
 
-	txn = db.Transaction(true)
+	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			context.Background(),
 			txn,
 			replayPoint,
 			2,

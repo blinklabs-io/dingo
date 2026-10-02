@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -93,7 +94,7 @@ func TestBlockBroadcasterAddsWithoutEventSubscriber(t *testing.T) {
 		1,
 	)
 	require.NoError(t, err)
-	cm, err := chain.NewManager(nil, nil)
+	cm, err := chain.NewManager(context.Background(), nil, nil)
 	require.NoError(t, err)
 	broadcaster := &blockBroadcaster{
 		chain:  cm.PrimaryChain(),
@@ -156,7 +157,7 @@ func newSigmaDenominatorLedger(
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
-	chainManager, err := chain.NewManager(db, nil)
+	chainManager, err := chain.NewManager(context.Background(), db, nil)
 	require.NoError(t, err)
 	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -418,7 +419,7 @@ func replaceSigmaSnapshotAtomically(
 	capturedSlot uint64,
 ) {
 	t.Helper()
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	defer func() { require.NoError(t, txn.Rollback()) }()
 
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshots(
@@ -1191,6 +1192,7 @@ func (c testLeiosParentChain) Tip() ochainsync.Tip {
 }
 
 func (c testLeiosParentChain) BlockByPoint(
+	context.Context,
 	ocommon.Point,
 	*database.Txn,
 ) (models.Block, error) {

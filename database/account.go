@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -25,11 +26,15 @@ import (
 // is nil a write transaction is opened, committed on success and rolled
 // back on error via Txn.Do; pass an existing write txn to participate
 // in a wider unit of work.
-func (d *Database) CreateAccount(txn *Txn, account *models.Account) error {
+func (d *Database) CreateAccount(
+	ctx context.Context,
+	txn *Txn,
+	account *models.Account,
+) error {
 	if txn != nil {
 		return d.metadata.CreateAccount(txn.Metadata(), account)
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.metadata.CreateAccount(t.Metadata(), account)
 	})
 }
@@ -41,6 +46,7 @@ func (d *Database) CreateAccount(txn *Txn, account *models.Account) error {
 // on error via Txn.Do; pass an existing write txn to participate in a
 // wider unit of work.
 func (d *Database) RenewAccountExpirations(
+	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	expirationEpoch uint64,
 	txn *Txn,
@@ -52,7 +58,7 @@ func (d *Database) RenewAccountExpirations(
 			txn.Metadata(),
 		)
 	}
-	return d.MetadataTxn(true).Do(func(t *Txn) error {
+	return d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		return d.metadata.RenewAccountExpirations(
 			refs,
 			expirationEpoch,
@@ -68,12 +74,13 @@ func (d *Database) RenewAccountExpirations(
 // absent from the map. When txn is nil a read transaction is opened for the
 // query; pass an existing txn to read within a wider unit of work.
 func (d *Database) AccountLastWitnessSlots(
+	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	maxSlot uint64,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.AccountLastWitnessSlots(refs, maxSlot, txn.Metadata())
@@ -86,11 +93,12 @@ func (d *Database) AccountLastWitnessSlots(
 // deleted. When txn is nil a read transaction is opened for the query; pass an
 // existing txn to read within a wider unit of work.
 func (d *Database) AccountsWitnessedAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.AccountsWitnessedAfterSlot(slot, txn.Metadata())
@@ -104,6 +112,7 @@ func (d *Database) AccountsWitnessedAfterSlot(
 // rolled back on error via Txn.Do; pass an existing write txn to participate
 // in a wider unit of work.
 func (d *Database) StampAllActiveAccountExpirations(
+	ctx context.Context,
 	expirationEpoch uint64,
 	txn *Txn,
 ) (int64, error) {
@@ -114,7 +123,7 @@ func (d *Database) StampAllActiveAccountExpirations(
 		)
 	}
 	var rows int64
-	err := d.MetadataTxn(true).Do(func(t *Txn) error {
+	err := d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		var doErr error
 		rows, doErr = d.metadata.StampAllActiveAccountExpirations(
 			expirationEpoch,
@@ -128,11 +137,12 @@ func (d *Database) StampAllActiveAccountExpirations(
 // AccountInactivityActivationMembership returns the requested credentials that
 // were included in the one-time CIP-0163 activation stamp.
 func (d *Database) AccountInactivityActivationMembership(
+	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	txn *Txn,
 ) (map[string]struct{}, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.AccountInactivityActivationMembership(
@@ -147,13 +157,14 @@ func (d *Database) AccountInactivityActivationMembership(
 // witness expiration. When txn is nil, the operation runs in its own write
 // transaction.
 func (d *Database) ResetAccountExpirationActivation(
+	ctx context.Context,
 	txn *Txn,
 ) ([]models.StakeCredentialRef, error) {
 	if txn != nil {
 		return d.metadata.ResetAccountExpirationActivation(txn.Metadata())
 	}
 	var refs []models.StakeCredentialRef
-	err := d.MetadataTxn(true).Do(func(t *Txn) error {
+	err := d.MetadataTxn(ctx, true).Do(func(t *Txn) error {
 		var doErr error
 		refs, doErr = d.metadata.ResetAccountExpirationActivation(
 			t.Metadata(),
@@ -176,11 +187,12 @@ func (d *Database) ResetAccountExpirationActivation(
 //
 // See cardano-ledger Conway/Rules/HardFork.hs (updateDRepDelegations).
 func (d *Database) ClearDanglingDRepDelegations(
+	ctx context.Context,
 	atSlot uint64,
 	txn *Txn,
 ) (int, error) {
 	var n int
-	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	err := d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		updated, err := d.metadata.ClearDanglingDRepDelegations(
 			atSlot,
 			txn.Metadata(),
@@ -206,10 +218,11 @@ func (d *Database) ClearDanglingDRepDelegations(
 // Drep delegations to the state they had at the given slot, or deletes them
 // if they were registered after that slot.
 func (d *Database) RestoreAccountStateAtSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.RestoreAccountStateAtSlot(
 			slot,
 			txn.Metadata(),
@@ -226,13 +239,14 @@ func (d *Database) RestoreAccountStateAtSlot(
 
 // GetAccountByCredential returns an account by staking credential tag and key.
 func (d *Database) GetAccountByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakeKey []byte,
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Account, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	account, err := d.metadata.GetAccountByCredential(
@@ -253,12 +267,13 @@ func (d *Database) GetAccountByCredential(
 // GetAccountsByCredential returns accounts for the given staking credentials in
 // a single query, keyed by StakeCredentialRef.MapKey().
 func (d *Database) GetAccountsByCredential(
+	ctx context.Context,
 	refs []models.StakeCredentialRef,
 	includeInactive bool,
 	txn *Txn,
 ) (map[string]*models.Account, error) {
 	if txn == nil {
-		txn = d.MetadataTxn(false)
+		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
 	return d.metadata.GetAccountsByCredential(
@@ -276,6 +291,7 @@ func (d *Database) GetAccountsByCredential(
 // crash-replayed boundary map onto the existing row and skip idempotently.
 // Pass nil when no per-event discriminator is available.
 func (d *Database) AddAccountRewardByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
@@ -284,6 +300,7 @@ func (d *Database) AddAccountRewardByCredential(
 	txn *Txn,
 ) error {
 	return d.addAccountRewardByCredential(
+		ctx,
 		credentialTag, stakeKey, amount, slot, sourceHash, false, txn,
 	)
 }
@@ -292,13 +309,14 @@ func (d *Database) AddAccountRewardByCredential(
 // effect of one AddAccountRewardByCredential call per credit; see
 // metadata.MetadataStore.AddAccountRewardsByCredential.
 func (d *Database) AddAccountRewardsByCredential(
+	ctx context.Context,
 	credits []models.AccountRewardCredit,
 	txn *Txn,
 ) error {
 	if len(credits) == 0 {
 		return nil
 	}
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.AddAccountRewardsByCredential(
 			credits, txn.Metadata(),
 		); err != nil {
@@ -317,6 +335,7 @@ func (d *Database) AddAccountRewardsByCredential(
 // boundary slot. Use AddAccountRewardByCredential for those — the delayed reward
 // update and MIR — and for transaction-driven credits.
 func (d *Database) AddPostSnapshotAccountRewardByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
@@ -325,11 +344,13 @@ func (d *Database) AddPostSnapshotAccountRewardByCredential(
 	txn *Txn,
 ) error {
 	return d.addAccountRewardByCredential(
+		ctx,
 		credentialTag, stakeKey, amount, slot, sourceHash, true, txn,
 	)
 }
 
 func (d *Database) addAccountRewardByCredential(
+	ctx context.Context,
 	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
@@ -345,7 +366,7 @@ func (d *Database) addAccountRewardByCredential(
 	if postSnapshot {
 		credit = d.metadata.AddPostSnapshotAccountRewardByCredential
 	}
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := credit(
 			credentialTag,
 			stakeKey,
@@ -364,10 +385,11 @@ func (d *Database) addAccountRewardByCredential(
 // after the given slot. Used during chain rollback for governance credits and
 // transaction withdrawals.
 func (d *Database) DeleteAccountRewardsAfterSlot(
+	ctx context.Context,
 	slot uint64,
 	txn *Txn,
 ) error {
-	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+	return d.withMetadataWriteTxn(ctx, txn, func(txn *Txn) error {
 		if err := d.metadata.DeleteAccountRewardsAfterSlot(
 			slot,
 			txn.Metadata(),

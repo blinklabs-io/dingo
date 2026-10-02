@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -138,18 +139,24 @@ func (d *LedgerDelta) addTransaction(
 	)
 }
 
-func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
-	return d.applyWithDonationRecording(ls, txn, true)
-}
-
-func (d *LedgerDelta) applyWithoutRecordingDonations(
+func (d *LedgerDelta) apply(
+	ctx context.Context,
 	ls *LedgerState,
 	txn *database.Txn,
 ) error {
-	return d.applyWithDonationRecording(ls, txn, false)
+	return d.applyWithDonationRecording(ctx, ls, txn, true)
+}
+
+func (d *LedgerDelta) applyWithoutRecordingDonations(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
+	return d.applyWithDonationRecording(ctx, ls, txn, false)
 }
 
 func (d *LedgerDelta) applyWithDonationRecording(
+	ctx context.Context,
 	ls *LedgerState,
 	txn *database.Txn,
 	recordDonations bool,
@@ -214,11 +221,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 
 			// A withdrawal writes the balance it reads, so a credential with a
 			// pending reward round has that round's credit written first.
-			if err := ls.foldRewardCreditsForWithdrawals(level, txn); err != nil {
+			if err := ls.foldRewardCreditsForWithdrawals(ctx, level, txn); err != nil {
 				certDepositsMapPool.Put(certDeposits)
 				return err
 			}
 			setErr := ls.db.SetTransactionWithOpts(
+				ctx,
 				level,
 				d.Point,
 				uint32(storageIndex), //nolint:gosec
@@ -246,6 +254,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				return fmt.Errorf("record transaction body %d: %w", levelIndex, setErr)
 			}
 			if err := ApplyDijkstraDirectDeposits(
+				ctx,
 				ls.db,
 				level,
 				d.Point.Slot,
@@ -254,8 +263,12 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
 			}
 			if level.IsValid() {
-				if err := d.processGovernance(ls, level, txn); err != nil {
-					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
+				if err := d.processGovernance(ctx, ls, level, txn); err != nil {
+					return fmt.Errorf(
+						"process transaction body %d governance: %w",
+						levelIndex,
+						err,
+					)
 				}
 			}
 		}
@@ -284,6 +297,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			witnessTxs = append(witnessTxs, TransactionLevelsForApply(tr.Tx)...)
 		}
 		if err := ls.renewWitnessedAccountExpirations(
+			ctx,
 			txn,
 			currentEpoch,
 			witnessTxs,
@@ -328,7 +342,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				ls.beforeTransactionApplyPublish()
 			}
 			for _, evt := range applyEvents {
-				ls.publishTransactionEvent(evt)
+				ls.publishTransactionEvent(ctx, evt)
 			}
 		})
 	}
@@ -432,6 +446,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 // These items are only present in Conway-era transactions, so this is a no-op
 // for pre-Conway eras.
 func (d *LedgerDelta) processGovernance(
+	ctx context.Context,
 	ls *LedgerState,
 	tx lcommon.Transaction,
 	txn *database.Txn,
@@ -464,6 +479,7 @@ func (d *LedgerDelta) processGovernance(
 	// Process governance proposals
 	if len(proposals) > 0 {
 		if err := governance.ProcessProposals(
+			ctx,
 			tx,
 			d.Point,
 			currentEpoch,
@@ -478,6 +494,7 @@ func (d *LedgerDelta) processGovernance(
 	// Process governance votes
 	if len(votes) > 0 {
 		if err := governance.ProcessVotes(
+			ctx,
 			tx,
 			d.Point,
 			currentEpoch,
@@ -491,6 +508,7 @@ func (d *LedgerDelta) processGovernance(
 
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
+			ctx,
 			tx,
 			currentEpoch,
 			conwayPParams.DRepInactivityPeriod,
@@ -548,12 +566,16 @@ func (b *LedgerDeltaBatch) addDelta(delta *LedgerDelta) {
 	b.deltas = append(b.deltas, delta)
 }
 
-func (b *LedgerDeltaBatch) apply(ls *LedgerState, txn *database.Txn) error {
+func (b *LedgerDeltaBatch) apply(
+	ctx context.Context,
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
 	for _, delta := range b.deltas {
 		if delta == nil {
 			continue // Skip nil deltas (shouldn't happen in normal operation)
 		}
-		err := delta.apply(ls, txn)
+		err := delta.apply(ctx, ls, txn)
 		if err != nil {
 			return err
 		}

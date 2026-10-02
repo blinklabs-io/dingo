@@ -15,6 +15,7 @@
 package governance
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -36,7 +37,10 @@ func TranslateRatifiedGovActions(
 		toEraId != gdijkstra.EraIdDijkstra {
 		return nil
 	}
-	proposals, err := db.GetRatifiedGovernanceProposals(txn)
+	proposals, err := db.GetRatifiedGovernanceProposals(
+		context.Background(),
+		txn,
+	)
 	if err != nil {
 		return err
 	}
@@ -57,7 +61,7 @@ func TranslateRatifiedGovActions(
 			)
 		}
 		proposal.GovActionCbor = translated
-		if err := db.SetGovernanceProposal(proposal, txn); err != nil {
+		if err := db.SetGovernanceProposal(context.Background(), proposal, txn); err != nil {
 			return fmt.Errorf(
 				"persist translated governance proposal %x#%d: %w",
 				proposal.TxHash,

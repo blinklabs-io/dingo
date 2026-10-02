@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -74,7 +75,13 @@ func accountRewards(
 	t.Helper()
 	ret := make(map[string]uint64, len(keys))
 	for key := range keys {
-		account, err := f.db.GetAccountByCredential(0, []byte(key), true, nil)
+		account, err := f.db.GetAccountByCredential(
+			context.Background(),
+			0,
+			[]byte(key),
+			true,
+			nil,
+		)
 		require.NoError(t, err)
 		ret[key] = uint64(account.Reward)
 	}
@@ -93,7 +100,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 	stored := accountRewards(t, f, credits)
 
 	var creds []olocalstatequery.StakeCredential
-	txn := f.db.Transaction(false)
+	txn := f.db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		view := &LedgerView{ls: f.ls, txn: txn}
 		for key, credit := range credits {
@@ -153,9 +160,9 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 	tx := &conway.ConwayTransaction{Body: conway.ConwayTransactionBody{
 		TxWithdrawals: map[*lcommon.Address]uint64{&address: balance},
 	}}
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := f.ls.foldRewardCreditsForWithdrawals(tx, txn); err != nil {
+		if err := f.ls.foldRewardCreditsForWithdrawals(context.Background(), tx, txn); err != nil {
 			return err
 		}
 		return f.db.Metadata().ApplyAccountRewardWithdrawal(
@@ -166,7 +173,7 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 	}))
 	var hash lcommon.Blake2b224
 	copy(hash[:], key)
-	readTxn := f.db.Transaction(false)
+	readTxn := f.db.Transaction(context.Background(), false)
 	require.NoError(t, readTxn.Do(func(txn *database.Txn) error {
 		view := &LedgerView{ls: f.ls, txn: txn}
 		after, err := view.RewardAccountBalance(lcommon.Credential{
@@ -179,7 +186,13 @@ func TestPendingRewardRoundWithdrawalCreditsOnce(t *testing.T) {
 		return nil
 	}))
 	settleRewardCredits(t, f.ls)
-	account, err := f.db.GetAccountByCredential(0, []byte(key), true, nil)
+	account, err := f.db.GetAccountByCredential(
+		context.Background(),
+		0,
+		[]byte(key),
+		true,
+		nil,
+	)
 	require.NoError(t, err)
 	require.Zero(t, uint64(account.Reward),
 		"folding the round must not credit a withdrawn credit again")
@@ -200,7 +213,7 @@ func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 	).Scan(&outputsBefore))
 	require.Positive(t, outputsBefore)
 	// Some credits are folded, as by withdrawals, before the rollback.
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	folded := 0
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		for key := range credits {
@@ -208,16 +221,16 @@ func TestPendingRewardRoundRollbackBelowBoundary(t *testing.T) {
 				break
 			}
 			folded++
-			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+			if err := f.ls.foldRewardCreditFor(context.Background(), txn, 0, []byte(key)); err != nil {
 				return err
 			}
 		}
 		return nil
 	}))
 	boundary := epochBoundaryBenchStart(epochBoundaryBenchEndedEpoch + 1)
-	txn = f.db.Transaction(true)
+	txn = f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := f.db.DeleteAccountRewardsAfterSlot(boundary-1, txn); err != nil {
+		if err := f.db.DeleteAccountRewardsAfterSlot(context.Background(), boundary-1, txn); err != nil {
 			return err
 		}
 		return f.db.DeleteRewardStateAfterSlot(boundary-1, txn)
@@ -269,7 +282,7 @@ func TestFencedPrecomputeChunkDoesNotWrite(t *testing.T) {
 func TestPendingRewardStakeInputsHoldBackTheRound(t *testing.T) {
 	t.Parallel()
 	ls, db := seedMultiPoolRewardPrecomputeFixture(t, 7, 4, 7)
-	txn := db.Transaction(true)
+	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return markRewardStakeInputsPending(
 			db.Metadata(), txn.Metadata(), survivalSnapshotEpoch, 100,
@@ -351,10 +364,10 @@ func TestPrecomputeLeavesCreditedRoundAlone(t *testing.T) {
 	for key := range credits {
 		keys = append(keys, key)
 	}
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		for _, key := range keys[:len(keys)/4] {
-			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+			if err := f.ls.foldRewardCreditFor(context.Background(), txn, 0, []byte(key)); err != nil {
 				return err
 			}
 		}
@@ -432,7 +445,7 @@ func observePendingRoundReaders(
 	ret.localStateDist = fmt.Sprintf("%+v", dist)
 
 	ret.drepPower = dumpDRepVotingPower(t, f)
-	dreps, err := f.db.GetActiveDreps(nil)
+	dreps, err := f.db.GetActiveDreps(context.Background(), nil)
 	require.NoError(t, err)
 	singles := make([]string, 0, len(dreps))
 	for _, drep := range dreps {
@@ -450,7 +463,7 @@ func observePendingRoundReaders(
 	ret.utxoStake = renderStakeMaps(stakes, delegators)
 	amounts := make([]string, 0, len(credits))
 	for key := range credits {
-		amount, err := f.db.GetControlledAmountByCredential(0, []byte(key), nil)
+		amount, err := f.db.GetControlledAmountByCredential(context.Background(), 0, []byte(key), nil)
 		require.NoError(t, err)
 		amounts = append(amounts, fmt.Sprintf("%x=%d", key, amount))
 	}
@@ -477,10 +490,10 @@ func TestPendingRewardRoundAggregateReadsCountEachCreditOnce(t *testing.T) {
 	}
 	slices.Sort(keys)
 	require.Greater(t, len(keys), 40)
-	txn := f.db.Transaction(true)
+	txn := f.db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		for _, key := range keys[:len(keys)/3] {
-			if err := f.ls.foldRewardCreditFor(txn, 0, []byte(key)); err != nil {
+			if err := f.ls.foldRewardCreditFor(context.Background(), txn, 0, []byte(key)); err != nil {
 				return err
 			}
 		}

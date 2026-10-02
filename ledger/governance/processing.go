@@ -16,6 +16,7 @@ package governance
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -54,6 +55,7 @@ func HasDRepActivityCertificates(tx lcommon.Transaction) bool {
 // before this function runs, and both writes participate in the same database
 // transaction.
 func ProcessDRepActivityCertificates(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
@@ -93,6 +95,7 @@ func ProcessDRepActivityCertificates(
 			continue
 		}
 		if err := db.UpdateDRepActivity(
+			ctx,
 			credentialTag,
 			credential.Credential[:],
 			currentEpoch,
@@ -118,6 +121,7 @@ func ProcessDRepActivityCertificates(
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring.
 func ProcessProposals(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -126,6 +130,7 @@ func ProcessProposals(
 	txn *database.Txn,
 ) error {
 	return persistGovernanceProposals(
+		ctx,
 		tx,
 		point,
 		currentEpoch,
@@ -136,6 +141,7 @@ func ProcessProposals(
 }
 
 func persistGovernanceProposals(
+	ctx context.Context,
 	tx proposalSource,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -228,7 +234,7 @@ func persistGovernanceProposals(
 			govProposal.PolicyHash = policyHash
 		}
 
-		if err := db.SetGovernanceProposal(govProposal, txn); err != nil {
+		if err := db.SetGovernanceProposal(ctx, govProposal, txn); err != nil {
 			return fmt.Errorf(
 				"set governance proposal %d in tx %s: %w",
 				i,
@@ -248,6 +254,7 @@ func persistGovernanceProposals(
 // When a DRep votes, their activity epoch is updated to the current epoch,
 // which resets their expiry countdown based on the dRepInactivityPeriod.
 func ProcessVotes(
+	ctx context.Context,
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	currentEpoch uint64,
@@ -302,6 +309,7 @@ func ProcessVotes(
 			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
 				err := db.UpdateDRepActivity(
+					ctx,
 					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
@@ -317,6 +325,7 @@ func ProcessVotes(
 					// anchor_hash, active) is preserved and rollback semantics
 					// in RestoreDrepStateAtSlot remain intact.
 					if setErr := db.InsertDrepIfAbsent(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
 						point.Slot,
@@ -341,6 +350,7 @@ func ProcessVotes(
 						)
 					}
 					err = db.UpdateDRepActivity(
+						ctx,
 						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
@@ -373,6 +383,7 @@ func ProcessVotes(
 			if !ok {
 				var err error
 				proposal, err = db.GetGovernanceProposal(
+					ctx,
 					actionId.TransactionId[:],
 					actionId.GovActionIdx,
 					txn,
@@ -387,6 +398,7 @@ func ProcessVotes(
 					}
 					var repairErr error
 					proposal, repairErr = repairMissingGovernanceProposal(
+						ctx,
 						actionId.TransactionId[:],
 						actionId.GovActionIdx,
 						db,
@@ -437,7 +449,7 @@ func ProcessVotes(
 				vote.AnchorHash = procedure.Anchor.DataHash[:]
 			}
 
-			if err := db.SetGovernanceVote(vote, txn); err != nil {
+			if err := db.SetGovernanceVote(ctx, vote, txn); err != nil {
 				return fmt.Errorf(
 					"set governance vote in tx %s: %w",
 					txHashForLog,
@@ -561,13 +573,14 @@ func (c *proposalRepairCache) govActionValidityPeriod(
 }
 
 func repairMissingGovernanceProposal(
+	ctx context.Context,
 	proposalTxHash []byte,
 	actionIndex uint32,
 	db *database.Database,
 	txn *database.Txn,
 	repairCache *proposalRepairCache,
 ) (*models.GovernanceProposal, error) {
-	txRecord, err := db.GetTransactionByHash(proposalTxHash, txn)
+	txRecord, err := db.GetTransactionByHash(ctx, proposalTxHash, txn)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup governance proposal tx %s: %w",
@@ -621,6 +634,7 @@ func repairMissingGovernanceProposal(
 		return nil, err
 	}
 	if err := persistGovernanceProposals(
+		ctx,
 		txBody,
 		ocommon.Point{
 			Slot: txRecord.Slot,
@@ -637,7 +651,7 @@ func repairMissingGovernanceProposal(
 			err,
 		)
 	}
-	return db.GetGovernanceProposal(proposalTxHash, actionIndex, txn)
+	return db.GetGovernanceProposal(ctx, proposalTxHash, actionIndex, txn)
 }
 
 func epochContainsSlot(epoch models.Epoch, slot uint64) bool {
