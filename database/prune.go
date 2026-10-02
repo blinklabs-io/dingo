@@ -45,7 +45,9 @@ const HistoryExpiryCursorSyncKey = "history_expiry_cursor"
 // block, and rewrites the UTxO blob entry as raw CBOR (which the resolver
 // treats as the legacy non-offset format). The block expiry marker and all
 // UTxO rewrites happen in a single blob transaction, so the block is
-// never expired while live UTxOs still depend on it.
+// never expired while live UTxOs still depend on it. The cloud plugins apply
+// a transaction's objects one request at a time and apply the marker last,
+// so a concurrent reader or snapshot never sees it ahead of the rewrites.
 //
 // In core storage mode only live (deleted_slot = 0) UTxOs at the slot are
 // considered, because spent UTxOs are hard-deleted by the periodic
