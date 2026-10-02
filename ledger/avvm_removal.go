@@ -58,7 +58,7 @@ import (
 // SQLite-backed UTxO model, not a semantic difference.
 //
 // Returns the count and total lovelace of the rows marked deleted.
-func (ls *LedgerState) removeAvvmUtxos(
+func (ls *LedgerState) removeAvvmUtxos(ctx context.Context,
 	txn *database.Txn,
 	boundarySlot uint64,
 ) (int, uint64, error) {
@@ -66,7 +66,7 @@ func (ls *LedgerState) removeAvvmUtxos(
 		refs          []types.UtxoKey
 		totalLovelace uint64
 	)
-	if err := ls.db.IterateLiveUtxos(context.Background(), txn, func(u *models.Utxo) error {
+	if err := ls.db.IterateLiveUtxos(ctx, txn, func(u *models.Utxo) error {
 		out, err := u.Decode()
 		if err != nil {
 			return fmt.Errorf(
@@ -105,7 +105,7 @@ func (ls *LedgerState) removeAvvmUtxos(
 		return 0, 0, fmt.Errorf("scan live utxos: %w", err)
 	}
 	if err := ls.db.MarkUtxosDeletedAtSlot(
-		context.Background(),
+		ctx,
 		txn, refs, boundarySlot,
 	); err != nil {
 		return 0, 0, fmt.Errorf("mark avvm utxos deleted: %w", err)

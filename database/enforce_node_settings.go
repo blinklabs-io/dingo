@@ -16,6 +16,7 @@ package database
 
 import (
 	"context"
+
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 )
 

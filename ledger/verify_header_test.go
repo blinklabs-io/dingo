@@ -1032,7 +1032,7 @@ func TestVerifyBlockHeaderCrypto_ByronValidated(t *testing.T) {
 		newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
 		DefaultSlotClockConfig(),
 	)
-	err = ls.verifyBlockHeaderCrypto(block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.NoError(t, err, "valid Byron PBFT headers should pass")
 }
 
@@ -1097,7 +1097,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 	ls.publishSnapshotsLocked()
 	// Block at slot 2000, which is beyond epoch 0 (ends at slot 1000)
 	block := &mockBabbageBlock{slot: 2000}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.Error(
 		t,
 		err,
@@ -1236,7 +1236,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 500}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	require.ErrorIs(t, err, errEpochNonceUnavailable,
 		"missing nonce must be classified before downstream crypto checks")
 }
@@ -1329,7 +1329,7 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 
 	// Verify: the epoch-aware lookup should find epoch 0 for this block
 	// and use epoch0Nonce (which matches the block's VRF proof).
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	assert.NoError(
 		t,
 		err,
@@ -1347,7 +1347,7 @@ func TestVerifyBlockHeaderOnlyCryptoSkipsStatefulPoolChecks(t *testing.T) {
 	err := ls.verifyBlockHeaderOnlyCrypto(tb.block.Header())
 	require.NoError(t, err)
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
@@ -1367,7 +1367,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.True(t, IsHeaderVerificationDeferred(err))
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, models.ErrPoolNotFound)
 }
@@ -1388,7 +1388,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.Contains(t, err.Error(), "leader stake snapshot state")
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)
@@ -1577,7 +1577,7 @@ func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 100}
-	err := ls.verifyBlockHeaderCrypto(block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), block, true, false)
 	assert.Error(t, err, "should reject with empty epoch cache")
 	assert.Contains(t, err.Error(), "epoch cache is empty")
 }
@@ -1620,7 +1620,7 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 	}
 	ls.publishSnapshotsLocked()
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	assert.Error(
 		t,
 		err,
@@ -3029,7 +3029,7 @@ func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
 	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
 	seedBlockPoolRegistration(t, db, tb.block)
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.NoError(t, err)
 	logs := logBuf.String()
 	assert.Contains(
@@ -3047,7 +3047,7 @@ func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	seedBlockPoolRegistration(t, db, tb.block)
 
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "epoch mark snapshot is empty")
 	assert.Contains(t, err.Error(), "has no stake in epoch")
@@ -3636,7 +3636,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersZeroTotalActiveStake(
 	assert.ErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.Contains(t, err.Error(), "leader stake snapshot state")
 
-	err = ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCryptoWithEpochAdvance(t.Context(), tb.block, true, false)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, errHeaderVerificationDeferred)
 	assert.ErrorIs(t, err, errLeaderStakeSnapshotUnavailable)

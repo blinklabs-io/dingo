@@ -47,12 +47,12 @@ import (
 // The rollover stack consumes the application entry points below.
 const stakeRewardSourcePrefix = models.StakeRewardSourcePrefix
 
-func (ls *LedgerState) applyStakeRewards(
+func (ls *LedgerState) applyStakeRewards(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
-	err := ls.applyStakeRewardUpdate(txn, newEpoch, boundarySlot)
+	err := ls.applyStakeRewardUpdate(ctx, txn, newEpoch, boundarySlot)
 	if err == nil || !errors.Is(err, rewards.ErrNegativeLeaderReward) {
 		return err
 	}
@@ -85,7 +85,7 @@ func (e *rewardUpdateHaltError) Unwrap() []error {
 	return []error{e.err, errHaltLedgerPipeline}
 }
 
-func (ls *LedgerState) applyStakeRewardUpdate(
+func (ls *LedgerState) applyStakeRewardUpdate(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -122,7 +122,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 			return nil
 		}
 	}
-	app, ok, err := ls.boundaryStakeRewardApplication(
+	app, ok, err := ls.boundaryStakeRewardApplication(ctx,
 		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
@@ -131,7 +131,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 	if !ok {
 		return nil
 	}
-	return ls.applyStakeRewardApplication(txn, app, boundarySlot)
+	return ls.applyStakeRewardApplication(ctx, txn, app, boundarySlot)
 }
 
 // boundaryStakeRewardApplication resolves the reward round a boundary
@@ -142,7 +142,7 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 // bootstrap rounds and pre-Allegra rounds -- and rounds whose inputs are
 // missing use the single-pass calculation, which also reports a skipped
 // round.
-func (ls *LedgerState) boundaryStakeRewardApplication(
+func (ls *LedgerState) boundaryStakeRewardApplication(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
@@ -185,7 +185,7 @@ func (ls *LedgerState) boundaryStakeRewardApplication(
 	if cursor != nil {
 		resumedFrom = cursor.CompletedPools
 	}
-	done, err := ls.stakeRewardPrecomputeChunksInTxn(txn, round, 0)
+	done, err := ls.stakeRewardPrecomputeChunksInTxn(ctx, txn, round, 0)
 	if err != nil {
 		return nil, false, err
 	}
@@ -802,7 +802,7 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}, true, nil
 }
 
-func (ls *LedgerState) applyStakeRewardApplication(
+func (ls *LedgerState) applyStakeRewardApplication(ctx context.Context,
 	txn *database.Txn,
 	app *stakeRewardApplication,
 	boundarySlot uint64,
@@ -812,7 +812,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	}
 	if app.deferCredits {
 		return ls.applyDeferredStakeRewardRound(
-			context.Background(),
+			ctx,
 			txn,
 			app,
 			boundarySlot,
@@ -847,7 +847,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 	// self-corrects a stale guarded=true from a credential that was later
 	// renewed, or from the gate being disabled since the row was last written.
 	if ls.config.DelegatorInactivityEnabled {
-		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		guarded, err := ls.guardedExpiredRewardCredentials(ctx, txn, app)
 		if err != nil {
 			return err
 		}
@@ -896,7 +896,7 @@ func (ls *LedgerState) applyStakeRewardApplication(
 			SourceHash:    stakeRewardSourceHash(app.epochs.snapshot, reward),
 		})
 	}
-	if err := ls.db.AddAccountRewardsByCredential(context.Background(), credits, txn); err != nil {
+	if err := ls.db.AddAccountRewardsByCredential(ctx, credits, txn); err != nil {
 		return fmt.Errorf(
 			"credit stake rewards epoch %d: %w", app.epochs.snapshot, err,
 		)
@@ -1031,7 +1031,7 @@ func (ls *LedgerState) applyDeferredStakeRewardRound(
 // see historicalExpirationSQL's doc comment
 // (database/plugin/metadata/sqlstore/historical_stake.go) and ARCHITECTURE.md's
 // CIP-0163 section for why that holds today.
-func (ls *LedgerState) guardedExpiredRewardCredentials(
+func (ls *LedgerState) guardedExpiredRewardCredentials(ctx context.Context,
 	txn *database.Txn,
 	app *stakeRewardApplication,
 ) (map[string]struct{}, error) {
@@ -1072,7 +1072,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 		refs = append(refs, ref)
 	}
 	accounts, err := ls.db.GetAccountsByCredential(
-		context.Background(),
+		ctx,
 		refs,
 		true,
 		txn,
@@ -1081,7 +1081,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 		return nil, fmt.Errorf("load reward account expirations: %w", err)
 	}
 	lastWitness, err := ls.db.AccountLastWitnessSlots(
-		context.Background(),
+		ctx,
 		refs, app.snapshotCapturedSlot, txn,
 	)
 	if err != nil {
@@ -1097,7 +1097,7 @@ func (ls *LedgerState) guardedExpiredRewardCredentials(
 	var activationMembership map[string]struct{}
 	if activationApplies {
 		activationMembership, err = ls.db.AccountInactivityActivationMembership(
-			context.Background(),
+			ctx,
 			refs,
 			txn,
 		)

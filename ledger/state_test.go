@@ -13515,7 +13515,7 @@ func TestRollbackChainAndStateRefusesRedirectBelowPruneFloor(t *testing.T) {
 
 	require.ErrorIs(
 		t,
-		f.ls.rollbackChainAndStateDeferred(target, nil),
+		f.ls.rollbackChainAndStateDeferred(context.Background(), target, nil),
 		ErrRollbackBelowUtxoPruneFloor,
 	)
 	require.Equal(

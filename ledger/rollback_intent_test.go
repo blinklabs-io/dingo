@@ -96,7 +96,7 @@ func TestValidateAndEmitRollbackUndoRefusesBeforePersistingIntent(t *testing.T) 
 			t.Parallel()
 			fixture := newChainsyncRollbackFixture(t)
 			require.NoError(t, tc.prepare(fixture))
-			err := fixture.ls.validateAndEmitRollbackUndo(
+			err := fixture.ls.validateAndEmitRollbackUndo(context.Background(),
 				fixture.ancestorTip.Point,
 			)
 			require.ErrorIs(t, err, tc.want)
@@ -236,7 +236,7 @@ func TestRollbackUndoSurvivesMetadataTruncationFailure(t *testing.T) {
 	) (ochainsync.Tip, []byte, error) {
 		return ochainsync.Tip{}, nil, injected
 	}
-	rollbackErr := ls.rollbackChainAndStateDeferred(targetPoint, nil)
+	rollbackErr := ls.rollbackChainAndStateDeferred(context.Background(), targetPoint, nil)
 	require.ErrorIs(t, rollbackErr, ErrChainTruncatedLedgerRollbackFailed)
 	require.Contains(t, rollbackErr.Error(), injected.Error())
 
@@ -420,7 +420,7 @@ func TestEnsureRollbackIntentRetainsSupersededPayload(t *testing.T) {
 	ls.currentTip = tip
 
 	middlePoint := ocommon.NewPoint(raw[1].Slot, raw[1].Hash)
-	require.NoError(t, ls.validateAndEmitRollbackUndo(middlePoint))
+	require.NoError(t, ls.validateAndEmitRollbackUndo(context.Background(), middlePoint))
 	_, firstBlocks, pending, err := loadRollbackIntent(db)
 	require.NoError(t, err)
 	require.True(t, pending)

@@ -177,7 +177,11 @@ Two gaps in that propagation are deliberate:
 methods that open one when called with a nil `txn`) takes `ctx` as its first
 parameter. A cancelled caller therefore cancels the metadata-store transaction
 underneath it. HTTP and RPC adapters pass request contexts into these methods.
-Node listener providers retain the node lifecycle context. Mandatory recovery
+Node listener providers retain the node lifecycle context. Mempool chain workers
+derive a context from startup and cancel it before waiting for shutdown, so
+in-flight validation can release its database transaction. Ratification jobs
+retain caller values without caller cancellation and independently observe
+ledger shutdown. Mandatory recovery
 and after-commit persistence use `context.WithoutCancel` to finish repair after
 the initiating request ends. Blob providers have no context API; batch loops
 check cancellation between operations. `golangci-lint`'s `contextcheck` is enabled for the whole

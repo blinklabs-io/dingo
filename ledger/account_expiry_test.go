@@ -357,7 +357,7 @@ func runDelegatorInactivityLifecycleScenario(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn,
 			delegatorInactivityE2ERewardNewEpoch,
 			delegatorInactivityE2EBoundarySlot,

@@ -142,7 +142,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 		BlockNumber: block.BlockNumber(),
 	}
 	candidateView, _ := praos.GetPraosTiebreakerView(block.Header())
-	incumbentView := ls.localTipPraosView(incumbentTip)
+	incumbentView := ls.localTipPraosView(ctx, incumbentTip)
 	if !praosPrefersCandidateSibling(
 		candidateTip,
 		incumbentTip,
@@ -181,7 +181,7 @@ func (ls *LedgerState) AdoptLocalForgedSibling(ctx context.Context,
 	// sound: a batch tagged with the older generation can only have been
 	// requested for the segment this rollback abandons.
 	ls.blockfetchRollbackGeneration.Add(1)
-	if err := ls.rollbackChainAndStateDeferred(parent, &pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ctx, parent, &pending); err != nil {
 		return false, fmt.Errorf(
 			"roll back to fork point %x for locally forged sibling: %w",
 			parent.Hash,

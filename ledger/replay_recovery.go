@@ -392,7 +392,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	if primaryChainRewound &&
 		pointMatches(ls.chain.Tip().Point, rewindPoint) &&
 		pointMatches(ls.Tip().Point, rewindPoint) {
-		ls.armContinuationAudit(rewindPoint, "replay recovery rewind")
+		ls.armContinuationAudit(ls.lifecycleContext(), rewindPoint, "replay recovery rewind")
 	}
 	return true, nil
 }
@@ -1112,7 +1112,7 @@ func (ls *LedgerState) rollbackPrimaryChainInSecurityParamWindows(
 		// re-reading the tip is what clears it. The retry is only taken
 		// while nothing has been emitted, so a ledger.tx consumer is never
 		// told to undo the same block twice.
-		emitted, err := ls.validateAndEmitRollbackUndoEmitted(next)
+		emitted, err := ls.validateAndEmitRollbackUndoEmitted(ls.lifecycleContext(), next)
 		if err != nil {
 			if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) &&
 				overKRetries < maxWindowedRewindRetries {

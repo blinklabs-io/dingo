@@ -4615,7 +4615,7 @@ func (ls *LedgerState) drainBlockPipelineBeforeRollback(
 // handler's queue); registering the chain on pubs.chainDrains drains that
 // sequencer after the mutex is released. A nil pubs drains immediately
 // (unlocked / test path).
-func (ls *LedgerState) rollbackChainAndStateDeferred(
+func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	point ocommon.Point,
 	pubs *pendingPublishes,
 ) error {
@@ -4639,7 +4639,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// -- the pre-existing Mithril check has the same window -- and ls.rollback
 	// remains the backstop that refuses before mutating the ledger.
 	resolved, resolveErr := ls.resolveRollbackTarget(
-		context.Background(),
+		ctx,
 		point,
 		currentTip,
 	)
@@ -4702,13 +4702,13 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// No ctx is threaded through the chainsync event-handling call chain
 	// that reaches this method (handleEventChainsyncRollback,
 	// tryResolveFork), so drainBlockPipelineBeforeRollback deliberately
-	// uses context.Background(), identical to decodeReadChainBatch's own
+	// uses ctx, identical to decodeReadChainBatch's own
 	// Submit calls and for the same reason: this wait, like that
 	// submission, must not be cut short by an unrelated per-attempt
 	// cancellation.
 	//nolint:contextcheck // see comment above
 	ls.drainBlockPipelineBeforeRollback(
-		context.Background(),
+		ctx,
 		"chainsync rollback",
 	)
 	// A database commit becomes visible before its AfterCommit callbacks run.
@@ -4721,7 +4721,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 		ls.chainRollbackGeneration.Add(1)
 		ls.transactionEventMutex.Lock()
 		defer ls.transactionEventMutex.Unlock()
-		if err := ls.validateAndEmitRollbackUndo(point); err != nil {
+		if err := ls.validateAndEmitRollbackUndo(ctx, point); err != nil {
 			// Validation refused the point before the chain was touched --
 			// over-K, ErrRollbackPointNotOnChain, or models.ErrBlockNotFound,
 			// all of which handleEventChainsyncRollback treats as
@@ -4737,7 +4737,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			ls.chainRollbackGeneration.Store(priorGeneration)
 			return err
 		}
-		if _, rbErr := ls.chain.RollbackDeferred(context.Background(), point); rbErr != nil {
+		if _, rbErr := ls.chain.RollbackDeferred(ctx, point); rbErr != nil {
 			return rbErr
 		}
 		return nil
@@ -4760,7 +4760,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// dropped and no chain.update is produced at all). drainChain is
 	// idempotent per chain.
 	pubs.drainChain(ls.chain)
-	if err := ls.rollbackWithBlocks(context.Background(), point, nil, false); err != nil {
+	if err := ls.rollbackWithBlocks(ctx, point, nil, false); err != nil {
 		// ls.rollback can fail with the ledger already sitting on the
 		// rollback point: the no-op branch it takes when the tip
 		// already matches returns enforceDurableTipFloor's error
@@ -4788,7 +4788,7 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 	// producer. Arm only when both sides actually reached the rollback point,
 	// and discard any window left by an earlier rollback when they did not.
 	if pointMatches(ls.Tip().Point, point) {
-		ls.armContinuationAudit(point, "chainsync rollback")
+		ls.armContinuationAudit(ctx, point, "chainsync rollback")
 	} else {
 		ls.disarmContinuationAudit()
 	}
@@ -5254,7 +5254,7 @@ func (ls *LedgerState) applyBoundaryEraTransitions(
 	}
 
 	if rolloverResult.BoundarySnapshotDeferred {
-		if err := ls.captureEpochBoundarySnapshot(
+		if err := ls.captureEpochBoundarySnapshot(ls.lifecycleContext(),
 			txn, snapshotEpoch, rolloverResult,
 		); err != nil {
 			return nil, err

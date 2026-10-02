@@ -412,7 +412,7 @@ func TestChunkedRewardPrecomputeMatchesMonolithicCalculation(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.True(t, ok, "fixture must produce a calculable reward round")
-		return monolithic.applyStakeRewardApplication(txn, app, boundarySlot)
+		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	monolithicResult := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -739,7 +739,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.True(t, ok)
-		return monolithic.applyStakeRewardApplication(txn, app, boundarySlot)
+		return monolithic.applyStakeRewardApplication(context.Background(), txn, app, boundarySlot)
 	}))
 	want := snapshotRewardPrecomputeOutputs(
 		t, monolithicDB, rewardSnapshotEpoch, potsEpoch,
@@ -760,7 +760,7 @@ func TestChunkedRewardPrecomputeFinishesDegenerateRound(t *testing.T) {
 	require.True(t, cursor.Done, "a degenerate round finishes in one step")
 	writeTxn = chunkedDB.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return chunked.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return chunked.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, chunked)
 	require.Equal(t, want, snapshotRewardPrecomputeOutputs(

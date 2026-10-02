@@ -1222,7 +1222,7 @@ func enactTestUpdateCommittee(
 		t,
 		db.SetGovernanceProposal(context.Background(), proposal, nil),
 	)
-	_, err = governance.EnactProposal(&governance.EnactmentContext{
+	_, err = governance.EnactProposal(context.Background(), &governance.EnactmentContext{
 		DB:      db,
 		Epoch:   0,
 		Slot:    slot,

@@ -559,7 +559,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 			done = true
 			return nil
 		}
-		done, err = ls.stakeRewardPrecomputeChunksInTxn(txn, round, 1)
+		done, err = ls.stakeRewardPrecomputeChunksInTxn(ls.lifecycleContext(), txn, round, 1)
 		return err
 	})
 	return done, err
@@ -569,7 +569,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunkStep(
 // round inside txn (maxChunks <= 0 means until done), resuming from the
 // persisted cursor when its progress is still valid for round. done is true
 // once the round is complete.
-func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(
+func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(ctx context.Context,
 	txn *database.Txn,
 	round *stakeRewardPrecomputeRound,
 	maxChunks int,
@@ -635,7 +635,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunksInTxn(
 			}
 			return true, nil
 		}
-		next, err := ls.stakeRewardPrecomputeChunk(
+		next, err := ls.stakeRewardPrecomputeChunk(ctx,
 			txn, round, cursor, startIndex,
 		)
 		if err != nil {
@@ -714,7 +714,7 @@ func (ls *LedgerState) resumableRewardPrecomputeCursor(
 // stakeRewardPrecomputeChunk computes and persists Pass 2 for the chunk of
 // pools starting at startIndex, advancing cursor, and returns the next pool
 // index.
-func (ls *LedgerState) stakeRewardPrecomputeChunk(
+func (ls *LedgerState) stakeRewardPrecomputeChunk(ctx context.Context,
 	txn *database.Txn,
 	round *stakeRewardPrecomputeRound,
 	cursor *rewardPrecomputeCursor,
@@ -839,7 +839,7 @@ func (ls *LedgerState) stakeRewardPrecomputeChunk(
 	// witness history at the snapshot's captured slot, which no later block
 	// changes, so the flag set here holds whenever the round is applied.
 	if ls.config.DelegatorInactivityEnabled {
-		guarded, err := ls.guardedExpiredRewardCredentials(
+		guarded, err := ls.guardedExpiredRewardCredentials(ctx,
 			txn,
 			&stakeRewardApplication{
 				accountOutputs:       accountOutputs,

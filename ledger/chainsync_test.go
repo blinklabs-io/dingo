@@ -2407,7 +2407,7 @@ func TestRefusedRollbackKeepsInFlightBatch(t *testing.T) {
 
 	var pending pendingPublishes
 	f.ls.chainsyncMutex.Lock()
-	err := f.ls.rollbackChainAndStateDeferred(missing, &pending)
+	err := f.ls.rollbackChainAndStateDeferred(context.Background(), missing, &pending)
 	f.ls.chainsyncMutex.Unlock()
 	pending.flush()
 	require.Error(
@@ -15985,7 +15985,7 @@ func TestCaptureEpochBoundarySnapshotHookNil(t *testing.T) {
 	}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.captureEpochBoundarySnapshot(
+		return ls.captureEpochBoundarySnapshot(context.Background(),
 			txn, models.Epoch{EpochId: 0}, result,
 		)
 	}))
@@ -16017,7 +16017,7 @@ func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
 	}
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.captureEpochBoundarySnapshot(
+		return ls.captureEpochBoundarySnapshot(context.Background(),
 			txn, models.Epoch{EpochId: 0}, result,
 		)
 	}))
@@ -16062,7 +16062,7 @@ func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		// Must NOT surface the hook error: capture failures defer to the
 		// event-driven fallback rather than wedging the rollover.
-		return ls.captureEpochBoundarySnapshot(
+		return ls.captureEpochBoundarySnapshot(context.Background(),
 			txn, models.Epoch{EpochId: 0}, result,
 		)
 	}))

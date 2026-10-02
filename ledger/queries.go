@@ -502,6 +502,10 @@ func (ls *LedgerState) queryBlock(ctx context.Context, query *olocalstatequery.B
 }
 
 func (ls *LedgerState) querySystemStart(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
 		return nil, errors.New(
@@ -665,6 +669,10 @@ type eraBoundData struct {
 }
 
 func (ls *LedgerState) queryHardForkEraHistory(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Read the tip, current era, and transition info from the lock-free
 	// snapshots so this (potentially slow) DB-querying path never contends
 	// with the ledger write lock.
@@ -1512,6 +1520,10 @@ func (ls *LedgerState) circulatingSupplyGenesis() *gshelley.ShelleyGenesis {
 
 func (ls *LedgerState) queryShelleyGenesisConfig(ctx context.Context, protocolVersion uint16,
 ) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if protocolVersion == 0 ||
 		protocolVersion < 21+protocol.ProtocolVersionNtCOffset {
@@ -1877,6 +1889,10 @@ func (ls *LedgerState) allDRepDelegators(ctx context.Context) (
 // [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
 // reserves negative).
 func (ls *LedgerState) queryShelleyAccountState(ctx context.Context) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	state, err := ls.db.Metadata().GetNetworkState(nil)
 	if err != nil {
 		return nil, err

@@ -195,7 +195,7 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
 	}), "aged-out stake inputs must skip reward application, not error")
@@ -264,7 +264,7 @@ func TestApplyStakeRewardsAcceptsZeroDelegatorSnapshot(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
 	}), "an empty snapshot must reconcile normally, not error")
@@ -346,7 +346,7 @@ func TestApplyStakeRewardsSkipsPrunedStakeInputsReportsLoudly(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
 	}), "aged-out stake inputs must still skip, not error")
@@ -759,7 +759,7 @@ func TestApplyStakeRewardsReconstructsRetentionPrunedInputs(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, retentionNewEpoch, retentionBoundarySlot,
 		)
 	}), "a retention-pruned epoch with real underlying data must "+
@@ -1020,7 +1020,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -1092,7 +1092,7 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -1346,7 +1346,7 @@ func applyGuardExpiredLeaderScenario(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -1517,7 +1517,7 @@ func TestApplyStakeRewardsSkipsBootstrapRoundWithByronPerformanceEpoch(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 2, 43_200)
+		return ls.applyStakeRewards(context.Background(), txn, 2, 43_200)
 	}))
 	settleRewardCredits(t, ls)
 }
@@ -1562,7 +1562,7 @@ func TestApplyStakeRewardsSkipsEpochOneRoundWithByronPerformanceEpoch(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 1, 21_600)
+		return ls.applyStakeRewards(context.Background(), txn, 1, 21_600)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -1663,7 +1663,7 @@ func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(
 	}
 	txn := db.Transaction(context.Background(), false)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		guarded, err := ls.guardedExpiredRewardCredentials(context.Background(), txn, app)
 		if err != nil {
 			return err
 		}
@@ -1843,7 +1843,7 @@ func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -2416,7 +2416,7 @@ func TestApplyStakeRewardsUsesPrecomputedOutputs(t *testing.T) {
 
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -2641,7 +2641,7 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -2832,7 +2832,7 @@ func TestApplyStakeRewardsDoesNotMergeCredentialTags(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -3007,7 +3007,7 @@ WHERE epoch = ? AND snapshot_type = 'mark'`,
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -5189,7 +5189,7 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 
 		guardTxn := db.Transaction(context.Background(), false)
 		require.NoError(t, guardTxn.Do(func(txn *database.Txn) error {
-			guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+			guarded, err := ls.guardedExpiredRewardCredentials(context.Background(), txn, app)
 			if err != nil {
 				return err
 			}
@@ -5561,7 +5561,7 @@ func TestApplyStakeRewardsUsesRewardUpdatePrefilterAccountHistory(
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -5642,7 +5642,7 @@ func TestApplyStakeRewardsPrefilterUsesBeginningOfRUPDSlot(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -5752,7 +5752,7 @@ func TestApplyStakeRewardsAccountsEmptySnapshotPots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+		return ls.applyStakeRewards(context.Background(), txn, newEpoch, boundarySlot)
 	}))
 	settleRewardCredits(t, ls)
 
@@ -9431,7 +9431,7 @@ INSERT INTO "transaction" (
 		require.NotNil(t, ended)
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			if err := ls.applyStakeRewards(txn, tc.epoch, boundary); err != nil {
+			if err := ls.applyStakeRewards(context.Background(), txn, tc.epoch, boundary); err != nil {
 				return err
 			}
 			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
@@ -10376,7 +10376,7 @@ func TestApplyStakeRewardsPreviewEpoch1Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 1, previewEpochLength)
+		return ls.applyStakeRewards(context.Background(), txn, 1, previewEpochLength)
 	}))
 
 	state, err := meta.GetNetworkState(nil)
@@ -10409,7 +10409,7 @@ func TestApplyStakeRewardsPreviewEpoch2Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 2, 2*previewEpochLength)
+		return ls.applyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength)
 	}))
 
 	state, err := meta.GetNetworkState(nil)
@@ -10463,7 +10463,7 @@ INSERT INTO "transaction" (
 	// ADA pots the way processEpochRollover does.
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := ls.applyStakeRewards(
+		if err := ls.applyStakeRewards(context.Background(),
 			txn, 1, previewEpochLength,
 		); err != nil {
 			return err
@@ -10483,7 +10483,7 @@ INSERT INTO "transaction" (
 	// Boundary into epoch 2, reading the row the previous boundary wrote.
 	txn = db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 2, 2*previewEpochLength)
+		return ls.applyStakeRewards(context.Background(), txn, 2, 2*previewEpochLength)
 	}))
 
 	state, err := meta.GetNetworkState(nil)
@@ -10526,7 +10526,7 @@ func TestApplyStakeRewardsPreviewEpoch3Pots(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 3, 3*previewEpochLength)
+		return ls.applyStakeRewards(context.Background(), txn, 3, 3*previewEpochLength)
 	}))
 
 	state, err := meta.GetNetworkState(nil)

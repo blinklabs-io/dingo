@@ -313,7 +313,7 @@ func ProcessEpoch(
 		}
 		enactCtx.PParams = candidatePParams
 
-		res, err := EnactProposal(enactCtx, proposal)
+		res, err := EnactProposal(ctx, enactCtx, proposal)
 		if err != nil {
 			operation := "enact proposal"
 			if replay {

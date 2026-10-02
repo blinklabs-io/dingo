@@ -38,7 +38,7 @@ func runActivate(
 	t.Helper()
 	txn := db.Transaction(context.Background(), true)
 	return txn.Do(func(txn *database.Txn) error {
-		return ls.activateDelegatorInactivityIfNeeded(txn, currentEpoch)
+		return ls.activateDelegatorInactivityIfNeeded(context.Background(), txn, currentEpoch)
 	})
 }
 

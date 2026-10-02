@@ -54,13 +54,13 @@ import (
 // credits (AccountRewardDelta journal) and treasury writes (NetworkState) are
 // slot-keyed and reverted by the normal rollback path, after which re-applying
 // the boundary re-derives the same refunds.
-func (ls *LedgerState) applyPoolRetirements(
+func (ls *LedgerState) applyPoolRetirements(ctx context.Context,
 	txn *database.Txn,
 	newEpoch uint64,
 	boundarySlot uint64,
 ) error {
 	refunds, err := ls.db.GetPoolsRetiringAtEpoch(
-		context.Background(),
+		ctx,
 		newEpoch, boundarySlot, txn,
 	)
 	if err != nil {
@@ -76,7 +76,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		// The reward account on a pool registration is the 28-byte stake
 		// credential hash, the same form AddAccountReward looks up.
 		credited, err := governance.CreditRegisteredRewardAccountAfterSnapshot(
-			context.Background(),
+			ctx,
 			ls.db,
 			txn,
 			refund.RewardAccountCredentialTag,

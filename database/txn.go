@@ -178,6 +178,7 @@ func (t *Txn) releaseBlobPinLocked() {
 	pin.release()
 }
 
+//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
 func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
 	if ctx == nil {
 		ctx = context.Background()
@@ -217,6 +218,7 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	return t
 }
 
+//nolint:contextcheck // Preserve the public nil-context compatibility boundary.
 func NewMetadataOnlyTxn(
 	ctx context.Context,
 	db *Database,

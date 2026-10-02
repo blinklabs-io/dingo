@@ -59,7 +59,7 @@ import (
 // two would otherwise either re-run the stamp or, worse, record activation
 // without ever having stamped anything. Passing the rollover's txn rules out
 // both partial states.
-func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
+func (ls *LedgerState) activateDelegatorInactivityIfNeeded(ctx context.Context,
 	txn *database.Txn,
 	currentEpoch uint64,
 ) error {
@@ -78,7 +78,7 @@ func (ls *LedgerState) activateDelegatorInactivityIfNeeded(
 	}
 	expiration := currentEpoch + ls.config.DelegatorInactivity
 	stamped, err := ls.db.StampAllActiveAccountExpirations(
-		context.Background(),
+		ctx,
 		expiration,
 		txn,
 	)

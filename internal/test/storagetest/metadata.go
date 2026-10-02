@@ -15,7 +15,7 @@
 package storagetest
 
 import (
- "context"
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -88,12 +88,12 @@ func RunMetadataStoreConformance(
 		// are documented to overwrite: "a later call overwrites an earlier
 		// value for the same name" (metadata.SettingsStore doc comment).
 		name := conformanceGateName(t, "update-gate")
-		require.NoError(t, store.SetNodeSettingsGates(context.Background(), 
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{name: "first-value"},
 			1,
 			10,
 		))
-		require.NoError(t, store.SetNodeSettingsGates(context.Background(), 
+		require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 			nodesettings.Values{name: "second-value"},
 			2,
 			20,
@@ -118,7 +118,7 @@ func RunMetadataStoreConformance(
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				ok, err := store.InsertNodeSettingsGateIfAbsent(context.Background(), 
+				ok, err := store.InsertNodeSettingsGateIfAbsent(context.Background(),
 					name,
 					fmt.Sprintf("value-%d", i),
 					1,

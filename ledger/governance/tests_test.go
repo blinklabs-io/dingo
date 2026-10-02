@@ -80,7 +80,7 @@ func TestBoundaryCreditVisibility_TreasuryWithdrawalIsExcludedFromSnapshot(
 	insertBoundaryAccount(t, store, stakeCred)
 	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
 
-	require.NoError(t, applyTreasuryWithdrawal(
+	require.NoError(t, applyTreasuryWithdrawal(context.Background(),
 		&EnactmentContext{DB: db, Slot: 200},
 		&lcommon.TreasuryWithdrawalGovAction{
 			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},

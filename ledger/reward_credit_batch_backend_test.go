@@ -770,7 +770,7 @@ VALUES (?, ?, 0, '2000000')`), 300+index, ref.Key)
 		}
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(txn, 4, 1_200)
+			return ls.applyStakeRewards(context.Background(), txn, 4, 1_200)
 		}))
 		settleRewardCredits(t, ls)
 		var sb strings.Builder
@@ -1083,7 +1083,7 @@ func testRewardPrecomputeWriteRacesRollback(
 		"control: the surviving chain pays member")
 	writeTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, writeTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(txn, 4, 1_200)
+		return ls.applyStakeRewards(context.Background(), txn, 4, 1_200)
 	}))
 	settleRewardCredits(t, ls)
 	account, err := db.GetAccountByCredential(

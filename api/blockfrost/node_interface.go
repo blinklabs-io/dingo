@@ -14,8 +14,10 @@
 
 package blockfrost
 
-import "context"
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // BlockfrostNode is the interface that the Blockfrost API
 // server uses to query the node for blockchain data. This

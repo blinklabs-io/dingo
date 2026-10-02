@@ -101,7 +101,7 @@ func (a *NodeAdapter) AccountUTXOs(ctx context.Context,
 		)
 	}
 
-	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
+	txBlockHashes, err := a.addressUtxoBlockHashes(ctx, paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get block hashes for account UTxOs %q: %w",
@@ -202,7 +202,7 @@ func (a *NodeAdapter) AccountWithdrawals(ctx context.Context,
 	blockNumbers := make(map[string]uint64, len(rows))
 	ret := make([]AccountWithdrawalInfo, 0, len(rows))
 	for _, row := range rows {
-		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(ctx,
 			row.TxSlot,
 			row.BlockHash,
 			blockNumbers,

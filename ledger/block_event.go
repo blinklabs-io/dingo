@@ -232,10 +232,10 @@ func (ls *LedgerState) publishBlockEvent(
 // metadata rollback fails after publication. Reconciliation uses the same
 // outbox with blocks captured from applied ledger state before it publishes
 // its undo events.
-func (ls *LedgerState) validateAndEmitRollbackUndo(
+func (ls *LedgerState) validateAndEmitRollbackUndo(ctx context.Context,
 	point ocommon.Point,
 ) error {
-	_, err := ls.validateAndEmitRollbackUndoEmitted(point)
+	_, err := ls.validateAndEmitRollbackUndoEmitted(ctx, point)
 	return err
 }
 
@@ -249,20 +249,20 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(
 // rather than the publish is deliberately conservative -- a block that decodes
 // to no transactions publishes nothing, and a caller that treats it as emitted
 // merely declines a retry it could have taken.
-func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
+func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(ctx context.Context,
 	point ocommon.Point,
 ) (bool, error) {
 	existing, _, pending, loadErr := loadRollbackIntent(ls.db)
 	if loadErr != nil || (pending && !pointMatches(existing, point) &&
 		point.Slot >= existing.Slot) {
-		if err := ls.recoverRollbackIntentLocked(context.Background()); err != nil {
+		if err := ls.recoverRollbackIntentLocked(ctx); err != nil {
 			return false, fmt.Errorf(
 				"complete previous rollback intent: %w",
 				err,
 			)
 		}
 	}
-	if err := ls.chain.ValidateRollback(context.Background(), point); err != nil {
+	if err := ls.chain.ValidateRollback(ctx, point); err != nil {
 		return false, err
 	}
 	ls.RLock()
@@ -270,7 +270,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
 	resolved, err := ls.resolveRollbackTarget(
-		context.Background(),
+		ctx,
 		point,
 		currentTip,
 	)
@@ -304,14 +304,14 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	if point.Slot > durableTip.Point.Slot {
 		return false, nil
 	}
-	blocks, err := ls.readBlocksAboveSlot(context.Background(), point.Slot)
+	blocks, err := ls.readBlocksAboveSlot(ctx, point.Slot)
 	if err != nil {
 		return false, fmt.Errorf("read rollback undo blocks: %w", err)
 	}
 	if len(blocks) == 0 {
 		return false, nil
 	}
-	if err := ls.ensureRollbackIntent(context.Background(), point, blocks); err != nil {
+	if err := ls.ensureRollbackIntent(ctx, point, blocks); err != nil {
 		if !errors.Is(err, errRollbackIntentTooLarge) {
 			return false, err
 		}
@@ -321,7 +321,7 @@ func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 			"error", err,
 		)
 	}
-	ls.emitRollbackTransactionEvents(context.Background(), blocks)
+	ls.emitRollbackTransactionEvents(ctx, blocks)
 	return len(blocks) > 0, nil
 }
 

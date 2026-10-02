@@ -92,7 +92,7 @@ func loadPendingRatification(
 // deferBoundaryJob records the boundary's pending work in its transaction
 // and, once it commits, pins a read transaction and runs the work on it in the
 // background: mark[epoch] when snapshotEvt is set, then plan's RATIFY.
-func (ls *LedgerState) deferBoundaryJob(
+func (ls *LedgerState) deferBoundaryJob(ctx context.Context,
 	txn *database.Txn,
 	epoch uint64,
 	boundarySlot uint64,
@@ -124,7 +124,9 @@ func (ls *LedgerState) deferBoundaryJob(
 	// The callback runs in the committing goroutine before it returns, so no
 	// later block has committed yet; the first read below fixes the snapshot.
 	txn.AfterCommit(func() {
-		snapshot := ls.db.Transaction(ls.closeCtx(), false)
+		jobCtx, cancelJob := context.WithCancel(context.WithoutCancel(ctx))
+		stopClose := context.AfterFunc(ls.closeCtx(), cancelJob) //nolint:contextcheck // Ledger shutdown independently cancels the detached after-commit job.
+		snapshot := ls.db.Transaction(jobCtx, false)
 		pinned, err := loadPendingRatification(ls.db, snapshot)
 		if err == nil && (pinned == nil || *pinned != rec) {
 			err = errors.New("pending ratification missing from its snapshot")
@@ -140,18 +142,22 @@ func (ls *LedgerState) deferBoundaryJob(
 		}
 		ls.ratificationMu.Unlock()
 		if closed {
+			stopClose()
+			cancelJob()
 			snapshot.Release()
 			return
 		}
 		go func() {
 			defer ls.ratificationWG.Done()
-			ls.runRatificationJob(job, snapshot, err)
+			defer stopClose()
+			defer cancelJob()
+			ls.runRatificationJob(jobCtx, job, snapshot, err)
 		}()
 	})
 	return nil
 }
 
-func (ls *LedgerState) runRatificationJob(
+func (ls *LedgerState) runRatificationJob(ctx context.Context,
 	job *ratificationJob,
 	snapshot *database.Txn,
 	pinErr error,
@@ -170,7 +176,7 @@ func (ls *LedgerState) runRatificationJob(
 		}
 	}
 	if err == nil && job.plan != nil {
-		decision, err = job.plan.Decide(ls.closeCtx(), snapshot)
+		decision, err = job.plan.Decide(ctx, snapshot)
 	}
 	snapshot.Release()
 	ls.ratificationMu.Lock()
@@ -192,7 +198,7 @@ func (ls *LedgerState) runRatificationJob(
 	if ls.ratificationApplyHook != nil {
 		ls.ratificationApplyHook(job.record.Epoch)
 	}
-	ls.applyRatificationJob(context.Background(), job)
+	ls.applyRatificationJob(ctx, job)
 }
 
 // applyRatificationJob writes a decided job's marks in its own transaction
@@ -279,7 +285,7 @@ func (ls *LedgerState) writeRatificationDecision(
 // in this boundary's transaction if the background job has not, waiting for
 // the job to decide. It runs before anything else at the boundary, so ENACT
 // and DROP read the same marks the boundary before would have written.
-func (ls *LedgerState) consumePendingRatification(txn *database.Txn) error {
+func (ls *LedgerState) consumePendingRatification(ctx context.Context, txn *database.Txn) error {
 	rec, err := loadPendingRatification(ls.db, txn)
 	if err != nil || rec == nil {
 		return err
@@ -304,7 +310,7 @@ func (ls *LedgerState) consumePendingRatification(txn *database.Txn) error {
 			"ratification for epoch %d failed: %w", rec.Epoch, job.err,
 		)
 	}
-	return ls.writeRatificationDecision(context.Background(), txn, job)
+	return ls.writeRatificationDecision(ctx, txn, job)
 }
 
 func (ls *LedgerState) closeCh() <-chan struct{} {

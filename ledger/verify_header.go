@@ -372,11 +372,6 @@ func verifyBlockHeaderHex(
 // rejected rather than silently skipping verification. This prevents
 // an attacker from forging headers that bypass verification by
 // targeting the epoch boundary window.
-func (ls *LedgerState) verifyBlockHeaderCrypto(
-	block ledger.Block,
-) error {
-	return ls.verifyBlockHeaderCryptoWithEpochAdvance(context.Background(), block, true, false)
-}
 
 func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
 	block ledger.Block,

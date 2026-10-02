@@ -93,7 +93,7 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 	keys := seedPlominFixtures(t, db)
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil,  // nil txn → owned metadata txn inside the Database wrapper
 		10,   // newMajor
 		7777, // boundarySlot
@@ -139,7 +139,7 @@ func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
 	ls := newTestLSForHardForkRule(t, db)
 
 	for _, major := range []uint{9, 11, 12, 99} {
-		require.NoError(t, ls.applyIntraEraHardForkRule(
+		require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 			nil, major, 1234, 100,
 		))
 	}
@@ -263,7 +263,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 
 	ls := newTestLSForHardForkRule(t, db)
 	const boundarySlot uint64 = 4_492_800
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 
@@ -306,7 +306,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 
 	ls := newTestLSForHardForkRule(t, db)
 	const boundarySlot uint64 = 4_492_800
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 
@@ -326,7 +326,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsAvvmToReserves(t *testing.T) {
 	assert.NotNil(t, pubkey)
 
 	// A replay sees no live AVVM rows and must not credit the same value again.
-	require.NoError(t, ls.applyIntraEraHardForkRule(
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(),
 		nil, 3, boundarySlot, 208,
 	))
 	state, err = db.Metadata().GetNetworkState(nil)
@@ -357,7 +357,7 @@ func TestApplyIntraEraHardForkRule_Pv3_CreditsOnlyAvvmValue(t *testing.T) {
 	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 100, nil))
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(nil, 3, 200, 1))
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1))
 
 	state, err := db.Metadata().GetNetworkState(nil)
 	require.NoError(t, err)
@@ -380,7 +380,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RollbackRestoresReserveAndAvvm(
 
 	ls := newTestLSForHardForkRule(t, db)
 	txn := db.Transaction(context.Background(), true)
-	require.NoError(t, ls.applyIntraEraHardForkRule(txn, 3, 200, 1))
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), txn, 3, 200, 1))
 	require.NoError(t, txn.Rollback())
 
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -417,7 +417,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 
 		ls := newTestLSForHardForkRule(t, db)
-		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
+		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM lovelace total overflows uint64")
 		for _, txID := range [][]byte{first, second} {
 			_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
@@ -443,7 +443,7 @@ func TestApplyIntraEraHardForkRule_Pv3_RejectsOverflow(t *testing.T) {
 		)
 
 		ls := newTestLSForHardForkRule(t, db)
-		err = ls.applyIntraEraHardForkRule(nil, 3, 200, 1)
+		err = ls.applyIntraEraHardForkRule(context.Background(), nil, 3, 200, 1)
 		require.ErrorContains(t, err, "AVVM reserve credit overflows uint64")
 		_, lookupErr := db.UtxoByRef(context.Background(), txID, 0, nil)
 		require.NoError(t, lookupErr)
@@ -465,7 +465,7 @@ func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
 	avvmTxId, _ := seedByronAvvmFixtures(t, db)
 
 	ls := newTestLSForHardForkRule(t, db)
-	require.NoError(t, ls.applyIntraEraHardForkRule(nil, 4, 1234, 100))
+	require.NoError(t, ls.applyIntraEraHardForkRule(context.Background(), nil, 4, 1234, 100))
 
 	avvm, err := db.UtxoByRef(context.Background(), avvmTxId, 0, nil)
 	require.NoError(t, err)

@@ -201,7 +201,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardUnregisteredAccount(t *testing.T) 
 	for range 2 {
 		txn := db.Transaction(context.Background(), true)
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
-			return ls.applyStakeRewards(
+			return ls.applyStakeRewards(context.Background(),
 				txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 			)
 		}))
@@ -238,7 +238,7 @@ func TestApplyStakeRewardsNegativeLeaderRewardRegisteredAccountStops(t *testing.
 	}
 	txn := db.Transaction(context.Background(), true)
 	err := txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	})
@@ -348,7 +348,7 @@ func TestNegativeLeaderRewardExpiredRewardAccountIsGuarded(t *testing.T) {
 	))
 	applyTxn := db.Transaction(context.Background(), true)
 	require.NoError(t, applyTxn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	}))
@@ -370,7 +370,7 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	ls, db, _ := seedNegativeLeaderRewardRound(t, false)
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return ls.applyStakeRewards(
+		return ls.applyStakeRewards(context.Background(),
 			txn, negativeLeaderNewEpoch, negativeLeaderBoundarySlot,
 		)
 	}))

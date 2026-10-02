@@ -219,6 +219,7 @@ func delegationActivationEpoch(
 // block hash, since the metadata SQL schema does not hold block numbers);
 // blockNumbers caches lookups across the rows of a single response.
 func (a *NodeAdapter) accountHistoryBlockInfo(
+	ctx context.Context,
 	txSlot uint64,
 	blockHash []byte,
 	blockNumbers map[string]uint64,
@@ -231,7 +232,7 @@ func (a *NodeAdapter) accountHistoryBlockInfo(
 	blockHashKey := hex.EncodeToString(blockHash)
 	blockHeight, ok := blockNumbers[blockHashKey]
 	if !ok {
-		block, err := a.ledgerState.BlockByHash(context.Background(), blockHash)
+		block, err := a.ledgerState.BlockByHash(ctx, blockHash)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf(
 				"get block %x for account history: %w",
@@ -2698,7 +2699,7 @@ func (a *NodeAdapter) AccountDelegationHistory(ctx context.Context,
 				err,
 			)
 		}
-		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(ctx,
 			row.TxSlot,
 			row.BlockHash,
 			blockNumbers,
@@ -2781,7 +2782,7 @@ func (a *NodeAdapter) AccountRegistrationHistory(ctx context.Context,
 		len(rows),
 	)
 	for _, row := range rows {
-		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(ctx,
 			row.TxSlot,
 			row.BlockHash,
 			blockNumbers,
@@ -3535,7 +3536,7 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 		pageRefs = refs[start:end]
 	}
 
-	paged, err := a.orderedUtxosByRefs(pageRefs, txn)
+	paged, err := a.orderedUtxosByRefs(ctx, pageRefs, txn)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get address UTxOs for %q: %w",
@@ -3543,7 +3544,7 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 			err,
 		)
 	}
-	txBlockHashes, err := a.addressUtxoBlockHashes(paged)
+	txBlockHashes, err := a.addressUtxoBlockHashes(ctx, paged)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get block hashes for address UTxOs %q: %w",
@@ -3606,6 +3607,7 @@ func (a *NodeAdapter) AddressUTXOs(ctx context.Context,
 // callers of this helper only need it for its embedded Utxo fields, which
 // UtxosByRefs already populates in full.
 func (a *NodeAdapter) orderedUtxosByRefs(
+	ctx context.Context,
 	refs []models.UtxoId,
 	txn *database.Txn,
 ) ([]models.UtxoWithOrdering, error) {
@@ -3613,7 +3615,7 @@ func (a *NodeAdapter) orderedUtxosByRefs(
 		return []models.UtxoWithOrdering{}, nil
 	}
 	utxos, err := a.ledgerState.Database().
-		UtxosByRefs(context.Background(), refs, txn)
+		UtxosByRefs(ctx, refs, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -4855,6 +4857,7 @@ func (a *NodeAdapter) TransactionRequiredSigners(
 }
 
 func (a *NodeAdapter) addressUtxoBlockHashes(
+	ctx context.Context,
 	utxos []models.UtxoWithOrdering,
 ) (map[string]string, error) {
 	ret := make(map[string]string, len(utxos))
@@ -4873,7 +4876,7 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 		hashes = append(hashes, utxo.TxId)
 	}
 
-	txs, err := a.ledgerState.GetTransactionsByHashes(hashes)
+	txs, err := a.ledgerState.Database().GetTransactionsByHashes(ctx, hashes, nil)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"get transactions for address UTxO block mapping: %w",

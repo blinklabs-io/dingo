@@ -290,7 +290,7 @@ func (f *leiosAuditFixture) spenderBlockAt(
 func TestContinuationAuditAcceptsEndorserBlockProducer(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
@@ -334,7 +334,7 @@ func TestContinuationAuditTreatsPendingEndorserBlockAsInconclusive(
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
 	*f.providerOK = false
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
@@ -364,7 +364,7 @@ func TestContinuationAuditTreatsPendingEndorserBlockAsInconclusive(
 func TestContinuationAuditStillReportsMissingProducerOnLeios(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
@@ -446,7 +446,7 @@ func TestContinuationAuditOutcomesAreCounted(t *testing.T) {
 	t.Run("clean", func(t *testing.T) {
 		f := newLeiosAuditFixture(t)
 		ls := f.ls
-		ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+		ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 		ls.auditContinuationBlock(BlockfetchEvent{
 			ConnectionId: f.connId,
 			Block:        f.certRB,
@@ -462,7 +462,7 @@ func TestContinuationAuditOutcomesAreCounted(t *testing.T) {
 		f := newLeiosAuditFixture(t)
 		ls := f.ls
 		*f.providerOK = false
-		ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+		ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 		ls.auditContinuationBlock(BlockfetchEvent{
 			ConnectionId: f.connId,
 			Block:        f.certRB,
@@ -485,7 +485,7 @@ func TestContinuationAuditOutcomesAreCounted(t *testing.T) {
 	t.Run("missing_producer", func(t *testing.T) {
 		f := newLeiosAuditFixture(t)
 		ls := f.ls
-		ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+		ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 		missing := mustSpliceAuditInput(
 			t,
 			testHashBytes("counted-absent-producer"),
@@ -543,7 +543,7 @@ func continuationAuditFillProducers(
 func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	continuationAuditFillProducers(
@@ -594,7 +594,7 @@ func TestContinuationAuditCapDisarmIsExplicit(t *testing.T) {
 func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	// One of the endorser block's two transactions is already a producer.
@@ -661,7 +661,7 @@ func TestContinuationAuditCapCountsOnlyNewProducers(t *testing.T) {
 func TestContinuationAuditResolvesEachEndorserBlockOnce(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	for _, slot := range []uint64{40, 41, 42} {
 		certRB := leiosAuditCertifyingBlock(t, slot, f.announceHash)
@@ -713,7 +713,7 @@ func TestContinuationAuditSkipsEndorserResolutionWithoutEndorserSpends(
 ) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
@@ -812,7 +812,7 @@ func queueContinuationAuditTestRefs(
 func TestContinuationAuditEndorserResolutionIsBudgeted(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -924,7 +924,7 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 		return []cbor.RawMessage{rawTx}, true
 	}
 
-	ls.armContinuationAudit(fixture.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), fixture.ancestorTip.Point, "test rollback")
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: fixture.connId,
 		Block:        announcing,
@@ -990,7 +990,7 @@ func TestContinuationAuditAcceptsAnnouncedEndorserBlockProducer(t *testing.T) {
 func TestContinuationAuditRetriesUnresolvedCertifyingParent(t *testing.T) {
 	f := newLeiosAuditFixtureOpts(t, false)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -1082,7 +1082,7 @@ func TestContinuationAuditRetriesUnresolvedCertifyingParent(t *testing.T) {
 func TestContinuationAuditRetriesParentAtMostOncePerBlock(t *testing.T) {
 	f := newLeiosAuditFixtureOpts(t, false)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -1161,7 +1161,7 @@ func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
 	}, nil))
 
 	*f.providerOK = false
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 
@@ -1226,7 +1226,7 @@ func TestContinuationAuditDedupesConvergingEndorserRefs(t *testing.T) {
 func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 	window := ls.continuationAudit.Load()
 	require.NotNil(t, window)
 	queueContinuationAuditTestRefs(
@@ -1292,7 +1292,7 @@ func TestContinuationAuditBudgetStopIsCountedOncePerBody(t *testing.T) {
 func TestContinuationAuditReusesAnAlreadyMergedEndorserBlock(t *testing.T) {
 	f := newLeiosAuditFixture(t)
 	ls := f.ls
-	ls.armContinuationAudit(f.ancestorTip.Point, "test rollback")
+	ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "test rollback")
 
 	ls.auditContinuationBlock(BlockfetchEvent{
 		ConnectionId: f.connId,
@@ -1421,7 +1421,7 @@ func TestContinuationAuditCarriesAPermanentEndorserHole(t *testing.T) {
 			) ([]cbor.RawMessage, bool) {
 				return []cbor.RawMessage{{0xff}}, true
 			}
-			ls.armContinuationAudit(f.ancestorTip.Point, "first rollback")
+			ls.armContinuationAudit(context.Background(), f.ancestorTip.Point, "first rollback")
 
 			ls.auditContinuationBlock(BlockfetchEvent{
 				ConnectionId: f.connId,
@@ -1444,7 +1444,7 @@ func TestContinuationAuditCarriesAPermanentEndorserHole(t *testing.T) {
 					"drop record carries the hole",
 			)
 
-			ls.armContinuationAudit(
+			ls.armContinuationAudit(context.Background(),
 				ocommon.NewPoint(
 					tc.rearmSlot,
 					testHashBytes("permanent-hole-rearm"),

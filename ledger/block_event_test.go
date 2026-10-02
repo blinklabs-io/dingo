@@ -332,7 +332,7 @@ func TestRollbackWaitsForCommittedApplyPublication(t *testing.T) {
 
 	rollbackDone := make(chan error, 1)
 	go func() {
-		rollbackDone <- ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil)
+		rollbackDone <- ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil)
 	}()
 	testutil.RequireNoReceive(
 		t,
@@ -452,7 +452,7 @@ func TestBlockApplyRejectsRolledBackCandidate(t *testing.T) {
 	rolledBackCandidate := fixture.currentTip.Point
 	require.NoError(
 		t,
-		fixture.ls.rollbackChainAndStateDeferred(
+		fixture.ls.rollbackChainAndStateDeferred(context.Background(),
 			fixture.ancestorTip.Point,
 			nil,
 		),
@@ -585,7 +585,7 @@ func TestRollbackChainAndStateEmitsUndoEventsBeforeTruncating(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+		ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil),
 	)
 
 	// The block above the rollback point was visited by the undo emitter.
@@ -636,7 +636,7 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 		fixture.ancestorTip.Point.Slot,
 		testHashBytes("no-such-block"),
 	)
-	require.Error(t, ls.rollbackChainAndStateDeferred(badPoint, nil))
+	require.Error(t, ls.rollbackChainAndStateDeferred(context.Background(), badPoint, nil))
 
 	testutil.RequireNoReceive(
 		t, txCh, 250*time.Millisecond,
@@ -1550,7 +1550,7 @@ func TestBlocksAboveSlotServesLedgerErrorOnlySubscribers(t *testing.T) {
 
 	require.NoError(
 		t,
-		ls.rollbackChainAndStateDeferred(fixture.ancestorTip.Point, nil),
+		ls.rollbackChainAndStateDeferred(context.Background(), fixture.ancestorTip.Point, nil),
 	)
 
 	evt := testutil.RequireReceive(

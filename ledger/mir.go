@@ -105,14 +105,14 @@ const (
 // certificate is discarded rather than retried. Failing the boundary instead
 // would wedge the node, since the stored certificates are re-read and re-fail
 // on every deterministic retry.
-func (ls *LedgerState) applyMIRCerts(
+func (ls *LedgerState) applyMIRCerts(ctx context.Context,
 	txn *database.Txn,
 	epochStartSlot uint64,
 	boundarySlot uint64,
 	epochEraID uint,
 ) error {
 	effects, err := ls.db.GetMIRCertsInSlotRange(
-		context.Background(),
+		ctx,
 		epochStartSlot, boundarySlot, txn,
 	)
 	if err != nil {
@@ -121,7 +121,7 @@ func (ls *LedgerState) applyMIRCerts(
 	if len(effects) == 0 {
 		return nil
 	}
-	boundary, err := ls.collectMIRBoundary(txn, effects, epochEraID)
+	boundary, err := ls.collectMIRBoundary(ctx, txn, effects, epochEraID)
 	if err != nil {
 		return err
 	}
@@ -162,7 +162,7 @@ func (ls *LedgerState) applyMIRCerts(
 		)
 		return nil
 	}
-	appliedReserves, appliedTreasury, err := ls.applyMIRCredits(
+	appliedReserves, appliedTreasury, err := ls.applyMIRCredits(ctx,
 		txn, boundary.credits, boundarySlot,
 	)
 	if err != nil {
@@ -312,12 +312,12 @@ func (b *mirBoundary) addTransfer(sourcePot uint, amount uint64) {
 // or replaced by the latest certificate's amount below Alonzo, matching
 // `Map.union`'s left bias on the newer entry. See the era discussion on
 // applyMIRCerts.
-func (ls *LedgerState) collectMIRBoundary(
+func (ls *LedgerState) collectMIRBoundary(ctx context.Context,
 	txn *database.Txn,
 	effects []models.MIREffect,
 	epochEraID uint,
 ) (*mirBoundary, error) {
-	registered, err := ls.registeredMIRAccounts(txn, effects)
+	registered, err := ls.registeredMIRAccounts(ctx, txn, effects)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +413,7 @@ func (ls *LedgerState) collectMIRBoundary(
 // is the read-only equivalent of the account lookup the credit path performs,
 // and it establishes the same registered-vs-skipped split before any pot is
 // debited.
-func (ls *LedgerState) registeredMIRAccounts(
+func (ls *LedgerState) registeredMIRAccounts(ctx context.Context,
 	txn *database.Txn,
 	effects []models.MIREffect,
 ) (map[string]bool, error) {
@@ -438,7 +438,7 @@ func (ls *LedgerState) registeredMIRAccounts(
 		return nil, nil
 	}
 	accounts, err := ls.db.GetAccountsByCredential(
-		context.Background(),
+		ctx,
 		refs,
 		false,
 		txn,
@@ -459,14 +459,14 @@ func (ls *LedgerState) registeredMIRAccounts(
 // actually applied per source pot. The totals are re-derived here rather than
 // reused from the capacity check so the pot debit can never exceed what was
 // credited.
-func (ls *LedgerState) applyMIRCredits(
+func (ls *LedgerState) applyMIRCredits(ctx context.Context,
 	txn *database.Txn,
 	credits []mirCredit,
 	boundarySlot uint64,
 ) (appliedReserves, appliedTreasury uint64, err error) {
 	for _, credit := range credits {
 		credited, err := governance.CreditRegisteredRewardAccountBeforeSnapshot(
-			context.Background(),
+			ctx,
 			ls.db,
 			txn,
 			credit.credentialTag,

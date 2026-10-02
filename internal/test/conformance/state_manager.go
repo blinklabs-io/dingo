@@ -2147,7 +2147,7 @@ func (m *DingoStateManager) persistEnactment(
 	if dijkstraPP, ok := m.protocolParams.(*dijkstra.DijkstraProtocolParameters); ok {
 		enactmentPP = dijkstraPP
 	}
-	result, err := governance.EnactProposal(&governance.EnactmentContext{
+	result, err := governance.EnactProposal(context.Background(), &governance.EnactmentContext{
 		DB:                 m.db,
 		Txn:                txn,
 		Epoch:              m.currentEpoch,

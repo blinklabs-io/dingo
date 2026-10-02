@@ -2772,7 +2772,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			),
 		)
 	}
-	if err := ls.rollbackChainAndStateDeferred(e.Point, pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), e.Point, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// Missing rollback point can happen when local state and peer
 			// chainsync cursor drift. Recover by forcing re-intersect.
@@ -3076,14 +3076,14 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 	}
 }
 
-func (ls *LedgerState) localTipPraosView(
+func (ls *LedgerState) localTipPraosView(ctx context.Context,
 	localTip ochainsync.Tip,
 ) praos.PraosTiebreakerView {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
 		return praos.PraosTiebreakerView{}
 	}
 	block, err := database.BlockByHash(
-		ls.lifecycleContext(),
+		ctx,
 		ls.db,
 		localTip.Point.Hash,
 	)
@@ -3133,7 +3133,7 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(localTip),
+		ls.localTipPraosView(ls.lifecycleContext(), localTip),
 	)
 	if result != praos.ChainEqual {
 		return result
@@ -3169,7 +3169,7 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 		observedTip,
 		localTip,
 		incomingView,
-		ls.localTipPraosView(localTip),
+		ls.localTipPraosView(ls.lifecycleContext(), localTip),
 	) == praos.ChainABetter
 }
 
@@ -4345,7 +4345,7 @@ func (ls *LedgerState) tryResolveFork(
 		"connection_id", e.ConnectionId.String(),
 	)
 
-	if err := ls.rollbackChainAndStateDeferred(rollbackPoint, pending); err != nil {
+	if err := ls.rollbackChainAndStateDeferred(ls.lifecycleContext(), rollbackPoint, pending); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			// The ancestor resolved but the chain no longer holds it at that
 			// index, so rolling back would splice a continuation onto a parent
@@ -7159,7 +7159,7 @@ func (ls *LedgerState) processEpochRollover(
 	// body issues SQL within `txn` that may join against `pparams` rows.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "ratify_consume", func() error {
-			return ls.consumePendingRatification(txn)
+			return ls.consumePendingRatification(ctx, txn)
 		},
 	); err != nil {
 		return nil, fmt.Errorf("apply pending ratification: %w", err)
@@ -7167,7 +7167,7 @@ func (ls *LedgerState) processEpochRollover(
 
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "reward_apply", func() error {
-			return ls.applyStakeRewards(
+			return ls.applyStakeRewards(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -7187,7 +7187,7 @@ func (ls *LedgerState) processEpochRollover(
 	// capture below.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "mir", func() error {
-			return ls.applyMIRCerts(
+			return ls.applyMIRCerts(ctx,
 				txn, currentEpoch.StartSlot, epochStartSlot, currentEpoch.EraId,
 			)
 		},
@@ -7314,7 +7314,7 @@ func (ls *LedgerState) processEpochRollover(
 	// governance.ProcessEpoch below.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "pool_reap", func() error {
-			return ls.applyPoolRetirements(
+			return ls.applyPoolRetirements(ctx,
 				txn, currentEpoch.EpochId+1, epochStartSlot,
 			)
 		},
@@ -7329,7 +7329,7 @@ func (ls *LedgerState) processEpochRollover(
 	// durable marker still commit or roll back atomically with it.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "inactivity_activation", func() error {
-			return ls.activateDelegatorInactivityIfNeeded(
+			return ls.activateDelegatorInactivityIfNeeded(ctx,
 				txn, currentEpoch.EpochId+1,
 			)
 		},
@@ -7539,7 +7539,7 @@ func (ls *LedgerState) processEpochRollover(
 		if oldVer.Major != newVer.Major {
 			if err := ls.timeRolloverPhase(
 				currentEpoch.EpochId+1, "hardfork", func() error {
-					return ls.applyIntraEraHardForkRule(
+					return ls.applyIntraEraHardForkRule(ctx,
 						txn, newVer.Major, epochStartSlot, currentEpoch.EpochId+1,
 					)
 				},
@@ -7650,7 +7650,7 @@ func (ls *LedgerState) processEpochRollover(
 	default:
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "snap_persist", func() error {
-				return ls.captureEpochBoundarySnapshot(
+				return ls.captureEpochBoundarySnapshot(ctx,
 					txn, currentEpoch, result,
 				)
 			},
@@ -7661,7 +7661,7 @@ func (ls *LedgerState) processEpochRollover(
 	if deferredPlan != nil || snapshotEvt != nil {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "defer", func() error {
-				return ls.deferBoundaryJob(
+				return ls.deferBoundaryJob(ctx,
 					txn, currentEpoch.EpochId+1, epochStartSlot,
 					deferredPlan, snapshotEvt,
 				)
@@ -7835,7 +7835,7 @@ func (ls *LedgerState) boundarySnapshotEvent(
 	}
 }
 
-func (ls *LedgerState) captureEpochBoundarySnapshot(
+func (ls *LedgerState) captureEpochBoundarySnapshot(ctx context.Context,
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	result *EpochRolloverResult,
@@ -7861,7 +7861,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshot(
 	}
 	err := hook(txn, evt)
 	if err == nil {
-		err = ls.takeDeferredRewardStakeInputs(ls.lifecycleContext(), txn)
+		err = ls.takeDeferredRewardStakeInputs(ctx, txn)
 	}
 	if err != nil {
 		ls.discardDeferredRewardStakeInputs(txn)
