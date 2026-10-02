@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"math/bits"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -12271,11 +12272,17 @@ func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
 	if epochLength == 0 {
 		return 0, false
 	}
+	// An epoch whose end does not fit a uint64 has no cutoff: the wrapped
+	// value would report the nonce stable from the epoch's first slot.
+	epochEndSlot, carry := bits.Add64(currentEpoch.StartSlot, epochLength, 0)
+	if carry != 0 {
+		return 0, false
+	}
 	stabilityWindow := ls.nonceStabilityWindow(currentEpoch.EraId)
 	if stabilityWindow >= epochLength {
 		return currentEpoch.StartSlot, true
 	}
-	return currentEpoch.StartSlot + epochLength - stabilityWindow, true
+	return epochEndSlot - stabilityWindow, true
 }
 
 // computeNextEpochNonce speculatively computes the epoch nonce for the

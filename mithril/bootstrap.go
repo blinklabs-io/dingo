@@ -1014,6 +1014,7 @@ func downloadAncillary(
 			"artifact", "ancillary_ledger_state",
 		),
 		WithReplaceDestination(),
+		withArchiveLimits(ancillaryLimits()),
 	); extractErr != nil {
 		return nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",

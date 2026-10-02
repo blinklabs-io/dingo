@@ -208,6 +208,46 @@ func TestComputeCandidateNonce_RejectsWrappedEpochRange(t *testing.T) {
 	}
 }
 
+// TestNextEpochNonceReadyCutoffSlot_RejectsWrappedEpochRange covers the
+// nonce-ready cutoff for an epoch whose end slot does not fit a uint64.
+// Unchecked, the cutoff wraps to a small slot and the next epoch's nonce is
+// reported stable from the epoch's first slot.
+func TestNextEpochNonceReadyCutoffSlot_RejectsWrappedEpochRange(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newConwayBootstrapStabilityCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	// Conway window 4k/f = 60 with this config.
+	for _, tc := range []struct {
+		name       string
+		start      uint64
+		length     uint
+		wantReady  bool
+		wantCutoff uint64
+	}{
+		{"end is MaxUint64", math.MaxUint64 - 1000, 1000, true, math.MaxUint64 - 60},
+		{"end wraps by one", math.MaxUint64 - 999, 1000, false, 0},
+		{"start is MaxUint64", math.MaxUint64, 100, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(models.Epoch{
+				StartSlot:     tc.start,
+				LengthInSlots: tc.length,
+				EraId:         eras.ConwayEraDesc.Id,
+			})
+			require.Equal(t, tc.wantReady, ready)
+			if tc.wantReady {
+				require.Equal(t, tc.wantCutoff, cutoff)
+			}
+		})
+	}
+}
+
 // TestFoldEndSlotForTip pins the conversion from a tip slot to the fold's
 // exclusive end bound, including the saturating edge.
 //

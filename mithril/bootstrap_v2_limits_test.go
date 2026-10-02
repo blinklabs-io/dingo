@@ -336,3 +336,70 @@ func TestBootstrapV2RefusesImmutableArchiveWithForeignMember(t *testing.T) {
 	}
 	require.ErrorContains(t, err, ErrExtractUnexpectedMember.Error())
 }
+
+// TestDownloadAncillaryV1AdmitsOnlyConsumedMembers covers the v1 ancillary
+// archive, which the aggregator builds with the same layout as the v2 one.
+func TestDownloadAncillaryV1AdmitsOnlyConsumedMembers(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		files   map[string][]byte
+		wantErr error
+	}{
+		{
+			name: "ledger state and next trio",
+			files: map[string][]byte{
+				"ledger/100/state":          []byte("state"),
+				"ledger/100/tables/values":  []byte("values"),
+				"immutable/00003.chunk":     []byte("c"),
+				"immutable/00003.primary":   []byte("p"),
+				"immutable/00003.secondary": []byte("s"),
+			},
+		},
+		{
+			name: "unrelated top-level file",
+			files: map[string][]byte{
+				"ledger/100/state": []byte("state"),
+				"unrelated.bin":    []byte("x"),
+			},
+			wantErr: ErrExtractUnexpectedMember,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			archive := buildTarZst(t, tc.files)
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write(archive)
+				},
+			))
+			t.Cleanup(srv.Close)
+			tree, _, err := downloadAncillary(
+				t.Context(),
+				BootstrapConfig{
+					AllowInsecureHTTP: true,
+					Logger: slog.New(
+						slog.NewTextHandler(io.Discard, nil),
+					),
+				},
+				&SnapshotListItem{
+					SnapshotBase: SnapshotBase{
+						Digest:             "abc123",
+						Network:            "preprod",
+						AncillaryLocations: []string{srv.URL},
+					},
+				},
+				t.TempDir(),
+			)
+			if tree != nil {
+				tree.Close()
+			}
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

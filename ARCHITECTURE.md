@@ -7361,16 +7361,17 @@ memory limit, configurable through `WithZstdLimits`.
 Extraction also bounds the archive's shape while it is read: an entry-count
 cap (directories and empty files count), per-member and aggregate expanded-byte
 caps, and an expansion bound of 256 times the compressed bytes read plus a
-64 MiB floor. v2 archives admit only the members their consumer reads, and a
-refused member is never created. An immutable archive admits its own certified
-trio (plus a `ledger/` tree, where v1-layout archives keep the ledger state)
-and each trio file is SHA-256-checked against the certified digest list as it
-is written, so a mismatching file is removed before the pool moves on. The
-digest list archive admits one top-level JSON file of at most 64 MiB. The
-ancillary archive admits the signed manifest, the `ledger/` tree and the next
-immutable trio. The immutable pool charges each in-flight download at its size
-limit against a 16 GiB budget, so raising the limit lowers concurrency rather
-than raising the disk the pool can claim.
+64 MiB floor. Each archive type except the v1 full snapshot admits only the
+members its consumer reads, and a refused member is never created. An
+immutable archive admits its own certified trio (plus a `ledger/` tree, where
+v1-layout archives keep the ledger state) and each trio file is
+SHA-256-checked against the certified digest list as it is written, so a
+mismatching file is removed before the pool moves on. The digest list archive
+admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
+archives admit the signed manifest, the `ledger/` tree and the next immutable
+trio. The immutable pool charges each in-flight download at its size limit
+against a 16 GiB budget, so raising the limit lowers concurrency rather than
+raising the disk the pool can claim.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
