@@ -335,6 +335,14 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_USER_AGENT
   # CLI: --token-registry-user-agent
   # userAgent: ""
+  # Extra HTTP headers sent with every registry request, for a mirror that
+  # needs authentication. The values are credentials: they are redacted from
+  # logged configuration and are not sent to another origin after a redirect.
+  # There is no CLI flag, since arguments are visible in the process list.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_HEADER_SECRETS
+  # (comma-separated name:value pairs)
+  # headerSecrets:
+  #   Authorization: "Bearer <token>"
   # Cap on the compressed registry download. 0 uses the default (768MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes

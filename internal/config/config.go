@@ -454,6 +454,13 @@ type TokenRegistryConfig struct {
 	RequestTimeout time.Duration `yaml:"requestTimeout"        envconfig:"DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT"`
 	// UserAgent is sent with the registry request.
 	UserAgent string `yaml:"userAgent"             envconfig:"DINGO_TOKEN_REGISTRY_USER_AGENT"`
+	// HeaderSecrets are sent as headers with every registry request, for
+	// mirrors that need authentication (for example Authorization). They are
+	// credentials: they are redacted from rendered configuration, dropped from
+	// a redirect to another origin, and have no CLI flag, which would expose
+	// them in the process list. The environment form is comma-separated
+	// name:value pairs.
+	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
 	// MaxDecompressedBytes bounds all expanded tar content.

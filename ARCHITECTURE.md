@@ -2527,6 +2527,12 @@ variables, or `--token-registry-*` CLI flags. An empty source URL selects by
 network: the Cardano Foundation registry for mainnet, the IOG testnet registry
 otherwise.
 
+`tokenRegistry.headerSecrets` adds request headers (for example
+`Authorization`) for an authenticated mirror. It is YAML and environment only,
+is redacted from `Config.LogValue`, and the sync removes the headers from a
+redirect that changes scheme or host so a redirect cannot forward the
+credential. A public registry needs none.
+
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup
 path and the live storage-restart path in `node_lifecycle.go` call, so the two

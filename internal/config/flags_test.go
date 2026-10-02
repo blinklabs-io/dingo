@@ -127,6 +127,7 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.API.Blockfrost.Config":        {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
+		"TokenRegistry.HeaderSecrets":          {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
 		"Midnight.MappingValidatorAddress":     {},
@@ -1404,4 +1405,30 @@ func TestMinPoolMarginEnvBinding(t *testing.T) {
 			cfg.MinPoolMargin,
 		)
 	}
+}
+
+func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	unsetEnv(t, "DINGO_TOKEN_REGISTRY_HEADER_SECRETS")
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(
+		configFile,
+		[]byte("tokenRegistry:\n  headerSecrets:\n    Authorization: Bearer yaml\n"),
+		0o600,
+	))
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{"Authorization": "Bearer yaml"},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", "X-Api-Key:from-env")
+	cfg, err = LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t, "from-env", cfg.TokenRegistry.HeaderSecrets["X-Api-Key"],
+	)
 }

@@ -61,6 +61,8 @@ const (
 var logSecretConfigFields = []string{
 	// Koios Bearer token.
 	"KoiosParity.APIKey",
+	// Outbound registry headers, typically Authorization.
+	"TokenRegistry.HeaderSecrets",
 }
 
 // logURIConfigFields are Config field paths holding a URI that an operator

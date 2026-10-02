@@ -706,6 +706,7 @@ func buildDingoConfig(
 				RequestTimeout: cfg.TokenRegistry.
 					RequestTimeout,
 				UserAgent: cfg.TokenRegistry.UserAgent,
+				Headers:   cfg.TokenRegistry.HeaderSecrets,
 				MaxBytes:  cfg.TokenRegistry.MaxBytes,
 				MaxDecompressedBytes: cfg.TokenRegistry.
 					MaxDecompressedBytes,
