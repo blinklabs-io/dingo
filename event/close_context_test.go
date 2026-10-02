@@ -45,7 +45,10 @@ func TestCloseContextAbandonsBlockedHandlerAndNamesItsType(t *testing.T) {
 	bus.Publish(stuckType, NewEvent(stuckType, struct{}{}))
 	testutil.RequireReceive(t, entered, 5*time.Second, "handler never started")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- bus.CloseContext(ctx) }()
@@ -56,6 +59,7 @@ func TestCloseContextAbandonsBlockedHandlerAndNamesItsType(t *testing.T) {
 	require.ErrorContains(t, err, string(stuckType))
 
 	releaseHandler()
+	require.NoError(t, bus.CloseContext(context.Background()))
 }
 
 func TestCloseContextClosesBusWhenNoHandlerIsBlocked(t *testing.T) {

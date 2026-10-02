@@ -1610,6 +1610,15 @@ outgoing instance and silently lost.
 
 ### Shutdown Flow
 
+Bark serializes TLS/listener preflight and server publication with a lifecycle
+lock that shutdown can wait on with its context. A deadline during preflight
+returns without observing a partially published server. Plugin host shutdown
+waits for capability teardown already in flight before closing remaining
+providers, retains capability stop errors, and leaves dependencies open when
+that wait exceeds its deadline. Event buses sharing a metrics registry subtract
+only their own subscriber contributions when stopping.
+
+
 Graceful shutdown proceeds in phases:
 
 ```

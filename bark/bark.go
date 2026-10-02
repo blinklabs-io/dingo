@@ -62,7 +62,7 @@ type Bark struct {
 	// draining an in-flight request that itself calls Acquire) — see
 	// Acquire's doc comment for why its config.DB read deliberately does
 	// NOT take mu, to avoid exactly that deadlock.
-	mu           sync.Mutex
+	mu           lifecycleMutex
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
@@ -80,6 +80,45 @@ type Bark struct {
 	// of startServer so a test can hold Start inside its TLS/listen
 	// preflight while another goroutine races it.
 	beforePreflight func()
+}
+
+// lifecycleMutex keeps preflight and publication atomic while allowing Stop
+// to abandon its wait when the caller's shutdown budget expires.
+type lifecycleMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (m *lifecycleMutex) init() {
+	m.once.Do(
+		func() { m.token = make(chan struct{}, 1); m.token <- struct{}{} },
+	)
+}
+
+func (m *lifecycleMutex) Lock() { m.init(); <-m.token }
+func (m *lifecycleMutex) TryLock() bool {
+	m.init()
+	select {
+	case <-m.token:
+		return true
+	default:
+		return false
+	}
+}
+func (m *lifecycleMutex) Unlock() { m.token <- struct{}{} }
+func (m *lifecycleMutex) lockContext(ctx context.Context) error {
+	m.init()
+	select {
+	case <-m.token:
+		return nil
+	default:
+	}
+	select {
+	case <-m.token:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type BarkConfig struct {
@@ -545,7 +584,9 @@ func (b *Bark) handleServeExit(
 }
 
 func (b *Bark) Stop(ctx context.Context) error {
-	b.mu.Lock()
+	if err := b.mu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer b.mu.Unlock()
 
 	if b.server != nil {

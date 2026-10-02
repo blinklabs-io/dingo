@@ -1476,6 +1476,17 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 		}
 		running = e.runningHandlerTypes()
 	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	if len(running) == 0 {
+		return fmt.Errorf(
+			"event bus close bookkeeping did not finish: %w",
+			ctx.Err(),
+		)
+	}
 	return fmt.Errorf(
 		"event bus close abandoned with handlers still running for %v: %w",
 		running,
@@ -1538,8 +1549,16 @@ func (e *EventBus) shutdown(restart bool) {
 
 	// Close subscribers outside of lock
 	discardQueued := !restart
-	for _, evtTypeSubs := range subsCopy {
+	for eventType, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
+			if e.metrics != nil {
+				kind := "remote"
+				if _, ok := sub.(*channelSubscriber); ok {
+					kind = "in-memory"
+				}
+				e.metrics.subscribers.WithLabelValues(string(eventType), kind).
+					Dec()
+			}
 			if chSub, ok := sub.(*channelSubscriber); ok {
 				chSub.close(discardQueued)
 			} else {
@@ -1571,11 +1590,6 @@ func (e *EventBus) shutdown(restart bool) {
 		}
 	}
 	e.mu.Unlock()
-
-	// Reset subscriber metrics if they exist
-	if e.metrics != nil {
-		e.metrics.subscribers.Reset()
-	}
 
 	// Every ordered-lane worker watched the stop channel closed above and
 	// has exited (asyncWg.Wait covered them alongside the shared pool), so

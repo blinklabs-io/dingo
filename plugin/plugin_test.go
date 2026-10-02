@@ -582,6 +582,22 @@ func TestHostStopWaitsForInFlightStopCapability(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releaseStop) }) }
 	defer release()
 	var stopFinished atomic.Bool
+	stopFailure := errors.New("capability drain failed")
+	if err := Register(host, Descriptor{Capability: CapabilityStorageBlob, Name: "dependency"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "dependency", Lifecycle{StopFunc: func(context.Context) error {
+				if !stopFinished.Load() {
+					return errors.New("dependency stopped before consumer")
+				}
+				return nil
+			}}, nil
+		}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](context.Background(), host, CapabilityStorageBlob, "dependency", nil, testDeps{}); err != nil {
+		t.Fatal(err)
+	}
 
 	err := Register(
 		host,
@@ -593,7 +609,7 @@ func TestHostStopWaitsForInFlightStopCapability(t *testing.T) {
 					close(stopStarted)
 					<-releaseStop
 					stopFinished.Store(true)
-					return nil
+					return stopFailure
 				},
 			}, nil
 		},
@@ -623,13 +639,20 @@ func TestHostStopWaitsForInFlightStopCapability(t *testing.T) {
 	}
 
 	release()
-	if err := testutil.RequireReceive(t, hostStopDone, 3*time.Second, "host stop"); err != nil {
-		t.Fatal(err)
+	if err := testutil.RequireReceive(t, hostStopDone, 3*time.Second, "host stop"); !errors.Is(
+		err,
+		stopFailure,
+	) ||
+		strings.Contains(err.Error(), "dependency stopped") {
+		t.Fatalf("Host.Stop error = %v", err)
 	}
 	if !stopFinished.Load() {
 		t.Fatal("Host.Stop returned before provider teardown completed")
 	}
-	if err := testutil.RequireReceive(t, capStopDone, 3*time.Second, "capability stop"); err != nil {
+	if err := testutil.RequireReceive(t, capStopDone, 3*time.Second, "capability stop"); !errors.Is(
+		err,
+		stopFailure,
+	) {
 		t.Fatal(err)
 	}
 }
@@ -669,7 +692,10 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	go func() { _ = host.StopCapability(context.Background(), CapabilityMempool) }()
 	testutil.RequireReceive(t, stopStarted, 3*time.Second, "provider stop")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		50*time.Millisecond,
+	)
 	defer cancel()
 	if err := host.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Host.Stop error = %v, want deadline exceeded", err)

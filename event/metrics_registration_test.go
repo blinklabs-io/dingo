@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,4 +55,12 @@ func TestNewEventBusReusesRegisteredMetrics(t *testing.T) {
 	require.NotPanics(t, func() { second = NewEventBus(registry, nil) })
 	defer second.Close()
 	require.Same(t, first.metrics.eventsTotal, second.metrics.eventsTotal)
+	first.Subscribe("shared")
+	second.Subscribe("shared")
+	gauge := second.metrics.subscribers.WithLabelValues("shared", "in-memory")
+	require.Equal(t, float64(2), testutil.ToFloat64(gauge))
+	first.Close()
+	require.Equal(t, float64(1), testutil.ToFloat64(gauge))
+	second.Close()
+	require.Equal(t, float64(0), testutil.ToFloat64(gauge))
 }

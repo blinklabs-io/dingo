@@ -126,7 +126,8 @@ type Host struct {
 	// stopCapabilityWG tracks StopCapability teardown that has already removed
 	// its providers from started, so Stop can wait for it. Add happens under mu
 	// while stopped is false; Stop sets stopped under mu before it Waits.
-	stopCapabilityWG sync.WaitGroup
+	stopCapabilityWG  sync.WaitGroup
+	capabilityStopErr error
 }
 
 // NewHost returns an empty plugin host.
@@ -427,7 +428,15 @@ func (h *Host) Stop(ctx context.Context) error {
 			h.mu.Unlock()
 			return err
 		case <-ctx.Done():
-			return ctx.Err()
+			select {
+			case <-done:
+				h.mu.Lock()
+				err := h.stopErr
+				h.mu.Unlock()
+				return err
+			default:
+				return ctx.Err()
+			}
 		}
 	}
 	h.stopped = true
@@ -435,7 +444,7 @@ func (h *Host) Stop(ctx context.Context) error {
 	started := h.started
 	h.started = nil
 	h.mu.Unlock()
-	err := stopReverse(ctx, started)
+	var err error
 	// stopping counts in-flight StopCapability calls under mu, and none can
 	// start once stopped is set, so an empty map means there is nothing to
 	// wait for even when ctx has already ended.
@@ -451,10 +460,23 @@ func (h *Host) Stop(ctx context.Context) error {
 		select {
 		case <-capabilitiesDone:
 		case <-ctx.Done():
-			err = errors.Join(err, ctx.Err())
+			select {
+			case <-capabilitiesDone:
+			default:
+				h.mu.Lock()
+				if len(h.stopping) > 0 {
+					err = ctx.Err()
+				}
+				h.mu.Unlock()
+			}
 		}
 	}
+	// Dependencies must stay alive while capability consumers drain.
+	if err == nil {
+		err = stopReverse(ctx, started)
+	}
 	h.mu.Lock()
+	err = errors.Join(err, h.capabilityStopErr)
 	h.stopErr = err
 	close(h.stopDone)
 	h.mu.Unlock()
@@ -493,12 +515,13 @@ func (h *Host) StopCapability(
 	h.started = remaining
 	h.mu.Unlock()
 	err := stopReverse(ctx, selected)
-	h.stopCapabilityWG.Done()
 	h.mu.Lock()
+	h.capabilityStopErr = errors.Join(h.capabilityStopErr, err)
 	h.stopping[capability]--
 	if h.stopping[capability] <= 0 {
 		delete(h.stopping, capability)
 	}
+	h.stopCapabilityWG.Done()
 	h.mu.Unlock()
 	return err
 }

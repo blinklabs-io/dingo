@@ -3008,7 +3008,7 @@ func (c *stubChainsyncServerConnection) closeCount() int {
 }
 
 // newChainsyncServerFixtureLogging is newChainsyncServerFixture with the
-// Ouroboros logger redirected into a buffer, for the two tests whose assertion
+// Ouroboros logger redirected into a buffer, for the teardown test whose assertion
 // includes the reason the waiter logged for a teardown.
 func newChainsyncServerFixtureLogging(
 	t *testing.T,
@@ -3435,7 +3435,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				ouroboros_mock.ConversationEntryHandshakeNtCResponseInput,
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
@@ -3445,7 +3447,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				},
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
