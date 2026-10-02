@@ -770,15 +770,11 @@ type LedgerStateConfig struct {
 	// effect only in Dijkstra and later. Enable a nonzero value only on a
 	// network where every node also enables the same value.
 	MinPoolMargin uint
-	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage reward cap. It
-	// is a consensus-affecting feature gate that defaults false; enable it only
-	// on a network where every node also enables it (mainnet and the public
-	// testnets keep it off). Unlike the Musashi-derived toggles above it is set
-	// from operator config in node.go, not derived from the network.
+	// PledgeLeverageEnabled enables the experimental pre-Dijkstra pledge
+	// leverage override. Dijkstra uses the enacted protocol parameter instead.
 	PledgeLeverageEnabled bool
-	// PledgeLeverage is L, the CIP-50 maximum ratio of total stake to pledge,
-	// in the range [1, 10000]. It is used only when PledgeLeverageEnabled is
-	// true.
+	// PledgeLeverage is the experimental pre-Dijkstra L value. It is used only
+	// when PledgeLeverageEnabled is true.
 	PledgeLeverage uint
 	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
 	// entire epoch reward pot is apportioned across pools that earned a base
@@ -9732,13 +9728,24 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 	era eras.EraDesc,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	if era.DecodePParamsFunc == nil {
+	return ls.loadPersistedProtocolParametersWith(
+		epoch, era, era.DecodePParamsFunc, txn,
+	)
+}
+
+func (ls *LedgerState) loadPersistedProtocolParametersWith(
+	epoch uint64,
+	era eras.EraDesc,
+	decode func([]byte) (lcommon.ProtocolParameters, error),
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if decode == nil {
 		return nil, nil
 	}
 	pparams, err := ls.db.GetPParams(
 		epoch,
 		era.Id,
-		era.DecodePParamsFunc,
+		decode,
 		txn,
 	)
 	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
