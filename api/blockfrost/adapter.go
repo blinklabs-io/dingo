@@ -3958,6 +3958,7 @@ func isLedgerStorageFailure(err error) bool {
 
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.
 func (a *NodeAdapter) TransactionSubmit(
+	ctx context.Context,
 	txCbor []byte,
 ) (string, error) {
 	if a.submitter == nil {
@@ -3979,7 +3980,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(context.Background(), txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",
