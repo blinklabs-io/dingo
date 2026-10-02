@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -977,7 +976,14 @@ func (t *gcsTxn) Commit() error {
 	for key := range t.pending {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	// The expiry marker goes last so a reader never sees a block expired while
+	// data rewritten for that expiry is still pending.
+	keys = compensate.ApplyOrder(keys, func(key string) bool {
+		change := t.pending[key]
+		return !change.deleted &&
+			strings.HasPrefix(key, types.BlockBlobKeyPrefix) &&
+			types.IsBlockTombstone(change.value)
+	})
 
 	// Build the compensation log before applying anything. Existence is probed
 	// with object metadata rather than a full read, and a prior value is
@@ -1047,7 +1053,7 @@ func (t *gcsTxn) Commit() error {
 			undoCtx, undoCancel := t.store.opContext()
 			defer undoCancel()
 			undoErr := comp.Undo(
-				i,
+				i+1,
 				func(key string, value *io.SectionReader, _ int64) error {
 					return t.store.writeObjectStream(
 						undoCtx,
