@@ -36,7 +36,7 @@ import (
 //
 // at is Query's pinned point (unpinned = live); PoolStakeDistribution
 // resolves it to the historical epoch whose mark snapshot governed that
-// slot (blinklabs-io/dingo#382).
+// slot.
 func (ls *LedgerState) queryShelleyPoolDistr2(
 	q *olocalstatequery.ShelleyPoolDistr2Query,
 	at QueryPoint,

@@ -26,9 +26,12 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	omockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
@@ -37,7 +40,7 @@ import (
 )
 
 // TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain is the ledger-level
-// regression for issue #3005.
+// regression for the cross-fork splice.
 //
 // After the node abandons a fork, the rolled-back blocks stay resolvable
 // through the chain manager's retained block cache with the block indexes the
@@ -311,6 +314,42 @@ func TestRollbackAheadOfLedgerDoesNotArmContinuationAudit(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, ls.currentTip)
 }
 
+// TestRollbackAheadOfLedgerDoesNotPersistIntent covers genesis and snapshot
+// catch-up, where the primary chain may already contain blocks beyond the
+// applied ledger tip. A rollback to that primary-chain point does not move the
+// ledger, so it must not leave a durable undo intent for a later restart.
+func TestRollbackAheadOfLedgerDoesNotPersistIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	subID, _ := bus.SubscribeWithBuffer(TransactionEventType, 1)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, subID) })
+
+	durableTip := ochainsync.Tip{}
+	ls.Lock()
+	ls.currentTip = durableTip
+	ls.currentTipBlockNonce = nil
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	require.NoError(t, ls.db.SetTip(durableTip, nil))
+	emitted, err := ls.validateAndEmitRollbackUndoEmitted(
+		fixture.ancestorTip.Point,
+	)
+	require.NoError(t, err)
+	assert.False(t, emitted)
+	_, _, pending, err := loadRollbackIntent(ls.db)
+	require.NoError(t, err)
+	assert.False(
+		t,
+		pending,
+		"validation must not create an intent ahead of the applied tip",
+	)
+}
+
 // TestContinuationAuditAcceptsProducerInSameWindow guards the audit against
 // false positives: blockfetch runs ahead of ledger application, so a producer
 // delivered earlier in the same audit window is on the local chain even though
@@ -458,14 +497,15 @@ func armRearmFixture(
 	return ls, logBuf.String(), producerTxId
 }
 
-// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
-// issue #4102. Fork churn re-arms the audit repeatedly, and every rollback
-// target in that issue's run sat ahead of the blocks the previous window had
-// already vetted. Such a rollback truncates nothing those blocks occupy, so
-// they stay on the primary chain -- unapplied, because ledger apply lags
-// blockfetch by design, and never re-fetched, because the chain still has
-// them. Forgetting them at the rearm therefore leaves the next audited spend
-// of their outputs with no way to resolve, which is the false report.
+// TestContinuationAuditRearmPreservesInFlightProducer is the regression for the
+// audit re-arming during early replay. Fork churn re-arms the audit repeatedly,
+// and every rollback target in the failing run sat ahead of the blocks the
+// previous window had already vetted. Such a rollback truncates nothing those
+// blocks occupy, so they stay on the primary chain -- unapplied, because ledger
+// apply lags blockfetch by design, and never re-fetched, because the chain
+// still has them. Forgetting them at the rearm therefore leaves the next
+// audited spend of their outputs with no way to resolve, which is the false
+// report.
 func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
 	t.Parallel()
 
@@ -1307,7 +1347,39 @@ func TestReconcileTruncationTransitionsContinuationAudit(t *testing.T) {
 			ls.continuationAudit.Load(),
 			"a refused rewind deletes nothing the window describes",
 		)
+		_, _, pending, err := loadRollbackIntent(ls.db)
+		require.NoError(t, err)
+		assert.False(t, pending, "a refused rewind must not leave a new intent")
 	})
+}
+
+func TestReconcileRefusedRewindRestoresPreviousRollbackIntent(t *testing.T) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	oldBlock, err := database.BlockByPoint(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+	)
+	require.NoError(t, err)
+	priorBlocks := []models.Block{oldBlock}
+	require.NoError(t, persistRollbackIntent(
+		fixture.ls.db,
+		fixture.currentTip.Point,
+		priorBlocks,
+	))
+	putPrimaryChainOnForkBeyondK(t, fixture, "reconcile-prior-intent")
+	chainTip := fixture.ls.chain.Tip()
+
+	err = fixture.ls.reconcilePrimaryChainTipWithLedgerTip()
+	require.ErrorIs(t, err, chain.ErrRollbackExceedsSecurityParam)
+	require.Equal(t, chainTip, fixture.ls.chain.Tip())
+
+	intentPoint, intentBlocks, pending, err := loadRollbackIntent(fixture.ls.db)
+	require.NoError(t, err)
+	require.True(t, pending)
+	require.Equal(t, fixture.currentTip.Point, intentPoint)
+	require.Equal(t, priorBlocks, intentBlocks)
 }
 
 // TestPrimaryChainTipRegressed pins which tip movements a recovery rewind may

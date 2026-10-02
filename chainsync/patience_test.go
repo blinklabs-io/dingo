@@ -95,10 +95,10 @@ func patience(capacity, rate uint64) chainsync.PatienceConfig {
 	}
 }
 
-// TestPatienceDisconnectsSlowDripPeer is the #4348 regression: a peer that
-// advertises a far better tip and delivers one valid header every 110 seconds
-// refreshes LastActivity each time, so the two-minute stall watchdog never
-// fires. The Limit on Patience must exhaust it anyway.
+// TestPatienceDisconnectsSlowDripPeer is the Genesis Limit on Patience
+// regression: a peer that advertises a far better tip and delivers one valid
+// header every 110 seconds refreshes LastActivity each time, so the two-minute
+// stall watchdog never fires. The Limit on Patience must exhaust it anyway.
 func TestPatienceDisconnectsSlowDripPeer(t *testing.T) {
 	t.Parallel()
 	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())

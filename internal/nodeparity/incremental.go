@@ -266,8 +266,7 @@ func fullCheckReasonPriority(reason FullCheckReason) int {
 // specific block that raised them: coalescing one of those away in favor
 // of a lower-priority request already queued would lose the reason
 // entirely, not just delay it, since the condition itself will typically no
-// longer hold by the time the next check runs (blinklabs-io/dingo#4183
-// review).
+// longer hold by the time the next check runs.
 type fullCheckWorker struct {
 	cfg    IncrementalConfig
 	cursor *cursorState
@@ -329,7 +328,7 @@ func (w *fullCheckWorker) request(reason FullCheckReason, at Tip) {
 // regardless of outcome (the prior behavior) silently delayed the next
 // legitimate interval checkpoint by up to a full --full-check-interval's
 // worth of blocks even though no check had actually completed
-// (blinklabs-io/dingo#1900 incremental-mode audit finding).
+// (incremental-mode audit finding).
 func fullCheckSucceeded(result *CheckResult, err error) bool {
 	return err == nil && result != nil && !result.Skipped
 }
@@ -430,7 +429,7 @@ type IncrementalConfig struct {
 	// error -- a per-block LocalStateQuery failure (the failure class this
 	// exists for: previously such errors reached only a log line, never any
 	// metric, so the NodeParityCheckErrors alert could not see them at all;
-	// blinklabs-io/dingo#1900 incremental-mode audit finding), a dial
+	// incremental-mode audit finding), a dial
 	// failure, or any other reason the session dropped -- right before
 	// RunIncremental logs it and reconnects with backoff. Unlike OnBlockCheck
 	// (one call per successfully-validated block), this is one call per
@@ -488,7 +487,7 @@ const DefaultFullCheckTimeout = 20 * time.Minute
 // pointReachable), RunIncremental resumes sequential validation from there
 // instead, so blocks that landed during any downtime are individually
 // compared rather than silently skipped for the fresh baseline's own,
-// typically-later point (blinklabs-io/dingo#1900 incremental-mode audit
+// typically-later point (incremental-mode audit
 // finding). Only when there is no prior cursor, or its point is no longer
 // reachable (pruned, or a fork), does the cursor fall back to the fresh
 // baseline's own point. Either way, BlocksSinceFullCheck is always seeded
@@ -627,8 +626,7 @@ func establishBaseline(
 		// its doc comment), so nothing else stops a peer that accepts the
 		// connection and then stalls mid-query from hanging this retry
 		// loop indefinitely instead of timing out and retrying with
-		// backoff like every other failure mode here already does
-		// (blinklabs-io/dingo#4183 review).
+		// backoff like every other failure mode here already does.
 		checkCtx, cancel := context.WithTimeout(ctx, cfg.FullCheckTimeout)
 		result, err := Check(
 			checkCtx,
@@ -673,7 +671,7 @@ func establishBaseline(
 // resumes from once a trustworthy live-tip baseline result is in hand: a
 // prior cursor's own persisted point, when one exists and both nodes can
 // still Acquire it (pointReachable) -- so blocks that landed during any
-// downtime are not silently skipped, the fix for blinklabs-io/dingo#1900's
+// downtime are not silently skipped, the fix for the
 // incremental-mode audit finding that a restart always discarded the saved
 // point for the fresh baseline's own -- or the fresh baseline result's own
 // point otherwise (no prior cursor, or its point is no longer reachable:
@@ -690,7 +688,7 @@ func establishBaseline(
 // per-cycle report) so an operator watching logs can tell a session started
 // life already disputed, rather than only discovering that by reading the
 // same "ledger state diverged" line every other full check produces
-// (blinklabs-io/dingo#1900 incremental-mode audit finding).
+// (incremental-mode audit finding).
 func buildStartupCursor(
 	ctx context.Context,
 	cfg IncrementalConfig,
@@ -719,8 +717,7 @@ func buildStartupCursor(
 	// (this function's own epoch lookup, or pointReachable's two probes).
 	// These are fast GetEpochNo queries, far short of a full whole-UTxO
 	// walk, so FullCheckTimeout gives generous headroom rather than
-	// needing to be tuned tightly for them specifically
-	// (blinklabs-io/dingo#4183 review).
+	// needing to be tuned tightly for them specifically.
 	queryCtx, cancel := context.WithTimeout(ctx, cfg.FullCheckTimeout)
 	defer cancel()
 
@@ -871,8 +868,7 @@ func queryEpochAt(
 // backoff to watcherMinBackoff on every reconnect, so the loop redialed
 // both nodes roughly every 250ms indefinitely instead of backing off, the
 // exact dial churn incrementalSession's own doc comment above identifies
-// as making "protocol is shutting down" failures worse
-// (blinklabs-io/dingo#4183 review).
+// as making "protocol is shutting down" failures worse.
 func incrementalSession(
 	ctx context.Context,
 	cfg IncrementalConfig,
@@ -1046,10 +1042,10 @@ func incrementalSession(
 // out as a pure function so it can be tested directly against every
 // combination of inputs -- including the interval and epoch-transition
 // triggers, which the live testnet used to develop this package could not
-// exercise on its own: blinklabs-io/dingo#3854 (open at the time of
-// writing) makes the stake-distribution comparison diverge on effectively
-// every block, so a live run's mismatch trigger always fires first and
-// preempts both of the others before their own conditions are ever reached.
+// exercise on its own: a divergence (pointer-address UTxOs not attributed to
+// their stake credential) made the stake-distribution comparison diverge on
+// effectively every block, so a live run's mismatch trigger always fires first
+// and preempts both of the others before their own conditions are ever reached.
 //
 // diffEmpty is the block's own delta-check result; epoch and beforeEpoch are
 // this block's freshly-queried epoch and the cursor's epoch before this
@@ -1185,7 +1181,7 @@ func handleIncrementalRollback(
 // walk is behind by design -- querying it here reliably stalled every
 // incremental session against a real Dingo node, since the very next block's
 // query would fail the same way forever, the cursor never advancing
-// (blinklabs-io/dingo#1900 incremental-mode audit finding). Stake
+// (incremental-mode audit finding). Stake
 // distribution is still compared by this mode's periodic full checkpoints
 // (--full-check-interval), which pin at live tip via the shared Check()
 // path and so can query it safely. It returns the negative epoch number
@@ -1317,7 +1313,7 @@ func queryIncrementalHalf(
 	// equals its live tip (ledger/queries_stakedistribution.go), which is
 	// never true for a per-block walk that is behind tip by design --
 	// querying it here permanently stalled every incremental session against
-	// a real Dingo node (blinklabs-io/dingo#1900 incremental-mode audit
+	// a real Dingo node (incremental-mode audit
 	// finding: 4339 identical failures in a row, cursor never advancing).
 	// Stake-distribution divergence is still caught by incremental mode's
 	// periodic full checkpoints (--full-check-interval), which pin at live
@@ -1388,7 +1384,7 @@ func blockRefsToQuery(
 // is missing from both because it was also consumed within this same block
 // (created by one transaction, spent by a later one): that is the correct,
 // expected outcome, not a divergence, so it must not be reported (see the
-// produced loop below; blinklabs-io/dingo#1900 incremental-mode audit
+// produced loop below; incremental-mode audit
 // finding -- an intra-block create-then-spend previously produced a false
 // "missing from both" line).
 func diffBlockUtxoDelta(

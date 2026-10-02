@@ -28,7 +28,7 @@ import (
 const defaultKoiosParityCacheSubdir = ".koios/cache.db"
 
 // startKoiosParityObserver wires the optional in-process Koios reward-parity
-// observer (dingo #3098) into the running node: it builds the narrow
+// observer into the running node: it builds the narrow
 // reward-parity source adapter directly from n.db (no export, no second
 // Dingo sync, no new permanent table — see koiosparity.DatabaseSource's doc
 // comment), constructs the observer, subscribes it to
@@ -88,19 +88,20 @@ func (n *Node) startKoiosParityObserver() error {
 	}
 
 	observer, err := koiosparity.NewObserver(koiosparity.ObserverConfig{
-		Network:              network,
-		CachePath:            cachePath,
-		APIKey:               cfg.APIKey,
-		BaseURL:              cfg.BaseURL,
-		AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
-		Source:               source,
-		Strict:               cfg.Strict,
-		AccountsEnabled:      accountsEnabled,
-		GraceHours:           cfg.GraceHours,
-		AccountChunkSize:     cfg.AccountChunkSize,
-		AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
-		PromRegistry:         n.config.promRegistry,
-		Logger:               n.config.logger,
+		Network:               network,
+		CachePath:             cachePath,
+		APIKey:                cfg.APIKey,
+		BaseURL:               cfg.BaseURL,
+		AllowInsecureHTTP:     cfg.AllowInsecureHTTP,
+		AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		Source:                source,
+		Strict:                cfg.Strict,
+		AccountsEnabled:       accountsEnabled,
+		GraceHours:            cfg.GraceHours,
+		AccountChunkSize:      cfg.AccountChunkSize,
+		AccountChunkMaxBytes:  cfg.AccountChunkMaxBytes,
+		PromRegistry:          n.config.promRegistry,
+		Logger:                n.config.logger,
 		FatalFunc: func(err error) {
 			n.config.logger.Error(
 				"fatal koios parity validation failure, initiating shutdown",
@@ -131,7 +132,7 @@ func (n *Node) startKoiosParityObserver() error {
 		return fmt.Errorf("start koios parity observer: %w", err)
 	}
 	n.koiosParityObserver = observer
-	n.koiosParitySubId = n.eventBus.SubscribeFunc(
+	n.koiosParitySubId = n.subscribeRequiredEvent(
 		event.EpochTransitionEventType,
 		observer.HandleEpochTransitionEvent,
 	)

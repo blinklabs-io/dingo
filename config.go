@@ -79,7 +79,7 @@ type HistoryExpiryConfig struct {
 }
 
 // KoiosParityConfig controls the optional in-process Koios reward-parity
-// observer (dingo #3098). When Enabled, Run() subscribes an observer to the
+// observer. When Enabled, Run() subscribes an observer to the
 // node's own EventBus (event.EpochTransitionEventType) that validates each
 // newly closed epoch's committed reward state directly against Koios
 // reference data as the node advances — see internal/koiosparity and
@@ -100,6 +100,10 @@ type KoiosParityConfig struct {
 	BaseURL string
 	// AllowInsecureHTTP permits a plain-HTTP BaseURL. Local dev/test only.
 	AllowInsecureHTTP bool
+	// AllowPrivateAddresses permits a private, loopback, or special-use
+	// BaseURL. Leave false unless the operator intentionally runs Koios on
+	// such a network.
+	AllowPrivateAddresses bool
 	// APIKey is the Koios Bearer token for higher-rate-limit access.
 	APIKey string
 	// Strict stops/cancels the node on the first Koios/tool error or
@@ -112,14 +116,14 @@ type KoiosParityConfig struct {
 	// Dingo-side row is treated as reference/sync lag rather than a
 	// failure. 0 selects the default (24).
 	GraceHours int
-	// Accounts additionally runs #3097's per-account exact-parity fetch+check
+	// Accounts additionally runs the per-account exact-parity fetch+check
 	// phase for every epoch the observer processes, alongside the existing
 	// epoch-aggregate/pool phases. A nil pointer defaults to true — see
 	// internalconfig.DefaultKoiosParityConfig — since a plain bool's zero
 	// value (false) can't be distinguished from an explicit opt-out. Pass a
 	// pointer to false to disable account-level checking explicitly.
 	Accounts *bool
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request issued by the Accounts phase above, by
 	// both address count and encoded body size. 0 for either selects the
 	// package default. Unused when Accounts resolves to false.
@@ -151,7 +155,11 @@ type TokenRegistryConfig struct {
 	Interval              time.Duration
 	RequestTimeout        time.Duration
 	MaxBytes              int64
+	MaxDecompressedBytes  int64
 	MaxEntryBytes         int64
+	MaxArchiveEntries     int
+	MaxAcceptedEntries    int
+	MaxBatchBytes         int64
 	Enabled               bool
 	StoreLogos            bool
 	AllowPrivateAddresses bool
@@ -248,6 +256,7 @@ type Config struct {
 	inboundPruneAfter, inboundCooldown                                                  time.Duration
 	inboundDuplexOnlyForHot                                                             bool
 	maxConnectionsPerIP, maxInboundConns, maxNtCConns, maxNtCConnectionsPerIP           int
+	maxTrustedLocalNtCConns                                                             int
 	genesisBootstrap                                                                    bool
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
@@ -256,9 +265,10 @@ type Config struct {
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration
 	forgeSyncToleranceSlots, forgeStaleGapThresholdSlots                                uint64
-	forgePrimaryChainTipToleranceSlots                                                  uint64
 	forgeUpstreamStalenessSlots, forgeAppliedTipStalenessSlots                          uint64
 	forgeEndorserBlockStalenessSlots                                                    uint64
+	forgeEBMaxTxRefs, forgeEBMaxBytes                                                   *uint64
+	forgeEBSelectionReserve                                                             time.Duration
 	validateForgedBlock                                                                 bool
 	blockPipelineEnabled                                                                bool
 	blockPipelineValidateEnabled                                                        bool
@@ -796,17 +806,18 @@ func (c *Config) syncCompatFields() {
 	// so the mirror always carries a non-nil pointer.
 	koiosParityAccounts := c.cfg.KoiosParity.Accounts
 	c.koiosParity = KoiosParityConfig{
-		Enabled:              c.cfg.KoiosParity.Enabled,
-		Network:              c.cfg.KoiosParity.Network,
-		CachePath:            c.cfg.KoiosParity.CachePath,
-		APIKey:               c.cfg.KoiosParity.APIKey,
-		BaseURL:              c.cfg.KoiosParity.BaseURL,
-		AllowInsecureHTTP:    c.cfg.KoiosParity.AllowInsecureHTTP,
-		Strict:               c.cfg.KoiosParity.Strict,
-		GraceHours:           c.cfg.KoiosParity.GraceHours,
-		Accounts:             &koiosParityAccounts,
-		AccountChunkSize:     c.cfg.KoiosParity.AccountChunkSize,
-		AccountChunkMaxBytes: c.cfg.KoiosParity.AccountChunkMaxBytes,
+		Enabled:               c.cfg.KoiosParity.Enabled,
+		Network:               c.cfg.KoiosParity.Network,
+		CachePath:             c.cfg.KoiosParity.CachePath,
+		APIKey:                c.cfg.KoiosParity.APIKey,
+		BaseURL:               c.cfg.KoiosParity.BaseURL,
+		AllowInsecureHTTP:     c.cfg.KoiosParity.AllowInsecureHTTP,
+		AllowPrivateAddresses: c.cfg.KoiosParity.AllowPrivateAddresses,
+		Strict:                c.cfg.KoiosParity.Strict,
+		GraceHours:            c.cfg.KoiosParity.GraceHours,
+		Accounts:              &koiosParityAccounts,
+		AccountChunkSize:      c.cfg.KoiosParity.AccountChunkSize,
+		AccountChunkMaxBytes:  c.cfg.KoiosParity.AccountChunkMaxBytes,
 	}
 	// The token registry syncer reads this runtime mirror, so YAML, env, and
 	// CLI values -- which only ever land on c.cfg -- have to be carried
@@ -820,7 +831,11 @@ func (c *Config) syncCompatFields() {
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
 		MaxBytes:              c.cfg.TokenRegistry.MaxBytes,
+		MaxDecompressedBytes:  c.cfg.TokenRegistry.MaxDecompressedBytes,
 		MaxEntryBytes:         c.cfg.TokenRegistry.MaxEntryBytes,
+		MaxArchiveEntries:     c.cfg.TokenRegistry.MaxArchiveEntries,
+		MaxAcceptedEntries:    c.cfg.TokenRegistry.MaxAcceptedEntries,
+		MaxBatchBytes:         c.cfg.TokenRegistry.MaxBatchBytes,
 		Enabled:               c.cfg.TokenRegistry.Enabled,
 		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
 		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
@@ -863,13 +878,15 @@ func (c *Config) syncCompatFields() {
 	c.inboundHotScoreThreshold, c.inboundPruneAfter, c.inboundDuplexOnlyForHot, c.inboundCooldown = c.cfg.InboundHotScoreThreshold, c.cfg.InboundPruneAfter, c.cfg.InboundDuplexOnlyForHot, c.cfg.InboundCooldown
 	c.maxConnectionsPerIP, c.maxInboundConns = c.cfg.MaxConnectionsPerIP, c.cfg.MaxInboundConns
 	c.maxNtCConns, c.maxNtCConnectionsPerIP = c.cfg.MaxNtCConns, c.cfg.MaxNtCConnectionsPerIP
+	c.maxTrustedLocalNtCConns = c.cfg.MaxTrustedLocalNtCConns
 	c.genesisBootstrap, c.genesisWindowSlots, c.genesisCorroborationPeers = c.cfg.GenesisBootstrap.Enabled, c.cfg.GenesisBootstrap.WindowSlots, c.cfg.GenesisBootstrap.CorroborationPeers
 	c.blockProducer, c.shelleyVRFKey, c.shelleyKESKey, c.shelleyOperationalCertificate = c.cfg.BlockProducer, c.cfg.ShelleyVRFKey, c.cfg.ShelleyKESKey, c.cfg.ShelleyOperationalCertificate
 	c.shelleyKESAgentSocket, c.shelleyKESAgentMode, c.shelleyKESAgentSignTimeout = c.cfg.ShelleyKESAgentSocket, c.cfg.ShelleyKESAgentMode, c.cfg.ShelleyKESAgentSignTimeout
 	c.forgeSyncToleranceSlots, c.forgeStaleGapThresholdSlots, c.validateForgedBlock = c.cfg.ForgeSyncToleranceSlots, c.cfg.ForgeStaleGapThresholdSlots, c.cfg.ValidateForgedBlock
-	c.forgePrimaryChainTipToleranceSlots = c.cfg.ForgePrimaryChainTipToleranceSlots
 	c.forgeUpstreamStalenessSlots, c.forgeAppliedTipStalenessSlots = c.cfg.ForgeUpstreamStalenessSlots, c.cfg.ForgeAppliedTipStalenessSlots
 	c.forgeEndorserBlockStalenessSlots = c.cfg.ForgeEndorserBlockStalenessSlots
+	c.forgeEBMaxTxRefs, c.forgeEBMaxBytes = c.cfg.ForgeEBMaxTxRefs, c.cfg.ForgeEBMaxBytes
+	c.forgeEBSelectionReserve = c.cfg.ForgeEBSelectionReserve
 	c.blockPipelineEnabled = c.cfg.BlockPipelineEnabled
 	c.blockPipelineValidateEnabled = c.cfg.BlockPipelineValidateEnabled
 	c.minPoolMargin, c.pledgeLeverageEnabled, c.pledgeLeverage = c.cfg.MinPoolMargin, c.cfg.PledgeLeverageEnabled, c.cfg.PledgeLeverage
@@ -1452,6 +1469,25 @@ func WithMaxNtCConnectionsPerIP(n int) ConfigOptionFunc {
 	}
 }
 
+// WithMaxTrustedLocalNtCConns specifies the maximum number of node-to-client
+// connections accepted by listeners bound to local-only transports.
+// Non-positive values are ignored. Default: 100.
+func WithMaxTrustedLocalNtCConns(n int) ConfigOptionFunc {
+	return func(c *Config) {
+		if n > 0 {
+			c.cfg.MaxTrustedLocalNtCConns = n
+		}
+	}
+}
+
+// WithSkipRewardLiveStakeBackfillCheck skips the startup scan that verifies
+// reward live-stake rows against the full UTxO table.
+func WithSkipRewardLiveStakeBackfillCheck(skip bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.SkipRewardLiveStakeBackfillCheck = skip
+	}
+}
+
 // WithGenesisBootstrap enables Genesis-mode chain selection during from-origin
 // bootstrap. Genesis mode automatically exits once the local tip is within the
 // configured Genesis window of the best known peer tip.
@@ -1565,15 +1601,6 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgePrimaryChainTipToleranceSlots sets how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-// Use 0 to fall back to the built-in default.
-func WithForgePrimaryChainTipToleranceSlots(slots uint64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.cfg.ForgePrimaryChainTipToleranceSlots = slots
-	}
-}
-
 // WithForgeUpstreamStalenessSlots sets how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
 // 0 (the default) DISABLES the bound -- it is not "fall back to a built-in
@@ -1585,9 +1612,10 @@ func WithForgeUpstreamStalenessSlots(slots uint64) ConfigOptionFunc {
 	}
 }
 
-// WithForgeAppliedTipStalenessSlots sets how many slots older than the current
-// slot the newest block this node holds may be before forging is skipped. 0
-// disables this wall-clock backstop.
+// WithForgeAppliedTipStalenessSlots sets the optional wall-clock age bound
+// for newestKnown when a corroborated upstream target is available. The bound
+// is ignored when the target is unavailable, because tip age alone does not
+// show that the network advanced. Zero disables the bound.
 func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeAppliedTipStalenessSlots = slots
@@ -1600,9 +1628,8 @@ func WithForgeAppliedTipStalenessSlots(slots uint64) ConfigOptionFunc {
 // default", and nothing fills it in: see
 // internal/config.DefaultForgeEndorserBlockStalenessSlots, which is itself 0.
 //
-// Deliberately separate from WithForgePrimaryChainTipToleranceSlots: that one
-// bounds a local block-against-block comparison, this one bounds a
-// network-stage announcement watermark against the local applied tip.
+// This bounds a network-stage announcement watermark against the local
+// applied tip.
 func WithForgeEndorserBlockStalenessSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeEndorserBlockStalenessSlots = slots
@@ -1614,6 +1641,34 @@ func WithForgeEndorserBlockStalenessSlots(slots uint64) ConfigOptionFunc {
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.ForgeStaleGapThresholdSlots = slots
+	}
+}
+
+// WithForgeEBSelectionReserve sets how much of the slot Leios
+// endorser-block selection must leave for ranking-block assembly, signing
+// and broadcast. Zero falls back to the built-in default.
+func WithForgeEBSelectionReserve(d time.Duration) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBSelectionReserve = d
+	}
+}
+
+// WithForgeEBMaxTxRefs caps the number of transaction references a forged
+// Leios endorser block may carry. 0 disables the cap; leaving the option
+// unset takes the built-in default. The slot deadline remains the
+// operative bound in normal operation.
+func WithForgeEBMaxTxRefs(refs uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBMaxTxRefs = &refs
+	}
+}
+
+// WithForgeEBMaxBytes caps the total referenced transaction bytes a forged
+// Leios endorser block may carry. 0 disables the cap; leaving the option
+// unset takes the built-in default.
+func WithForgeEBMaxBytes(bytes uint64) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.ForgeEBMaxBytes = &bytes
 	}
 }
 
@@ -1630,7 +1685,7 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockPipelineEnabled enables the parallel block-decode pipeline for the
-// chainsync replay loop (issue #1894 phase 1). Not consensus-affecting; off
+// chainsync replay loop (phase 1 of the pipeline). Not consensus-affecting; off
 // by default. See LedgerStateConfig.BlockPipelineEnabled.
 func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -1639,7 +1694,7 @@ func WithBlockPipelineEnabled(enabled bool) ConfigOptionFunc {
 }
 
 // WithBlockPipelineValidateEnabled adds a parallel VRF/KES and OpCert
-// validate stage to the block-decode pipeline (issue #1894 phase 3). Off by
+// validate stage to the block-decode pipeline (phase 3 of the pipeline). Off by
 // default; requires WithBlockPipelineEnabled. See
 // LedgerStateConfig.BlockPipelineValidateEnabled.
 func WithBlockPipelineValidateEnabled(enabled bool) ConfigOptionFunc {
@@ -1718,7 +1773,7 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 }
 
 // WithKoiosParity configures the optional in-process Koios reward-parity
-// observer (dingo #3098). See KoiosParityConfig's doc comment. This is how a
+// observer. See KoiosParityConfig's doc comment. This is how a
 // library caller (or internal/node's composition of a real dingo.yaml/env
 // config) enables live-driven parity validation for the node Run() starts —
 // the one-off validation run and a normal sync share the same process and
@@ -1730,23 +1785,24 @@ func WithKoiosParity(cfg KoiosParityConfig) ConfigOptionFunc {
 		// internalconfig.DefaultKoiosParityConfig) unless the caller
 		// explicitly opts out via a non-nil pointer to false — a plain bool
 		// field here would make an unset value indistinguishable from an
-		// explicit false, silently disabling #3097's per-account checking.
+		// explicit false, silently disabling per-account checking.
 		accounts := true
 		if cfg.Accounts != nil {
 			accounts = *cfg.Accounts
 		}
 		c.cfg.KoiosParity = internalconfig.KoiosParityConfig{
-			Enabled:              cfg.Enabled,
-			Network:              cfg.Network,
-			CachePath:            cfg.CachePath,
-			APIKey:               cfg.APIKey,
-			BaseURL:              cfg.BaseURL,
-			AllowInsecureHTTP:    cfg.AllowInsecureHTTP,
-			Strict:               cfg.Strict,
-			GraceHours:           cfg.GraceHours,
-			Accounts:             accounts,
-			AccountChunkSize:     cfg.AccountChunkSize,
-			AccountChunkMaxBytes: cfg.AccountChunkMaxBytes,
+			Enabled:               cfg.Enabled,
+			Network:               cfg.Network,
+			CachePath:             cfg.CachePath,
+			APIKey:                cfg.APIKey,
+			BaseURL:               cfg.BaseURL,
+			AllowInsecureHTTP:     cfg.AllowInsecureHTTP,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+			Strict:                cfg.Strict,
+			GraceHours:            cfg.GraceHours,
+			Accounts:              accounts,
+			AccountChunkSize:      cfg.AccountChunkSize,
+			AccountChunkMaxBytes:  cfg.AccountChunkMaxBytes,
 		}
 	}
 }
@@ -1791,7 +1847,11 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
 			MaxBytes:              cfg.MaxBytes,
+			MaxDecompressedBytes:  cfg.MaxDecompressedBytes,
 			MaxEntryBytes:         cfg.MaxEntryBytes,
+			MaxArchiveEntries:     cfg.MaxArchiveEntries,
+			MaxAcceptedEntries:    cfg.MaxAcceptedEntries,
+			MaxBatchBytes:         cfg.MaxBatchBytes,
 			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
 		}
@@ -2377,21 +2437,15 @@ func (c *Config) ForgeSyncToleranceSlots() uint64 {
 	return c.cfg.ForgeSyncToleranceSlots
 }
 
-// ForgePrimaryChainTipToleranceSlots returns how far the ledger-applied tip may
-// trail this node's own primary chain tip before forging is skipped.
-func (c *Config) ForgePrimaryChainTipToleranceSlots() uint64 {
-	return c.cfg.ForgePrimaryChainTipToleranceSlots
-}
-
 // ForgeUpstreamStalenessSlots returns how far the newest block this node holds
 // may trail the corroborated upstream sync target before forging is skipped.
 func (c *Config) ForgeUpstreamStalenessSlots() uint64 {
 	return c.cfg.ForgeUpstreamStalenessSlots
 }
 
-// ForgeAppliedTipStalenessSlots returns how many slots older than the current
-// slot the newest block this node holds may be before forging is skipped.
-// 0 disables the wall-clock backstop.
+// ForgeAppliedTipStalenessSlots returns the optional wall-clock age bound for
+// newestKnown when a corroborated upstream target is available. Zero disables
+// the bound; an unavailable target is not evidence of network progress.
 func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
 	return c.cfg.ForgeAppliedTipStalenessSlots
 }
@@ -2401,6 +2455,25 @@ func (c *Config) ForgeAppliedTipStalenessSlots() uint64 {
 // 0 disables the bound.
 func (c *Config) ForgeEndorserBlockStalenessSlots() uint64 {
 	return c.cfg.ForgeEndorserBlockStalenessSlots
+}
+
+// ForgeEBSelectionReserve returns the slot time reserved for
+// ranking-block assembly after endorser-block selection.
+func (c *Config) ForgeEBSelectionReserve() time.Duration {
+	return c.cfg.ForgeEBSelectionReserve
+}
+
+// ForgeEBMaxTxRefs returns the endorser-block transaction reference cap.
+// Nil means unset, so the forger applies its built-in default; a non-nil 0
+// disables the cap.
+func (c *Config) ForgeEBMaxTxRefs() *uint64 {
+	return c.cfg.ForgeEBMaxTxRefs
+}
+
+// ForgeEBMaxBytes returns the endorser-block referenced-bytes cap. Nil
+// means unset; a non-nil 0 disables the cap.
+func (c *Config) ForgeEBMaxBytes() *uint64 {
+	return c.cfg.ForgeEBMaxBytes
 }
 
 // ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.

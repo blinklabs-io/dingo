@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/netguard"
 )
 
 const (
@@ -65,13 +67,13 @@ const (
 
 	// koios408MaxRetriesDefault/koios408InitialBackoffDefault/
 	// koios408MaxBackoffDefault give HTTP 408 ("Request Time-out") its own,
-	// much longer retry budget than koiosMaxRetries/koiosRetryBackoff5xx
-	// (dingo #4486). 408 means the upstream (or an intermediate gateway --
+	// much longer retry budget than koiosMaxRetries/koiosRetryBackoff5xx.
+	// 408 means the upstream (or an intermediate gateway --
 	// the observed incident's body was the literal
 	// "<h1>408 Request Time-out</h1>") took too long to answer *this*
 	// request; it says nothing about whether the next one will succeed,
 	// unlike the 400/404/422/401/403 class the fallthrough in get()/post()
-	// still treats as permanent. The dingo #4486 incident saw Koios degrade
+	// still treats as permanent. A past incident saw Koios degrade
 	// for close to an hour; koiosMaxRetries's budget (3 attempts, exhausting
 	// in a few minutes even combined with burst-429 cooldowns) gives up long
 	// before a real outage like that clears -- and under
@@ -115,8 +117,8 @@ const (
 	// large the full requested address universe is, and limits the "blast
 	// radius" of a single failed/timed-out request to a small slice of the
 	// epoch's account universe rather than the whole thing. This was the
-	// minimal viable chunking for #3097; shaping requests further by actual
-	// encoded byte size and mid-fetch resumable checkpointing is #3099's
+	// minimal viable chunking; shaping requests further by actual
+	// encoded byte size and mid-fetch resumable checkpointing is a separate
 	// scope, delivered in fetchAccountRewardsForEpoch (see its doc comment)
 	// via chunkAddressesByCountAndSize — koiosAccountChunkSize remains the
 	// default address-count bound when an operator hasn't tuned
@@ -124,7 +126,7 @@ const (
 	koiosAccountChunkSize = 100
 
 	// koiosMaxResponseBytes caps every Koios response body read (GET and
-	// POST) — dingo #3099's "bound response/body memory" requirement.
+	// POST) — the "bound response/body memory" requirement.
 	// Existing GET responses are already page-bounded to koiosPageSize rows
 	// and never approach this; it exists specifically as a defensive
 	// ceiling for /account_reward_history's POST responses, whose size
@@ -249,9 +251,9 @@ type KoiosPoolHistoryItem struct {
 }
 
 // KoiosEpochParamsResp is the Koios /epoch_params response shape for the
-// per-epoch protocol parameters (dingo #3931). A wrong stored protocol
+// per-epoch protocol parameters. A wrong stored protocol
 // parameter changes what the node accepts, so it is wedge-class in exactly
-// the way a wrong validation rule is (#3928) — and nothing else in this
+// the way a wrong validation rule is — and nothing else in this
 // checker looked at it.
 //
 // Every numeric field is a json.Number rather than a concrete Go numeric
@@ -424,7 +426,7 @@ func validateKoiosNetwork(network string) error {
 // host that does rate-limit still backs off correctly on 429.
 func NewKoiosClient(
 	network, apiKey, baseURL string,
-	allowInsecureHTTP bool,
+	allowInsecureHTTP, allowPrivateAddresses bool,
 ) (*KoiosClient, error) {
 	if err := validateKoiosNetwork(network); err != nil {
 		return nil, err
@@ -432,7 +434,11 @@ func NewKoiosClient(
 	base := koiosBaseURLs[network]
 	burstLimit := koiosBurstLimitSafe
 	if trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/"); trimmed != "" {
-		if err := validateKoiosBaseURL(trimmed, allowInsecureHTTP); err != nil {
+		if err := validateKoiosBaseURL(
+			trimmed,
+			allowInsecureHTTP,
+			allowPrivateAddresses,
+		); err != nil {
 			return nil, err
 		}
 		base = trimmed
@@ -455,6 +461,11 @@ func NewKoiosClient(
 				koiosTLSHandshakeTimeout,
 				koiosResponseHeaderTimeout,
 				koiosExpectContinueTimeout,
+				allowPrivateAddresses,
+			),
+			CheckRedirect: koiosRedirectPolicy(
+				allowInsecureHTTP,
+				allowPrivateAddresses,
 			),
 		},
 		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
@@ -472,11 +483,11 @@ func NewKoiosClient(
 // addition to (never instead of) the http.Client-level Timeout set alongside
 // it in NewKoiosClient.
 //
-// It starts from http.DefaultTransport.Clone() rather than a bare
-// &http.Transport{} so this client keeps DefaultTransport's other tuning
-// (HTTP/2 negotiation, proxy-from-environment, idle connection pooling) and
-// only overrides the fields this package cares about giving explicit,
-// shorter-than-the-client-timeout bounds.
+// It uses a fresh transport rather than cloning http.DefaultTransport. The
+// process-global default may have custom TLS verification or alternate
+// protocol handlers installed, either of which would escape this client's
+// security boundary. The inert HTTP/2 and idle-pool tuning from the standard
+// default is copied explicitly below.
 //
 // dialTimeout/dialKeepAlive configure the net.Dialer used for
 // DialContext -- redundant with DefaultTransport's own dial defaults today,
@@ -500,27 +511,37 @@ func NewKoiosClient(
 func newKoiosTransport(
 	dialTimeout, dialKeepAlive time.Duration,
 	tlsHandshakeTimeout, responseHeaderTimeout, expectContinueTimeout time.Duration,
+	allowPrivateAddresses bool,
 ) *http.Transport {
-	// http.DefaultTransport is documented as *http.Transport today, but
-	// nothing enforces that at compile time; a comma-ok assertion with a
-	// safe fallback (matching mithril/download.go's newDownloadTransport)
-	// means a future replacement of the package-level default degrades to a
-	// fresh transport with this function's explicit timeouts still applied,
-	// instead of panicking.
 	var transport *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = base.Clone()
 	} else {
 		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
-	transport.DialContext = (&net.Dialer{
-		Timeout:   dialTimeout,
-		KeepAlive: dialKeepAlive,
-	}).DialContext
+	transport.ForceAttemptHTTP2 = true
+	transport.MaxIdleConns = 100
+	transport.TLSClientConfig = nil
+	transport.TLSNextProto = nil
 	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	transport.ExpectContinueTimeout = expectContinueTimeout
 	transport.IdleConnTimeout = koiosIdleConnTimeout
+	dialer := &net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}
+	restricted := &koiosRestrictedDialer{
+		dialContext:           dialer.DialContext,
+		lookupIPAddr:          net.DefaultResolver.LookupIPAddr,
+		allowPrivateAddresses: allowPrivateAddresses,
+	}
+	transport.Proxy = nil
+	transport.DialContext = restricted.DialContext
+	// Clear deprecated hooks that could bypass DialContext.
+	transport.Dial = nil    //nolint:staticcheck
+	transport.DialTLS = nil //nolint:staticcheck
+	transport.DialTLSContext = nil
 	return transport
 }
 
@@ -579,7 +600,10 @@ func isPublicKoiosHost(rawURL string) bool {
 // against forged reference data can report a false PASS -- the one outcome a
 // parity checker must never produce. allowInsecureHTTP is the local dev/test
 // escape hatch, mirroring Mithril.AllowInsecureHTTP.
-func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
+func validateKoiosBaseURL(
+	rawURL string,
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		// rawURL is never echoed: an operator can put credentials in it as
@@ -591,6 +615,12 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 		return errors.New(
 			"koios base URL has no host; give the full v1 API root, e.g. https://host/api/v1",
 		)
+	}
+	if err := validateKoiosHost(
+		parsed.Hostname(),
+		allowPrivateAddresses,
+	); err != nil {
+		return err
 	}
 	// get and post build an endpoint by appending a path and its own query to
 	// this root. A root that already carries a query or fragment would put the
@@ -625,6 +655,86 @@ func validateKoiosBaseURL(rawURL string, allowInsecureHTTP bool) error {
 			parsed.Scheme,
 		)
 	}
+}
+
+func koiosRedirectPolicy(
+	allowInsecureHTTP, allowPrivateAddresses bool,
+) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		if req.URL == nil || req.URL.Host == "" {
+			return errors.New("koios redirect URL has no host")
+		}
+		switch strings.ToLower(req.URL.Scheme) {
+		case "https":
+		case "http":
+			if !allowInsecureHTTP {
+				return errors.New("koios redirect uses plain HTTP")
+			}
+		default:
+			return fmt.Errorf(
+				"koios redirect must use http or https, got scheme %q",
+				req.URL.Scheme,
+			)
+		}
+		return validateKoiosHost(req.URL.Hostname(), allowPrivateAddresses)
+	}
+}
+
+type koiosRestrictedDialer struct {
+	dialContext           func(context.Context, string, string) (net.Conn, error)
+	lookupIPAddr          func(context.Context, string) ([]net.IPAddr, error)
+	allowPrivateAddresses bool
+}
+
+func (d *koiosRestrictedDialer) DialContext(
+	ctx context.Context,
+	network, address string,
+) (net.Conn, error) {
+	if d.allowPrivateAddresses {
+		return d.dialContext(ctx, network, address)
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateKoiosHost(host, false); err != nil {
+		return nil, err
+	}
+	conn, err := netguard.DialContext(
+		ctx,
+		network,
+		address,
+		d.dialContext,
+		d.lookupIPAddr,
+	)
+	if errors.Is(err, netguard.ErrBlockedDestination) {
+		return nil, errors.New(
+			"koios destination resolved to a private or special-use address",
+		)
+	}
+	if errors.Is(err, netguard.ErrNoAddresses) {
+		return nil, errors.New("koios destination resolved to no addresses")
+	}
+	return conn, err
+}
+
+func validateKoiosHost(host string, allowPrivateAddresses bool) error {
+	if host == "" {
+		return errors.New("koios destination has no host")
+	}
+	if allowPrivateAddresses {
+		return nil
+	}
+	if netguard.IsBlockedHost(host) {
+		return errors.New("koios destination is a private or special-use host")
+	}
+	if ip := net.ParseIP(host); ip != nil && netguard.IsBlockedIP(ip) {
+		return errors.New("koios destination is a private or special-use address")
+	}
+	return nil
 }
 
 // redactURLError strips the URL from a *url.Error so a parse failure cannot
@@ -779,8 +889,8 @@ var errKoiosResponseTooLarge = fmt.Errorf(
 	ErrKoiosPermanent,
 )
 
-// readBodyLimited reads r fully, capped at koiosMaxResponseBytes — dingo
-// #3099's "bound response/body memory" requirement, applied uniformly to
+// readBodyLimited reads r fully, capped at koiosMaxResponseBytes —
+// the "bound response/body memory" requirement, applied uniformly to
 // every Koios call (GET and POST). Reading koiosMaxResponseBytes+1 bytes
 // means the true body is at or past the cap, so it fails hard with
 // errKoiosResponseTooLarge rather than silently returning a truncated
@@ -939,8 +1049,8 @@ func (k *KoiosClient) get(
 			continue
 		}
 		if resp.StatusCode == http.StatusRequestTimeout {
-			// 408 is a gateway/upstream timeout on this specific request
-			// (dingo #4486), not a deterministic rejection of it like the
+			// 408 is a gateway/upstream timeout on this specific request,
+			// not a deterministic rejection of it like the
 			// 400/404/422/401/403 class below -- give it its own, much
 			// longer capped-exponential budget instead of failing fast.
 			bodyStr := strings.TrimSpace(string(body))
@@ -953,7 +1063,7 @@ func (k *KoiosClient) get(
 				// Logged through the package-level default rather than
 				// an injected logger: one KoiosClient serves the
 				// concurrent chunk fetchers, so it deliberately holds no
-				// logger field (dingo #3796). cmd/dingo and
+				// logger field. cmd/dingo and
 				// cmd/node-parity call slog.SetDefault before building
 				// one, and cmd/koios-parity logs through slog.Default()
 				// itself, so this lands wherever the binary's own output
@@ -1496,7 +1606,7 @@ func (k *KoiosClient) GetPoolEpochHistory(
 
 // GetAllAccountAddresses returns the bech32 stake address of every account
 // Koios knows about, including accounts with zero current stake or that have
-// since deregistered — the Koios-side "master list" for #3097's per-account
+// since deregistered — the Koios-side "master list" for the per-account
 // address universe, exactly analogous to GetAllHistoricalPoolIDs's role for
 // pools. /account_list is Range-paginated the same way /pool_list is.
 //
@@ -1514,7 +1624,7 @@ func (k *KoiosClient) GetAllAccountAddresses(
 // GetAllAccountAddressesWithProgress is GetAllAccountAddresses with a progress
 // line every accountListLogEveryPages pages. The logger is a parameter rather
 // than a client field because the same client serves the concurrent chunk
-// fetchers, and a field written here would be read by them (dingo #3796).
+// fetchers, and a field written here would be read by them.
 func (k *KoiosClient) GetAllAccountAddressesWithProgress(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -1568,7 +1678,7 @@ func (k *KoiosClient) getAllAccountAddresses(
 		}
 		// Preview answers 303k accounts in 304 sequential pages. Without a
 		// progress line the whole walk is silent, which is indistinguishable
-		// from a stalled fetch (dingo #3796). Emitted after the page is
+		// from a stalled fetch. Emitted after the page is
 		// folded in, so a crawl ending on exactly a milestone page still
 		// reports it before the loop breaks below.
 		pages++
@@ -1665,7 +1775,7 @@ func (k *KoiosClient) GetAccountRewardHistory(
 	if err := json.Unmarshal(resp.Body, &items); err != nil {
 		return nil, fmt.Errorf("koios /account_reward_history decode: %w", err)
 	}
-	// dingo #3099: /account_reward_history does not honor the Range header
+	// /account_reward_history does not honor the Range header
 	// the way GET table-view endpoints (/pool_list, /account_list) do —
 	// verified live against preview: repeated requests with different Range
 	// values return the same first koiosPageSize-row window rather than
@@ -1697,8 +1807,8 @@ func (k *KoiosClient) GetAccountRewardHistory(
 // that fails JSON decoding, rather than any structured error).
 //
 // Exported so a caller accumulating hashes across multiple blocks before
-// calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction,
-// blinklabs-io/dingo#1900) can flush at the same size GetTxInfos itself
+// calling GetTxInfos (e.g. nodeparity's from-genesis UTxO reconstruction)
+// can flush at the same size GetTxInfos itself
 // batches at, rather than duplicating this number.
 const KoiosTxInfoBatchSize = 40
 
@@ -1737,7 +1847,7 @@ type KoiosTxInfoAsset struct {
 //	[(PolicyID {policyID = ScriptHash "09e5..."},[("474f565f4e4654",1)]),(PolicyID {policyID = ScriptHash "65a9..."},[("494e4459",32200000000000)])]
 //
 // The empty case, "[]", happens to also be valid JSON, which is why the
-// original string-form support (dingo #1900, the phase-2-invalid collateral
+// original string-form support (the phase-2-invalid collateral
 // fix) looked correct: every transaction whose collateral return carried no
 // tokens decoded fine. A collateral return that actually carries tokens --
 // the normal case for a phase-2-invalid Plutus transaction, whose whole
@@ -2182,7 +2292,7 @@ func CanonicalKoiosUTxOEntry(out KoiosTxInfoOutput) string {
 // Unlike GetPoolEpochHistory's "missing means missing" contract (a
 // legitimate outcome there -- a pool with no snapshot row yet), a
 // transaction hash given to GetTxInfos is never optional: the caller
-// (nodeparity's from-genesis UTxO reconstruction, blinklabs-io/dingo#1900)
+// (nodeparity's from-genesis UTxO reconstruction)
 // asked for it because a block it already trusts contains that exact
 // transaction, so Koios omitting it from the response means either
 // transient incompleteness or that this specific hash isn't indexed yet --

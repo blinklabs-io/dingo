@@ -1084,7 +1084,7 @@ func (g *credentialGeneration) kesSign(
 	// Non-negotiable: every KES signing path -- local key or agent-backed --
 	// must reject a period outside the operational certificate's validated
 	// lifetime, regardless of what a caller already checked. This is the
-	// gate #3115's agent client skipped: it signed through a direct call to
+	// gate the agent client once skipped: it signed through a direct call to
 	// the agent instead of through this method, bypassing the opcert-lifetime
 	// check on both the agent and local paths. Checking it again here, rather
 	// than trusting SignBlockHeader/buildBlock's own call to validateKESPeriod,
@@ -1435,7 +1435,7 @@ type LedgerView interface {
 	// LatestOpCertSequence returns the highest opcert IssueNumber
 	// observed on chain for poolID. found is false when on-chain
 	// counter tracking is not implemented or this pool has never
-	// minted a block.
+	// minted a block; the counter rule then uses a baseline of zero.
 	LatestOpCertSequence(
 		poolID [28]byte,
 	) (sequence uint64, found bool, err error)

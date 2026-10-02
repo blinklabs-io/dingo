@@ -89,7 +89,7 @@ func (r PoolRelay) Addresses() []string {
 	// A hostname that cannot resolve is not a peer. The ledger carries
 	// whatever an operator registered, and a value like "--pool-relay-port"
 	// becomes a dial attempt, four connection failures and a half-hour deny
-	// entry before anything notices it was never an address (issue #2018).
+	// entry before anything notices it was never an address.
 	if IsResolvableHost(r.Hostname) {
 		addresses = append(addresses, net.JoinHostPort(r.Hostname, portStr))
 	}

@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // deepCatchupRequest records one BlockfetchRequestRangeFunc call for the
@@ -69,15 +70,62 @@ func buildDeepCatchupChain(
 	return testChain, hashes
 }
 
+func TestBlockfetchMetadataWriteReleasesBlockfetchMutex(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	ls.chainsyncBlockfetchMutex.Lock()
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		err := ls.withBlockfetchMutexReleased(func() error {
+			close(writeStarted)
+			<-releaseWrite
+			return nil
+		})
+		ls.chainsyncBlockfetchMutex.Unlock()
+		done <- err
+	}()
+	defer func() {
+		select {
+		case <-releaseWrite:
+		default:
+			close(releaseWrite)
+		}
+	}()
+	select {
+	case <-writeStarted:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("metadata operation did not start")
+	}
+	lockAcquired := make(chan struct{})
+	go func() {
+		ls.chainsyncBlockfetchMutex.Lock()
+		close(lockAcquired)
+		ls.chainsyncBlockfetchMutex.Unlock()
+	}()
+	select {
+	case <-lockAcquired:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("chainsync handler remained blocked by metadata write")
+	}
+	close(releaseWrite)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("blockfetch handler did not reacquire its mutex")
+	}
+}
+
 // TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup is the
-// direct fail-before proof for issue #4651: before the dispatch-timing
-// rework, a single dispatch issued exactly one RequestRange call and waited
-// for its BatchDone before dispatching another, paying a full peer
-// round-trip at every batch boundary. With more than BlockfetchBatchSize
+// direct fail-before proof for pipelined RequestRange: before the
+// dispatch-timing rework, a single dispatch issued exactly one RequestRange
+// call and waited for its BatchDone before dispatching another, paying a full
+// peer round-trip at every batch boundary. With more than BlockfetchBatchSize
 // headers queued (deep catch-up, not "near tip" -- see
-// shadowBlockfetchMaxHeaders), the first dispatch must also pre-queue a
-// second, non-overlapping range so the peer always has a next request in
-// hand.
+// shadowBlockfetchMaxHeaders), the first dispatch must also pre-queue a second,
+// non-overlapping range so the peer always has a next request in hand.
 func TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup(
 	t *testing.T,
 ) {
@@ -305,7 +353,8 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 		},
 	}
 	// Slots 1-80 are Mithril-covered so the block deliveries below skip
-	// header crypto verification (issue #3528 machinery, orthogonal to what
+	// header crypto verification (header-crypto gate machinery, orthogonal to
+	// what
 	// this test proves): these synthetic blocks carry no real VRF/KES
 	// material.
 	ls.mithrilLedgerSlot = 80
@@ -367,7 +416,7 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// While the discard window is still open, a block for connId must be
 	// dropped rather than misattributed to whatever dispatch follows.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
@@ -422,7 +471,7 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 	// Once the discard window has closed, a block for connId belongs to the
 	// fresh dispatch and must be accepted.
 	ls.chainsyncBlockfetchMutex.Lock()
-	err = ls.handleEventBlockfetchBlockDeferred(BlockfetchEvent{
+	err = handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
 		ConnectionId: connId,
 		Point:        ocommon.NewPoint(51, hashes[50].Bytes()),
 		Block: &blockfetchTestBlock{
@@ -789,7 +838,8 @@ func buildPartiallyAppliedCatchupChain(
 // precondition promotion actually needs. A completed batch applying at least
 // one block does not mean it applied every header it claimed: a body that
 // does not fit the chain tip is swallowed as "ignored" rather than returned
-// (chain.BlockNotFitChainTipError, see issue #4272), and a transport-shaped
+// (chain.BlockNotFitChainTipError, see the non-extending block handling), and a
+// transport-shaped
 // RangeErr can terminate a range after a partial delivery. Either leaves the
 // rest of the claimed headers queued at the front.
 //

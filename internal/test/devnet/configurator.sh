@@ -73,6 +73,50 @@ config_config_json() {
     esac
 }
 
+configure_leios_dijkstra() {
+    local pool_dir="$1"
+    local configs_dir="${pool_dir}/configs"
+
+    if [ "${DEVNET_LEIOS_ENABLED:-0}" != "1" ]; then
+        return
+    fi
+
+    # Register one deterministic, test-only BLS key for each generated pool
+    # and activate Dijkstra at genesis. The devnet has equal pool stake, so
+    # all three producers can form a quorum without bypassing signature or
+    # on-chain key-registration checks.
+    cp /dijkstra-genesis.json "${configs_dir}/dijkstra-genesis.json"
+    jq --slurpfile leios_key /leios-key.json \
+        '(.staking.pools[]).leiosKey = $leios_key[0]' \
+        "${configs_dir}/shelley-genesis.json" \
+        | write_file "${configs_dir}/shelley-genesis.json"
+    jq '.DijkstraGenesisFile = "dijkstra-genesis.json"
+        | .DijkstraGenesisHash = ""
+        | .TestDijkstraHardForkAtEpoch = 0
+        | .ExperimentalHardForksEnabled = true
+        | .ExperimentalProtocolsEnabled = true' \
+        "${configs_dir}/config.json" \
+        | write_file "${configs_dir}/config.json"
+    cp /leios-vote.skey "${pool_dir}/keys/leios-vote.skey"
+}
+
+configure_byron_delegation() {
+    local pool_dir="$1"
+    local genesis="${pool_dir}/configs/byron-genesis.json"
+
+    if [ "${DEVNET_LEIOS_ENABLED:-0}" != "1" ]; then
+        return
+    fi
+
+    # The testnet generator omits Byron issuers for Shelley-first testnets.
+    # Dingo still validates the Byron genesis trust root while loading its
+    # ledger, even when this network immediately hard-forks past Byron.
+    jq --slurpfile delegation /byron-heavy-delegation.json \
+        '.bootStakeholders = $delegation[0].bootStakeholders
+         | .heavyDelegation = $delegation[0].heavyDelegation' \
+        "${genesis}" | write_file "${genesis}"
+}
+
 config_topology_json() {
     # Generate a ring topology, where pool_n is connected to pool_{n-1} and pool_{n+1}
 
@@ -174,10 +218,43 @@ cp /testnet.yaml /configs/utxo-keys/runtime-genesis
 sed -i "/^systemStartDelay:/a systemStartUnix: ${SYSTEM_START_UNIX}" \
   /configs/utxo-keys/runtime-genesis
 
+# The generator leaves Byron bootStakeholders empty. Dingo builds the Byron
+# PBFT trust-root set at startup even though this network hard-forks to
+# Shelley at epoch zero, so give each generated genesis a valid temporary
+# issuer key hash. No Byron blocks use this key.
+BYRON_BOOTSTRAP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-byron-bootstrap.XXXXXX")"
+trap 'rm -rf "${BYRON_BOOTSTRAP_DIR}"' EXIT
+BYRON_BOOTSTRAP_SKEY="${BYRON_BOOTSTRAP_DIR}/bootstrap.skey"
+BYRON_BOOTSTRAP_VKEY="${BYRON_BOOTSTRAP_DIR}/bootstrap.vkey"
+cardano-cli byron key keygen --secret "${BYRON_BOOTSTRAP_SKEY}"
+cardano-cli byron key to-verification \
+  --byron-formats \
+  --secret "${BYRON_BOOTSTRAP_SKEY}" \
+  --to "${BYRON_BOOTSTRAP_VKEY}"
+BYRON_BOOTSTRAP_HASH="$(python3 - "${BYRON_BOOTSTRAP_VKEY}" <<'PYHASH'
+import base64
+import hashlib
+import pathlib
+import sys
+
+key = base64.b64decode(pathlib.Path(sys.argv[1]).read_text().strip(), validate=True)
+if len(key) != 64:
+    raise SystemExit(f"unexpected Byron verification key length: {len(key)}")
+cbor_bytes = bytes((0x58, len(key))) + key
+print(hashlib.blake2b(hashlib.sha3_256(cbor_bytes).digest(), digest_size=28).hexdigest())
+PYHASH
+)"
+
 for pool in $pools; do
   echo "pool: $pool"
+  byron_genesis="${pool}/configs/byron-genesis.json"
+  jq --arg key "${BYRON_BOOTSTRAP_HASH}" \
+    '.bootStakeholders[$key] = 1' \
+    "${byron_genesis}" | write_file "${byron_genesis}"
   set_start_time "$pool"
+  configure_byron_delegation "$pool"
   config_config_json "$pool"
+  configure_leios_dijkstra "$pool"
 done
 
 # Expose the Shelley genesis (updated system start) to txpump so it can
@@ -190,18 +267,35 @@ cp /tmp/testnet/utxos/keys/genesis.*.skey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
 
+# Expose the generated cold keys only to the isolated accelerated governance
+# scenario, which signs SPO voting procedures with the actual pool credentials.
+mkdir -p /configs/utxo-keys/pool-keys
+for pool in $pools; do
+    pool_id="${pool##*/}"
+    cp "${pool}/keys/cold.skey" "/configs/utxo-keys/pool-keys/pool-${pool_id}.skey"
+    cp "${pool}/keys/cold.vkey" "/configs/utxo-keys/pool-keys/pool-${pool_id}.vkey"
+done
+
 # Expose genesis stake verification keys and delegated address info so the
 # dingo-only harness can derive the stake credentials that genesis delegated
 # to each pool. The generator's stake key layout is discovered in the CIP-50
 # task; copy every plausible stake artifact so the loader can find them.
 mkdir -p /configs/utxo-keys/stake
-find /tmp/testnet -type f \( -name '*stake*.vkey' -o -name '*stake*.addr*' \) \
+find /tmp/testnet -type f \( -name '*stake*.skey' -o -name '*stake*.vkey' -o -name '*stake*.addr*' \) \
     -exec cp {} /configs/utxo-keys/stake/ \; 2>/dev/null || true
 
 # Test-only credentials: make config + genesis files world-readable so any
 # consuming container's user can read them.
 find /configs -type d -exec chmod 0755 {} +
 find /configs -type f -exec chmod 0644 {} +
+
+# Pool cold keys are used only by the host-side governance scenario. Keep
+# them unreadable to node containers sharing the UTxO-key volume.
+if [ -d /configs/utxo-keys/pool-keys ]; then
+    chmod 0700 /configs/utxo-keys/pool-keys
+    find /configs/utxo-keys/pool-keys -type f -name '*.skey' \
+        -exec chmod 0600 {} +
+fi
 
 # cardano-node refuses to start when vrf.skey has "other" read permissions,
 # so the per-pool keys directories must be 0700/0600. Pools listed in

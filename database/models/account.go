@@ -32,6 +32,17 @@ var (
 	)
 )
 
+// AccountRewardCredit is one reward-account credit for
+// AddAccountRewardsByCredential: the same arguments one
+// AddAccountRewardByCredential call takes.
+type AccountRewardCredit struct {
+	StakingKey    []byte
+	SourceHash    []byte
+	Amount        uint64
+	Slot          uint64
+	CredentialTag uint8
+}
+
 // AccountCreatedSlotUnset is the sentinel the account create helpers stamp on a
 // freshly built (not-yet-persisted) account so the save helpers can resolve
 // Account.CreatedSlot to the account's AddedSlot at insert time without

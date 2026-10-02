@@ -1,3 +1,5 @@
+//go:build windows
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build windows
-
 package mithril
 
 import (
@@ -26,7 +26,8 @@ import (
 
 // This file gives the three Windows extraction operations (rename, file
 // removal, directory removal) a way to address their target through a handle
-// rather than a path, closing the gap described in issue #3228.
+// rather than a path, closing the race between the directory walk and the
+// operation.
 //
 // MoveFile, DeleteFile and RemoveDirectory all take a string and resolve it
 // themselves, which is a second, independent resolution of names

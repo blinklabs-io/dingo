@@ -140,7 +140,7 @@ func CalculateEtaVAlonzo(
 	// See CalculateEtaVShelley for the rationale: TPraos folds bnonce ∈
 	// Seed into the rolling nonce, where bnonce is BLAKE2b-256 of the
 	// raw VRF certificate output. Folding the raw certificate bytes
-	// directly produces nonces that disagree with peers (#2125).
+	// directly produces nonces that disagree with peers.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -274,6 +274,7 @@ func ValidateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return err
@@ -305,13 +306,15 @@ func ValidateTxAlonzo(
 			if err != nil {
 				return err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -430,6 +433,7 @@ func EvaluateTxAlonzo(
 			tx,
 			slices.Concat(resolvedInputs, resolvedRefInputs),
 			script.StrictValidityUpperBoundForTransaction(tx),
+			uint(tmpPparams.ProtocolMajor),
 		)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -462,13 +466,15 @@ func EvaluateTxAlonzo(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

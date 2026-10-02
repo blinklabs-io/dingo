@@ -122,7 +122,7 @@ func TestStandaloneBlockAddsDrainQueuedHeaderEvents(t *testing.T) {
 // refused as a duplicate -- the same "seated member does not vote" outcome the
 // header stream exists to fix, handed to a peer.
 //
-// The verified header must still announce: that is the path this PR adds, and
+// The verified header must still announce: that is the announcement path, and
 // gating it away would restore the missed votes.
 func TestHeaderAnnouncementRequiresCryptoVerifiedHeader(t *testing.T) {
 	announcing := func(tag string, slot uint64) announcingStreamHeader {

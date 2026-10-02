@@ -39,6 +39,12 @@ import (
 // be located within an extracted snapshot.
 var ErrLedgerDirNotFound = errors.New("ledger directory not found")
 
+// ErrByronSnapshotUnsupported is returned for a snapshot whose current era is
+// Byron.
+var ErrByronSnapshotUnsupported = errors.New(
+	"snapshot is in the Byron era: Byron ledger states are not supported",
+)
+
 // FindLedgerStateFile searches the extracted snapshot directory for
 // the ledger state file. It supports two formats:
 //   - Legacy: ledger/<slot>.lstate or ledger/<slot>
@@ -388,6 +394,13 @@ func parseSnapshotData(data []byte) (*RawLedgerState, error) {
 		)
 	}
 
+	// A Byron ledger state is not Shelley-shaped and carries the Byron
+	// update state a node would have to restore its adopted parameters from,
+	// which nothing here reads.
+	if eraIndex == EraByron {
+		return nil, ErrByronSnapshotUnsupported
+	}
+
 	// Parse the current era's state
 	result, err := parseCurrentEra(eraIndex, currentState)
 	if err != nil {
@@ -619,12 +632,18 @@ func parseCurrentEra(
 		)
 	}
 
-	// UTxOState[2] is the fee pot accumulated so far this epoch. It is one
+	// UTxOState[2] (utxosFees) is ssFee plus the fees this epoch has
+	// collected up to and including the snapshot's anchor block, not a
+	// partial "so far" total in isolation -- cardano-ledger's NEWEPOCH rule
+	// subtracts ssFee out of it and SNAP resets ssFee from it every epoch, so
+	// it only ever grows across a single epoch's ssFee baseline. It is one
 	// of the three addends of the reward pot (see ledger/rewards: the pot is
 	// incentives + fees), so a reward round computed without it understates
 	// every pool's reward. Decoding it is what lets a Mithril bootstrap seed
-	// a complete RewardAdaPots row rather than a partial one. Older eras may
-	// carry a shorter array, so its absence is tolerated and left at zero.
+	// a complete RewardAdaPots row rather than a partial one, and lets
+	// seedImportedRewardBasis recover the epoch's pre-anchor fee pot as
+	// utxosFees minus ssFee. Older eras may carry a shorter array, so its
+	// absence is tolerated and left at zero.
 	var fees uint64
 	if len(utxoState) > 2 {
 		if _, err := cbor.Decode(utxoState[2], &fees); err != nil {
@@ -1365,8 +1384,9 @@ func ParseActivePoolDistribution(
 		}
 
 		var leiosKey *lcommon.LeiosKey
+		var keyRegistrationEpoch *uint64
 		if len(fields) == 4 {
-			leiosKey, err = decodeOptionalLeiosKey(fields[3])
+			leiosKey, keyRegistrationEpoch, err = decodeOptionalLeiosKey(fields[3])
 			if err != nil {
 				return nil, fmt.Errorf(
 					"active pool distribution entry %d: %w",
@@ -1384,12 +1404,13 @@ func ParseActivePoolDistribution(
 		}
 
 		result = append(result, ParsedActivePoolStake{
-			PoolKeyHash:             slices.Clone(poolKeyHash),
-			StakeNumerator:          stakeNumerator,
-			StakeDenominator:        stakeDenominator,
-			VrfKeyHash:              slices.Clone(vrfKeyHash),
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
+			PoolKeyHash:               slices.Clone(poolKeyHash),
+			StakeNumerator:            stakeNumerator,
+			StakeDenominator:          stakeDenominator,
+			VrfKeyHash:                slices.Clone(vrfKeyHash),
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: keyRegistrationEpoch,
 		})
 	}
 	return result, nil
@@ -1715,7 +1736,7 @@ func parsePoolParamsMap(
 // totals, producing PoolStakeSnapshot models suitable for database
 // storage. Every pool with at least one delegated credential gets a row,
 // even when every one of its delegators is at zero stake -- see the loop
-// below and blinklabs-io/dingo#4152.
+// below.
 func AggregatePoolStake(
 	snap *ParsedSnapShot,
 	epoch uint64,
@@ -1750,7 +1771,7 @@ func AggregatePoolStake(
 		// (its UTxOs spent, no reward balance) -- that is still a real
 		// delegator, not a decode gap, and a real cardano-node's own
 		// GetStakeDistribution reply reports the pool anyway (confirmed live
-		// against a real Preview cardano-node during blinklabs-io/dingo#4152:
+		// against a real Preview cardano-node:
 		// it answers with an explicit zero StakeFraction rather than omitting
 		// the pool). Gating the count on stake > 0, as this used to, made a
 		// pool whose only delegator(s) happened to be at zero stake
@@ -1766,7 +1787,7 @@ func AggregatePoolStake(
 	// this used to) is what made a registered, actively-delegated pool vanish
 	// from GetStakeDistribution/GetPoolDistr2 entirely after a Mithril
 	// bootstrap, rather than reporting it with a zero stake the way a real
-	// cardano-node does (blinklabs-io/dingo#4152). The row survives only
+	// cardano-node does. The row survives only
 	// until the live snapshot-rotation path (which never applied this skip)
 	// recomputes the epoch a few epochs later; until then the pool is simply
 	// missing.
@@ -1785,23 +1806,29 @@ func AggregatePoolStake(
 
 		pool := snap.PoolParams[poolHex]
 		var leiosKeyPublic, leiosKeyPossessionProof []byte
+		var leiosKeyRegistrationEpoch *uint64
 		if pool != nil {
 			leiosKeyPublic = append([]byte(nil), pool.LeiosKeyPublic...)
 			leiosKeyPossessionProof = append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
 			)
+			if pool.LeiosKeyRegistrationEpoch != nil {
+				epoch := *pool.LeiosKeyRegistrationEpoch
+				leiosKeyRegistrationEpoch = &epoch
+			}
 		}
 
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
-			Epoch:                   epoch,
-			SnapshotType:            snapshotType,
-			PoolKeyHash:             poolKeyHash,
-			TotalStake:              types.Uint64(agg.totalStake),
-			DelegatorCount:          agg.delegatorCount,
-			CapturedSlot:            capturedSlot,
-			LeiosKeyPublic:          leiosKeyPublic,
-			LeiosKeyPossessionProof: leiosKeyPossessionProof,
-			CalculationVersion:      models.RewardStakeCalculationVersion,
+			Epoch:                     epoch,
+			SnapshotType:              snapshotType,
+			PoolKeyHash:               poolKeyHash,
+			TotalStake:                types.Uint64(agg.totalStake),
+			DelegatorCount:            agg.delegatorCount,
+			CapturedSlot:              capturedSlot,
+			LeiosKeyPublic:            leiosKeyPublic,
+			LeiosKeyPossessionProof:   leiosKeyPossessionProof,
+			LeiosKeyRegistrationEpoch: leiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 

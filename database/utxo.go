@@ -122,7 +122,7 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 		// the store rejects every further staged write, including the
 		// commit timestamp Txn.Commit puts into this same transaction, so
 		// an unbounded stage costs the caller its whole commit rather than
-		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// just the tail of this set. What is left
 		// unstaged is counted with the deletes that failed and reported
 		// through ErrBlobDeleteIncomplete below: the metadata naming these
 		// objects goes away either way, so both are orphans rather than
@@ -321,7 +321,7 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 // branch below. Only recoverUtxoCbor's metadata-based fallback
 // (utxoRecoveryBlockForTx, once the blob-based lookup misses) actually
 // needs one, so a metadata-capable transaction is opened here, on demand,
-// just for that branch (blinklabs-io/dingo#1900 review). This is an
+// just for that branch. This is an
 // explicit, self-contained guarantee: sqlstore.Store.GetTransactionByHash
 // (what that fallback ultimately calls) separately tolerates a nil
 // types.Txn by borrowing its own ad-hoc pooled connection for just that one
@@ -354,7 +354,7 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob
 				// handle to fetch the producing block's raw CBOR, which
 				// txn doesn't have. Mirrors the metadata-missing case
-				// above for the opposite gap (cubic review).
+				// above for the opposite gap.
 				recoveryTxn, cleanup = txn.withBlobForRecovery()
 			}
 			if cleanup != nil {
@@ -610,8 +610,8 @@ func repairUtxoBlob(
 	// above located this block through the caller's pinned store, and
 	// re-pinning here would let a concurrent SetBlobStore swap repair a
 	// different store than the one just read from, splitting the read
-	// and the write-back non-atomically across two stores
-	// (blinklabs-io/dingo#1900 review). The caller's own pin, still held
+	// and the write-back non-atomically across two stores.
+	// The caller's own pin, still held
 	// for txn's lifetime (which spans this whole call), keeps that store
 	// from being drained out from under this write.
 	var store blob.BlobStore
@@ -732,7 +732,7 @@ func (d *Database) UtxosByRefs(
 // at atSlot" or "was live at atSlot but its spend record has since been
 // hard-deleted by the periodic stability-window cleanup"
 // (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
-// blinklabs-io/dingo#382/#1900) must reject that case themselves before
+// node-parity) must reject that case themselves before
 // calling this -- see ledger's checkUtxoRetentionWindow.
 func (d *Database) UtxosByRefsAsOf(
 	refs []models.UtxoId,
@@ -1310,7 +1310,7 @@ func (d *Database) UtxosDeleteConsumed(
 	// that removes them. TruncateAfterSlot restores spent UTxOs with an
 	// UPDATE, which cannot reach a row that no longer exists, so a rollback
 	// below this slot silently leaves the live set short of every output
-	// consumed above it (issue #3766). The floor only ever moves up: a sweep
+	// consumed above it. The floor only ever moves up: a sweep
 	// at a lower slot does not make rows an earlier, higher sweep removed
 	// restorable again.
 	if utxoCount > 0 && slot > pruneFloor {
