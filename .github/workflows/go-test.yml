@@ -121,31 +121,44 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          # This job runs `go run ...@latest`, so third-party code executes in
-          # the workspace. Do not leave GITHUB_TOKEN in the local git config.
+          persist-credentials: false
+      # The action is pinned; the scanner it installs and the vulnerability
+      # database it reads are not, so a new advisory fails the job instead of
+      # waiting behind a stale scanner. The toolchain floats for the same
+      # reason. govulncheck exits non-zero only for vulnerabilities this module
+      # actually calls, so unreachable findings it also prints do not fail the
+      # job. GOFLAGS carries the build tags `make govulncheck` passes, which
+      # the action has no input for.
+      - name: govulncheck
+        uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0 https://github.com/golang/govulncheck-action/releases/tag/v1.1.0
+        env:
+          GOFLAGS: -tags=dingo_extra_plugins
+        with:
+          go-version-input: 1.26.x
+          check-latest: true
+          repo-checkout: false
+
+  # The accelerated all-Dingo DevNet with the block pipeline and its parallel
+  # validate stage on, the only end-to-end run of that stage. Both flags
+  # default off in production and in the other DevNet runs. Not a dependency of
+  # anything and not shared with publish.yml.
+  devnet:
+    name: devnet (block pipeline)
+    needs: [go-test-linux-quick]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 https://github.com/actions/setup-go/releases/tag/v7.0.0
         with:
           go-version: 1.26.x
-          cache: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 https://github.com/actions/cache/releases/tag/v6.1.0
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-1.26.x-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-1.26.x-
-      - name: govulncheck
-        # govulncheck exits non-zero only for vulnerabilities this module
-        # actually calls, so the unreachable findings it also prints (currently
-        # GO-2026-5932, an unmaintained golang.org/x/crypto package with no
-        # fixed version) do not fail the job.
-        # Both the toolchain and the scanner float on purpose: a pin on either
-        # one parks a new advisory behind a stale version instead of forcing it
-        # to be fixed. Run through the Makefile so this CI check and
-        # `make govulncheck` cannot drift apart.
-        run: make govulncheck
+      - name: DevNet (accelerated)
+        env:
+          DEVNET_BLOCK_PIPELINE_ENABLED: "true"
+          DEVNET_BLOCK_PIPELINE_VALIDATE_ENABLED: "true"
+        run: ./internal/test/devnet/run-tests.sh --accelerated
 
   # Stage 2. The whole suite on SQLite with no race instrumentation and no
   # service containers -- the same command the macOS job runs, which completes
