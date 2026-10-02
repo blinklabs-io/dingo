@@ -4849,6 +4849,37 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 	)
 }
 
+// TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker pins
+// the ordering the failed-delete path relies on. A delete error is logged and
+// returns before the readmission re-test, which is safe only if the error
+// leaves the blob marker in place; removing the blob marker before the legacy
+// sync_state read would drop the durable pin of a point re-deferred during the
+// call, and after a restart its stateful check would be skipped.
+func TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	// Closing the metadata store makes the legacy sync_state read fail while
+	// the blob store stays usable.
+	require.NoError(t, db.Metadata().Close())
+
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(point),
+	))
+	assert.True(
+		t,
+		deferredMarkerPersisted(t, ls, point),
+		"a failed delete must leave the blob marker in place",
+	)
+}
+
 // TestGenesisOverlayUnresolvablePParamsDefers pins the classification of an
 // overlay decision the node cannot make from its own state. A nil pparams
 // result means the snapshot, the persisted row and the era forecast all

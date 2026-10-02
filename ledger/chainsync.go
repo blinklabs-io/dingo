@@ -744,24 +744,26 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	)
 }
 
-// deleteDeferredMarkerByKey removes the blob marker for a map key and, when a
-// read shows one, the sync_state row an earlier version wrote.
+// deleteDeferredMarkerByKey removes, when a read shows one, the sync_state row
+// an earlier version wrote for a map key, and then the blob marker.
+//
+// The blob marker goes last so that any error leaves it in place: the caller
+// treats a failed delete as harmless only because the durable marker survives
+// it, and skips the readmission re-test on that basis.
 func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
-	if err := ls.db.DeleteDeferredHeaderMarker(k); err != nil {
-		return err
+	if ls.db.Metadata() != nil {
+		syncKey := deferredHeaderValidationSyncStatePrefix + k
+		value, err := ls.db.GetSyncState(syncKey, nil)
+		if err != nil {
+			return err
+		}
+		if value != "" {
+			if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+				return err
+			}
+		}
 	}
-	if ls.db.Metadata() == nil {
-		return nil
-	}
-	syncKey := deferredHeaderValidationSyncStatePrefix + k
-	value, err := ls.db.GetSyncState(syncKey, nil)
-	if err != nil {
-		return err
-	}
-	if value == "" {
-		return nil
-	}
-	return ls.db.DeleteSyncState(syncKey, nil)
+	return ls.db.DeleteDeferredHeaderMarker(k)
 }
 
 // repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
