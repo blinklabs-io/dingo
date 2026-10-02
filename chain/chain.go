@@ -2483,6 +2483,26 @@ func (c *Chain) FirstVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
 	return c.firstHeaderMatchesPoint(point, true)
 }
 
+// QueuedVerifiedHeaderMatchesPoint reports whether any queued header matches
+// point by slot and hash and had its stateless crypto verified before
+// queueing. Blockfetch buffers fetched blocks before adding them to the
+// chain, so a fetched block's own header is usually queued behind the head.
+func (c *Chain) QueuedVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for i := range c.headers {
+		header := &c.headers[i]
+		if header.point.Slot == point.Slot &&
+			bytes.Equal(header.point.Hash, point.Hash) {
+			return header.cryptoVerified
+		}
+	}
+	return false
+}
+
 func (c *Chain) firstHeaderMatchesPoint(
 	point ocommon.Point,
 	requireCryptoVerified bool,
