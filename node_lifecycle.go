@@ -70,6 +70,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
 	"github.com/blinklabs-io/dingo/api/kupo"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -374,6 +375,14 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			err = errors.Join(
 				err,
 				fmt.Errorf("mesh API shutdown: %w", stopErr),
+			)
+		}
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIMcp,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("mcp API shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -1282,6 +1291,31 @@ func (n *Node) reinitializeAPIServers() error {
 		)
 		if err != nil {
 			return fmt.Errorf("recreate mesh API server: %w", err)
+		}
+	}
+
+	mcpSelection, mcpPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMcp,
+	)
+	if err != nil {
+		return err
+	}
+	if mcpPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
+			mcpSelection.Provider, mcpSelection.Config,
+			mcp.ProviderDependencies{
+				Logger:             n.config.logger,
+				Database:           n.db,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("recreate mcp API server: %w", err)
 		}
 	}
 
