@@ -28,6 +28,13 @@ import (
 // dingo.NodeService, supplied to the node from outside because the root
 // package cannot import this one.
 func Service(cfg *config.Config) dingo.NodeService {
+	return serviceWithProgress(cfg, &roundProgress{})
+}
+
+func serviceWithProgress(
+	cfg *config.Config,
+	progress *roundProgress,
+) dingo.NodeService {
 	return func(
 		ctx context.Context,
 		env dingo.NodeServiceEnv,
@@ -40,7 +47,7 @@ func Service(cfg *config.Config) dingo.NodeService {
 		if cfg.Mithril.AllowInsecureHTTP {
 			clientOpts = append(clientOpts, mithril.WithAllowInsecureHTTP())
 		}
-		s, err := New(Config{
+		s, err := newSigner(Config{
 			KESKeyPath:          cfg.Mithril.Signer.KESKey,
 			OperationalCertPath: cfg.Mithril.Signer.OperationalCert,
 			ColdVKeyPath:        cfg.Mithril.Signer.ColdVKey,
@@ -68,7 +75,7 @@ func Service(cfg *config.Config) dingo.NodeService {
 			Ledger:       env.LedgerView,
 			Logger:       env.Logger,
 			PromRegistry: env.PromRegistry,
-		})
+		}, progress)
 		if err != nil {
 			return nil, fmt.Errorf("mithril signer: %w", err)
 		}

@@ -25,6 +25,15 @@ import (
 	"github.com/blinklabs-io/dingo/mithril"
 )
 
+var errRegistrationWindowClosed = errors.New("signer registration window closed")
+
+type permanentRoundError struct {
+	err error
+}
+
+func (e permanentRoundError) Error() string { return e.err.Error() }
+func (e permanentRoundError) Unwrap() error { return e.err }
+
 // round brings the signer up to date with the aggregator's current epoch: it
 // registers once per epoch and signs the epoch's stake distribution once.
 func (s *Signer) round(ctx context.Context) error {
@@ -33,13 +42,21 @@ func (s *Signer) round(ctx context.Context) error {
 		return err
 	}
 	epoch := settings.Epoch
-	if !s.registered.is(epoch) {
+	if !s.progress.isRegistered(epoch) {
 		if err := s.register(ctx, epoch); err != nil {
-			return err
+			if errors.Is(err, errRegistrationWindowClosed) {
+				s.cfg.Logger.Warn(
+					"mithril signer registration window closed",
+					"component", "mithril-signer",
+					"epoch", epoch,
+				)
+			} else {
+				return err
+			}
 		}
-		s.registered.mark(epoch)
+		s.progress.markRegistered(epoch)
 	}
-	if s.signed.is(epoch) {
+	if s.progress.isSigned(epoch) {
 		return nil
 	}
 	done, err := s.signStakeDistribution(ctx, settings)
@@ -47,7 +64,7 @@ func (s *Signer) round(ctx context.Context) error {
 		return err
 	}
 	if done {
-		s.signed.mark(epoch)
+		s.progress.markSigned(epoch)
 	}
 	return nil
 }
@@ -96,13 +113,29 @@ func (s *Signer) register(ctx context.Context, epoch uint64) error {
 	if err != nil {
 		return err
 	}
-	if err := s.cfg.Client.RegisterSigner(ctx, epoch+1, mithril.AggregatorSigner{
+	err = s.cfg.Client.RegisterSigner(ctx, epoch+1, mithril.AggregatorSigner{
 		PartyID:                  s.partyID,
 		VerificationKey:          encodedVK,
 		VerificationKeySignature: encodedKESSignature,
 		OperationalCertificate:   encodedOpCert,
 		KESPeriod:                period - opCert.KESPeriod,
-	}); err != nil {
+	})
+	if err != nil {
+		if statusErr, ok := errors.AsType[*mithril.HTTPStatusError](err); ok {
+			switch statusErr.StatusCode {
+			case http.StatusNotFound:
+				return err
+			case http.StatusGone:
+				return errRegistrationWindowClosed
+			default:
+				if statusErr.StatusCode >= http.StatusBadRequest &&
+					statusErr.StatusCode < http.StatusInternalServerError &&
+					statusErr.StatusCode != http.StatusRequestTimeout &&
+					statusErr.StatusCode != http.StatusTooManyRequests {
+					return permanentRoundError{err: err}
+				}
+			}
+		}
 		return err
 	}
 	s.cfg.Logger.Info(
@@ -123,11 +156,14 @@ func (s *Signer) signStakeDistribution(
 	settings *mithril.EpochSettings,
 ) (bool, error) {
 	epoch := settings.Epoch
-	if epoch < 2 {
-		return false, fmt.Errorf(
-			"epoch %d precedes the first signing epoch",
-			epoch,
+	if epoch < 2 || len(settings.CurrentSigners) == 0 ||
+		len(settings.NextSigners) == 0 {
+		s.cfg.Logger.Debug(
+			"mithril signer waiting for a non-empty signer set",
+			"component", "mithril-signer",
+			"epoch", epoch,
 		)
+		return false, nil
 	}
 	// Signers sign two epochs after registering, and the next epoch's
 	// signers registered one epoch ago.

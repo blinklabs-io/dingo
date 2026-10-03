@@ -501,7 +501,14 @@ func validateSTMParameters(params ProtocolParameters) error {
 	if params.M == 0 {
 		return errors.New("invalid protocol parameter M=0")
 	}
-	if params.PhiF <= 0 || params.PhiF > 1.0 {
+	if params.M > MaxSTMLotteryCount {
+		return fmt.Errorf(
+			"invalid protocol parameter M=%d (maximum %d)",
+			params.M,
+			MaxSTMLotteryCount,
+		)
+	}
+	if math.IsNaN(params.PhiF) || params.PhiF <= 0 || params.PhiF > 1.0 {
 		return fmt.Errorf(
 			"invalid protocol parameter phi_f=%f (must be in (0, 1])",
 			params.PhiF,

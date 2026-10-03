@@ -28,6 +28,11 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
 
+// MaxSTMLotteryCount bounds signing and verification work for aggregator-
+// supplied protocol parameters. It is above published network values while
+// keeping malformed parameters from causing unbounded lottery iteration.
+const MaxSTMLotteryCount uint64 = 1 << 16
+
 // stmProofOfPossessionMessage is the message hashed for the first half of a
 // verification key's proof of possession.
 var stmProofOfPossessionMessage = []byte("PoP")

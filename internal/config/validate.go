@@ -1082,6 +1082,12 @@ func (c *Config) validateMithrilSigner() []error {
 				"invalid mithril.signer.aggregatorEndpoint: "+
 					"must be a URL with a host",
 			))
+		case parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" ||
+			parsed.Fragment != "" || strings.Contains(endpoint, "#"):
+			errs = append(errs, errors.New(
+				"invalid mithril.signer.aggregatorEndpoint: "+
+					"must not include userinfo, query, or fragment",
+			))
 		case parsed.Scheme != "https" &&
 			(parsed.Scheme != "http" || !c.Mithril.AllowInsecureHTTP):
 			errs = append(errs, errors.New(
@@ -1104,8 +1110,7 @@ func (c *Config) validateMithrilSigner() []error {
 			if shared.signer == "" || shared.producer == "" {
 				continue
 			}
-			signerPath := filepath.Clean(shared.signer)
-			if signerPath != filepath.Clean(shared.producer) {
+			if !sameFilePath(shared.signer, shared.producer) {
 				errs = append(errs, fmt.Errorf(
 					"mithril.signer.%s %q must match the block producer's %q",
 					shared.name, shared.signer, shared.producer,
@@ -1114,4 +1119,19 @@ func (c *Config) validateMithrilSigner() []error {
 		}
 	}
 	return errs
+}
+
+func sameFilePath(first, second string) bool {
+	resolve := func(path string) string {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err == nil {
+			return resolved
+		}
+		return filepath.Clean(absolute)
+	}
+	return resolve(first) == resolve(second)
 }

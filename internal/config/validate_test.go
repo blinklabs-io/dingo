@@ -1423,6 +1423,8 @@ func TestValidateMithrilSigner(t *testing.T) {
 		return path
 	}
 	kesKey := file("kes.skey")
+	kesKeyAlias := filepath.Join(dir, "kes-alias.skey")
+	require.NoError(t, os.Symlink(kesKey, kesKeyAlias))
 	opCert := file("op.cert")
 	coldVKey := file("cold.vkey")
 	enabled := func(c *Config) {
@@ -1468,6 +1470,20 @@ func TestValidateMithrilSigner(t *testing.T) {
 			},
 		},
 		{
+			name: "endpoint rejects userinfo",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "https://user:pass@aggregator.example"
+			},
+			wantErr: "must not include userinfo, query, or fragment",
+		},
+		{
+			name: "endpoint rejects query and fragment",
+			modify: func(c *Config) {
+				c.Mithril.Signer.AggregatorEndpoint = "https://aggregator.example?token=x#section"
+			},
+			wantErr: "must not include userinfo, query, or fragment",
+		},
+		{
 			name: "endpoint without host",
 			modify: func(c *Config) {
 				c.Mithril.Signer.AggregatorEndpoint = "https:///aggregator"
@@ -1502,6 +1518,16 @@ func TestValidateMithrilSigner(t *testing.T) {
 				c.ShelleyVRFKey = "vrf.skey"
 				c.ShelleyKESKey = kesKey
 				c.ShelleyOperationalCertificate = dir + "/./op.cert"
+			},
+		},
+		{
+			name: "block producer sharing a symlinked KES key",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "vrf.skey"
+				c.ShelleyKESKey = kesKey
+				c.ShelleyOperationalCertificate = opCert
+				c.Mithril.Signer.KESKey = kesKeyAlias
 			},
 		},
 		{
@@ -1546,4 +1572,11 @@ func TestValidateMithrilSigner(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestSameFilePathResolvesRelativePaths(t *testing.T) {
+	t.Parallel()
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	require.True(t, sameFilePath("validate.go", filepath.Join(cwd, "validate.go")))
 }

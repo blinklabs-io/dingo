@@ -15,8 +15,9 @@
 package signer
 
 import (
+	"errors"
+
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type metrics struct {
@@ -27,19 +28,38 @@ type metrics struct {
 
 // newMetrics registers the signer's counters with reg, which may be nil.
 func newMetrics(reg prometheus.Registerer) *metrics {
-	factory := promauto.With(reg)
 	return &metrics{
-		rounds: factory.NewCounter(prometheus.CounterOpts{
+		rounds: registerCounter(reg, prometheus.CounterOpts{
 			Name: "dingo_mithril_signer_rounds_total",
 			Help: "Signer rounds attempted.",
 		}),
-		signatures: factory.NewCounter(prometheus.CounterOpts{
+		signatures: registerCounter(reg, prometheus.CounterOpts{
 			Name: "dingo_mithril_signer_signatures_submitted_total",
 			Help: "Individual signatures accepted by the aggregator.",
 		}),
-		errors: factory.NewCounter(prometheus.CounterOpts{
+		errors: registerCounter(reg, prometheus.CounterOpts{
 			Name: "dingo_mithril_signer_errors_total",
 			Help: "Signer rounds that failed.",
 		}),
 	}
+}
+
+func registerCounter(
+	reg prometheus.Registerer,
+	opts prometheus.CounterOpts,
+) prometheus.Counter {
+	counter := prometheus.NewCounter(opts)
+	if reg == nil {
+		return counter
+	}
+	if err := reg.Register(counter); err != nil {
+		if alreadyRegistered, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
+			existing, ok := alreadyRegistered.ExistingCollector.(prometheus.Counter)
+			if ok {
+				return existing
+			}
+		}
+		panic(err)
+	}
+	return counter
 }

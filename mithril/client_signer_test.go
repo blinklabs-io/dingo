@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,14 +97,15 @@ func TestClientSignerWrites(t *testing.T) {
 		body        map[string]any
 	}
 	got := make(chan received, 2)
-	status := http.StatusCreated
+	var status atomic.Int32
+	status.Store(http.StatusCreated)
 	srv := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
 			require.Equal(t, http.MethodPost, r.Method)
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			got <- received{r.URL.Path, r.Header.Get("Content-Type"), body}
-			w.WriteHeader(status)
+			w.WriteHeader(int(status.Load()))
 		},
 	))
 	defer srv.Close()
@@ -135,7 +137,7 @@ func TestClientSignerWrites(t *testing.T) {
 		Indexes:       []uint64{1, 5},
 		SignedMessage: "ee",
 	}
-	status = http.StatusAccepted
+	status.Store(http.StatusAccepted)
 	require.NoError(
 		t,
 		client.RegisterSingleSignature(t.Context(), registration),
@@ -152,7 +154,7 @@ func TestClientSignerWrites(t *testing.T) {
 		"signed_message": "ee",
 	}, req.body)
 
-	status = http.StatusGone
+	status.Store(http.StatusGone)
 	err := client.RegisterSingleSignature(t.Context(), registration)
 	var statusErr *HTTPStatusError
 	require.ErrorAs(t, err, &statusErr)
@@ -160,7 +162,7 @@ func TestClientSignerWrites(t *testing.T) {
 	<-got
 
 	// A status the call does not list is a failure even when it is 2xx.
-	status = http.StatusOK
+	status.Store(http.StatusOK)
 	require.Error(t, client.RegisterSigner(t.Context(), 9, AggregatorSigner{}))
 	<-got
 }

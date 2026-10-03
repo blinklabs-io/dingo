@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"slices"
 	"strconv"
@@ -181,6 +182,19 @@ func TestSTMVerificationKeyProofOfPossession(t *testing.T) {
 	assert.Equal(t, vk.VK, parsed)
 }
 
+func TestValidateSTMParameters(t *testing.T) {
+	t.Parallel()
+
+	valid := ProtocolParameters{K: 1, M: 1, PhiF: 0.5}
+	require.NoError(t, validateSTMParameters(valid))
+	require.ErrorContains(t, validateSTMParameters(ProtocolParameters{
+		K: 1, M: MaxSTMLotteryCount + 1, PhiF: 1,
+	}), "maximum")
+	require.ErrorContains(t, validateSTMParameters(ProtocolParameters{
+		K: 1, M: 1, PhiF: math.NaN(),
+	}), "phi_f")
+}
+
 func TestSTMSignProducesVerifiableSignature(t *testing.T) {
 	t.Parallel()
 	fx := loadSignerFixture(t)
@@ -201,6 +215,7 @@ func TestSTMSignProducesVerifiableSignature(t *testing.T) {
 	)
 	require.NoError(t, err)
 	params := fx.Certificate.Metadata.Parameters
+	params.PhiF = 1
 	msg := []byte(fx.Certificate.SignedMessage)
 
 	sig, err := key.Sign(msg, reg, params)

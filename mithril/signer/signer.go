@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/bursa"
@@ -87,9 +88,7 @@ type Signer struct {
 	partyID string
 	metrics *metrics
 
-	// Progress is owned by the Run goroutine.
-	registered epochMark
-	signed     epochMark
+	progress *roundProgress
 }
 
 // New loads the pool's key material and the signer's STM key and checks them:
@@ -97,6 +96,10 @@ type Signer struct {
 // keys, its KES period must be current, and its counter must not be behind
 // the chain's.
 func New(cfg Config) (*Signer, error) {
+	return newSigner(cfg, nil)
+}
+
+func newSigner(cfg Config, progress *roundProgress) (*Signer, error) {
 	switch {
 	case cfg.Client == nil:
 		return nil, errors.New("aggregator client is required")
@@ -118,6 +121,9 @@ func New(cfg Config) (*Signer, error) {
 	}
 	if cfg.MaxBackoff < cfg.MinBackoff {
 		cfg.MaxBackoff = max(defaultMaxBackoff, cfg.MinBackoff)
+	}
+	if progress == nil {
+		progress = &roundProgress{}
 	}
 
 	creds := forging.NewPoolCredentials()
@@ -152,13 +158,14 @@ func New(cfg Config) (*Signer, error) {
 		return nil, fmt.Errorf("derive STM verification key: %w", err)
 	}
 	s := &Signer{
-		cfg:     cfg,
-		creds:   creds,
-		opCert:  opCert,
-		stmKey:  stmKey,
-		stmVK:   stmVK,
-		partyID: creds.GetPoolID().String(),
-		metrics: newMetrics(cfg.PromRegistry),
+		cfg:      cfg,
+		creds:    creds,
+		opCert:   opCert,
+		stmKey:   stmKey,
+		stmVK:    stmVK,
+		partyID:  creds.GetPoolID().String(),
+		metrics:  newMetrics(cfg.PromRegistry),
+		progress: progress,
 	}
 	if err := s.validateCredentials(); err != nil {
 		return nil, err
@@ -178,6 +185,9 @@ func (s *Signer) validateCredentials() error {
 	slot, err := s.cfg.Slot()
 	switch {
 	case errors.Is(err, ErrSlotUnavailable):
+		if _, _, err := s.creds.ValidateAgainstLedger(s.cfg.Ledger); err != nil {
+			return fmt.Errorf("validate against ledger: %w", err)
+		}
 		s.cfg.Logger.Warn(
 			"mithril signer: KES period check deferred until the current slot is known",
 			"component",
@@ -220,6 +230,15 @@ func (s *Signer) Run(ctx context.Context) error {
 			return nil
 		default:
 		}
+		if _, ok := errors.AsType[permanentRoundError](err); ok {
+			s.metrics.errors.Inc()
+			s.cfg.Logger.Error(
+				"mithril signer stopped after permanent round failure",
+				"component", "mithril-signer",
+				"error", err,
+			)
+			return err
+		}
 		if err == nil {
 			backoff = s.cfg.MinBackoff
 			wait = s.cfg.PollInterval
@@ -241,6 +260,36 @@ func (s *Signer) Run(ctx context.Context) error {
 type epochMark struct {
 	epoch uint64
 	set   bool
+}
+
+type roundProgress struct {
+	mu         sync.Mutex
+	registered epochMark
+	signed     epochMark
+}
+
+func (p *roundProgress) isRegistered(epoch uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.registered.is(epoch)
+}
+
+func (p *roundProgress) markRegistered(epoch uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registered.mark(epoch)
+}
+
+func (p *roundProgress) isSigned(epoch uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.signed.is(epoch)
+}
+
+func (p *roundProgress) markSigned(epoch uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.signed.mark(epoch)
 }
 
 func (m *epochMark) is(epoch uint64) bool { return m.set && m.epoch == epoch }

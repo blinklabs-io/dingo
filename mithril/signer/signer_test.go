@@ -186,6 +186,7 @@ type stubAggregator struct {
 	// signatureStatus is the status returned for the next signature
 	// submissions, one per element, then 201.
 	signatureStatuses chan int
+	registerStatuses  chan int
 	epochSettingsHits atomic.Int32
 	hitsMu            sync.Mutex
 	epochSettingsAt   []time.Time
@@ -200,6 +201,7 @@ func newStubAggregator(t *testing.T) *stubAggregator {
 	stub := &stubAggregator{
 		stakes:            map[string]uint64{},
 		signatureStatuses: make(chan int, 8),
+		registerStatuses:  make(chan int, 8),
 		registrations:     make(chan map[string]any, 8),
 		signatures:        make(chan map[string]any, 8),
 	}
@@ -276,7 +278,12 @@ func newStubAggregator(t *testing.T) *stubAggregator {
 		"/register-signer",
 		func(w http.ResponseWriter, r *http.Request) {
 			stub.registrations <- decodeBody(t, r)
-			w.WriteHeader(http.StatusCreated)
+			status := http.StatusCreated
+			select {
+			case status = <-stub.registerStatuses:
+			default:
+			}
+			w.WriteHeader(status)
 		},
 	)
 	mux.HandleFunc(
@@ -558,6 +565,46 @@ func TestRoundSkipsSigningWhenNotInCurrentSigners(t *testing.T) {
 	assert.Equal(t, int32(2), s.stub.epochSettingsHits.Load())
 }
 
+func TestSignStakeDistributionWaitsForUsableSignerSets(t *testing.T) {
+	t.Parallel()
+	s := newTestSigner(t, testOptions{ownIsCurrent: true})
+	nonEmpty := []mithril.AggregatorSigner{{PartyID: "pool"}}
+	tests := []struct {
+		name     string
+		settings mithril.EpochSettings
+	}{
+		{
+			name: "first signing epoch",
+			settings: mithril.EpochSettings{
+				Epoch:          1,
+				CurrentSigners: nonEmpty,
+				NextSigners:    nonEmpty,
+			},
+		},
+		{
+			name: "empty current signer set",
+			settings: mithril.EpochSettings{
+				Epoch:       testEpoch,
+				NextSigners: nonEmpty,
+			},
+		},
+		{
+			name: "empty next signer set",
+			settings: mithril.EpochSettings{
+				Epoch:          testEpoch,
+				CurrentSigners: nonEmpty,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			done, err := s.signStakeDistribution(t.Context(), &tt.settings)
+			require.NoError(t, err)
+			assert.False(t, done)
+		})
+	}
+}
+
 func TestRunRetriesFailedRoundsWithBackoff(t *testing.T) {
 	t.Parallel()
 	s := newTestSigner(t, testOptions{ownIsCurrent: true})
@@ -641,6 +688,34 @@ func TestRunStopsRetryingLateSignature(t *testing.T) {
 	assert.Zero(t, promtestutil.ToFloat64(s.metrics.errors))
 }
 
+func TestRunStopsOnPermanentRegistrationStatus(t *testing.T) {
+	t.Parallel()
+	s := newTestSigner(t, testOptions{
+		ownIsCurrent: true,
+		minBackoff:   time.Millisecond,
+		maxBackoff:   time.Millisecond,
+	})
+	s.stub.registerStatuses <- http.StatusBadRequest
+
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	err := s.Run(ctx)
+	var permanent permanentRoundError
+	require.ErrorAs(t, err, &permanent)
+	assert.Len(t, s.stub.registrations, 1)
+	require.Equal(t, float64(1), promtestutil.ToFloat64(s.metrics.errors))
+}
+
+func TestRoundContinuesAfterRegistrationWindowCloses(t *testing.T) {
+	t.Parallel()
+	s := newTestSigner(t, testOptions{ownIsCurrent: true})
+	s.stub.registerStatuses <- http.StatusGone
+
+	require.NoError(t, s.round(t.Context()))
+	assert.Len(t, s.stub.registrations, 1)
+	assert.Len(t, s.stub.signatures, 1)
+}
+
 func TestRunReturnsWhenCancelledBeforeFirstRound(t *testing.T) {
 	t.Parallel()
 	s := newTestSigner(t, testOptions{ownIsCurrent: true})
@@ -675,6 +750,14 @@ func TestNewRejectsInvalidCredentials(t *testing.T) {
 		},
 		{
 			name:    "counter behind the chain",
+			ledger:  fakeLedger{registered: true, opCertSequence: 5},
+			wantErr: "opcert sequence 0 invalid",
+		},
+		{
+			name: "counter behind the chain when slot is unavailable",
+			slot: func() (uint64, error) {
+				return 0, ErrSlotUnavailable
+			},
 			ledger:  fakeLedger{registered: true, opCertSequence: 5},
 			wantErr: "opcert sequence 0 invalid",
 		},

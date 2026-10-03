@@ -111,6 +111,37 @@ func TestServiceRegistersWithAggregator(t *testing.T) {
 	stop()
 }
 
+func TestServiceRestartReusesMetricsAndRegistrationProgress(t *testing.T) {
+	t.Parallel()
+	srv, registrations := registrationAggregator(t)
+	progress := &roundProgress{}
+	service := serviceWithProgress(
+		serviceConfig(newPoolKeys(t, testOpCertStartPeriod), srv.URL),
+		progress,
+	)
+	env := serviceEnv(func() (uint64, bool, error) {
+		return testSlot, true, nil
+	})
+
+	stop, err := service(t.Context(), env)
+	require.NoError(t, err)
+	testutil.RequireReceive(t, registrations, testWait, "first registration")
+	require.Eventually(t, func() bool {
+		return progress.isRegistered(testEpoch)
+	}, testWait, time.Millisecond)
+	stop()
+
+	stop, err = service(t.Context(), env)
+	require.NoError(t, err)
+	defer stop()
+	testutil.RequireNoReceive(
+		t,
+		registrations,
+		100*time.Millisecond,
+		"duplicate registration after service restart",
+	)
+}
+
 func TestServiceFailsOnInvalidCredentials(t *testing.T) {
 	t.Parallel()
 	keys := newPoolKeys(t, testOpCertStartPeriod)
@@ -181,7 +212,6 @@ func TestSignerEndpoint(t *testing.T) {
 // a stub aggregator: the signer registers once the node's slot clock is
 // usable, and the node stops it on shutdown.
 func TestNodeRunsTheSigner(t *testing.T) {
-	t.Parallel()
 	srv, registrations := registrationAggregator(t)
 	keys := newPoolKeys(t, 0)
 
