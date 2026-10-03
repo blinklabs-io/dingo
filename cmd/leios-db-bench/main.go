@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/plugin"
@@ -95,6 +96,9 @@ func run() (runErr error) {
 			BlobPlugin:     "badger",
 			MetadataPlugin: "sqlite",
 			Logger:         logger,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				nil, "", "mainnet",
+			),
 		},
 		plugins.StorageSelections{
 			Blob:     plugin.Selection{Provider: "badger"},
@@ -160,7 +164,7 @@ func validateConfig(config benchConfig) error {
 		config.txSizeBytes < 32 || config.fetchClients < 1 ||
 		config.ebsPerClient < 1 || config.fetchServers < 1 ||
 		config.chainSelReads < 1 || config.gcTicks < 0 || config.runs < 1 {
-		return fmt.Errorf(
+		return errors.New(
 			"invalid benchmark configuration: counts must be positive, " +
 				"GC ticks may be zero, and transaction sizes must be " +
 				"at least 32 bytes",
@@ -202,10 +206,11 @@ func setupBenchEnv(env *benchEnv) error {
 	config := env.config
 	fmt.Printf("Inserting EBs: ")
 	for i := range config.prePopulatedEbs {
-		if err := insertOneEb(env.db, i, config); err != nil {
+		point, err := insertOneEb(env.db, i, config)
+		if err != nil {
 			return fmt.Errorf("prepopulate EB %d: %w", i, err)
 		}
-		env.points = append(env.points, genPoint(i))
+		env.points = append(env.points, point)
 		step := max(config.prePopulatedEbs/10, 1)
 		if (i+1)%step == 0 || i+1 == config.prePopulatedEbs {
 			fmt.Printf("%d ", i+1)
@@ -253,11 +258,9 @@ func benchConcurrentAll(env *benchEnv) error {
 	errCh := make(chan error, workerCount)
 	var wg sync.WaitGroup
 	start := func(work func() error) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			errCh <- work()
-		}()
+		})
 	}
 
 	start(func() error { return chainSelReader(env) })
@@ -284,7 +287,7 @@ func benchConcurrentAll(env *benchEnv) error {
 func fetchClient(env *benchEnv, firstEb, count int) error {
 	for i := range count {
 		idx := firstEb + i
-		if err := insertOneEb(env.db, idx, env.config); err != nil {
+		if _, err := insertOneEb(env.db, idx, env.config); err != nil {
 			return fmt.Errorf("write EB %d: %w", idx, err)
 		}
 	}
@@ -338,21 +341,38 @@ func fetchServer(env *benchEnv, server int) error {
 	return nil
 }
 
-func insertOneEb(db *database.Database, ebIdx int, config benchConfig) error {
-	point := genPoint(ebIdx)
-	manifest := genManifest(ebIdx, config.txsPerEb)
+func insertOneEb(
+	db *database.Database,
+	ebIdx int,
+	config benchConfig,
+) (benchPoint, error) {
+	point, err := genPoint(ebIdx)
+	if err != nil {
+		return benchPoint{}, err
+	}
+	manifest, err := genManifest(ebIdx, config.txsPerEb)
+	if err != nil {
+		return benchPoint{}, err
+	}
 	txs, err := genTxs(ebIdx, config)
 	if err != nil {
-		return err
+		return benchPoint{}, err
 	}
-	return db.SetLeiosEB(point.slot, point.hash, manifest, txs)
+	if err := db.SetLeiosEB(point.slot, point.hash, manifest, txs); err != nil {
+		return benchPoint{}, err
+	}
+	return point, nil
 }
 
 func genTxs(ebIdx int, config benchConfig) ([]cbor.RawMessage, error) {
 	txs := make([]cbor.RawMessage, config.txsPerEb)
 	payloadSize := config.txSizeBytes
 	for {
-		headerSize := len(appendCborHead(nil, 2, uint64(payloadSize)))
+		payloadLength, err := nonNegativeUint64(payloadSize)
+		if err != nil {
+			return nil, err
+		}
+		headerSize := len(appendCborHead(nil, 2, payloadLength))
 		nextSize := config.txSizeBytes - headerSize
 		if nextSize == payloadSize {
 			break
@@ -380,20 +400,35 @@ func genTxs(ebIdx int, config benchConfig) ([]cbor.RawMessage, error) {
 	return txs, nil
 }
 
-func genManifest(ebIdx, txsPerEb int) []byte {
-	manifest := appendCborHead(nil, 5, uint64(txsPerEb))
+func genManifest(ebIdx, txsPerEb int) ([]byte, error) {
+	count, err := nonNegativeUint64(txsPerEb)
+	if err != nil {
+		return nil, err
+	}
+	manifest := appendCborHead(nil, 5, count)
 	for txIdx := range txsPerEb {
 		manifest = appendCborBytes(manifest, genTxHash(ebIdx, txIdx))
 		manifest = appendCborHead(manifest, 0, referenceTxBytes)
 	}
-	return manifest
+	return manifest, nil
 }
 
-func genPoint(ebIdx int) benchPoint {
-	return benchPoint{
-		slot: uint64(ebIdx),
-		hash: genHash(fmt.Sprintf("ebHash:%d", ebIdx)),
+func genPoint(ebIdx int) (benchPoint, error) {
+	slot, err := nonNegativeUint64(ebIdx)
+	if err != nil {
+		return benchPoint{}, err
 	}
+	return benchPoint{
+		slot: slot,
+		hash: genHash(fmt.Sprintf("ebHash:%d", ebIdx)),
+	}, nil
+}
+
+func nonNegativeUint64(value int) (uint64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("cannot encode negative integer %d as CBOR", value)
+	}
+	return uint64(value), nil
 }
 
 func genTxHash(ebIdx, txIdx int) []byte {
