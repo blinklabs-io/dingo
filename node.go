@@ -1989,6 +1989,12 @@ func (n *Node) buildChainSelectorConfig(
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
 		},
+		PeerIdentity: func(connId ouroboros.ConnectionId) string {
+			if n.peerGov == nil {
+				return ""
+			}
+			return n.peerGov.DiversityGroupByConnId(connId)
+		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {
 				return 0, false

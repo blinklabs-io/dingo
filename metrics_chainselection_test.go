@@ -192,6 +192,16 @@ func TestBuildChainSelectorConfigWiresRollbackRegistrationCounter(
 	)
 }
 
+// The corroboration identity hook is installed by the composition site; a
+// hook left unset silently falls back to grouping witnesses by remote host.
+func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
+	n, _ := newMetricsTestNode(t)
+	cfg := n.buildChainSelectorConfig(2160, true, 0)
+	require.NotNil(t, cfg.PeerIdentity)
+
+	assert.Empty(t, cfg.PeerIdentity(newNodeTestConnId(3303)))
+}
+
 // New() registers the chain-selection counters, so they exist for the node's
 // whole lifetime rather than only after a component that happens to touch them
 // is built. Registration must happen against the pre-wrap registerer (see
