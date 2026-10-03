@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package dmq implements phase 1 of CIP-0137's Decentralized Message Queue:
-// the generic message pool shared by every DMQ topic instance. It holds no
-// opinion about authentication, KES/opcert validation, network wiring, or
-// peer selection -- those belong to later CIP-0137 phases.
+// Package dmq implements CIP-0137's Decentralized Message Queue: the generic
+// message pool shared by every DMQ topic instance, and the Stack that serves
+// it to local producers and consumers over a Unix socket alongside the Cardano
+// stack. The pool itself holds no opinion about authentication, KES/opcert
+// validation, network wiring, or peer selection.
 //
 // The wire types -- Message, MessagePayload, and OperationalCertificate, along
 // with their CBOR encode/decode and message-ID computation -- already exist
@@ -49,4 +50,23 @@
 // bound with ErrFull, and rejects an already-expired message with ErrExpired,
 // so callers can apply their own backpressure or reply with a CIP-0137 reject
 // reason without the pool growing unbounded between TTL sweeps.
+//
+// # Local submission and notification
+//
+// A Stack owns one topic instance: a MessageMempool, a connection manager of
+// its own, and a Unix socket speaking the DMQ node-to-client handshake under
+// the topic's network magic. Each connection carries both local mini-protocols.
+//
+// Local message submission validates a message in order -- already expired,
+// expiry beyond the configured message TTL, CIP-0137 authentication -- and
+// then admits it to the pool. It replies accept, or rejects with the current
+// CIP-0137 reason: expired, invalid (with the validation error), alreadyReceived
+// for a duplicate ID, or other (with the error) when the pool is full.
+//
+// Local message notification gives each connection its own cursor over the
+// pool, so every consumer receives every message once. A feeder goroutine moves
+// messages from the cursor into the connection's notification queue and holds
+// back any message the queue refuses, so a slow consumer delays messages but
+// never loses one. Blocking and non-blocking requests are answered by the
+// gouroboros notification server.
 package dmq

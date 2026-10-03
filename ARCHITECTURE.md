@@ -6255,10 +6255,10 @@ make a long rebuild repeatedly lose its pinned ledger generation.
 ## DMQ Message Pool
 
 `dmq.MessageMempool` is the message mempool of CIP-0137's Decentralized
-Message Queue (primary use case: Mithril signature diffusion). It is a
-standalone package, not yet wired into `node.go`, the plugin host, or any
-network protocol client/server, and there is no DMQ feature flag or peer
-manager integration yet.
+Message Queue (primary use case: Mithril signature diffusion).
+`dmq.Stack` composes it with the local node-to-client protocols (see "DMQ
+Local Protocols" below) and `node.go` runs that stack when `dmq.enabled` is
+set.
 
 The wire types are not redefined here. `Message`, `MessagePayload`, and
 `OperationalCertificate` from CIP-0137's CDDL, along with their CBOR
@@ -6297,7 +6297,7 @@ sequence number, not a slice index, so TTL compaction never invalidates it)
 over the arrival-ordered log, mirroring CIP-0137's per-peer outstanding
 message-ids queue for the node-to-node message-submission mini-protocol
 (protocol 18) without implementing that protocol's blocking/non-blocking
-request state machine itself, which is not implemented yet. A peer new to
+request state machine itself, which a node-to-node transport must provide. A peer new to
 the pool sees the full retained backlog before anything arriving after it
 connects; `RemovePeer` releases a disconnected peer's cursor.
 
@@ -6313,6 +6313,51 @@ lock, matching the mempool package's event-publication rule. Their payloads
 are `AddMessageEvent` and `RemoveMessageEvent`, each carrying a 32-byte
 `MessageID` field. `EventBus` is optional (nil-safe) so the package is usable
 standalone ahead of node composition.
+
+### DMQ Local Protocols
+
+`dmq.Stack` is one DMQ topic instance running in the Cardano node's process: its
+own `MessageMempool`, its own `connmanager.ConnectionManager`, its own event
+bus, and one Unix socket (`dmq.socketPath`, distinct from the Cardano
+`socketPath`). The Cardano connection manager, event bus and handlers never see
+a DMQ connection. Connections negotiate the DMQ node-to-client handshake
+(`WithDMQ`) under the topic's network magic, which `dmq.networkMagic` overrides
+and otherwise comes from the topic and Cardano network (`dmq.TopicNetworkMagic`).
+Each connection carries local message submission (mini-protocol 14) and local
+message notification (mini-protocol 15).
+
+Submission validates in this order and replies with the CIP-0137 reject reason
+of the first check that fails: already expired (`expired`), expiry beyond
+`dmq.messageTtl` (`invalid`), `MessageAuthenticator.VerifyMessage` (`invalid`),
+then `MessageMempool.Add` (`expired`, `invalid` for a mismatched ID,
+`alreadyReceived` for a duplicate, `other` when the pool is full). The
+gouroboros server's own TTL and authentication checks are disabled because
+`Stack` performs them, so that every refusal is counted by reason and an
+expired message is reported as expired rather than invalid.
+
+Notification gives each connection a `NextForPeer` cursor keyed by connection
+ID. A feeder goroutine per connection moves messages into the gouroboros
+notification server's queue (`Server.AddMessage`) and keeps a refused message
+pending, retrying every 100ms, so a consumer with a full queue delays messages
+and never loses one. Feeders wake on `MessageMempool.AddedSignal`, taken before
+each drain so an admission between the drain and the wait is not missed. The
+server's authentication and TTL checks are disabled here because pooled
+messages were validated on admission and a second `VerifyMessage` would trip
+the authenticator's replay tracking. The cursor is released when the connection
+closes.
+
+Metrics are registered against the retained registry (not the rebuildable one,
+which a live restore unregisters) and are all prefixed `dingo_dmq_`:
+`messages_received_total`, `messages_expired_total`, `messages_sent_total`
+(messages queued for a notification consumer),
+`validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`, and
+`connections`.
+
+Not yet provided: the node-to-node transport (mini-protocol 18), its listener,
+topology, peer limits and ledger peer discovery, which the DMQ stack needs
+before it can exchange messages with other nodes. `n2n_port`, `listen_address`,
+`topology_file`, `min_peers` and `max_peers` are therefore not configuration
+keys yet.
 
 ### DMQ Message Authentication
 
@@ -6335,11 +6380,10 @@ callback required) and gates on a stake-weighted `StakeAuthority` interface
 rather than a boolean registered-pool set, so this codebase no longer needs
 its own copy.
 
-Nothing in the codebase constructs a `MessageAuthenticator` yet: driving one
-from an inbound message and then feeding an authenticated message to
-`MessageMempool.Add` needs protocol wiring that does not exist yet: nothing
-runs the node-to-node mini-protocol or composes the DMQ subsystem into
-`node.go`.
+`node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
+`StakeAuthority` that reads the pool's stake from the snapshot Praos leader
+election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
+accepted only from a pool that may currently forge blocks.
 
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus

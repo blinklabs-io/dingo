@@ -1413,3 +1413,91 @@ func TestValidateMinPoolMargin(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDMQ(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr string
+	}{
+		{
+			name:   "disabled ignores its other settings",
+			mutate: func(c *Config) { c.DMQ.SocketPath = c.SocketPath },
+		},
+		{
+			name:   "enabled defaults",
+			mutate: func(c *Config) { c.DMQ.Enabled = true },
+		},
+		{
+			name: "socket shared with the cardano socket",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.SocketPath = c.SocketPath
+			},
+			wantErr: "dmq.socketPath must differ from socketPath",
+		},
+		{
+			name: "empty socket",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.SocketPath = ""
+			},
+			wantErr: "dmq.socketPath must be set",
+		},
+		{
+			name: "empty topic",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.Topic = ""
+			},
+			wantErr: "dmq.topic must be set",
+		},
+		{
+			name: "zero ttl",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MessageTTL = 0
+			},
+			wantErr: "dmq.messageTtl must be positive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			cfg.SocketPath = "dingo.socket"
+			cfg.DMQ = DefaultDMQConfig()
+			tt.mutate(cfg)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestPipeline_DMQYAMLAndFlags(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"dmq:\n  enabled: true\n  topic: mithril\n  messageTtl: 300\n",
+		[]string{
+			"--dmq-socket-path=/run/dmq.sock",
+			"--dmq-network-magic=7",
+			"--dmq-max-mempool-size=4",
+			"--dmq-message-ttl=600",
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, DMQConfig{
+		Enabled:        true,
+		Topic:          "mithril",
+		NetworkMagic:   7,
+		SocketPath:     "/run/dmq.sock",
+		MessageTTL:     600,
+		MaxMempoolSize: 4,
+	}, cfg.DMQ)
+}

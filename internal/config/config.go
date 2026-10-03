@@ -590,6 +590,37 @@ func DefaultMidnightConfig() MidnightConfig {
 	}
 }
 
+// DMQConfig holds configuration for the CIP-0137 Decentralized Message Queue
+// running alongside the Cardano stack in the same process.
+type DMQConfig struct {
+	// Enabled starts the DMQ stack. Default false.
+	Enabled bool `yaml:"enabled"      envconfig:"DINGO_DMQ_ENABLED"`
+	// Topic names the DMQ instance. It selects the default NetworkMagic for
+	// the configured Cardano network; only "mithril" is supported.
+	Topic string `yaml:"topic"        envconfig:"DINGO_DMQ_TOPIC"`
+	// NetworkMagic overrides the topic's default DMQ network magic. Required
+	// when the Cardano network has no default for the topic.
+	NetworkMagic uint32 `yaml:"networkMagic" envconfig:"DINGO_DMQ_NETWORK_MAGIC"`
+	// SocketPath is the Unix socket serving local message submission and
+	// notification. It must differ from the Cardano SocketPath.
+	SocketPath string `yaml:"socketPath"   envconfig:"DINGO_DMQ_SOCKET_PATH"`
+	// MessageTTL is the longest expiry, in seconds, a submitted message may
+	// claim.
+	MessageTTL uint `yaml:"messageTtl"   envconfig:"DINGO_DMQ_MESSAGE_TTL"`
+	// MaxMempoolSize bounds the message pool, in megabytes.
+	MaxMempoolSize uint `yaml:"maxMempoolSize" envconfig:"DINGO_DMQ_MAX_MEMPOOL_SIZE"`
+}
+
+// DefaultDMQConfig returns the default DMQ settings.
+func DefaultDMQConfig() DMQConfig {
+	return DMQConfig{
+		Topic:          "mithril",
+		SocketPath:     "dingo-dmq.socket",
+		MessageTTL:     1800,
+		MaxMempoolSize: 128,
+	}
+}
+
 type Config struct {
 	Plugins PluginsConfig `yaml:"plugins"`
 	// API holds shared TLS policy defaults for every selected
@@ -768,6 +799,8 @@ type Config struct {
 
 	// Midnight indexer and gRPC API configuration.
 	Midnight MidnightConfig `yaml:"midnight"`
+	// DMQ configures the CIP-0137 Decentralized Message Queue stack.
+	DMQ DMQConfig `yaml:"dmq"`
 
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
@@ -1295,6 +1328,7 @@ func newDefaultConfig() *Config {
 		Logging: DefaultLoggingConfig(),
 		// Midnight defaults
 		Midnight: DefaultMidnightConfig(),
+		DMQ:      DefaultDMQConfig(),
 		// KES configuration defaults (mainnet values)
 		SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 		MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
