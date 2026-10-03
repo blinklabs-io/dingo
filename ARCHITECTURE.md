@@ -1847,7 +1847,32 @@ paths, where the point is to report before the goroutine unwinds.
 - Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
   buffers for high-volume ledger chainsync and chain-update paths. The
   payload-heavy ledger blockfetch path uses an eight-entry buffer and relies
-  on lossless backpressure once one chain-store commit batch is queued
+  on lossless backpressure once one chain-store commit batch is queued. That
+  backpressure does not reach the gouroboros blockfetch receive goroutine:
+  `ouroboros.blockfetchClientBlock` and `blockfetchClientRangeDone` append
+  each event to a per-connection forward queue
+  (`ouroboros/blockfetch_forward.go`), and one forwarder goroutine per
+  connection publishes it to `ledger.blockfetch` in FIFO order. The shared
+  muxer's read loop, which the receive goroutine serves, keeps draining the
+  socket, including keep-alive pongs, however far behind the ledger falls.
+  The gouroboros in-flight byte budget does not bound the forward queue,
+  since that budget is released when a range finishes arriving, and the
+  ledger's per-connection limit of an active and a pre-queued range does not
+  either, since `blockfetchRequestRangeCleanup` releases requests on timeout,
+  rollback and fork restart while they may still be streaming and a retry
+  can redispatch on the same connection. The queue is therefore bounded per
+  connection at twice the in-flight byte budget and twice the events of the
+  ranges that budget admits. Waiting for space would stall the receive
+  goroutine again, so an event that would exceed either bound terminates
+  the connection instead: the queued events not yet taken by the forwarder
+  are discarded, the connection is closed off the receive goroutine, later
+  events for it are dropped until its close is handled, and the ledger's
+  close handling releases its requests for refetch elsewhere.
+  `dingo_blockfetch_forward_overflow_total` counts those closes,
+  `dingo_blockfetch_inflight_bytes`/`_inflight_blocks` gauge the backlog
+  across connections, and `dingo_blockfetch_stage_duration_seconds{stage=
+  "enqueue"|"ledger_publish"}` separates the receive path's hand-off time
+  from the forwarder's time in `Publish`, which includes ledger backpressure
 - Lossless delivery with bounded producer backpressure: when a subscriber buffer
   or the async queue is full, `Publish`, `PublishBlocking`, and `PublishAsync`
   wait for capacity instead of dropping an event for a live subscriber. An
@@ -1912,10 +1937,13 @@ paths, where the point is to report before the goroutine unwinds.
   gouroboros' `RequestRange`, which (with request pipelining enabled) returns
   as soon as the request is sent rather than waiting for the range to
   complete, but it can still block first: `sendRequestRange` waits for the
-  client's in-flight-byte budget to admit the request, and that budget is only
-  released as an earlier request's blocks are delivered — by the same receive
-  callback that publishes `ledger.blockfetch` and needs the ledger mutex to do
-  it. `startQueuedBlockfetchLocked` reserves the
+  client's in-flight-byte budget to admit the request, and that budget is
+  released as an earlier request's blocks are delivered to the gouroboros
+  receive callback. That callback only enqueues onto the per-connection
+  forward queue and returns, so the release does not depend on ledger
+  consumption or the ledger mutex; only the forwarder goroutine draining the
+  queue does.
+  `startQueuedBlockfetchLocked` reserves the
   batch and arms its timer under the mutex, releases the mutex for the primary
   and shadow requests, then reacquires it before inspecting state. If a
   callback completed or replaced the batch while the request was outside the

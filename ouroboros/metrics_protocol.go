@@ -39,6 +39,12 @@ type protocolMetrics struct {
 	messageDuration               *prometheus.HistogramVec
 	txsubmissionAdmissionRetries  prometheus.Histogram
 	txsubmissionReplySizeMismatch *prometheus.CounterVec
+	// keepaliveTimeouts counts connections closed because this node's
+	// keep-alive client timed out waiting for a pong, as classified by
+	// classifyKeepaliveTimeoutClose. A timeout never reaches
+	// instrumentKeepaliveResponse, so messagesReceived{protocol="keepalive"}
+	// has no failure outcome to record it under.
+	keepaliveTimeouts prometheus.Counter
 }
 
 func (o *Ouroboros) initProtocolMetrics() {
@@ -80,6 +86,12 @@ func (o *Ouroboros) initProtocolMetrics() {
 				Buckets: []float64{
 					1, 2, 3, 5, 10, 20, 50,
 				},
+			},
+		),
+		keepaliveTimeouts: factory.NewCounter(
+			prometheus.CounterOpts{
+				Name: "dingo_keepalive_timeout_total",
+				Help: "connections closed because this node's keep-alive client timed out waiting for a pong",
 			},
 		),
 	}
@@ -131,4 +143,13 @@ func (o *Ouroboros) recordTxsubmissionAdmissionRetry(streak int) {
 		return
 	}
 	o.protocolMetrics.txsubmissionAdmissionRetries.Observe(float64(streak))
+}
+
+// recordKeepaliveTimeout increments the keep-alive timeout counter. Safe to
+// call when metrics are not initialized.
+func (o *Ouroboros) recordKeepaliveTimeout() {
+	if o.protocolMetrics == nil {
+		return
+	}
+	o.protocolMetrics.keepaliveTimeouts.Inc()
 }
