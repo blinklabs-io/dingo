@@ -1429,19 +1429,39 @@ func TestVerifyDeferredBlockHeaderStateSurvivesRestartMarker(
 	seedBlockPoolRegistration(t, db, tb.block)
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
-	require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
 
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return ls.verifyDeferredBlockHeaderState(txn, point, tb.block)
 	}))
 
-	value, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		nil,
-	)
+	require.False(t, deferredMarkerPersisted(t, ls, point))
+}
+
+// TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker requires the blob
+// marker to outlive an apply transaction that rolls back: the block is still
+// unapplied, so the retry must find the marker and run the stateful check.
+func TestVerifyDeferredBlockHeaderStateRollbackKeepsMarker(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedBlockPoolRegistration(t, db, tb.block)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	txn := db.Transaction(true)
+	require.NoError(t, ls.verifyDeferredBlockHeaderState(txn, point, tb.block))
+	require.NoError(t, txn.Rollback())
+
+	require.True(t, deferredMarkerPersisted(t, ls, point))
+	required, err := ls.deferredHeaderValidationRequired(point, nil)
 	require.NoError(t, err)
-	require.Empty(t, value)
+	require.True(t, required, "rolled-back apply must leave the check pending")
 }
 
 // TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply is the
@@ -1481,7 +1501,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 
 	// REJECT: the deferred header's issuer is NOT the assigned genesis delegate.
 	t.Run("wrong issuer rejected at apply", func(t *testing.T) {
-		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 		wrongDelegate := make([]byte, lcommon.Blake2b224Size)
 		wrongDelegate[0] = 0xAB
 		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
@@ -1505,7 +1525,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 
 		// With the marker present the stateful genesis-delegate check runs at
 		// apply and rejects the wrong issuer; the block cannot be adopted.
-		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		require.NoError(t, ls.persistDeferredHeaderValidation(point))
 		ls.markDeferredHeaderValidation(point)
 		err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
 		require.Error(t, err)
@@ -1519,21 +1539,16 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 		// The persisted marker is NOT cleared on rejection: the header stays
 		// outstanding (its rejection is terminal via the typed rewind), never
 		// silently resolved.
-		marker, gerr := db.GetSyncState(
-			deferredHeaderValidationSyncStateKey(point), nil,
-		)
-		require.NoError(t, gerr)
-		assert.Equal(
+		assert.True(
 			t,
-			deferredHeaderValidationSyncStateValue,
-			marker,
+			deferredMarkerPersisted(t, ls, point),
 			"rejected header's marker must not be cleared",
 		)
 	})
 
 	// ACCEPT: the correct genesis delegate re-validates at apply and clears.
 	t.Run("correct delegate revalidated and cleared", func(t *testing.T) {
-		ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+		ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 		ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
 			t,
 			hex.EncodeToString(delegateHash.Bytes()),
@@ -1543,7 +1558,7 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 			Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 		}
 		ls.publishSnapshotsLocked()
-		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+		require.NoError(t, ls.persistDeferredHeaderValidation(point))
 		ls.markDeferredHeaderValidation(point)
 
 		require.NoError(
@@ -1553,11 +1568,11 @@ func TestVerifyDeferredBlockHeaderState_GenesisOverlayRevalidatedAtApply(
 		)
 		// Resolved: in-memory entry consumed and the persisted marker cleared.
 		assert.False(t, ls.consumeDeferredHeaderValidation(point))
-		v, gerr := db.GetSyncState(
-			deferredHeaderValidationSyncStateKey(point), nil,
+		assert.False(
+			t,
+			deferredMarkerPersisted(t, ls, point),
+			"resolved header's persisted marker must be cleared",
 		)
-		require.NoError(t, gerr)
-		assert.Empty(t, v, "resolved header's persisted marker must be cleared")
 	})
 }
 
@@ -4193,7 +4208,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_RealPruneNoDeadlock(
 	// lock, and so consume has a marker to clear on the apply side.
 	deferred := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
 	ls.markDeferredHeaderValidation(deferred)
-	require.NoError(t, ls.persistDeferredHeaderValidation(deferred, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(deferred))
 
 	connHeld := make(chan struct{})
 	pruneReached := make(chan struct{})
@@ -4399,8 +4414,8 @@ func TestRepopulateDeferredHeaderValidation(t *testing.T) {
 	// in-memory map (simulating the post-restart empty set).
 	p11 := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
 	p14 := ocommon.Point{Slot: 1_450, Hash: []byte{0x14}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(p11, nil))
-	require.NoError(t, ls.persistDeferredHeaderValidation(p14, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(p11))
+	require.NoError(t, ls.persistDeferredHeaderValidation(p14))
 
 	// Empty in-memory set: no pin yet.
 	if _, ok := ls.OldestRequiredSnapshotEpoch(); ok {
@@ -4433,7 +4448,7 @@ func TestRepopulateDeferredHeaderValidation_FailsClosedOnScanError(
 
 	// Persist a marker, then close the database so the marker scan errors.
 	require.NoError(t, ls.persistDeferredHeaderValidation(
-		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}, nil,
+		ocommon.Point{Slot: 1_150, Hash: []byte{0x11}},
 	))
 	dbtest.CloseDatabase(db) //nolint:errcheck
 
@@ -4465,8 +4480,8 @@ func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
 	staleKey := headerValidationPointKey(staleGone)
 
 	// Both points have a persisted marker (as any deferred header would).
-	require.NoError(t, ls.persistDeferredHeaderValidation(reAdmitted, nil))
-	require.NoError(t, ls.persistDeferredHeaderValidation(staleGone, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(reAdmitted))
+	require.NoError(t, ls.persistDeferredHeaderValidation(staleGone))
 
 	// The re-admitted point is back in the in-memory set (re-deferred after the
 	// eviction that produced the delete list); the stale one is not.
@@ -4475,22 +4490,20 @@ func TestDeletePersistedDeferredMarkers_SkipsReAdmitted(t *testing.T) {
 	// Cleanup runs for BOTH evicted keys.
 	ls.deletePersistedDeferredMarkers([]string{reAdmittedKey, staleKey})
 
-	remaining, err := ls.db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix, nil,
-	)
+	remaining, err := ls.db.ListDeferredHeaderMarkers()
 	require.NoError(t, err)
 	// The re-admitted point's marker MUST survive (it now backs a live pin);
 	// the genuinely-stale marker MUST be gone.
 	assert.Contains(
 		t,
 		remaining,
-		deferredHeaderValidationSyncStatePrefix+reAdmittedKey,
+		reAdmittedKey,
 		"re-deferred point's marker must not be deleted",
 	)
 	assert.NotContains(
 		t,
 		remaining,
-		deferredHeaderValidationSyncStatePrefix+staleKey,
+		staleKey,
 		"genuinely stale marker must be deleted",
 	)
 }
@@ -4506,7 +4519,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
 		{
 			EpochId:       11,
@@ -4521,7 +4534,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 
 	stale := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
 	ls.markDeferredHeaderValidation(stale)
-	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(stale))
 
 	// Before: the abandoned header pins epoch 10.
 	floor, ok := ls.OldestRequiredSnapshotEpoch()
@@ -4539,12 +4552,11 @@ func TestPrunePoolSnapshotsWithRetentionFloor_EvictsStaleBehindCursor(
 	assert.Equal(t, uint64(25), seenBefore, "evicted header must not pin")
 	_, ok = ls.OldestRequiredSnapshotEpoch()
 	assert.False(t, ok, "abandoned header must be evicted from the set")
-	marker, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(stale),
-		nil,
+	assert.False(
+		t,
+		deferredMarkerPersisted(t, ls, stale),
+		"evicted header's persisted marker must be deleted",
 	)
-	require.NoError(t, err)
-	assert.Empty(t, marker, "evicted header's persisted marker must be deleted")
 }
 
 // TestPrunePoolSnapshotsWithRetentionFloor_ResolveReleasesPin proves a deferred
@@ -4655,7 +4667,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 	t.Parallel()
 
 	tb := createTestBlock(t, [32]byte{73}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.epochCache = []models.Epoch{
 		{
 			EpochId:       11,
@@ -4678,7 +4690,7 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 	unreachable := ocommon.Point{Slot: 5_000, Hash: []byte{0x12}}
 	for _, p := range []ocommon.Point{readoptable, unreachable} {
 		ls.markDeferredHeaderValidation(p)
-		require.NoError(t, ls.persistDeferredHeaderValidation(p, nil))
+		require.NoError(t, ls.persistDeferredHeaderValidation(p))
 	}
 
 	var seenBefore uint64
@@ -4700,25 +4712,16 @@ func TestPrunePoolSnapshotsWithRetentionFloor_KeepsReadoptableDeferredHeader(
 
 	// ...and it keeps its durable marker, so a rollback-then-re-adopt still
 	// finds required == true at apply instead of skipping the check.
-	marker, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(readoptable), nil,
-	)
-	require.NoError(t, err)
-	assert.Equal(
+	assert.True(
 		t,
-		deferredHeaderValidationSyncStateValue,
-		marker,
+		deferredMarkerPersisted(t, ls, readoptable),
 		"re-adoptable header's marker must survive eviction",
 	)
 
 	// The unreachable header is still evicted, marker and all.
-	gone, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(unreachable), nil,
-	)
-	require.NoError(t, err)
-	assert.Empty(
+	assert.False(
 		t,
-		gone,
+		deferredMarkerPersisted(t, ls, unreachable),
 		"header beyond the rollback horizon must still be evicted",
 	)
 }
@@ -4749,10 +4752,10 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{74}, 0, tamperNone)
-	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 
 	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted))
 
 	// The re-defer lands DURING the delete window, via the seam. Cleared before
 	// the stale sub-case below and on test exit.
@@ -4765,29 +4768,24 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoresMarkerReadmittedDuringDele
 		headerValidationPointKey(readmitted),
 	))
 
-	marker, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(readmitted), nil,
-	)
-	require.NoError(t, err)
-	assert.Equal(
+	assert.True(
 		t,
-		deferredHeaderValidationSyncStateValue,
-		marker,
+		deferredMarkerPersisted(t, ls, readmitted),
 		"marker for a key re-admitted DURING the delete must be restored",
 	)
 
 	// A key that is NOT re-admitted (hook cleared) still has its marker removed.
 	afterDeferredMarkerDeleteHook = nil
 	stale := ocommon.Point{Slot: 1_160, Hash: []byte{0x12}}
-	require.NoError(t, ls.persistDeferredHeaderValidation(stale, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(stale))
 	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
 		headerValidationPointKey(stale),
 	))
-	gone, err := db.GetSyncState(
-		deferredHeaderValidationSyncStateKey(stale), nil,
+	assert.False(
+		t,
+		deferredMarkerPersisted(t, ls, stale),
+		"genuinely stale marker must be deleted",
 	)
-	require.NoError(t, err)
-	assert.Empty(t, gone, "genuinely stale marker must be deleted")
 }
 
 // TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates proves a
@@ -4809,16 +4807,16 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 
 	readmitted := ocommon.Point{Slot: 1_150, Hash: []byte{0x11}}
 	key := headerValidationPointKey(readmitted)
-	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted, nil))
+	require.NoError(t, ls.persistDeferredHeaderValidation(readmitted))
 
 	// During the delete window: re-admit the point (so the restore path runs)
-	// and close the metadata store so the restore's SetSyncState fails
-	// deterministically. DeleteSyncState has already committed by the time the
+	// and close the blob store so the restore's SetDeferredHeaderMarker fails
+	// deterministically. The delete has already committed by the time the
 	// hook fires, so the delete succeeds and only the restore fails.
 	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
 	afterDeferredMarkerDeleteHook = func() {
 		ls.markDeferredHeaderValidation(readmitted)
-		require.NoError(t, ls.db.Metadata().Close())
+		require.NoError(t, ls.db.Blob().Close())
 	}
 
 	err := ls.deleteDeferredMarkerUnlessReadmitted(key)
@@ -4835,16 +4833,47 @@ func TestDeleteDeferredMarkerUnlessReadmitted_RestoreFailurePropagates(
 
 	// The same failure surfaces through the cleanup batch entry point.
 	ls2, _ := newEligibilityTestLedger(t, tb.epochNonce)
-	require.NoError(t, ls2.persistDeferredHeaderValidation(readmitted, nil))
+	require.NoError(t, ls2.persistDeferredHeaderValidation(readmitted))
 	afterDeferredMarkerDeleteHook = func() {
 		ls2.markDeferredHeaderValidation(readmitted)
-		require.NoError(t, ls2.db.Metadata().Close())
+		require.NoError(t, ls2.db.Blob().Close())
 	}
 	batchErr := ls2.deletePersistedDeferredMarkers([]string{key})
 	require.Error(
 		t,
 		batchErr,
 		"deletePersistedDeferredMarkers must propagate the lost-pin error",
+	)
+}
+
+// TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker pins
+// the ordering the failed-delete path relies on. A delete error is logged and
+// returns before the readmission re-test, which is safe only if the error
+// leaves the blob marker in place; removing the blob marker before the legacy
+// sync_state read would drop the durable pin of a point re-deferred during the
+// call, and after a restart its stateful check would be skipped.
+func TestDeleteDeferredMarkerUnlessReadmitted_FailedLegacyReadKeepsMarker(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{76}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(point))
+
+	// Closing the metadata store makes the legacy sync_state read fail while
+	// the blob store stays usable.
+	require.NoError(t, db.Metadata().Close())
+
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(point),
+	))
+	assert.True(
+		t,
+		deferredMarkerPersisted(t, ls, point),
+		"a failed delete must leave the blob marker in place",
 	)
 }
 
@@ -6543,4 +6572,45 @@ func containsAny(s string, subs ...string) bool {
 		}
 	}
 	return false
+}
+
+// TestDeferredHeaderMarkerLegacySyncStateStillHonoured covers a marker an
+// earlier version wrote to sync_state: it must still force the apply-time
+// check, repopulate into the in-memory set, and be removed once the check
+// passes.
+func TestDeferredHeaderMarkerLegacySyncStateStillHonoured(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedBlockPoolRegistration(t, db, tb.block)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+
+	require.NoError(t, db.SetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	))
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
+	ls.deferredHeaderValidationMu.Lock()
+	_, restored := ls.deferredHeaderValidation[headerValidationPointKey(point)]
+	ls.deferredHeaderValidationMu.Unlock()
+	require.True(t, restored)
+	require.True(t, ls.consumeDeferredHeaderValidation(point))
+
+	required, err := ls.deferredHeaderValidationRequired(point, nil)
+	require.NoError(t, err)
+	require.True(t, required, "legacy sync_state marker must still gate apply")
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		return ls.verifyDeferredBlockHeaderState(txn, point, tb.block)
+	}))
+	value, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, value, "legacy marker must be removed after apply")
 }

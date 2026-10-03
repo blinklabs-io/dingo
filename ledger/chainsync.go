@@ -593,7 +593,7 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 	return evicted
 }
 
-// deletePersistedDeferredMarkers removes the sync_state markers for a set of
+// deletePersistedDeferredMarkers removes the persisted markers for a set of
 // evicted deferred-header map keys. It runs after the in-memory eviction has
 // already released the retention pin, so a delete failure only leaves a dead
 // marker row to be re-cleaned on a later pass.
@@ -616,16 +616,17 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // still outstanding. So the delete is made effectively conditional by
 // re-testing membership AFTER it and RE-PERSISTING the marker for any key that
 // came back, rather than by holding the lock across the delete. Re-persisting
-// is idempotent (SetSyncState of the same key/value) and runs with no lock
+// is idempotent (SetDeferredHeaderMarker of the same key) and runs with no lock
 // held, so it closes the window without reintroducing the lock inversion.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
 		return nil
 	}
 	// The membership test is taken under the lock, but the lock is RELEASED
-	// before DeleteSyncState: that delete opens the single sqlite write
-	// connection (nil txn -> Transaction(true)), and block apply holds that
-	// connection before taking this mutex via consumeDeferredHeaderValidation.
+	// before the delete: removing a legacy sync_state row opens the single
+	// sqlite write connection (nil txn -> Transaction(true)), and block apply
+	// holds that connection before taking this mutex via
+	// consumeDeferredHeaderValidation.
 	// Holding the mutex across the delete inverts the lock order (mutex->write-
 	// conn here vs. write-conn->mutex on apply) and deadlocks the node on the
 	// single write connection -- the same inversion as the prune path. A point
@@ -661,7 +662,7 @@ func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
 
 // afterDeferredMarkerDeleteHook is a test seam. It is nil in production (a
 // single nil-check, zero cost) and, when set, runs inside
-// deleteDeferredMarkerUnlessReadmitted immediately AFTER DeleteSyncState returns
+// deleteDeferredMarkerUnlessReadmitted immediately AFTER the delete returns
 // and BEFORE the membership re-test. It lets a test inject a re-admission
 // (markDeferredHeaderValidation) that lands DURING the delete window rather than
 // before the call, so the TOCTOU restore path is actually exercised: an
@@ -691,7 +692,7 @@ const deferredMarkerRestoreMaxAttempts = 3
 // verifyDeferredBlockHeaderState skips the stateful check for a header that is
 // still outstanding.
 //
-// A failed DeleteSyncState leaves the durable marker in place, so the retention
+// A failed delete leaves the durable marker in place, so the retention
 // pin is NOT lost — the stale row is simply re-cleaned on a later pass — and is
 // logged best-effort. A failed RESTORE is different: it drops the durable pin
 // for a header that is live again in the in-memory set, so after a restart the
@@ -702,7 +703,7 @@ const deferredMarkerRestoreMaxAttempts = 3
 // fails the cleanup rather than continuing toward a restart that would lose it.
 func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	syncKey := deferredHeaderValidationSyncStatePrefix + k
-	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+	if err := ls.deleteDeferredMarkerByKey(k); err != nil {
 		ls.config.Logger.Warn(
 			"failed to delete stale deferred-header marker",
 			"key", syncKey,
@@ -722,11 +723,7 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	}
 	var restoreErr error
 	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
-		restoreErr = ls.db.SetSyncState(
-			syncKey,
-			deferredHeaderValidationSyncStateValue,
-			nil,
-		)
+		restoreErr = ls.db.SetDeferredHeaderMarker(k)
 		if restoreErr == nil {
 			return nil
 		}
@@ -744,6 +741,28 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 		deferredMarkerRestoreMaxAttempts,
 		restoreErr,
 	)
+}
+
+// deleteDeferredMarkerByKey removes, when a read shows one, the sync_state row
+// an earlier version wrote for a map key, and then the blob marker.
+//
+// The blob marker goes last so that any error leaves it in place: the caller
+// treats a failed delete as harmless only because the durable marker survives
+// it, and skips the readmission re-test on that basis.
+func (ls *LedgerState) deleteDeferredMarkerByKey(k string) error {
+	if ls.db.Metadata() != nil {
+		syncKey := deferredHeaderValidationSyncStatePrefix + k
+		value, err := ls.db.GetSyncState(syncKey, nil)
+		if err != nil {
+			return err
+		}
+		if value != "" {
+			if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return ls.db.DeleteDeferredHeaderMarker(k)
 }
 
 // repopulateDeferredHeaderValidation rebuilds the in-memory deferred-header set
@@ -766,18 +785,37 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 // retries rather than running with an unpinned retention floor; a swallowed
 // marker-scan failure would reopen the pruned-snapshot bug.
 func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	keys, err := ls.db.ListSyncStateKeysByPrefix(
-		deferredHeaderValidationSyncStatePrefix,
-		nil,
-	)
+	keys, err := ls.db.ListDeferredHeaderMarkers()
 	if err != nil {
 		return fmt.Errorf(
 			"repopulate deferred-header set from persisted markers: %w",
 			err,
 		)
+	}
+	// Markers an earlier version wrote to sync_state are still honoured.
+	if ls.db.Metadata() != nil {
+		legacy, err := ls.db.ListSyncStateKeysByPrefix(
+			deferredHeaderValidationSyncStatePrefix,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"repopulate deferred-header set from persisted markers: %w",
+				err,
+			)
+		}
+		for _, syncKey := range legacy {
+			keys = append(
+				keys,
+				strings.TrimPrefix(
+					syncKey,
+					deferredHeaderValidationSyncStatePrefix,
+				),
+			)
+		}
 	}
 	if len(keys) == 0 {
 		return nil
@@ -787,12 +825,8 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		ls.deferredHeaderValidation = make(map[string]struct{}, len(keys))
 	}
 	restored := 0
-	for _, syncKey := range keys {
-		mapKey := strings.TrimPrefix(
-			syncKey,
-			deferredHeaderValidationSyncStatePrefix,
-		)
-		if mapKey == "" || mapKey == syncKey {
+	for _, mapKey := range keys {
+		if mapKey == "" {
 			continue
 		}
 		ls.deferredHeaderValidation[mapKey] = struct{}{}
@@ -809,34 +843,87 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 	return nil
 }
 
+// persistDeferredHeaderValidation durably records the deferred-header marker
+// for point in the blob store. It deliberately does not use sync_state: this
+// runs on the blockfetch handler, and a sync_state write needs the single
+// SQLite write connection, which a block-apply transaction holds for its whole
+// length. A handler parked there stops block intake for the duration of an
+// epoch-rollover snapshot.
 func (ls *LedgerState) persistDeferredHeaderValidation(
 	point ocommon.Point,
-	txn *database.Txn,
 ) error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.SetSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
-		txn,
+	if err := ls.db.SetDeferredHeaderMarker(
+		headerValidationPointKey(point),
 	); err != nil {
 		return fmt.Errorf("set deferred header validation marker: %w", err)
 	}
 	return nil
 }
 
+// clearPersistentDeferredHeaderValidation removes both forms of the marker:
+// the blob record, and the sync_state row a node running an earlier version
+// may have written.
+//
+// With a transaction the blob record is removed only once that transaction
+// commits. Deleting it earlier would let a crash between the blob commit and
+// the metadata commit leave the block unapplied with no marker, so its
+// stateful check would be skipped on replay. A marker that outlives a crash
+// is harmless: the retention guard evicts it.
 func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 	point ocommon.Point,
 	txn *database.Txn,
 ) error {
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return nil
 	}
-	if err := ls.db.DeleteSyncState(
-		deferredHeaderValidationSyncStateKey(point),
-		txn,
-	); err != nil {
+	key := headerValidationPointKey(point)
+	if err := ls.deleteLegacyDeferredMarker(point, txn); err != nil {
+		return err
+	}
+	if txn == nil {
+		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+			return fmt.Errorf(
+				"delete deferred header validation marker: %w",
+				err,
+			)
+		}
+		return nil
+	}
+	txn.AfterCommit(func() {
+		if err := ls.db.DeleteDeferredHeaderMarker(key); err != nil {
+			ls.config.Logger.Warn(
+				"failed to delete resolved deferred-header marker",
+				"key", key,
+				"error", err,
+				"component", "ledger",
+			)
+		}
+	})
+	return nil
+}
+
+// deleteLegacyDeferredMarker removes the sync_state form of the marker. The
+// row is only deleted when a read shows it, so a node with no pre-upgrade
+// markers never takes the write connection here.
+func (ls *LedgerState) deleteLegacyDeferredMarker(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db.Metadata() == nil {
+		return nil
+	}
+	syncKey := deferredHeaderValidationSyncStateKey(point)
+	value, err := ls.db.GetSyncState(syncKey, txn)
+	if err != nil {
+		return fmt.Errorf("read deferred header validation marker: %w", err)
+	}
+	if value == "" {
+		return nil
+	}
+	if err := ls.db.DeleteSyncState(syncKey, txn); err != nil {
 		return fmt.Errorf("delete deferred header validation marker: %w", err)
 	}
 	return nil
@@ -847,8 +934,20 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 	txn *database.Txn,
 ) (bool, error) {
 	required := ls.consumeDeferredHeaderValidation(point)
-	if ls.db == nil || ls.db.Metadata() == nil {
+	if ls.db == nil {
 		return required, nil
+	}
+	persisted, err := ls.db.HasDeferredHeaderMarker(
+		headerValidationPointKey(point),
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"read deferred header validation marker: %w",
+			err,
+		)
+	}
+	if ls.db.Metadata() == nil {
+		return required || persisted, nil
 	}
 	value, err := ls.db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
@@ -860,7 +959,8 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			err,
 		)
 	}
-	return required || value == deferredHeaderValidationSyncStateValue, nil
+	return required || persisted ||
+		value == deferredHeaderValidationSyncStateValue, nil
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
@@ -4562,7 +4662,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			if IsHeaderVerificationDeferred(verifyErr) {
 				ls.markDeferredHeaderValidation(e.Point)
 				persist := func() error {
-					return ls.persistDeferredHeaderValidation(e.Point, nil)
+					return ls.persistDeferredHeaderValidation(e.Point)
 				}
 				var persistErr error
 				if blockfetchMutexHeld {
