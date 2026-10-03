@@ -13970,7 +13970,7 @@ reach the boundaries that applied them. The folded flag is the job's progress
 record, so a stopped job resumes where it left off, and a rollback over a
 compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
-the folded credits' journal rows. Core-mode retention keeps a credited round's
+the folded credits' journal rows. A Mithril catch-up/repair import's own pre-phase sweep (`ledgerstate.ImportLedgerState`, see DATABASE.md's `reward_credit_round` row) removes the round and clears `folded` the same way but does not reverse the journal in the same step: it relies on the later cert-state account import to overwrite `account.reward` back to the certified pre-boundary value for every credential the snapshot covers, which is equivalent only when the round was still unfolded at import time. A credential folded during the anchor-to-tip gap keeps its surviving journal row, so a credit refold after the import's overwrite can collide with it and be dropped; see DATABASE.md's `epoch` row. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a
 credited round's outputs is refused: they are balances, and rewritten rows
 would count folded credits again.
