@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -40,6 +41,24 @@ func (s pv10ReferenceScriptState) UtxoById(
 		return lcommon.Utxo{}, nil
 	}
 	return utxo, err
+}
+
+// referenceScriptParams selects the parameters for the aggregate check of a
+// block. A block of the era immediately before the ledger's current era is
+// judged under the previous era's parameters, the same predecessor rule
+// resolveValidationEra applies to its transactions, so the aggregate and
+// per-transaction checks cannot pick different parameters for one block. The
+// ledger's own era transition has already fixed currentEra; the block
+// contributes only its wire era, and a block further behind is unreachable.
+func referenceScriptParams(
+	block ledger.Block,
+	currentEra eras.EraDesc,
+	pparams, prevEraPParams lcommon.ProtocolParameters,
+) lcommon.ProtocolParameters {
+	if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
+		return prevEraPParams
+	}
+	return pparams
 }
 
 // validateBlockReferenceScripts checks the aggregate against the UTxO state
