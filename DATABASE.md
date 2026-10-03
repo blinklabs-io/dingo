@@ -920,6 +920,69 @@ the `metadata.MetadataStore` methods
 `RetirePools` plus the existing
 `IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`. Live-state rows are never deleted.
 
+A reward credit or withdrawal applied locally after a snapshot's anchor
+leaves a row in `account_reward_delta`/`account_withdrawal_witness` with
+`added_slot` strictly after the anchor. `ImportAccount`'s upsert
+unconditionally sets `account.reward` from the snapshot's own anchor-time
+value (`reward = excluded.reward`, with no guard against a newer local
+value), so a catch-up or reconcile re-import at the same anchor leaves those
+post-anchor journal rows in place, untouched. `AddAccountRewardByCredential`/
+`AddPostSnapshotAccountRewardByCredential` and the transaction withdrawal
+path (`applyTransactionWithdrawals`) both insert their journal row with
+`ON CONFLICT ... DO NOTHING` and skip the `UPDATE account SET reward`
+entirely when the insert affects zero rows — an idempotency guard meant for
+a crash-replayed boundary — so ordinary replay of the same post-anchor
+credit or withdrawal after re-import silently no-ops against the surviving
+stale journal row, leaving `account.reward` stuck at the snapshot's
+anchor-time value instead of the correctly re-derived one.
+
+`ImportLedgerState` closes this with
+`Database.DeleteAccountRewardJournalForCredentialsAfterSlot`, called once
+cert-state import has finished writing `account` rows from the snapshot,
+scoped to exactly the credentials that import just wrote. This is a plain
+scoped delete of the stale `account_reward_delta`/`account_withdrawal_witness`
+rows — it never reverses `account.reward` by subtraction the way
+`TruncateAfterSlot`'s `DeleteAccountRewardsAfterSlot` does. Reversal-by-
+subtraction is unsafe here: a credential that already went through an
+earlier, pre-fix import has `account.reward` reset to the anchor value
+without the post-anchor credit ever having been included in it (that is
+the exact gap this closes), so subtracting that credit a second time
+underflows a balance that never held it — observed with a POOLREAP deposit
+refund, which is often larger than the affected account's anchor-time
+balance. Cert-state import's own write is the authoritative value for
+every credential it covers, so there is no "previous" balance to reverse
+from in a way that is guaranteed consistent; the journal rows for those
+credentials are simply cleared, and ordinary replay of the same post-anchor
+events inserts fresh ones against the now-correct current balance. A
+credential cert-state import does not cover is deliberately excluded from
+the delete: nothing else touches that account's `account.reward` during
+import, so deleting its journal would let replay double-apply a credit
+already reflected in its current, untouched balance. This runs on every
+import, not only `Reconcile: true`, since a non-reconcile catch-up or the
+legacy reward-repair shape hits the identical gap. An import resumed from a
+checkpoint at or past `certstate` but short of `tip` skips cert-state import,
+so it repeats the delete for the snapshot's accounts, re-derived from its
+cert state; this also repairs a cert-state phase checkpointed without the
+cleanup. A `tip` checkpoint marks a completed import whose journal may since
+hold legitimate post-anchor rows, so a re-run at `tip` deletes nothing.
+Confirmed reachable on
+ordinary replay this way: transaction withdrawals (direct per-transaction
+processing, no round-level gate); POOLREAP deposit refunds
+(`ledger.applyPoolRetirements` re-derives retiring pools fresh at every
+boundary crossing, with no persisted "already reaped" marker); and
+governance-enacted treasury withdrawals (`ledger/governance.ProcessEpoch`'s
+`GetEnactedGovernanceProposalsAt` explicitly re-applies a proposal's side
+effects when it is already marked enacted at the exact boundary being
+processed). Ordinary per-epoch delegator rewards applied through the
+deferred/precomputed round path are a separate, open gap: a
+`reward_credit_round` row registered locally after the anchor also survives
+this import untouched (`ImportLedgerState` does not call
+`Database.DeleteRewardStateAfterSlot`, unlike `TruncateAfterSlot`), and
+`resolveStakeRewardPrecomputeRoundInTxn`
+(`ledger/reward_precompute_chunked.go`) skips recomputing and crediting a
+round it finds already marked credited, with no analogous replay path to
+governance's. That gap is not closed by this change.
+
 `database.Config` carries the gate values a bare database open can supply,
 independently of any parsed cardano config: `NetworkMagic`, `StartEra`,
 `BlobPlugin`, and `MetadataPlugin`, alongside the pre-existing `StorageMode`
