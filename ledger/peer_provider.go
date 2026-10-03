@@ -17,11 +17,13 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -34,6 +36,14 @@ type PoolRelay struct {
 	IPv4     *net.IP
 	IPv6     *net.IP
 	Port     uint
+	// Stake is the delegated stake, in lovelace, of the pool owning the
+	// relay. StakeKnown reports whether the lookup succeeded.
+	Stake uint64
+	// StakeKnown distinguishes a successful zero-stake lookup from absent data.
+	StakeKnown bool
+	// IsMultiHost marks a MultiHostName relay: a hostname with no port,
+	// whose port comes from an SRV record.
+	IsMultiHost bool
 }
 
 // PoolRelayProvider exposes active stake pool relays from the ledger/database
@@ -50,6 +60,11 @@ type PoolRelayProvider struct {
 	// provider instance.
 	eventBus *event.EventBus
 	subID    event.EventSubscriberId
+
+	// stakeByPools returns delegated stake keyed by pool key hash. It is a
+	// field so a test can make the lookup fail, which the database does not
+	// do on demand.
+	stakeByPools func(poolKeyHashes [][]byte) (map[string]uint64, error)
 
 	// Cache for pool relays
 	cacheMu      sync.RWMutex
@@ -77,6 +92,12 @@ func NewPoolRelayProvider(
 		db:          db,
 		cacheTTL:    defaultRelayCacheTTL,
 		eventBus:    eventBus,
+	}
+	provider.stakeByPools = func(
+		poolKeyHashes [][]byte,
+	) (map[string]uint64, error) {
+		stakes, _, err := db.GetStakeByPools(poolKeyHashes, nil)
+		return stakes, err
 	}
 	if eventBus != nil {
 		provider.subID = eventBus.SubscribeFunc(
@@ -121,11 +142,33 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 		return nil, fmt.Errorf("GetActivePoolRelays: fetch relays: %w", err)
 	}
 
+	// Stake only weights peer sampling, so a failed lookup degrades to
+	// unweighted discovery instead of failing it.
+	stakes, err := p.lookupStake(relays)
+	if err != nil {
+		slog.Warn(
+			"failed to fetch pool stake for ledger relays",
+			"component", "ledger",
+			"error", err,
+		)
+	}
+
 	result := make([]PoolRelay, 0, len(relays))
 	for _, relay := range relays {
+		_, known := stakes[string(relay.PoolKeyHash)]
 		pr := PoolRelay{
-			Hostname: relay.Hostname,
-			Port:     relay.Port,
+			Hostname:   relay.Hostname,
+			Port:       relay.Port,
+			Stake:      stakes[string(relay.PoolKeyHash)],
+			StakeKnown: known && err == nil,
+			// The relay row stores no relay type, so a hostname with no port
+			// is treated as MultiHostName. A SingleHostName registered with
+			// a null port matches too; its SRV lookup finds nothing and it
+			// falls back to the default port it would have dialed anyway.
+			IsMultiHost: relay.Hostname != "" &&
+				relay.Port == 0 &&
+				relay.Ipv4 == nil &&
+				relay.Ipv6 == nil,
 		}
 		if relay.Ipv4 != nil {
 			pr.IPv4 = relay.Ipv4
@@ -146,6 +189,30 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 	p.cacheMu.Unlock()
 
 	return copyPoolRelays(result), nil
+}
+
+// lookupStake batch-fetches the delegated stake of every pool owning one of
+// relays. The returned map is nil on error.
+func (p *PoolRelayProvider) lookupStake(
+	relays []models.PoolRegistrationRelay,
+) (map[string]uint64, error) {
+	seen := make(map[string]struct{}, len(relays))
+	hashes := make([][]byte, 0, len(relays))
+	for _, relay := range relays {
+		key := string(relay.PoolKeyHash)
+		if len(relay.PoolKeyHash) == 0 {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		hashes = append(hashes, relay.PoolKeyHash)
+	}
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	return p.stakeByPools(hashes)
 }
 
 // InvalidateCache clears the cached pool relays, forcing the next
@@ -170,8 +237,11 @@ func copyPoolRelays(relays []PoolRelay) []PoolRelay {
 	result := make([]PoolRelay, len(relays))
 	for i, r := range relays {
 		result[i] = PoolRelay{
-			Hostname: r.Hostname,
-			Port:     r.Port,
+			Hostname:    r.Hostname,
+			Port:        r.Port,
+			Stake:       r.Stake,
+			StakeKnown:  r.StakeKnown,
+			IsMultiHost: r.IsMultiHost,
 		}
 		if r.IPv4 != nil {
 			ipCopy := make(net.IP, len(*r.IPv4))
