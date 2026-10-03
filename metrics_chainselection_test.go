@@ -17,12 +17,15 @@ package dingo
 import (
 	"io"
 	"log/slog"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -195,11 +198,47 @@ func TestBuildChainSelectorConfigWiresRollbackRegistrationCounter(
 // The corroboration identity hook is installed by the composition site; a
 // hook left unset silently falls back to grouping witnesses by remote host.
 func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	n, _ := newMetricsTestNode(t)
 	cfg := n.buildChainSelectorConfig(2160, true, 0)
 	require.NotNil(t, cfg.PeerIdentity)
+	peerGovs := []*peergov.PeerGovernor{
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{Logger: logger}),
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{Logger: logger}),
+	}
+	conn := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(44, 0, 0, 1), Port: 3001},
+	}
+	assert.Empty(t, cfg.PeerIdentity(conn))
 
-	assert.Empty(t, cfg.PeerIdentity(newNodeTestConnId(3303)))
+	// Live restore replaces this pointer while the retained selector remains
+	// active. Exercise the same synchronized read alongside repeated replacement.
+	start := make(chan struct{})
+	groups := make(chan string, 64)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 64 {
+			groups <- cfg.PeerIdentity(conn)
+		}
+	}()
+	go func() {
+		defer workers.Done()
+		<-start
+		for i := range 64 {
+			n.setPeerGovernor(peerGovs[i%len(peerGovs)])
+		}
+	}()
+	close(start)
+	workers.Wait()
+	close(groups)
+	for got := range groups {
+		assert.Empty(t, got)
+	}
 }
 
 // New() registers the chain-selection counters, so they exist for the node's

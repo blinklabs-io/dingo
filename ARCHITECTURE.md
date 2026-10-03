@@ -1806,11 +1806,15 @@ with a different hash, the same slot or block number, and the same
 share a cold key, so that key is forging in two places. Each such pair
 increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
 three competing blocks are three pairs. `self_key="true"` when the pool is this
-node's own, taken from the block producer credentials validated at startup. The
-counter series for a pool appears only when it first equivocates. Blocks are
-decoded only when a slot or number matches, so a normal sync pays one scan of a
-normally empty list. A competing block this node never applied, because it
-never became the chain, is not seen.
+node's own, taken from the block producer credentials validated at startup. A
+distinct pair is counted once, even if the chain switches between its blocks
+again; repeated rolled-back hashes are retained only once. Both the rollback
+history and recently reported pair set are bounded to 2160 entries. On
+rollback, every rolled-back block is decoded to read its issuer. For later
+added blocks, the detector first scans stored slot and block-number fields and
+decodes only when a possible match exists, so a normal sync pays one scan of
+the bounded, usually empty history. A competing block this node never applied,
+because it never became the chain, is not seen.
 
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
@@ -5289,6 +5293,11 @@ unique local/public-root set by admitting public roots only into the remaining
 slots.
 
 `Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
+
+The chain selector remains active while live restore/truncate replaces the peer
+governor. Node's peer-identity and peer-activity callbacks read and use the
+current governor while holding `peerGovMu`; replacement takes its write lock
+before publishing the new governor.
 
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,

@@ -52,9 +52,7 @@ func (n *Node) chainsyncObservePeerTip(
 	n.chainSelector.HandlePeerTipUpdateEvent(
 		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
 	)
-	if n.peerGov != nil {
-		n.peerGov.TouchPeerByConnId(e.ConnectionId)
-	}
+	n.touchPeerByConnId(e.ConnectionId)
 	return true
 }
 
@@ -104,8 +102,8 @@ func (n *Node) chainsyncApplyEligible(
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {
-	if n.peerGov != nil {
-		return n.peerGov.IsChainSelectionEligible(connId)
+	if eligible, ok := n.peerChainSelectionEligible(connId); ok {
+		return eligible
 	}
 	n.chainsyncIngressEligibilityMu.RLock()
 	defer n.chainsyncIngressEligibilityMu.RUnlock()
@@ -117,6 +115,17 @@ func (n *Node) isChainsyncIngressEligible(
 		return false
 	}
 	return eligible
+}
+
+func (n *Node) peerChainSelectionEligible(
+	connId ouroboros.ConnectionId,
+) (bool, bool) {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	if n.peerGov == nil {
+		return false, false
+	}
+	return n.peerGov.IsChainSelectionEligible(connId), true
 }
 
 func (n *Node) setChainsyncIngressEligibility(

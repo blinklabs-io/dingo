@@ -32,6 +32,7 @@ import (
 // comparison. A rollback is at most k blocks deep, so this covers the deepest
 // one and older entries cannot meet a block on the live chain again.
 const maxEquivocationRolledBack = 2160
+const maxEquivocationReportedPairs = 2160
 
 // rolledBackBlock is a block that left the chain, kept to recognise a
 // competing block from the same pool.
@@ -41,6 +42,8 @@ type rolledBackBlock struct {
 	slot   uint64
 	number uint64
 }
+
+type equivocationPair [2]string
 
 // equivocationDetector counts blocks that compete with an earlier block of the
 // same pool: same issuer, a different hash, and the same slot or block number.
@@ -53,11 +56,13 @@ type rolledBackBlock struct {
 // pair shares a slot or number, so the per-block cost on a normal sync is one
 // scan of a normally empty list.
 type equivocationDetector struct {
-	logger     *slog.Logger
-	counter    *prometheus.CounterVec
-	selfPoolID string
-	rolledBack []rolledBackBlock
-	mu         sync.Mutex
+	logger        *slog.Logger
+	counter       *prometheus.CounterVec
+	selfPoolID    string
+	rolledBack    []rolledBackBlock
+	reported      map[equivocationPair]struct{}
+	reportedOrder []equivocationPair
+	mu            sync.Mutex
 }
 
 // newEquivocationDetector creates a detector reporting through a
@@ -117,7 +122,18 @@ func (d *equivocationDetector) recordRolledBack(blocks []models.Block) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.rolledBack = append(d.rolledBack, entries...)
+	seen := make(map[string]struct{}, len(d.rolledBack)+len(entries))
+	for _, prior := range d.rolledBack {
+		seen[string(prior.hash)] = struct{}{}
+	}
+	for _, entry := range entries {
+		hash := string(entry.hash)
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		d.rolledBack = append(d.rolledBack, entry)
+	}
 	if over := len(d.rolledBack) - maxEquivocationRolledBack; over > 0 {
 		d.rolledBack = append(d.rolledBack[:0], d.rolledBack[over:]...)
 	}
@@ -144,7 +160,33 @@ func (d *equivocationDetector) checkAdded(block models.Block) {
 		if rival.pool != pool {
 			continue
 		}
+		pair := orderedEquivocationPair(rival.hash, block.Hash)
+		if _, ok := d.reported[pair]; ok {
+			continue
+		}
+		d.rememberEquivocationPair(pair)
 		d.report(pool, block, rival)
+	}
+}
+
+func orderedEquivocationPair(first, second []byte) equivocationPair {
+	if bytes.Compare(first, second) > 0 {
+		first, second = second, first
+	}
+	return equivocationPair{string(first), string(second)}
+}
+
+func (d *equivocationDetector) rememberEquivocationPair(pair equivocationPair) {
+	if d.reported == nil {
+		d.reported = make(map[equivocationPair]struct{})
+	}
+	d.reported[pair] = struct{}{}
+	d.reportedOrder = append(d.reportedOrder, pair)
+	if over := len(d.reportedOrder) - maxEquivocationReportedPairs; over > 0 {
+		for _, expired := range d.reportedOrder[:over] {
+			delete(d.reported, expired)
+		}
+		d.reportedOrder = append(d.reportedOrder[:0], d.reportedOrder[over:]...)
 	}
 }
 

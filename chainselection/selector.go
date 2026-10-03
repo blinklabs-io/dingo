@@ -428,11 +428,18 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 //
 // Once this transition fires, both peer ranking and authoritative ledger fork
 // resolution intentionally return to Praos.
-func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
+func (cs *ChainSelector) bestKnownGenesisSlotLocked(
+	bestKnownBlock *uint64,
+) uint64 {
 	window := cs.genesisWindowSlotsLocked()
 	var best uint64
 	for connId, pt := range cs.peerTips {
-		if !cs.isPeerSelectableLocked(connId, pt, false) {
+		if !cs.isPeerSelectableWithBestKnownBlockLocked(
+			connId,
+			pt,
+			false,
+			bestKnownBlock,
+		) {
 			continue
 		}
 		// A peer registered from a rollback has delivered no header: its
@@ -460,28 +467,41 @@ func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 	return best
 }
 
-func (cs *ChainSelector) shouldExitGenesisModeLocked() bool {
+func (cs *ChainSelector) shouldExitGenesisModeLocked(
+	bestKnownBlock *uint64,
+) (bool, uint64) {
 	if cs.mode != SelectionModeGenesis {
-		return false
+		return false, 0
 	}
-	bestSlot := cs.bestKnownGenesisSlotLocked()
+	bestSlot := cs.bestKnownGenesisSlotLocked(bestKnownBlock)
 	if bestSlot == 0 {
-		return false
+		return false, bestSlot
 	}
 	return safeAddUint64(
 		cs.localTip.Point.Slot,
 		cs.genesisWindowSlotsLocked(),
-	) >= bestSlot
+	) >= bestSlot, bestSlot
 }
 
 func (cs *ChainSelector) advanceSelectionModeLocked() bool {
-	if !cs.shouldExitGenesisModeLocked() {
+	return cs.advanceSelectionModeWithBestKnownBlockLocked(nil)
+}
+
+func (cs *ChainSelector) advanceSelectionModeWithBestKnownBlockLocked(
+	bestKnownBlock *uint64,
+) bool {
+	if cs.mode == SelectionModeGenesis &&
+		cs.securityParam > 0 && bestKnownBlock == nil {
+		bestBlock := cs.bestKnownBlockNumber()
+		bestKnownBlock = &bestBlock
+	}
+	shouldExit, bestSlot := cs.shouldExitGenesisModeLocked(bestKnownBlock)
+	if !shouldExit {
 		return false
 	}
 	// Capture exit context while still in Genesis mode so the best-known slot
 	// reflects the Genesis-mode selectable set.
 	localSlot := cs.localTip.Point.Slot
-	bestSlot := cs.bestKnownGenesisSlotLocked()
 	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
 	cs.refreshGenesisSelectionSnapshotLocked()
@@ -1351,6 +1371,20 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	peerTip *PeerChainTip,
 	logSkip bool,
 ) bool {
+	return cs.isPeerSelectableWithBestKnownBlockLocked(
+		connId,
+		peerTip,
+		logSkip,
+		nil,
+	)
+}
+
+func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+	logSkip bool,
+	bestKnownBlock *uint64,
+) bool {
 	if peerTip == nil {
 		return false
 	}
@@ -1413,7 +1447,12 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 		// compares against: its delivered block number is 0, and the escape
 		// only considers leaders holding a bestBlock > 0 frontier.
 		if cs.securityParam > 0 {
-			bestBlock := cs.bestKnownBlockNumber()
+			bestBlock := uint64(0)
+			if bestKnownBlock == nil {
+				bestBlock = cs.bestKnownBlockNumber()
+			} else {
+				bestBlock = *bestKnownBlock
+			}
 			if bestBlock > 0 &&
 				safeAddUint64(
 					selectionTip.BlockNumber,
@@ -1450,7 +1489,21 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 }
 
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
-	cs.advanceSelectionModeLocked()
+	var bestKnownBlock *uint64
+	if cs.mode == SelectionModeGenesis && cs.securityParam > 0 {
+		bestBlock := cs.bestKnownBlockNumber()
+		bestKnownBlock = &bestBlock
+	}
+	modeChanged := cs.advanceSelectionModeWithBestKnownBlockLocked(
+		bestKnownBlock,
+	)
+	if modeChanged {
+		bestKnownBlock = nil
+	}
+	if cs.securityParam > 0 && bestKnownBlock == nil {
+		bestBlock := cs.bestKnownBlockNumber()
+		bestKnownBlock = &bestBlock
+	}
 	if len(cs.peerTips) == 0 {
 		return nil
 	}
@@ -1459,7 +1512,12 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 	var bestPeerTip *PeerChainTip
 
 	for connId, peerTip := range cs.peerTips {
-		if !cs.isPeerSelectableLocked(connId, peerTip, true) {
+		if !cs.isPeerSelectableWithBestKnownBlockLocked(
+			connId,
+			peerTip,
+			true,
+			bestKnownBlock,
+		) {
 			continue
 		}
 

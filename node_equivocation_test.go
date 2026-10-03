@@ -18,6 +18,8 @@ import (
 	"crypto/ed25519"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,8 +27,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -219,14 +224,55 @@ func TestEquivocationLabelsOwnKey(t *testing.T) {
 // exactly as the issuer's PoolId read from a block, or self_key never matches.
 func TestEquivocationSelfPoolIDMatchesCredentialDerivation(t *testing.T) {
 	t.Parallel()
-	coldSeed := [32]byte{1}
-	coldSeed[0] ^= 0xBB
-	cold := ed25519.NewKeyFromSeed(coldSeed[:]).Public().(ed25519.PublicKey)
-	credentialPoolID := lcommon.PoolId(lcommon.Blake2b224Hash(cold)).String()
-	assert.Equal(t, newPoolFixture(1).poolID, credentialPoolID)
+	privateKeyPath := func(name string) string {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("config", "cardano", "devnet", "keys", name))
+		require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), name)
+		require.NoError(t, os.WriteFile(path, raw, 0o600))
+		return path
+	}
+	creds := forging.NewPoolCredentials()
+	require.NoError(t, creds.LoadFromFiles(
+		privateKeyPath("vrf.skey"),
+		privateKeyPath("kes.skey"),
+		privateKeyPath("opcert.cert"),
+	))
+	opCert := creds.GetOpCert()
+	require.NotNil(t, opCert)
+	require.Len(t, opCert.ColdVKey, ed25519.PublicKeySize)
+	var issuer lcommon.IssuerVkey
+	copy(issuer[:], opCert.ColdVKey)
+
+	withCredentialIssuer := func(hash string) models.Block {
+		block := newPoolFixture(1).block(t, 100, 10, hash)
+		decoded, err := conway.NewConwayBlockFromCbor(block.Cbor)
+		require.NoError(t, err)
+		decoded.BlockHeader.Body.IssuerVkey = issuer
+		decoded.BlockHeader.Body.SetCbor(nil)
+		decoded.BlockHeader.SetCbor(nil)
+		decoded.SetCbor(nil)
+		block.Cbor, err = cbor.Encode(decoded)
+		require.NoError(t, err)
+		return block
+	}
+	first := withCredentialIssuer("credential-pool-first")
+	second := withCredentialIssuer("credential-pool-second")
+	issuerPoolID, ok := blockPoolID(first)
+	require.True(t, ok)
+	assert.Equal(t, creds.GetPoolID().String(), issuerPoolID)
+
+	detector, registry := newTestEquivocationDetector(t)
+	n := &Node{equivocation: detector}
+	n.setEquivocationSelfPoolID(creds)
+	detector.handleChainUpdate(rollbackEvt(first))
+	detector.handleChainUpdate(addEvt(second))
+	assert.Equal(t, map[string]float64{
+		"pool_id=" + creds.GetPoolID().String() + ",self_key=true,": 1,
+	}, equivocations(t, registry))
 }
 
-// Three competing blocks from one pool are three pairs.
+// Three competing blocks from one pool are three distinct pairs.
 func TestEquivocationCountsEveryCompetingPair(t *testing.T) {
 	t.Parallel()
 	d, registry := newTestEquivocationDetector(t)
@@ -240,6 +286,38 @@ func TestEquivocationCountsEveryCompetingPair(t *testing.T) {
 
 	assert.Equal(t, map[string]float64{
 		"pool_id=" + pool.poolID + ",self_key=false,": 3,
+	}, equivocations(t, registry))
+}
+
+func TestEquivocationDoesNotCountPairAgainAfterChainSwitch(t *testing.T) {
+	t.Parallel()
+	d, registry := newTestEquivocationDetector(t)
+	pool := newPoolFixture(1)
+	first := pool.block(t, 100, 10, "first")
+	second := pool.block(t, 100, 10, "second")
+
+	d.handleChainUpdate(rollbackEvt(first))
+	d.handleChainUpdate(addEvt(second))
+	d.handleChainUpdate(rollbackEvt(second))
+	d.handleChainUpdate(addEvt(first))
+
+	assert.Equal(t, map[string]float64{
+		"pool_id=" + pool.poolID + ",self_key=false,": 1,
+	}, equivocations(t, registry))
+}
+
+func TestEquivocationDeduplicatesRepeatedRollbackBlocks(t *testing.T) {
+	t.Parallel()
+	d, registry := newTestEquivocationDetector(t)
+	pool := newPoolFixture(1)
+	rolledBack := pool.block(t, 100, 10, "rolled-back")
+
+	d.handleChainUpdate(rollbackEvt(rolledBack))
+	d.handleChainUpdate(rollbackEvt(rolledBack))
+	d.handleChainUpdate(addEvt(pool.block(t, 100, 10, "competitor")))
+
+	assert.Equal(t, map[string]float64{
+		"pool_id=" + pool.poolID + ",self_key=false,": 1,
 	}, equivocations(t, registry))
 }
 

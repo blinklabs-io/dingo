@@ -25,7 +25,7 @@ import (
 )
 
 // feedChain delivers one header per step slots on a named chain from start to
-// end inclusive, with block number equal to slot.
+// end inclusive, with block numbers advancing at one tenth the slot rate.
 func feedChain(
 	cs *ChainSelector,
 	conn ouroboros.ConnectionId,
@@ -35,7 +35,7 @@ func feedChain(
 	for slot := start; slot <= end; slot += step {
 		cs.UpdatePeerTip(
 			conn,
-			genesisTip(slot, fmt.Sprintf("%s%d", chain, slot), slot),
+			genesisTip(slot, fmt.Sprintf("%s%d", chain, slot), slot/10),
 			nil,
 		)
 	}
@@ -79,9 +79,9 @@ func TestGenesisBehindExclusionIgnoresUncorroboratedFrontier(t *testing.T) {
 	)
 }
 
-// A witness whose delivered frontier only reaches a point the candidate
-// passed long ago supports the shared past, not the candidate's suffix.
-func TestGenesisWitnessMustSupportCandidateSuffix(t *testing.T) {
+// Suffix support is measured in block numbers, even when the corresponding
+// slot gap is larger than the security parameter.
+func TestGenesisWitnessSuffixUsesBlockNumber(t *testing.T) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:        true,
@@ -105,12 +105,12 @@ func TestGenesisWitnessMustSupportCandidateSuffix(t *testing.T) {
 		"fixture must share a window point with the fast chain",
 	)
 
-	assert.Zero(t, cs.corroboratingPeers(fast))
-	assert.False(t, cs.frontierTrusted(fast))
+	assert.Equal(t, 1, cs.corroboratingPeers(fast))
+	assert.True(t, cs.frontierTrusted(fast))
 
 	near := corrConn(4)
 	feedChain(cs, near, "a", 910, 990, 10)
-	assert.Equal(t, 1, cs.corroboratingPeers(fast))
+	assert.Equal(t, 2, cs.corroboratingPeers(fast))
 	assert.True(t, cs.frontierTrusted(fast))
 }
 
@@ -204,6 +204,39 @@ func TestGenesisWitnessIdentityUsesPeerIdentity(t *testing.T) {
 		cs.corroboratingPeers(fast),
 		"a witness in the candidate's own group is not independent",
 	)
+}
+
+func TestGenesisSelectionComputesBestTrustedFrontierOnce(t *testing.T) {
+	t.Parallel()
+	const peerCount = 16
+	var identityCalls atomic.Uint64
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		GenesisWindowSlots:    100,
+		MinCorroboratingPeers: 1,
+		PeerIdentity: func(conn ouroboros.ConnectionId) string {
+			identityCalls.Add(1)
+			return conn.String()
+		},
+	})
+	for i := range peerCount {
+		conn := corrConn(i + 1)
+		feedChain(cs, conn, "shared", 910, 1000, 10)
+	}
+
+	cs.mutex.Lock()
+	identityCalls.Store(0)
+	best := cs.selectBestChainLocked()
+	calls := identityCalls.Load()
+	cs.mutex.Unlock()
+
+	require.NotNil(t, best)
+	// Genesis-mode horizon checking and candidate selection each need one
+	// candidate corroboration pass. Recomputing the trusted frontier for every
+	// candidate would exceed this quadratic bound.
+	maxCalls := uint64(peerCount * peerCount * 3)
+	assert.LessOrEqual(t, calls, maxCalls)
 }
 
 func (cs *ChainSelector) frontierTrusted(conn ouroboros.ConnectionId) bool {

@@ -72,6 +72,7 @@ import (
 
 type Node struct {
 	connManager *connmanager.ConnectionManager
+	peerGovMu   sync.RWMutex
 	peerGov     *peergov.PeerGovernor
 	// poolRelayProvider backs peerGov's LedgerPeerProvider. Tracked here (not
 	// a throwaway local) so quiesceForLiveLifecycleOp can Close it -- it has
@@ -1245,7 +1246,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 	}
 	applyPeerTargets(n.config, &peerGovConfig)
-	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
+	n.setPeerGovernor(peergov.NewPeerGovernor(peerGovConfig))
 	// Construct ouroboros now that every dependency exists. It takes them all
 	// up front and validates them, so it can never be observed partially
 	// wired. This is deliberately the last construction before the peer
@@ -1996,10 +1997,7 @@ func (n *Node) buildChainSelectorConfig(
 				n.connManager.GetConnectionById(connId) != nil
 		},
 		PeerIdentity: func(connId ouroboros.ConnectionId) string {
-			if n.peerGov == nil {
-				return ""
-			}
-			return n.peerGov.DiversityGroupByConnId(connId)
+			return n.peerDiversityGroupByConnId(connId)
 		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {
@@ -2008,6 +2006,31 @@ func (n *Node) buildChainSelectorConfig(
 			return n.chainsyncState.BlockfetchLatency(connId)
 		},
 		OnRollbackRegistration: n.recordRollbackRegistration,
+	}
+}
+
+func (n *Node) setPeerGovernor(peerGov *peergov.PeerGovernor) {
+	n.peerGovMu.Lock()
+	n.peerGov = peerGov
+	n.peerGovMu.Unlock()
+}
+
+func (n *Node) peerDiversityGroupByConnId(
+	connId ouroboros.ConnectionId,
+) string {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	if n.peerGov == nil {
+		return ""
+	}
+	return n.peerGov.DiversityGroupByConnId(connId)
+}
+
+func (n *Node) touchPeerByConnId(connId ouroboros.ConnectionId) {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	if n.peerGov != nil {
+		n.peerGov.TouchPeerByConnId(connId)
 	}
 }
 
@@ -2031,10 +2054,10 @@ func (n *Node) subscribeChainSelectorEvents() {
 		chainselection.PeerTipUpdateEventType,
 		func(evt event.Event) {
 			e, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
-			if !ok || n.peerGov == nil {
+			if !ok {
 				return
 			}
-			n.peerGov.TouchPeerByConnId(e.ConnectionId)
+			n.touchPeerByConnId(e.ConnectionId)
 		},
 	)
 	// Activity events refresh selector and peer-governance liveness; the
@@ -2047,9 +2070,7 @@ func (n *Node) subscribeChainSelectorEvents() {
 				return
 			}
 			n.chainSelector.TouchPeerActivity(e.ConnectionId)
-			if n.peerGov != nil {
-				n.peerGov.TouchPeerByConnId(e.ConnectionId)
-			}
+			n.touchPeerByConnId(e.ConnectionId)
 		},
 	)
 	// Subscribe to chain switch events to update active connection
