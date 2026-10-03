@@ -415,6 +415,9 @@ rounds retain the magnitude of negative leader rewards.
 Migration `v33` (`governance-proposal-order`, integer version 33) adds the
 `governance_proposal_order` companion table and backfills it from each
 proposal's stored transaction.
+Migration `v34` (`midnight-rollback-journal`, integer version 34) adds the
+`midnight_candidate_removals` and `midnight_epoch_transitions` rollback
+journals.
 
 The upgrade runner owns a `schema_migrations` row per contiguous integer version with
 `version`, stable `name`, SHA-256 `checksum`, `phase`, opaque `cursor`, `dirty`,
@@ -1092,6 +1095,8 @@ emits nothing while it runs.
 | `midnight_governance_datums` | `id`, `datum_type`, `tx_hash`, `output_index`, `datum`, `block_number` | PK `id`; composite index `(datum_type, block_number DESC)`; **unique** composite index `(datum_type, tx_hash, output_index)` (`idx_midnight_governance_datums_output`) | Latest Technical Committee and Council datum snapshots. `datum_type` values are `technical_committee` and `council`; use the composite index for latest-at-or-before queries. The unique output key keeps restart/backfill replay idempotent while preserving distinct governance outputs as separate history rows. |
 | `midnight_ariadne_params` | `id`, `epoch`, `datum` | PK `id`; unique `epoch` | Ariadne parameters per epoch when changed. |
 | `midnight_ariadne_rollbacks` | `id`, `block_number`, `epoch`, `previous_exists`, `previous_datum` | PK `id`; unique `(block_number, epoch)` | Durable rollback journal for Ariadne upserts. Before changing an epoch row, the indexer records the previous row (or absence) so an undo after restart can restore/delete the row. |
+| `midnight_candidate_removals` | `id`, `block_number`, `tx_hash`, `output_index`, `datum` | PK `id`; unique `(block_number, tx_hash, output_index)` | Durable rollback journal for committee-candidate UTxOs spent by a block, written in the block's transaction so a rollback after restart can restore them. Pruned past the rollback window. |
+| `midnight_epoch_transitions` | `block_number`, `previous_epoch` | PK `block_number` | Durable rollback journal for the epoch that preceded an epoch advance at a block, so a rollback after restart restores it. Pruned past the rollback window. |
 | `midnight_epoch_candidates` | `id`, `epoch`, `block_number`, `candidates_cbor` | PK `id`; unique `epoch`; index `block_number` | Candidate snapshots captured at epoch boundaries. `block_number` records the block application that wrote the snapshot, so rollback deletes only snapshots created by the rolled-back block. `candidates_cbor` records only `(tx_hash, output_index, datum)` membership per candidate — see `midnight_committee_candidate_registrations` for per-candidate provenance. |
 | `midnight_committee_candidate_registrations` | `id`, `tx_hash`, `output_index`, `block_number`, `slot_number`, `tx_index`, `tx_inputs_cbor` | PK `id`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_committee_candidate_reg_utxo`); index `block_number` | Durable provenance for a committee-candidate UTxO, written once when it's first observed as a transaction output. `tx_inputs_cbor` is the creating transaction's inputs, CBOR-encoded as a list of `(tx_hash, index)` pairs. Exists because the in-memory candidate set is rebuilt on restart from the generic UTXO index (`GetMidnightCandidates`), which carries only `tx_hash`/`output_index`/`datum` — this table is the only durable source for `tx_inputs`/`slot_number`/`tx_index`/`block_number`, which `MidnightState.GetEpochCandidates` joins in by `tx_hash`. |
 
@@ -1127,6 +1132,14 @@ emits nothing while it runs.
 | `FindMidnightAriadneRollbacksByBlock(txn, blockNumber)` | Returns Ariadne rollback journal rows for a rolled-back block. |
 | `DeleteMidnightAriadneRollbacksByBlock(txn, blockNumber)` | Deletes Ariadne rollback journal rows after a successful rollback. |
 | `DeleteMidnightAriadneRollbacksBeforeBlock(txn, blockNumber)` | Prunes Ariadne rollback journal rows older than the rollback window. |
+| `CreateMidnightCandidateRemoval(txn, *MidnightCandidateRemoval)` | Insert a candidate-spend journal row, ignoring duplicate `(block_number, tx_hash, output_index)` rows for idempotent replay. |
+| `FindMidnightCandidateRemovalsByBlock(txn, blockNumber)` | Returns the candidate-spend journal rows for a rolled-back block. |
+| `DeleteMidnightCandidateRemovalsByBlock(txn, blockNumber)` | Deletes candidate-spend journal rows after a successful rollback. |
+| `DeleteMidnightCandidateRemovalsBeforeBlock(txn, blockNumber)` | Prunes candidate-spend journal rows older than the rollback window. |
+| `UpsertMidnightEpochTransition(txn, *MidnightEpochTransition)` | Insert or replace the pre-advance epoch recorded for a block. |
+| `GetMidnightEpochTransitionByBlock(txn, blockNumber)` | Returns the epoch transition journal row for a rolled-back block, or nil. |
+| `DeleteMidnightEpochTransitionsByBlock(txn, blockNumber)` | Deletes the epoch transition journal row after a successful rollback. |
+| `DeleteMidnightEpochTransitionsBeforeBlock(txn, blockNumber)` | Prunes epoch transition journal rows older than the rollback window. |
 | `UpsertMidnightEpochCandidates(txn, *MidnightEpochCandidates)` | Insert or replace the committee-candidate snapshot for the given epoch, including the block number that created it. |
 | `DeleteMidnightEpochCandidatesByBlock(txn, blockNumber)` | Deletes candidate snapshots created while applying `blockNumber`. Used during candidate rollback so persisted snapshots cannot retain stale candidate sets. |
 | `GetMidnightEpochCandidatesByEpoch(epoch, txn)` | Returns the candidate snapshot row for one epoch, or nil when none exists. Backs `MidnightState.GetEpochCandidates`; `CandidatesCbor` is decoded via `midnight/indexer.DecodeEpochCandidatesCbor`. |

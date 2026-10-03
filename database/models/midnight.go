@@ -118,6 +118,22 @@ type MidnightAriadneRollback struct {
 	PreviousDatum  []byte
 }
 
+// MidnightCandidateRemoval records a committee-candidate UTxO spent by a
+// block, so a later rollback can restore it even after process restart.
+type MidnightCandidateRemoval struct {
+	BlockNumber uint64
+	TxHash      []byte
+	OutputIndex uint32
+	Datum       []byte
+}
+
+// MidnightEpochTransition records the epoch that was current before a block
+// advanced it, so a later rollback can restore it even after process restart.
+type MidnightEpochTransition struct {
+	BlockNumber   uint64
+	PreviousEpoch uint64
+}
+
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.
 type MidnightEpochCandidates struct {
 	ID             uint

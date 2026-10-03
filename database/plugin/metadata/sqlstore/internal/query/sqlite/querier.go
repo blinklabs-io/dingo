@@ -24,6 +24,7 @@ type Querier interface {
 	CreateMidnightAriadneRollback(ctx context.Context, arg CreateMidnightAriadneRollbackParams) (int64, error)
 	CreateMidnightAssetCreate(ctx context.Context, arg CreateMidnightAssetCreateParams) (int64, error)
 	CreateMidnightAssetSpend(ctx context.Context, arg CreateMidnightAssetSpendParams) (int64, error)
+	CreateMidnightCandidateRemoval(ctx context.Context, arg CreateMidnightCandidateRemovalParams) error
 	CreateMidnightDeregistration(ctx context.Context, arg CreateMidnightDeregistrationParams) (int64, error)
 	CreateMidnightRegistration(ctx context.Context, arg CreateMidnightRegistrationParams) (int64, error)
 	CreatePoolStakeSnapshot(ctx context.Context, arg CreatePoolStakeSnapshotParams) (int64, error)
@@ -48,9 +49,13 @@ type Querier interface {
 	DeleteMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetCreatesByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsBeforeBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightCommitteeCandidateRegistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightEpochCandidatesByBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsBeforeBlock(ctx context.Context, blockNumber int64) error
+	DeleteMidnightEpochTransitionsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightGovernanceDatumsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) error
 	DeleteNetworkDonationsAfterSlot(ctx context.Context, slot int64) error
@@ -78,6 +83,7 @@ type Querier interface {
 	DeleteSyncState(ctx context.Context, syncKey string) error
 	DeleteTransactionMetadataLabelsAfterSlot(ctx context.Context, slot sql.NullInt64) error
 	FindMidnightAriadneRollbacksByBlock(ctx context.Context, blockNumber int64) ([]MidnightAriadneRollback, error)
+	FindMidnightCandidateRemovalsByBlock(ctx context.Context, blockNumber int64) ([]MidnightCandidateRemoval, error)
 	FindUnspentMidnightAssetCreates(ctx context.Context) ([]MidnightAssetCreate, error)
 	FindUnspentMidnightRegistrations(ctx context.Context) ([]MidnightRegistration, error)
 	GetAccountByCredential(ctx context.Context, arg GetAccountByCredentialParams) (Account, error)
@@ -143,6 +149,7 @@ type Querier interface {
 	GetMidnightAssetSpendsByBlock(ctx context.Context, blockNumber int64) ([]MidnightAssetSpend, error)
 	GetMidnightDeregistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightDeregistration, error)
 	GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch int64) (MidnightEpochCandidate, error)
+	GetMidnightEpochTransitionByBlock(ctx context.Context, blockNumber int64) (MidnightEpochTransition, error)
 	GetMidnightRegistrationsByBlock(ctx context.Context, blockNumber int64) ([]MidnightRegistration, error)
 	GetNetworkStateAsOfSlot(ctx context.Context, slot int64) (NetworkState, error)
 	GetNodeSettings(ctx context.Context) (GetNodeSettingsRow, error)
@@ -235,6 +242,7 @@ type Querier interface {
 	UpdatePParamsCbor(ctx context.Context, arg UpdatePParamsCborParams) error
 	UpsertMidnightAriadneParams(ctx context.Context, arg UpsertMidnightAriadneParamsParams) (int64, error)
 	UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertMidnightEpochCandidatesParams) (int64, error)
+	UpsertMidnightEpochTransition(ctx context.Context, arg UpsertMidnightEpochTransitionParams) error
 	UpsertNodeSettingsGate(ctx context.Context, arg UpsertNodeSettingsGateParams) error
 	// A later sync is authoritative for the whole subject: every property column
 	// is overwritten from the incoming row, so a property the registry has since

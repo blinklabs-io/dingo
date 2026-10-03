@@ -69,6 +69,7 @@ const (
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
+	midnightRollbackJournalSchemaRelease                = "midnight-rollback-journal"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -201,6 +202,11 @@ var schemaVersions = []struct {
 		Version: 33,
 		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
+	},
+	{
+		Version: 34,
+		Name:    midnightRollbackJournalSchemaRelease,
+		Dir:     "v34",
 	},
 }
 

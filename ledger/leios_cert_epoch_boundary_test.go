@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -109,15 +110,43 @@ func TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary(
 
 	t.Run("same era", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, false)
+		runLeiosCertEpochBoundaryCase(t, false, nil)
 	})
 	t.Run("hard fork", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, true)
+		runLeiosCertEpochBoundaryCase(t, true, nil)
 	})
 }
 
-func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
+// TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary
+// shows that deferring the certificate check past the boundary does not
+// accept an invalid certificate: the rollover still happens, the certifying
+// block is checked against its own epoch, and its rejection stops the batch
+// before the block is applied.
+func TestLedgerProcessBlocksRejectsInvalidLeiosCertificatePastEpochBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	errInvalidCertificate := errors.New("invalid leios certificate")
+	t.Run("same era", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, false, errInvalidCertificate)
+	})
+	t.Run("hard fork", func(t *testing.T) {
+		t.Parallel()
+		runLeiosCertEpochBoundaryCase(t, true, errInvalidCertificate)
+	})
+}
+
+// runLeiosCertEpochBoundaryCase drives the batch through the ledger. A nil
+// certificateErr makes the certificate validator accept; otherwise it rejects
+// and the batch must fail with that error before the certifying block applies.
+func runLeiosCertEpochBoundaryCase(
+	t *testing.T,
+	hardFork bool,
+	certificateErr error,
+) {
 	t.Helper()
 	const epochLength = 1_000
 	ebHash := leiosTestHash(0xE4)
@@ -219,7 +248,7 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 			validatedMu.Lock()
 			defer validatedMu.Unlock()
 			validatedEpochs = append(validatedEpochs, epoch)
-			return nil
+			return certificateErr
 		},
 	})
 	require.NoError(t, err)
@@ -236,10 +265,34 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: blocks}
 	close(results)
-	require.NoError(t, ls.ledgerProcessBlocksFromSource(
+	processErr := ls.ledgerProcessBlocksFromSource(
 		context.Background(),
 		results,
-	))
+	)
+	if certificateErr != nil {
+		require.ErrorIs(t, processErr, certificateErr)
+		require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
+		require.Less(
+			t,
+			ls.currentTip.Point.Slot,
+			certifier.SlotNumber(),
+			"the rejected certifying block must not be applied",
+		)
+		validatedMu.Lock()
+		defer validatedMu.Unlock()
+		require.NotEmpty(t, validatedEpochs)
+		for _, epoch := range validatedEpochs {
+			require.Equal(
+				t,
+				uint64(1),
+				epoch,
+				"the certificate must be checked against its own epoch, "+
+					"never a forecast or previous-era one",
+			)
+		}
+		return
+	}
+	require.NoError(t, processErr)
 
 	require.Equal(t, uint64(1), ls.currentEpoch.EpochId)
 	require.Equal(t, eras.DijkstraEraDesc.Id, ls.currentEra.Id)
