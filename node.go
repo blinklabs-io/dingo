@@ -101,6 +101,7 @@ type Node struct {
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
 	dmqStack                *dmq.Stack
+	dmqStake                dmqStakeAuthority
 	offchainMetadataFetcher *offchainmetadata.Fetcher
 	tokenRegistrySync       *offchainmetadata.TokenRegistrySync
 	midnightIndexer         *midnightindexer.Indexer

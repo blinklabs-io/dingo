@@ -15,7 +15,11 @@
 package dingo
 
 import (
+	"context"
+	"sync"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -105,8 +109,50 @@ func TestConfigPopulateDMQNetworkMagic(t *testing.T) {
 
 func TestDMQStakeAuthorityWithoutLedger(t *testing.T) {
 	t.Parallel()
-	_, err := dmqStakeAuthority{node: &Node{}}.PoolActiveStake(
+	_, err := (&dmqStakeAuthority{}).PoolActiveStake(
 		ocommon.PoolKeyHash{},
 	)
 	require.ErrorContains(t, err, "ledger state unavailable")
+}
+
+// A live truncate closes and replaces the ledger state while DMQ submissions
+// keep looking up pool stake; the lookups must never touch a ledger state
+// being swapped, and must follow the rebuilt one afterwards.
+func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
+	t.Parallel()
+	const numBlocks = 6
+	n, points := newLiveLifecycleTestNode(t, numBlocks)
+	auth := &n.dmqStake
+	auth.setLedgerState(n.ledgerState)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	// Only the detached state may fail a lookup: any other error means a
+	// lookup reached storage that was closed or not yet reopened.
+	var lookupErr error
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
+			if err != nil && err.Error() != "ledger state unavailable" {
+				lookupErr = err
+				return
+			}
+		}
+	})
+	targetSlot := points[numBlocks/2].Slot
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	close(stop)
+	wg.Wait()
+	require.NoError(t, err)
+	require.NoError(t, lookupErr)
+	if _, err = auth.PoolActiveStake(ocommon.PoolKeyHash{}); err != nil {
+		require.NotContains(t, err.Error(), "ledger state unavailable")
+	}
 }

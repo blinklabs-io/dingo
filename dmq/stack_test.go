@@ -379,7 +379,12 @@ func TestStackNotificationBlockingWaitsForMessage(t *testing.T) {
 	require.NoError(t, c.client().RequestMessagesBlocking())
 	select {
 	case msgs := <-c.replies:
-		require.FailNow(t, "blocking request answered with no message", "%v", msgs)
+		require.FailNow(
+			t,
+			"blocking request answered with no message",
+			"%v",
+			msgs,
+		)
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -417,4 +422,45 @@ func TestStackNotificationDeliversEveryMessageOnce(t *testing.T) {
 		want = append(want, fmt.Sprintf("msg-%03d", i))
 	}
 	require.Equal(t, want, got)
+}
+
+// Local connections are node-to-client, which the connection manager reports
+// only through ConnClosedFunc, never the bus's closed event. A disconnect must
+// still stop the connection's feeder and release its pool cursor.
+func TestStackReleasesClosedConnection(t *testing.T) {
+	t.Parallel()
+	s, reg := newTestStack(t, StackConfig{})
+	c := newConsumer(t, s)
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return len(s.feeders) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, c.conn.Close())
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		feeders := len(s.feeders)
+		s.mu.Unlock()
+		s.pool.peersMu.Lock()
+		cursors := len(s.pool.peers)
+		s.pool.peersMu.Unlock()
+		return feeders == 0 && cursors == 0 &&
+			metricValue(t, reg, "dingo_dmq_connections", "") == 0
+	}, 10*time.Second, 10*time.Millisecond)
+}
+
+func TestStackStartFailureStopsPool(t *testing.T) {
+	t.Parallel()
+	s, err := NewStack(StackConfig{
+		SocketPath:    filepath.Join(t.TempDir(), "missing", "dmq.sock"),
+		Authenticator: ocommon.NewNoOpAuthenticator(nil),
+	})
+	require.NoError(t, err)
+	require.Error(t, s.Start(t.Context()))
+	select {
+	case <-s.pool.done:
+	default:
+		require.FailNow(t, "message pool expiry loop left running")
+	}
 }

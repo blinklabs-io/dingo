@@ -6342,9 +6342,10 @@ pending, retrying every 100ms, so a consumer with a full queue delays messages
 and never loses one. Feeders wake on `MessageMempool.AddedSignal`, taken before
 each drain so an admission between the drain and the wait is not missed. The
 server's authentication and TTL checks are disabled here because pooled
-messages were validated on admission and a second `VerifyMessage` would trip
-the authenticator's replay tracking. The cursor is released when the connection
-closes.
+messages were validated on admission. The connection manager publishes its
+closed event only for node-to-node connections, so the stack learns of a local
+disconnect through `ConnClosedFunc`, which stops the feeder and releases the
+cursor.
 
 Metrics are registered against the retained registry (not the rebuildable one,
 which a live restore unregisters) and are all prefixed `dingo_dmq_`:
@@ -6383,7 +6384,11 @@ its own copy.
 `node_dmq.go` constructs the `MessageAuthenticator` for `dmq.Stack`, with a
 `StakeAuthority` that reads the pool's stake from the snapshot Praos leader
 election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
-accepted only from a pool that may currently forge blocks.
+accepted only from a pool that may currently forge blocks. The DMQ stack is not
+stopped by a live restore or truncate, so the `StakeAuthority` holds its own
+ledger reference under a lock: quiesce clears it, waiting for any lookup in
+flight, before storage closes, and reinitialization sets the rebuilt ledger
+state. Submissions in between are rejected as `invalid`.
 
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus

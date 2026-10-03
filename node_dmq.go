@@ -17,10 +17,12 @@ package dingo
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/dmq"
+	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -47,16 +49,29 @@ func (n *Node) configPopulateDMQNetworkMagic() error {
 
 // dmqStakeAuthority reports a pool's stake from the snapshot Praos uses for
 // leader election, so a DMQ message is accepted from exactly the pools that
-// may currently forge blocks. It reads the ledger on every call, so it follows
-// a ledger that is rebuilt underneath it.
+// may currently forge blocks.
+//
+// The DMQ stack keeps serving through a live restore or truncate, so it cannot
+// read n.ledgerState, which that operation closes and replaces. The node
+// clears the authority's ledger state before closing storage and sets the
+// rebuilt one afterwards; clearing waits for any lookup in flight.
 type dmqStakeAuthority struct {
-	node *Node
+	mu          sync.RWMutex
+	ledgerState *ledger.LedgerState
 }
 
-func (a dmqStakeAuthority) PoolActiveStake(
+func (a *dmqStakeAuthority) setLedgerState(ls *ledger.LedgerState) {
+	a.mu.Lock()
+	a.ledgerState = ls
+	a.mu.Unlock()
+}
+
+func (a *dmqStakeAuthority) PoolActiveStake(
 	pool ocommon.PoolKeyHash,
 ) (uint64, error) {
-	ls := a.node.ledgerState
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	ls := a.ledgerState
 	if ls == nil {
 		return 0, errors.New("ledger state unavailable")
 	}
@@ -76,9 +91,10 @@ func (n *Node) startDMQ() error {
 	if !cfg.Enabled {
 		return nil
 	}
+	n.dmqStake.setLedgerState(n.ledgerState)
 	authenticator, err := ocommon.NewMessageAuthenticator(
 		ocommon.MessageAuthenticatorConfig{
-			StakeAuthority:    dmqStakeAuthority{node: n},
+			StakeAuthority:    &n.dmqStake,
 			SlotsPerKESPeriod: n.ledgerState.SlotsPerKESPeriod(),
 			MaxKESEvolutions:  n.config.MaxKESEvolutions(),
 			Logger:            n.config.logger,
@@ -88,13 +104,17 @@ func (n *Node) startDMQ() error {
 		return fmt.Errorf("creating dmq authenticator: %w", err)
 	}
 	stack, err := dmq.NewStack(dmq.StackConfig{
-		Logger:          n.config.logger,
-		PromRegistry:    n.retainedComponentPromRegistry(),
-		NetworkMagic:    cfg.NetworkMagic,
-		SocketPath:      cfg.SocketPath,
-		MessageTTL:      time.Duration(cfg.MessageTTL) * time.Second, // #nosec G115 -- seconds
-		MaxMempoolBytes: int64(cfg.MaxMempoolSize) << 20,             // #nosec G115 -- MB count
-		Authenticator:   authenticator,
+		Logger:       n.config.logger,
+		PromRegistry: n.retainedComponentPromRegistry(),
+		NetworkMagic: cfg.NetworkMagic,
+		SocketPath:   cfg.SocketPath,
+		MessageTTL: time.Duration(
+			cfg.MessageTTL,
+		) * time.Second, // #nosec G115 -- seconds
+		MaxMempoolBytes: int64(
+			cfg.MaxMempoolSize,
+		) << 20, // #nosec G115 -- MB count
+		Authenticator: authenticator,
 	})
 	if err != nil {
 		return fmt.Errorf("creating dmq stack: %w", err)

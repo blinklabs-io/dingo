@@ -89,14 +89,9 @@ type Stack struct {
 	stopOnce sync.Once
 	stopErr  error
 
-	mu      sync.Mutex // guards feeders
-	feeders map[ouroboros.ConnectionId]context.CancelFunc
-	subs    []subscription
-}
-
-type subscription struct {
-	eventType event.EventType
-	id        event.EventSubscriberId
+	mu         sync.Mutex // guards feeders
+	feeders    map[ouroboros.ConnectionId]context.CancelFunc
+	inboundSub event.EventSubscriberId
 }
 
 // NewStack builds a Stack. Call Start to open its socket.
@@ -143,6 +138,11 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		connmanager.ConnectionManagerConfig{
 			Logger:   logger,
 			EventBus: s.bus,
+			// Local connections are node-to-client, and the connection
+			// manager publishes its closed event only for node-to-node ones.
+			ConnClosedFunc: func(id ouroboros.ConnectionId, _ bool, _ error) {
+				s.handleClosed(id)
+			},
 			Listeners: []connmanager.ListenerConfig{{
 				ListenNetwork: "unix",
 				ListenAddress: cfg.SocketPath,
@@ -173,21 +173,16 @@ func (s *Stack) Mempool() *MessageMempool {
 // Start opens the local socket and begins serving.
 func (s *Stack) Start(ctx context.Context) error {
 	s.pool.Start()
-	for _, sub := range []struct {
-		eventType event.EventType
-		fn        event.EventHandlerFunc
-	}{
-		{connmanager.InboundConnectionEventType, s.handleInbound},
-		{connmanager.ConnectionClosedEventType, s.handleClosed},
-	} {
-		s.subs = append(s.subs, subscription{
-			eventType: sub.eventType,
-			id:        s.bus.SubscribeFunc(sub.eventType, sub.fn),
-		})
-	}
+	s.inboundSub = s.bus.SubscribeFunc(
+		connmanager.InboundConnectionEventType,
+		s.handleInbound,
+	)
 	if err := s.connMgr.Start(ctx); err != nil {
 		s.shutdownLocal()
-		return fmt.Errorf("dmq: start connection manager: %w", err)
+		return errors.Join(
+			fmt.Errorf("dmq: start connection manager: %w", err),
+			s.pool.Stop(ctx),
+		)
 	}
 	return nil
 }
@@ -207,10 +202,10 @@ func (s *Stack) Stop(ctx context.Context) error {
 }
 
 func (s *Stack) shutdownLocal() {
-	for _, sub := range s.subs {
-		s.bus.UnsubscribeAndWait(sub.eventType, sub.id)
-	}
-	s.subs = nil
+	s.bus.UnsubscribeAndWait(
+		connmanager.InboundConnectionEventType,
+		s.inboundSub,
+	)
 	s.cancel()
 	s.wg.Wait()
 	s.bus.Stop()
@@ -289,8 +284,7 @@ func reasonLabel(reason ocommon.RejectReason) string {
 
 // notificationConfig serves protocol 15. Each connection's server queue is
 // fed from the pool by a feeder goroutine, so the messages it holds were
-// already validated on admission and need no second authentication pass --
-// repeating it would also trip the authenticator's replay tracking.
+// already validated on admission and need no second authentication pass.
 func (s *Stack) notificationConfig() localmessagenotification.Config {
 	return localmessagenotification.NewConfig(
 		localmessagenotification.WithAuthenticator(
@@ -307,7 +301,6 @@ func (s *Stack) handleInbound(evt event.Event) {
 	if !ok {
 		return
 	}
-	s.conns.Inc()
 	conn := s.connMgr.GetConnectionById(data.ConnectionId)
 	if conn == nil || conn.LocalMessageNotification() == nil {
 		return
@@ -316,25 +309,29 @@ func (s *Stack) handleInbound(evt event.Event) {
 	s.mu.Lock()
 	s.feeders[data.ConnectionId] = cancel
 	s.mu.Unlock()
+	s.conns.Inc()
 	server := conn.LocalMessageNotification().Server
 	consumerID := data.ConnectionId.String()
 	s.wg.Go(func() {
 		defer s.pool.RemovePeer(consumerID)
 		s.feed(ctx, consumerID, server)
 	})
+	// This handler runs on the bus, after the connection is registered, and
+	// can lose a race with the close callback. The connection manager removes
+	// a connection before calling ConnClosedFunc, so a connection already gone
+	// here had its close handled before this feeder was registered.
+	if s.connMgr.GetConnectionById(data.ConnectionId) == nil {
+		s.handleClosed(data.ConnectionId)
+	}
 }
 
-func (s *Stack) handleClosed(evt event.Event) {
-	data, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-	if !ok {
-		return
-	}
-	s.conns.Dec()
+func (s *Stack) handleClosed(id ouroboros.ConnectionId) {
 	s.mu.Lock()
-	cancel := s.feeders[data.ConnectionId]
-	delete(s.feeders, data.ConnectionId)
+	cancel, ok := s.feeders[id]
+	delete(s.feeders, id)
 	s.mu.Unlock()
-	if cancel != nil {
+	if ok {
+		s.conns.Dec()
 		cancel()
 	}
 }
