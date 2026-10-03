@@ -967,6 +967,36 @@ func TestBlockByNumberReportsMissingNumbersAsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
 }
 
+func TestFirstBlockAtOrAfterSlot(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	for _, b := range []struct {
+		slot uint64
+		id   uint64
+	}{{100, 1}, {200, 2}, {300, 3}} {
+		hash := make([]byte, 32)
+		hash[0] = byte(b.id)
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID: b.id, Slot: b.slot, Hash: hash, Number: b.id, Type: 1,
+			Cbor: []byte{0x80},
+		}, nil))
+	}
+	// A synthetic blob (ID 0) between real blocks must be skipped.
+	require.NoError(t, db.SetGenesisCbor(
+		150, bytes.Repeat([]byte{0xcc}, 32), []byte{0x80}, nil,
+	))
+	for _, tc := range []struct {
+		query uint64
+		want  uint64
+	}{{0, 100}, {100, 100}, {101, 200}, {300, 300}} {
+		blk, err := FirstBlockAtOrAfterSlot(db, tc.query)
+		require.NoError(t, err, "query %d", tc.query)
+		require.Equal(t, tc.want, blk.Slot, "query %d", tc.query)
+	}
+	_, err := FirstBlockAtOrAfterSlot(db, 301)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // reverseIteratorCountingStore records reverse blob iterators opened through
 // it. The s3 and gcs plugins implement reverse iteration by listing every key
 // under the prefix into a temporary file before the seek runs, so a reverse

@@ -13909,3 +13909,117 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
+
+// TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock covers a failure in
+// the first block of an epoch. The rollover commits before that block applies,
+// so the ledger tip is still in the previous epoch while the current epoch
+// already starts at the failing block. A deep rewind would discard the rollover
+// just as it does when the tip is inside the epoch.
+func TestAtTipRecoveryRewindKeepsRolloverBeforeFirstEpochBlock(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = pruneFixtureTipSlot + 1
+	f := newPrunedUtxoFixture(t, 0)
+	completeRollover := func() {
+		require.NoError(t, f.db.SetEpoch(
+			boundarySlot, 1,
+			[]byte("nonce-first-block"), []byte("evolving-first-block"),
+			[]byte("candidate-first-block"), []byte("last-first-block"),
+			eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+		))
+		f.ls.currentEpoch = models.Epoch{
+			EpochId:   1,
+			StartSlot: boundarySlot,
+			EraId:     eras.ConwayEraDesc.Id,
+		}
+	}
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+	// Re-delivery of the failing block recomputes the rollover the first
+	// attempt's same-tip repair discarded.
+	completeRollover()
+	f.driveAtTipRecovery(t, 1)
+
+	require.Equal(
+		t,
+		uint64(pruneFixtureTipSlot),
+		f.ls.currentTip.Point.Slot,
+		"recovery rewound below the tip that precedes the completed rollover",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryRewindKeepsCompletedEpochBoundary ensures recovery retains
+// an epoch rollover that completed before the failing block was applied.
+func TestAtTipRecoveryRewindKeepsCompletedEpochBoundary(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	require.NoError(t, f.db.SetEpoch(
+		boundarySlot, 1,
+		[]byte("nonce-4577"), []byte("evolving-4577"),
+		[]byte("candidate-4577"), []byte("last-4577"),
+		eras.ConwayEraDesc.Id, 1, 1_000_000, nil,
+	))
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+
+	f.driveAtTipRecovery(t, 2)
+
+	require.GreaterOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		uint64(boundarySlot),
+		"recovery rewound below an already completed epoch boundary",
+	)
+	require.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(f.ls.metrics.atTipRecoveryEpochBoundaryClamped),
+	)
+}
+
+// TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce verifies that the
+// deepest scheduled attempt may cross a boundary once for an epoch only.
+func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			pruneFixtureTipSlot+1,
+			testHashBytes("4577-f"),
+		),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	crossed := f.ls.metrics.atTipRecoveryEpochBoundaryClamped
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts-1,
+	)
+	require.Equal(t, tip, got)
+	require.Equal(t, 1.0, promtestutil.ToFloat64(crossed))
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
+	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
+}

@@ -1580,6 +1580,12 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			}
 		}
 	}
+	rewindPoint = ls.clampRecoveryRewindToEpochBoundary(
+		rewindPoint,
+		ledgerTip.Point,
+		validationErr,
+		attempts,
+	)
 	// Never target a point below the consumed-UTxO prune floor. The sweep
 	// hard-deletes spent rows at or below tip-stabilityWindow, while each
 	// escalating attempt rewinds a further stability window below the
@@ -1949,6 +1955,65 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		)
 	}
 	return nil
+}
+
+// clampRecoveryRewindToEpochBoundary keeps an at-tip recovery rewind from
+// discarding an epoch rollover that has already completed. When the ledger
+// tip or the failing block is in the current epoch and the target lies before
+// that epoch's start slot, re-delivery would recompute the whole rollover
+// before reaching the same failing block, so the target moves to the first
+// block at or after the boundary, or to the ledger tip when none is applied.
+// The failing block counts because the rollover commits before the first
+// block of the epoch applies, leaving the tip in the previous epoch. The final scheduled attempt may cross the boundary once per
+// epoch, so a failure that only a different pre-boundary history can repair
+// still gets the deepest rewind. Any lookup failure holds at the ledger tip.
+func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
+	rewindPoint ocommon.Point,
+	ledgerTip ocommon.Point,
+	validationErr *txValidationError,
+	attempts int,
+) ocommon.Point {
+	ls.RLock()
+	boundary := ls.currentEpoch.StartSlot
+	ls.RUnlock()
+	if boundary == 0 ||
+		max(ledgerTip.Slot, validationErr.BlockPoint.Slot) < boundary ||
+		rewindPoint.Slot >= boundary ||
+		pointMatches(rewindPoint, ledgerTip) {
+		return rewindPoint
+	}
+	logger := ls.config.Logger.With(
+		"component", "ledger",
+		"failing_block_slot", validationErr.BlockPoint.Slot,
+		"epoch_boundary_slot", boundary,
+		"requested_rewind_slot", rewindPoint.Slot,
+		"ledger_tip_slot", ledgerTip.Slot,
+		"attempt", attempts,
+	)
+	if attempts >= maxAtTipRecoveryAttempts &&
+		ls.atTipRecoveryCrossedEpochStart != boundary {
+		ls.atTipRecoveryCrossedEpochStart = boundary
+		logger.Warn(
+			"at-tip recovery rewinding across epoch boundary, the rollover will be recomputed",
+		)
+		return rewindPoint
+	}
+	clamped := ledgerTip
+	block, err := database.FirstBlockAtOrAfterSlot(ls.db, boundary)
+	if err == nil && block.Slot <= ledgerTip.Slot {
+		clamped = ocommon.Point{Slot: block.Slot, Hash: block.Hash}
+	} else if err != nil {
+		logger.Warn(
+			"epoch boundary block lookup failed, using ledger tip",
+			"error", err.Error(),
+		)
+	}
+	ls.metrics.atTipRecoveryEpochBoundaryClamped.Inc()
+	logger.Warn(
+		"at-tip recovery rewind target is below the completed epoch boundary, clamping to avoid recomputing the rollover",
+		"clamped_rewind_slot", clamped.Slot,
+	)
+	return clamped
 }
 
 // findRewindPoint returns the highest committed chain point at or

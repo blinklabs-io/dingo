@@ -709,6 +709,16 @@ on a Mithril-bootstrapped node the anchor sits far below the prune floor, so the
 boundary check admits every target the rewind schedule produces and only the
 prune floor refuses them.
 
+At-tip recovery also keeps its rewind target at or after the current epoch's
+start slot while the ledger tip or the failing block is inside that epoch, so a
+deterministic post-boundary failure does not discard and recompute the completed
+rollover on each attempt. The failing block counts because the rollover commits
+before the epoch's first block applies. The target moves to the first applied
+block at or after the boundary, or holds at the ledger tip when there is none
+(`dingo_ledger_attip_recovery_epoch_boundary_clamped_total`). Only the final
+scheduled attempt may cross the boundary, once per epoch, so a failure that
+needs a different pre-boundary history can still be repaired.
+
 Startup reconciliation rolls the ledger back to the blob tip when metadata
 leads it, and that rollback can be arbitrarily deep, so it can now fail with
 `ErrRollbackBelowUtxoPruneFloor` and refuse to start. That is the intended
