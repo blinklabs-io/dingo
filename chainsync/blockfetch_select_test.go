@@ -140,17 +140,47 @@ func TestSelectBlockfetchPeerUnsampledOnlyHolderIsUsed(t *testing.T) {
 	assert.Equal(t, 0, f.selectFrom(0))
 }
 
-// An unsampled peer is not shut out for lacking a sample: it is selected
-// occasionally, and only occasionally, so it can earn one.
+// announce records point as announced by every peer.
+func (f *fetchPeers) announce(point ocommon.Point) {
+	for _, connId := range f.conns {
+		f.state.RecordObservedHeader(chainsync.ObservedHeader{
+			ConnectionId: connId,
+			Point:        point,
+			Tip:          ochainsync.Tip{Point: point, BlockNumber: 5},
+			BlockHeader: testBlockHeader{
+				hash:        lcommon.NewBlake2b256(point.Hash),
+				prevHash:    lcommon.NewBlake2b256([]byte("prev")),
+				blockNumber: 5,
+				slot:        point.Slot,
+			},
+		})
+	}
+}
+
+// rangePoints returns n distinct points, each announced by every peer.
+func (f *fetchPeers) rangePoints(n int) []ocommon.Point {
+	points := make([]ocommon.Point, n)
+	for i := range points {
+		points[i] = ocommon.NewPoint(
+			uint64(1000+i),
+			[]byte{'r', byte(i), byte(i >> 8)},
+		)
+		f.announce(points[i])
+	}
+	return points
+}
+
+// An unsampled peer is not shut out for lacking a sample: it is selected for
+// some ranges, and only for a small share of them, so it can earn one.
 func TestSelectBlockfetchPeerExploresUnsampledPeerSparingly(t *testing.T) {
 	t.Parallel()
 	f := newFetchPeers(t, 2)
 	f.sample(0, 40*time.Millisecond, 50*time.Millisecond)
 
-	const rounds = 64
+	points := f.rangePoints(64)
 	explored := 0
-	for range rounds {
-		if f.selectFrom(0) == 1 {
+	for _, point := range points {
+		if f.indexOf(f.state.SelectBlockfetchPeer(f.conns[0], point)) == 1 {
 			explored++
 		}
 	}
@@ -159,9 +189,30 @@ func TestSelectBlockfetchPeerExploresUnsampledPeerSparingly(t *testing.T) {
 	assert.LessOrEqual(
 		t,
 		explored,
-		rounds/4,
+		len(points)/4,
 		"exploration must stay a small share of selections",
 	)
+}
+
+// The ledger can ask about one range more than once (when a deep catch-up
+// pipeline defers to the policy and again when the next batch starts), so the
+// answer for a range must not depend on how many times it was asked.
+func TestSelectBlockfetchPeerAnswersEachRangeConsistently(t *testing.T) {
+	t.Parallel()
+	f := newFetchPeers(t, 2)
+	f.sample(0, 40*time.Millisecond, 50*time.Millisecond)
+
+	for _, point := range f.rangePoints(32) {
+		first := f.state.SelectBlockfetchPeer(f.conns[0], point)
+		again := f.state.SelectBlockfetchPeer(f.conns[0], point)
+		assert.Equal(
+			t,
+			f.indexOf(first),
+			f.indexOf(again),
+			"range at slot %d answered differently when asked again",
+			point.Slot,
+		)
+	}
 }
 
 // Peers whose measurements differ by less than the band are equals: the

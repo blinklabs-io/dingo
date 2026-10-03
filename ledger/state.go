@@ -909,11 +909,11 @@ type PeersWithBlockFunc func(
 ) []ouroboros.ConnectionId
 
 // SelectBlockfetchPeerFunc returns the connection to fetch the range that
-// starts at the given point from. origin is the connection that delivered the
+// ends at the given point from. origin is the connection that delivered the
 // header and is the answer when nothing better is known.
 type SelectBlockfetchPeerFunc func(
 	origin ouroboros.ConnectionId,
-	rangeStart ocommon.Point,
+	rangeEnd ocommon.Point,
 ) ouroboros.ConnectionId
 
 // RecordBlockfetchThroughputFunc records how many bytes a batch delivered

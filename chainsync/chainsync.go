@@ -293,8 +293,7 @@ type State struct {
 	// blockfetchSalt breaks ties between near-equal peers differently on
 	// each node, so independent nodes do not converge on the same relay.
 	blockfetchSalt uint64
-	// blockfetchSelection guards the selection counter and the last peer
-	// chosen.
+	// blockfetchSelection guards the last peer chosen.
 	blockfetchSelection blockfetchSelectionState
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain

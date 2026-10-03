@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -25,22 +27,29 @@ import (
 )
 
 // The peer a batch is fetched from comes from the selection policy, asked
-// about the start of the range that is actually queued.
-func TestSelectInitialBlockfetchConnAsksPolicyForQueuedRangeStart(
+// about the last block of the range that is actually queued: a peer that
+// announced the range start may have forked away before its end.
+func TestSelectInitialBlockfetchConnAsksPolicyForQueuedRangeEnd(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	ls, testChain := newForkExtensionRestartFixture(t)
+	testChain, hashes := buildDeepCatchupChain(t, 3)
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
 	header := testChainsyncConnId(6000, 3001)
 	better := testChainsyncConnId(6000, 3002)
 	var gotOrigin ouroboros.ConnectionId
-	var gotStart ocommon.Point
+	var gotPoint ocommon.Point
 	ls.config.SelectBlockfetchPeerFunc = func(
 		origin ouroboros.ConnectionId,
-		start ocommon.Point,
+		point ocommon.Point,
 	) ouroboros.ConnectionId {
-		gotOrigin, gotStart = origin, start
+		gotOrigin, gotPoint = origin, point
 		return better
 	}
 
@@ -48,8 +57,81 @@ func TestSelectInitialBlockfetchConnAsksPolicyForQueuedRangeStart(
 
 	assert.Equal(t, better, selected)
 	assert.Equal(t, header, gotOrigin)
-	queuedStart, _ := testChain.HeaderRange(BlockfetchBatchSize)
-	assert.Equal(t, queuedStart, gotStart)
+	assert.Equal(t, ocommon.NewPoint(3, hashes[2].Bytes()), gotPoint)
+}
+
+// In deep catch-up a promoted request normally tops the pipeline up on its own
+// connection. When the policy prefers another peer for the next window, the
+// pipeline is left empty so the promoted batch drains on its peer and the
+// continuation after it hands the queue over.
+func TestTryPromoteQueuedBlockfetchLeavesNextWindowToPreferredPeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const remainingHeaders = 80
+	const promotedClaim = 50
+	testChain, hashes := buildDeepCatchupChain(t, remainingHeaders)
+	incumbent := testChainsyncConnId(6302, 3001)
+	better := testChainsyncConnId(6302, 3002)
+	var requests []ouroboros.ConnectionId
+	var asked []ocommon.Point
+	ls := &LedgerState{
+		chain:                        testChain,
+		activeBlockfetchConnId:       incumbent,
+		chainsyncBlockfetchReadyChan: make(chan struct{}),
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) (uint64, error) {
+				requests = append(requests, connId)
+				return uint64(len(requests)), nil
+			},
+			SelectBlockfetchPeerFunc: func(
+				origin ouroboros.ConnectionId,
+				point ocommon.Point,
+			) ouroboros.ConnectionId {
+				asked = append(asked, point)
+				return better
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	ls.nextBlockfetchRequest = &queuedBlockfetchRequest{
+		connId:      incumbent,
+		headerStart: ocommon.NewPoint(1, hashes[0].Bytes()),
+		headerEnd: ocommon.NewPoint(
+			promotedClaim,
+			hashes[promotedClaim-1].Bytes(),
+		),
+		headerCount:  promotedClaim,
+		dispatchedAt: time.Now(),
+	}
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	promoted := ls.tryPromoteQueuedBlockfetchLocked()
+	next := ls.nextBlockfetchRequest
+	ls.chainsyncBlockfetchMutex.Unlock()
+
+	require.True(t, promoted)
+	assert.Equal(t, incumbent, ls.activeBlockfetchConnId)
+	assert.Empty(t, requests, "no top-up may be queued on the incumbent")
+	assert.Nil(t, next)
+	require.Len(t, asked, 1)
+	assert.Equal(
+		t,
+		ocommon.NewPoint(remainingHeaders, hashes[remainingHeaders-1].Bytes()),
+		asked[0],
+		"the policy is asked about the window after the promoted claim",
+	)
+
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.blockfetchRequestRangeCleanup()
+	ls.activeBlockfetchConnId = ouroboros.ConnectionId{}
+	ls.chainsyncBlockfetchMutex.Unlock()
 }
 
 func TestSelectInitialBlockfetchConnWithoutPolicyKeepsHeaderPeer(

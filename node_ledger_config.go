@@ -208,11 +208,11 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 		},
 		SelectBlockfetchPeerFunc: func(
 			origin ouroboros.ConnectionId,
-			rangeStart ocommon.Point,
+			rangeEnd ocommon.Point,
 		) ouroboros.ConnectionId {
 			selected := origin
 			n.withLiveChainsyncState(func(state *chainsync.State) {
-				selected = state.SelectBlockfetchPeer(origin, rangeStart)
+				selected = state.SelectBlockfetchPeer(origin, rangeEnd)
 			})
 			return selected
 		},

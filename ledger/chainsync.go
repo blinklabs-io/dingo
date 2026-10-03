@@ -8062,21 +8062,37 @@ func (ls *LedgerState) checkSlotBattle(
 // selectInitialBlockfetchConn picks the connection to fetch the queued range
 // from. The connection that delivered the header says only where the peer sits
 // in the diffusion graph, so the selection policy, when wired, chooses among
-// the peers that announced the range start by measured delivery. Without a
-// policy, or when none of those peers has anything to recommend, the header
-// peer is used. It runs for every batch, so a better peer takes over at the
-// next batch boundary while the batch in flight finishes where it started.
+// the peers that announced the range by measured delivery. Without a policy,
+// or when none of those peers has anything to recommend, the header peer is
+// used. It runs for every batch, so a better peer takes over at the next batch
+// boundary while the batch in flight finishes where it started.
 func (ls *LedgerState) selectInitialBlockfetchConn(
 	headerConnId ouroboros.ConnectionId,
 ) ouroboros.ConnectionId {
+	return ls.selectBlockfetchConnForWindow(headerConnId, 0)
+}
+
+// selectBlockfetchConnForWindow asks the selection policy for the queued
+// window that starts skip headers past the queue head, cut exactly as a
+// dispatch cuts it. The policy is asked about the window's last header, since
+// a peer that announced it holds every block before it on the same chain while
+// a peer that announced only the first may have forked away after it.
+func (ls *LedgerState) selectBlockfetchConnForWindow(
+	current ouroboros.ConnectionId,
+	skip int,
+) ouroboros.ConnectionId {
 	if ls.config.SelectBlockfetchPeerFunc == nil {
-		return headerConnId
+		return current
 	}
-	rangeStart, _ := ls.chain.HeaderRange(BlockfetchBatchSize)
-	if len(rangeStart.Hash) == 0 {
-		return headerConnId
+	_, end, available := ls.chain.HeaderRangeAfterBytes(
+		skip,
+		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
+	)
+	if available == 0 || len(end.Hash) == 0 {
+		return current
 	}
-	return ls.config.SelectBlockfetchPeerFunc(headerConnId, rangeStart)
+	return ls.config.SelectBlockfetchPeerFunc(current, end)
 }
 
 func (ls *LedgerState) selectRetryBlockfetchConn(

@@ -34,7 +34,7 @@ const (
 	// blockfetchBand is the relative margin within which two delivery
 	// estimates count as equal and the per-node salt decides.
 	blockfetchBand = 0.05
-	// blockfetchExploreEvery spaces the selections that go to a peer with no
+	// blockfetchExploreEvery spaces the ranges that go to a peer with no
 	// delivery sample, so a new peer can earn one without taking a large
 	// share of the traffic.
 	blockfetchExploreEvery = 8
@@ -42,9 +42,8 @@ const (
 
 type blockfetchSelectionState struct {
 	sync.Mutex
-	selections uint64
-	last       ouroboros.ConnectionId
-	haveLast   bool
+	last     ouroboros.ConnectionId
+	haveLast bool
 }
 
 // RecordBlockfetchThroughput folds one batch's delivery rate into the
@@ -82,22 +81,24 @@ type blockfetchCandidate struct {
 	tie      uint64
 }
 
-// SelectBlockfetchPeer picks the connection to fetch the range starting at
-// point from. The candidates are origin, which delivered the header, and every
-// other eligible peer that announced the same point. Peers are ranked by the
-// time their measured one-way latency and per-byte delivery cost predict for a
-// typical batch; estimates within blockfetchBand of the best are tied and
-// settled by a per-node salt, so near-equal peers neither flap nor attract
-// every node alike. A peer with no latency sample is tried one selection in
-// blockfetchExploreEvery. When nothing has been measured, or no other peer
-// holds point, origin is used.
+// SelectBlockfetchPeer picks the connection to fetch the range ending at point
+// from. The candidates are origin, which delivered the header, and every other
+// eligible peer that announced point; headers chain by hash, so such a peer
+// holds the whole range. Peers are ranked by the time their measured one-way
+// latency and per-byte delivery cost predict for a typical batch; estimates
+// within blockfetchBand of the best are tied and settled by a per-node salt,
+// so near-equal peers neither flap nor attract every node alike. A peer with
+// no latency sample is tried for one range in blockfetchExploreEvery, chosen
+// by the salted range hash, so asking about the same range again gives the
+// same answer while the measurements stand. When nothing has been measured,
+// or no other peer holds point, origin is used.
 func (s *State) SelectBlockfetchPeer(
 	origin ouroboros.ConnectionId,
 	point ocommon.Point,
 ) ouroboros.ConnectionId {
 	holders := s.PeersWithBlock(origin, point)
 	candidates := s.blockfetchCandidates(origin, holders)
-	chosen, decision := s.chooseBlockfetchCandidate(candidates)
+	chosen, decision := s.chooseBlockfetchCandidate(candidates, point)
 
 	s.blockfetchSelectionsCounter.WithLabelValues(decision).Inc()
 	sel := &s.blockfetchSelection
@@ -158,16 +159,13 @@ func (s *State) blockfetchCandidates(
 
 func (s *State) chooseBlockfetchCandidate(
 	candidates []blockfetchCandidate,
+	point ocommon.Point,
 ) (ouroboros.ConnectionId, string) {
 	origin := candidates[0].connId
 	if len(candidates) == 1 {
 		return origin, "only_holder"
 	}
-	sel := &s.blockfetchSelection
-	sel.Lock()
-	sel.selections++
-	exploring := sel.selections%blockfetchExploreEvery == 0
-	sel.Unlock()
+	exploring := s.saltedHash(point.Hash)%blockfetchExploreEvery == 0
 
 	var unsampled, sampled []blockfetchCandidate
 	for _, c := range candidates {
@@ -211,10 +209,15 @@ func lowestTie(
 // blockfetchTie ranks connId among tied peers: stable for this node, but
 // different on nodes with different salts.
 func (s *State) blockfetchTie(connId ouroboros.ConnectionId) uint64 {
+	return s.saltedHash([]byte(connId.String()))
+}
+
+// saltedHash hashes data with this node's blockfetch salt.
+func (s *State) saltedHash(data []byte) uint64 {
 	h := fnv.New64a()
 	var salt [8]byte
 	binary.LittleEndian.PutUint64(salt[:], s.blockfetchSalt)
 	_, _ = h.Write(salt[:])
-	_, _ = h.Write([]byte(connId.String()))
+	_, _ = h.Write(data)
 	return h.Sum64()
 }
