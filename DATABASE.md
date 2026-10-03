@@ -76,6 +76,37 @@ behavior, and persisted formats are unchanged. Library callers of Mithril
 `Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
 local `badger` blob and `sqlite` metadata providers.
 
+MCP's SQL tools validate the main SQL statement after CTE definitions and reject
+mutations before execution. Read-only EXPLAIN and metadata PRAGMAs remain
+supported. The tools use a separate read-only SQLite connection at the active
+provider's resolved file location, exposed through the optional
+`sqlstore.Store.SQLitePath()` capability. A metadata provider `dataDir` override
+therefore also controls MCP's read target. Other backends and in-memory SQLite
+return no file location. MCP owns the extra connection pool and closes it when
+the API stops; it never borrows or closes the provider's pools. SQL row limits
+are enforced during iteration, including PRAGMA results. The MCP table catalog
+reads column names and declared types from the connected SQLite schema on each
+request; its db-sync cheatsheet examples target the production metadata schema.
+Datum/script resolution reads the API indexes: core mode does not populate them,
+while API mode indexes inline and witness datums subject to retained/backfilled
+history. MCP distinguishes database query failures from missing indexed hashes;
+neither missing rows nor empty core-mode indexes prove absence on-chain.
+MCP governance proposal lookups, listings, and vote tallies exclude rows with
+`deleted_slot` set. Query and scan failures return tool errors, not empty
+proposal lists or zero vote counts. These reads do not alter the schema or
+stored governance state.
+MCP exact-address UTxO queries use `Database.UtxosByAddressPage`: a context-bound
+coordinated read transaction scans bounded candidate batches and compares output
+CBOR before returning matches. The continuation cursor records the last fully
+examined candidate, including nonmatches; deadlines can return partial progress.
+Candidate scans skip native-asset loading. SQLite exact-payment lookups exclude
+the low-selectivity `deleted_slot` predicate from index selection so snapshot
+statistics do not select that low-selectivity index solely for the liveness
+filter. The integer liveness filter still applies. Existing nonpaged callers
+retain their pagination and matching semantics. See the
+[MCP guide](docs/mcp/README.md#metadata-and-query-semantics) for page bounds and
+live-state consistency semantics.
+
 The blob-store reference can be replaced while the database is live.
 `Database.SetBlobStore` installs the new store and returns the one it replaced
 together with a drain func. Operations already in flight keep running against

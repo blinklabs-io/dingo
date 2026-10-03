@@ -284,8 +284,7 @@ func mithrilRewardRepairPending(
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
@@ -319,8 +318,7 @@ func checkMithrilInactivityCompat(
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// A commit-timestamp mismatch is recovered downstream in node.Run;
 		// the marker read works on the partially-initialised handle.
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
@@ -352,8 +350,7 @@ func repairDeferredIndexes(
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}

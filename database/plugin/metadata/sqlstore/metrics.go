@@ -248,8 +248,7 @@ func safeRegisterGaugeFunc(
 		fn,
 	)
 	if err := reg.Register(gauge); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if !errors.As(err, &already) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}
@@ -274,8 +273,7 @@ func safeRegisterCounterFunc(
 		fn,
 	)
 	if err := reg.Register(counter); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if !errors.As(err, &already) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}

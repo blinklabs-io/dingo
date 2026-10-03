@@ -1539,8 +1539,7 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	db := runtime.Database
 	defer runtime.Close(context.Background())
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}

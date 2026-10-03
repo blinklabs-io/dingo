@@ -67,6 +67,9 @@ func boundedInterval(
 	}
 }
 
+//go:fix inline
+func u64(v uint64) *uint64 { return new(v) }
+
 func testSubTransaction(
 	deposits gdijkstra.DijkstraDirectDeposits,
 	intervals gdijkstra.DijkstraAccountBalanceIntervals,

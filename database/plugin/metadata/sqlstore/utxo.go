@@ -1451,7 +1451,10 @@ func (s *Store) utxoRefsByTxID(
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		placeholders := strings.TrimSuffix(
+			strings.Repeat("?,", len(batch)),
+			",",
+		)
 		args := make([]any, len(batch))
 		for i, txID := range batch {
 			args[i] = txID
@@ -1907,6 +1910,15 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	predicate, args, err := utxoOrderingPredicate(query)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
+	}
+	if s.dialect.Name() == "sqlite" && len(query.AddressPatterns) == 1 &&
+		len(query.AddressPatterns[0].ExactAddress) > 0 &&
+		strings.Contains(predicate, "utxo.payment_key = ?") {
+		// The low-selectivity deleted/payment-script index can beat the
+		// payment-key index under stale snapshot statistics, scanning millions
+		// of live rows for one address. Keep the integer liveness comparison,
+		// but prevent it from selecting that index for exact payment lookups.
+		predicate = "+" + predicate
 	}
 	slotExpr := `COALESCE("transaction".slot, utxo.added_slot)`
 	blockIndexExpr := `COALESCE("transaction".block_index, 0)`

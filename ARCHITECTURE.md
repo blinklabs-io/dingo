@@ -8365,9 +8365,46 @@ it lands on. The gap is reported as
 its database but has not begun following the chain reports not-ready rather
 than reading as perfectly caught up.
 
+### MCP API (`api/mcp/`)
+
+The instance-owned plugin host registers MCP explicitly from composition.
+`node.go` and live lifecycle reconstruction inject the active database, ledger
+state and mempool. MCP serves Streamable HTTP and legacy SSE through
+`internal/apilistener`. It opens and owns a separate read-only pool at the active
+SQLite metadata provider's resolved location; storage selection is never inferred
+from the global data directory. Exact-address queries delegate to the database's
+context-aware CBOR address page API. Request deadlines reach the coordinated
+read transaction; candidate processing checks cancellation between blob loads
+and decodes. Pages carry a cursor after the last completed candidate, including
+empty pages that have more candidates. Each page reads live state independently.
+The table-catalog resource introspects
+the same read-only SQLite pool at request time; without that pool it reports
+schema unavailability.
+
+MCP is opt-in: `plugins.api.mcp.config.port: 0` prevents node composition
+from constructing or starting the server. It does not request an ephemeral
+port. Set a positive port, such as `8088`, to enable it in either core or API
+storage mode. This keeps the SQL and node-inspection endpoint from starting
+automatically on existing nodes. Authentication is optional and unset by
+default; the listener defaults to `127.0.0.1`. Storage mode and retained
+metadata determine which queries have data available.
+Any non-loopback MCP bind additionally requires both a non-empty auth token and
+server TLS; unprotected network binds fail during provider construction.
+The canonical plugin auth-token environment setting overrides the compatibility
+`DINGO_MCP_AUTH_TOKEN` alias, which overrides YAML. Browser origins must be
+same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
+does not grant access to MCP. Rejected origins receive HTTP 403 before any
+transport or preflight handling. Native clients can omit Origin. Streaming
+responses have no absolute write timeout. The rate limiter reclaims stale entries
+on requests and starts no background worker. Stopping MCP closes its owned
+read-only pool after listener shutdown.
+
+See [MCP architecture](docs/mcp/architecture.md) for tool semantics and upstream
+protocol references.
+
 ### API security (TLS)
 
-Blockfrost, Kupo, Mesh, and UTxO RPC share one optional TLS contract. TLS is
+Blockfrost, Kupo, Mesh, UTxO RPC, and MCP share one optional TLS contract. TLS is
 validated before listeners bind: an invalid mode is rejected at construction,
 and `mode: server` requires both certificate and key paths. TLS may be configured
 through the shared `api.tls` policy or a provider's
@@ -8380,23 +8417,29 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-API routes require no credentials, including health and reflection routes.
+Blockfrost, Kupo, Mesh, and UTxO RPC routes require no credentials, including
+health and reflection routes. MCP supports an optional shared token through Bearer
+authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
+rate limiting; `/health` does not. Origin validation precedes both routes and
+preflight handling.
 
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
-RPC-only TLS compatibility input among these three providers; Midnight also
-uses the pair directly. They are not promoted to Blockfrost or Mesh.
-The four API listeners use the root `bindAddr`, whose default is
-`0.0.0.0`. `debugBindAddr` remains the separate pprof
-listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
-CORS setting shared by the API providers.
+RPC-only TLS compatibility input among these providers; Midnight also
+uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
+Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
+`0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
+`127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
+`debugBindAddr` remains the separate pprof listener setting.
+`corsAllowedOrigins` is shared configuration, but MCP rejects its wildcard
+and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
 
-All four API servers (`api/blockfrost`, `api/kupo`, `api/mesh`,
-`api/utxorpc`) share one
+The API servers (`api/blockfrost`, `api/kupo`, `api/mesh`, `api/utxorpc`,
+`api/mcp`) share one
 start/stop protocol rather than each implementing its own, because the way they
 bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
-all three.
+all five.
 
 The problem is that `http.Server.Shutdown` closes only the listeners `Serve`
 has already registered, and each server opens its socket synchronously — so a
