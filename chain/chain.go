@@ -1001,6 +1001,16 @@ func (c *Chain) addBlockLocked(
 		blockHashBytes = block.Hash().Bytes()
 		point = ocommon.NewPoint(block.SlotNumber(), blockHashBytes)
 	}
+	// The hash is stored as the block's key and read back into fixed-width
+	// hash types, so a wrong length is refused here rather than persisted.
+	if len(blockHashBytes) != lcommon.Blake2b256Size {
+		return event.Event{}, fmt.Errorf(
+			"block hash at slot %d: expected %d bytes, got %d",
+			point.Slot,
+			lcommon.Blake2b256Size,
+			len(blockHashBytes),
+		)
+	}
 	blockPrevHashBytes := []byte(nil)
 	blockNumber := block.BlockNumber()
 	// Check that the new block matches our first header, if any

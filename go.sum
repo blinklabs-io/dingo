@@ -127,8 +127,8 @@ github.com/blinklabs-io/bursa v0.17.1 h1:f8KkpggbAgrOwTb3PZkgPK4GMZL4AKE+mIqI7md
 github.com/blinklabs-io/bursa v0.17.1/go.mod h1:8PP8LVyh8OD+oK1RVxcrHGU/Rif0im6h3rQpuVccuOs=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.208.5 h1:imDoaKdnb6cP30I0YRKaYi8UM7P2yLBqwkHgeWiYhWM=
-github.com/blinklabs-io/gouroboros v0.208.5/go.mod h1:nw/oc+rPceFj0Uri2QFX5K/XQPcxZrmuYbGcQFxfd2E=
+github.com/blinklabs-io/gouroboros v0.209.0 h1:7YvRotN/5IzFXhTn++kTgOhVCI0cDF0jh7+Iq6z/Szc=
+github.com/blinklabs-io/gouroboros v0.209.0/go.mod h1:nw/oc+rPceFj0Uri2QFX5K/XQPcxZrmuYbGcQFxfd2E=
 github.com/blinklabs-io/ouroboros-mock v0.20.3 h1:izl3ijoj5zU9kWhySX8ru4FCfjWTMFcwKMT7dpgIvjg=
 github.com/blinklabs-io/ouroboros-mock v0.20.3/go.mod h1:UqITUSH8u9y6Hx3IvqrCoQmu7poWPW8hUT+lJCQauFI=
 github.com/blinklabs-io/plutigo v0.7.2 h1:t66Z8ud5KVYz6qu2WSa/Ri4OhMWjH/oe19jX5gveWjQ=

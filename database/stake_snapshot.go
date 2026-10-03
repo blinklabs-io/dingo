@@ -106,7 +106,15 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 		s.RewardAccountAutoVoteResolved = false
 		key := string(s.PoolKeyHash)
 		if _, seen := snapshotsByPool[key]; !seen {
-			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
+			pkh, err := lcommon.NewBlake2b224Checked(s.PoolKeyHash)
+			if err != nil {
+				return fmt.Errorf(
+					"resolve reward account auto-vote for epoch %d: %w",
+					s.Epoch,
+					err,
+				)
+			}
+			pkhs = append(pkhs, lcommon.PoolKeyHash(pkh))
 		}
 		snapshotsByPool[key] = append(snapshotsByPool[key], s)
 	}

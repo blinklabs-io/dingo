@@ -2085,7 +2085,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 		poolHash28(0x11),
 		poolHash28(0x99),
 	}
-	result := stakePoolsResult(keyHashes)
+	result, err := stakePoolsResult(keyHashes)
+	require.NoError(t, err)
 
 	// Wire shape: []any{ cbor.Set{ poolIds... } }
 	require.Len(t, result, 1)
@@ -2120,7 +2121,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 func TestStakePoolsResult_Empty(t *testing.T) {
 	t.Parallel()
 
-	result := stakePoolsResult(nil)
+	result, err := stakePoolsResult(nil)
+	require.NoError(t, err)
 	require.Len(t, result, 1)
 	set, ok := result[0].(cbor.Set)
 	require.True(t, ok, "inner element must be a cbor.Set")

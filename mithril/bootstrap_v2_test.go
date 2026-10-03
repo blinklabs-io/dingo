@@ -146,6 +146,15 @@ func validImmutableFiles(
 }
 
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
+	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
+}
+
+func minimalLedgerStateWithUTxOMap(
+	t *testing.T,
+	slot uint64,
+	hash []byte,
+	utxoMap cbor.RawMessage,
+) []byte {
 	t.Helper()
 	emptyMap, err := cbor.Encode(map[uint64]uint64{})
 	require.NoError(t, err)
@@ -176,7 +185,10 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(dState),
 	})
 	require.NoError(t, err)
-	utxoState, err := cbor.Encode([]any{cbor.RawMessage(emptyMap)})
+	if len(utxoMap) == 0 {
+		utxoMap = emptyMap
+	}
+	utxoState, err := cbor.Encode([]any{cbor.RawMessage(utxoMap)})
 	require.NoError(t, err)
 	ledgerState, err := cbor.Encode([]any{
 		cbor.RawMessage(certState),
@@ -273,10 +285,14 @@ type v2FixtureOptions struct {
 	// immutable location templates, the way cloud-storage locations carry
 	// their credentials. The mux routes on path only, so it changes nothing
 	// but what an error is at risk of quoting.
-	signedImmutableQuery bool
-	missingAncillary     bool
-	validImmutable       bool
-	fallbackLedgerState  bool
+	signedImmutableQuery       bool
+	missingAncillary           bool
+	validImmutable             bool
+	fallbackLedgerState        bool
+	fallbackLedgerStateSlot    uint64
+	fallbackLedgerStateUTxOMap cbor.RawMessage
+	ancillaryLedgerState       []byte
+	ancillaryLedgerSlot        uint64
 	// ancillaryHonorsRange serves the ancillary archive with Range support,
 	// so resuming a fully cached file yields 416 with the total size, the way
 	// object storage does.
@@ -338,9 +354,23 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				var blockHash []byte
 				files, blockHash = validImmutableFiles(t, 1000)
 				if opts.fallbackLedgerState {
+					stateSlot := opts.fallbackLedgerStateSlot
+					if stateSlot == 0 {
+						stateSlot = 1000
+					}
+					stateHash := blockHash
+					if stateSlot == 999 {
+						stateHash = files["immutable/00000.secondary"][16:48]
+					}
 					files["ledger/100/state"] = minimalLedgerState(
-						t, 1000, blockHash,
+						t, stateSlot, stateHash,
 					)
+					if opts.fallbackLedgerStateUTxOMap != nil {
+						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+							t, stateSlot, stateHash,
+							opts.fallbackLedgerStateUTxOMap,
+						)
+					}
 				}
 				break
 			}
@@ -416,8 +446,16 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	require.NoError(t, err)
 	fixture.ancillaryVKey = mithrilJSONHexKey(t, ancillaryPub)
 	nextTrio := opts.immutableFileNumber + 1
+	ancillaryLedgerState := []byte("ledger state data")
+	if len(opts.ancillaryLedgerState) > 0 {
+		ancillaryLedgerState = opts.ancillaryLedgerState
+	}
+	ancillaryLedgerSlot := opts.ancillaryLedgerSlot
+	if ancillaryLedgerSlot == 0 {
+		ancillaryLedgerSlot = 100
+	}
 	ancillaryFiles := map[string][]byte{
-		"ledger/100/state": []byte("ledger state data"),
+		fmt.Sprintf("ledger/%d/state", ancillaryLedgerSlot): ancillaryLedgerState,
 	}
 	for _, ext := range []string{"chunk", "primary", "secondary"} {
 		name := fmt.Sprintf("immutable/%05d.%s", nextTrio, ext)

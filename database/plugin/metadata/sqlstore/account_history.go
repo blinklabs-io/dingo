@@ -413,11 +413,15 @@ ORDER BY sr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
 		if tag == 1 {
 			credentialType = lcommon.CredentialTypeScriptHash
 		}
+		credential, err := lcommon.NewBlake2b224Checked(key)
+		if err != nil {
+			return nil, fmt.Errorf("stake registration credential: %w", err)
+		}
 		ret = append(ret, lcommon.StakeRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypeStakeRegistration),
 			StakeCredential: lcommon.Credential{
 				CredType:   credentialType,
-				Credential: lcommon.CredentialHash(key),
+				Credential: lcommon.CredentialHash(credential),
 			},
 		})
 	}
