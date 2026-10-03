@@ -1747,18 +1747,15 @@ func TestGenesisConfigResultUsesNegotiatedLayout(t *testing.T) {
 	_, err = cbor.Decode(currentFields[15], &extra)
 	require.NoError(t, err)
 	require.Len(t, extra, 1)
+	require.Equal(t, "83", hex.EncodeToString(extra[0][:1]))
 	var decodedCurrent olocalstatequery.GenesisConfigResult
 	_, err = cbor.Decode(encoded, &decodedCurrent)
 	require.NoError(t, err)
 	require.NotEmpty(t, decodedCurrent.ExtraConfig)
-	var decodedInitialFunds []cbor.RawMessage
-	_, err = cbor.Decode(decodedCurrent.InitialFunds, &decodedInitialFunds)
-	require.NoError(t, err)
-	require.Empty(t, decodedInitialFunds)
-	var decodedStaking []cbor.RawMessage
-	_, err = cbor.Decode(decodedCurrent.Staking, &decodedStaking)
-	require.NoError(t, err)
-	require.Len(t, decodedStaking, 2)
+	// compactGenesis erases both fields to empty maps: initial funds is a
+	// map, and staking is a record of a pools map and a stake map.
+	require.Equal(t, "a0", hex.EncodeToString(decodedCurrent.InitialFunds))
+	require.Equal(t, "82a0a0", hex.EncodeToString(decodedCurrent.Staking))
 
 	var legacyWireValues []any
 	_, err = cbor.Decode(legacy, &legacyWireValues)

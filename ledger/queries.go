@@ -34,6 +34,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	protocol "github.com/blinklabs-io/gouroboros/protocol"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -547,6 +548,16 @@ func (ls *LedgerState) queryChainPoint() (any, error) {
 	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
 
+// queryShelleyLedgerTip answers GetLedgerTip: the acquired point when one is
+// pinned (Query has already verified it is on the chain), otherwise the live
+// tip.
+func (ls *LedgerState) queryShelleyLedgerTip(at QueryPoint) (any, error) {
+	if at.pinned() {
+		return []any{ocommon.NewPoint(at.Slot, at.Hash)}, nil
+	}
+	return []any{cloneTip(ls.loadTipSnapshot().currentTip).Point}, nil
+}
+
 // queryHardFork answers HardFork queries. at is Query's pinned point
 // (unpinned = live); only HardForkCurrentEraQuery honors it --
 // HardForkEraHistoryQuery answers the whole era-boundary table as known up
@@ -975,6 +986,10 @@ func (ls *LedgerState) queryShelley(
 // a real Preview cardano-node, every flagged row's own AddedSlot was strictly
 // after the pinned slot).
 //
+// Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
+// ShelleyProposedProtocolParamsUpdatesQuery (a constant empty map from Conway
+// on, so the point is irrelevant; refused in earlier eras).
+//
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
 // ShelleyGetLedgerPeerSnapshotQuery (peer/networking bootstrap data, not
@@ -997,6 +1012,8 @@ func (ls *LedgerState) queryShelley(
 //     per-proposal state with no historical-by-point record; would need new
 //     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
 //     slot columns, not attempted.
+//   - ShelleyStakePoolParamsQuery: reads the live pool registration rows,
+//     which carry no per-point history.
 //   - ShelleyAccountStateQuery: chain-wide treasury/reserves totals, same
 //     class of gap as protocol parameters (no historical-by-epoch record).
 //   - ShelleyStakeSnapshotsQuery: its per-epoch mark/set/go reads are
@@ -1016,6 +1033,14 @@ func (ls *LedgerState) queryShelley(
 //     reads live per-pool operational-certificate counters with no
 //     historical tracking, so the reply as a whole cannot be pinned
 //     without that piece too.
+//
+// Not answered, so the call fails with "unsupported query type":
+// ShelleyPoolStateQuery, ShelleyPoolDistrQuery and
+// ShelleyNonMyopicMemberRewardsQuery, whose request filters the pinned
+// gouroboros version cannot decode (the request is rejected before it reaches
+// this switch); ShelleyRewardInfoPoolsQuery, ShelleyRewardProvenanceQuery,
+// ShelleyDebugEpochStateQuery and ShelleyDebugNewEpochStateQuery, which need
+// reward-calculation and full epoch state that is not tracked.
 //
 // Not applicable: ShelleyCborQuery (a combinator, not a leaf query --
 // forwards at to whatever it wraps).
@@ -1066,19 +1091,18 @@ func (ls *LedgerState) queryShelleyLeaf(
 		return ls.queryShelleyStakeDistribution(at, txn)
 	case *olocalstatequery.ShelleyUtxoWholeQuery:
 		return ls.queryShelleyUtxoWhole(at, txn)
-	// TODO: implement the remaining Shelley ledger queries below.
-	/*
-		case *olocalstatequery.ShelleyLedgerTipQuery:
-		case *olocalstatequery.ShelleyNonMyopicMemberRewardsQuery:
-		case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
-		case *olocalstatequery.ShelleyDebugEpochStateQuery:
-		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
-		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyStakePoolParamsQuery:
-		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
-		case *olocalstatequery.ShelleyPoolStateQuery:
-		case *olocalstatequery.ShelleyPoolDistrQuery:
-	*/
+	case *olocalstatequery.ShelleyLedgerTipQuery:
+		return ls.queryShelleyLedgerTip(at)
+	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
+		// Conway replaced update proposals with governance actions, so from
+		// Conway on the ledger holds none to report. Earlier eras do carry
+		// proposals, which this query does not read.
+		if ls.loadConsensusSnapshot().currentEra.Id < eras.ConwayEraDesc.Id {
+			return nil, fmt.Errorf("unsupported query type: %T", q)
+		}
+		return []any{map[any]any{}}, nil
+	case *olocalstatequery.ShelleyStakePoolParamsQuery:
+		return ls.queryShelleyStakePoolParams(q.PoolIds.Items())
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -1610,27 +1634,12 @@ func genesisConfigResult(
 			MinPoolCost: int(pp.MinPoolCost),
 		},
 	}
-	initialFunds, err := cbor.Encode([]any{})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis initial funds: %w", err,
-		)
-	}
-	staking, err := cbor.Encode([]any{[]any{}, map[any]any{}})
-	if err != nil {
-		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
-			"encode compact genesis staking: %w", err,
-		)
-	}
-	// The current ledger compactGenesis erases these two startup-only fields.
-	// Keep the raw values available only through the legacy path.
-	result.InitialFunds = initialFunds
-	result.Staking = staking
-	if genesis.ExtraConfig == nil {
-		result.ExtraConfig, err = cbor.Encode([]any{})
-	} else {
-		result.ExtraConfig, err = cbor.Encode([]any{genesis.ExtraConfig})
-	}
+	// The current ledger compactGenesis erases initial funds and staking to
+	// empty maps: funds is a map, and staking a record of a pools map and a
+	// stake map. The raw values stay available only through the legacy path.
+	result.InitialFunds = cbor.RawMessage{0xa0}
+	result.Staking = cbor.RawMessage{0x82, 0xa0, 0xa0}
+	result.ExtraConfig, err = shelleyExtraConfigCBOR(genesis, networkID)
 	if err != nil {
 		return olocalstatequery.GenesisConfigResult{}, fmt.Errorf(
 			"encode genesis extra config: %w", err,
