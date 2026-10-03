@@ -537,6 +537,12 @@ func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
 // The caller must not hold deferredHeaderValidationMu, and must not hold the
 // blockfetch mutex across the database writes (see deletePersistedDeferredMarkers).
 func (ls *LedgerState) boundDeferredHeaderValidation() error {
+	// Serialize the snapshot, durable floor write, and marker deletion. The
+	// in-memory mutex must be released for the database write to avoid lock
+	// inversion with block apply, so it cannot also serialize concurrent bounds.
+	ls.deferredHeaderValidationBoundMu.Lock()
+	defer ls.deferredHeaderValidationBoundMu.Unlock()
+
 	limit := ls.maxDeferredHeaderMarkers
 	if limit <= 0 {
 		limit = defaultMaxDeferredHeaderMarkers
@@ -959,11 +965,8 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		)
 		ls.deferredHeaderValidationMu.Unlock()
 	}
-	if len(keys) == 0 {
-		return nil
-	}
 	ls.deferredHeaderValidationMu.Lock()
-	if ls.deferredHeaderValidation == nil {
+	if len(keys) > 0 && ls.deferredHeaderValidation == nil {
 		ls.deferredHeaderValidation = make(
 			map[string]ouroboros.ConnectionId, len(keys),
 		)
@@ -990,7 +993,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			"component", "ledger",
 		)
 	}
-	return nil
+	return ls.boundDeferredHeaderValidation()
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(

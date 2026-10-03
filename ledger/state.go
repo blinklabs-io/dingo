@@ -1262,17 +1262,18 @@ type LedgerState struct {
 	admissionVerifiedMu sync.Mutex
 	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
 	// non-zero.
-	maxAdmissionVerified        int
-	deferredHeaderValidationMu  sync.Mutex
-	checkpointWrittenForEpoch   bool
-	closed                      atomic.Bool
-	closeMu                     sync.Mutex
-	closeDone                   chan struct{}
-	closeErr                    error
-	inRecovery                  bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery           *atTipRecoveryAttempt
-	lastHeaderValidationFailure *headerValidationError
-	lastHeaderValidationTip     ocommon.Point
+	maxAdmissionVerified            int
+	deferredHeaderValidationMu      sync.Mutex
+	deferredHeaderValidationBoundMu sync.Mutex
+	checkpointWrittenForEpoch       bool
+	closed                          atomic.Bool
+	closeMu                         sync.Mutex
+	closeDone                       chan struct{}
+	closeErr                        error
+	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery               *atTipRecoveryAttempt
+	lastHeaderValidationFailure     *headerValidationError
+	lastHeaderValidationTip         ocommon.Point
 	// At-tip recovery non-convergence tracking. A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in

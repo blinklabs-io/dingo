@@ -278,6 +278,7 @@ func headerFailureBlamesPeer(cause error) bool {
 		!errors.Is(cause, errVrfKeyRegistrationHistoryUnavailable) &&
 		!errors.Is(cause, errPoolSnapshotPruned) &&
 		!errors.Is(cause, errHeaderStateLookupFailed) &&
+		!errors.Is(cause, errHeaderLocalConfiguration) &&
 		!errors.Is(cause, errBlockPipelineEta0Unavailable)
 }
 

@@ -125,6 +125,11 @@ var (
 	errHeaderStateLookupFailed = errors.New(
 		"header state lookup failed",
 	)
+	// Invalid local genesis input does not establish that a peer supplied a
+	// bad header.
+	errHeaderLocalConfiguration = errors.New(
+		"header local configuration invalid",
+	)
 )
 
 // headerStateLookupErr marks err, a failure reading local state, with
@@ -945,7 +950,8 @@ func (ls *LedgerState) genesisOverlayDelegationForSlotWithParams(
 	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
 	if err != nil {
 		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
-			"block header verification rejected at slot %d: %w",
+			"%w: block header verification at slot %d: %w",
+			errHeaderLocalConfiguration,
 			slot,
 			err,
 		)
@@ -2089,12 +2095,12 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 		if found && len(vrfKeyHash) > 0 {
 			hash, err := lcommon.NewBlake2b256Checked(vrfKeyHash)
 			if err != nil {
-				return lcommon.Blake2b256{}, false, fmt.Errorf(
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(fmt.Errorf(
 					"VRF key hash at cutoff slot %d for pool %x: %w",
 					cutoffSlot,
 					poolKeyHash[:],
 					err,
-				)
+				))
 			}
 			return hash, true, nil
 		}
@@ -2120,12 +2126,12 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 		if found && len(vrfKeyHash) > 0 {
 			hash, err := lcommon.NewBlake2b256Checked(vrfKeyHash)
 			if err != nil {
-				return lcommon.Blake2b256{}, false, fmt.Errorf(
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(fmt.Errorf(
 					"VRF key hash at capture slot %d for pool %x: %w",
 					capturedSlot,
 					poolKeyHash[:],
 					err,
-				)
+				))
 			}
 			return hash, true, nil
 		}

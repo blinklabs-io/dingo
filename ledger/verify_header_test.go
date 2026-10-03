@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2011,6 +2012,64 @@ func (s *stakeSnapshotCountingStore) GetPoolStakeSnapshot(
 	)
 }
 
+type deferredFloorWriteGateStore struct {
+	metadata.MetadataStore
+	firstFloorWrite  chan string
+	secondFloorWrite chan string
+	releaseFirst     <-chan struct{}
+	mu               sync.Mutex
+	floorWrites      int
+}
+
+func (s *deferredFloorWriteGateStore) SetSyncState(
+	key string,
+	value string,
+	txn types.Txn,
+) error {
+	if key == deferredHeaderValidationFloorSyncStateKey {
+		s.mu.Lock()
+		write := s.floorWrites
+		s.floorWrites++
+		s.mu.Unlock()
+		switch write {
+		case 0:
+			s.firstFloorWrite <- value
+			<-s.releaseFirst
+		case 1:
+			s.secondFloorWrite <- value
+		}
+	}
+	return s.MetadataStore.SetSyncState(key, value, txn)
+}
+
+type malformedVrfKeyHashStore struct {
+	metadata.MetadataStore
+	cutoffHash   []byte
+	earliestHash []byte
+}
+
+func (s *malformedVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
+	_ []byte,
+	_ uint64,
+	_ types.Txn,
+) ([]byte, bool, error) {
+	if s.cutoffHash == nil {
+		return nil, false, nil
+	}
+	return s.cutoffHash, true, nil
+}
+
+func (s *malformedVrfKeyHashStore) GetPoolEarliestVrfKeyHashAtSlot(
+	_ []byte,
+	_ uint64,
+	_ types.Txn,
+) ([]byte, bool, error) {
+	if s.earliestHash == nil {
+		return nil, false, nil
+	}
+	return s.earliestHash, true, nil
+}
+
 // TestVerifyBlockHeaderStateReadsElectingSnapshotOnce pins that one header's
 // state verification resolves the producing pool's electing stake snapshot a
 // single time, although both the VRF-key cutoff and the leader-eligibility
@@ -2120,6 +2179,92 @@ func TestHeaderStateStorageFailureDoesNotBlamePeer(t *testing.T) {
 			assert.False(t, headerFailureBlamesPeer(err))
 		})
 	}
+}
+
+func TestMalformedVrfKeyMetadataDoesNotBlamePeer(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		cutoffHash   []byte
+		earliestHash []byte
+	}{
+		{name: "snapshot cutoff", cutoffHash: []byte{0x01}},
+		{name: "snapshot capture", earliestHash: []byte{0x01}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &malformedVrfKeyHashStore{
+				cutoffHash:   tc.cutoffHash,
+				earliestHash: tc.earliestHash,
+			}
+			db, err := dbtest.NewDatabaseWithMetadataWrapper(
+				t,
+				dbtest.Options{
+					Config: &database.Config{DataDir: t.TempDir()},
+				},
+				func(inner metadata.MetadataStore) metadata.MetadataStore {
+					store.MetadataStore = inner
+					return store
+				},
+			)
+			require.NoError(t, err)
+			tb := createTestBlock(t, [32]byte{69}, 0, tamperNone)
+			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			epochCache := []models.Epoch{{
+				EpochId:       5,
+				StartSlot:     1_000,
+				LengthInSlots: 1_000,
+				SlotLength:    1,
+				EraId:         eras.ShelleyEraDesc.Id,
+			}}
+			ls.epochCache = epochCache
+			ls.publishSnapshotsLocked()
+			poolKeyHash := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
+			snapshot := electingSnapshot{
+				epoch:      5,
+				kind:       models.PoolStakeSnapshotTypeMark,
+				epochCache: epochCache,
+				row: &models.PoolStakeSnapshot{
+					CapturedSlot: 1_500,
+				},
+			}
+
+			_, _, err = ls.electingVrfKeyHashFromSnapshot(
+				poolKeyHash,
+				epochCache,
+				snapshot,
+			)
+			require.ErrorIs(t, err, errHeaderStateLookupFailed)
+			assert.False(t, headerFailureBlamesPeer(err))
+		})
+	}
+}
+
+func TestMalformedGenesisDelegationDoesNotBlamePeer(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{70}, 0, tamperNone)
+	delegateHash := tb.block.IssuerVkey().Hash()
+	genesisConfig := newGenesisDelegateShelleyGenesisCfg(
+		t,
+		hex.EncodeToString(delegateHash.Bytes()),
+		strings.Repeat("22", lcommon.Blake2b256Size),
+	)
+	genesisConfig.ShelleyGenesis().GenDelegs[strings.Repeat("11", lcommon.Blake2b224Size)]["vrf"] = "malformed"
+
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.config.CardanoNodeConfig = genesisConfig
+	ls.currentPParams = &shelley.ShelleyProtocolParameters{
+		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
+	}
+	ls.publishSnapshotsLocked()
+
+	handled, err := ls.verifyGenesisDelegateHeader(tb.block, false)
+	require.True(t, handled)
+	require.ErrorIs(t, err, errHeaderLocalConfiguration)
+	assert.False(t, headerFailureBlamesPeer(err))
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
@@ -4783,6 +4928,158 @@ func TestBoundDeferredHeaderValidationWhileAppliedTipStalls(t *testing.T) {
 		var hve *headerValidationError
 		assert.ErrorAs(t, err, &hve)
 	}
+}
+
+func TestConcurrentDeferredHeaderBoundsKeepPersistedFloorCurrent(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const markerCap = 4
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+
+	store := &deferredFloorWriteGateStore{
+		firstFloorWrite:  make(chan string, 1),
+		secondFloorWrite: make(chan string, 1),
+		releaseFirst:     releaseFirst,
+	}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{DataDir: t.TempDir()}},
+		func(inner metadata.MetadataStore) metadata.MetadataStore {
+			store.MetadataStore = inner
+			return store
+		},
+	)
+	require.NoError(t, err)
+	ls := newEligibilityTestLedgerOnDB(
+		t,
+		make([]byte, 32),
+		db,
+	)
+	t.Cleanup(release)
+	ls.maxDeferredHeaderMarkers = markerCap
+	for _, slot := range []uint64{0, 50, 60, 70, 80} {
+		point := ocommon.Point{Slot: slot, Hash: []byte{byte(slot + 1)}}
+		ls.markDeferredHeaderValidation(point)
+		require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- ls.boundDeferredHeaderValidation() }()
+	firstFloor := testutil.RequireReceive(
+		t,
+		store.firstFloorWrite,
+		testutil.AsyncWait,
+		"first bound should persist its floor",
+	)
+	require.Equal(t, "51", firstFloor)
+
+	newlyDeferred := ocommon.Point{Slot: 52, Hash: []byte{0x53}}
+	ls.markDeferredHeaderValidation(newlyDeferred)
+	require.NoError(t, ls.persistDeferredHeaderValidation(newlyDeferred, nil))
+
+	secondStarted := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		close(secondStarted)
+		secondDone <- ls.boundDeferredHeaderValidation()
+	}()
+	testutil.RequireReceive(
+		t,
+		secondStarted,
+		testutil.AsyncWait,
+		"second bound should start while the first floor write is blocked",
+	)
+	require.Never(
+		t,
+		func() bool {
+			select {
+			case <-store.secondFloorWrite:
+				return true
+			default:
+				return false
+			}
+		},
+		100*time.Millisecond,
+		10*time.Millisecond,
+		"concurrent bound must wait for the earlier durable floor write",
+	)
+	release()
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		firstDone,
+		testutil.AsyncWait,
+		"first bound should finish after its floor write is released",
+	))
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		secondDone,
+		testutil.AsyncWait,
+		"second bound should finish after the first bound",
+	))
+
+	storedFloor, err := db.GetSyncState(
+		deferredHeaderValidationFloorSyncStateKey,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "51", storedFloor)
+	ls.deferredHeaderValidationMu.Lock()
+	inMemoryFloor := ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+	require.Equal(t, uint64(51), inMemoryFloor)
+
+	restarted := &LedgerState{
+		db:                       db,
+		maxDeferredHeaderMarkers: markerCap,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
+	required, _, err := restarted.deferredHeaderValidationRequired(
+		newlyDeferred,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, required)
+}
+
+func TestRepopulateDeferredHeaderValidationEnforcesMarkerCap(t *testing.T) {
+	t.Parallel()
+
+	const markerCap = 4
+	tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.maxDeferredHeaderMarkers = markerCap
+	points := make([]ocommon.Point, 5)
+	for i := range points {
+		points[i] = ocommon.Point{
+			Slot: uint64(i + 1),
+			Hash: []byte{byte(i + 1)},
+		}
+		require.NoError(
+			t,
+			ls.persistDeferredHeaderValidation(points[i], nil),
+		)
+	}
+
+	// Startup must return with a bounded set and a floor covering every
+	// persisted marker it removed.
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
+	ls.deferredHeaderValidationMu.Lock()
+	count := len(ls.deferredHeaderValidation)
+	floor := ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+	require.LessOrEqual(t, count, markerCap)
+	require.Equal(t, 3, deferredMarkerCount(t, db))
+	require.Equal(t, uint64(3), floor)
+	required, _, err := ls.deferredHeaderValidationRequired(points[1], nil)
+	require.NoError(t, err)
+	require.True(t, required, "evicted slot must be covered by the floor")
 }
 
 // TestDeferredHeaderFloorSkipsMithrilCoveredSlots pins that the eviction floor
