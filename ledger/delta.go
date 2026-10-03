@@ -164,7 +164,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+		if !fitsUint32(tr.Index) {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
 		levels := TransactionLevelsForApply(tr.Tx)

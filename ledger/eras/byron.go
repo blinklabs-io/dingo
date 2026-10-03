@@ -185,7 +185,7 @@ func (e LovelaceBoundByronError) Error() string {
 		"%s %s exceeds the maximum Lovelace value %d",
 		e.Balance,
 		e.Value.String(),
-		byronMaxLovelace,
+		uint64(byronMaxLovelace),
 	)
 }
 
