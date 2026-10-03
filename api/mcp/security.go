@@ -112,9 +112,27 @@ func SecurityMiddleware(
 		}
 
 		// Health endpoint bypasses auth and rate limiting
-		if r.URL.Path == "/healthz" {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return
+		}
+
+		// Rate limiting check
+		if limiter != nil {
+			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				clientIP = r.RemoteAddr
+			}
+
+			if !limiter.getLimiter(clientIP).Allow() {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": "too many requests: rate limit exceeded",
+				})
+				return
+			}
 		}
 
 		// Authentication check
@@ -136,24 +154,6 @@ func SecurityMiddleware(
 				w.WriteHeader(http.StatusUnauthorized)
 				_ = json.NewEncoder(w).Encode(map[string]string{
 					"error": "unauthorized: missing or invalid authentication token",
-				})
-				return
-			}
-		}
-
-		// Rate limiting check
-		if limiter != nil {
-			clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				clientIP = r.RemoteAddr
-			}
-
-			if !limiter.getLimiter(clientIP).Allow() {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "1")
-				w.WriteHeader(http.StatusTooManyRequests)
-				_ = json.NewEncoder(w).Encode(map[string]string{
-					"error": "too many requests: rate limit exceeded",
 				})
 				return
 			}

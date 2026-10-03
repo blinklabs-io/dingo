@@ -36,6 +36,7 @@ for arg in "$@"; do
   [[ "${arg}" != --keep-up ]] || KEEP_UP=true
 done
 STARTED=false
+OWN_ARTIFACTS=false
 cleanup() {
   local result=$?
   trap - EXIT
@@ -51,6 +52,9 @@ cleanup() {
           echo "[apple-container] Could not stop ${RUNNER}; inspect it with container list" >&2
       fi
     fi
+  fi
+  if [[ "${OWN_ARTIFACTS}" == true && ${result} -eq 0 && "${KEEP_UP}" == false ]]; then
+    rm -rf -- "${DEVNET_ARTIFACT_DIR}"
   fi
   rmdir "${STATE_DIR}/lock" || true
   exit "${result}"
@@ -99,12 +103,13 @@ EXEC_ENV=()
 while IFS= read -r key; do
   case "${key}" in
     DEVNET_RUNTIME|DEVNET_CONTAINER_*) ;;
-    DEVNET_*|COMPOSE_PROJECT_NAME|COMPOSE_PROFILES|MODE|DINGO_PORT|CARDANO_PORT|RELAY_PORT)
+    DEVNET_*|COMPOSE_PROJECT_NAME|COMPOSE_PROFILES|MODE|DINGO_PORT|CARDANO_PORT|RELAY_PORT|TEST_TIMEOUT|DINGO_IMAGE)
       EXEC_ENV+=(-e "${key}=${!key}") ;;
   esac
 done < <(compgen -e)
 if [[ -z "${DEVNET_ARTIFACT_DIR:-}" ]]; then
   DEVNET_ARTIFACT_DIR="$(mktemp -d "${STATE_DIR}/run.XXXXXX")"
+  OWN_ARTIFACTS=true
 fi
 case "${DEVNET_ARTIFACT_DIR}" in
   "${PROJECT_ROOT}/"*) ;;

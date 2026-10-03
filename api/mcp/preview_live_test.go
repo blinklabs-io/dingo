@@ -16,7 +16,9 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"os"
 	"regexp"
@@ -42,6 +44,12 @@ var previewTestDB = flag.String(
 	"preview-mcp-db",
 	"",
 	"Local metadata database for the Preview MCP endpoint",
+)
+
+var previewTestQueryTimeout = flag.Duration(
+	"preview-mcp-query-timeout",
+	5*time.Second,
+	"Query deadline for Preview SQL correctness checks; use 5s for production latency and a larger explicit budget under -race",
 )
 
 // TestPreviewLiveEvaluation evaluates unsigned templates without submitting
@@ -82,14 +90,20 @@ func TestPreviewLiveEvaluation(t *testing.T) {
 	var hash, payment []byte
 	var idx uint32
 	var amount uint64
-	require.NoError(t, db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `
 SELECT tx_id, output_idx, payment_key, amount
 FROM utxo u
 WHERE deleted_slot=0 AND payment_script=0 AND length(payment_key)=28
   AND (datum_hash IS NULL OR length(datum_hash)=0)
   AND CAST(amount AS INTEGER)>5000000
   AND NOT EXISTS (SELECT 1 FROM asset WHERE utxo_id=u.id)
-LIMIT 1`).Scan(&hash, &idx, &payment, &amount))
+LIMIT 1`).Scan(&hash, &idx, &payment, &amount)
+	if errors.Is(err, sql.ErrNoRows) {
+		t.Skip(
+			"preview database has no eligible unspent key output above 5 ADA without datum or assets",
+		)
+	}
+	require.NoError(t, err)
 	address, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		0,
@@ -183,6 +197,8 @@ func TestPreviewLiveSQL(t *testing.T) {
 	)
 	require.Equal(t, "preview", network)
 	cfg := DefaultProviderConfig()
+	require.Positive(t, *previewTestQueryTimeout)
+	cfg.QueryTimeout = *previewTestQueryTimeout
 	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db})
 	require.NoError(t, err)
 	ct, st := mcp.NewInMemoryTransports()
@@ -193,6 +209,27 @@ func TestPreviewLiveSQL(t *testing.T) {
 		Connect(t.Context(), ct, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = cs.Close() })
+	call := func(name string, args map[string]any) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(
+			t.Context(),
+			cfg.QueryTimeout+time.Second,
+		)
+		defer cancel()
+		started := time.Now()
+		result, err := cs.CallTool(
+			ctx,
+			&mcp.CallToolParams{Name: name, Arguments: args},
+		)
+		require.NoError(t, err)
+		require.False(t, result.IsError, "%v", result.Content)
+		t.Logf(
+			"%s finished in %s (query deadline %s)",
+			name,
+			time.Since(started),
+			cfg.QueryTimeout,
+		)
+	}
 	guidance, err := cs.ReadResource(
 		t.Context(),
 		&mcp.ReadResourceParams{URI: "dingo://dbsync/cheatsheet"},
@@ -207,12 +244,9 @@ func TestPreviewLiveSQL(t *testing.T) {
 		stmt, err := db.PrepareContext(t.Context(), example[1])
 		require.NoError(t, err)
 		require.NoError(t, stmt.Close())
-		callTool(
-			t,
-			cs,
+		call(
 			"sqlite_query",
 			map[string]any{"query": example[1]},
-			false,
 		)
 	}
 	catalog, err := cs.ReadResource(
@@ -222,12 +256,9 @@ func TestPreviewLiveSQL(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, catalog.Contents[0].Text, "staking_key BLOB")
 	require.Contains(t, catalog.Contents[0].Text, "output_idx INTEGER")
-	callTool(
-		t,
-		cs,
+	call(
 		"sqlite_query",
 		map[string]any{"query": "PRAGMA table_info(utxo)"},
-		false,
 	)
 	var queryOnly int
 	require.NoError(

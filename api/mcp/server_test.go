@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -636,8 +637,10 @@ func TestServerStartStopLifecycle(t *testing.T) {
 
 func TestSSESessionSurvivesIdleInterval(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("exercises the former 60-second SSE deadline")
+	if testing.Short() || os.Getenv("MCP_SSE_SURVIVAL_TEST") != "1" {
+		t.Skip(
+			"set MCP_SSE_SURVIVAL_TEST=1 to exercise the former 60-second SSE deadline",
+		)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

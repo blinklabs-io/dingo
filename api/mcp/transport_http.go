@@ -18,9 +18,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
@@ -30,6 +33,9 @@ import (
 
 // Server encapsulates the MCP HTTP and SSE transport server.
 type Server struct {
+	lifecycleMu   sync.Mutex
+	stopped       bool
+	cleanupOnce   sync.Once
 	config        ProviderConfig
 	resolvedTLS   apiconfig.EffectiveTLS
 	logger        *slog.Logger
@@ -47,6 +53,13 @@ func NewServer(
 	resolvedTLS apiconfig.EffectiveTLS,
 	listenAddress string,
 ) (*Server, error) {
+	host, _, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return nil, fmt.Errorf("MCP listen address: %w", err)
+	}
+	if err := validateListenSecurity(host, cfg.AuthToken, resolvedTLS.Enabled); err != nil {
+		return nil, err
+	}
 	mcpServer, openedDB, err := NewMCPServer(cfg, deps)
 	if err != nil {
 		return nil, fmt.Errorf("create MCP server: %w", err)
@@ -129,7 +142,13 @@ func (s *Server) handler() http.Handler {
 
 // Start binds the socket and starts serving in a background goroutine.
 func (s *Server) Start(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	if s.stopped {
+		s.lifecycleMu.Unlock()
+		return errors.New("MCP server stopped")
+	}
 	startDone, err := s.listener.BeginStart()
+	s.lifecycleMu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -150,7 +169,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
-	s.listener.Watch(ctx, server, apilistener.Graceful)
+	s.listener.Watch(ctx, server, stopHTTPServer)
 
 	served, err := s.listener.Bind(server, bindDone, s.resolvedTLS)
 	if err != nil {
@@ -167,9 +186,39 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop gracefully shuts down the server.
 func (s *Server) Stop(ctx context.Context) error {
-	err := s.listener.Stop(ctx, apilistener.Graceful)
-	if s.openedDB != nil {
-		_ = s.openedDB.Close()
+	s.lifecycleMu.Lock()
+	s.stopped = true
+	s.lifecycleMu.Unlock()
+	err := s.listener.Stop(ctx, stopHTTPServer)
+	if err != nil {
+		s.cleanupOnce.Do(func() {
+			// A timed-out Start still owns publication; wait for it before closing
+			// the database, and prevent any later Start with the stopped gate.
+			go func() {
+				if cleanupErr := s.listener.Stop(context.Background(), func(_ context.Context, server *http.Server) error { return server.Close() }); cleanupErr != nil {
+					s.logger.Error(
+						"MCP deferred shutdown failed",
+						"error",
+						cleanupErr,
+					)
+					return
+				}
+				if s.openedDB != nil {
+					_ = s.openedDB.Close()
+				}
+			}()
+		})
+		return err
 	}
-	return err
+	if s.openedDB != nil {
+		return s.openedDB.Close()
+	}
+	return nil
+}
+
+func stopHTTPServer(ctx context.Context, server *http.Server) error {
+	if err := server.Shutdown(ctx); err != nil {
+		return errors.Join(err, server.Close())
+	}
+	return nil
 }

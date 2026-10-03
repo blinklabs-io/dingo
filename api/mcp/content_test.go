@@ -147,13 +147,13 @@ func TestMCPPromptsGet(t *testing.T) {
 	resSim, err := cs.GetPrompt(ctx, &mcp.GetPromptParams{
 		Name: "simulate_and_diagnose_tx",
 		Arguments: map[string]string{
-			"tx_cbor": "84a3008182582001...",
+			"tx_cbor": "84a3008182582001",
 			"purpose": "dex-swap",
 		},
 	})
 	require.NoError(t, err)
 	simText := resSim.Messages[0].Content.(*mcp.TextContent).Text
-	assert.Contains(t, simText, "84a3008182582001...")
+	assert.Contains(t, simText, "84a3008182582001")
 	assert.Contains(t, simText, "dex-swap")
 	assert.Contains(t, simText, "evaluate_tx")
 

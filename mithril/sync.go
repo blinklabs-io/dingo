@@ -1470,6 +1470,10 @@ func Sync(
 		indexRebuildElapsed,
 	)
 
+	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+		return SyncResult{}, err
+	}
+
 	if err := updateMithrilReadyState(
 		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 		"", true,

@@ -447,6 +447,9 @@ func resumeBackfill(
 		if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 			return err
 		}
+		if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+			return err
+		}
 		return clearBackfillSyncStatus(db)
 	}
 
@@ -469,6 +472,9 @@ func resumeBackfill(
 	// crash between the two leaves both markers set and the next
 	// startup re-runs the rebuild.
 	if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
+		return err
+	}
+	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
 		return err
 	}
 	if err := clearBackfillSyncStatus(db); err != nil {

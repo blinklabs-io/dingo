@@ -308,10 +308,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		)
 		n.koiosParitySubId = 0
 	}
-	// utxorpc/blockfrost/kupo/mesh are API-capability plugin providers with no
-	// service kept on Node (see node.go's Run()) -- StopCapability is a
-	// no-op if the capability was never resolved (e.g. non-API storage
-	// mode or a zero configured port).
+	// API services, including MCP in either storage mode, are owned by the
+	// plugin host. Unresolved capabilities need no shutdown.
 	if n.pluginHost != nil {
 		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityAPIUtxorpc,

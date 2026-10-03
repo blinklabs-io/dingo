@@ -1443,6 +1443,7 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.API.Kupo = clonePluginSelection(cfg.Plugins.API.Kupo)
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	clone.Plugins.API.Mcp = clonePluginSelection(cfg.Plugins.API.Mcp)
 	if cfg.provenance != nil {
 		clone.provenance = make(Provenance, len(cfg.provenance))
 		maps.Copy(clone.provenance, cfg.provenance)

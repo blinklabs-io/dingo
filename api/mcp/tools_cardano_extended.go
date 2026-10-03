@@ -277,11 +277,11 @@ func registerExtendedCardanoTools(
 			addrTypeName = fmt.Sprintf("Address Type %d", addr.Type())
 		}
 
-		zeroHash := lcommon.NewBlake2b224(nil)
+		pk, sk := addressCredentialHashes(addr)
 		paymentType := "none"
 		paymentHash := "none"
-		if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
-			paymentHash = hex.EncodeToString(pkh.Bytes())
+		if len(pk) > 0 {
+			paymentHash = hex.EncodeToString(pk)
 			switch addr.Type() {
 			case lcommon.AddressTypeScriptKey,
 				lcommon.AddressTypeScriptScript,
@@ -296,8 +296,8 @@ func registerExtendedCardanoTools(
 		stakeType := "none"
 		stakeHash := "none"
 		stakeAddrStr := "none"
-		if skh := addr.StakeKeyHash(); skh != zeroHash {
-			stakeHash = hex.EncodeToString(skh.Bytes())
+		if len(sk) > 0 {
+			stakeHash = hex.EncodeToString(sk)
 			switch addr.Type() {
 			case lcommon.AddressTypeKeyScript,
 				lcommon.AddressTypeScriptScript,
@@ -394,11 +394,12 @@ func registerExtendedCardanoTools(
 				actionIdx = *input.ActionIndex
 			}
 
+			//nolint:gosec // whereClause consists only of fixed lifecycle predicates.
 			row := db.QueryRowContext(ctxTimeout, `
 				SELECT id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
 				       enacted_epoch, ratified_epoch, expired_epoch, anchor_url, anchor_hash, deposit, return_address
 				FROM governance_proposal
-				WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL
+				WHERE tx_hash = ? AND action_index = ? AND deleted_slot IS NULL AND (`+whereClause+`)
 				LIMIT 1`,
 				txHashBytes, actionIdx,
 			)
@@ -454,7 +455,7 @@ func registerExtendedCardanoTools(
 
 			urlStr := "none"
 			if anchorURL.Valid && anchorURL.String != "" {
-				urlStr = anchorURL.String
+				urlStr = formatUntrustedInline(anchorURL.String)
 			}
 			anchorHashHex := "none"
 			if len(anchorHashRaw) > 0 {
@@ -538,6 +539,20 @@ func registerExtendedCardanoTools(
 				"| **Proposal Deposit** | %d Lovelace (%.6f ADA) |\n",
 				deposit,
 				float64(deposit)/1000000.0,
+			)
+			returnAddress := "none"
+			if len(returnAddressRaw) > 0 {
+				address, err := lcommon.NewAddressFromBytes(returnAddressRaw)
+				if err != nil {
+					returnAddress = "0x" + hex.EncodeToString(returnAddressRaw)
+				} else {
+					returnAddress = address.String()
+				}
+			}
+			fmt.Fprintf(
+				&sb,
+				"| **Deposit Return Address** | `%s` |\n",
+				returnAddress,
 			)
 			fmt.Fprintf(&sb, "| **Metadata Anchor URL** | %s |\n", urlStr)
 			fmt.Fprintf(
@@ -675,12 +690,23 @@ func registerExtendedCardanoTools(
 		} else if ls != nil {
 			if pp := ls.GetCurrentPParamsForReporting(); pp != nil {
 				switch p := pp.(type) {
+				case *dijkstra.DijkstraProtocolParameters:
+					if p == nil {
+						return nil, nil, errors.New("protocol parameters unavailable")
+					}
+					coinsPerByte = p.AdaPerUtxoByte
 				case *conway.ConwayProtocolParameters:
+					if p == nil {
+						return nil, nil, errors.New("protocol parameters unavailable")
+					}
 					coinsPerByte = p.AdaPerUtxoByte
 				case *babbage.BabbageProtocolParameters:
+					if p == nil {
+						return nil, nil, errors.New("protocol parameters unavailable")
+					}
 					coinsPerByte = p.AdaPerUtxoByte
 				case *alonzo.AlonzoProtocolParameters:
-					coinsPerByte = p.AdaPerUtxoByte
+					return nil, nil, errors.New("alonzo word-based minimum UTxO sizing is unsupported; supply coins_per_byte for Babbage/Conway sizing")
 				}
 			}
 		}
@@ -709,8 +735,12 @@ func registerExtendedCardanoTools(
 			if err != nil {
 				return nil, nil, fmt.Errorf("invalid output CBOR hex: %w", err)
 			}
-			if err := output.UnmarshalCBOR(raw); err != nil {
+			n, err := cbor.Decode(raw, &output)
+			if err != nil {
 				return nil, nil, fmt.Errorf("decode output CBOR: %w", err)
+			}
+			if n != len(raw) {
+				return nil, nil, errors.New("trailing data after output CBOR")
 			}
 		} else {
 			if input.HasDatum || input.InlineDatumHex != "" || input.RefScriptHex != "" || input.AssetsCount != 0 || input.PoliciesCount != 0 {
@@ -766,6 +796,9 @@ func formatProtocolParameters(
 ) string {
 	eraOverride := ""
 	if pp, ok := pparams.(*dijkstra.DijkstraProtocolParameters); ok {
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		pparams = &pp.ConwayProtocolParameters
 		eraOverride = "Dijkstra"
 	}
@@ -797,6 +830,9 @@ func formatProtocolParameters(
 
 	switch pp := pparams.(type) {
 	case *conway.ConwayProtocolParameters:
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		eraName = "Conway"
 		protoMajor = pp.ProtocolVersion.Major
 		protoMinor = pp.ProtocolVersion.Minor
@@ -819,6 +855,9 @@ func formatProtocolParameters(
 		refScriptCostPerByte = ratPointerPtr(pp.MinFeeRefScriptCostPerByte)
 		costModels = extractCostModelNames(pp.CostModels)
 	case *babbage.BabbageProtocolParameters:
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		eraName = "Babbage"
 		protoMajor = pp.ProtocolMajor
 		protoMinor = pp.ProtocolMinor
@@ -838,6 +877,9 @@ func formatProtocolParameters(
 		maxCollateralInputs = pp.MaxCollateralInputs
 		costModels = extractCostModelNames(pp.CostModels)
 	case *alonzo.AlonzoProtocolParameters:
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		eraName = "Alonzo"
 		utxoParameter, utxoUnit = "coins_per_utxo_word", "Lovelace/word"
 		protoMajor = pp.ProtocolMajor
@@ -858,6 +900,9 @@ func formatProtocolParameters(
 		maxCollateralInputs = pp.MaxCollateralInputs
 		costModels = extractCostModelNames(pp.CostModels)
 	case *mary.MaryProtocolParameters:
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		eraName = "Mary"
 		utxoParameter, utxoUnit = "min_utxo_value", "Lovelace"
 		utxoCost = uint64(pp.MinUtxoValue)
@@ -871,6 +916,9 @@ func formatProtocolParameters(
 		poolDeposit = uint64(pp.PoolDeposit)
 		minPoolCost = pp.MinPoolCost
 	case *shelley.ShelleyProtocolParameters:
+		if pp == nil {
+			return "Protocol parameters unavailable"
+		}
 		eraName = "Shelley"
 		if pp.ProtocolMajor == 3 {
 			eraName = "Allegra"

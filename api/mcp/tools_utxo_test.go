@@ -33,6 +33,7 @@ func TestGetUtxosByAsset(t *testing.T) {
 
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	defer db.Close()
 
 	_, err = db.Exec(`
@@ -206,8 +207,11 @@ func TestGetUtxosByAsset(t *testing.T) {
 	)
 	RegisterCardanoTools(serverNil, nil, nil, nil, "preview", 5*time.Second)
 	ctNil, stNil := mcp.NewInMemoryTransports()
-	_, _ = serverNil.Connect(ctx, stNil, nil)
-	csNil, _ := client.Connect(ctx, ctNil, nil)
+	_, err = serverNil.Connect(ctx, stNil, nil)
+	require.NoError(t, err)
+	csNil, err := mcp.NewClient(&mcp.Implementation{Name: "nil-client", Version: "1"}, nil).
+		Connect(ctx, ctNil, nil)
+	require.NoError(t, err)
 	defer csNil.Close()
 
 	resNilDB, err := csNil.CallTool(ctx, &mcp.CallToolParams{
@@ -228,6 +232,7 @@ func TestGetAssetInfo(t *testing.T) {
 
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	defer db.Close()
 
 	_, err = db.Exec(`
@@ -397,8 +402,11 @@ func TestGetAssetInfo(t *testing.T) {
 	)
 	RegisterCardanoTools(serverNil, nil, nil, nil, "preview", 5*time.Second)
 	ctNil, stNil := mcp.NewInMemoryTransports()
-	_, _ = serverNil.Connect(ctx, stNil, nil)
-	csNil, _ := client.Connect(ctx, ctNil, nil)
+	_, err = serverNil.Connect(ctx, stNil, nil)
+	require.NoError(t, err)
+	csNil, err := mcp.NewClient(&mcp.Implementation{Name: "nil-client", Version: "1"}, nil).
+		Connect(ctx, ctNil, nil)
+	require.NoError(t, err)
 	defer csNil.Close()
 
 	resNilDB, err := csNil.CallTool(ctx, &mcp.CallToolParams{
@@ -507,6 +515,7 @@ func TestGetUtxosWithMetadataSchema(t *testing.T) {
 
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	defer db.Close()
 
 	// Real Dingo UTxO schema

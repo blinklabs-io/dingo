@@ -4228,8 +4228,8 @@ multi-index OR optimization, but only once `sqlite_stat1` exists. With the
 `idx_account_active_pool_staking_key (active=?)` and evaluates the whole OR
 chain per row, so each chunk costs `O(active rows × refs)` and the
 "batched" read becomes slower than the per-item loop it replaced as the
-account table grows. `ANALYZE` only runs via `RunPlannerStats` at Mithril
-sync and before backfill, never as the table grows during a genesis sync,
+account table grows. `ANALYZE` runs at Mithril sync and around metadata backfill,
+never as the table grows during a genesis sync,
 so that no-statistics state is what a long-running genesis-synced node is
 actually in — and even with statistics present, the grouped-IN form is
 still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
@@ -8274,7 +8274,8 @@ are not the only writer of that row. `ClearSyncState`
 (`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
 that clear through `updateMithrilReadyState` immediately after the critical
 rebuild. It therefore re-writes every row a completed sync still needs —
-`mithril_ledger_slot`, `mithril_ledger_hash`, and the deferred-index marker —
+`mithril_ledger_slot`, `mithril_ledger_hash`, the post-backfill statistics marker,
+and the deferred-index marker —
 back after the clear; without the last of those, every Mithril-bootstrapped
 database loses the marker moments after `BuildCritical` set it and never builds
 the lazy manifest entries at all. Core-mode startup still
@@ -8288,6 +8289,20 @@ schema migration that created those indexes is recorded complete and never
 re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
+
+After a completed metadata backfill, `internal/node.FinalizeBackfillPlannerStats`
+refreshes planner statistics after critical index repair and before either
+Mithril sync or `serve` clears import readiness state. It records a checkpoint
+identity in `metadata_planner_stats_backfill` only after successful analysis;
+startup repairs older completed imports without that marker, and interruption or
+failure leaves the refresh retryable. Built-in SQL providers accept the startup
+context through `ContextPlannerStatsUpdater`. Subsequent starts skip analysis
+when the checkpoint identity matches. This prevents pre-backfill row-count
+estimates from driving expensive query plans on the completed database.
+
+MCP node status inspects SQLite's index catalog and sync state to distinguish
+critical index readiness from pending background maintenance. Neither a complete
+index catalog nor a recorded statistics refresh establishes ledger readiness.
 
 ## External Interfaces
 
@@ -8373,7 +8388,7 @@ state and mempool. MCP serves Streamable HTTP and legacy SSE through
 `internal/apilistener`. It opens and owns a separate read-only pool at the active
 SQLite metadata provider's resolved location; storage selection is never inferred
 from the global data directory. Exact-address queries delegate to the database's
-context-aware CBOR address page API. Request deadlines reach the coordinated
+context-aware CBOR address page API, including when no SQLite pool exists. Request deadlines reach the coordinated
 read transaction; candidate processing checks cancellation between blob loads
 and decodes. Pages carry a cursor after the last completed candidate, including
 empty pages that have more candidates. Each page reads live state independently.
@@ -8389,15 +8404,36 @@ automatically on existing nodes. Authentication is optional and unset by
 default; the listener defaults to `127.0.0.1`. Storage mode and retained
 metadata determine which queries have data available.
 Any non-loopback MCP bind additionally requires both a non-empty auth token and
-server TLS; unprotected network binds fail during provider construction.
+server TLS; unprotected network binds fail during provider construction and
+direct server construction, checked against the actual listen address.
 The canonical plugin auth-token environment setting overrides the compatibility
 `DINGO_MCP_AUTH_TOKEN` alias, which overrides YAML. Browser origins must be
 same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
 does not grant access to MCP. Rejected origins receive HTTP 403 before any
 transport or preflight handling. Native clients can omit Origin. Streaming
 responses have no absolute write timeout. The rate limiter reclaims stale entries
-on requests and starts no background worker. Stopping MCP closes its owned
-read-only pool after listener shutdown.
+on requests and starts no background worker. It runs before authentication, so
+failed credentials consume capacity; preflight and both health aliases bypass
+it. Negative or non-finite rate limits fail construction. Stopping MCP prevents
+new starts and closes its owned pool after listener shutdown; a timed-out start
+is awaited by deferred cleanup before closing that pool.
+
+SQLite-backed tools and resources enforce the configured query timeout.
+Tip responses report synchronization as unknown without a measured current
+slot, and database lookup failures remain errors rather than missing records.
+
+Transaction evaluation and minimum-UTxO sizing reject trailing bytes after the
+single supplied CBOR value. Credential presence follows address payload types,
+including all-zero hashes; raw Bech32 credentials require the expected prefix
+and an exact 28-byte payload.
+
+`evaluate_tx` admits at most one ledger evaluation per MCP server. Cancellation
+or the configured query timeout releases the request, but the non-interruptible
+ledger call retains that admission slot until it finishes. Further evaluations
+receive a busy error, preventing canceled requests from accumulating workers.
+Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
+SQLite size limits before execution. The original settings are restored before
+the connection returns to an injected pool.
 
 See [MCP architecture](docs/mcp/architecture.md) for tool semantics and upstream
 protocol references.

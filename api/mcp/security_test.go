@@ -217,10 +217,12 @@ func TestSecurityMiddlewareBrowserOrigins(t *testing.T) {
 func TestServerRejectsReboundOrigin(t *testing.T) {
 	t.Parallel()
 	for _, path := range []string{"/mcp", "/sse", "/"} {
+		cfg := DefaultProviderConfig()
+		cfg.AuthToken = "test-secret"
 		server, err := NewServer(
-			DefaultProviderConfig(),
+			cfg,
 			ProviderDependencies{},
-			apiconfig.EffectiveTLS{},
+			apiconfig.EffectiveTLS{Enabled: true},
 			"0.0.0.0:8088",
 		)
 		require.NoError(t, err)

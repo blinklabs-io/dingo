@@ -18,8 +18,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // formatUntrustedInline JSON-quotes external text and escapes Markdown fence
@@ -75,9 +77,10 @@ func SanitizeExternalString(input string) string {
 
 	res := sb.String()
 	if len(res) > maxStringLength {
-		return res[:maxStringLength] + fmt.Sprintf(
-			"... [truncated %d chars]",
-			len(res)-maxStringLength,
+		prefix := truncateUTF8(res, maxStringLength)
+		return prefix + fmt.Sprintf(
+			"... [truncated %d bytes]",
+			len(res)-len(prefix),
 		)
 	}
 	return res
@@ -90,7 +93,7 @@ func WrapUntrustedChainData(data string) string {
 	sanitized := SanitizeExternalString(data)
 	return fmt.Sprintf(
 		"<untrusted_chain_data>\n%s\n</untrusted_chain_data>",
-		sanitized,
+		html.EscapeString(sanitized),
 	)
 }
 
@@ -117,18 +120,18 @@ func FormatCell(val any) string {
 		clean := SanitizeExternalString(v)
 		// Clean markdown pipes so table layout is not corrupted
 		clean = strings.ReplaceAll(clean, "|", "\\|")
-		clean = strings.ReplaceAll(clean, "\n", " ")
+		clean = strings.NewReplacer("\n", " ", "\r", " ").Replace(clean)
 		if len(clean) > maxCellLength {
-			return clean[:maxCellLength] + "..."
+			return truncateUTF8(clean, maxCellLength) + "..."
 		}
 		return clean
 
 	default:
 		s := fmt.Sprintf("%v", v)
 		s = strings.ReplaceAll(s, "|", "\\|")
-		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.NewReplacer("\n", " ", "\r", " ").Replace(s)
 		if len(s) > maxCellLength {
-			return s[:maxCellLength] + "..."
+			return truncateUTF8(s, maxCellLength) + "..."
 		}
 		return s
 	}
@@ -148,7 +151,7 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 		if i > 0 {
 			sb.WriteString(" | ")
 		}
-		sb.WriteString(col)
+		sb.WriteString(FormatCell(col))
 	}
 	sb.WriteString(" |\n")
 
@@ -175,4 +178,14 @@ func FormatMarkdownTable(columns []string, rows [][]string) string {
 	}
 
 	return sb.String()
+}
+
+func truncateUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

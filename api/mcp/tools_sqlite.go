@@ -17,11 +17,15 @@ package mcp
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // SQLiteQueryParams defines the input schema for sqlite_query.
@@ -88,14 +92,22 @@ func RegisterSQLiteTools(
 		}
 		effectiveLimit = min(effectiveLimit, maxRows, 200)
 		offset := max(input.Offset, 0)
+		if offset > 10000 {
+			return nil, nil, errors.New("offset must not exceed 10000")
+		}
 		q := strings.TrimRight(strings.TrimSpace(input.Query), ";")
 
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
+		conn, release, err := boundedSQLiteConn(qCtx, db)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer release()
 		start := time.Now()
 		//nolint:gosec // q is validated by ValidateReadOnlyQuery
-		rows, err := db.QueryContext(qCtx, q)
+		rows, err := conn.QueryContext(qCtx, q)
 		if err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
@@ -179,7 +191,7 @@ func RegisterSQLiteTools(
 			"\n*(Returned %d rows in %v | Query: `%s`)*\n",
 			count,
 			duration.Round(time.Millisecond),
-			q,
+			formatUntrustedInline(q),
 		)
 
 		return &mcp.CallToolResult{
@@ -206,7 +218,7 @@ func RegisterSQLiteTools(
 		}
 
 		cleanQ := strings.TrimRight(strings.TrimSpace(input.Query), ";")
-		if err := ValidateReadOnlyQuery(cleanQ); err != nil {
+		if err := ValidateReadOnlyQuery(input.Query); err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
 				Content: []mcp.Content{
@@ -222,7 +234,13 @@ func RegisterSQLiteTools(
 		qCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 
-		rows, err := db.QueryContext(qCtx, explainQuery)
+		conn, release, err := boundedSQLiteConn(qCtx, db)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer release()
+
+		rows, err := conn.QueryContext(qCtx, explainQuery)
 		if err != nil {
 			return &mcp.CallToolResult{
 				IsError: true,
@@ -330,11 +348,9 @@ func RegisterSQLiteTools(
 			}, nil, nil
 		}
 
-		// Get columns via PRAGMA table_info
-		//nolint:gosec // tableName is validated to be alphanumeric/underscore only
 		rows, err := db.QueryContext(
 			qCtx,
-			fmt.Sprintf("PRAGMA table_info(%s)", tableName),
+			"SELECT * FROM pragma_table_info(?)", tableName,
 		)
 		if err != nil {
 			return &mcp.CallToolResult{
@@ -348,7 +364,10 @@ func RegisterSQLiteTools(
 		}
 		defer rows.Close()
 
-		cols, _ := rows.Columns()
+		cols, err := rows.Columns()
+		if err != nil {
+			return nil, nil, err
+		}
 		var colRows [][]string
 		rowValues := make([]any, len(cols))
 		valuePtrs := make([]any, len(cols))
@@ -357,7 +376,9 @@ func RegisterSQLiteTools(
 		}
 
 		for rows.Next() {
-			if err := rows.Scan(valuePtrs...); err == nil {
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return nil, nil, err
+			} else {
 				rowFormatted := make([]string, len(cols))
 				for i, val := range rowValues {
 					rowFormatted[i] = FormatCell(val)
@@ -377,16 +398,20 @@ func RegisterSQLiteTools(
 			}, nil, nil
 		}
 
-		// Get indexes via PRAGMA index_list
-		//nolint:gosec // tableName is validated to be alphanumeric/underscore only
 		idxRows, qErr := db.QueryContext(
 			qCtx,
-			fmt.Sprintf("PRAGMA index_list(%s)", tableName),
+			"SELECT * FROM pragma_index_list(?)", tableName,
 		)
 		var indexesMarkdown string
-		if qErr == nil && idxRows != nil {
+		if qErr != nil {
+			return nil, nil, fmt.Errorf("read indexes: %w", qErr)
+		}
+		if idxRows != nil {
 			defer idxRows.Close()
-			idxCols, _ := idxRows.Columns()
+			idxCols, err := idxRows.Columns()
+			if err != nil {
+				return nil, nil, err
+			}
 			var idxData [][]string
 			idxVal := make([]any, len(idxCols))
 			idxPtr := make([]any, len(idxCols))
@@ -394,7 +419,9 @@ func RegisterSQLiteTools(
 				idxPtr[i] = &idxVal[i]
 			}
 			for idxRows.Next() {
-				if err := idxRows.Scan(idxPtr...); err == nil {
+				if err := idxRows.Scan(idxPtr...); err != nil {
+					return nil, nil, err
+				} else {
 					rowFormatted := make([]string, len(idxCols))
 					for i, val := range idxVal {
 						rowFormatted[i] = FormatCell(val)
@@ -402,7 +429,10 @@ func RegisterSQLiteTools(
 					idxData = append(idxData, rowFormatted)
 				}
 			}
-			if err := idxRows.Err(); err == nil && len(idxData) > 0 {
+			if err := idxRows.Err(); err != nil {
+				return nil, nil, err
+			}
+			if len(idxData) > 0 {
 				indexesMarkdown = "\n### Indexes\n\n" + FormatMarkdownTable(
 					idxCols,
 					idxData,
@@ -413,7 +443,7 @@ func RegisterSQLiteTools(
 		out := fmt.Sprintf(
 			"## Table: `%s`\n\n```sql\n%s\n```\n\n### Columns\n\n%s%s",
 			tableName,
-			sqlDDL.String,
+			formatUntrustedInline(sqlDDL.String),
 			FormatMarkdownTable(cols, colRows),
 			indexesMarkdown,
 		)
@@ -424,4 +454,66 @@ func RegisterSQLiteTools(
 			},
 		}, nil, nil
 	})
+}
+
+// boundedSQLiteConn applies limits before SQLite materializes arbitrary values.
+// Settings are restored before an injected pool's connection can be reused.
+func boundedSQLiteConn(
+	ctx context.Context,
+	db *sql.DB,
+) (*sql.Conn, func(), error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var queryOnly int
+	if err := conn.QueryRowContext(ctx, "PRAGMA query_only").Scan(&queryOnly); err != nil {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	limits := []struct{ id, value, previous int }{
+		{sqlite3.SQLITE_LIMIT_LENGTH, 1 << 20, 0},
+		{sqlite3.SQLITE_LIMIT_SQL_LENGTH, maxSQLiteQueryLength, 0},
+		{sqlite3.SQLITE_LIMIT_COLUMN, 128, 0},
+	}
+	applied := 0
+	release := func() {
+		// Cleanup must survive request cancellation before returning the connection.
+		cleanupCtx, cancel := context.WithTimeout(
+			context.Background(),
+			time.Second,
+		)
+		defer cancel()
+		var restoreErr error
+		for _, limit := range limits[:applied] {
+			_, err := sqlite.Limit(conn, limit.id, limit.previous)
+			restoreErr = errors.Join(restoreErr, err)
+		}
+		if queryOnly == 0 {
+			_, err := conn.ExecContext(cleanupCtx, "PRAGMA query_only=0")
+			restoreErr = errors.Join(restoreErr, err)
+		}
+		if restoreErr != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}
+	for i := range limits {
+		previous, err := sqlite.Limit(conn, limits[i].id, -1)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		limits[i].previous = previous
+		if _, err := sqlite.Limit(conn, limits[i].id, min(previous, limits[i].value)); err != nil {
+			release()
+			return nil, nil, err
+		}
+		applied++
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA query_only=1"); err != nil {
+		release()
+		return nil, nil, err
+	}
+	return conn, release, nil
 }

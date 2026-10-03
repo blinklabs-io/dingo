@@ -18,7 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -323,7 +325,12 @@ func RegisterResources(
 	db *sql.DB,
 	ls *ledger.LedgerState,
 	network string,
+	timeouts ...time.Duration,
 ) {
+	queryTimeout := 5 * time.Second
+	if len(timeouts) > 0 && timeouts[0] > 0 {
+		queryTimeout = timeouts[0]
+	}
 	// Resource: dingo://docs/identity
 	server.AddResource(&mcp.Resource{
 		URI:         "dingo://docs/identity",
@@ -403,6 +410,8 @@ func RegisterResources(
 		Description: "Overview of all tables in Dingo's metadata SQLite store with descriptions and primary columns",
 		MIMEType:    "text/markdown",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
 		content, err := sqliteTablesCatalog(ctx, db)
 		if err != nil {
 			return nil, err
@@ -425,26 +434,34 @@ func RegisterResources(
 		Description: "Current passive status of the Dingo node, configured network, and synchronization tip",
 		MIMEType:    "text/markdown",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+		defer cancel()
 		var slot uint64
 		var hashHex string
 		var blockHeight uint64
-		var behindHead uint64
+		syncStatus := "unknown"
 
 		if ls != nil {
 			tip := ls.Tip()
 			slot = tip.Point.Slot
 			hashHex = hex.EncodeToString(tip.Point.Hash)
 			blockHeight = tip.BlockNumber
-			behindHead = ls.SlotsBehindHead()
+			if head, err := ls.CurrentSlot(); err == nil {
+				syncStatus = "in sync"
+				if head > slot && head-slot > 100 {
+					syncStatus = fmt.Sprintf(
+						"syncing (%d slots behind)",
+						head-slot,
+					)
+				}
+			}
 		} else if db != nil {
 			var rawHash []byte
-			_ = db.QueryRowContext(ctx, "SELECT slot, hash FROM transaction ORDER BY slot DESC LIMIT 1").Scan(&slot, &rawHash)
+			err := db.QueryRowContext(ctx, `SELECT slot, block_hash FROM "transaction" ORDER BY slot DESC LIMIT 1`).Scan(&slot, &rawHash)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("read database tip: %w", err)
+			}
 			hashHex = hex.EncodeToString(rawHash)
-		}
-
-		syncStatus := "in sync"
-		if behindHead > 100 {
-			syncStatus = fmt.Sprintf("syncing (%d slots behind)", behindHead)
 		}
 
 		statusMarkdown := fmt.Sprintf("# Dingo Node Status\n\n"+
@@ -454,6 +471,12 @@ func RegisterResources(
 			"- **Block Hash**: `%s`\n"+
 			"- **Sync Status**: `%s`\n",
 			network, slot, blockHeight, hashHex, syncStatus)
+
+		indexStatus, err := sqliteMaintenanceStatus(ctx, db)
+		if err != nil {
+			return nil, err
+		}
+		statusMarkdown += indexStatus
 
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{
@@ -468,7 +491,9 @@ func RegisterResources(
 
 	// Register dynamic resource for tables if db is available
 	if db != nil {
-		rows, err := db.Query(
+		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		defer cancel()
+		rows, err := db.QueryContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		)
 		if err == nil {
@@ -483,26 +508,40 @@ func RegisterResources(
 						Description: "SQLite schema and column definitions for " + tableName,
 						MIMEType:    "text/markdown",
 					}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+						ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+						defer cancel()
 						var sqlDDL sql.NullString
-						_ = db.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name = ?", tableName).
-							Scan(&sqlDDL)
+						if err := db.QueryRowContext(ctx, "SELECT sql FROM sqlite_master WHERE name = ?", tableName).Scan(&sqlDDL); err != nil {
+							return nil, fmt.Errorf("read table DDL: %w", err)
+						}
 
 						infoRows, qErr := db.QueryContext(
 							ctx,
-							fmt.Sprintf("PRAGMA table_info(%s)", tableName),
+							"SELECT * FROM pragma_table_info(?)", tableName,
 						)
 						var cols []string
 						var tableData [][]string
-						if qErr == nil && infoRows != nil {
+						if qErr != nil {
+							return nil, fmt.Errorf(
+								"read table columns: %w",
+								qErr,
+							)
+						}
+						if infoRows != nil {
 							defer infoRows.Close()
-							cols, _ = infoRows.Columns()
+							cols, qErr = infoRows.Columns()
+							if qErr != nil {
+								return nil, qErr
+							}
 							valPtrs := make([]any, len(cols))
 							vals := make([]any, len(cols))
 							for i := range vals {
 								valPtrs[i] = &vals[i]
 							}
 							for infoRows.Next() {
-								if err := infoRows.Scan(valPtrs...); err == nil {
+								if err := infoRows.Scan(valPtrs...); err != nil {
+									return nil, err
+								} else {
 									row := make([]string, len(cols))
 									for i, v := range vals {
 										row[i] = FormatCell(v)
@@ -518,7 +557,7 @@ func RegisterResources(
 						content := fmt.Sprintf(
 							"# Table Schema: `%s`\n\n```sql\n%s\n```\n\n### Columns\n\n%s",
 							tableName,
-							sqlDDL.String,
+							formatUntrustedInline(sqlDDL.String),
 							FormatMarkdownTable(cols, tableData),
 						)
 

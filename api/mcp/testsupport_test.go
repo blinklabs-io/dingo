@@ -30,9 +30,11 @@ func newFixtureDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 
 	_, err = db.Exec(`
-		CREATE TABLE epoch (epoch_id INTEGER, start_slot INTEGER, length_in_slots INTEGER, nonce BLOB);
+		CREATE TABLE "transaction" (id INTEGER PRIMARY KEY, slot INTEGER, hash BLOB, block_hash BLOB, fee INTEGER, block_index INTEGER);
+        CREATE TABLE epoch (epoch_id INTEGER, start_slot INTEGER, length_in_slots INTEGER, nonce BLOB);
 		INSERT INTO epoch VALUES (10, 1000, 100, NULL);
 		CREATE TABLE epoch_summary (epoch INTEGER, epoch_nonce BLOB);
 		CREATE TABLE block_nonce (slot INTEGER);
@@ -77,6 +79,7 @@ func newFixtureDB(t *testing.T) *sql.DB {
 
 		INSERT INTO tx (hash, block_id, slot, fee, size)
 		VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 1, 1000, 175000, 450);
+ INSERT INTO "transaction"(id,slot,hash,fee,block_index) SELECT id,slot,hash,fee,0 FROM tx;
 
 		INSERT INTO utxo (tx_hash, tx_index, address, value)
 		VALUES ('1111111111111111111111111111111111111111111111111111111111111111', 0, 'addr_test1vrm9x2zs...sample', 5000000);

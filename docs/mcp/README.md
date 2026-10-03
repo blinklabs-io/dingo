@@ -42,7 +42,7 @@ curl -s http://127.0.0.1:8088/healthz
   }
   ```
 - **Codex / Custom Agents** (Streamable HTTP):
-  Target `http://127.0.0.1:8088/mcp` with header `Accept: application/json`.
+  Target `http://127.0.0.1:8088/mcp` with header `Accept: application/json, text/event-stream`.
 
 ### Step 4: Run an Inspection Prompt
 Ask your AI assistant:
@@ -75,7 +75,7 @@ discovered non-internal SQLite table, so the total varies by database:
 - `dingo://docs/identity`: Node architecture, block header fingerprint (Protocol Minor Version 69), durable forge fencing.
 - `dingo://docs/faq`: Storage profiles, memory footprint, Mithril fast-sync.
 - `dingo://docs/architecture`: Node pipeline and indexer overview.
-- `dingo://node/status`: Live tip slot, block height, block hash, and sync status.
+- `dingo://node/status`: Live tip slot, block height, block hash, sync status, and metadata maintenance status.
 - `dingo://dbsync/cheatsheet`: PostgreSQL-to-SQLite schema translation reference.
 - `dingo://schema/tables` and `dingo://schema/table/{name}`: DDL and column catalog for discovered SQLite tables.
 
@@ -153,7 +153,7 @@ For automated agents operating in tight loops, tools differ significantly in res
 
 When an operator, developer, or AI agent interacts with Dingo via MCP, the user poses a question in natural language (e.g., *"What is my node's sync tip?"*, *"Find UTxOs holding token policy X"*, or *"Why is my Plutus script failing?"*).
 
-During MCP initialization (`initialize`), Dingo delivers schemas for **21 tools**, six fixed resources plus a database-dependent number of table-schema resources, and **6 prompt workflows**, accompanied by system instructions. The LLM maps the user's intent to the appropriate tool or resource.
+During MCP initialization (`initialize`), Dingo advertises capabilities and server instructions. Clients then call `tools/list`, `resources/list`, and `prompts/list` to discover the **21 tools**, six fixed resources plus database-dependent table-schema resources, and **6 prompt workflows**. The LLM maps the user's intent to the appropriate tool or resource.
 
 The matrix below details how question styles and intents map across 5 core Cardano domains:
 
@@ -215,7 +215,7 @@ The complete lifecycle of a request consists of 6 distinct phases:
 
 1. **Phase 1: Handshake & Discovery (`initialize`)**:
    - The AI client (Claude, Cursor, Codex) initiates a session via `POST /mcp` or `GET /sse`.
-   - Dingo responds with server capabilities, registering 21 tools, six fixed resources plus one per discovered non-internal SQLite table, and system steering instructions detailing block identity and forge fencing.
+   - Dingo responds with server capabilities and instructions detailing block identity and forge fencing. The client completes `notifications/initialized`, then calls `tools/list`, `resources/list`, and `prompts/list` for the registered schemas and entries.
 2. **Phase 2: Intent Classification & Tool Invocation (`tools/call`)**:
    - The LLM parses the user prompt, determines the required data, and emits a JSON-RPC 2.0 tool invocation.
 3. **Phase 3: Ingress Security Perimeter**:
@@ -303,7 +303,7 @@ When running on port `8088`, Dingo serves:
 | --- | --- | --- |
 | `/mcp` | `POST` | Modern Streamable HTTP JSON-RPC 2.0 MCP endpoint |
 | `/sse` | `GET`, `POST` | Legacy & streaming Server-Sent Events MCP endpoint |
-| `/health` | `GET` | Plaintext health check (`ok\n`) |
+| `/health` | `GET` | JSON health check (alias of `/healthz`) |
 | `/healthz` | `GET` | JSON health check (`{"status":"ok","service":"dingo-mcp"}`) |
 
 ---
@@ -372,7 +372,16 @@ pages do not provide a complete balance at a single ledger snapshot.
 `sqlite_query` applies `offset` and the effective row limit while reading results,
 including PRAGMA and EXPLAIN results and SQL containing its own LIMIT. The
 result cap is the smallest of the requested limit (default 50), configured
-`maxRows`, and 200.
+`maxRows`, and 200. Offsets above 10,000 are rejected. Before execution,
+SQL longer than 64 KiB is rejected before tokenization. SQLite enforces a 1 MiB value/encoded-row limit, 64 KiB SQL limit, and 128-column
+limit. Arbitrary SQL runs with connection-level `query_only`, including injected
+pools, and the previous connection settings are restored afterward.
+
+`evaluate_tx` permits one evaluation at a time per MCP server. The request
+returns on cancellation or the configured timeout. The ledger evaluator cannot
+be interrupted, so it retains the slot until completion; subsequent evaluations
+receive a busy error. Set `MCP_SSE_SURVIVAL_TEST=1` when running the MCP tests to
+include the 61-second SSE idle-survival regression.
 
 Epoch nonce reporting reads `epoch_summary.epoch_nonce` with `epoch.nonce` as
 fallback. Recorded block counts cover retained `block_nonce` rows inside the
@@ -391,12 +400,25 @@ metadata file without starting another node or enabling its MCP listener:
 
 ```sh
 DINGO_MCP_PREVIEW_TEST_DB=/path/to/metadata.sqlite \
-go test -race ./api/mcp -run TestPreviewLiveSQL -v -count=1
+go test ./api/mcp -run TestPreviewLiveSQL -v -count=1
 ```
 
 This test opens the database read-only, starts an in-memory MCP session using the
 current implementation, and executes the resource SQL examples and a metadata
-PRAGMA. It does not evaluate or submit transactions.
+PRAGMA. It does not evaluate or submit transactions. This run uses the production
+five-second query budget. Run correctness checks under race instrumentation with
+an explicit, separate budget; this does not change the server timeout:
+
+```sh
+DINGO_MCP_PREVIEW_TEST_DB=/path/to/metadata.sqlite \
+go test -race ./api/mcp -run TestPreviewLiveSQL -v -count=1 \
+  -preview-mcp-query-timeout=30s
+```
+
+`dingo://node/status` distinguishes missing critical indexes from pending
+background indexes. Background maintenance alone does not mean critical indexes
+are unavailable. Statistics completion is recorded after a successful
+post-backfill refresh; these maintenance fields do not certify ledger readiness.
 
 Opt-in live evaluation testing (requires an MCP endpoint; no submission):
 
@@ -601,7 +623,7 @@ The Dingo MCP server provides 21 specialized tools:
 | `get_cardano_tip` | Live Cardano slot, height, block hash, and sync state | *none* |
 | `get_block` | Look up block details by slot number or block hash | `hash_or_slot` (string, required) |
 | `get_transaction` | Fetch transaction details by 64-character hex hash | `tx_hash` (string, required) |
-| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `offset` |
+| `get_utxos` | Query unspent outputs for a Bech32 address or payment credential | `address_or_credential` (string, required), `limit`, `cursor` (full addresses; nonzero `offset` rejected), `offset` (payment credentials) |
 | `get_account` | Query the stored stake-account row, including indexed delegation, reward, and DRep fields | `stake_address_or_credential` (string, required), `credential_type` (`key` or `script`, required for hex credentials) |
 | `get_epoch_summary` | Summary stats and boundary nonces for an epoch | `epoch` (int, optional) |
 | `resolve_datum_or_script` | Look up and decode Plutus CIP-32 datum or script metadata from hash | `hash` (string, required - 56 or 64 hex chars) |
@@ -660,7 +682,7 @@ Inspects Dingo's live in-memory transaction buffer (mempool) awaiting inclusion 
 - **Global Mempool Health (when called with `{}`)**:
   - `pending_tx_count`: Total number of validated transactions currently queued in memory.
   - `mempool_bytes`: Aggregated memory volume consumed by buffered transactions.
-  - `max_mempool_bytes`: Configured maximum memory pool capacity (default 64 MiB).
+  - `max_mempool_bytes`: Configured maximum memory pool capacity (default 1 MiB in standard modes, 25 MiB in Leios).
   - `saturation_pct`: Real-time percentage saturation of the node's mempool buffer.
   - `transactions`: Summary listing of pending transaction hashes, fees, and sizes in bytes.
 - **Single Transaction Inspection (when called with `{"tx_hash": "..."}`)**:
@@ -684,7 +706,7 @@ Cryptographically parses any Cardano address (Bech32 or uppercase/lowercase hex)
 
 #### `get_utxos_by_asset`
 Mirrors Kupo-style indexing by finding all unspent UTxOs containing assets under a specific minting policy:
-- Supports matching by `policy_id` alone (wildcard asset name) or exact `policy_id` + `asset_name` (accepts ASCII string like `HOSKY` or hex).
+- Supports matching by `policy_id` alone (wildcard asset name) or exact `policy_id` + `asset_name`. Asset names accept hex or literal UTF-8, up to 32 decoded bytes. Hex takes precedence: `AB` selects byte `0xab`; use `4142` to select the text `AB`. Whitespace in literal names is significant.
 - Returns a markdown table detailing UTxO reference (`tx_hash#index`), payment credential hash, lovelace balance, asset amount, asset fingerprint, and datum hash.
 - Filters out spent outputs (`deleted_slot = 0`).
 
@@ -758,7 +780,7 @@ MCP Resources allow LLMs to passively read context without invoking functions:
 | `dingo://docs/identity` | Complete guide to Dingo's on-chain block fingerprint (`BlockHeaderProtocolMinor = 69`), OpCert sequence tracking, and peer handshakes. |
 | `dingo://docs/faq` | Frequently asked questions covering Dingo architecture, storage modes (`core` vs `api`), Mithril fast-sync, and tool usage. |
 | `dingo://docs/architecture` | Detailed breakdown of Ouroboros Praos consensus, Plutus interpreter, block forging, and Badger/SQLite storage subsystems. |
-| `dingo://node/status` | Current tip slot, block height, block hash, and sync status. |
+| `dingo://node/status` | Current tip, sync status, critical index readiness, background index maintenance, and post-backfill statistics status. |
 | `dingo://schema/tables` | Catalog of all metadata tables with column summaries and descriptions. |
 | `dingo://schema/table/<name>` | Full dynamic SQL schema definition and index list for any table `<name>`. |
 | `dingo://dbsync/cheatsheet` | Rosetta stone mapping queries from PostgreSQL `cardano-db-sync` schema to Dingo's SQLite schema. |

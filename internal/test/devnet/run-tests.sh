@@ -23,6 +23,7 @@
 #   4. Tears down the DevNet and reports results
 #
 # Usage:
+#   ./run-tests.sh --runtime container --accelerated
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
 #   ./run-tests.sh --accelerated      # Run accelerated timeline and governance scenarios

@@ -83,7 +83,7 @@ func TestExactAddressCursorBudgetAndResume(t *testing.T) {
 		}
 		return nil
 	}))
-	cs := newToolSessionWithTimeout(t, newSchemaDB(t), 100, time.Minute, db)
+	cs := newToolSessionWithTimeout(t, nil, 100, time.Minute, db)
 	type pageResult struct {
 		Utxos []struct {
 			TxID string `json:"tx_id"`

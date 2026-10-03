@@ -1971,7 +1971,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 	}
 	// Force a deterministic failure after the API startup section so Run
 	// returns without requiring an external shutdown signal. Reaching block
-	// producer validation proves all three zero-port decisions were exercised.
+	// producer validation proves all four zero-port decisions were exercised.
 	n.config.blockProducer = true
 
 	require.ErrorIs(

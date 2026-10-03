@@ -1208,14 +1208,19 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
+	return s.UpdatePlannerStatsContext(context.Background())
+}
+
+// UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
+func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkMu.RLock()
 	defer s.bulkMu.RUnlock()
 	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 	}
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
 }
 
 // SQLitePath returns the active provider's on-disk SQLite location, if any.

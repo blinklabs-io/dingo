@@ -31,7 +31,7 @@ type ProviderConfig struct {
 	Host         string              `yaml:"host"`
 	AuthToken    string              `yaml:"authToken"`
 	RateLimit    float64             `yaml:"rateLimit"` // requests per second (0 = unlimited)
-	Burst        int                 `yaml:"burst"`     // rate limiter burst allowance (default 10)
+	Burst        int                 `yaml:"burst"`     // rate limiter burst allowance (default 15)
 	QueryTimeout time.Duration       `yaml:"queryTimeout"`
 	MaxRows      int                 `yaml:"maxRows"`
 	TLS          apiconfig.TLSPolicy `yaml:"tls"`
@@ -41,7 +41,7 @@ type ProviderConfig struct {
 type ProviderDependencies struct {
 	Logger             *slog.Logger
 	Database           *database.Database
-	SQLDB              *sql.DB // optional direct SQLite read-only connection
+	SQLDB              *sql.DB // optional SQLite pool; arbitrary queries borrow read-only connections
 	LedgerState        *ledger.LedgerState
 	Mempool            mempool.Service
 	Host               string

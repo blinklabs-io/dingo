@@ -21,9 +21,14 @@ import (
 	"strings"
 )
 
+const maxSQLiteQueryLength = 64 << 10
+
 // ValidateReadOnlyQuery accepts one read-only SQLite statement. SQLite still
 // checks syntax; the connection's mode=ro and query_only enforce the final boundary.
 func ValidateReadOnlyQuery(query string) error {
+	if len(query) > maxSQLiteQueryLength {
+		return errors.New("SQL query exceeds 64 KiB")
+	}
 	tokens, err := sqliteQueryTokens(query)
 	if err != nil {
 		return err

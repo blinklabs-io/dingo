@@ -15,12 +15,16 @@
 package mcp
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
@@ -58,6 +62,12 @@ func OpenReadOnlySQLite(databasePath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open read-only SQLite: %w", err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open read-only SQLite: %w", err)
+	}
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 	return db, nil
@@ -68,6 +78,12 @@ func NewMCPServer(
 	cfg ProviderConfig,
 	deps ProviderDependencies,
 ) (*mcp.Server, *sql.DB, error) {
+	if cfg.RateLimit < 0 || math.IsNaN(cfg.RateLimit) ||
+		math.IsInf(cfg.RateLimit, 0) {
+		return nil, nil, errors.New(
+			"MCP rateLimit must be finite and nonnegative",
+		)
+	}
 	var db *sql.DB
 	var openedDB *sql.DB
 
@@ -130,7 +146,7 @@ func NewMCPServer(
 		cfg.QueryTimeout,
 		addressLookup,
 	)
-	RegisterResources(server, db, deps.LedgerState, deps.Network)
+	RegisterResources(server, db, deps.LedgerState, deps.Network, cfg.QueryTimeout)
 	RegisterPrompts(server, db, deps.LedgerState, deps.Network)
 
 	return server, openedDB, nil

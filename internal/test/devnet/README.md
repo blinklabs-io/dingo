@@ -146,7 +146,7 @@ The canonical specs are deliberately *not* accelerated: they are what soak
 and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
 someone quietly speeds them up.
 
-## Prerequisites
+## Docker runtime prerequisites
 
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
@@ -164,7 +164,7 @@ someone quietly speeds them up.
 ### Apple Container on macOS
 
 `run-tests.sh` optionally uses [Apple Container](https://github.com/apple/container)
-on an Apple silicon Mac. Docker remains the default runtime:
+on an Apple silicon Mac with the Apple Container CLI installed and its system running. A host Go installation and host Docker are not required. Docker remains the default runtime:
 
 ```bash
 container system start
@@ -198,8 +198,8 @@ directories are not mounted. Test configuration environment variables
 (`DEVNET_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, and `MODE`) are forwarded.
 
 `--keep-up` leaves both the network and VM running after success. Use
-`container exec -w <checkout-path> <runner-name> bash internal/test/devnet/stop.sh`
-(adding `--conformance` if selected) to tear the network down, then
+`container exec -e COMPOSE_PROJECT_NAME=<project-name> -w <checkout-path> <runner-name> bash internal/test/devnet/stop.sh`
+(using the project name selected for the run and adding `--conformance` if selected) to tear the network down, then
 `container stop <runner-name>` to stop the VM. Run manual queries inside the
 VM with `container exec`; its DevNet ports are not published to macOS.
 
