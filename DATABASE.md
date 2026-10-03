@@ -1884,6 +1884,15 @@ it, so it rolls the ledger back to the blob tip instead. That rollback can be
 arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
 `mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
 
+Each SQLite connection in the read and write pools also sets
+`journal_size_limit=67108864` (64 MiB).
+After a checkpoint resets the WAL, SQLite can shrink the retained file to this
+limit instead of preserving a larger burst indefinitely. This is not a ceiling
+on an active WAL: a transaction can grow it beyond 64 MiB, and a reader holding
+an older snapshot can prevent reset and leave the file larger. The periodic
+TRUNCATE checkpoint below remains the operation that can reduce an idle WAL to
+zero.
+
 **Periodic forced WAL checkpoint (`checkpointWAL`,
 `database/plugin/metadata/sqlite/shared_sqlstore.go`).** Raising
 `wal_autocheckpoint` (above) fixed the write-amplification problem but
@@ -1892,8 +1901,9 @@ single decrease, on any of four live instances, one of which had no other
 change applied at all. `wal_autocheckpoint` only ever invokes a PASSIVE
 checkpoint, and PASSIVE — like FULL and RESTART — backfills WAL frames into
 `metadata.sqlite` and lets future commits reuse that reclaimed space, but
-never calls `ftruncate` on the `-wal` file itself; only
-`SQLITE_CHECKPOINT_TRUNCATE` does. Verified directly against a copy of a
+does not shrink the `-wal` file itself. The `journal_size_limit` above can
+shrink it when SQLite resets the WAL, while `SQLITE_CHECKPOINT_TRUNCATE` can
+reduce it to zero. Verified directly against a copy of a
 live, actively-growing `metadata.sqlite`: with zero readers blocking it
 (every attempt reported `busy=0` with `checkpointed==log`, i.e. a fully
 successful checkpoint), PASSIVE, FULL, and RESTART each left a
@@ -1901,18 +1911,18 @@ successful checkpoint), PASSIVE, FULL, and RESTART each left a
 dropped it to 0. So the gauge — a plain `os.Stat` of that file — could never
 show reclaim under `wal_autocheckpoint` alone, no matter how well passive
 checkpointing was working underneath; the file's on-disk footprint is a
-high-water mark that only grows or holds steady until something truncates
-it. `checkpointWAL` is that something: a `Store.Checkpoint` callback (a new
+high-water mark under `wal_autocheckpoint` alone. With `journal_size_limit`
+configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
+operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
 of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
-that attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes, letting
-the WAL's on-disk size be brought back down on a schedule instead of only
-ever growing. Before truncating, `checkpointWAL` runs PASSIVE and proceeds to
-TRUNCATE only when PASSIVE reports every WAL frame checkpointed. If a reader
+attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes. Before
+truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
+PASSIVE reports every WAL frame checkpointed. If a reader
 or writer prevents PASSIVE from draining the WAL, the truncation attempt is
 skipped. A reader at the WAL tip can still make TRUNCATE return `busy` even
 after PASSIVE drains the frames. In either case the file stays at its current
-size until a later tick succeeds.
+size until a WAL reset or later TRUNCATE succeeds.
 
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
