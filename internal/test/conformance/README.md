@@ -54,12 +54,49 @@ The deterministic corpus currently contains five scenarios: one origin
 roll-forward smoke test, one within-k fork, one longer fork using `local_tip`,
 one equal-length slot battle, and one beyond-k no-switch case. The tests log
 the exact scenario and ledger coverage counts; a passing ledger profile must
-not be summarized as complete node conformance.
+not be summarized as complete node conformance. The release and Linux CI gates
+run the ledger and deterministic consensus profiles as part of `./...`; the
+reference-node profile is a separate DevNet check and is not represented as
+passing when it was not run.
 
-The Tweag Node-vs-Environment runner/test-generator approach remains a
-feasibility reference rather than a dependency: no stable reusable upstream
-artifact is pinned here, so these shared local captures preserve equivalent
-fork-choice and rollback scenarios until one exists.
+The consensus replay feeds each peer's captured headers through Dingo's
+ChainSync client handlers into the real chain selector, then asserts the final
+tip, the selector's reported rollback point on fork switches, and the ChainSync
+messages Dingo serves downstream. For the last, the selected peer's headers
+are added to a Dingo chain as header-only blocks (the replay has no block
+bodies, and a node-to-node `RollForward` carries only the header) and a
+node-to-node client syncs that chain from origin through Dingo's ChainSync
+server until it receives `AwaitReply`. Density and multi-peer scheduling
+scenarios are not in the corpus yet.
+
+### Tweag Node-vs-Environment runner
+
+[tweag/cardano-conformance-testing-of-consensus](https://github.com/tweag/cardano-conformance-testing-of-consensus)
+designs three tools around `ouroboros-consensus`'s Node-vs-Environment tests:
+`testgen` generates a test file holding a point schedule and a property,
+`runner` serves that schedule from simulated upstream peers and judges the
+node under test through a downstream observer peer, and `shrinkview` prints
+shrunk counterexamples. Each `testgen`/`runner` pair is one property-test
+case, to be run in a loop.
+
+Dingo does not consume it yet:
+
+- No release exists. The executables live on unreleased `conformance-testing`
+  branches of Tweag forks of `cardano-node` (based on 10.5.1) and
+  `ouroboros-consensus`, and there is no tagged test-file format or corpus to
+  pin in `go.mod` or `ouroboros-mock`.
+- The node under test must take a generated topology, connect to the runner's
+  peers over real sockets, and accept headers without VRF validation, because
+  the generators place blocks in arbitrary slots. Dingo has no option to skip
+  VRF validation.
+- Runs depend on the runner's wall-clock ticking and a Haskell toolchain, so
+  they belong beside the reference-node DevNet profile rather than in the
+  deterministic `go test` profile.
+
+What it would add is generated density, peer-scheduling and adversarial
+schedules with shrinking. Until a tagged runner release exists, the captured
+scenarios in `ouroboros-mock` are the deterministic consensus coverage, and new
+fork-choice cases are added there.
 
 ## Running the tests
 

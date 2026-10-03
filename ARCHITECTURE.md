@@ -4484,7 +4484,12 @@ comparison, and behind-peer filtering use the delivered frontier. A
 `ChainSwitchEvent` preserves the advertised tips in `NewTip`/`PreviousTip` for
 protocol compatibility and carries the decision frontiers separately in
 `NewObservedTip`/`PreviousObservedTip`; ledger resync decisions use the observed
-field (falling back to `NewTip` for legacy/direct event producers). Before the
+field (falling back to `NewTip` for legacy/direct event producers). When a
+fork switch replaces a tracked peer, `RollbackPoint` carries the highest point
+the two peers' candidate fragments share. It is not intersected with the local
+chain and can lie above the local tip; it is nil for switches where the
+previous peer is gone (disconnect, stale cleanup) or the fragments do not
+overlap. Before the
 node has applied any local block, new peers' advertisements remain bounded
 against the first bootstrap peer; after a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised

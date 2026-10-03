@@ -2248,9 +2248,9 @@ func (f *chainsyncServerFixture) appendBlock(
 	).(*testBlockHeader)
 	require.True(t, ok)
 	block := &testBlock{
-		testBlockHeader: header,
-		blockType:       1,
-		cbor:            []byte{0x80},
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
 	}
 	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
@@ -3295,7 +3295,7 @@ type testBlockHeader struct {
 // testBlock is the smallest block implementation needed to wake a server-side
 // ChainIterator and drive the async RollForward path.
 type testBlock struct {
-	*testBlockHeader
+	gledger.BlockHeader
 	blockType int
 	cbor      []byte
 }
@@ -3337,7 +3337,7 @@ func (h *testBlockHeader) BlockBodyHash() gledger.Blake2b256 {
 }
 
 func (b *testBlock) Header() gledger.BlockHeader {
-	return b.testBlockHeader
+	return b.BlockHeader
 }
 
 func (b *testBlock) Type() int {
@@ -3640,7 +3640,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
-		testBlockHeader: &testBlockHeader{
+		BlockHeader: &testBlockHeader{
 			hash:        gledger.Blake2b256{0x01},
 			blockNumber: 1,
 			slotNumber:  10,

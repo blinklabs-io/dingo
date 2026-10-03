@@ -123,6 +123,14 @@ type ChainSwitchEvent struct {
 	PreviousObservedTip  ochainsync.Tip
 	ComparisonResult     ChainComparisonResult
 	BlockDifference      int64
+	// RollbackPoint is the highest point the previous and new peers'
+	// candidate fragments have in common. It is not intersected with the
+	// local chain, so it can lie above the local tip when the local chain has
+	// not caught up to the fork; a consumer rolling the local chain back must
+	// intersect it with that chain first. It is nil when the selector cannot
+	// establish one, such as when the previous peer was removed (its fragment
+	// is gone) or the retained fragments do not overlap.
+	RollbackPoint *ocommon.Point
 }
 
 // ChainSelectionEvent is published when chain selection evaluation completes.
