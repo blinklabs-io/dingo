@@ -766,6 +766,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl:                   n.config.barkBaseUrl,
 			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
+			MaxBlockSize:              state.MaxBlockSize,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -1460,17 +1461,15 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			Port:                            n.config.barkPort,
 			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
 			DestinationRegistry:             n.destinationRegistry,
+			ArchiveMaxConcurrentFetches:     n.config.barkArchiveMaxConcurrentFetches,
 		}
 		// Mount the DatabaseService only when a snapshot directory is
 		// configured — bark.NewBark requires one alongside Lifecycle, and
 		// an operator who enabled bark only for its Archive service
 		// shouldn't get a DatabaseService that fails on first call.
 		if lifecycleEnabled {
-			// cfg is never read: SetLiveNode below makes every Service
-			// method delegate straight to n's own Restore/Truncate/
-			// Snapshot rather than the offline path that would use it.
 			dbLifecycleService := dblifecycle.NewService(
-				&internalconfig.Config{},
+				&internalconfig.Config{DatabaseLifecycle: n.config.databaseLifecycle},
 				n.destinationRegistry,
 				n.config.logger,
 			)

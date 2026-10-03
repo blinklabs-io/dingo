@@ -178,6 +178,11 @@ func (d *Database) TruncateAfterSlot(
 		}()
 	}
 
+	// Replay can recreate eligible history below the previous expiry cursor.
+	if err := d.SetSyncState(HistoryExpiryCursorSyncKey, "0", txn); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf("reset history expiry cursor: %w", err)
+	}
+
 	// Restore pool state before deleting any certificates: unlike account
 	// restoration (which reads the Account row's own denormalized
 	// AddedSlot field, independent of certificate rows),

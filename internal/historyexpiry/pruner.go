@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,6 +47,8 @@ type Pruner struct {
 	logger      *slog.Logger
 	ledgerState LedgerWindow
 	db          *database.Database
+	// expire is a seam so a test can inject a per-block failure.
+	expire func(*database.BlobBlockResult) error
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
@@ -55,12 +58,14 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
-	return &Pruner{
+	p := &Pruner{
 		config:      cfg,
 		logger:      cfg.Logger,
 		ledgerState: cfg.LedgerState,
 		db:          cfg.DB,
 	}
+	p.expire = p.pruneBlock
+	return p
 }
 
 func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
@@ -68,6 +73,38 @@ func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
 		return fmt.Errorf("history expiry: %w", err)
 	}
 	return nil
+}
+
+// loadCursor returns the persisted resume slot, or 0 when none is usable.
+func (p *Pruner) loadCursor() uint64 {
+	raw, err := p.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	if err != nil {
+		p.logger.Error("history expiry: failed to read cursor", "error", err)
+		return 0
+	}
+	if raw == "" {
+		return 0
+	}
+	cursor, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		p.logger.Error(
+			"history expiry: ignoring malformed cursor",
+			"value", raw,
+			"error", err,
+		)
+		return 0
+	}
+	return cursor
+}
+
+func (p *Pruner) saveCursor(cursor uint64) {
+	if err := p.db.SetSyncState(
+		database.HistoryExpiryCursorSyncKey,
+		strconv.FormatUint(cursor, 10),
+		nil,
+	); err != nil {
+		p.logger.Error("history expiry: failed to save cursor", "error", err)
+	}
 }
 
 func (p *Pruner) prune(ctx context.Context) {
@@ -87,8 +124,19 @@ func (p *Pruner) prune(ctx context.Context) {
 			"history expiry: skipped because current slot is not high enough")
 		return
 	}
+	// cursor is the slot every block before has been expired through. It
+	// stops advancing at the first block whose expiry fails so that block
+	// stays inside the next round's range. The scan restarts at the cursor
+	// slot itself because only some of the blocks sharing it may be expired.
+	start := p.loadCursor()
+	cursor := start
+	defer func() {
+		if cursor > start {
+			p.saveCursor(cursor)
+		}
+	}()
 	iter := p.db.BlocksInRange(
-		0,
+		start,
 		currentSlot-stabilityWindow-1,
 	)
 	defer iter.Close()
@@ -101,6 +149,7 @@ func (p *Pruner) prune(ctx context.Context) {
 			next, err := iter.NextRaw()
 			if err != nil {
 				if errors.Is(err, types.ErrHistoryExpired) {
+					cursor, _ = iter.Progress()
 					continue
 				}
 				p.logger.Error(
@@ -115,13 +164,15 @@ func (p *Pruner) prune(ctx context.Context) {
 				return
 			}
 
-			if err := p.pruneBlock(next); err != nil {
+			if err := p.expire(next); err != nil {
 				p.logger.Error(
 					"history expiry: failed to expire block",
 					"error",
 					err,
 				)
+				return
 			}
+			cursor = next.Slot
 		}
 	}
 }

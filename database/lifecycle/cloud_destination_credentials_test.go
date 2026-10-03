@@ -204,7 +204,7 @@ func runCloudDestinationRoundTrip(t *testing.T, scheme string, bucket string) {
 	require.Equal(t, manifest.Checksum, fetched.Checksum)
 
 	// Restore accepts the cloud URI directly (downloads, then runs the same
-	// validation as a local restore) — this exercises DownloadDir plus the
+	// validation as a local restore) — this exercises DownloadFiles plus the
 	// full manifest/tip/commit-timestamp consistency checks against real
 	// downloaded data, not just a local round-trip.
 	restoredDir := filepath.Join(t.TempDir(), "restored")

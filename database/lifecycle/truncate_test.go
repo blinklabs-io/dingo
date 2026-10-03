@@ -406,6 +406,26 @@ func TestTruncateRemovesBlocksAndIsIdempotentAtTip(t *testing.T) {
 	require.Zero(t, blocksRemoved)
 }
 
+// A truncate can remove blocks the history-expiry cursor already passed, so
+// the cursor must not survive it.
+func TestTruncateClearsHistoryExpiryCursor(t *testing.T) {
+	t.Parallel()
+
+	f := buildTestChain(t, 5)
+	require.NoError(t, f.db.SetSyncState(
+		database.HistoryExpiryCursorSyncKey, "4", nil,
+	))
+
+	_, err := lifecycle.Truncate(
+		context.Background(), f.db, f.blocks[2], 0, false, 0,
+	)
+	require.NoError(t, err)
+
+	got, err := f.db.GetSyncState(database.HistoryExpiryCursorSyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, got)
+}
+
 // TestTruncateRemovesBlobTailAheadOfMetadataTip reproduces the live truncate
 // state where blockfetch has persisted blocks beyond the last block applied to
 // ledger metadata. The operator target can equal the metadata tip while the

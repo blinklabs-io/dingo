@@ -627,6 +627,12 @@ type Config struct {
 	// BarkOperatorCertificateFingerprints match. Also requires
 	// TlsCertFilePath/TlsKeyFilePath to be set.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
+	// BarkArchiveMaxConcurrentFetches bounds how many ArchiveService
+	// FetchBlock requests Bark serves at once; a request over the limit is
+	// refused rather than queued. ArchiveService takes no client credentials,
+	// so this is what bounds the storage work an anonymous caller can cause.
+	// Zero selects Bark's default (16); a negative value is rejected.
+	BarkArchiveMaxConcurrentFetches int `yaml:"barkArchiveMaxConcurrentFetches"     envconfig:"DINGO_BARK_ARCHIVE_MAX_CONCURRENT_FETCHES"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
 	// for destructive DatabaseService RPCs. Every DatabaseService caller must
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
@@ -1222,6 +1228,14 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotTrustKeyFile is the path to a file holding the shared secret
+	// that authenticates snapshot manifests. When set, every snapshot's
+	// manifest is signed with it and a restore refuses a manifest that does
+	// not verify, so a writer to the cloud destination cannot substitute
+	// payloads. Without it a manifest is only checked against its own
+	// unkeyed checksum. Every node that restores another's snapshots must
+	// hold the same secret.
+	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 }
 
 var configMu sync.RWMutex

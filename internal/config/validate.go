@@ -440,6 +440,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, err)
 	}
 
+	if c.BarkArchiveMaxConcurrentFetches < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid barkArchiveMaxConcurrentFetches %d: must not be negative",
+			c.BarkArchiveMaxConcurrentFetches,
+		))
+	}
+
 	// Bark's DatabaseService is mounted whenever bark is enabled with a snapshot
 	// directory configured. Every method must authenticate its caller, and its
 	// destructive methods additionally require explicit operator authorization.

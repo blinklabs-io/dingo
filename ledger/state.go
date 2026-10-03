@@ -11840,6 +11840,53 @@ func (ls *LedgerState) GetCurrentPParams() lcommon.ProtocolParameters {
 	return ls.loadConsensusSnapshot().currentPParams
 }
 
+// blockFramingAllowance covers the CBOR array headers around a block's header
+// and body sections, which the protocol's header and body size limits do not
+// count.
+const blockFramingAllowance = 64
+
+// MaxBlockSize returns the largest serialized block this chain admits for a
+// stored block of any era: persisted and current header/body limits plus framing,
+// or the Byron genesis block size limit when that is larger. A stored block
+// was admitted under its own era's limits, and Byron main and epoch boundary
+// blocks are bounded by the genesis maxBlockSize rather than the much smaller
+// Shelley-family limits, so the current limits alone would refuse Byron
+// history. It returns 0 when neither limit is known, which callers treat as
+// unknown.
+func (ls *LedgerState) MaxBlockSize() uint64 {
+	var size uint64
+	if limits, ok := protocolBlockLimits(ls.GetCurrentPParams()); ok {
+		size = limits.maxHeaderSize + limits.maxBodySize + blockFramingAllowance
+	}
+	if ls.db != nil {
+		for _, era := range ls.eraList() {
+			if era.DecodePParamsFunc == nil {
+				continue
+			}
+			rows, err := ls.db.Metadata().ListPParamsForEra(era.Id, nil)
+			if err != nil {
+				return 0
+			}
+			for _, row := range rows {
+				params, err := era.DecodePParamsFunc(row.Cbor)
+				if err != nil {
+					return 0
+				}
+				if limits, ok := protocolBlockLimits(params); ok {
+					size = max(size, limits.maxHeaderSize+limits.maxBodySize+blockFramingAllowance)
+				}
+			}
+		}
+	}
+	if nodeConfig := ls.config.CardanoNodeConfig; nodeConfig != nil {
+		if genesis := nodeConfig.ByronGenesis(); genesis != nil &&
+			genesis.BlockVersionData.MaxBlockSize > 0 {
+			size = max(size, uint64(genesis.BlockVersionData.MaxBlockSize))
+		}
+	}
+	return size
+}
+
 // PlutusEvalContextCache returns the shared PlutusEvalContextCache script
 // evaluation reuses across every redeemer, transaction, and block this
 // LedgerState validates or evaluates. Returns nil for a bare-constructed

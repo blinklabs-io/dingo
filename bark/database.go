@@ -945,6 +945,7 @@ func verifySnapshotIntegrity(
 	registry *lifecycle.DestinationRegistry,
 	snapshotDir string,
 	storageConfig lifecycle.RestoreStorageConfig,
+	manifestOpts []lifecycle.ManifestOption,
 ) error {
 	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
 	if err != nil {
@@ -961,6 +962,7 @@ func verifySnapshotIntegrity(
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if _, err := lifecycle.Restore(
 		ctx, host, registry, snapshotDir, tempDir, storageConfig,
+		manifestOpts...,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
@@ -989,6 +991,11 @@ func (h *databaseServiceHandler) VerifySnapshot(
 		h.finishOperation()
 		return nil, err
 	}
+	manifestOpts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		h.finishOperation()
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	op, opCtx := h.registerOperation(
 		databasev1alpha1.OperationType_OPERATION_TYPE_VERIFY,
 	)
@@ -1002,6 +1009,7 @@ func (h *databaseServiceHandler) VerifySnapshot(
 				h.bark.config.DestinationRegistry,
 				source,
 				h.bark.config.Lifecycle.RestoreStorageConfig(),
+				manifestOpts,
 			)
 		}), 0)
 	}()

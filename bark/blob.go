@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -42,11 +43,12 @@ import (
 // per-item expired-history resolution.
 const archiveFetchTimeout = 20 * time.Second
 
-// maxArchiveBlockSize caps archive download responses to guard against
-// memory exhaustion from a malicious or misconfigured archive service.
+// defaultMaxArchiveBlockSize caps archive download responses to guard against
+// memory exhaustion from a malicious or misconfigured archive service when no
+// protocol-derived limit is available.
 // 128 KiB covers the current Cardano max block body size (~90 KiB) plus
 // header/CBOR overhead while keeping malicious archive responses small.
-const maxArchiveBlockSize = 128 * 1024
+const defaultMaxArchiveBlockSize = 128 * 1024
 
 // validateArchiveURL rejects download URLs that could enable SSRF, credential
 // leakage, or TLS-downgrade attacks.
@@ -122,6 +124,11 @@ type BlobStoreBarkConfig struct {
 	BaseUrl                   string
 	HTTPClient                *http.Client
 	BlockDownloadAllowedHosts []string
+	// MaxBlockSize reports the largest block, in bytes, an archive download may
+	// carry. It is read on every download, so a limit that follows the live
+	// protocol parameters stays current. A nil func, or a zero result, selects
+	// the default cap.
+	MaxBlockSize func() uint64
 }
 
 type BlobStoreBark struct {
@@ -155,6 +162,17 @@ func NewBarkBlobStore(
 		),
 		upstream: upstream,
 	}, nil
+}
+
+// maxBlockSize returns the largest archive download to accept.
+func (b *BlobStoreBark) maxBlockSize() int64 {
+	if b.config.MaxBlockSize != nil {
+		if limit := b.config.MaxBlockSize(); limit > 0 &&
+			limit <= math.MaxInt64-1 {
+			return int64(limit)
+		}
+	}
+	return defaultMaxArchiveBlockSize
 }
 
 func (b *BlobStoreBark) Close() error {
@@ -492,18 +510,15 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 				blockResp.StatusCode)
 	}
 
-	lr := io.LimitReader(blockResp.Body, maxArchiveBlockSize+1)
-	blockBody, err := io.ReadAll(lr)
+	limit := b.maxBlockSize()
+	blockBody, err := io.ReadAll(io.LimitReader(blockResp.Body, limit+1))
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed reading block body: %w", err)
 	}
-	if int64(len(blockBody)) > maxArchiveBlockSize {
+	if int64(len(blockBody)) > limit {
 		return nil, types.BlockMetadata{},
-			fmt.Errorf(
-				"bark: archive response exceeds %d-byte limit",
-				maxArchiveBlockSize,
-			)
+			fmt.Errorf("bark: archive response exceeds %d-byte limit", limit)
 	}
 
 	archivePrevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())

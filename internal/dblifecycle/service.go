@@ -178,6 +178,10 @@ func (s *Service) Snapshot(
 		return lifecycle.Manifest{}, err
 	}
 	defer db.Close(ctx)
+	manifestOpts, err := s.ManifestOptions()
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,
@@ -190,6 +194,7 @@ func (s *Service) Snapshot(
 		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		manifestOpts...,
 	)
 }
 
@@ -225,6 +230,10 @@ func (s *Service) Restore(
 		)
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
+	manifestOpts, err := s.ManifestOptions()
+	if err != nil {
+		return lifecycle.Manifest{}, err
+	}
 	manifest, err := lifecycle.RestoreValidated(
 		ctx,
 		host,
@@ -247,11 +256,22 @@ func (s *Service) Restore(
 			return nil
 		},
 		s.RestoreStorageConfig(),
+		manifestOpts...,
 	)
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// ManifestOptions returns the manifest options this Service's configuration
+// selects, for a caller that snapshots or restores through database/lifecycle
+// directly against the same configuration.
+func (s *Service) ManifestOptions() ([]lifecycle.ManifestOption, error) {
+	if s == nil || s.cfg == nil {
+		return nil, nil
+	}
+	return ManifestOptions(s.cfg.DatabaseLifecycle)
 }
 
 // RestoreStorageConfig is the restore-time storage configuration this

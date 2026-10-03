@@ -830,6 +830,12 @@ func finishPendingTruncate(
 				err,
 			)
 		}
+		if err := db.DeleteSyncState(
+			database.HistoryExpiryCursorSyncKey,
+			txn,
+		); err != nil {
+			return fmt.Errorf("clear history expiry cursor: %w", err)
+		}
 		if err := db.DeleteSyncState(pendingTruncateSyncKey, txn); err != nil {
 			return fmt.Errorf("clear pending truncate marker: %w", err)
 		}

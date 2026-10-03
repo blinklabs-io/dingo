@@ -461,7 +461,11 @@ func (m *Manager) handleEpochTransition(
 		}
 		return nil
 	}
-	_, err := lifecycle.SnapshotToCloud(
+	manifestOpts, err := ManifestOptions(m.cfg)
+	if err != nil {
+		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
+	}
+	_, err = lifecycle.SnapshotToCloud(
 		ctx,
 		m.destinationRegistry,
 		m.db,
@@ -473,6 +477,7 @@ func (m *Manager) handleEpochTransition(
 		m.effectiveCloudDestination(),
 		"",
 		"",
+		manifestOpts...,
 	)
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
