@@ -175,6 +175,13 @@ type ChainSelectorConfig struct {
 	// zero value) is replaced with defaultSwitchBackCooldown by
 	// NewChainSelector, matching EvaluationInterval and StaleTipThreshold.
 	SwitchBackCooldown time.Duration
+	// OnGenesisDensityDisconnect is called, outside the selector lock, once
+	// per peer the Genesis Density Disconnector finds provably sparser than
+	// another candidate chain. The composition layer disconnects and denies
+	// the peer. The disconnector is inactive while this is nil or outside
+	// Genesis mode. Evaluation runs at most once per
+	// GenesisDensityEvaluationInterval.
+	OnGenesisDensityDisconnect func(GenesisDensityDisconnect)
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
@@ -243,6 +250,13 @@ type ChainSelector struct {
 	// written under mutex. See switchBackDebouncedLocked and
 	// recordSwitchAwayLocked.
 	lastDiscretionarySwitchAt time.Time
+
+	// lastGenesisDensityEval is when the Genesis Density Disconnector last
+	// ran; genesisDensityDisconnected holds peers already reported so a peer
+	// whose connection has not yet closed is not reported on every pass.
+	// Pruned in deletePeerLocked. Guarded by mutex.
+	lastGenesisDensityEval     time.Time
+	genesisDensityDisconnected map[ouroboros.ConnectionId]struct{}
 
 	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
 	// persistently uncorroborated fast source does not emit an event on every
@@ -1020,6 +1034,7 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 	delete(cs.priority, connId)
 	delete(cs.recentlyLeft, connId)
 	delete(cs.farTipClaims, connId)
+	delete(cs.genesisDensityDisconnected, connId)
 }
 
 // RemovePeer removes a peer from tracking.
@@ -2287,15 +2302,20 @@ func (cs *ChainSelector) EvaluateAndSwitch() bool {
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	var corroborationEvent *event.Event
+	var sparse []GenesisDensityDisconnect
 	switchOccurred := false
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
+		sparse = cs.genesisDensityDisconnectsLocked()
 	}()
 
 	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
+	for _, d := range sparse {
+		cs.config.OnGenesisDensityDisconnect(d)
+	}
 	return switchOccurred
 }
 

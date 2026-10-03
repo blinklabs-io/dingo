@@ -2027,7 +2027,8 @@ func (n *Node) buildChainSelectorConfig(
 			}
 			return n.chainsyncState.BlockfetchLatency(connId)
 		},
-		OnRollbackRegistration: n.recordRollbackRegistration,
+		OnRollbackRegistration:     n.recordRollbackRegistration,
+		OnGenesisDensityDisconnect: n.onGenesisDensityDisconnect,
 	}
 }
 

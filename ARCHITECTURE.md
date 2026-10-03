@@ -4741,6 +4741,39 @@ Eagerness and the Genesis Density Disconnector need to find the intersection
 across candidate fragments and compare per-candidate density there; neither is
 implemented by this type.
 
+**Genesis Density Disconnector** (`chainselection/density_disconnector.go`)
+disconnects peers whose candidate chain is provably sparser than another
+candidate's. It runs only in Genesis mode, from `EvaluateAndSwitch`, at most
+once per `GenesisDensityEvaluationInterval` (one second, as upstream's
+`gcfGDDRateLimit`), because the pairwise comparison is quadratic in the number
+of tracked peers. For each ordered pair of live, eligible, non-stale
+candidates it takes the `CandidateFragment.Intersect` of the two fragments and
+counts blocks in `(intersection, intersection + window]`, where the window is
+the Genesis window (`3k/f`). Peer B is disconnected when the blocks peer A has
+delivered in that window exceed the most B can still have there: B's delivered
+blocks plus every slot between B's head and the window end, unless B's head
+already reached the window end. A peer whose window is incomplete can still be
+disconnected, but only when the rival's delivered blocks exceed that upper
+bound. A peer that has delivered up to its advertised tip is treated the same
+way, not as complete: that tip can still advance, so an honest peer at its own
+tip on a short fork keeps the trailing slots in its upper bound. Fragments retain at most k+1 headers and the
+intersection must lie in both, so the dominating peer contributes at most k
+blocks; a sparse peer with k or more blocks in its window is not detected.
+Pairs with no shared point in the retained fragments, and pairs
+where either peer is a prefix of the other (a peer that is only behind), are
+not decidable and never trigger a disconnect. A peer is reported once, and
+reported peers stop counting as rivals, including peers reported earlier in
+the same pass, so the last remaining candidate is never disconnected even when
+pairwise density comparisons, each taken at its own intersection, form a
+cycle. The selector hands each peer to
+`ChainSelectorConfig.OnGenesisDensityDisconnect`; the node adds the peer's
+remote address to peer governance's deny list for ten minutes (`DenyPeer`),
+closes the connection if it is still open, logs whether the deny was applied,
+and counts the report in `dingo_chainselection_gdd_disconnects_total`, whether
+or not a connection was left to close.
+The disconnector does not implement the Limit on Eagerness; it only removes
+sparse peers from the candidate set that cap is measured across.
+
 The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
 local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
 quickly but are not themselves trustworthy — is that the densest/longest source

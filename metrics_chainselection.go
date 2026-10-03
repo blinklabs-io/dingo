@@ -15,6 +15,8 @@
 package dingo
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -37,6 +39,7 @@ const (
 type chainSelectionMetrics struct {
 	stalls                *prometheus.CounterVec
 	rollbackRegistrations *prometheus.CounterVec
+	gddDisconnects        prometheus.Counter
 }
 
 // registerChainSelectionMetrics registers the chain-selection counters. It runs
@@ -69,6 +72,10 @@ func (n *Node) registerChainSelectionMetrics() {
 			[]string{"outcome"},
 		),
 	}
+	metrics.gddDisconnects = factory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_chainselection_gdd_disconnects_total",
+		Help: "peers the Genesis Density Disconnector reported for serving a provably sparser chain, counted whether or not the connection was still open to close",
+	})
 	for _, reason := range []string{
 		chainSelectionStallNoSelectablePeer,
 		chainSelectionStallGenesisCorroboration,
@@ -110,4 +117,47 @@ func (n *Node) recordRollbackRegistration(
 	n.chainSelectionMetrics.rollbackRegistrations.
 		WithLabelValues(string(outcome)).
 		Inc()
+}
+
+// genesisDensityDenyDuration bounds how long a peer disconnected for serving a
+// provably sparser chain stays on the deny list. Density is measured against
+// the current candidates, so the denial is temporary rather than permanent.
+const genesisDensityDenyDuration = 10 * time.Minute
+
+// onGenesisDensityDisconnect acts on a peer the Genesis Density Disconnector
+// found provably sparser: it counts the report, denies the peer for
+// genesisDensityDenyDuration when its connection ID carries a remote address,
+// and closes its connection if it is still open.
+func (n *Node) onGenesisDensityDisconnect(
+	d chainselection.GenesisDensityDisconnect,
+) {
+	if n.chainSelectionMetrics != nil {
+		n.chainSelectionMetrics.gddDisconnects.Inc()
+	}
+	// A connection ID without a remote address cannot be denied, so the log
+	// reports whether the deny happened rather than implying it.
+	denied := n.peerGov != nil && d.ConnectionId.RemoteAddr != nil
+	n.config.logger.Warn(
+		"disconnecting peer serving a provably sparser chain",
+		"connection_id", d.ConnectionId.String(),
+		"dominating_connection_id", d.DominatingConnectionId.String(),
+		"intersection_slot", d.Intersection.Slot,
+		"genesis_window_slots", d.WindowSlots,
+		"dominating_density", d.DominatingDensity,
+		"max_density", d.MaxDensity,
+		"denied", denied,
+		"deny_duration", genesisDensityDenyDuration,
+	)
+	if denied {
+		n.peerGov.DenyPeer(
+			d.ConnectionId.RemoteAddr.String(),
+			genesisDensityDenyDuration,
+		)
+	}
+	if n.connManager == nil {
+		return
+	}
+	if conn := n.connManager.GetConnectionById(d.ConnectionId); conn != nil {
+		conn.Close()
+	}
 }
