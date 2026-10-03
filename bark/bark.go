@@ -95,7 +95,11 @@ func (m *lifecycleMutex) init() {
 	)
 }
 
-func (m *lifecycleMutex) Lock() { m.init(); <-m.token }
+func (m *lifecycleMutex) Lock() {
+	m.init()
+	<-m.token
+}
+
 func (m *lifecycleMutex) TryLock() bool {
 	m.init()
 	select {
@@ -105,6 +109,7 @@ func (m *lifecycleMutex) TryLock() bool {
 		return false
 	}
 }
+
 func (m *lifecycleMutex) Unlock() {
 	m.init()
 	select {
@@ -113,6 +118,7 @@ func (m *lifecycleMutex) Unlock() {
 		panic("unlock of unlocked lifecycleMutex")
 	}
 }
+
 func (m *lifecycleMutex) lockContext(ctx context.Context) error {
 	m.init()
 	select {

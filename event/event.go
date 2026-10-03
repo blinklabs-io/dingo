@@ -1463,7 +1463,6 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 	// A ctx that was already done on entry gives Close no time at all. Allow
 	// the in-flight close a short bounded grace, including when a handler was
 	// still running at the deadline, before declaring the drain abandoned.
-	running := e.runningHandlerTypes()
 	grace := time.NewTimer(closeContextGrace)
 	defer grace.Stop()
 	select {
@@ -1471,7 +1470,7 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 		return nil
 	case <-grace.C:
 	}
-	running = e.runningHandlerTypes()
+	running := e.runningHandlerTypes()
 	select {
 	case <-done:
 		return nil
