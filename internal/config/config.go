@@ -878,6 +878,12 @@ type Config struct {
 	DelegatorInactivityEnabled bool   `yaml:"delegatorInactivityEnabled"             envconfig:"DINGO_DELEGATOR_INACTIVITY_ENABLED"`
 	DelegatorInactivity        uint64 `yaml:"delegatorInactivity"                    envconfig:"DINGO_DELEGATOR_INACTIVITY"`
 
+	// Leios persistence retention (experimental, leios runMode only).
+	// LeiosPersistenceRetentionSlots bounds how far behind the highest
+	// persisted Leios endorser block historical-serving records are kept.
+	// Zero retains all history.
+	LeiosPersistenceRetentionSlots uint64 `yaml:"leiosPersistenceRetentionSlots" envconfig:"DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS"`
+
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a Cardano text-envelope
 	// BLS12-381 vote signing key (or a legacy raw hex scalar). When set on

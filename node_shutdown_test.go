@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -191,6 +192,31 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	// mutually exclusive with calling n.db.Close: its presence is direct
 	// proof the close branch did not run.
 	assert.ErrorContains(t, stopErr, "database close skipped")
+}
+
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
+func TestNodeStopSkipsStorageCloseWhenLeiosPersistenceDrainUnconfirmed(
+	t *testing.T,
+) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	previous := closeOuroborosInstance
+	closeOuroborosInstance = func(*ouroborosPkg.Ouroboros) error {
+		return ouroborosPkg.ErrLeiosPersistDrainUnconfirmed
+	}
+	t.Cleanup(func() { closeOuroborosInstance = previous })
+
+	stopErr := n.Stop()
+	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
+	require.ErrorContains(
+		t, stopErr,
+		"database close skipped: storage-user drain unconfirmed",
+	)
+	_, err := n.db.GetTip(nil)
+	require.NoError(
+		t, err,
+		"database must remain usable after an unconfirmed Leios worker drain",
+	)
+	require.NoError(t, n.ouroboros().Close())
 }
 
 // shutdownTestResourceLogHandler counts closeWithShutdownTimeout's log records

@@ -193,12 +193,12 @@ var componentStopsForQuiesce = (*Node).quiesceComponentStops
 // decision.
 //
 // An unfinished wait escalates to errStorageDrainUnconfirmed rather than being
-// reported as an ordinary failure, matching connManager.Stop, the leios
-// persist writer's drain, and the storage providers below. The distinction is
-// what the caller does next: a component that reports a failure has stopped,
-// while one that never returned may still be reading or writing n.db, so
-// Restore/Truncate must abandon the operation and force a supervised restart
-// instead of reopening storage underneath it.
+// reported as an ordinary failure, matching connManager.Stop, the Leios
+// persistence/GC worker drain, and the storage providers below. The
+// distinction is what the caller does next: a component reporting a failure
+// has stopped. A stop that has not returned may still be reading or writing
+// n.db. Restore/Truncate must abandon the operation and force a supervised
+// restart instead of reopening storage underneath it.
 //
 // The abandoned goroutine is deliberately left running. It cannot be
 // interrupted from here, and the escalation brings the process down anyway, so
@@ -1798,12 +1798,12 @@ var errRestoreSwapUnrecoverable = errors.New(
 // closeStorageForLiveLifecycleOp failure where a background goroutine could
 // not be confirmed to have exited before its bounded wait timed out —
 // currently n.ledgerState.Close()'s rollback-event/dbWorkerPool waits, the
-// leios persist writer's drain (PauseLeiosPersistWriterForLiveLifecycleOp),
-// or a storage provider whose context-bounded Stop returned before its cleanup
-// completed. Unlike every other error
-// these functions can return, this one means a goroutine may still be
-// reading/writing n.db, not merely that some cleanup step reported failure
-// after the resource was already unused. Restore/Truncate must not treat
+// Leios persistence/GC worker drain
+// (PauseLeiosPersistWriterForLiveLifecycleOp), or a storage provider whose
+// context-bounded Stop returned before its cleanup completed. Unlike every
+// other error these functions can return, this one means a goroutine may
+// still be reading/writing n.db; other errors may only report cleanup failure
+// after a resource is already unused. Restore/Truncate must not treat
 // this the way they treat every other quiesce/close-storage error (attempt
 // reinitializeAndResume against the same on-disk data): reopening storage a
 // still-running goroutine may be touching is exactly the use-after-close

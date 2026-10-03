@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -110,14 +111,28 @@ func (d *Database) GetLeiosEBManifest(
 //
 // COST. The full prefix scan is inherent, not an oversight: the current key
 // layout is "em"+hash+slot, so keys sort by hash and no bounded reverse seek
-// can find the maximum slot. The scan runs synchronously from newOuroboros at
-// startup. On badger it is key-only -- the iterator options leave
-// PrefetchValues false and only the legacy branch copies a value -- while on
-// the S3 and GCS blob plugins the same call is a paginated object listing
-// over the whole prefix, with no deadline on the startup path. Ordering the
-// keys by slot, or maintaining the maximum as its own record, is what would
-// make it bounded.
+// can find the maximum slot. It runs at startup to restore the watermark and
+// hourly when GC computes its cutoff. On Badger it is key-only -- iterator
+// options leave PrefetchValues false and only the legacy branch copies a
+// value -- while S3 and GCS perform a paginated listing over the prefix.
+// Ordering keys by slot or maintaining the maximum as its own record would
+// make the scan bounded.
 func (d *Database) MaxLeiosEBSlot() (uint64, error) {
+	return d.MaxLeiosEBSlotContext(context.Background())
+}
+
+// MaxLeiosEBSlotContext is MaxLeiosEBSlot with cancellation checks between
+// records. Blob iterator operations themselves are controlled by the selected
+// provider, but a canceled caller will not continue scanning later records.
+func (d *Database) MaxLeiosEBSlotContext(
+	ctx context.Context,
+) (uint64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	txn := d.BlobTxn(false)
 	defer txn.Rollback() //nolint:errcheck
 	blob := txn.BlobStore()
@@ -138,6 +153,9 @@ func (d *Database) MaxLeiosEBSlot() (uint64, error) {
 
 	var maxSlot uint64
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		item := it.Item()
 		if item == nil {
 			continue
@@ -308,4 +326,199 @@ func (d *Database) SetLeiosEB(
 		return fmt.Errorf("SetLeiosEB: commit: %w", err)
 	}
 	return nil
+}
+
+// Cloud blob transactions spool every prior object value before applying
+// deletes so they can compensate a partial commit. The BlobItem interface
+// does not expose value sizes; keeping one delete per transaction bounds that
+// spool to one object without downloading every value just to measure it.
+const leiosEBPruneBatchSize = 1
+
+// PruneLeiosEBBeforeSlot removes persisted Leios manifests and transaction
+// lists strictly older than beforeSlot. The caller chooses the retention
+// frontier; this method does not infer one from chain state.
+//
+// It scans the shared "e" prefix once because the manifest and transaction
+// prefixes are adjacent. Deletes commit in blob-only transactions containing
+// at most one key. Cloud stores spool prior object values for compensation, so
+// this avoids aggregating many large values into one local spool. Repeating the
+// same call is safe after a partial cloud commit. The returned count includes
+// only keys from fully committed transactions; on error it is a lower bound.
+func (d *Database) PruneLeiosEBBeforeSlot(
+	ctx context.Context,
+	beforeSlot uint64,
+) (int, error) {
+	if beforeSlot == 0 {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	readTxn := d.BlobTxn(false)
+	defer readTxn.Release()
+	blob := readTxn.BlobStore()
+	if blob == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	blobTxn := readTxn.Blob()
+	if blobTxn == nil {
+		return 0, types.ErrNilTxn
+	}
+
+	// Listing one byte of prefix lets cloud stores stream em and et in one
+	// ordered object listing. Filter the exact two-byte prefixes below.
+	iteratorPrefix := []byte(types.LeiosEBManifestKeyPrefix[:1])
+	it := blob.NewIterator(
+		blobTxn,
+		types.BlobIteratorOptions{Prefix: iteratorPrefix},
+	)
+	if it == nil {
+		return 0, types.ErrBlobStoreUnavailable
+	}
+	defer it.Close()
+
+	var (
+		deleteKeys    [][]byte
+		deletedKeyCnt int
+	)
+	flush := func() error {
+		if len(deleteKeys) == 0 {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Keep writes on the store pinned by readTxn. SetBlobStore may replace
+		// the installed store while an operation is running; re-pinning here
+		// could otherwise list one store and delete matching keys in another.
+		writeTxn := &Txn{
+			db:        d,
+			blobStore: blob,
+			blobTxn:   blob.NewTransaction(true),
+			readWrite: true,
+		}
+		if writeTxn.blobTxn == nil {
+			return types.ErrNilTxn
+		}
+		batchDeleted := 0
+		if err := writeTxn.Do(func(txn *Txn) error {
+			for _, key := range deleteKeys {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				err := blob.Delete(txn.Blob(), key)
+				if errors.Is(err, types.ErrBlobKeyNotFound) {
+					continue
+				}
+				if err != nil {
+					return fmt.Errorf("prune Leios key %x: %w", key, err)
+				}
+				batchDeleted++
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("prune Leios batch: %w", err)
+		}
+		deletedKeyCnt += batchDeleted
+		deleteKeys = deleteKeys[:0]
+		return nil
+	}
+	stageDelete := func(key []byte) error {
+		deleteKeys = append(deleteKeys, append([]byte(nil), key...))
+		if len(deleteKeys) >= leiosEBPruneBatchSize {
+			return flush()
+		}
+		return nil
+	}
+
+	it.Seek(iteratorPrefix)
+	for ; it.ValidForPrefix(iteratorPrefix); it.Next() {
+		if err := ctx.Err(); err != nil {
+			return deletedKeyCnt, err
+		}
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if len(key) < 2 {
+			continue
+		}
+		switch string(key[:2]) {
+		case types.LeiosEBManifestKeyPrefix:
+			switch len(key) {
+			case len(types.LeiosEBManifestKeyPrefix) + 32 + 8:
+				slot := binary.BigEndian.Uint64(key[len(key)-8:])
+				if slot >= beforeSlot {
+					continue
+				}
+				if err := stageDelete(key); err != nil {
+					return deletedKeyCnt, err
+				}
+			case len(types.LeiosEBManifestKeyPrefix) + 32:
+				value, err := item.ValueCopy(nil)
+				if err != nil {
+					return deletedKeyCnt, fmt.Errorf(
+						"read legacy Leios manifest: %w",
+						err,
+					)
+				}
+				if len(value) < 8 ||
+					binary.BigEndian.Uint64(value[:8]) >= beforeSlot {
+					continue
+				}
+				if err := stageDelete(key); err != nil {
+					return deletedKeyCnt, err
+				}
+			}
+		case types.LeiosEBTxsKeyPrefix:
+			// Transaction keys are handled here, including their paired
+			// manifests above, so each key is staged and counted only once.
+			switch len(key) {
+			case len(types.LeiosEBTxsKeyPrefix) + 32 + 8:
+				slot := binary.BigEndian.Uint64(key[len(key)-8:])
+				if slot < beforeSlot {
+					if err := stageDelete(key); err != nil {
+						return deletedKeyCnt, err
+					}
+				}
+			case len(types.LeiosEBTxsKeyPrefix) + 32:
+				hash := key[len(types.LeiosEBTxsKeyPrefix):]
+				manifest, err := blob.Get(
+					blobTxn,
+					types.LegacyLeiosEBManifestKey(hash),
+				)
+				switch {
+				case errors.Is(err, types.ErrBlobKeyNotFound):
+					// No legacy manifest can name these bodies, so they are
+					// orphaned and safe to remove.
+				case err != nil:
+					return deletedKeyCnt, fmt.Errorf(
+						"read legacy Leios manifest for transaction list: %w",
+						err,
+					)
+				case len(manifest) < 8:
+					// The slot cannot be established, so preserve the bodies
+					// alongside the malformed manifest.
+					continue
+				case binary.BigEndian.Uint64(manifest[:8]) >= beforeSlot:
+					continue
+				}
+				if err := stageDelete(key); err != nil {
+					return deletedKeyCnt, err
+				}
+			}
+		}
+	}
+	if err := it.Err(); err != nil {
+		return deletedKeyCnt, fmt.Errorf("prune Leios records: iterator: %w", err)
+	}
+	if err := flush(); err != nil {
+		return deletedKeyCnt, err
+	}
+	return deletedKeyCnt, nil
 }

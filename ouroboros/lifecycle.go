@@ -122,7 +122,7 @@ func (o *Ouroboros) subscribeTracked(
 
 // Close releases everything this Ouroboros owns that outlives it: EventBus
 // subscriptions, Prometheus collectors, and the background Leios
-// endorser-block persistence writer.
+// endorser-block persistence and optional GC workers.
 //
 // It exists because Ouroboros takes its dependencies at construction and so
 // cannot be retained across a live snapshot/restore. That operation discards
@@ -132,9 +132,23 @@ func (o *Ouroboros) subscribeTracked(
 // Without this, each restore would leave stale handlers permanently attached
 // and the replacement's metric registration would panic on duplicates.
 //
-// Close is idempotent, so Run()'s deferred shutdown and an explicit
-// live-restore teardown can both call it.
+// Close is idempotent, so node shutdown and an explicit live-restore teardown
+// can both call it.
 func (o *Ouroboros) Close() error {
+	return o.close()
+}
+
+func (o *Ouroboros) close() error {
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+
+	// Serialize closure against lazy worker startup and queue admission. A
+	// callback that passed this gate before Close may still finish cloning, but
+	// reserve/install reject it after closure; no worker can start afterward.
+	o.leiosPersistMu.Lock()
+	o.leiosPersistClosed = true
+	o.leiosPersistMu.Unlock()
+
 	o.leiosValidationMu.Lock()
 	o.leiosValidationClosed = true
 	if o.leiosValidationCancel != nil {
@@ -160,7 +174,10 @@ func (o *Ouroboros) Close() error {
 			o.eventBus.UnsubscribeAndWait(sub.eventType, sub.id)
 		}
 	}
-	o.StopLeiosPersistWriter()
+	var closeErr error
+	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
+		closeErr = ErrLeiosPersistDrainUnconfirmed
+	}
 	o.registerer.unregisterAll()
-	return nil
+	return closeErr
 }

@@ -2204,6 +2204,27 @@ because neither representation is inlined into the other.
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
 | `nodesettings/storeid` | Opaque `uuid.NewString()` bytes, minted on first use and never overwritten thereafter | This blob store's identity for the `blob_store_id` node settings gate (`Database.blobStoreID`), compared only for equality against the value latched in `node_settings_gate` |
 
+Leios historical-serving persistence is kept indefinitely by default. A positive
+`leiosPersistenceRetentionSlots` setting (environment variable
+`DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) opts into pruning records older than
+`max persisted Leios EB slot - retention slots`; the cutoff slot itself is
+retained. The asynchronous GC scans the shared `e` prefix, deletes `em` and
+`et` keys one per transaction, and runs after startup restores the Leios slot
+watermark and then hourly. It also removes legacy hash-only records when their
+embedded slot is older than the cutoff, plus unpaired legacy transaction
+records. A legacy manifest shorter than its 8-byte slot prefix has no
+trustworthy slot, so it and its paired transaction record are preserved.
+Pruning is idempotent across partial cloud-store commits. These keys support
+historical serving after the in-memory cache expires and the Ouroboros
+provider's cache-miss reload path. The GC does not delete ordinary ledger
+blocks, UTxOs, or already-applied Leios effects. A
+later rollback/replay that needs a pruned endorser block must refetch it from a
+Leios peer; downstream requests outside the configured window have the same
+peer dependency. Hourly sweeps list manifests to find the highest persisted
+slot, then list the shared Leios prefix to select deletion candidates. On S3
+and GCS this means two paginated listings plus per-key delete requests, so
+retention remains opt-in.
+
 `Database.BlockPointByIndex` resolves a `bi` entry by parsing its `bp` value
 directly into the canonical slot and hash. It deliberately does not load the
 referenced block CBOR or metadata; ledger primary-chain membership checks use

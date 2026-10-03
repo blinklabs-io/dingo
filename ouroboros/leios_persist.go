@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"sync"
@@ -69,15 +70,13 @@ var leiosPersistMaxQueueBytes = 256 << 20 // 256 MiB
 // real multi-second timeout.
 var leiosPersistShutdownDrainTimeout = 5 * time.Second
 
-// ErrLeiosPersistDrainUnconfirmed is returned by
-// PauseLeiosPersistWriterForLiveLifecycleOp when its bounded wait gave up
-// before confirming the writer goroutine actually exited. Unlike a normal
-// permanent StopLeiosPersistWriter timeout (best-effort, the process is
-// exiting anyway), a live restore/truncate's caller must not treat this as
-// safe to proceed: the old writer may still be running drainLeiosPersist
-// against the about-to-close database and the shared pending map.
+const leiosPersistGCInterval = time.Hour
+
+// ErrLeiosPersistDrainUnconfirmed is returned when a bounded wait gives up
+// before confirming the persistence writer and GC workers exited. Callers
+// must not close or replace storage while either worker may still use it.
 var ErrLeiosPersistDrainUnconfirmed = errors.New(
-	"leios persist writer drain not confirmed before timeout",
+	"leios persistence worker drain not confirmed before timeout",
 )
 
 // leiosPersistJob is one endorser block queued for best-effort blob-store
@@ -141,7 +140,10 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if o.leiosDatabase() == nil {
 		return
 	}
-	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
+	o.startLeiosPersistenceGC(0, false)
+	if !o.startLeiosPersistWriterIfOpen() {
+		return
+	}
 	// The caller's transaction slices, not a copy: they are only measured
 	// here, and are cloned below if and only if the job is admitted.
 	var txsRaw []cbor.RawMessage
@@ -221,6 +223,9 @@ func (o *Ouroboros) reserveLeiosPersistBytes(
 ) (bool, string) {
 	o.leiosPersistMu.Lock()
 	defer o.leiosPersistMu.Unlock()
+	if o.leiosPersistClosed {
+		return false, ""
+	}
 	// Reject work once the writer is stopping. The shutdown drain runs only
 	// after leiosPersistStop is closed and reads the pending map under this same
 	// mutex; a job added after the drain has emptied the map would be stranded
@@ -288,6 +293,10 @@ func (o *Ouroboros) installLeiosPersistJob(
 	// The in-flight phase ends either way: the bytes are held by the
 	// installed job from here on, or released below.
 	o.leiosPersistReserved--
+	if o.leiosPersistClosed {
+		o.leiosPersistBytes -= job.size
+		return false
+	}
 	select {
 	case <-o.leiosPersistStop:
 		// Stop was signalled while this job was being copied. Installing it
@@ -358,6 +367,153 @@ func (o *Ouroboros) startLeiosPersistWriter() {
 	go o.leiosPersistLoop()
 }
 
+func (o *Ouroboros) startLeiosPersistWriterIfOpen() bool {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	if o.leiosPersistClosed {
+		return false
+	}
+	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
+	return true
+}
+
+// startLeiosPersistenceGC starts the optional pruning worker independently of
+// the persistence writer. initialMaxSlot is supplied after the startup
+// watermark scan so enabling GC does not repeat that full scan immediately.
+func (o *Ouroboros) startLeiosPersistenceGC(
+	initialMaxSlot uint64,
+	initialMaxKnown bool,
+) {
+	if o.config.LeiosPersistenceRetentionSlots == 0 ||
+		o.leiosDatabase() == nil {
+		return
+	}
+	o.leiosPersistGCOnce.Do(func() {
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		o.leiosPersistGCMu.Lock()
+		o.leiosPersistMu.Lock()
+		if o.leiosPersistClosed {
+			o.leiosPersistMu.Unlock()
+			o.leiosPersistGCMu.Unlock()
+			return
+		}
+		o.leiosPersistGCStop = stop
+		o.leiosPersistGCDone = done
+		o.leiosPersistGCStarted.Store(true)
+		o.leiosPersistMu.Unlock()
+		o.leiosPersistGCMu.Unlock()
+		go o.leiosPersistGCLoop(stop, done, initialMaxSlot, initialMaxKnown)
+	})
+}
+
+func (o *Ouroboros) leiosPersistGCLoop(
+	stop <-chan struct{},
+	done chan<- struct{},
+	initialMaxSlot uint64,
+	initialMaxKnown bool,
+) {
+	defer close(done)
+	ctx, cancel := context.WithCancel(context.Background())
+	watcherDone := make(chan struct{})
+	go func() {
+		select {
+		case <-stop:
+			cancel()
+		case <-watcherDone:
+		}
+	}()
+	defer func() {
+		close(watcherDone)
+		cancel()
+	}()
+
+	var initialMax *uint64
+	if initialMaxKnown {
+		initialMax = &initialMaxSlot
+	}
+	o.runLeiosPersistenceGC(ctx, initialMax)
+
+	ticker := time.NewTicker(leiosPersistGCInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			o.runLeiosPersistenceGC(ctx, nil)
+		}
+	}
+}
+
+func (o *Ouroboros) runLeiosPersistenceGC(
+	ctx context.Context,
+	knownMaxSlot *uint64,
+) {
+	retention := o.config.LeiosPersistenceRetentionSlots
+	if retention == 0 || ctx.Err() != nil {
+		return
+	}
+	db := o.leiosDatabase()
+	if db == nil {
+		return
+	}
+	var maxSlot uint64
+	if knownMaxSlot != nil {
+		maxSlot = *knownMaxSlot
+	} else {
+		var err error
+		maxSlot, err = db.MaxLeiosEBSlotContext(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				o.config.Logger.Warn(
+					"failed to scan persisted leios endorser blocks for pruning",
+					"error", err,
+				)
+			}
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	var candidateBeforeSlot uint64
+	if maxSlot > retention {
+		candidateBeforeSlot = maxSlot - retention
+	}
+	// Writers hold this lock for SetLeiosEB. Publishing the cutoff after the
+	// scan means an in-flight write completes before the sweep, while later
+	// writes below it are rejected. The potentially paginated scan and deletes
+	// stay outside the lock so cloud-store latency cannot stall persistence.
+	o.leiosPersistStoreMu.Lock()
+	if candidateBeforeSlot > o.leiosPersistPruneBeforeSlot {
+		o.leiosPersistPruneBeforeSlot = candidateBeforeSlot
+	}
+	beforeSlot := o.leiosPersistPruneBeforeSlot
+	o.leiosPersistStoreMu.Unlock()
+	if beforeSlot == 0 || ctx.Err() != nil {
+		return
+	}
+	deleted, err := db.PruneLeiosEBBeforeSlot(ctx, beforeSlot)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			o.config.Logger.Warn(
+				"failed to prune persisted leios endorser blocks",
+				"before_slot", beforeSlot,
+				"error", err,
+			)
+		}
+		return
+	}
+	if deleted > 0 {
+		o.config.Logger.Debug(
+			"pruned persisted leios endorser blocks",
+			"before_slot", beforeSlot,
+			"deleted_keys", deleted,
+		)
+	}
+}
+
 func (o *Ouroboros) leiosPersistLoop() {
 	defer close(o.leiosPersistDone)
 	for {
@@ -399,7 +555,14 @@ func (o *Ouroboros) drainLeiosPersist() {
 		if db == nil {
 			continue
 		}
-		if err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw); err != nil {
+		o.leiosPersistStoreMu.Lock()
+		if job.slot < o.leiosPersistPruneBeforeSlot {
+			o.leiosPersistStoreMu.Unlock()
+			continue
+		}
+		err := db.SetLeiosEB(job.slot, job.hash, job.manifestRaw, job.txsRaw)
+		o.leiosPersistStoreMu.Unlock()
+		if err != nil {
 			o.config.Logger.Debug(
 				"failed to persist leios EB to blob store",
 				"component", "network",
@@ -410,56 +573,115 @@ func (o *Ouroboros) drainLeiosPersist() {
 	}
 }
 
-// StopLeiosPersistWriter stops the background persistence writer and waits, up
-// to leiosPersistShutdownDrainTimeout, for it to drain queued writes and exit.
-// Safe to call when the writer never started (no endorser block was ever
-// fetched) and idempotent across multiple calls.
+// StopLeiosPersistWriter stops the background persistence and GC workers,
+// sharing one bounded wait across both. It logs if a worker does not stop in
+// time; callers that must confirm the drain should use Close. Safe when
+// neither worker started and idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {
-	o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout)
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }
 
-// stopLeiosPersistWriter closes the stop channel and waits for the writer to
-// drain and exit, giving up after drainTimeout so a stuck blob store cannot
-// hang graceful shutdown. Split out from StopLeiosPersistWriter so tests can
-// exercise the bounded wait without the production timeout. Returns whether
-// the writer's exit was actually confirmed (false on timeout) so a caller
-// that cannot tolerate an unconfirmed exit -- see
-// PauseLeiosPersistWriterForLiveLifecycleOp -- can react instead of assuming
-// a timeout means the writer is gone.
-func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
+func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	writerDone, writerStarted := o.requestLeiosPersistWriterStop()
+	gcDone, gcStarted := o.requestLeiosPersistenceGCStop()
+	writerStopped := true
+	if writerStarted {
+		writerTimeout := time.Until(deadline)
+		writerStopped = waitForLeiosPersistWorker(
+			writerDone,
+			writerTimeout,
+		)
+		if !writerStopped {
+			o.logLeiosPersistWriterStopTimeout(writerTimeout)
+		}
+	}
+	gcStopped := true
+	if gcStarted {
+		gcTimeout := time.Until(deadline)
+		gcStopped = waitForLeiosPersistWorker(gcDone, gcTimeout)
+		if gcStopped {
+			o.leiosPersistGCStarted.Store(false)
+		} else {
+			o.config.Logger.Warn(
+				"timed out waiting for leios persistence GC to stop",
+				"component", "network",
+				"timeout", gcTimeout,
+			)
+		}
+	}
+	return writerStopped && gcStopped
+}
+
+func (o *Ouroboros) requestLeiosPersistWriterStop() (<-chan struct{}, bool) {
 	if !o.leiosPersistStarted.Load() {
-		return true
+		return nil, false
 	}
 	// Always close the stop channel so the writer observes the stop and exits,
-	// even if we stop waiting for it below.
+	// even if the caller gives up waiting below.
 	o.leiosPersistStopOnce.Do(func() { close(o.leiosPersistStop) })
-	timer := time.NewTimer(drainTimeout)
+	return o.leiosPersistDone, true
+}
+
+func (o *Ouroboros) logLeiosPersistWriterStopTimeout(timeout time.Duration) {
+	// The drain is stuck (likely a slow/unavailable blob store). Abandon the
+	// wait: historical-serving persistence is best-effort and the writer
+	// goroutine will still exit once the store unblocks.
+	o.config.Logger.Warn(
+		"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
+		"component",
+		"network",
+		"timeout",
+		timeout,
+	)
+}
+
+func (o *Ouroboros) requestLeiosPersistenceGCStop() (<-chan struct{}, bool) {
+	if !o.leiosPersistGCStarted.Load() {
+		return nil, false
+	}
+	o.leiosPersistGCMu.Lock()
+	stop := o.leiosPersistGCStop
+	done := o.leiosPersistGCDone
+	o.leiosPersistGCStopOnce.Do(func() { close(stop) })
+	o.leiosPersistGCMu.Unlock()
+	return done, true
+}
+
+func waitForLeiosPersistWorker(done <-chan struct{}, timeout time.Duration) bool {
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	if timeout <= 0 {
+		return false
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-o.leiosPersistDone:
+	case <-done:
 		return true
 	case <-timer.C:
-		// The drain is stuck (likely a slow/unavailable blob store). Abandon the
-		// wait: historical-serving persistence is best-effort and the writer
-		// goroutine will still exit once the store unblocks.
-		o.config.Logger.Warn(
-			"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
-			"component",
-			"network",
-			"timeout",
-			drainTimeout,
-		)
-		return false
+		// The worker can exit as the timer fires. Recheck its completion before
+		// reporting an unconfirmed drain so a ready done channel always wins.
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
 	}
 }
 
 // PauseLeiosPersistWriterForLiveLifecycleOp stops the persistence writer
 // (draining whatever is already queued against the current, about-to-close
-// database) and resets its start-once guard, so a later enqueueLeiosPersist
-// call -- once LedgerState has been reassigned to the reinitialized
-// database after a live Restore/Truncate -- lazily relaunches a fresh
-// writer against the new database, the same way the very first call ever
-// does.
+// database) and the optional GC worker (canceling its current sweep). It
+// resets both start-once guards, so a later enqueueLeiosPersist call -- once
+// LedgerState has been reassigned to the reinitialized database after a live
+// Restore/Truncate -- lazily relaunches fresh workers against the new database.
 //
 // Without this, the writer (once started) ran for the whole Ouroboros
 // object's lifetime, since that object is retained (not rebuilt) across a
@@ -486,22 +708,32 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // practice, not just "shouldn't" by convention.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
-// the drain wait timed out: the old writer goroutine may still be running
-// drainLeiosPersist against the old database and the shared pending map,
-// so resetting leiosPersistOnce here would let the very next enqueue start
-// a second writer against a freshly reset map and channels while the old
-// one is still reading and deleting from that same map (now repointed)
-// under leiosPersistMu — silently stealing jobs meant for the new database
-// and, worse, writing them into the old one via the stale captured db
-// reference. The caller must not proceed to close storage or attempt
-// reinitializeAndResume in that case; it must escalate to a supervised
-// restart instead, the same as errStorageDrainUnconfirmed.
+// either worker misses the shared drain deadline. The writer may still be
+// writing against the old database, or the GC may still be scanning or
+// deleting through its pinned blob store. The caller must not proceed to close
+// or replace storage in that case; it must escalate to a supervised restart,
+// the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
-	if !o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout) {
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+
+	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed
+	}
+	o.leiosPersistMu.Lock()
+	closed := o.leiosPersistClosed
+	o.leiosPersistMu.Unlock()
+	if closed {
+		return nil
 	}
 	o.leiosPersistOnce = sync.Once{}
 	o.leiosPersistStopOnce = sync.Once{}
 	o.leiosPersistStarted.Store(false)
+	o.leiosPersistStoreMu.Lock()
+	o.leiosPersistPruneBeforeSlot = 0
+	o.leiosPersistStoreMu.Unlock()
+	o.leiosPersistGCOnce = sync.Once{}
+	o.leiosPersistGCStopOnce = sync.Once{}
+	o.leiosPersistGCStarted.Store(false)
 	return nil
 }

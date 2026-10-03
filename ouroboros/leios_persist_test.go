@@ -15,10 +15,16 @@
 package ouroboros
 
 import (
+	"bytes"
+	"context"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	databaseTypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -659,6 +665,180 @@ func TestLeiosVerifiedEbSlotRestoredByNewOuroboros(t *testing.T) {
 	require.Equal(t, point.Slot, second.MaxVerifiedEndorserBlockSlot())
 }
 
+func TestLeiosPersistenceGCRetainsConfiguredSlotWindow(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	txs := []cbor.RawMessage{mustCbor(t, "tx")}
+	oldHash := make([]byte, 32)
+	boundaryHash := make([]byte, 32)
+	newHash := make([]byte, 32)
+	oldHash[0], boundaryHash[0], newHash[0] = 1, 2, 3
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 10, hash: oldHash},
+		{slot: 20, hash: boundaryHash},
+		{slot: 30, hash: newHash},
+	} {
+		require.NoError(t, db.SetLeiosEB(
+			record.slot,
+			record.hash,
+			[]byte("manifest"),
+			txs,
+		))
+	}
+
+	o.runLeiosPersistenceGC(context.Background(), nil)
+	_, err := db.GetLeiosEBManifest(oldHash, 10)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+	for _, record := range []struct {
+		slot uint64
+		hash []byte
+	}{
+		{slot: 20, hash: boundaryHash},
+		{slot: 30, hash: newHash},
+	} {
+		_, err := db.GetLeiosEBManifest(record.hash, record.slot)
+		require.NoError(t, err)
+	}
+}
+
+type blockingLeiosManifestScanStore struct {
+	blob.BlobStore
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingLeiosManifestScanStore) NewIterator(
+	txn databaseTypes.Txn,
+	opts databaseTypes.BlobIteratorOptions,
+) databaseTypes.BlobIterator {
+	if bytes.Equal(opts.Prefix, []byte(databaseTypes.LeiosEBManifestKeyPrefix)) {
+		s.once.Do(func() {
+			close(s.started)
+			<-s.release
+		})
+	}
+	return s.BlobStore.NewIterator(txn, opts)
+}
+
+func TestLeiosPersistenceWriterRunsDuringSlowGCScan(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+
+	oldPoint, oldRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
+	require.NoError(t, db.SetLeiosEB(oldPoint.Slot, oldPoint.Hash, oldRaw, nil))
+
+	baseStore := db.Blob()
+	require.NotNil(t, baseStore)
+	releaseScan := make(chan struct{})
+	var releaseScanOnce sync.Once
+	release := func() { releaseScanOnce.Do(func() { close(releaseScan) }) }
+	blockingStore := &blockingLeiosManifestScanStore{
+		BlobStore: baseStore,
+		started:   make(chan struct{}),
+		release:   releaseScan,
+	}
+	db.SetBlobStore(blockingStore)
+	t.Cleanup(func() {
+		release()
+		require.NoError(t, o.Close())
+		_, drain := db.SetBlobStore(baseStore)
+		drain()
+	})
+
+	o.startLeiosPersistenceGC(0, false)
+	select {
+	case <-blockingStore.started:
+	case <-time.After(time.Second):
+		t.Fatal("GC did not begin its max-slot scan")
+	}
+
+	point, blockRaw, data, _ := leiosPersistTestEntry(t, 40, 1, 4)
+	o.enqueueLeiosPersist(point, blockRaw, data)
+	require.Eventually(t, func() bool {
+		_, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+		return err == nil
+	}, time.Second, 10*time.Millisecond,
+		"persistence writer stalled behind the GC's slow scan",
+	)
+}
+
+func TestLeiosPersistenceWriterDoesNotRestorePrunedSlots(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+
+	newerPoint, newerRaw := testLeiosEndorserBlockRawWithRefs(t, 30, 1)
+	require.NoError(t, db.SetLeiosEB(
+		newerPoint.Slot,
+		newerPoint.Hash,
+		newerRaw,
+		nil,
+	))
+	o.runLeiosPersistenceGC(context.Background(), nil)
+
+	point, blockRaw, data, _ := leiosPersistTestEntry(t, 10, 1, 4)
+	o.enqueueLeiosPersist(point, blockRaw, data)
+	require.NoError(t, o.Close())
+
+	_, err := db.GetLeiosEBManifest(point.Hash, point.Slot)
+	require.ErrorIs(t, err, databaseTypes.ErrBlobKeyNotFound)
+}
+
+func TestLeiosPersistenceGCRetriesAfterStartupWatermarkScanFailure(
+	t *testing.T,
+) {
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+
+	db := o.leiosDatabase()
+	require.NotNil(t, db)
+	require.NoError(t, dbtest.CloseDatabase(db))
+	_, err := db.MaxLeiosEBSlot()
+	require.Error(t, err)
+
+	o.restoreLeiosVerifiedEbSlot()
+	require.True(
+		t,
+		o.leiosPersistGCStarted.Load(),
+		"GC must retry its watermark scan after startup restoration fails",
+	)
+}
+
+func TestWaitForLeiosPersistWorkerPrefersCompletedWorkerAtExpiredDeadline(
+	t *testing.T,
+) {
+	done := make(chan struct{})
+	close(done)
+	for range 100 {
+		require.True(t, waitForLeiosPersistWorker(done, 0))
+		require.True(t, waitForLeiosPersistWorker(done, -time.Second))
+	}
+}
+
+func TestLeiosPersistenceGCPausesBeforeLiveDatabaseReplacement(t *testing.T) {
+	t.Parallel()
+
+	o := newTestOuroborosWithLeiosDB(t)
+	o.config.LeiosPersistenceRetentionSlots = 10
+	o.startLeiosPersistenceGC(0, false)
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	require.False(t, o.leiosPersistGCStarted.Load())
+}
+
 // TestLeiosPersistTwoOccurrencesOfSameHashPersistIndependently verifies that
 // durable blob records distinguish occurrences by hash and slot, so
 // when two live occurrences of the same content-addressed hash existed at
@@ -730,11 +910,137 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 	})
 }
 
+// Not t.Parallel: swaps the package-global leiosPersistShutdownDrainTimeout.
+func TestCloseReportsUnconfirmedLeiosPersistenceGCDrain(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+
+	originalTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = originalTimeout })
+
+	o.leiosPersistGCMu.Lock()
+	o.leiosPersistGCStop = make(chan struct{})
+	o.leiosPersistGCDone = make(chan struct{})
+	o.leiosPersistGCMu.Unlock()
+	o.leiosPersistGCStarted.Store(true)
+
+	require.ErrorIs(t, o.Close(), ErrLeiosPersistDrainUnconfirmed)
+	close(o.leiosPersistGCDone)
+	require.NoError(t, o.Close())
+}
+
+func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
+	t.Run("close before first enqueue", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		o.config.LeiosPersistenceRetentionSlots = 100
+		require.NoError(t, o.Close())
+
+		point, blockRaw, data, _ := leiosPersistTestEntry(t, 0, 1, 4)
+		o.enqueueLeiosPersist(point, blockRaw, data)
+
+		require.False(t, o.leiosPersistStarted.Load())
+		require.False(t, o.leiosPersistGCStarted.Load())
+		require.Empty(t, o.leiosPersistPending)
+	})
+
+	t.Run("enqueue admitted before close", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		point, blockRaw, data, _ := leiosPersistTestEntry(t, 1, 1, 4)
+		reserved := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+		o.leiosPersistAfterReserve = func() {
+			close(reserved)
+			<-release
+		}
+
+		enqueueDone := make(chan struct{})
+		go func() {
+			o.enqueueLeiosPersist(point, blockRaw, data)
+			close(enqueueDone)
+		}()
+		select {
+		case <-reserved:
+		case <-time.After(5 * time.Second):
+			t.Fatal("enqueue did not reach its reserved-copy phase")
+		}
+
+		require.NoError(t, o.Close())
+		releaseOnce.Do(func() { close(release) })
+		select {
+		case <-enqueueDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-flight enqueue did not finish after close")
+		}
+
+		o.leiosPersistMu.Lock()
+		defer o.leiosPersistMu.Unlock()
+		require.Empty(t, o.leiosPersistPending)
+		require.Zero(t, o.leiosPersistBytes)
+		require.Zero(t, o.leiosPersistReserved)
+	})
+}
+
+func TestLeiosPersistenceLifecycleOperationsSerialize(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosPersistLifecycleMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			o.leiosPersistLifecycleMu.Unlock()
+		}
+	}()
+
+	start := make(chan struct{})
+	closeReady := make(chan struct{})
+	pauseReady := make(chan struct{})
+	closeDone := make(chan error, 1)
+	pauseDone := make(chan error, 1)
+	go func() {
+		close(closeReady)
+		<-start
+		closeDone <- o.Close()
+	}()
+	go func() {
+		close(pauseReady)
+		<-start
+		pauseDone <- o.PauseLeiosPersistWriterForLiveLifecycleOp()
+	}()
+	<-closeReady
+	<-pauseReady
+	close(start)
+	runtime.Gosched()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close bypassed the persistence lifecycle lock: %v", err)
+	case err := <-pauseDone:
+		t.Fatalf("Pause bypassed the persistence lifecycle lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	o.leiosPersistLifecycleMu.Unlock()
+	locked = false
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after the persistence lifecycle lock was released")
+	}
+	select {
+	case err := <-pauseDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pause did not finish after the persistence lifecycle lock was released")
+	}
+}
+
 // TestLeiosPersistStopDrainTimesOut verifies that the shutdown drain wait is
 // bounded: if the writer's drain is stuck (e.g. the blob store hangs inside
-// SetLeiosEB, so leiosPersistDone is never closed), stopLeiosPersistWriter
-// returns after the drain timeout instead of blocking graceful shutdown
-// forever, and still closes the stop channel so the writer can exit later.
+// SetLeiosEB, so leiosPersistDone is never closed), the writer drain wait
+// returns after the timeout instead of blocking graceful shutdown forever,
+// and the stop request still lets the writer exit later.
 func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	t.Parallel()
 
@@ -747,14 +1053,16 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	returned := make(chan struct{})
 	var drained bool
 	go func() {
-		drained = o.stopLeiosPersistWriter(50 * time.Millisecond)
+		done, started := o.requestLeiosPersistWriterStop()
+		require.True(t, started)
+		drained = waitForLeiosPersistWorker(done, 50*time.Millisecond)
 		close(returned)
 	}()
 
 	select {
 	case <-returned:
 	case <-time.After(5 * time.Second):
-		t.Fatal("stopLeiosPersistWriter hung past the bounded drain timeout")
+		t.Fatal("writer drain wait hung past the bounded timeout")
 	}
 	require.False(t, drained, "drain must be reported unconfirmed on timeout")
 
