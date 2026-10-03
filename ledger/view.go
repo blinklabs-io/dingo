@@ -780,6 +780,10 @@ func (lv *LedgerView) EpochForSlot(slot uint64) (uint64, error) {
 	return epoch.EpochId, nil
 }
 
+// A view that loses this capability does not fail: the retirement-epoch bound
+// and the pool-deposit decision silently take their degraded paths.
+var _ lcommon.EpochState = (*LedgerView)(nil)
+
 func (lv *LedgerView) GenesisDelegateKeyHashes(
 	slot uint64,
 ) ([]lcommon.Blake2b224, error) {
