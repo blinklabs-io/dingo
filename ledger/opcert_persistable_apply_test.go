@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -81,6 +82,7 @@ func TestLedgerProcessBlockRejectsOpCertCounterAbovePersistableBound(
 
 	err := db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 10},
 			block,

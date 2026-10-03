@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -300,6 +301,7 @@ func TestLedgerProcessBlockRejectsOutputNetworkMismatch(t *testing.T) {
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, procErr := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
 			block,

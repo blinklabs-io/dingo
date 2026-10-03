@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,6 +80,7 @@ func processByronBlockWithPParams(
 	}
 	return db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: 1, Hash: block.Hash().Bytes()},
 			block,

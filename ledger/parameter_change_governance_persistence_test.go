@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -153,6 +154,7 @@ func TestLedgerProcessBlockRejectsParameterChangeProtocolVersionAndPersistsNoPro
 	processErr := db.Transaction(true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
+				context.Background(),
 				txn,
 				ocommon.NewPoint(10, block.Hash().Bytes()),
 				block,
@@ -250,6 +252,7 @@ func TestLedgerProcessBlockRejectsDijkstraParameterChangeProtocolVersionAndPersi
 	processErr := db.Transaction(true).
 		Do(func(txn *database.Txn) error {
 			_, err := ls.ledgerProcessBlock(
+				context.Background(),
 				txn,
 				ocommon.NewPoint(10, block.Hash().Bytes()),
 				block,

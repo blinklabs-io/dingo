@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -64,6 +65,7 @@ func processFixtureBlock(
 	point := ocommon.NewPoint(fx.blockSlot, block.Hash().Bytes())
 	return fx.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := fx.dingoLS.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			point,
 			block,

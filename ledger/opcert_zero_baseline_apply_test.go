@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -131,6 +132,7 @@ func applyOpCertBaselineBlock(
 	}
 	return ls.db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			ocommon.Point{Slot: slot, Hash: block.Hash().Bytes()},
 			block,

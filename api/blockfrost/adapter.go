@@ -122,7 +122,7 @@ func drepInactivityFromPParams(
 
 // TransactionSubmitter accepts raw transaction CBOR for mempool admission.
 type TransactionSubmitter interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 }
 
 // transactionEvaluator evaluates a decoded transaction's scripts against the
@@ -3958,6 +3958,7 @@ func isLedgerStorageFailure(err error) bool {
 
 // TransactionSubmit submits raw signed transaction CBOR to the mempool.
 func (a *NodeAdapter) TransactionSubmit(
+	ctx context.Context,
 	txCbor []byte,
 ) (string, error) {
 	if a.submitter == nil {
@@ -3979,7 +3980,7 @@ func (a *NodeAdapter) TransactionSubmit(
 			ErrInvalidTransaction,
 		)
 	}
-	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
+	if err := a.submitter.AddTransaction(ctx, txType, txCbor); err != nil {
 		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf(
 				"submit transaction to mempool: %w: %w",

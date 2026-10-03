@@ -1349,6 +1349,7 @@ dingo/
 │   │   └── pruner.go    # Background expiry scanner
 │   ├── committeeauth/   # Live rollback-safe immutable-slot sync for committee auth pruning
 │   │   └── syncer.go    # Background PointAtDepth -> SetCommitteeAuthImmutableSlot sync
+│   ├── tracing/         # Span helpers over the process-wide OpenTelemetry provider
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Cardano Blueprint ledger-rule conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
@@ -1358,6 +1359,20 @@ dingo/
 ├── config.go            # Configuration management (functional options)
 └── tracing.go           # OpenTelemetry tracing
 ```
+
+Tracing is off unless `tracing` is set or `tracingEndpoint` is non-empty.
+`setupTracing` installs an OTLP HTTP (or stdout) exporter with `service.name`/`service.version` resource attributes
+and a parent-based trace-ID-ratio sampler (`tracingSampleRatio`, default 1).
+`tracingEndpoint` sets the collector URL and must be an `http` or `https` URL;
+empty defers to the standard `OTEL_EXPORTER_OTLP_*` variables. Hot paths start spans through
+`internal/tracing`: `chain.add_blocks`, `ledger.process_block`,
+`ledger.epoch_transition`, `chainsync.roll_forward`,
+`chainsync.roll_backward`, `blockfetch.block` and `mempool.add_transaction`.
+`Chain.AddBlocks`, `Mempool.AddTransaction` and the ledger block and epoch
+steps take a `context.Context`, so their spans nest under the caller's span;
+the API submit handlers pass the request context. The Ouroboros chainsync,
+blockfetch and transaction-submission callbacks carry no context, so their
+spans are roots.
 
 ## Core Node Structure
 

@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/tracing"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -6967,12 +6968,19 @@ func cloneProtocolParametersForEra(
 // result reports BoundarySnapshotDeferred so exactly one capture is taken —
 // re-running the capture instead would double-write under the savepoint.
 func (ls *LedgerState) processEpochRollover(
+	ctx context.Context,
 	txn *database.Txn,
 	currentEpoch models.Epoch,
 	currentEra eras.EraDesc,
 	currentPParams lcommon.ProtocolParameters,
 	deferBoundarySnapshot bool,
-) (*EpochRolloverResult, error) {
+) (result *EpochRolloverResult, err error) {
+	_, span := tracing.Start(
+		ctx,
+		"ledger.epoch_transition",
+		tracing.Uint64("epoch", currentEpoch.EpochId),
+	)
+	defer func() { tracing.End(span, err) }()
 	// Fail closed at the top of the production rollover path rather than
 	// letting a nil config reach one of the several unchecked
 	// ls.config.CardanoNodeConfig dereferences below (e.g. the
@@ -6998,7 +7006,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err != nil {
 		return nil, fmt.Errorf("clone current protocol parameters: %w", err)
 	}
-	result := &EpochRolloverResult{
+	result = &EpochRolloverResult{
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
 		NewCurrentPParams:         ownedPParams,

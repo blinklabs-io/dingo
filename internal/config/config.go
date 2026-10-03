@@ -685,9 +685,17 @@ type Config struct {
 	SkipRewardLiveStakeBackfillCheck bool `yaml:"skipRewardLiveStakeBackfillCheck"                                                             split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
-	// Spans are sent via OTLP HTTP; configure the destination with the
-	// standard OTEL_EXPORTER_OTLP_* env vars.
+	// Spans are sent via OTLP HTTP; the destination defaults to the
+	// standard OTEL_EXPORTER_OTLP_* env vars unless TracingEndpoint is set.
 	Tracing bool `yaml:"tracing"                             envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingEndpoint is the OTLP HTTP collector URL (for example
+	// http://localhost:4318). Setting it enables tracing; empty leaves tracing
+	// to Tracing and the destination to the OTEL_EXPORTER_OTLP_* env vars.
+	TracingEndpoint string `yaml:"tracingEndpoint"                     envconfig:"DINGO_TRACING_ENDPOINT"`
+	// TracingServiceName is the service.name resource attribute on exported spans.
+	TracingServiceName string `yaml:"tracingServiceName"                  envconfig:"DINGO_TRACING_SERVICE_NAME"`
+	// TracingSampleRatio is the fraction of new traces sampled, from 0 to 1.
+	TracingSampleRatio float64 `yaml:"tracingSampleRatio"                  envconfig:"DINGO_TRACING_SAMPLE_RATIO"`
 	// TracingStdout redirects spans to stdout instead of OTLP. Requires
 	// Tracing to also be enabled. Mostly useful for local debugging.
 	TracingStdout   bool     `yaml:"tracingStdout"                       envconfig:"DINGO_TRACING_STDOUT"`
@@ -1250,6 +1258,8 @@ func newDefaultConfig() *Config {
 		StrictUtxoValidation:                true,
 		Tracing:                             false,
 		TracingStdout:                       false,
+		TracingServiceName:                  "dingo",
+		TracingSampleRatio:                  1,
 		Network:                             "preview",
 		NetworkMagic:                        0,
 		MetricsPort:                         12798,
@@ -1728,6 +1738,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.KoiosParity.GraceHours == 0 {
 		c.KoiosParity.GraceHours = 24
+	}
+	// A collector endpoint turns tracing on; see TracingEndpoint.
+	if c.TracingEndpoint != "" {
+		c.Tracing = true
 	}
 }
 

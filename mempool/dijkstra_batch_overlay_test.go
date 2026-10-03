@@ -292,7 +292,7 @@ func newChainedOverlayValidator(
 
 func addBatch(t *testing.T, pool *Mempool, cborBytes []byte) error {
 	t.Helper()
-	return pool.AddTransaction(uint(dijkstra.TxTypeDijkstra), cborBytes)
+	return pool.AddTransaction(context.Background(), uint(dijkstra.TxTypeDijkstra), cborBytes)
 }
 
 func TestAddTransactionDijkstraBatchChildInputDoubleSpend(t *testing.T) {

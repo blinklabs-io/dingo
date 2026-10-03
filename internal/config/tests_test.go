@@ -15,6 +15,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -982,4 +983,48 @@ func TestValidateAllowsUnambiguousNetworks(t *testing.T) {
 			require.NoError(t, cfg.Validate(RunModeServe))
 		})
 	}
+}
+
+func TestValidateTracingSampleRatio(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		ratio   float64
+		wantErr bool
+	}{
+		{name: "zero", ratio: 0},
+		{name: "fraction", ratio: 0.25},
+		{name: "one", ratio: 1},
+		{name: "negative", ratio: -0.1, wantErr: true},
+		{name: "above one", ratio: 1.5, wantErr: true},
+		{name: "nan", ratio: math.NaN(), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := newDefaultConfig()
+			cfg.TracingSampleRatio = tc.ratio
+			err := cfg.Validate(RunModeServe)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "tracingSampleRatio")
+				return
+			}
+			if err != nil {
+				assert.NotContains(t, err.Error(), "tracingSampleRatio")
+			}
+		})
+	}
+}
+
+func TestApplyDefaultsTracingEndpointEnablesTracing(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{}
+	cfg.ApplyDefaults()
+	require.False(t, cfg.Tracing)
+
+	cfg = &Config{TracingEndpoint: "http://localhost:4318"}
+	cfg.ApplyDefaults()
+	require.True(t, cfg.Tracing)
 }

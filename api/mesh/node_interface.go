@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"context"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -66,7 +67,7 @@ type MeshSyncProgress interface {
 
 // MeshMempool is the subset of mempool.Mempool needed by the Mesh server.
 type MeshMempool interface {
-	AddTransaction(txType uint, txBytes []byte) error
+	AddTransaction(ctx context.Context, txType uint, txBytes []byte) error
 	GetTransaction(hash string) (mempool.MempoolTransaction, bool)
 	Transactions() []mempool.MempoolTransaction
 }

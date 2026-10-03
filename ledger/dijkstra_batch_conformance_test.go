@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -120,6 +121,7 @@ func TestLedgerProcessBlockExpandsIndexesAcrossValidatedTransactions(
 	}
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
+			context.Background(),
 			txn,
 			point,
 			block,

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 
@@ -244,6 +245,7 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 			processErr := db.Transaction(true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -401,6 +403,7 @@ func TestLedgerProcessBlockHistoricalValidationRunsPhase2(t *testing.T) {
 			processErr := db.Transaction(true).
 				Do(func(txn *database.Txn) error {
 					_, err := ls.ledgerProcessBlock(
+						context.Background(),
 						txn,
 						ocommon.NewPoint(10, block.Hash().Bytes()),
 						block,
@@ -496,6 +499,7 @@ func TestLedgerProcessBlockEnforcesTransactionValidationOutcomes(
 
 			err = db.Transaction(true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
+					context.Background(),
 					txn,
 					ocommon.NewPoint(1, block.Hash().Bytes()),
 					block,

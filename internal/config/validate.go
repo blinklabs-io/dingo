@@ -277,6 +277,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if !(c.TracingSampleRatio >= 0 && c.TracingSampleRatio <= 1) {
+		errs = append(errs, fmt.Errorf(
+			"invalid tracingSampleRatio: %v (must be between 0 and 1)",
+			c.TracingSampleRatio,
+		))
+	}
+
 	// Load mode requires a source ImmutableDB
 	if effectiveMode == RunModeLoad && c.ImmutableDbPath == "" {
 		errs = append(errs, errors.New(

@@ -141,6 +141,23 @@ var flagSpecs = []flagSpec{
 		"tracing",
 		"enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)",
 	),
+	stringFlag(
+		"TracingEndpoint",
+		"tracing-endpoint",
+		"",
+		"OTLP HTTP collector URL for spans; setting it enables tracing (default: OTEL_EXPORTER_OTLP_* env vars)",
+	),
+	stringFlag(
+		"TracingServiceName",
+		"tracing-service-name",
+		"",
+		"service.name resource attribute on exported spans",
+	),
+	float64Flag(
+		"TracingSampleRatio",
+		"tracing-sample-ratio",
+		"fraction of new traces sampled, from 0 to 1",
+	),
 	boolFlag(
 		"TracingStdout",
 		"tracing-stdout",
