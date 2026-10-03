@@ -27,13 +27,6 @@ import (
 
 var errRegistrationWindowClosed = errors.New("signer registration window closed")
 
-type permanentRoundError struct {
-	err error
-}
-
-func (e permanentRoundError) Error() string { return e.err.Error() }
-func (e permanentRoundError) Unwrap() error { return e.err }
-
 // round brings the signer up to date with the aggregator's current epoch: it
 // registers once per epoch and signs the epoch's stake distribution once.
 func (s *Signer) round(ctx context.Context) error {
@@ -127,13 +120,6 @@ func (s *Signer) register(ctx context.Context, epoch uint64) error {
 				return err
 			case http.StatusGone:
 				return errRegistrationWindowClosed
-			default:
-				if statusErr.StatusCode >= http.StatusBadRequest &&
-					statusErr.StatusCode < http.StatusInternalServerError &&
-					statusErr.StatusCode != http.StatusRequestTimeout &&
-					statusErr.StatusCode != http.StatusTooManyRequests {
-					return permanentRoundError{err: err}
-				}
 			}
 		}
 		return err

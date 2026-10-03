@@ -230,15 +230,6 @@ func (s *Signer) Run(ctx context.Context) error {
 			return nil
 		default:
 		}
-		if _, ok := errors.AsType[permanentRoundError](err); ok {
-			s.metrics.errors.Inc()
-			s.cfg.Logger.Error(
-				"mithril signer stopped after permanent round failure",
-				"component", "mithril-signer",
-				"error", err,
-			)
-			return err
-		}
 		if err == nil {
 			backoff = s.cfg.MinBackoff
 			wait = s.cfg.PollInterval

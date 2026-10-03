@@ -688,22 +688,47 @@ func TestRunStopsRetryingLateSignature(t *testing.T) {
 	assert.Zero(t, promtestutil.ToFloat64(s.metrics.errors))
 }
 
-func TestRunStopsOnPermanentRegistrationStatus(t *testing.T) {
+func TestRunRetriesClientRegistrationErrorsWithCappedBackoff(t *testing.T) {
 	t.Parallel()
+	const minBackoff = 20 * time.Millisecond
 	s := newTestSigner(t, testOptions{
 		ownIsCurrent: true,
-		minBackoff:   time.Millisecond,
-		maxBackoff:   time.Millisecond,
+		minBackoff:   minBackoff,
+		maxBackoff:   2 * minBackoff,
 	})
 	s.stub.registerStatuses <- http.StatusBadRequest
+	s.stub.registerStatuses <- http.StatusBadRequest
+	s.stub.registerStatuses <- http.StatusBadRequest
 
-	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-	defer cancel()
-	err := s.Run(ctx)
-	var permanent permanentRoundError
-	require.ErrorAs(t, err, &permanent)
-	assert.Len(t, s.stub.registrations, 1)
-	require.Equal(t, float64(1), promtestutil.ToFloat64(s.metrics.errors))
+	s.start(t)
+	for range 4 {
+		testutil.RequireReceive(
+			t,
+			s.stub.registrations,
+			testWait,
+			"registration attempt",
+		)
+	}
+	testutil.RequireReceive(t, s.stub.signatures, testWait, "signature after registration retry")
+
+	s.stub.hitsMu.Lock()
+	hits := slices.Clone(s.stub.epochSettingsAt)
+	s.stub.hitsMu.Unlock()
+	require.GreaterOrEqual(t, len(hits), 4)
+	for i, minimum := range []time.Duration{
+		minBackoff,
+		2 * minBackoff,
+		2 * minBackoff,
+	} {
+		assert.GreaterOrEqual(
+			t,
+			hits[i+1].Sub(hits[i]),
+			minimum,
+			"wait after registration failure %d",
+			i+1,
+		)
+	}
+	assert.Equal(t, float64(3), promtestutil.ToFloat64(s.metrics.errors))
 }
 
 func TestRoundContinuesAfterRegistrationWindowCloses(t *testing.T) {
