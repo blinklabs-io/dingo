@@ -2836,6 +2836,7 @@ var pipelineStages = []string{
 	"lint",
 	"govulncheck",
 	"go-test-linux-quick",
+	"go-test-modules",
 	"go-test-linux",
 	"go-test-linux-race",
 	"go-test-macos",
