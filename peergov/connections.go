@@ -956,12 +956,11 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
 				connDur < minStableConnectionDuration {
-				// A close without an error is one this node requested (a
-				// resync, recycle or prune), not the peer dropping us, so
-				// it is not evidence that the peer is flapping.
-				if e.Error != nil {
-					peer.InboundShortLivedCount++
-				}
+				// A close with no error is not proof that this node asked
+				// for it: the connection layer reports a remote close as
+				// clean when every protocol is still idle, which is how a
+				// peer that handshakes and disconnects looks.
+				peer.InboundShortLivedCount++
 			} else if !peer.InboundConnectedAt.IsZero() {
 				peer.InboundShortLivedCount = 0
 			}
@@ -1093,7 +1092,6 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	normalized := p.resolveAddress(address)
 	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
 		p.addPeerDenyKeysLocked(
@@ -1111,6 +1109,9 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 		p.denyList[normalized] = expiry
 		p.denyList[hostnameNormalized] = expiry
 	}
+	selectionEvents := p.syncUpstreamWithholdLocked(nil)
+	p.mu.Unlock()
+	p.publishPendingEvents(selectionEvents)
 	p.config.Logger.Debug(
 		"peer added to deny list",
 		"address", address,

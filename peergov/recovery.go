@@ -50,7 +50,7 @@ func (p *PeerGovernor) countEligibleUpstreamsLocked() int {
 		if chainSelectionState(
 			p.bootstrapExited,
 			peer.Source,
-			peer.Connection,
+			p.selectionConnLocked(peer),
 		).eligible {
 			count++
 		}

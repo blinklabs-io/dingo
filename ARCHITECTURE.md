@@ -5469,15 +5469,22 @@ for the next reconcile, and redial ranking puts a peer that stalled within
 Inbound source ports are ephemeral, so inbound identity is the host.
 `resolveInboundIdentity` reuses a disconnected inbound entry from the same host
 when a peer reconnects from a new port, keeping its short-session history. A
-session counts toward that history only when the peer's side ended it with an
-error; a close with no error is one this node requested (resync, recycle,
-prune) and is not evidence of flapping. Inbound admission refuses only an
-arrival whose exact connection tuple is denied: refusing by host would cut off a
-downstream that reconnects because this node closed its sessions. A denial on a
-configured peer is instead applied to its upstream role. When a denied
-topology peer's inbound connection is admitted, `PeerConnection.UpstreamWithheld`
-is set and `chainSelectionEligible` excludes the connection, while the
-connection stays open so the peer can still consume from this node. Inbound-only
+session counts toward that history whenever it is short, whatever the close
+error: the connection layer reports a remote close as clean when every protocol
+is still idle, so a peer that handshakes and disconnects arrives with no error.
+Inbound admission refuses only an arrival whose exact connection tuple is
+denied: refusing by host would cut off a downstream that reconnects because this
+node closed its sessions. A denial on a configured peer is instead applied to
+its upstream role. While the peer is denied, its open connection has
+`PeerConnection.UpstreamWithheld` set and `chainSelectionEligible` excludes it,
+while the connection stays open so the peer can still consume from this node.
+The withhold is read against the live denial (`upstreamWithheldLocked`), so an
+expired denial restores eligibility immediately; `syncUpstreamWithholdLocked`,
+run when a denial is added and on every reconcile, clears the stored flag and
+publishes `PeerEligibilityChanged` when a denial starts or expires on an open
+connection. A withheld connection is not reusable inbound topology demand, is
+not promoted to hot, and is not counted toward hot or warm totals in bootstrap
+recovery. Inbound-only
 entries are never chain selection sources, so flapping is bounded for them by
 the warm-peer prune and the hot-promotion check.
 

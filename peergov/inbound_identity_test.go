@@ -170,10 +170,11 @@ func closeInbound(
 	})
 }
 
-// A session this node closed ends with no error from the peer. It must not
-// count toward the peer's flapping history, or every resync close would push
-// a healthy downstream toward a cooldown.
-func TestInboundShortSessionClosedLocallyIsNotCounted(t *testing.T) {
+// A peer that completes the handshake and disconnects reaches this node as a
+// close with no error, because the connection layer suppresses the close
+// error when every protocol is still idle. Those sessions are the flapping
+// pattern and must accumulate.
+func TestInboundShortSessionCleanCloseIsCounted(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
 	for port := 51000; port < 51004; port++ {
@@ -183,10 +184,10 @@ func TestInboundShortSessionClosedLocallyIsNotCounted(t *testing.T) {
 	}
 	peers := pg.GetPeers()
 	require.Equal(t, 1, len(peers))
-	assert.Equal(t, uint32(0), peers[0].InboundShortLivedCount)
+	assert.Equal(t, uint32(4), peers[0].InboundShortLivedCount)
 }
 
-// Control: a short session the peer ended with an error still counts.
+// A short session the peer ended with an error counts as well.
 func TestInboundShortSessionEndedByPeerErrorIsCounted(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)

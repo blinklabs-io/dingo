@@ -947,7 +947,7 @@ func (p *PeerGovernor) IsChainSelectionEligible(
 	return chainSelectionState(
 		p.bootstrapExited,
 		p.peers[peerIdx].Source,
-		p.peers[peerIdx].Connection,
+		p.selectionConnLocked(p.peers[peerIdx]),
 	).eligible
 }
 
@@ -967,7 +967,7 @@ func (p *PeerGovernor) IsConfiguredRootConnection(
 	peer := p.peers[peerIdx]
 	return (peer.Source == PeerSourceTopologyLocalRoot ||
 		peer.Source == PeerSourceTopologyPublicRoot) &&
-		chainSelectionEligible(peer.Source, peer.Connection)
+		chainSelectionEligible(peer.Source, p.selectionConnLocked(peer))
 }
 
 // withholdDeniedUpstreamLocked keeps the peer's new inbound connection open
@@ -982,6 +982,63 @@ func (p *PeerGovernor) withholdDeniedUpstreamLocked(peer *Peer) {
 		return
 	}
 	peer.Connection.UpstreamWithheld = p.isPeerDeniedLocked(peer)
+}
+
+// upstreamWithheldLocked reports whether peer's open connection is withheld
+// from upstream use right now. The stored flag records the last withhold
+// that was announced; the denial is what keeps it in force, so an expired
+// denial lifts the withhold before the next sync clears the flag. Must be
+// called with p.mu held.
+func (p *PeerGovernor) upstreamWithheldLocked(peer *Peer) bool {
+	return peer != nil && peer.Connection != nil &&
+		peer.Connection.UpstreamWithheld && p.isPeerDeniedLocked(peer)
+}
+
+// usableClientLocked reports whether peer has a client-capable connection
+// that may serve as an upstream. Must be called with p.mu held.
+func (p *PeerGovernor) usableClientLocked(peer *Peer) bool {
+	return peer.hasClientConnection() && !p.upstreamWithheldLocked(peer)
+}
+
+// selectionConnLocked returns peer's connection with the withhold resolved
+// against the current denial state, for chain selection decisions. Must be
+// called with p.mu held.
+func (p *PeerGovernor) selectionConnLocked(peer *Peer) *PeerConnection {
+	if peer == nil || peer.Connection == nil {
+		return nil
+	}
+	conn := *peer.Connection
+	conn.UpstreamWithheld = p.upstreamWithheldLocked(peer)
+	return &conn
+}
+
+// syncUpstreamWithholdLocked aligns each open connection's withhold with the
+// current denial state and appends the resulting chain selection events. A
+// denial that starts or expires while a connection is open changes whether
+// that connection may feed chainsync. Must be called with p.mu held.
+func (p *PeerGovernor) syncUpstreamWithholdLocked(
+	events []pendingEvent,
+) []pendingEvent {
+	for _, peer := range p.peers {
+		if peer == nil || peer.Connection == nil ||
+			peer.Source == PeerSourceInboundConn {
+			continue
+		}
+		denied := p.isPeerDeniedLocked(peer)
+		if denied == peer.Connection.UpstreamWithheld {
+			continue
+		}
+		oldConn := clonePeerConnection(peer.Connection)
+		peer.Connection.UpstreamWithheld = denied
+		events = p.appendChainSelectionEventsLocked(
+			events,
+			p.bootstrapExited,
+			peer.Source,
+			oldConn,
+			peer,
+		)
+	}
+	return events
 }
 
 func clonePeerConnection(conn *PeerConnection) *PeerConnection {
