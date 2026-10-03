@@ -130,6 +130,13 @@ type namedStop struct {
 // as it did inline, after the koios parity observer.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
+	// Services read the ledger, so they stop before it can be closed.
+	if len(n.serviceStops) > 0 {
+		stops = append(stops, namedStop{
+			name: "node services",
+			stop: func() error { n.stopNodeServices(); return nil },
+		})
+	}
 	if n.blockForger != nil {
 		stops = append(stops, namedStop{
 			name: "block forger",
@@ -1455,6 +1462,10 @@ func (n *Node) reinitializeAndResume(ctx context.Context) error {
 		}},
 		{"API servers", n.reinitializeAPIServers},
 		{"block producer", n.reinitializeBlockProducer},
+		{"node services", func() error {
+			_, err := n.startNodeServices(n.ctx, nil)
+			return err
+		}},
 	}
 	for _, step := range steps {
 		if err := step.fn(); err != nil {

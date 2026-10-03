@@ -114,6 +114,8 @@ type Node struct {
 	// without recomputing them and drifting from Run.
 	ouroborosConfig ouroborosPkg.OuroborosConfig
 	blockForger     *forging.BlockForger
+	// serviceStops stops the running NodeServices (see node_services.go).
+	serviceStops []func()
 	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
 	// either serve-key or sign mode. validateBlockProducerStartup owns
 	// dialing/closing it (closing the prior one before replacing it, so a
@@ -1718,6 +1720,12 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return err
 		}
+	}
+
+	var servicesErr error
+	started, servicesErr = n.startNodeServices(n.ctx, started)
+	if servicesErr != nil {
+		return servicesErr
 	}
 
 	// All components started successfully

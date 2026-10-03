@@ -841,6 +841,31 @@
   # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
   # verifyCertificates: true
+  # Mithril signer: registers the pool with the aggregator each epoch and
+  # signs its Mithril stake distribution with the pool's KES key and
+  # operational certificate. Requires a synced node run by the pool operator.
+  # When blockProducer is also enabled, kesKey and operationalCert must be the
+  # block producer's shelleyKesKey and shelleyOperationalCertificate files.
+  # CLI: --mithril-signer-enabled, --mithril-signer-kes-key,
+  #      --mithril-signer-operational-cert, --mithril-signer-cold-vkey,
+  #      --mithril-signer-stm-key, --mithril-signer-aggregator-endpoint
+  # Env: DINGO_MITHRIL_SIGNER_ENABLED, DINGO_MITHRIL_SIGNER_KES_KEY,
+  #      DINGO_MITHRIL_SIGNER_OPERATIONAL_CERT, DINGO_MITHRIL_SIGNER_COLD_VKEY,
+  #      DINGO_MITHRIL_SIGNER_STM_KEY, DINGO_MITHRIL_SIGNER_AGGREGATOR_ENDPOINT
+  # signer:
+    # Default: false
+    # enabled: false
+    # Pool KES signing key and operational certificate (cardano-cli format)
+    # kesKey: "/path/to/kes.skey"
+    # operationalCert: "/path/to/node.cert"
+    # Pool cold verification key; must be the key that signed the certificate
+    # coldVkey: "/path/to/cold.vkey"
+    # File holding the signer's own Mithril signing key. It is created on
+    # first start; keep it, since the aggregator registers its public key.
+    # stmKey: "/path/to/mithril-signer.key"
+    # Aggregator to register with and submit to. If empty, aggregatorUrl is
+    # used, then the network default.
+    # aggregatorEndpoint: ""
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)
