@@ -171,7 +171,6 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 		"blockCacheSize":   uint64(4096),
 		"indexCacheSize":   uint64(8192),
 		"compression":      false,
-		"gc":               true,
 		"compressionLevel": 7,
 	}, blob.ProviderDependencies{
 		StorageMode: "api",
@@ -180,7 +179,7 @@ func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	require.Equal(t, uint64(4096), store.blockCacheSize)
 	require.Equal(t, uint64(8192), store.indexCacheSize)
 	require.False(t, store.compressionEnabled)
-	require.True(t, store.gcEnabled)
+	require.False(t, store.gcEnabled)
 	require.Equal(t, 7, store.compressionLevel)
 }
 

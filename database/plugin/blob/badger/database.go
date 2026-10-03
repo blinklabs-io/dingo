@@ -342,6 +342,8 @@ type BlobStoreBadger struct {
 	compressionEnabled   bool
 	compressionLevel     int
 	gcEnabled            bool
+	gcInterval           time.Duration
+	gcDiscardRatio       float64
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
 
@@ -359,10 +361,29 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
 		memTableSize:       int64(DefaultMemTableSize),
 		valueThreshold:     int64(DefaultValueThreshold),
+		gcInterval:         DefaultGCInterval,
+		gcDiscardRatio:     DefaultGCDiscardRatio,
 		closeDone:          make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(db)
+	}
+	if db.gcInterval == 0 {
+		db.gcInterval = DefaultGCInterval
+	}
+	if db.gcInterval < 0 {
+		return nil, fmt.Errorf(
+			"badger gc interval must not be negative: %s",
+			db.gcInterval,
+		)
+	}
+	// Badger rejects a discard ratio outside (0, 1), and NaN fails both
+	// comparisons.
+	if !(db.gcDiscardRatio > 0 && db.gcDiscardRatio < 1) {
+		return nil, fmt.Errorf(
+			"badger gc discard ratio must be between 0 and 1 exclusive: %v",
+			db.gcDiscardRatio,
+		)
 	}
 
 	if db.deferOpen {
@@ -464,7 +485,7 @@ func (d *BlobStoreBadger) init() error {
 	}
 	// Configure GC
 	if d.gcEnabled {
-		d.gcTicker = time.NewTicker(5 * time.Minute)
+		d.gcTicker = time.NewTicker(d.gcInterval)
 		d.gcStopCh = make(chan struct{})
 		d.gcWg.Add(1)
 		go d.blobGc(d.gcTicker.C, d.gcStopCh)
@@ -492,7 +513,7 @@ func (d *BlobStoreBadger) blobGc(
 					beforeLSM, beforeVlog = d.DB().Size()
 				}
 				gcStarted := time.Now()
-				err := d.runValueLogGC(0.5)
+				err := d.runValueLogGC(d.gcDiscardRatio)
 				if d.gcMetrics != nil {
 					d.gcMetrics.duration.Observe(
 						time.Since(gcStarted).Seconds(),

@@ -16,6 +16,7 @@ package badger
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -63,6 +64,22 @@ func WithIndexCacheSize(size uint64) BlobStoreBadgerOptionFunc {
 func WithGc(enabled bool) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
 		b.gcEnabled = enabled
+	}
+}
+
+// WithGcInterval specifies how often background value-log GC runs. New
+// rejects a negative interval; zero selects DefaultGCInterval.
+func WithGcInterval(interval time.Duration) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.gcInterval = interval
+	}
+}
+
+// WithGcDiscardRatio specifies the discard ratio passed to each value-log GC
+// pass. New rejects values outside the open interval (0, 1).
+func WithGcDiscardRatio(ratio float64) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.gcDiscardRatio = ratio
 	}
 }
 

@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -170,62 +171,7 @@ func BenchmarkValueLogGC(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				for pass := range 2 {
-					for batch := range 5 {
-						txn := store.DB().NewTransaction(true)
-						for j := range 20 {
-							key := batch*20 + j
-							value := make([]byte, 32<<10)
-							_, err = rand.Read(value)
-							require.NoError(b, err)
-							entry := badgerdb.NewEntry(
-								[]byte("benchmark-key-"+strconv.Itoa(key)),
-								value,
-							)
-							if pass == 0 {
-								entry.ExpiresAt = 1
-							}
-							require.NoError(b, txn.SetEntry(entry))
-						}
-						require.NoError(b, txn.Commit())
-					}
-				}
-				for batch := range 100 {
-					txn := store.DB().NewTransaction(true)
-					for j := range 1000 {
-						key := batch*1000 + j
-						require.NoError(
-							b,
-							txn.SetEntry(
-								badgerdb.NewEntry(
-									[]byte(
-										"benchmark-filler-"+strconv.Itoa(key),
-									),
-									[]byte{1},
-								),
-							),
-						)
-					}
-					require.NoError(b, txn.Commit())
-				}
-				for batch := range 3 {
-					txn := store.DB().NewTransaction(true)
-					for j := range 20 {
-						key := batch*20 + j
-						if key >= 45 {
-							continue
-						}
-						require.NoError(
-							b,
-							txn.Delete(
-								[]byte("benchmark-key-"+strconv.Itoa(key)),
-							),
-						)
-					}
-					require.NoError(b, txn.Commit())
-				}
-				require.NoError(b, store.DB().Flatten(10))
-				require.NoError(b, store.DB().Sync())
+				populateGCFixture(b, store)
 				b.StartTimer()
 				successes := 0
 				reclaimed := int64(0)
@@ -257,6 +203,185 @@ func BenchmarkValueLogGC(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// populateGCFixture writes rotated value-log files with overwritten, expired,
+// and deleted values so a GC pass has files it can rewrite.
+func populateGCFixture(b testing.TB, store *BlobStoreBadger) {
+	b.Helper()
+	var err error
+	for pass := range 2 {
+		for batch := range 5 {
+			txn := store.DB().NewTransaction(true)
+			for j := range 20 {
+				key := batch*20 + j
+				value := make([]byte, 32<<10)
+				_, err = rand.Read(value)
+				require.NoError(b, err)
+				entry := badgerdb.NewEntry(
+					[]byte("benchmark-key-"+strconv.Itoa(key)),
+					value,
+				)
+				if pass == 0 {
+					entry.ExpiresAt = 1
+				}
+				require.NoError(b, txn.SetEntry(entry))
+			}
+			require.NoError(b, txn.Commit())
+		}
+	}
+	for batch := range 100 {
+		txn := store.DB().NewTransaction(true)
+		for j := range 1000 {
+			key := batch*1000 + j
+			require.NoError(
+				b,
+				txn.SetEntry(
+					badgerdb.NewEntry(
+						[]byte(
+							"benchmark-filler-"+strconv.Itoa(key),
+						),
+						[]byte{1},
+					),
+				),
+			)
+		}
+		require.NoError(b, txn.Commit())
+	}
+	for batch := range 3 {
+		txn := store.DB().NewTransaction(true)
+		for j := range 20 {
+			key := batch*20 + j
+			if key >= 45 {
+				continue
+			}
+			require.NoError(
+				b,
+				txn.Delete(
+					[]byte("benchmark-key-"+strconv.Itoa(key)),
+				),
+			)
+		}
+		require.NoError(b, txn.Commit())
+	}
+	require.NoError(b, store.DB().Flatten(10))
+	require.NoError(b, store.DB().Sync())
+}
+
+// gcPolicyResult is what one GC policy did against the standard fixture.
+type gcPolicyResult struct {
+	// Passes counts successful value-log rewrites.
+	Passes int
+	// Ratios are the discard ratios the worker passed to Badger, in call order.
+	Ratios []float64
+	// Reclaimed is the on-disk size shed between the start and the end of the
+	// drain.
+	Reclaimed int64
+	// Drain is the time from arming the worker until it reported no rewrite
+	// after at least one success.
+	Drain time.Duration
+}
+
+// measureGCPolicy runs the production GC worker with the given policy against
+// the standard fixture and waits for it to drain. The worker is gated until
+// the fixture is written so the measurement excludes load time.
+func measureGCPolicy(
+	tb testing.TB,
+	ratio float64,
+	interval time.Duration,
+) gcPolicyResult {
+	tb.Helper()
+	store, err := New(
+		WithDataDir(tb.TempDir()),
+		WithGc(true),
+		WithGcInterval(interval),
+		WithGcDiscardRatio(ratio),
+		WithValueThreshold(1),
+		WithValueLogFileSize(1<<20),
+		WithMemTableSize(1<<20),
+		WithDeferOpen(),
+	)
+	require.NoError(tb, err)
+	var (
+		armed   atomic.Bool
+		mu      sync.Mutex
+		result  gcPolicyResult
+		drained = make(chan struct{})
+		once    sync.Once
+	)
+	store.runValueLogGC = func(r float64) error {
+		if !armed.Load() {
+			return badgerdb.ErrNoRewrite
+		}
+		err := store.DB().RunValueLogGC(r)
+		mu.Lock()
+		defer mu.Unlock()
+		result.Ratios = append(result.Ratios, r)
+		if err == nil {
+			result.Passes++
+		} else if errors.Is(err, badgerdb.ErrNoRewrite) && result.Passes > 0 {
+			once.Do(func() { close(drained) })
+		}
+		return err
+	}
+	require.NoError(tb, store.Start())
+	tb.Cleanup(func() { require.NoError(tb, store.Close()) })
+	populateGCFixture(tb, store)
+	before, err := store.DiskSize()
+	require.NoError(tb, err)
+	started := time.Now()
+	armed.Store(true)
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Minute):
+		tb.Fatal("GC worker did not drain the fixture")
+	}
+	elapsed := time.Since(started)
+	require.NoError(tb, store.Close())
+	after, err := store.DiskSize()
+	require.NoError(tb, err)
+	mu.Lock()
+	defer mu.Unlock()
+	result.Drain = elapsed
+	if before > after {
+		result.Reclaimed = before - after
+	}
+	return result
+}
+
+// BenchmarkValueLogGCPolicy compares GC policies through the production
+// worker, so the configured interval and discard ratio are the ones measured.
+func BenchmarkValueLogGCPolicy(b *testing.B) {
+	for _, interval := range []time.Duration{
+		5 * time.Millisecond, 50 * time.Millisecond,
+	} {
+		for _, ratio := range []float64{0.25, 0.5, 0.75} {
+			name := interval.String() + "/" +
+				strconv.FormatFloat(ratio, 'f', 2, 64)
+			b.Run(name, func(b *testing.B) {
+				var last gcPolicyResult
+				for i := 0; i < b.N; i++ {
+					last = measureGCPolicy(b, ratio, interval)
+				}
+				b.ReportMetric(float64(last.Passes), "rewrites")
+				b.ReportMetric(float64(last.Reclaimed), "bytes_reclaimed")
+				b.ReportMetric(float64(last.Drain.Milliseconds()), "drain_ms")
+			})
+		}
+	}
+}
+
+func TestMeasureGCPolicyDrivesProductionWorker(t *testing.T) {
+	t.Parallel()
+	for _, ratio := range []float64{0.25, 0.75} {
+		result := measureGCPolicy(t, ratio, 5*time.Millisecond)
+		require.Positive(t, result.Passes, "no rewrite was performed")
+		require.NotEmpty(t, result.Ratios)
+		for _, got := range result.Ratios {
+			require.InDelta(t, ratio, got, 0)
+		}
+		require.Positive(t, result.Drain)
 	}
 }
 
