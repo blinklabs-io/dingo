@@ -398,19 +398,19 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // A database written before application recorded every era's points has no
 // row for an applied Byron block. Such a block has nothing to iterate over,
 // so this cannot name it the way an unresolvable block is named -- but it
-// can detect that one is missing: the block-number gap between ancestor and ledgerTipBlockNumber
-// is independent of block_nonce entirely, so comparing it against how many
-// nonce rows accounted for that gap reveals a block-number's worth of
-// applied history this function had no record of, without guessing at
-// which block or reading it from the primary chain's current index (which
-// would risk resolving the wrong branch's block for that slot -- the exact
-// failure mode this function exists to avoid, see above). Logged and
-// counted via reconciliationUndoMissingRecord, distinctly from
-// reconciliationUndoUnresolved, so an operator can tell "we know what's
-// missing but can't reach it" apart from "we don't even have a record of
-// it existing". Skipped when ancestor's own
-// block cannot be resolved (e.g., after a restart) rather than reporting a
-// false gap from a missing baseline.
+// can detect that one is missing: the block-number gap between ancestor and
+// ledgerTipBlockNumber is independent of block_nonce entirely, so comparing
+// it against how many nonce rows accounted for that gap reveals a
+// block-number's worth of applied history this function had no record of,
+// without guessing at which block or reading it from the primary chain's
+// current index (which would risk resolving the wrong branch's block for
+// that slot -- the exact failure mode this function exists to avoid, see
+// above). Logged and counted via reconciliationUndoMissingRecord, distinctly
+// from reconciliationUndoUnresolved, so an operator can tell "we know what's
+// missing but can't reach it" apart from "we don't even have a record of it
+// existing". Skipped when ancestor's own block cannot be resolved (e.g.,
+// after a restart) rather than reporting a false gap from a missing
+// baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,

@@ -14697,14 +14697,14 @@ has none), so `reconciliationUndoBlocks`, `durableAppliedFloor` and
 `reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
 row at all in its undo range — the shape of a Byron-era block applied by a
 release that wrote rows only for eras with an evolving nonce — distinct from
-`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap. It cannot name or resolve that block (there
-is no row to read a hash from, and falling back to whatever the primary
-chain's blob store currently holds at that slot would risk resolving the
-wrong branch's block, the exact failure mode this function exists to
-avoid), but it can detect that one is missing: it resolves the ancestor's
-own block for its `BlockNumber` and compares the resulting
-`ledgerTipBlockNumber - ancestorBlockNumber` delta — independent of
-`block_nonce` entirely — against how many nonce rows accounted for it. A
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap. It
+cannot name or resolve that block (there is no row to read a hash from, and
+falling back to whatever the primary chain's blob store currently holds at
+that slot would risk resolving the wrong branch's block, the exact failure
+mode this function exists to avoid), but it can detect that one is missing:
+it resolves the ancestor's own block for its `BlockNumber` and compares the
+resulting `ledgerTipBlockNumber - ancestorBlockNumber` delta — independent
+of `block_nonce` entirely — against how many nonce rows accounted for it. A
 shortfall means the reconciler had no durable record of that many applied
 blocks' existence at all, not merely of their content.
 

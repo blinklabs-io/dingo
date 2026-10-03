@@ -16,12 +16,19 @@ package ledger
 
 import (
 	"context"
+	"io"
+	"log/slog"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -133,4 +140,117 @@ func TestDurableAppliedFloorIncludesNilNonceAppliedPoint(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Equal(t, byronLike, floor)
+}
+
+// TestReconcileDivergenceUndoesAppliedByronBlock diverges the primary chain
+// from a ledger whose applied tip is a real mainnet Byron block carrying two
+// transactions (slot 4471207). The common ancestor is also a Byron-shaped
+// point with no nonce. Reconciliation must find that ancestor and deliver a
+// rollback event for each transaction, newest first.
+func TestReconcileDivergenceUndoesAppliedByronBlock(t *testing.T) {
+	t.Parallel()
+
+	byronBlock := loadBoundaryBlock(t, "mainnet-byron-4471207.cbor", 1)
+	byronTxs := byronBlock.Transactions()
+	require.Len(t, byronTxs, 2)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+
+	ancestorTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			byronBlock.SlotNumber()-1,
+			byronBlock.PrevHash().Bytes(),
+		),
+		BlockNumber: byronBlock.BlockNumber() - 1,
+	}
+	byronTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			byronBlock.SlotNumber(),
+			byronBlock.Hash().Bytes(),
+		),
+		BlockNumber: byronBlock.BlockNumber(),
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        ancestorTip.Point.Slot,
+			Hash:        ancestorTip.Point.Hash,
+			BlockNumber: ancestorTip.BlockNumber,
+			Type:        1,
+			Cbor:        []byte{0x80},
+		},
+		{
+			Slot:        byronTip.Point.Slot,
+			Hash:        byronTip.Point.Hash,
+			BlockNumber: byronTip.BlockNumber,
+			Type:        1,
+			PrevHash:    ancestorTip.Point.Hash,
+			Cbor:        byronBlock.Cbor(),
+		},
+	}))
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	// The rows block application writes for Byron blocks: no nonce.
+	for _, tip := range []ochainsync.Tip{ancestorTip, byronTip} {
+		require.NoError(t, db.SetBlockNonce(
+			tip.Point.Hash, tip.Point.Slot, nil, false, nil,
+		))
+	}
+	require.NoError(t, db.SetTip(byronTip, nil))
+	ls.currentTip = byronTip
+	ls.currentTipBlockNonce = nil
+	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	ls.config.EventBus = bus
+	txSubID, txCh := bus.SubscribeWithBuffer(TransactionEventType, 64)
+	t.Cleanup(func() { bus.Unsubscribe(TransactionEventType, txSubID) })
+	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
+	t.Cleanup(func() { bus.Unsubscribe(LedgerErrorEventType, errSubID) })
+
+	require.NoError(t, ls.chain.Rollback(ancestorTip.Point))
+	require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{{
+		Slot:        byronTip.Point.Slot + 5,
+		Hash:        testHashBytes("byron-reconcile-fork"),
+		BlockNumber: byronTip.BlockNumber,
+		Type:        1,
+		PrevHash:    ancestorTip.Point.Hash,
+		Cbor:        []byte{0x80},
+	}}))
+
+	require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	for i, tx := range slices.Backward(byronTxs) {
+		evt := testutil.RequireReceive(
+			t, txCh, testutil.AsyncWait,
+			"rollback event for an applied Byron transaction",
+		)
+		te, ok := evt.Data.(TransactionEvent)
+		require.True(t, ok, "unexpected payload %T", evt.Data)
+		require.True(t, te.Rollback)
+		require.Equal(t, byronTip.Point, te.Point)
+		require.Equal(t, uint32(i), te.TxIndex) //nolint:gosec
+		require.Equal(t, tx.Hash(), te.Transaction.Hash())
+	}
+	testutil.RequireNoReceive(
+		t, txCh, 250*time.Millisecond,
+		"expected exactly one rollback event per Byron transaction",
+	)
+	testutil.RequireNoReceive(
+		t, errCh, 50*time.Millisecond,
+		"the applied Byron block must decode for its undo events",
+	)
+	require.Equal(t, ancestorTip, ls.currentTip)
 }
