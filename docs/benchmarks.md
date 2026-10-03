@@ -1,8 +1,8 @@
 # Benchmarks and profiling
 
 Run benchmark commands from the repository root. The Makefile targets include
-the default `dingo_extra_plugins` build tag. Go benchmark targets report memory
-allocations.
+the default `dingo_extra_plugins` build tag. Go test benchmark targets report
+memory allocations; `make bench-leios-db` prints workload timings only.
 
 ## Benchmarks
 
