@@ -3991,7 +3991,7 @@ func TestMuxerServerPeerReadMessage(t *testing.T) {
 				written <- nil
 			}()
 			for _, want := range [][]byte{first, second, third} {
-				gotProtocolId, got := peer.readMessage(t, 5*time.Second)
+				gotProtocolId, got := peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, protocolId, gotProtocolId)
 				require.Equal(t, want, got)
 			}
