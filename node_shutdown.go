@@ -416,7 +416,7 @@ func (n *Node) shutdown() error {
 	// confirmed stopping may still be using n.db, exactly the same danger an
 	// unconfirmed ledgerState close guards against below, so either failure
 	// must skip the database close and plugin host shutdown that follow.
-	ledgerStateDrainConfirmed := phase1DrainConfirmed
+	storageDrainConfirmed := phase1DrainConfirmed
 
 	if n.ledgerState != nil {
 		if !phase1DrainConfirmed {
@@ -426,12 +426,12 @@ func (n *Node) shutdown() error {
 			// as Restore/Truncate skip closeStorageForLiveLifecycleOp when
 			// quiesce reports errStorageDrainUnconfirmed.
 			n.config.logger.Error(
-				"skipping ledger state close because phase 1 drain was not confirmed",
+				"skipping ledger state close because a phase 1 worker drain was not confirmed",
 			)
 			err = errors.Join(
 				err,
 				errors.New(
-					"ledger state close skipped: phase 1 drain unconfirmed",
+					"ledger state close skipped: phase 1 worker drain unconfirmed",
 				),
 			)
 		} else {
@@ -442,7 +442,7 @@ func (n *Node) shutdown() error {
 				shutdownTimeout,
 				n.ledgerState.Close,
 			); closeErr != nil {
-				ledgerStateDrainConfirmed = false
+				storageDrainConfirmed = false
 				err = errors.Join(
 					err,
 					fmt.Errorf("ledger state close: %w", closeErr),
@@ -475,14 +475,14 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.db != nil {
-		if !ledgerStateDrainConfirmed {
+		if !storageDrainConfirmed {
 			n.config.logger.Error(
-				"skipping database close because ledger state drain was not confirmed",
+				"skipping database close because a storage user drain was not confirmed",
 			)
 			err = errors.Join(
 				err,
 				errors.New(
-					"database close skipped: ledger state drain unconfirmed",
+					"database close skipped: storage-user drain unconfirmed",
 				),
 			)
 		} else {
@@ -501,9 +501,9 @@ func (n *Node) shutdown() error {
 		}
 	}
 	if n.pluginHost != nil {
-		if !ledgerStateDrainConfirmed {
+		if !storageDrainConfirmed {
 			n.config.logger.Error(
-				"skipping plugin host shutdown because ledger state drain was not confirmed",
+				"skipping plugin host shutdown because a storage user drain was not confirmed",
 			)
 		} else if stopErr := n.pluginHost.Stop(ctx); stopErr != nil {
 			err = errors.Join(

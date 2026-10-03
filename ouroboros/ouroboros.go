@@ -302,7 +302,12 @@ type Ouroboros struct {
 	leiosPersistStarted     atomic.Bool
 	leiosPersistMu          sync.Mutex
 	leiosPersistClosed      bool // guarded by leiosPersistMu; permanent after Close
-	leiosPersistPending     map[string]*leiosPersistJob
+	leiosPersistStoreMu     sync.Mutex
+	// leiosPersistPruneBeforeSlot is the active store's retention frontier.
+	// Writers hold leiosPersistStoreMu through SetLeiosEB; GC publishes its
+	// frontier under the same lock, then scans and prunes without holding it.
+	leiosPersistPruneBeforeSlot uint64
+	leiosPersistPending         map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload
 	// copy is still in flight. leiosPersistReserved counts those in-flight

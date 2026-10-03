@@ -1590,9 +1590,12 @@ outlive it:
 - **EventBus subscriptions.** `Close` removes the subscriptions Ouroboros makes
   on its own behalf. A leaked one would be handled once per restore cycle,
   forever.
+- **Leios persistence workers.** `Close` stops the historical-serving writer
+  and optional retention GC before storage closes. An unconfirmed worker drain
+  prevents normal shutdown and live restore from closing storage underneath it.
 
-`Close` is idempotent, so `Run`'s deferred shutdown and an explicit restore
-teardown can both call it.
+`Close` is idempotent, so `Node.Stop` and an explicit restore teardown can both
+call it. Failed startup closes Ouroboros through `Run`'s LIFO rollback stack.
 
 Because the node's callbacks and the connection manager's providers all resolve
 the instance at call time, they follow the replacement automatically and are not
@@ -1616,7 +1619,8 @@ Phase 1: Stop accepting new work
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
   block forger, leader election, Leios pipeline and vote managers,
-  snapshot manager, database lifecycle manager
+  Ouroboros Leios persistence and optional retention GC, snapshot manager,
+  database lifecycle manager
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
   chain selector, peer governor, UTxO RPC,

@@ -1308,9 +1308,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		}
 		return closeErr
 	}
-	// Close this instance before storage cleanup on any startup rollback,
-	// including a failure while attaching its handlers.
-	defer func() { _ = closeOuroboros() }()
 	started = append(started, func() {
 		if closeErr := closeOuroboros(); closeErr != nil {
 			n.config.logger.Error(
@@ -1327,17 +1324,6 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		return err
 	}
 	n.ouroborosRef.Store(ouro)
-	// Close stops Leios persistence and optional GC workers and releases its
-	// EventBus subscriptions and Prometheus collectors. Register it on both
-	// the unwind stack and a defer for startup failure and graceful shutdown.
-	defer func() {
-		if current := n.ouroboros(); current != nil {
-			closeErr := current.Close()
-			if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
-				leiosPersistenceDrainConfirmed = false
-			}
-		}
-	}()
 	// A closure, not a method value, even though n.ouroboros already exists
 	// here: a live restore replaces the instance, and a method value would
 	// pin this subscription to the replaced one forever, so outbound

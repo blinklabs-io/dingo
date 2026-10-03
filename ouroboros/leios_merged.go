@@ -1052,6 +1052,7 @@ func (o *Ouroboros) restoreLeiosVerifiedEbSlot() {
 			"failed to restore persisted leios EB watermark",
 			"error", err,
 		)
+		o.startLeiosPersistenceGC(0, false)
 		return
 	}
 	o.advanceLeiosVerifiedEbSlot(slot)

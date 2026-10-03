@@ -132,8 +132,8 @@ func (o *Ouroboros) subscribeTracked(
 // Without this, each restore would leave stale handlers permanently attached
 // and the replacement's metric registration would panic on duplicates.
 //
-// Close is idempotent, so Run()'s deferred shutdown and an explicit
-// live-restore teardown can both call it.
+// Close is idempotent, so node shutdown and an explicit live-restore teardown
+// can both call it.
 func (o *Ouroboros) Close() error {
 	return o.close()
 }

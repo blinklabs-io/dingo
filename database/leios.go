@@ -380,9 +380,6 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 		return 0, types.ErrBlobStoreUnavailable
 	}
 	defer it.Close()
-	if err := it.Err(); err != nil {
-		return 0, fmt.Errorf("prune Leios records: iterator: %w", err)
-	}
 
 	var (
 		deleteKeys    [][]byte
@@ -438,7 +435,8 @@ func (d *Database) PruneLeiosEBBeforeSlot(
 		return nil
 	}
 
-	for it.Seek(iteratorPrefix); it.ValidForPrefix(iteratorPrefix); it.Next() {
+	it.Seek(iteratorPrefix)
+	for ; it.ValidForPrefix(iteratorPrefix); it.Next() {
 		if err := ctx.Err(); err != nil {
 			return deletedKeyCnt, err
 		}

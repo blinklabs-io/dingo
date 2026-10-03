@@ -194,6 +194,7 @@ func TestNodeStopSkipsDatabaseCloseWhenPhase1DrainUnconfirmed(t *testing.T) {
 	assert.ErrorContains(t, stopErr, "database close skipped")
 }
 
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
 func TestNodeStopSkipsStorageCloseWhenLeiosPersistenceDrainUnconfirmed(
 	t *testing.T,
 ) {
@@ -206,7 +207,10 @@ func TestNodeStopSkipsStorageCloseWhenLeiosPersistenceDrainUnconfirmed(
 
 	stopErr := n.Stop()
 	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
-	require.ErrorContains(t, stopErr, "database close skipped")
+	require.ErrorContains(
+		t, stopErr,
+		"database close skipped: storage-user drain unconfirmed",
+	)
 	_, err := n.db.GetTip(nil)
 	require.NoError(
 		t, err,

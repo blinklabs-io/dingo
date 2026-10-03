@@ -2202,11 +2202,12 @@ retained. The asynchronous GC scans the shared `e` prefix, deletes `em` and
 `et` keys one per transaction, and runs after startup restores the Leios slot
 watermark and then hourly. It also removes legacy hash-only records when their
 embedded slot is older than the cutoff, plus unpaired legacy transaction
-records. A malformed legacy manifest has no trustworthy slot, so it and its
-paired transaction record are preserved. Pruning is idempotent across partial
-cloud-store commits. These keys support historical serving after the in-memory
-cache expires and the Ouroboros provider's cache-miss reload path. The GC does
-not delete ordinary ledger blocks, UTxOs, or already-applied Leios effects. A
+records. A legacy manifest shorter than its 8-byte slot prefix has no
+trustworthy slot, so it and its paired transaction record are preserved.
+Pruning is idempotent across partial cloud-store commits. These keys support
+historical serving after the in-memory cache expires and the Ouroboros
+provider's cache-miss reload path. The GC does not delete ordinary ledger
+blocks, UTxOs, or already-applied Leios effects. A
 later rollback/replay that needs a pruned endorser block must refetch it from a
 Leios peer; downstream requests outside the configured window have the same
 peer dependency. Hourly sweeps list manifests to find the highest persisted

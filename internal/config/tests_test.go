@@ -633,13 +633,18 @@ func TestLoad_LoggingFromYAML(t *testing.T) {
 	}
 }
 
+// Not t.Parallel: resets package-global config and controls process environment.
 func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
 	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
 
-	defaults, err := LoadConfig("")
+	emptyConfig := filepath.Join(t.TempDir(), "empty.yaml")
+	require.NoError(t, os.WriteFile(emptyConfig, nil, 0o600))
+	defaults, err := LoadConfig(emptyConfig)
 	require.NoError(t, err)
 	assert.Zero(t, defaults.LeiosPersistenceRetentionSlots)
 
@@ -654,7 +659,9 @@ func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
 	assert.Equal(t, uint64(3600), fromEnv.LeiosPersistenceRetentionSlots)
 
 	t.Setenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
+	t.Setenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS", "")
 	os.Unsetenv("DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
+	os.Unsetenv("CARDANO_DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS")
 	fromYAML, err := LoadConfig(configFile)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7200), fromYAML.LeiosPersistenceRetentionSlots)
