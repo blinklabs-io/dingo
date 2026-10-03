@@ -1796,6 +1796,22 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+**Equivocation detection.** The node subscribes an observer
+(`equivocationDetector`, `node_equivocation.go`) to `chain.update`, detachable
+because a missed event loses the metric, not node state. It keeps the blocks
+named by each `ChainRollbackEvent` (decoded for their issuer, bounded to 2160
+entries) and compares every later `ChainBlockEvent` block against them. A block
+with a different hash, the same slot or block number, and the same
+`IssuerVkey().PoolId()` as a retained block is equivocation: two pools cannot
+share a cold key, so that key is forging in two places. Each such pair
+increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
+three competing blocks are three pairs. `self_key="true"` when the pool is this
+node's own, taken from the block producer credentials validated at startup. The
+counter series for a pool appears only when it first equivocates. Blocks are
+decoded only when a slot or number matches, so a normal sync pays one scan of a
+normally empty list. A competing block this node never applied, because it
+never became the chain, is not seen.
+
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
 `genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —

@@ -724,6 +724,7 @@ func (n *Node) startBlockProducer(
 			err,
 		)
 	}
+	n.equivocation.setSelfPoolID(creds.GetPoolID().String())
 	started = append(started, func() {
 		if n.blockForger != nil {
 			n.blockForger.Stop()
