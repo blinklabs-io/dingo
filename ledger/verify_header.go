@@ -119,7 +119,23 @@ var (
 	errBlockPipelineAdmissionVerified = errors.New(
 		"block-processing pipeline: header verified at admission",
 	)
+	// errHeaderStateLookupFailed marks a failure to read the local state a
+	// stateful header check needs. It says nothing about the header, so it
+	// must never be attributed to the peer that supplied it.
+	errHeaderStateLookupFailed = errors.New(
+		"header state lookup failed",
+	)
 )
+
+// headerStateLookupErr marks err, a failure reading local state, with
+// errHeaderStateLookupFailed. models.ErrPoolNotFound is an answer rather than a
+// failure and is returned unchanged.
+func headerStateLookupErr(err error) error {
+	if err == nil || errors.Is(err, models.ErrPoolNotFound) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", errHeaderStateLookupFailed, err)
+}
 
 // IsHeaderVerificationDeferred reports whether header-only verification could
 // not proceed because required ledger state, epoch data, or stake snapshot
@@ -1675,19 +1691,20 @@ func (ls *LedgerState) resolveElectingSnapshot(
 		epochCache,
 	)
 	if err != nil {
-		snap.selErr = err
+		snap.selErr = headerStateLookupErr(err)
 		return snap
 	}
 	if useImportedActive {
 		snap.epoch = epochId
 		snap.kind = models.PoolStakeSnapshotTypeActive
 	}
-	snap.row, snap.rowErr = ls.db.Metadata().GetPoolStakeSnapshot(
+	row, err := ls.db.Metadata().GetPoolStakeSnapshot(
 		snap.epoch,
 		snap.kind,
 		poolKeyHash[:],
 		nil,
 	)
+	snap.row, snap.rowErr = row, headerStateLookupErr(err)
 	return snap
 }
 
@@ -1916,7 +1933,7 @@ func (ls *LedgerState) leaderEligibilityStakeFromSnapshot(
 				"block header verification rejected at slot %d: "+
 					"lookup total active stake: %w",
 				block.SlotNumber(),
-				err,
+				headerStateLookupErr(err),
 			)
 	}
 	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType,
@@ -2064,7 +2081,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 			nil,
 		)
 		if err != nil {
-			return lcommon.Blake2b256{}, false, err
+			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
 		// An empty value is a registration row without a VRF key, which is a
 		// miss. Any other wrong length is a malformed stored hash: reading it
@@ -2098,7 +2115,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 				nil,
 			)
 		if err != nil {
-			return lcommon.Blake2b256{}, false, err
+			return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 		}
 		if found && len(vrfKeyHash) > 0 {
 			hash, err := lcommon.NewBlake2b256Checked(vrfKeyHash)
@@ -2136,7 +2153,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
 			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
 			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
-				return lcommon.Blake2b256{}, false, poolErr
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(poolErr)
 			}
 			hash, ok, err := registeredPoolVrfKeyHash(pool)
 			if err != nil {
@@ -2156,7 +2173,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 	}
 	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
 	if err != nil {
-		return lcommon.Blake2b256{}, false, err
+		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}
 	return registeredPoolVrfKeyHash(pool)
 }

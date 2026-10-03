@@ -269,14 +269,15 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 
 // headerFailureBlamesPeer reports whether a header validation failure is a
 // verdict on the block a peer supplied. Failures that only say this node lacks
-// the state to decide (still deferred, a missing or pruned snapshot, no nonce)
-// are not: they clear once local state catches up, and penalizing the peer
-// would punish an honest one.
+// the state to decide (still deferred, a missing or pruned snapshot, no nonce,
+// a failed state read) are not: they clear once local state catches up, and
+// penalizing the peer would punish an honest one.
 func headerFailureBlamesPeer(cause error) bool {
 	return !IsHeaderVerificationDeferred(cause) &&
 		!errors.Is(cause, errLeaderStakeSnapshotUnavailable) &&
 		!errors.Is(cause, errVrfKeyRegistrationHistoryUnavailable) &&
 		!errors.Is(cause, errPoolSnapshotPruned) &&
+		!errors.Is(cause, errHeaderStateLookupFailed) &&
 		!errors.Is(cause, errBlockPipelineEta0Unavailable)
 }
 

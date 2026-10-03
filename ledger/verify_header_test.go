@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -2035,6 +2036,90 @@ func TestVerifyBlockHeaderStateReadsElectingSnapshotOnce(t *testing.T) {
 
 	require.NoError(t, ls.verifyBlockHeaderState(tb.block, 5, false))
 	assert.Equal(t, int64(1), counter.reads.Load())
+}
+
+// failingStateStore fails one metadata read with a storage error.
+type failingStateStore struct {
+	metadata.MetadataStore
+	fail string
+}
+
+var errInjectedStorage = errors.New("injected storage failure")
+
+func (s *failingStateStore) GetPoolStakeSnapshot(
+	epoch uint64,
+	snapshotType string,
+	poolKeyHash []byte,
+	txn types.Txn,
+) (*models.PoolStakeSnapshot, error) {
+	if s.fail == "GetPoolStakeSnapshot" {
+		return nil, errInjectedStorage
+	}
+	return s.MetadataStore.GetPoolStakeSnapshot(
+		epoch, snapshotType, poolKeyHash, txn,
+	)
+}
+
+func (s *failingStateStore) GetTotalActiveStake(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (uint64, error) {
+	if s.fail == "GetTotalActiveStake" {
+		return 0, errInjectedStorage
+	}
+	return s.MetadataStore.GetTotalActiveStake(epoch, snapshotType, txn)
+}
+
+func (s *failingStateStore) GetPool(
+	pkh lcommon.PoolKeyHash,
+	includeInactive bool,
+	txn types.Txn,
+) (*models.Pool, error) {
+	if s.fail == "GetPool" {
+		return nil, errInjectedStorage
+	}
+	return s.MetadataStore.GetPool(pkh, includeInactive, txn)
+}
+
+// TestHeaderStateStorageFailureDoesNotBlamePeer pins that a storage read
+// failing during header state verification is classified as local state, so
+// apply-time recovery does not penalize the peer that supplied the block.
+func TestHeaderStateStorageFailureDoesNotBlamePeer(t *testing.T) {
+	t.Parallel()
+
+	for _, method := range []string{
+		"GetPoolStakeSnapshot",
+		"GetTotalActiveStake",
+		"GetPool",
+	} {
+		t.Run(method, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{69}, 0, tamperNone)
+			store := &failingStateStore{}
+			db, err := dbtest.NewDatabaseWithMetadataWrapper(
+				t,
+				dbtest.Options{
+					Config: &database.Config{DataDir: t.TempDir()},
+				},
+				func(inner metadata.MetadataStore) metadata.MetadataStore {
+					store.MetadataStore = inner
+					return store
+				},
+			)
+			require.NoError(t, err)
+			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			poolKeyHash := tb.block.IssuerVkey().Hash()
+			seedBlockPoolRegistration(t, db, tb.block)
+			seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+			require.NoError(t, ls.verifyBlockHeaderState(tb.block, 5, false))
+
+			store.fail = method
+			err = ls.verifyBlockHeaderState(tb.block, 5, false)
+			require.ErrorIs(t, err, errInjectedStorage)
+			assert.False(t, headerFailureBlamesPeer(err))
+		})
+	}
 }
 
 func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
