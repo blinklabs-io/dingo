@@ -71,6 +71,31 @@ func TestCloseContextClosesBusWhenNoHandlerIsBlocked(t *testing.T) {
 	require.True(t, bus.closed)
 }
 
+func TestCloseContextAllowsHandlerToFinishDuringGrace(t *testing.T) {
+	t.Parallel()
+
+	const eventType EventType = "test.close_context_grace"
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	bus := NewEventBus(nil, nil)
+	entered := make(chan struct{})
+	handlerDone := make(chan struct{})
+	bus.SubscribeFunc(eventType, func(Event) {
+		close(entered)
+		<-ctx.Done()
+		timer := time.NewTimer(10 * time.Millisecond)
+		defer timer.Stop()
+		<-timer.C
+		close(handlerDone)
+	})
+	bus.Publish(eventType, NewEvent(eventType, struct{}{}))
+	testutil.RequireReceive(t, entered, 5*time.Second, "handler never started")
+
+	require.NoError(t, bus.CloseContext(ctx))
+	testutil.RequireReceive(t, handlerDone, time.Second, "handler did not finish during close grace")
+}
+
 func TestCloseContextClosesIdleBusWhenDeadlineAlreadyPassed(t *testing.T) {
 	t.Parallel()
 

@@ -105,7 +105,14 @@ func (m *lifecycleMutex) TryLock() bool {
 		return false
 	}
 }
-func (m *lifecycleMutex) Unlock() { m.token <- struct{}{} }
+func (m *lifecycleMutex) Unlock() {
+	m.init()
+	select {
+	case m.token <- struct{}{}:
+	default:
+		panic("unlock of unlocked lifecycleMutex")
+	}
+}
 func (m *lifecycleMutex) lockContext(ctx context.Context) error {
 	m.init()
 	select {

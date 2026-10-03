@@ -15,8 +15,11 @@ registered through `internal/promutil`: a compatible collector already on the
 registry is reused, and a registration conflict unregisters what that
 construction added and returns an error rather than panicking.
 
-`Host.Stop` also waits, bounded by its context, for `StopCapability` teardown
-already in flight, so provider teardown has completed when `Stop` returns.
+`Host.Stop` waits, bounded by its context, for `StopCapability` teardown
+already in flight. It then calls `Stop` on every remaining provider in reverse
+start order with that same context, even if the capability wait reached its
+deadline, so one timed-out capability does not discard the host's remaining
+provider ownership.
 
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
@@ -1715,12 +1718,12 @@ node context is already cancelled, and later component teardown treats the
 already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
 events after waiting for in-flight handlers; ordinary `Unsubscribe` and
 reusable `EventBus.Stop` preserve queued events. The wait is bounded by the
-shutdown deadline (`EventBus.CloseContext`): a handler that never returns is
-abandoned, its event type is named in the returned error, and the unconfirmed
-drain makes phase 3 skip the `LedgerState.Close`, database close, and plugin
-host shutdown, since that handler may still be using them. When no handler is
-running at the deadline, the close gets a short bounded grace to finish rather
-than being reported as abandoned.
+shutdown deadline (`EventBus.CloseContext`), with a short bounded grace for
+close work already in flight when the deadline ends. A handler that remains
+active after that grace is abandoned, its event type is named in the returned
+error, and the unconfirmed drain makes phase 3 skip the `LedgerState.Close`,
+database close, and plugin host shutdown, since that handler may still be using
+them.
 
 If `LedgerState.Close` cannot confirm that its block-processing and database
 workers have drained, normal shutdown does not close the database or storage

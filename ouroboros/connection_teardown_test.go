@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -23,9 +24,13 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	dchainsync "github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,4 +134,94 @@ func TestBlockfetchServerSendBatchStopsOnManagerTeardown(t *testing.T) {
 				"a torn-down connection must not be sent BatchDone")
 		})
 	}
+}
+
+type observedDoneConnection struct {
+	connWithDone
+	doneRead chan struct{}
+}
+
+func (c observedDoneConnection) Done() <-chan struct{} {
+	close(c.doneRead)
+	return c.connWithDone.Done()
+}
+
+// TestConnectionTeardownReleasesChainsyncAndMempoolWaiters checks that two
+// production consumers can observe one manager-owned teardown while the
+// manager remains the only receiver of ErrorChan.
+func TestConnectionTeardownReleasesChainsyncAndMempoolWaiters(t *testing.T) {
+	t.Parallel()
+
+	fixture := txsubmissionTestFixtures(t)[0]
+	o, _ := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
+		cfg.MempoolCapacity = int64(len(fixture.body))
+	})
+	fifo := o.mempool.(*mempool.FIFO)
+	require.NoError(t, fifo.Mempool.AddTransaction(txsubmissionRelayTestEraId, fixture.body))
+	headroom, ok := o.mempool.(mempool.AdmissionHeadroom)
+	require.True(t, ok)
+	require.Zero(t, headroom.AdmissionHeadroomBytes())
+
+	ledgerState := newTestLedgerState(t)
+	iter, err := ledgerState.GetChainFromPoint(ocommon.Point{}, true)
+	require.NoError(t, err)
+	t.Cleanup(iter.Cancel)
+
+	closedErr := make(chan error, 1)
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
+		ConnClosedFunc: func(_ ouroboros.ConnectionId, _ bool, err error) {
+			closedErr <- err
+		},
+	})
+	o.connManager = cm
+	t.Cleanup(func() { _ = cm.Stop(context.Background()) })
+
+	rawConn, err := ouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(rawConn, false, "127.0.0.1:1234"))
+	conn, done := cm.GetConnectionWithDone(rawConn.Id())
+	require.Same(t, rawConn, conn)
+	select {
+	case <-done:
+		t.Fatal("done closed before teardown")
+	default:
+	}
+
+	chainDoneRead := make(chan struct{})
+	chainWaiterDone := make(chan struct{})
+	chainState := &dchainsync.ChainsyncClientState{ChainIter: iter}
+	go func() {
+		o.chainsyncServerAwaitNext(
+			ochainsync.CallbackContext{ConnectionId: rawConn.Id()},
+			observedDoneConnection{
+				connWithDone: connWithDone{conn: conn, done: done},
+				doneRead:     chainDoneRead,
+			},
+			chainState,
+		)
+		close(chainWaiterDone)
+	}()
+
+	admissionWaitStarted := make(chan struct{})
+	admissionWaiterDone := make(chan bool, 1)
+	go func() {
+		close(admissionWaitStarted)
+		admissionWaiterDone <- headroom.WaitForAdmissionHeadroom(1, done)
+	}()
+	testutil.RequireReceive(t, chainDoneRead, 5*time.Second,
+		"chainsync waiter did not begin waiting for teardown")
+	testutil.RequireReceive(t, admissionWaitStarted, 5*time.Second,
+		"mempool waiter did not start")
+
+	injected := errors.New("peer reset")
+	rawConn.ErrorChan() <- injected
+	require.ErrorIs(t, testutil.RequireReceive(t, closedErr, 5*time.Second,
+		"manager did not receive the connection error"), injected)
+	testutil.RequireReceive(t, done, 5*time.Second,
+		"manager did not publish teardown")
+	testutil.RequireReceive(t, chainWaiterDone, 5*time.Second,
+		"chainsync waiter did not exit on teardown")
+	require.False(t, testutil.RequireReceive(t, admissionWaiterDone, 5*time.Second,
+		"mempool waiter did not exit on teardown"),
+		"mempool admission should stop waiting when its connection closes")
 }

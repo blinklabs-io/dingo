@@ -1444,13 +1444,11 @@ func (e *EventBus) Close() {
 	e.shutdown(false)
 }
 
-// CloseContext is Close bounded by ctx. Close waits for every in-flight
-// SubscribeFunc handler to return, so a handler that never returns would hold
-// it forever. When ctx ends first, CloseContext stops waiting and returns an
-// error wrapping ctx.Err() that names the event types whose handlers are
-// still running. When no handler is running at that point, it first allows
-// the close a bounded grace to finish. The abandoned Close keeps running in its own goroutine and
-// finishes once those handlers return.
+// CloseContext waits for Close until ctx ends, then grants the in-flight close
+// a short bounded grace to finish. If handlers are still running after that
+// grace, it returns an error wrapping ctx.Err() that names their event types.
+// The abandoned Close keeps running in its own goroutine and finishes once
+// those handlers return.
 func (e *EventBus) CloseContext(ctx context.Context) error {
 	done := make(chan struct{})
 	go func() {
@@ -1462,20 +1460,18 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 	}
-	// A ctx that was already done on entry gives Close no time at all. With
-	// no handler running, Close is only finishing bookkeeping, so allow it a
-	// short bounded grace instead of reporting a drain that never stalled.
+	// A ctx that was already done on entry gives Close no time at all. Allow
+	// the in-flight close a short bounded grace, including when a handler was
+	// still running at the deadline, before declaring the drain abandoned.
 	running := e.runningHandlerTypes()
-	if len(running) == 0 {
-		grace := time.NewTimer(closeContextIdleGrace)
-		defer grace.Stop()
-		select {
-		case <-done:
-			return nil
-		case <-grace.C:
-		}
-		running = e.runningHandlerTypes()
+	grace := time.NewTimer(closeContextGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-grace.C:
 	}
+	running = e.runningHandlerTypes()
 	select {
 	case <-done:
 		return nil
@@ -1494,9 +1490,9 @@ func (e *EventBus) CloseContext(ctx context.Context) error {
 	)
 }
 
-// closeContextIdleGrace bounds how long CloseContext keeps waiting past its
-// deadline when no handler is running.
-const closeContextIdleGrace = time.Second
+// closeContextGrace bounds how long CloseContext waits past its deadline for
+// in-flight close work to finish.
+const closeContextGrace = time.Second
 
 func (e *EventBus) shutdown(restart bool) {
 	if e == nil {

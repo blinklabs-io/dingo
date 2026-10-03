@@ -1445,6 +1445,24 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
 	)
 }
 
+func TestHandleConnManagerClosedOwnerLogsNtCCloseCause(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	n := &Node{config: Config{
+		logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}}
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	cause := errors.New("local client reset")
+	n.handleConnManagerClosedOwner(conn, true, cause)
+
+	require.Contains(t, logs.String(), cause.Error())
+	require.Contains(t, logs.String(), conn.Id().String())
+}
+
 // TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
 // connmanager path used for both NtC and NtN. The EventBus path deliberately no
 // longer removes server-side state by connection ID because a delayed event

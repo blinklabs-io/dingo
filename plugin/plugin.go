@@ -471,10 +471,11 @@ func (h *Host) Stop(ctx context.Context) error {
 			}
 		}
 	}
-	// Dependencies must stay alive while capability consumers drain.
-	if err == nil {
-		err = stopReverse(ctx, started)
-	}
+	// Normally capability consumers drain before their dependencies stop. If
+	// the shared shutdown context expires first, still give every remaining
+	// provider the same context so its Stop can do bounded best-effort cleanup.
+	// Skipping this pass would discard the only references to those providers.
+	err = errors.Join(err, stopReverse(ctx, started))
 	h.mu.Lock()
 	err = errors.Join(err, h.capabilityStopErr)
 	h.stopErr = err

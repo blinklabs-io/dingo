@@ -661,13 +661,34 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	t.Parallel()
 
 	host := NewHost()
+	var dependencyStopped atomic.Bool
+	err := Register(
+		host,
+		Descriptor{Capability: CapabilityStorageBlob, Name: "dependency"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "dependency", Lifecycle{StopFunc: func(context.Context) error {
+				dependencyStopped.Store(true)
+				return nil
+			}}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve[string](
+		context.Background(), host, CapabilityStorageBlob, "dependency", nil, testDeps{},
+	); err != nil {
+		t.Fatal(err)
+	}
+
 	stopStarted := make(chan struct{})
 	releaseStop := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseStop) }) }
 	defer release()
 
-	err := Register(
+	err = Register(
 		host,
 		Descriptor{Capability: CapabilityMempool, Name: "blocked"},
 		func() testConfig { return testConfig{} },
@@ -689,7 +710,10 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = host.StopCapability(context.Background(), CapabilityMempool) }()
+	capStopDone := make(chan error, 1)
+	go func() {
+		capStopDone <- host.StopCapability(context.Background(), CapabilityMempool)
+	}()
 	testutil.RequireReceive(t, stopStarted, 3*time.Second, "provider stop")
 
 	ctx, cancel := context.WithTimeout(
@@ -699,6 +723,13 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	defer cancel()
 	if err := host.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Host.Stop error = %v, want deadline exceeded", err)
+	}
+	if !dependencyStopped.Load() {
+		t.Fatal("Host.Stop did not stop remaining providers after the capability wait timed out")
+	}
+	release()
+	if err := testutil.RequireReceive(t, capStopDone, 3*time.Second, "capability stop"); err != nil {
+		t.Fatal(err)
 	}
 }
 

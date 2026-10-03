@@ -45,6 +45,23 @@ func TestBarkListenAddrSupportsIPv6(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
+func TestLifecycleMutexUnlockWithoutLockPanics(t *testing.T) {
+	t.Parallel()
+
+	var mutex lifecycleMutex
+	panicValue := make(chan any, 1)
+	go func() {
+		defer func() { panicValue <- recover() }()
+		mutex.Unlock()
+	}()
+	select {
+	case got := <-panicValue:
+		require.Equal(t, "unlock of unlocked lifecycleMutex", got)
+	case <-time.After(time.Second):
+		t.Fatal("Unlock blocked instead of panicking")
+	}
+}
+
 // TestStartOnPortZeroBindsAFreePort asserts Port 0 asks the OS for a free port,
 // which Addr then reports. Two servers started that way must not contend for
 // one fixed port.

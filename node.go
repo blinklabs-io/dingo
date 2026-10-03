@@ -1796,11 +1796,18 @@ func taintValue(relaxed bool) string {
 
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
-	_ bool,
-	_ error,
+	isNtC bool,
+	err error,
 ) {
 	if conn == nil {
 		return
+	}
+	if isNtC && err != nil && n.config.logger != nil {
+		n.config.logger.Warn(
+			"node-to-client connection closed",
+			"connection_id", conn.Id().String(),
+			"error", err,
+		)
 	}
 	var chainsyncOwner *ochainsync.Server
 	if protocol := conn.ChainSync(); protocol != nil {
