@@ -807,12 +807,19 @@ func addressHost(address string) string {
 //     guess, because merging distinct configured identities would
 //     silently violate operator intent.
 //
-//  3. No match: caller creates a fresh PeerSourceInboundConn entry.
+//  3. Disconnected inbound entry from the same host: an earlier inbound
+//     entry with no live connection is reused, so a peer reconnecting from
+//     a new source port keeps its short-session history and cooldown state
+//     instead of starting from a fresh record. An entry that still holds a
+//     connection is never reused: concurrent connections from one host stay
+//     separate because protocol ownership is per connection.
+//
+//  4. No match: caller creates a fresh PeerSourceInboundConn entry.
 //
 // Rule 2 only consults topology peers; gossip/ledger/other inbound
-// entries never widen their identity, because the affordance granted
-// by a topology match (trust, valency) is specific to operator-declared
-// peers.
+// entries never widen their identity to a topology peer, because the
+// affordance granted by a topology match (trust, valency) is specific to
+// operator-declared peers.
 //
 // The second return value is the GroupID of the matched peer when that
 // peer is topology-sourced — regardless of whether the match came from
@@ -857,10 +864,19 @@ func (p *PeerGovernor) resolveInboundIdentity(
 		}
 		candidateIdx = i
 	}
-	if candidateIdx == -1 {
-		return -1, ""
+	if candidateIdx != -1 {
+		return candidateIdx, p.peers[candidateIdx].GroupID
 	}
-	return candidateIdx, p.peers[candidateIdx].GroupID
+	// Rule 3: a disconnected inbound entry from the same host.
+	for i, peer := range p.peers {
+		if peer != nil &&
+			peer.Source == PeerSourceInboundConn &&
+			peer.Connection == nil &&
+			addressHost(peer.NormalizedAddress) == inboundHost {
+			return i, ""
+		}
+	}
+	return -1, ""
 }
 
 // topologyGroupIDForPeer returns the matched peer's GroupID when the
@@ -933,6 +949,25 @@ func (p *PeerGovernor) IsChainSelectionEligible(
 		p.peers[peerIdx].Source,
 		p.peers[peerIdx].Connection,
 	).eligible
+}
+
+// IsConfiguredRootConnection reports whether connId is a live client
+// connection to an operator-configured local or public root. Roots are the
+// operator's known honest network, so chainsync client slots favor them over
+// discovered peers.
+func (p *PeerGovernor) IsConfiguredRootConnection(
+	connId ouroboros.ConnectionId,
+) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	peerIdx := p.peerIndexByConnId(connId)
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return false
+	}
+	peer := p.peers[peerIdx]
+	return (peer.Source == PeerSourceTopologyLocalRoot ||
+		peer.Source == PeerSourceTopologyPublicRoot) &&
+		chainSelectionEligible(peer.Source, peer.Connection)
 }
 
 func clonePeerConnection(conn *PeerConnection) *PeerConnection {

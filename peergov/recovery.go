@@ -17,6 +17,7 @@ package peergov
 import (
 	"cmp"
 	"slices"
+	"time"
 )
 
 // Connection recovery used to be edge-triggered only: the single
@@ -33,6 +34,10 @@ import (
 // single reconcile cycle will redial when the node has no eligible
 // upstream connection left or the hot set sits below MinHotPeers.
 const maxEmergencyRedialsPerReconcile = 3
+
+// chainsyncStallRankWindow is how long after a ChainSync stall a peer ranks
+// behind every other redial candidate.
+const chainsyncStallRankWindow = 15 * time.Minute
 
 // countEligibleUpstreamsLocked returns the number of peers whose current
 // connection can feed chainsync ingress. Must be called with p.mu held.
@@ -139,13 +144,20 @@ func (p *PeerGovernor) observedBelowThreshold(peer *Peer) bool {
 		peer.PerformanceScore < p.config.MinScoreThreshold
 }
 
-// redialRankCompare orders gossip/ledger redial candidates: observed
-// below-threshold peers last, then by score descending, so a known-good
-// peer is dialed before a never-observed one and both before a known-bad
-// one.
+// recentlyStalled reports whether a connection to peer closed on a ChainSync
+// stall within chainsyncStallRankWindow.
+func recentlyStalled(peer *Peer) bool {
+	return !peer.LastChainsyncStall.IsZero() &&
+		time.Since(peer.LastChainsyncStall) < chainsyncStallRankWindow
+}
+
+// redialRankCompare orders gossip/ledger redial candidates: recently stalled
+// and observed below-threshold peers last, then by score descending, so a
+// known-good peer is dialed before a never-observed one and both before a
+// known-bad one.
 func (p *PeerGovernor) redialRankCompare(a, b *Peer) int {
-	aBad := p.observedBelowThreshold(a)
-	bBad := p.observedBelowThreshold(b)
+	aBad := recentlyStalled(a) || p.observedBelowThreshold(a)
+	bBad := recentlyStalled(b) || p.observedBelowThreshold(b)
 	if aBad != bBad {
 		if aBad {
 			return 1

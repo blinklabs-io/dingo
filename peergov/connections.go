@@ -162,6 +162,16 @@ func isAddrInUseError(err error) bool {
 	return strings.Contains(msg, "cannot assign requested address")
 }
 
+// isChainsyncStallError reports whether err is the ChainSync protocol timeout
+// raised when a peer holds agency in MustReply and never answers.
+func isChainsyncStallError(err error) bool {
+	return err != nil &&
+		strings.Contains(
+			strings.ToLower(err.Error()),
+			"chain-sync: timeout waiting on transition",
+		)
+}
+
 func isExpectedConnectionCloseError(err error) bool {
 	if err == nil {
 		return false
@@ -754,7 +764,8 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	if p.isDeniedLocked(normalized) {
+	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
+	if p.isInboundDeniedLocked(normalized, peerIdx, now) {
 		p.recordInboundLifecycle("denied")
 		p.config.Logger.Info(
 			"denied inbound peer during cooldown",
@@ -781,7 +792,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		}
 		return
 	}
-	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
@@ -817,6 +827,11 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			return
 		}
 		p.recordInboundLifecycle("accepted")
+		if tmpPeer.Source == PeerSourceInboundConn {
+			// A reused entry follows the host to its newest source port.
+			tmpPeer.Address = address
+			tmpPeer.NormalizedAddress = normalized
+		}
 		// Record the topology identity once on first rule-2 match and
 		// keep it across subsequent reconnects. Rule-1 matches yield
 		// topologyGroupID == "" and must not clear a prior match.
@@ -923,6 +938,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		oldConn := clonePeerConnection(peer.Connection)
 		connClosedAt := time.Now()
 		denied := p.isPeerDeniedLocked(peer)
+		stalled := isChainsyncStallError(e.Error)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -979,14 +995,20 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					)
 					connDur = 0
 				}
-				if !peer.ConnectedAt.IsZero() &&
+				if stalled {
+					peer.LastChainsyncStall = connClosedAt
+				}
+				// A stall ends a long session without the peer having been
+				// useful, so it backs the peer off like a short one.
+				if !stalled && !peer.ConnectedAt.IsZero() &&
 					connDur >= minStableConnectionDuration {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
 					peer.ReconnectDelay = 0
 					peer.OutboundShortLivedCount = 0
 				} else if !peer.ConnectedAt.IsZero() {
-					// Short-lived connection: apply exponential backoff.
+					// Short-lived or stalled connection: apply exponential
+					// backoff.
 					// The stored delay is usually zero here because the
 					// reconnect goroutine consumes and zeroes it before
 					// dialing, so derive the rung from the consecutive
@@ -1040,11 +1062,74 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			if !peer.Reconnecting {
 				p.spawnOutboundConnectionLocked(peer)
 			}
+			if stalled {
+				// The stalled peer is now backing off. Dial alternates
+				// immediately: the next reconcile is minutes away, and
+				// until then the node would only redial the peer that
+				// just failed.
+				p.redialDisconnectedPeersLocked()
+			}
 		}
 	}
 	p.mu.Unlock()
 
 	p.publishPendingEvents(selectionEvents)
+}
+
+// isInboundDeniedLocked reports whether an inbound arrival must be refused.
+// Besides the connection tuple it checks the stable identity the arrival
+// resolves to: the host, and the peer record peerIdx names (-1 for none). An
+// arrival from a host that is already flapping is refused here and the host is
+// denied for the escalating flapping cooldown, which bounds sequential
+// reconnect churn rather than only concurrent connections. Must be called
+// with p.mu held.
+func (p *PeerGovernor) isInboundDeniedLocked(
+	normalized string,
+	peerIdx int,
+	now time.Time,
+) bool {
+	hostKey := addressHost(normalized)
+	if p.isDeniedLocked(normalized) ||
+		(hostKey != "" && p.isDeniedLocked(hostKey)) {
+		return true
+	}
+	if peerIdx == -1 || p.peers[peerIdx] == nil {
+		return false
+	}
+	peer := p.peers[peerIdx]
+	if p.isPeerDeniedLocked(peer) {
+		return true
+	}
+	flapping, multiplier := p.inboundFlappingStateLocked(peer, now)
+	if !flapping {
+		return false
+	}
+	p.denyInboundHostLocked(
+		peer,
+		now.Add(p.inboundFlappingCooldown(multiplier)),
+	)
+	return true
+}
+
+// inboundFlappingCooldown returns the deny duration for a flapping inbound
+// peer: the escalating inbound cooldown, never shorter than the normal deny
+// duration.
+func (p *PeerGovernor) inboundFlappingCooldown(multiplier int) time.Duration {
+	return max(
+		p.config.InboundCooldown*time.Duration(multiplier),
+		p.config.DenyDuration,
+	)
+}
+
+// denyInboundHostLocked denies an inbound peer by its record address and by
+// its bare host. Inbound source ports are ephemeral, so a host:port key alone
+// lets a peer shed a denial or cooldown by reconnecting; the bare host key is
+// matched by isInboundDeniedLocked. Must be called with p.mu held.
+func (p *PeerGovernor) denyInboundHostLocked(peer *Peer, expiry time.Time) {
+	p.denyList[peer.NormalizedAddress] = expiry
+	if host := addressHost(peer.NormalizedAddress); host != "" {
+		p.denyList[host] = expiry
+	}
 }
 
 // DenyPeer adds a peer to the deny list for the specified duration.
@@ -1266,6 +1351,9 @@ func (p *PeerGovernor) addPeerDenyKeysLocked(
 		remoteAddress := peer.Connection.Id.RemoteAddr.String()
 		p.denyList[connmanager.NormalizePeerAddr(remoteAddress)] = expiry
 		p.denyList[p.normalizeAddress(remoteAddress)] = expiry
+	}
+	if peer.Source == PeerSourceInboundConn {
+		p.denyInboundHostLocked(peer, expiry)
 	}
 }
 
