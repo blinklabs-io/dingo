@@ -1315,6 +1315,7 @@ dingo/
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
+│   ├── lifecycle.go     # Remote Stop/Restart/GetStatus service
 │   └── blob.go          # Remote archive blob adapter
 ├── midnight/            # Midnight MidnightState gRPC compatibility surface
 │   ├── midnight_state*.pb.go # Generated google.golang.org/grpc service stubs
@@ -1799,6 +1800,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.quota_status` | PeerGov | Quota status update |
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
+| `node.lifecycle` | Node | Remote stop or restart accepted; carries the graceful timeout and deadline |
 
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
@@ -11323,6 +11325,30 @@ documented "one operation at a time" invariant (a second call while one is
 running gets `FAILED_PRECONDITION`) and is the backing store for
 `GetOperationHistory` (in-memory only — does not survive a bark restart).
 
+**LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
+(Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
+`Run()` does when both `barkClientCaFilePath` and
+`barkOperatorCertificateFingerprints` are configured. Bark owns the transport,
+authentication and request validation (a negative `graceful_timeout` is
+`INVALID_ARGUMENT`) and delegates to `bark.NodeControl`, implemented by
+`*dingo.Node` in `node_remote_lifecycle.go`. `Stop` and `Restart` are
+classified destructive and `GetStatus` read-only in
+`newOperatorAuthInterceptor`, so Stop and Restart need an allowlisted operator
+certificate and `GetStatus` only a verified one. `Node.RequestShutdown` accepts
+exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
+timeout (zero, or anything longer than `shutdownTimeout`, selects
+`shutdownTimeout`, the bound `Node.Stop` enforces), publishes
+`event.NodeLifecycleEvent` on `node.lifecycle`, and queues a `ShutdownRequest`
+on `Node.ShutdownRequests`. `internal/node.Run` consumes that channel and ends
+the run as a signal would; `runRequestedShutdown` bounds the graceful shutdown
+by the request's timeout and abandons it past the deadline. A restart then
+calls `dingo.ReExec`, which `exec`s the same binary and arguments in place
+(Unix only; elsewhere `Restart` is `UNIMPLEMENTED`) so a supervisor sees one
+continuous process, and it does so even after a forced deadline. `GetStatus`
+reports the accepted state and deadline, uptime, version, the health probe's
+readiness and tip gap as health and sync status, and the ledger tip (omitted
+while a live restore or truncate holds `liveLifecycleMu`).
+
 **Request bounds.** Every Bark Connect handler, including ArchiveService,
 DatabaseService, health, and reflection, uses per-message 1 MiB read and send
 limits. Connect applies the read limit independently to compressed wire bytes
@@ -11335,8 +11361,9 @@ request read timeout but no write timeout, so slow request bodies are bounded
 without imposing an overall deadline on long-lived server streams.
 
 **Authentication and authorization** (`bark/auth.go`).
-Bind address alone doesn't authenticate a caller. Every DatabaseService RPC
-requires mTLS client-certificate authentication, independent of bind address;
+Bind address alone doesn't authenticate a caller. Every DatabaseService and
+LifecycleService RPC requires mTLS client-certificate authentication,
+independent of bind address;
 the entirely-read-only ArchiveService remains public. `BarkConfig.
 TlsClientCAFilePath` supplies a PEM CA bundle. `startServer` loads it into an
 `x509.CertPool` and sets the listener's `ClientAuth` to
