@@ -3732,7 +3732,7 @@ The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A
 `GenesisKeyDelegationCertificate` rewrites a genesis key's active delegate/VRF
 hash; `Store.GetGenesisDelegationForSlot` returns the latest
-`genesis_delegation` row with `added_slot < blockSlot`, and that row is written
+`genesis_delegation` row with `added_slot + stabilityWindow <= blockSlot`, and that row is written
 only when the block carrying the certificate is *applied*
 (`transaction_certificates.go`). During catch-up the header chain runs ahead of
 the applied tip, so at header-verification time the reassignment row can be
@@ -8643,8 +8643,8 @@ correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
-one query per pool: `CountPoolBlocksInSlotRange` returns every active pool's
-`blocks_minted` keyed by pool, and `GetOffchainMetadataBatch` returns every
+one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's
+`blocks_minted` keyed by pool (observed blocks plus a Mithril snapshot's imported counts), and `GetOffchainMetadataBatch` returns every
 pool's cached off-chain document keyed by URL, supplying the nullable
 `metadata` object. See the Off-chain Metadata Worker section above for the
 metadata half and DATABASE.md for both queries' index usage.
@@ -13428,7 +13428,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    caught up as of the currently validating slot. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
-   with withdrawals drained first. It also rejects delegation from a
+   with withdrawals drained first. For genesis key delegation certificates it
+   enforces `GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG` and
+   `DuplicateGenesisVRFDELEG` against the delegations in force and the pending
+   ones from `*LedgerView.GenesisDelegState`, and a certified delegation takes
+   effect only at its slot plus the stability window. It also rejects
+   delegation from a
    credential deregistered earlier in the transaction. Upstream value
    conservation counts a deposit for every registration and a refund for
    every deregistration, and those amounts match real accounts only because
