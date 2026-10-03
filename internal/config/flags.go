@@ -887,6 +887,11 @@ var flagSpecs = []flagSpec{
 		"mithril-download-max-idle-retries",
 		"Mithril snapshot download idle retries without progress",
 	),
+	int64Flag(
+		"Mithril.DownloadMaxBytes",
+		"mithril-download-max-bytes",
+		"Mithril per-object compressed download limit in bytes (0 uses built-in limits)",
+	),
 	boolFlag(
 		"Mithril.CleanupAfterLoad",
 		"mithril-cleanup-after-load",

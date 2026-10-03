@@ -834,6 +834,11 @@
   # 0 uses the built-in default
   # CLI: --mithril-download-max-idle-retries
   # downloadMaxIdleRetries: 0
+  # Compressed size limit in bytes for each downloaded Mithril object
+  # 0 uses built-in limits sized per archive type. A positive value replaces
+  # them for every object; raising it lowers immutable download concurrency.
+  # CLI: --mithril-download-max-bytes  Env: DINGO_MITHRIL_DOWNLOAD_MAX_BYTES
+  # downloadMaxBytes: 0
   # Remove temporary files after loading completes
   # Default: true
   # cleanupAfterLoad: true

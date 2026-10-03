@@ -631,6 +631,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid mithril.downloadIdleTimeout",
 		},
 		{
+			name: "negative mithril download limit",
+			modify: func(c *Config) {
+				c.Mithril.DownloadMaxBytes = -1
+			},
+			wantErr: "invalid mithril.downloadMaxBytes",
+		},
+		{
+			name: "positive mithril download limit",
+			modify: func(c *Config) {
+				c.Mithril.DownloadMaxBytes = 1 << 30
+			},
+		},
+		{
 			name:    "invalid chainsync strategy",
 			modify:  func(c *Config) { c.Chainsync.Strategy = "fastest" },
 			wantErr: "invalid chainsync.strategy",
