@@ -33,9 +33,10 @@ import (
 	"github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-const referenceTxBytes = 200
+const maxLeiosTxSizeBytes = 1<<16 - 1
 
 type benchConfig struct {
 	prePopulatedEbs int
@@ -161,14 +162,18 @@ func parseConfig() benchConfig {
 
 func validateConfig(config benchConfig) error {
 	if config.prePopulatedEbs < 1 || config.txsPerEb < 1 ||
-		config.txSizeBytes < 32 || config.fetchClients < 1 ||
+		config.txSizeBytes < 32 || config.txSizeBytes > maxLeiosTxSizeBytes ||
+		config.fetchClients < 1 ||
 		config.ebsPerClient < 1 || config.fetchServers < 1 ||
 		config.chainSelReads < 1 || config.gcTicks < 0 || config.runs < 1 {
 		return errors.New(
 			"invalid benchmark configuration: counts must be positive, " +
 				"GC ticks may be zero, and transaction sizes must be " +
-				"at least 32 bytes",
+				"between 32 and 65535 bytes",
 		)
+	}
+	if _, err := txPayloadSize(config.txSizeBytes); err != nil {
+		return fmt.Errorf("invalid benchmark configuration: %w", err)
 	}
 	return nil
 }
@@ -198,6 +203,8 @@ func printBenchInfo(config benchConfig) {
 	fmt.Println("  Haskell uses SQLite; Dingo stores Leios EB data in its Badger blob store.")
 	fmt.Println("  Dingo's SQLite metadata store is not touched by these Leios operations.")
 	fmt.Println("  Dingo reads the stored transaction list before selecting batch offsets.")
+	fmt.Println("  Dingo manifest refs bind each CBOR body's Blake2b-256 hash and serialized size.")
+	fmt.Println("  The reference fixture uses synthetic hashes and 200-byte manifest sizes.")
 	fmt.Println("  GC ticks match the reference's current no-op call; Badger's periodic GC remains enabled.")
 	fmt.Println()
 }
@@ -350,11 +357,11 @@ func insertOneEb(
 	if err != nil {
 		return benchPoint{}, err
 	}
-	manifest, err := genManifest(ebIdx, config.txsPerEb)
+	txs, err := genTxs(ebIdx, config)
 	if err != nil {
 		return benchPoint{}, err
 	}
-	txs, err := genTxs(ebIdx, config)
+	manifest, err := genManifest(txs)
 	if err != nil {
 		return benchPoint{}, err
 	}
@@ -366,26 +373,15 @@ func insertOneEb(
 
 func genTxs(ebIdx int, config benchConfig) ([]cbor.RawMessage, error) {
 	txs := make([]cbor.RawMessage, config.txsPerEb)
-	payloadSize := config.txSizeBytes
-	for {
-		payloadLength, err := nonNegativeUint64(payloadSize)
-		if err != nil {
-			return nil, err
-		}
-		headerSize := len(appendCborHead(nil, 2, payloadLength))
-		nextSize := config.txSizeBytes - headerSize
-		if nextSize == payloadSize {
-			break
-		}
-		payloadSize = nextSize
+	payloadSize, err := txPayloadSize(config.txSizeBytes)
+	if err != nil {
+		return nil, err
 	}
 	for txIdx := range config.txsPerEb {
 		payload := make([]byte, payloadSize)
 		copy(payload, genTxHash(ebIdx, txIdx))
-		txRaw, err := cbor.Encode(payload)
-		if err != nil {
-			return nil, fmt.Errorf("encode transaction %d in EB %d: %w", txIdx, ebIdx, err)
-		}
+		txRaw := appendCborHead(nil, 4, 1)
+		txRaw = appendCborBytes(txRaw, payload)
 		if len(txRaw) != config.txSizeBytes {
 			return nil, fmt.Errorf(
 				"encoded transaction %d in EB %d has %d bytes, want %d",
@@ -400,17 +396,61 @@ func genTxs(ebIdx int, config benchConfig) ([]cbor.RawMessage, error) {
 	return txs, nil
 }
 
-func genManifest(ebIdx, txsPerEb int) ([]byte, error) {
-	count, err := nonNegativeUint64(txsPerEb)
+func genManifest(txs []cbor.RawMessage) ([]byte, error) {
+	count, err := nonNegativeUint64(len(txs))
 	if err != nil {
 		return nil, err
 	}
 	manifest := appendCborHead(nil, 5, count)
-	for txIdx := range txsPerEb {
-		manifest = appendCborBytes(manifest, genTxHash(ebIdx, txIdx))
-		manifest = appendCborHead(manifest, 0, referenceTxBytes)
+	for _, tx := range txs {
+		if len(tx) > maxLeiosTxSizeBytes {
+			return nil, fmt.Errorf(
+				"serialized transaction size %d exceeds Leios limit %d",
+				len(tx),
+				maxLeiosTxSizeBytes,
+			)
+		}
+		txSize, err := nonNegativeUint64(len(tx))
+		if err != nil {
+			return nil, err
+		}
+		txHash := lcommon.Blake2b256Hash(tx)
+		manifest = appendCborBytes(manifest, txHash.Bytes())
+		manifest = appendCborHead(manifest, 0, txSize)
 	}
 	return manifest, nil
+}
+
+func txPayloadSize(serializedSize int) (int, error) {
+	const transactionArrayHeadSize = 1
+	for _, byteStringHeadSize := range []int{1, 2, 3, 5, 9} {
+		payloadSize := serializedSize - transactionArrayHeadSize - byteStringHeadSize
+		if payloadSize < 0 {
+			continue
+		}
+		if cborHeadSize(uint64(payloadSize)) == byteStringHeadSize {
+			return payloadSize, nil
+		}
+	}
+	return 0, fmt.Errorf(
+		"transaction size %d cannot be encoded as a CBOR array with one byte string",
+		serializedSize,
+	)
+}
+
+func cborHeadSize(value uint64) int {
+	switch {
+	case value < 24:
+		return 1
+	case value <= 0xff:
+		return 2
+	case value <= 0xffff:
+		return 3
+	case value <= 0xffffffff:
+		return 5
+	default:
+		return 9
+	}
 }
 
 func genPoint(ebIdx int) (benchPoint, error) {

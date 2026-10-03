@@ -1,7 +1,8 @@
 # Benchmarks and profiling
 
 Run benchmark commands from the repository root. The Makefile targets include
-the default `dingo_extra_plugins` build tag and report memory allocations.
+the default `dingo_extra_plugins` build tag. Go benchmark targets report memory
+allocations.
 
 ## Benchmarks
 
@@ -28,6 +29,12 @@ transactions each, three concurrent writers and readers, 50 closure reads,
 one warmup, and five timed iterations. The command accepts flags for adjusting
 the workload counts and transaction size and prints the minimum, average, and
 maximum iteration time.
+
+Dingo transaction fixtures retain the reference's 16 KiB body size. Dingo
+manifest references contain the Blake2b-256 hash and serialized size of each
+CBOR transaction, as required by Dingo's Leios fetch validation. The reference
+fixture instead uses synthetic hashes and records 200 bytes per manifest
+reference, so those manifest fields differ between the two workloads.
 
 The logical workload is aligned, while the storage implementations differ:
 Dingo persists Leios EBs in its Badger blob store, whereas the reference
