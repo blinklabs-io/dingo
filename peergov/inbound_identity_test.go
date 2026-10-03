@@ -70,22 +70,16 @@ func deniedInboundCount(pg *PeerGovernor) float64 {
 	)
 }
 
-// A peer denied on one source port stays denied when it reconnects from
-// another: inbound source ports are ephemeral, so the host is the identity.
-func TestInboundDenialSurvivesSourcePortRotation(t *testing.T) {
+// Denying an inbound peer must not turn its host away: the peer may be a
+// downstream consumer that dials us from a fresh source port, and refusing
+// the connection cuts it off. Inbound-only records are never a chain
+// selection source, so there is no upstream role to withhold from them.
+func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
 	first := inboundArrival(t, "44.0.0.1:51000")
 	pg.handleInboundConnectionEvent(first)
 	require.Equal(t, 1, len(pg.GetPeers()))
-	// The first connection is still open, so its entry is not reused by the
-	// arrivals below and only the host-wide denial can refuse them.
-	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{
-		Id:       first.Data.(connmanager.InboundConnectionEvent).ConnectionId,
-		IsClient: true,
-	}
-	pg.mu.Unlock()
 
 	pg.DenyPeer("44.0.0.1:51000", time.Minute)
 
@@ -96,43 +90,45 @@ func TestInboundDenialSurvivesSourcePortRotation(t *testing.T) {
 	}
 	assert.Equal(
 		t,
-		1,
-		len(pg.GetPeers()),
-		"a denied host must not obtain fresh records from new ports",
+		float64(0),
+		deniedInboundCount(pg),
+		"a host denied on one source port must still be admitted on another",
 	)
-	assert.Equal(t, float64(5), deniedInboundCount(pg))
-
-	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.2:51000"))
-	assert.Equal(t, 2, len(pg.GetPeers()), "other hosts are unaffected")
+	assert.Equal(t, 1, len(pg.GetPeers()), "the host keeps one record")
 }
 
-// Denying a connection that an inbound arrival was matched to a configured
-// topology peer applies to that topology peer, not to the source port.
-func TestInboundTopologyDenialSurvivesSourcePortRotation(t *testing.T) {
+// A host that flaps is not refused either: refusal also cuts off a
+// downstream that reconnects because this node closed its sessions.
+func TestInboundFlappingHostIsNotRefused(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
-	seedTopologyPeer(
-		pg, "44.0.0.1:3001", "44.0.0.1:3001",
-		"local-root-0", PeerSourceTopologyLocalRoot,
-	)
-	remote, err := net.ResolveTCPAddr("tcp", "44.0.0.1:51000")
-	require.NoError(t, err)
 	pg.mu.Lock()
-	pg.peers[0].Connection = &PeerConnection{
-		Id:       ouroboros.ConnectionId{RemoteAddr: remote},
-		IsClient: true,
-	}
+	pg.peers = append(pg.peers, &Peer{
+		Address:                "44.0.0.1:51000",
+		NormalizedAddress:      "44.0.0.1:51000",
+		Source:                 PeerSourceInboundConn,
+		State:                  PeerStateCold,
+		FirstSeen:              time.Now().Add(-time.Hour),
+		LastInboundDisconnect:  time.Now(),
+		InboundShortLivedCount: 3,
+	})
 	pg.mu.Unlock()
 
-	pg.DenyPeer("44.0.0.1:51000", time.Minute)
 	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
 
-	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	assert.Equal(t, float64(0), deniedInboundCount(pg))
+	peers := pg.GetPeers()
+	require.Equal(t, 1, len(peers))
+	assert.False(
+		t,
+		peers[0].InboundConnectedAt.IsZero(),
+		"the arrival must be attributed to the host's record",
+	)
 }
 
-// Short-lived sessions are counted against the host across source ports, and
-// a host already flapping is refused rather than given a fresh record.
-func TestInboundFlappingSurvivesSourcePortRotation(t *testing.T) {
+// A reconnect from a new source port reuses the host's disconnected record, so
+// its short-session history is not reset by port rotation.
+func TestInboundRecordReuseKeepsShortSessionHistory(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
 	pg.mu.Lock()
@@ -147,31 +143,66 @@ func TestInboundFlappingSurvivesSourcePortRotation(t *testing.T) {
 	})
 	pg.mu.Unlock()
 
-	// One short session so far: the new port inherits the record and its
-	// history instead of starting from zero.
 	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+
 	peers := pg.GetPeers()
 	require.Equal(t, 1, len(peers))
 	assert.Equal(t, uint32(1), peers[0].InboundShortLivedCount)
-
-	// Two short sessions inside the cooldown: every further arrival from the
-	// host is refused, whichever port it uses.
-	pg.mu.Lock()
-	pg.peers[0].InboundShortLivedCount = 2
-	pg.peers[0].LastInboundDisconnect = time.Now()
-	pg.mu.Unlock()
-	for port := 51002; port < 51007; port++ {
-		pg.handleInboundConnectionEvent(
-			inboundArrival(t, fmt.Sprintf("44.0.0.1:%d", port)),
-		)
-	}
-	assert.Equal(t, 1, len(pg.GetPeers()))
-	assert.Equal(t, float64(5), deniedInboundCount(pg))
 }
 
-// The flapping cooldown applied when a warm inbound peer is pruned must also
-// hold for the host on a new source port.
-func TestInboundFlappingPruneCooldownCoversHost(t *testing.T) {
+func closeInbound(
+	t *testing.T,
+	pg *PeerGovernor,
+	arrival event.Event,
+	closeErr error,
+) {
+	t.Helper()
+	connId := arrival.Data.(connmanager.InboundConnectionEvent).ConnectionId
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.mu.Unlock()
+	pg.handleConnectionClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error:        closeErr,
+		},
+	})
+}
+
+// A session this node closed ends with no error from the peer. It must not
+// count toward the peer's flapping history, or every resync close would push
+// a healthy downstream toward a cooldown.
+func TestInboundShortSessionClosedLocallyIsNotCounted(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	for port := 51000; port < 51004; port++ {
+		arrival := inboundArrival(t, fmt.Sprintf("44.0.0.1:%d", port))
+		pg.handleInboundConnectionEvent(arrival)
+		closeInbound(t, pg, arrival, nil)
+	}
+	peers := pg.GetPeers()
+	require.Equal(t, 1, len(peers))
+	assert.Equal(t, uint32(0), peers[0].InboundShortLivedCount)
+}
+
+// Control: a short session the peer ended with an error still counts.
+func TestInboundShortSessionEndedByPeerErrorIsCounted(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	for port := 51000; port < 51003; port++ {
+		arrival := inboundArrival(t, fmt.Sprintf("44.0.0.1:%d", port))
+		pg.handleInboundConnectionEvent(arrival)
+		closeInbound(t, pg, arrival, io.ErrUnexpectedEOF)
+	}
+	peers := pg.GetPeers()
+	require.Equal(t, 1, len(peers))
+	assert.Equal(t, uint32(3), peers[0].InboundShortLivedCount)
+}
+
+// Pruning a flapping warm peer cools down its tuple, but the host's next
+// connection from another port is still admitted.
+func TestInboundFlappingPruneDoesNotRefuseNewPort(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -199,6 +230,51 @@ func TestInboundFlappingPruneCooldownCoversHost(t *testing.T) {
 
 	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
 
-	assert.Equal(t, 0, len(pg.GetPeers()))
-	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	assert.Equal(t, float64(0), deniedInboundCount(pg))
+	assert.Equal(t, 1, len(pg.GetPeers()))
+}
+
+// A denied topology peer that reconnects from a new source port keeps its
+// connection but is not a chain selection source; an undenied one is.
+func TestWithholdDeniedUpstreamKeepsConnectionOutOfChainSelection(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	arrival := inboundArrival(t, "44.0.0.1:51001")
+	connId := arrival.Data.(connmanager.InboundConnectionEvent).ConnectionId
+	attach := func() {
+		pg.mu.Lock()
+		defer pg.mu.Unlock()
+		pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+		pg.withholdDeniedUpstreamLocked(pg.peers[0])
+	}
+
+	attach()
+	assert.True(t, pg.IsChainSelectionEligible(connId), "control: not denied")
+
+	pg.DenyPeer("44.0.0.1:3001", time.Minute)
+	attach()
+	assert.False(t, pg.IsChainSelectionEligible(connId))
+	assert.NotNil(t, pg.peers[0].Connection, "the connection stays open")
+}
+
+// A denied topology peer's arrival is admitted rather than closed.
+func TestInboundTopologyDenialDoesNotRefuseArrival(t *testing.T) {
+	t.Parallel()
+	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	pg.DenyPeer("44.0.0.1:3001", time.Minute)
+
+	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+
+	assert.Equal(t, float64(0), deniedInboundCount(pg))
+	assert.False(t, pg.GetPeers()[0].InboundConnectedAt.IsZero())
 }

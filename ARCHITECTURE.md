@@ -5469,11 +5469,17 @@ for the next reconcile, and redial ranking puts a peer that stalled within
 Inbound source ports are ephemeral, so inbound identity is the host.
 `resolveInboundIdentity` reuses a disconnected inbound entry from the same host
 when a peer reconnects from a new port, keeping its short-session history. A
-denial of an inbound peer and the flapping cooldown also deny the bare host
-(`denyInboundHostLocked`), and inbound admission checks the host, the arrival tuple,
-and the entry the arrival resolves to; an arrival from a host that is already
-flapping is refused and the host is denied for the escalating cooldown, which
-bounds sequential reconnect churn.
+session counts toward that history only when the peer's side ended it with an
+error; a close with no error is one this node requested (resync, recycle,
+prune) and is not evidence of flapping. Inbound admission refuses only an
+arrival whose exact connection tuple is denied: refusing by host would cut off a
+downstream that reconnects because this node closed its sessions. A denial on a
+configured peer is instead applied to its upstream role. When a denied
+topology peer's inbound connection is admitted, `PeerConnection.UpstreamWithheld`
+is set and `chainSelectionEligible` excludes the connection, while the
+connection stays open so the peer can still consume from this node. Inbound-only
+entries are never chain selection sources, so flapping is bounded for them by
+the warm-peer prune and the hot-promotion check.
 
 An outbound handshake refusal that proves the remote address belongs to a
 different Cardano network is denied for the lifetime of the in-memory peer

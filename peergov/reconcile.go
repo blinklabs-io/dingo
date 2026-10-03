@@ -765,7 +765,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 			})
 		}
 		if applyCooldown {
-			p.denyInboundHostLocked(peer, now.Add(cooldownDuration))
+			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
 			p.recordInboundLifecycle("cooled-down")
 		}
 		p.config.Logger.Info(
@@ -818,7 +818,13 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 		return false, "", "", 0, false
 	}
 	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
-		cooldownDuration = p.inboundFlappingCooldown(multiplier)
+		cooldownDuration = max(
+			// Keep cooldown at least as long as the normal deny duration.
+			p.config.InboundCooldown*time.Duration(
+				multiplier,
+			),
+			p.config.DenyDuration,
+		)
 		reason = "inbound flapping cooldown"
 		reasonLabel = "flapping_cooldown"
 		applyCooldown = true

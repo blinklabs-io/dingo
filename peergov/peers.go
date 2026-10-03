@@ -970,6 +970,20 @@ func (p *PeerGovernor) IsConfiguredRootConnection(
 		chainSelectionEligible(peer.Source, peer.Connection)
 }
 
+// withholdDeniedUpstreamLocked keeps the peer's new inbound connection open
+// but out of chain selection while the peer is denied. A denial on a stable
+// identity (a diverged topology peer reconnecting from a new source port) is
+// a verdict on the peer as an upstream; closing the connection would also cut
+// off a full-duplex peer that only consumes from this node. Must be called
+// with p.mu held.
+func (p *PeerGovernor) withholdDeniedUpstreamLocked(peer *Peer) {
+	if peer == nil || peer.Connection == nil ||
+		peer.Source == PeerSourceInboundConn {
+		return
+	}
+	peer.Connection.UpstreamWithheld = p.isPeerDeniedLocked(peer)
+}
+
 func clonePeerConnection(conn *PeerConnection) *PeerConnection {
 	if conn == nil {
 		return nil
@@ -979,7 +993,7 @@ func clonePeerConnection(conn *PeerConnection) *PeerConnection {
 }
 
 func chainSelectionEligible(source PeerSource, conn *PeerConnection) bool {
-	if conn == nil || !conn.IsClient {
+	if conn == nil || !conn.IsClient || conn.UpstreamWithheld {
 		return false
 	}
 	// A peer whose only record comes from an unsolicited inbound

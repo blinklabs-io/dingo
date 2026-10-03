@@ -198,4 +198,8 @@ type PeerConnection struct {
 	VersionData     oprotocol.VersionData
 	ProtocolVersion uint
 	IsClient        bool
+	// UpstreamWithheld marks a connection from a peer under a denial. The
+	// connection stays open so the peer can still use this node as a
+	// downstream, but it is never a chain selection source.
+	UpstreamWithheld bool
 }

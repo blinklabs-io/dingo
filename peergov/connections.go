@@ -764,8 +764,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
-	if p.isInboundDeniedLocked(normalized, peerIdx, now) {
+	if p.isDeniedLocked(normalized) {
 		p.recordInboundLifecycle("denied")
 		p.config.Logger.Info(
 			"denied inbound peer during cooldown",
@@ -792,6 +791,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		}
 		return
 	}
+	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
@@ -859,6 +859,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				// Preserve duplex-reuse semantics: a responder-only inbound
 				// must not replace an authoritative client-capable connection.
 				tmpPeer.setConnection(conn, false)
+				p.withholdDeniedUpstreamLocked(tmpPeer)
 				if tmpPeer.Connection != nil {
 					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 					p.recordPeerStateChange(tmpPeer.State, PeerStateWarm)
@@ -955,7 +956,12 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
 				connDur < minStableConnectionDuration {
-				peer.InboundShortLivedCount++
+				// A close without an error is one this node requested (a
+				// resync, recycle or prune), not the peer dropping us, so
+				// it is not evidence that the peer is flapping.
+				if e.Error != nil {
+					peer.InboundShortLivedCount++
+				}
 			} else if !peer.InboundConnectedAt.IsZero() {
 				peer.InboundShortLivedCount = 0
 			}
@@ -1074,62 +1080,6 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 	p.mu.Unlock()
 
 	p.publishPendingEvents(selectionEvents)
-}
-
-// isInboundDeniedLocked reports whether an inbound arrival must be refused.
-// Besides the connection tuple it checks the stable identity the arrival
-// resolves to: the host, and the peer record peerIdx names (-1 for none). An
-// arrival from a host that is already flapping is refused here and the host is
-// denied for the escalating flapping cooldown, which bounds sequential
-// reconnect churn rather than only concurrent connections. Must be called
-// with p.mu held.
-func (p *PeerGovernor) isInboundDeniedLocked(
-	normalized string,
-	peerIdx int,
-	now time.Time,
-) bool {
-	hostKey := addressHost(normalized)
-	if p.isDeniedLocked(normalized) ||
-		(hostKey != "" && p.isDeniedLocked(hostKey)) {
-		return true
-	}
-	if peerIdx == -1 || p.peers[peerIdx] == nil {
-		return false
-	}
-	peer := p.peers[peerIdx]
-	if p.isPeerDeniedLocked(peer) {
-		return true
-	}
-	flapping, multiplier := p.inboundFlappingStateLocked(peer, now)
-	if !flapping {
-		return false
-	}
-	p.denyInboundHostLocked(
-		peer,
-		now.Add(p.inboundFlappingCooldown(multiplier)),
-	)
-	return true
-}
-
-// inboundFlappingCooldown returns the deny duration for a flapping inbound
-// peer: the escalating inbound cooldown, never shorter than the normal deny
-// duration.
-func (p *PeerGovernor) inboundFlappingCooldown(multiplier int) time.Duration {
-	return max(
-		p.config.InboundCooldown*time.Duration(multiplier),
-		p.config.DenyDuration,
-	)
-}
-
-// denyInboundHostLocked denies an inbound peer by its record address and by
-// its bare host. Inbound source ports are ephemeral, so a host:port key alone
-// lets a peer shed a denial or cooldown by reconnecting; the bare host key is
-// matched by isInboundDeniedLocked. Must be called with p.mu held.
-func (p *PeerGovernor) denyInboundHostLocked(peer *Peer, expiry time.Time) {
-	p.denyList[peer.NormalizedAddress] = expiry
-	if host := addressHost(peer.NormalizedAddress); host != "" {
-		p.denyList[host] = expiry
-	}
 }
 
 // DenyPeer adds a peer to the deny list for the specified duration.
@@ -1351,9 +1301,6 @@ func (p *PeerGovernor) addPeerDenyKeysLocked(
 		remoteAddress := peer.Connection.Id.RemoteAddr.String()
 		p.denyList[connmanager.NormalizePeerAddr(remoteAddress)] = expiry
 		p.denyList[p.normalizeAddress(remoteAddress)] = expiry
-	}
-	if peer.Source == PeerSourceInboundConn {
-		p.denyInboundHostLocked(peer, expiry)
 	}
 }
 
