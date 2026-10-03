@@ -83,6 +83,7 @@ type Node struct {
 	chainsyncState          *chainsync.State
 	chainSelector           *chainselection.ChainSelector
 	chainSelectionMetrics   *chainSelectionMetrics
+	equivocation            *equivocationDetector
 	eventBus                *event.EventBus
 	pluginHost              *plugin.Host
 	destinationRegistry     *lifecycle.DestinationRegistry
@@ -272,6 +273,10 @@ func New(cfg Config) (*Node, error) {
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
 	n.registerChainSelectionMetrics()
+	n.equivocation = newEquivocationDetector(
+		n.config.promRegistry,
+		n.config.logger,
+	)
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
@@ -1162,6 +1167,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	n.startChainSelectedNoneWorker(n.ctx)
 	started = append(started, n.waitChainSelectedNoneWorker)
 	n.subscribeChainSelectorEvents()
+	n.subscribeEquivocationDetector()
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start chain selector: %w", err)
@@ -1874,8 +1880,8 @@ func (n *Node) subscribeRequiredEvent(
 func (n *Node) subscribeDetachableEvent(
 	eventType event.EventType,
 	handler event.EventHandlerFunc,
-) event.EventSubscriberId {
-	return n.eventBus.SubscribeFuncWithBufferPolicy(
+) {
+	n.eventBus.SubscribeFuncWithBufferPolicy(
 		eventType,
 		event.DefaultSubscriberBuffer,
 		event.SubscriberBackpressureDetach,
@@ -2020,6 +2026,12 @@ func (n *Node) buildChainSelectorConfig(
 		ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 			return n.connManager != nil &&
 				n.connManager.GetConnectionById(connId) != nil
+		},
+		PeerIdentity: func(connId ouroboros.ConnectionId) string {
+			if n.peerGov == nil {
+				return ""
+			}
+			return n.peerGov.DiversityGroupByConnId(connId)
 		},
 		BlockfetchLatency: func(connId ouroboros.ConnectionId) (time.Duration, bool) {
 			if n.chainsyncState == nil {

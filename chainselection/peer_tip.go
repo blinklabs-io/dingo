@@ -283,8 +283,8 @@ func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
 // corroboration (observedPoints, the block hashes), keeping the two in lockstep
 // and bounded to the density window.
 //
-// trackHashes gates the hash frontier: it is stored only while Genesis
-// corroboration is active. When false the hash frontier is dropped, so normal
+// trackHashes gates the hash frontier: it is stored only in Genesis mode.
+// When false the hash frontier is dropped, so normal
 // Praos operation does not retain per-peer window-length hash history.
 func (p *PeerChainTip) recordObservedPoint(
 	point ocommon.Point,

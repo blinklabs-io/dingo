@@ -1341,6 +1341,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	n.equivocation.setSelfPoolID(creds.GetPoolID().String())
 	// validateBlockProducerStartup may have dialled a KES agent and started
 	// its serve-key loop. Unlike Run's failure path this one leaves the node
 	// running, so a failure below would otherwise leave that loop installing

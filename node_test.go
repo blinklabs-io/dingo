@@ -3986,7 +3986,8 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents": 1,
+		"subscribeChainSelectorEvents":  1,
+		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
 		"subscribeRequiredEvent":                      "SubscriberBackpressureBlock",

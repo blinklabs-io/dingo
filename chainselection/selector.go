@@ -143,9 +143,13 @@ type ChainSelectorConfig struct {
 	// corroboration (density-only Genesis selection, the historical default).
 	MinCorroboratingPeers int
 	ConnectionLive        func(ouroboros.ConnectionId) bool
-	ConnectionEligible    func(ouroboros.ConnectionId) bool
-	ConnectionPriority    func(ouroboros.ConnectionId) int
-	MaxTrackedPeers       int // 0 means use DefaultMaxTrackedPeers
+	// PeerIdentity maps a connection to the independence group used to
+	// de-duplicate corroborating witnesses (peer governance's diversity
+	// group). An empty result, or a nil hook, falls back to the remote host.
+	PeerIdentity       func(ouroboros.ConnectionId) string
+	ConnectionEligible func(ouroboros.ConnectionId) bool
+	ConnectionPriority func(ouroboros.ConnectionId) int
+	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
 	// DisableEventSubscriptions leaves EventBus configured for publishing
 	// selector events but skips automatic input subscriptions. This is useful
 	// for deterministic replay harnesses that feed input events synchronously.
@@ -574,7 +578,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			return
 		}
 
-		trackHashes := cs.genesisCorroborationActiveLocked()
+		trackHashes := cs.mode == SelectionModeGenesis
 		if peerTip, exists := cs.peerTips[connId]; exists {
 			peerTip.UpdateTipWithObservedPraosView(
 				tip,
@@ -634,8 +638,8 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		case modeChanged:
 			shouldEvaluate = true
 		case trackHashes:
-			// Under Genesis corroboration any peer's frontier change can grant
-			// or revoke corroboration of the incumbent/leader, so always
+			// In Genesis mode any peer's frontier change can grant or revoke
+			// corroboration of the incumbent/leader's frontier, so always
 			// re-evaluate rather than only when this peer beats the best.
 			shouldEvaluate = true
 		case cs.bestPeerConn != nil:
@@ -1486,20 +1490,17 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 }
 
 // bestKnownBlockNumber returns the highest block number delivered by any
-// eligible, non-stale peer. Used to skip peers that are far behind the
-// observed frontier during catch-up. Advertised tips are untrusted and must
-// not suppress peers that have delivered valid headers. Only peers that pass
-// eligibility and staleness checks are considered.
+// trusted peer (see frontierTrustedLocked). Used to skip peers that are far
+// behind the observed frontier during catch-up. Advertised tips are untrusted
+// and must not suppress peers that have delivered valid headers.
 func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
 	var best uint64
 	for connId, pt := range cs.peerTips {
-		if !cs.isConnectionEligible(connId) || cs.isPeerTipStale(pt) {
+		blockNumber := pt.SelectionTip().BlockNumber
+		if blockNumber <= best || !cs.frontierTrustedLocked(connId, pt) {
 			continue
 		}
-		blockNumber := pt.SelectionTip().BlockNumber
-		if blockNumber > best {
-			best = blockNumber
-		}
+		best = blockNumber
 	}
 	return best
 }

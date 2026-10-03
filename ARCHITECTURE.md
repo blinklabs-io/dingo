@@ -1800,6 +1800,22 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
 
+**Equivocation detection.** The node subscribes an observer
+(`equivocationDetector`, `node_equivocation.go`) to `chain.update`, detachable
+because a missed event loses the metric, not node state. It keeps the blocks
+named by each `ChainRollbackEvent` (decoded for their issuer, bounded to 2160
+entries) and compares every later `ChainBlockEvent` block against them. A block
+with a different hash, the same slot or block number, and the same
+`IssuerVkey().PoolId()` as a retained block is equivocation: two pools cannot
+share a cold key, so that key is forging in two places. Each such pair
+increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
+three competing blocks are three pairs. `self_key="true"` when the pool is this
+node's own, taken from the block producer credentials validated at startup. The
+counter series for a pool appears only when it first equivocates. Blocks are
+decoded only when a slot or number matches, so a normal sync pays one scan of a
+normally empty list. A competing block this node never applied, because it
+never became the chain, is not seen.
+
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
 `genesis_corroboration_failed`, `genesis_mode_exited` and `selected_none` —
@@ -4759,14 +4775,30 @@ it. Dingo implements this as a **corroboration gate**
   source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
-- Witnesses are counted by distinct remote **host**, and a witness on the
-  candidate's own host is excluded, so several connections from one operator
-  cannot self-corroborate a private fork. This is a lower bound on independence,
-  not a guarantee: genuine independence (distinct operators, ASNs, and chain
-  views) depends on the operator's validated topology and peer-governance
-  diversity groups. Raising `corroborationPeers` raises the *count* required, not
-  the independence of the peers supplied — that remains an operator
-  responsibility.
+- A witness must also **reach the candidate's suffix**: its delivered frontier
+  must be within `securityParam` blocks of the candidate's
+  (`witnessSupportsSuffixLocked`). A witness that only shares a point the
+  candidate passed long ago, however recently it answered a keepalive, does not
+  count.
+- Witnesses are counted by distinct **peer identity**, and a witness with the
+  candidate's own identity is excluded, so several connections from one operator
+  cannot self-corroborate a private fork. The identity is peer governance's
+  diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
+  `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
+  (IPv4) or /64 (IPv6) prefix, else the host name; without a hook the selector
+  falls back to the remote host. This is a lower bound on independence, not a
+  guarantee: genuine independence (distinct operators, ASNs, and chain views)
+  depends on the operator's validated topology. Raising `corroborationPeers`
+  raises the *count* required, not the independence of the peers supplied —
+  that remains an operator responsibility.
+- **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
+  Genesis mode the "behind the best known tip" filter
+  (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
+  non-stale peer corroborated by at least `max(1, corroborationPeers)`
+  witnesses (`frontierTrustedLocked`). One uncorroborated peer, or one whose
+  connection is gone, therefore cannot make honest candidates look behind. When
+  no frontier is trusted nothing is excluded as behind. Outside Genesis mode
+  every eligible, non-stale frontier counts, as before.
 - In Genesis mode with `corroborationPeers > 0`, an **uncorroborated** candidate
   is denied chain selection (`isPeerSelectableLocked`). A fully divergent fast
   source shares no recent block with any honest peer, so it is never corroborated
@@ -4813,8 +4845,9 @@ it. Dingo implements this as a **corroboration gate**
   corroboration-failure event to react.
 - `corroborationPeers = 0` disables the gate (density-only Genesis selection,
   the historical default), preserving prior behavior for nodes that do not opt
-  into the Genesis trust model. While the gate is disabled the per-peer hash
-  frontier is not tracked, so normal Praos operation carries no extra state.
+  into the Genesis trust model. The per-peer hash frontier is tracked in every
+  Genesis mode (the trusted-frontier rule above needs it) and dropped in Praos,
+  so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
