@@ -214,6 +214,18 @@ func TestEquivocationLabelsOwnKey(t *testing.T) {
 	}, equivocations(t, registry))
 }
 
+// The node labels its own key with the pool ID held by its block producer
+// credentials, which derive it from the cold key as a PoolId; that must render
+// exactly as the issuer's PoolId read from a block, or self_key never matches.
+func TestEquivocationSelfPoolIDMatchesCredentialDerivation(t *testing.T) {
+	t.Parallel()
+	coldSeed := [32]byte{1}
+	coldSeed[0] ^= 0xBB
+	cold := ed25519.NewKeyFromSeed(coldSeed[:]).Public().(ed25519.PublicKey)
+	credentialPoolID := lcommon.PoolId(lcommon.Blake2b224Hash(cold)).String()
+	assert.Equal(t, newPoolFixture(1).poolID, credentialPoolID)
+}
+
 // Three competing blocks from one pool are three pairs.
 func TestEquivocationCountsEveryCompetingPair(t *testing.T) {
 	t.Parallel()
