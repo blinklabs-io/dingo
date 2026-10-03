@@ -3108,6 +3108,10 @@ Validated Conway and Dijkstra block admission checks the aggregate consumed
 reference-script size before validating the block's individual transactions.
 Imported blocks use the same database transaction as application, after any
 applicable endorser transactions and before the ranking block's own mutations.
+The check resolves UTxOs from the block's single prefetch, which the
+per-transaction validators then reuse, so each input is read from the database
+once. A block of the previous era is judged under the previous era's parameters,
+the same rule applied to its transactions.
 Forged blocks check a read view of the pre-block state even when full
 self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
 era parameters with an error before the upstream rule dereferences them.
