@@ -237,6 +237,10 @@ func stopWithDeadline(
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
 
+	// The DMQ stack keeps serving, so detach its stake lookups from the
+	// ledger state about to be closed.
+	n.dmqStake.setLedgerState(nil)
+
 	// Every component whose Stop cancels its own context and then waits on a
 	// WaitGroup with no deadline of its own is bounded here -- see
 	// stopWithDeadline for why an unfinished wait escalates to
@@ -677,6 +681,7 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		return fmt.Errorf("failed to reload state database: %w", err)
 	}
 	n.ledgerState = state
+	n.dmqStake.setLedgerState(state)
 	// n.ouroboros is rewired in one place, once every rebuilt dependency
 	// exists; see the NewOuroboros call in reinitializeNetworkingCore.
 	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {

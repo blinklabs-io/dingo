@@ -42,6 +42,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/dmq"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/chainsyncrecycler"
@@ -99,6 +100,8 @@ type Node struct {
 	committeeAuthSync       *committeeauth.Syncer
 	koiosParityObserver     *koiosparity.Observer
 	midnightServer          *midnightserver.Server
+	dmqStack                *dmq.Stack
+	dmqStake                dmqStakeAuthority
 	offchainMetadataFetcher *offchainmetadata.Fetcher
 	tokenRegistrySync       *offchainmetadata.TokenRegistrySync
 	midnightIndexer         *midnightindexer.Indexer
@@ -258,6 +261,9 @@ func New(cfg Config) (*Node, error) {
 		}
 	}
 	if err := n.configPopulateNetworkMagic(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	if err := n.configPopulateDMQNetworkMagic(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 	// Invalid configuration must not leave collectors in a caller-owned
@@ -1537,6 +1543,21 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			if err := n.midnightServer.Stop(context.Background()); err != nil {
 				n.config.logger.Error(
 					"failed to stop midnight gRPC server during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+	}
+
+	if err := n.startDMQ(); err != nil {
+		return err
+	}
+	if n.dmqStack != nil {
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.dmqStack.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop dmq stack during cleanup",
 					"error",
 					err,
 				)

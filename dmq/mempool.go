@@ -25,6 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Event types published by MessageMempool. See AGENTS.md's "Key events"
@@ -79,6 +81,10 @@ type Config struct {
 	// EventBus, when non-nil, receives AddMessageEventType and
 	// RemoveMessageEventType notifications.
 	EventBus *event.EventBus
+	// PromRegistry, when non-nil, receives the dingo_dmq_messages_received_total
+	// and dingo_dmq_messages_expired_total counters and the
+	// dingo_dmq_mempool_messages and dingo_dmq_mempool_bytes gauges.
+	PromRegistry prometheus.Registerer
 	// Now, when non-nil, replaces time.Now for expiry checks. Tests use
 	// this for deterministic TTL behavior.
 	Now func() time.Time
@@ -117,6 +123,13 @@ type MessageMempool struct {
 	eventBus        *event.EventBus
 	now             func() time.Time
 
+	// added is closed and replaced each time a message is admitted, waking
+	// everything blocked on AddedSignal. Guarded by mu.
+	added chan struct{}
+
+	receivedTotal prometheus.Counter
+	expiredTotal  prometheus.Counter
+
 	done      chan struct{}
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -142,7 +155,8 @@ func NewMessageMempool(cfg Config) *MessageMempool {
 	if now == nil {
 		now = time.Now
 	}
-	return &MessageMempool{
+	p := &MessageMempool{
+		added:           make(chan struct{}),
 		byID:            make(map[[32]byte]*entry),
 		peers:           make(map[string]*peerCursor),
 		capacity:        cfg.Capacity,
@@ -152,6 +166,26 @@ func NewMessageMempool(cfg Config) *MessageMempool {
 		now:             now,
 		done:            make(chan struct{}),
 	}
+	// promauto.With(nil) builds collectors without registering them, so the
+	// counters can be incremented unconditionally.
+	factory := promauto.With(cfg.PromRegistry)
+	p.receivedTotal = factory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_dmq_messages_received_total",
+		Help: "DMQ messages admitted to the message pool",
+	})
+	p.expiredTotal = factory.NewCounter(prometheus.CounterOpts{
+		Name: "dingo_dmq_messages_expired_total",
+		Help: "DMQ messages removed from the message pool after expiring",
+	})
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "dingo_dmq_mempool_messages",
+		Help: "DMQ messages currently held in the message pool",
+	}, func() float64 { return float64(p.Len()) })
+	factory.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "dingo_dmq_mempool_bytes",
+		Help: "CBOR-encoded bytes currently held in the DMQ message pool",
+	}, func() float64 { return float64(p.SizeBytes()) })
+	return p
 }
 
 // Start launches the background TTL-expiry goroutine. Calling Start more
@@ -280,7 +314,10 @@ func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
 	p.byID[key] = e
 	p.order = append(p.order, e)
 	p.curBytes += size
+	close(p.added)
+	p.added = make(chan struct{})
 	p.mu.Unlock()
+	p.receivedTotal.Inc()
 
 	if p.eventBus != nil {
 		p.eventBus.Publish(
@@ -292,6 +329,16 @@ func (p *MessageMempool) Add(msg ocommon.DmqMessage) (bool, error) {
 		)
 	}
 	return true, nil
+}
+
+// AddedSignal returns a channel that is closed the next time a message is
+// admitted. A consumer that drains NextForPeer should take the signal before
+// draining, so a message admitted between the drain and the wait is not
+// missed.
+func (p *MessageMempool) AddedSignal() <-chan struct{} {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.added
 }
 
 // Get returns the pooled message with the given ID, if present. The returned
@@ -395,6 +442,7 @@ func (p *MessageMempool) removeExpired() {
 	}
 	p.order = kept
 	p.mu.Unlock()
+	p.expiredTotal.Add(float64(len(removedIDs)))
 
 	if p.eventBus == nil {
 		return

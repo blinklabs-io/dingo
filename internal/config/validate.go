@@ -790,6 +790,24 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"midnight.reflectionEnabled requires midnight.serverEnabled",
 		))
 	}
+	if c.DMQ.Enabled {
+		if c.DMQ.Topic == "" {
+			errs = append(errs, errors.New("dmq.topic must be set"))
+		}
+		switch c.DMQ.SocketPath {
+		case "":
+			errs = append(errs, errors.New("dmq.socketPath must be set"))
+		case c.SocketPath:
+			errs = append(errs, errors.New(
+				"dmq.socketPath must differ from socketPath",
+			))
+		}
+		if c.DMQ.MessageTTL == 0 {
+			errs = append(errs, errors.New(
+				"dmq.messageTtl must be positive",
+			))
+		}
+	}
 	if c.DatabaseLifecycle.SnapshotEnabled &&
 		c.DatabaseLifecycle.SnapshotDir == "" {
 		errs = append(errs, errors.New(
