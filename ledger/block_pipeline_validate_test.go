@@ -883,7 +883,11 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 		ls := newAdmissionSkipTestLedger(t, vb, false)
 
 		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
-		assert.False(t, ok, "block without an admission record must be verified")
+		assert.False(
+			t,
+			ok,
+			"block without an admission record must be verified",
+		)
 	})
 	t.Run("same slot different hash is verified", func(t *testing.T) {
 		t.Parallel()
@@ -899,19 +903,22 @@ func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
 			"an admission record for another hash must not exempt this block",
 		)
 	})
-	t.Run("same slot different hash valid block is accepted", func(t *testing.T) {
-		t.Parallel()
-		ls := newAdmissionSkipTestLedger(t, vb, true)
-		ls.markAdmissionVerified(
-			ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
-		)
+	t.Run(
+		"same slot different hash valid block is accepted",
+		func(t *testing.T) {
+			t.Parallel()
+			ls := newAdmissionSkipTestLedger(t, vb, true)
+			ls.markAdmissionVerified(
+				ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+			)
 
-		decoded, ok := ls.decodeReadChainBatch(
-			t.Context(), []models.Block{block},
-		)
-		require.True(t, ok)
-		require.Len(t, decoded, 1)
-	})
+			decoded, ok := ls.decodeReadChainBatch(
+				t.Context(), []models.Block{block},
+			)
+			require.True(t, ok)
+			require.Len(t, decoded, 1)
+		},
+	)
 }
 
 // TestAdmissionVerifiedSetIsBounded pins that the admission record cannot grow

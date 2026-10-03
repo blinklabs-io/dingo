@@ -886,7 +886,9 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 				config: LedgerStateConfig{
 					ChainManager: cm,
 					EventBus:     bus,
-					Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+					Logger: slog.New(
+						slog.NewJSONHandler(io.Discard, nil),
+					),
 				},
 			}
 			ls.currentTip = ledgerTip

@@ -2153,7 +2153,9 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 		if ls.mithrilLedgerSlot != 0 && capturedSlot <= ls.mithrilLedgerSlot {
 			pool, poolErr := ls.db.GetPool(poolKeyHash, true, nil)
 			if poolErr != nil && !errors.Is(poolErr, models.ErrPoolNotFound) {
-				return lcommon.Blake2b256{}, false, headerStateLookupErr(poolErr)
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(
+					poolErr,
+				)
 			}
 			hash, ok, err := registeredPoolVrfKeyHash(pool)
 			if err != nil {
