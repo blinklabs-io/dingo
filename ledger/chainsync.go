@@ -188,6 +188,11 @@ const (
 	// Rollback loop detection thresholds
 	rollbackLoopThreshold = 2               // number of rollbacks to same slot before breaking loop
 	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
+	maxRollbackHistory    = 64              // cap on retained rollback records
+
+	// chainsyncResyncCoalesceWindow is how long repeated resync requests for
+	// one connection are treated as the same divergence episode.
+	chainsyncResyncCoalesceWindow = 10 * time.Second
 
 	// Number of consecutive header mismatches before triggering
 	// a chainsync re-sync to recover from persistent forks.
@@ -2206,6 +2211,9 @@ func (ls *LedgerState) requestChainsyncResync(
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.bufferedHeaderMutex.Unlock()
+	if ls.coalesceChainsyncResync(connId, reason) {
+		return
+	}
 	pending.add(
 		ls.config.EventBus,
 		event.ChainsyncResyncEventType,
@@ -2217,6 +2225,56 @@ func (ls *LedgerState) requestChainsyncResync(
 			},
 		),
 	)
+}
+
+// coalesceChainsyncResync reports whether a resync request for connId repeats
+// one already published within chainsyncResyncCoalesceWindow. A single
+// divergence delivers many headers that each fail the same way, and the
+// subscriber closes the connection and denies the peer once per request, so
+// only the first request of an episode is published.
+func (ls *LedgerState) coalesceChainsyncResync(
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	key := connIdKey(connId)
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	ls.resyncCoalesceMutex.Lock()
+	defer ls.resyncCoalesceMutex.Unlock()
+	if rec, ok := ls.resyncCoalesce[key]; ok &&
+		now.Sub(rec.at) < chainsyncResyncCoalesceWindow {
+		rec.suppressed++
+		if rec.suppressed == 1 {
+			ls.config.Logger.Info(
+				"coalescing repeated chainsync resync requests",
+				"component", "ledger",
+				"connection_id", key,
+				"reason", reason,
+			)
+		}
+		return true
+	}
+	for k, rec := range ls.resyncCoalesce {
+		if now.Sub(rec.at) < chainsyncResyncCoalesceWindow {
+			continue
+		}
+		if rec.suppressed > 0 {
+			ls.config.Logger.Info(
+				"coalesced repeated chainsync resync requests",
+				"component", "ledger",
+				"connection_id", k,
+				"coalesced", rec.suppressed,
+			)
+		}
+		delete(ls.resyncCoalesce, k)
+	}
+	if ls.resyncCoalesce == nil {
+		ls.resyncCoalesce = make(map[string]*resyncCoalesceRecord)
+	}
+	ls.resyncCoalesce[key] = &resyncCoalesceRecord{at: now}
+	return false
 }
 
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
@@ -2557,6 +2615,44 @@ func (ls *LedgerState) handleMithrilBoundaryRollback(
 	return nil
 }
 
+// recordRollback appends a rollback to the loop-detection history, prunes
+// entries older than rollbackLoopWindow, and returns how many records in the
+// window name this exact point from connKey. Different peers can legitimately
+// converge on the same rollback point during chain selection, so only repeats
+// from the same connection count.
+func (ls *LedgerState) recordRollback(
+	connKey string,
+	point ocommon.Point,
+	now time.Time,
+) int {
+	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
+		point: ocommon.Point{
+			Slot: point.Slot,
+			Hash: append([]byte(nil), point.Hash...),
+		},
+		connKey:   connKey,
+		timestamp: now,
+	})
+	cutoff := now.Add(-rollbackLoopWindow)
+	pruned := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if !r.timestamp.Before(cutoff) {
+			pruned = append(pruned, r)
+		}
+	}
+	if len(pruned) > maxRollbackHistory {
+		pruned = pruned[len(pruned)-maxRollbackHistory:]
+	}
+	ls.rollbackHistory = pruned
+	var count int
+	for _, r := range ls.rollbackHistory {
+		if r.connKey == connKey && pointMatches(r.point, point) {
+			count++
+		}
+	}
+	return count
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -2601,38 +2697,30 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		}
 	}
 
+	// A rollback to the current tip is a no-op — the peer's
+	// FindIntersect resolved to the same point we already sit at.
+	// Skip the rollback entirely to avoid publishing a spurious
+	// "local ledger rollback" resync event that would close all
+	// connections and create a reconnect loop. This runs before the
+	// loop-detection history is touched so a peer repeating it costs
+	// constant work and leaves no record behind.
+	localTip := ls.chain.HeaderTip()
+	if e.Point.Slot == localTip.Point.Slot &&
+		bytes.Equal(e.Point.Hash, localTip.Point.Hash) {
+		ls.config.Logger.Debug(
+			"rollback to current tip is no-op, skipping",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"connection_id", e.ConnectionId.String(),
+		)
+		return nil
+	}
+
 	// Rollback loop detection: track recent rollbacks and skip if
 	// the same peer repeats the same rollback point too frequently
 	// within the detection window.
-	now := time.Now()
 	connKey := connIdKey(e.ConnectionId)
-	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
-		point: ocommon.Point{
-			Slot: e.Point.Slot,
-			Hash: append([]byte(nil), e.Point.Hash...),
-		},
-		connKey:   connKey,
-		timestamp: now,
-	})
-	// Prune entries older than the detection window
-	cutoff := now.Add(-rollbackLoopWindow)
-	pruned := ls.rollbackHistory[:0]
-	for _, r := range ls.rollbackHistory {
-		if !r.timestamp.Before(cutoff) {
-			pruned = append(pruned, r)
-		}
-	}
-	ls.rollbackHistory = pruned
-	// Count repeated rollbacks to this exact point from the same
-	// connection. Different peers can legitimately converge on the
-	// same rollback point during chain selection, and those rollbacks
-	// must not be suppressed.
-	var slotCount int
-	for _, r := range ls.rollbackHistory {
-		if r.connKey == connKey && pointMatches(r.point, e.Point) {
-			slotCount++
-		}
-	}
+	slotCount := ls.recordRollback(connKey, e.Point, time.Now())
 	if slotCount >= rollbackLoopThreshold {
 		// Exempt rollbacks to slots where we forged a block — fork
 		// resolution on our own block is normal Ouroboros behavior
@@ -2704,23 +2792,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			)
 			return ErrRollbackLoopDetected
 		}
-	}
-
-	// A rollback to the current tip is a no-op — the peer's
-	// FindIntersect resolved to the same point we already sit at.
-	// Skip the rollback entirely to avoid publishing a spurious
-	// "local ledger rollback" resync event that would close all
-	// connections and create a reconnect loop.
-	localTip := ls.chain.HeaderTip()
-	if e.Point.Slot == localTip.Point.Slot &&
-		bytes.Equal(e.Point.Hash, localTip.Point.Hash) {
-		ls.config.Logger.Debug(
-			"rollback to current tip is no-op, skipping",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"connection_id", e.ConnectionId.String(),
-		)
-		return nil
 	}
 
 	// A rollback point ahead of our local tip is invalid for the
@@ -4477,6 +4548,43 @@ func (ls *LedgerState) tryResolveFork(
 	return true, nil
 }
 
+// resetBatchDeliveryLocked clears the per-batch delivery measurements for a
+// new batch.
+func (ls *LedgerState) resetBatchDeliveryLocked() {
+	ls.batchBlocksReceived = 0
+	ls.batchFirstBlockAt = time.Time{}
+	ls.batchLastBlockAt = time.Time{}
+	ls.batchStreamBytes = 0
+}
+
+// noteBatchBlockArrivalLocked counts an accepted block of the given size
+// toward the current batch. The first block only starts the clock: its
+// arrival time is the batch's latency, not its transfer rate.
+func (ls *LedgerState) noteBatchBlockArrivalLocked(size int) {
+	now := time.Now()
+	if ls.batchBlocksReceived == 0 {
+		ls.batchFirstBlockAt = now
+	} else {
+		ls.batchStreamBytes += uint64(size) //nolint:gosec // len is non-negative
+		ls.batchLastBlockAt = now
+	}
+	ls.batchBlocksReceived++
+}
+
+// recordBatchDeliveryLocked reports the finished batch's delivery rate for
+// peer selection. A batch of one block has no stream to measure.
+func (ls *LedgerState) recordBatchDeliveryLocked(connId ouroboros.ConnectionId) {
+	if ls.config.RecordBlockfetchThroughputFunc == nil ||
+		ls.batchBlocksReceived < 2 {
+		return
+	}
+	ls.config.RecordBlockfetchThroughputFunc(
+		connId,
+		ls.batchStreamBytes,
+		ls.batchLastBlockAt.Sub(ls.batchFirstBlockAt),
+	)
+}
+
 func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(
 	e BlockfetchEvent,
 	pubs *pendingPublishes,
@@ -4609,7 +4717,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 		}
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
-	ls.batchBlocksReceived++
+	ls.noteBatchBlockArrivalLocked(len(e.RawBlock))
 	// Range progress is noted where the block actually extends the chain,
 	// not here. Arrival alone is not progress: a block from a batch a
 	// rollback has superseded is discarded unapplied, and one that no
@@ -5112,10 +5220,10 @@ func (ls *LedgerState) noteBlockAcceptedFromConn(
 //
 // Callers that already own the selection (handoffPipelineOnSwitchLocked,
 // handleEventChainsyncBlockHeaderWithPending, and the recovery replay, each of
-// which assigns it first) may call startQueuedBlockfetchLocked directly. Note
-// that selectInitialBlockfetchConn is the identity function today, so that path
-// starts on the connection it just selected; if it ever returns a different
-// connection it needs this helper too.
+// which assigns it first) may call startQueuedBlockfetchLocked directly. The
+// header-driven start may begin on a connection other than the selected one;
+// the selection is deliberately left on the header peer there, because the
+// next batch asks selectInitialBlockfetchConn again.
 //
 // One current caller gains nothing from it: the timeout handler's alternate
 // connection comes from nextBlockfetchConnIdExcept, which can only return a
@@ -5208,7 +5316,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
-	ls.batchBlocksReceived = 0
+	ls.resetBatchDeliveryLocked()
 	ls.batchBlocksApplied = 0
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
@@ -7951,13 +8059,40 @@ func (ls *LedgerState) checkSlotBattle(
 	}
 }
 
-// selectInitialBlockfetchConn starts blockfetch on the same connection that
-// delivered the header. This keeps header and block ingress aligned and leaves
-// room for future selection logic if a different connection becomes preferable.
+// selectInitialBlockfetchConn picks the connection to fetch the queued range
+// from. The connection that delivered the header says only where the peer sits
+// in the diffusion graph, so the selection policy, when wired, chooses among
+// the peers that announced the range by measured delivery. Without a policy,
+// or when none of those peers has anything to recommend, the header peer is
+// used. It runs for every batch, so a better peer takes over at the next batch
+// boundary while the batch in flight finishes where it started.
 func (ls *LedgerState) selectInitialBlockfetchConn(
 	headerConnId ouroboros.ConnectionId,
 ) ouroboros.ConnectionId {
-	return headerConnId
+	return ls.selectBlockfetchConnForWindow(headerConnId, 0)
+}
+
+// selectBlockfetchConnForWindow asks the selection policy for the queued
+// window that starts skip headers past the queue head, cut exactly as a
+// dispatch cuts it. The policy is asked about the window's last header, since
+// a peer that announced it holds every block before it on the same chain while
+// a peer that announced only the first may have forked away after it.
+func (ls *LedgerState) selectBlockfetchConnForWindow(
+	current ouroboros.ConnectionId,
+	skip int,
+) ouroboros.ConnectionId {
+	if ls.config.SelectBlockfetchPeerFunc == nil {
+		return current
+	}
+	_, end, available := ls.chain.HeaderRangeAfterBytes(
+		skip,
+		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
+	)
+	if available == 0 || len(end.Hash) == 0 {
+		return current
+	}
+	return ls.config.SelectBlockfetchPeerFunc(current, end)
 }
 
 func (ls *LedgerState) selectRetryBlockfetchConn(
@@ -8589,6 +8724,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 			"shadow_connection_id", e.ConnectionId.String(),
 		)
 	}
+	if e.RangeErr == nil {
+		ls.recordBatchDeliveryLocked(e.ConnectionId)
+	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -8747,7 +8885,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// subscriber remains available for the next batch's block and BatchDone
 	// events.
 	ls.startQueuedBlockfetchFromEventLocked(
-		nextConnId,
+		ls.selectInitialBlockfetchConn(nextConnId),
 		nextConnId,
 		"blockfetch continuation failed",
 	)

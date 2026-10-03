@@ -162,6 +162,16 @@ func isAddrInUseError(err error) bool {
 	return strings.Contains(msg, "cannot assign requested address")
 }
 
+// isChainsyncStallError reports whether err is the ChainSync protocol timeout
+// raised when a peer holds agency in MustReply and never answers.
+func isChainsyncStallError(err error) bool {
+	return err != nil &&
+		strings.Contains(
+			strings.ToLower(err.Error()),
+			"chain-sync: timeout waiting on transition",
+		)
+}
+
 func isExpectedConnectionCloseError(err error) bool {
 	if err == nil {
 		return false
@@ -817,6 +827,11 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			return
 		}
 		p.recordInboundLifecycle("accepted")
+		if tmpPeer.Source == PeerSourceInboundConn {
+			// A reused entry follows the host to its newest source port.
+			tmpPeer.Address = address
+			tmpPeer.NormalizedAddress = normalized
+		}
 		// Record the topology identity once on first rule-2 match and
 		// keep it across subsequent reconnects. Rule-1 matches yield
 		// topologyGroupID == "" and must not clear a prior match.
@@ -844,6 +859,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				// Preserve duplex-reuse semantics: a responder-only inbound
 				// must not replace an authoritative client-capable connection.
 				tmpPeer.setConnection(conn, false)
+				p.withholdDeniedUpstreamLocked(tmpPeer)
 				if tmpPeer.Connection != nil {
 					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 					p.recordPeerStateChange(tmpPeer.State, PeerStateWarm)
@@ -923,6 +939,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		oldConn := clonePeerConnection(peer.Connection)
 		connClosedAt := time.Now()
 		denied := p.isPeerDeniedLocked(peer)
+		stalled := isChainsyncStallError(e.Error)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -939,6 +956,10 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			}
 			if !peer.InboundConnectedAt.IsZero() &&
 				connDur < minStableConnectionDuration {
+				// A close with no error is not proof that this node asked
+				// for it: the connection layer reports a remote close as
+				// clean when every protocol is still idle, which is how a
+				// peer that handshakes and disconnects looks.
 				peer.InboundShortLivedCount++
 			} else if !peer.InboundConnectedAt.IsZero() {
 				peer.InboundShortLivedCount = 0
@@ -979,14 +1000,20 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					)
 					connDur = 0
 				}
-				if !peer.ConnectedAt.IsZero() &&
+				if stalled {
+					peer.LastChainsyncStall = connClosedAt
+				}
+				// A stall ends a long session without the peer having been
+				// useful, so it backs the peer off like a short one.
+				if !stalled && !peer.ConnectedAt.IsZero() &&
 					connDur >= minStableConnectionDuration {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
 					peer.ReconnectDelay = 0
 					peer.OutboundShortLivedCount = 0
 				} else if !peer.ConnectedAt.IsZero() {
-					// Short-lived connection: apply exponential backoff.
+					// Short-lived or stalled connection: apply exponential
+					// backoff.
 					// The stored delay is usually zero here because the
 					// reconnect goroutine consumes and zeroes it before
 					// dialing, so derive the rung from the consecutive
@@ -1040,6 +1067,13 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			if !peer.Reconnecting {
 				p.spawnOutboundConnectionLocked(peer)
 			}
+			if stalled {
+				// The stalled peer is now backing off. Dial alternates
+				// immediately: the next reconcile is minutes away, and
+				// until then the node would only redial the peer that
+				// just failed.
+				p.redialDisconnectedPeersLocked()
+			}
 		}
 	}
 	p.mu.Unlock()
@@ -1058,7 +1092,6 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	normalized := p.resolveAddress(address)
 	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
 		p.addPeerDenyKeysLocked(
@@ -1076,6 +1109,9 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 		p.denyList[normalized] = expiry
 		p.denyList[hostnameNormalized] = expiry
 	}
+	selectionEvents := p.syncUpstreamWithholdLocked(nil)
+	p.mu.Unlock()
+	p.publishPendingEvents(selectionEvents)
 	p.config.Logger.Debug(
 		"peer added to deny list",
 		"address", address,

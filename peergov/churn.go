@@ -91,7 +91,7 @@ func (p *PeerGovernor) gossipChurn() {
 			chainSelectionState(
 				p.bootstrapExited,
 				peer.Source,
-				peer.Connection,
+				p.selectionConnLocked(peer),
 			).eligible
 		// Never close the node's last eligible upstream connection.
 		// Demoting it to cold would leave the node with no chainsync
@@ -364,7 +364,7 @@ func (p *PeerGovernor) isPromotableWarmNonRootPeerLocked(peer *Peer) bool {
 		peer.State == PeerStateWarm &&
 		(peer.Source == PeerSourceP2PGossip ||
 			peer.Source == PeerSourceP2PLedger) &&
-		peer.hasClientConnection() &&
+		p.usableClientLocked(peer) &&
 		peer.PerformanceScore >= p.config.MinScoreThreshold
 }
 
