@@ -81,12 +81,15 @@ var (
 	// transaction was at fault. It is the ledger-side counterpart of
 	// ErrMempoolUnavailable: both name a node condition the caller can
 	// retry rather than a transaction it must fix.
-	ErrLedgerUnavailable   = errors.New("ledger state unavailable")
-	ErrInvalidPoolID       = errors.New("invalid pool id")
-	ErrMempoolUnavailable  = errors.New("mempool unavailable")
-	ErrMempoolFull         = errors.New("mempool full")
-	ErrTransactionNotFound = errors.New("transaction not found")
-	ErrInvalidStakeAddress = errors.New("invalid stake address")
+	ErrLedgerUnavailable = errors.New("ledger state unavailable")
+	// ErrEvaluationOverloaded reports an evaluation refused because the node
+	// is already evaluating as many transactions as it admits.
+	ErrEvaluationOverloaded = errors.New("transaction evaluation overloaded")
+	ErrInvalidPoolID        = errors.New("invalid pool id")
+	ErrMempoolUnavailable   = errors.New("mempool unavailable")
+	ErrMempoolFull          = errors.New("mempool full")
+	ErrTransactionNotFound  = errors.New("transaction not found")
+	ErrInvalidStakeAddress  = errors.New("invalid stake address")
 	// ErrProtocolParamsUnavailable reports that no protocol parameters exist
 	// for the requested point. Byron carries no protocol-parameter CBOR, so a
 	// genuine Byron prefix reaches this during a from-genesis sync; it is an
@@ -1170,7 +1173,7 @@ func (a *NodeAdapter) AssetAddresses(
 		)
 	}
 	total := len(holders)
-	return paginateAssetHolders(holders, params), total, nil
+	return paginateSlice(holders, params), total, nil
 }
 
 type assetHolderQuantity struct {
@@ -1236,18 +1239,6 @@ func assetHoldersFromUtxos(
 		})
 	}
 	return holders, nil
-}
-
-func paginateAssetHolders(
-	holders []AssetHolderInfo,
-	params PaginationParams,
-) []AssetHolderInfo {
-	start := (params.Page - 1) * params.Count
-	if start >= len(holders) {
-		return []AssetHolderInfo{}
-	}
-	end := min(start+params.Count, len(holders))
-	return holders[start:end]
 }
 
 // drepRatificationWait bounds how long a DRep request waits for the latest
@@ -3657,7 +3648,7 @@ func utxoDatumAndScriptRef(
 // history for the requested address.
 func (a *NodeAdapter) AddressTransactions(
 	address string,
-	params PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
 	addr, err := lcommon.NewAddress(address)
 	if err != nil {
@@ -3669,7 +3660,25 @@ func (a *NodeAdapter) AddressTransactions(
 		)
 	}
 
-	total, err := a.ledgerState.CountTransactionsByAddress(addr)
+	from, fromSatisfiable, err := a.resolveBlockRangeBound(params.From, true)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve address transactions from range: %w",
+			err,
+		)
+	}
+	if !fromSatisfiable {
+		return []AddressTransactionInfo{}, 0, nil
+	}
+	to, _, err := a.resolveBlockRangeBound(params.To, false)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve address transactions to range: %w",
+			err,
+		)
+	}
+
+	total, err := a.ledgerState.CountTransactionsByAddress(addr, from, to)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count address transactions for %q: %w",
@@ -3680,9 +3689,11 @@ func (a *NodeAdapter) AddressTransactions(
 
 	txs, err := a.ledgerState.GetTransactionsByAddressWithOrder(
 		addr,
-		params.Count,
-		(params.Page-1)*params.Count,
-		params.Order,
+		params.Pagination.Count,
+		(params.Pagination.Page-1)*params.Pagination.Count,
+		params.Pagination.Order,
+		from,
+		to,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -4043,6 +4054,9 @@ func (a *NodeAdapter) TransactionEvaluate(
 	}
 	_, _, redeemerExUnits, err := a.evaluator.EvaluateTx(tx)
 	if err != nil {
+		if errors.Is(err, ledger.ErrEvaluationBusy) {
+			return nil, fmt.Errorf("%w: %w", ErrEvaluationOverloaded, err)
+		}
 		// Evaluation resolves the transaction's inputs from storage, so the
 		// same return carries both "this transaction cannot be evaluated"
 		// and "this node cannot read its own UTxO set". Only the former is

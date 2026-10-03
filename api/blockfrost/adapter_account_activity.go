@@ -228,7 +228,7 @@ func (a *NodeAdapter) AccountWithdrawals(
 // resolved only for the <= count rows on the page.
 func (a *NodeAdapter) AccountTransactions(
 	stakeAddress string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	stakeAddr, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {

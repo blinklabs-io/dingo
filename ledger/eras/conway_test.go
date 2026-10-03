@@ -4243,3 +4243,48 @@ func TestEvaluateTxConwayAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+// TestEvaluateTxConwayStopsAtTransactionWideBudget evaluates a multi-redeemer
+// transaction with MaxTxExUnits set at, and one step below, the work its
+// scripts consume in total. Each script alone fits either limit, so only a
+// budget shared across the redeemers can refuse the second.
+func TestEvaluateTxConwayStopsAtTransactionWideBudget(t *testing.T) {
+	t.Parallel()
+
+	pp := mainnetFixtureProtocolParams(t)
+	tx, err := conway.NewConwayTransactionFromCbor(
+		readErasFixture(t, mainnetFixtureTxFile),
+	)
+	require.NoError(t, err)
+	ls := mainnetFixtureLedgerState{mockLedgerState: newMockLedgerState()}
+	ls.networkId = uint(lcommon.AddressNetworkMainnet)
+	for _, inputTx := range mainnetFixtureInputTxs(t) {
+		for idx, output := range inputTx.Outputs() {
+			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
+			require.NoError(t, err)
+			ls.addUtxo(
+				shelley.NewShelleyTransactionInput(
+					inputTx.Hash().String(),
+					idx,
+				),
+				stored,
+			)
+		}
+	}
+	_, total, perRedeemer, err := EvaluateTxConway(tx, ls, pp)
+	require.NoError(t, err)
+	require.Greater(t, len(perRedeemer), 1, "fixture needs several redeemers")
+
+	atLimit := *pp
+	atLimit.MaxTxExUnits = total
+	_, _, _, err = EvaluateTxConway(tx, ls, &atLimit)
+	require.NoError(t, err, "a transaction using exactly the limit is valid")
+
+	overLimit := *pp
+	overLimit.MaxTxExUnits = lcommon.ExUnits{
+		Memory: total.Memory,
+		Steps:  total.Steps - 1,
+	}
+	_, _, _, err = EvaluateTxConway(tx, ls, &overLimit)
+	require.Error(t, err, "aggregate steps beyond the limit must be refused")
+}

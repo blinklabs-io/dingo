@@ -58,7 +58,7 @@ func (s *Server) handleBlock(
 			"failed to get block transactions",
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -120,7 +120,7 @@ func (s *Server) handleBlockTransaction(
 			"failed to look up transaction",
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 	if tx == nil {
@@ -198,7 +198,7 @@ func (s *Server) lookupBlock(
 			"failed to look up block",
 			"error", err,
 		)
-		return block, wrapErr(ErrInternal, err)
+		return block, ErrInternal
 	}
 	return block, nil
 }

@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -613,4 +614,32 @@ func TestHandleTransactionEvaluateStorageFailureReturns503(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.Equal(t, "Service Unavailable", resp.Error)
 	assert.Equal(t, "ledger state unavailable", resp.Message)
+}
+
+func TestTransactionEvaluateOverloadIsReportedAsOverload(t *testing.T) {
+	t.Parallel()
+
+	adapter := &NodeAdapter{
+		evaluator: &stubEvaluator{err: ledger.ErrEvaluationBusy},
+	}
+
+	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+
+	require.ErrorIs(t, err, ErrEvaluationOverloaded)
+	assert.NotErrorIs(t, err, ErrTransactionEvaluation)
+}
+
+func TestHandleTransactionEvaluateOverloadReturns429(t *testing.T) {
+	t.Parallel()
+
+	node := &mockNode{transactionEvaluationErr: ErrEvaluationOverloaded}
+	w := postEvaluate(
+		t,
+		node,
+		"/api/v0/utils/txs/evaluate",
+		"application/cbor",
+		hex.EncodeToString(rawEvaluateTxCbor),
+	)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 }

@@ -79,7 +79,7 @@ func (s *Server) handleAccountBalance(
 			"historical", point.historical,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 
@@ -120,7 +120,7 @@ func (s *Server) handleAccountCoins(
 			req.AccountIdentifier.Address,
 			"error", err,
 		)
-		writeError(w, wrapErr(ErrInternal, err))
+		writeError(w, ErrInternal)
 		return
 	}
 

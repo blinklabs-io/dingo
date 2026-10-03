@@ -1398,17 +1398,22 @@ func (d *Database) GetTransactionsByAddress(
 		limit,
 		offset,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 }
 
 // GetTransactionsByAddressWithOrder returns transactions
-// involving a given address with explicit ordering.
+// involving a given address with explicit ordering, restricted to the
+// inclusive (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) GetTransactionsByAddressWithOrder(
 	addr lcommon.Address,
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	return d.getTransactionsByExactAddress(
@@ -1416,6 +1421,8 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 		limit,
 		offset,
 		order,
+		from,
+		to,
 		txn,
 	)
 }
@@ -1448,6 +1455,8 @@ func (d *Database) getTransactionsByExactAddress(
 	limit int,
 	offset int,
 	order string,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) ([]models.Transaction, error) {
 	if txn == nil {
@@ -1483,6 +1492,8 @@ func (d *Database) getTransactionsByExactAddress(
 			batchSize,
 			candidateOffset,
 			order,
+			from,
+			to,
 			txn.Metadata(),
 		)
 		if err != nil {
@@ -1598,6 +1609,8 @@ func (d *Database) GetTransactionsByAddressKeys(
 		limit,
 		offset,
 		order,
+		nil,
+		nil,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -1615,9 +1628,12 @@ func (d *Database) GetTransactionsByAddressKeys(
 }
 
 // CountTransactionsByAddress returns the total number of
-// transactions involving a given address.
+// transactions involving a given address within the inclusive
+// (slot, block index) range [from, to]. A nil bound is open.
 func (d *Database) CountTransactionsByAddress(
 	addr lcommon.Address,
+	from *models.AddressTransactionPosition,
+	to *models.AddressTransactionPosition,
 	txn *Txn,
 ) (int, error) {
 	txs, err := d.getTransactionsByExactAddress(
@@ -1625,6 +1641,8 @@ func (d *Database) CountTransactionsByAddress(
 		0,
 		0,
 		"desc",
+		from,
+		to,
 		txn,
 	)
 	if err != nil {
@@ -1644,6 +1662,8 @@ func (d *Database) HasTransactionsByAddress(
 		1,
 		0,
 		"desc",
+		nil,
+		nil,
 		txn,
 	)
 	if err != nil {

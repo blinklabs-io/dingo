@@ -13909,3 +13909,20 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
+
+func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{evalSlots: make(chan struct{}, 2)}
+	ls.evalSlots <- struct{}{}
+	ls.evalSlots <- struct{}{}
+
+	// The refusal happens before the transaction is looked at.
+	var err error
+	require.NotPanics(t, func() {
+		_, _, _, err = ls.EvaluateTx(nil)
+	}, "admission must be checked before any evaluation work starts")
+
+	require.ErrorIs(t, err, ErrEvaluationBusy)
+	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
+}

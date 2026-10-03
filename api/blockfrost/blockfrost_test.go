@@ -898,7 +898,8 @@ type mockNode struct {
 	accountUTXOs                  []AccountUTXOInfo
 	accountWithdrawals            []AccountWithdrawalInfo
 	accountTransactions           []AccountTransactionInfo
-	lastAccountTransactionsParams AccountTransactionsParams
+	lastAccountTransactionsParams TransactionRangeParams
+	lastAddressTransactionsParams TransactionRangeParams
 	chainTipErr                   error
 	blockErr                      error
 	blockByIDErr                  error
@@ -1085,8 +1086,9 @@ func (m *mockNode) AddressUTXOs(
 
 func (m *mockNode) AddressTransactions(
 	_ string,
-	_ PaginationParams,
+	params TransactionRangeParams,
 ) ([]AddressTransactionInfo, int, error) {
+	m.lastAddressTransactionsParams = params
 	return m.addressTransactions, m.addressTxsTotal, m.addressTransactionsErr
 }
 
@@ -1320,7 +1322,7 @@ func (m *mockNode) AccountWithdrawals(
 
 func (m *mockNode) AccountTransactions(
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	m.lastAccountTransactionsParams = params
 	rows, total := mockPage(
@@ -4720,4 +4722,51 @@ func TestHandleMetadataTransactionsInvalidLabel(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "Invalid metadata label.", resp.Message)
+}
+
+func TestHandleAddressTransactionsRange(t *testing.T) {
+	t.Parallel()
+
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/addresses/a/transactions?from=100:2&to=200",
+		nil,
+	)
+	req.SetPathValue("address", "a")
+	w := httptest.NewRecorder()
+	b.handleAddressTransactions(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	got := mock.lastAddressTransactionsParams
+	require.NotNil(t, got.From)
+	require.NotNil(t, got.To)
+	assert.EqualValues(t, 100, got.From.Block)
+	require.NotNil(t, got.From.Index)
+	assert.EqualValues(t, 2, *got.From.Index)
+	assert.EqualValues(t, 200, got.To.Block)
+	assert.Nil(t, got.To.Index)
+}
+
+func TestHandleAddressTransactionsRangeRejectsBadBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, query := range []string{
+		"from=abc", "to=1:x", "from=5&to=4", "from=5:3&to=5:2",
+	} {
+		t.Run(query, func(t *testing.T) {
+			t.Parallel()
+			b := newTestBlockfrost(&mockNode{})
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/api/v0/addresses/a/transactions?"+query,
+				nil,
+			)
+			req.SetPathValue("address", "a")
+			w := httptest.NewRecorder()
+			b.handleAddressTransactions(w, req)
+			assert.Equal(t, http.StatusBadRequest, w.Code)
+		})
+	}
 }

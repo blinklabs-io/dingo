@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -1643,4 +1644,121 @@ func TestMatchesTxPattern_SignedMint(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestWaitForTxLimitsDistinctReferences(t *testing.T) {
+	t.Parallel()
+
+	ref := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
+	for _, tc := range []struct {
+		name    string
+		refs    [][]byte
+		wantErr bool
+	}{
+		{"at the limit", [][]byte{ref(1), ref(2)}, false},
+		{"duplicates do not count", [][]byte{ref(1), ref(2), ref(1), ref(2)}, false},
+		{"over the limit", [][]byte{ref(1), ref(2), ref(3)}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eb := newControlledWaitForTxEventBus()
+			lookups := 0
+			server := &submitServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{
+					EventBus: eb,
+					LedgerState: &waitForTxLedgerStub{
+						transactionByHash: func([]byte) (*models.Transaction, error) {
+							lookups++
+							return &models.Transaction{}, nil
+						},
+					},
+					ServerTimeout: time.Second,
+					MaxTxRefs:     2,
+				}),
+			}
+
+			err := server.waitForTx(
+				context.Background(),
+				tc.refs,
+				func(*submit.WaitForTxResponse) error { return nil },
+			)
+
+			if !tc.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+			require.Zero(t, lookups, "no ledger access before the limit check")
+			select {
+			case <-eb.subscribed:
+				t.Fatal("subscribed before the limit check")
+			default:
+			}
+		})
+	}
+}
+
+func TestWaitForTxLookupStopsOnCancel(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lookups := 0
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{
+			EventBus: newControlledWaitForTxEventBus(),
+			LedgerState: &waitForTxLedgerStub{
+				transactionByHash: func([]byte) (*models.Transaction, error) {
+					lookups++
+					cancel()
+					return nil, nil
+				},
+			},
+			ServerTimeout: time.Second,
+		}),
+	}
+	refs := [][]byte{
+		bytes.Repeat([]byte{1}, 32),
+		bytes.Repeat([]byte{2}, 32),
+		bytes.Repeat([]byte{3}, 32),
+	}
+
+	err := server.waitForTx(
+		ctx, refs, func(*submit.WaitForTxResponse) error { return nil },
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, lookups)
+}
+
+type evalBusyLedgerStub struct {
+	UtxorpcLedgerState
+}
+
+func (evalBusyLedgerStub) EvaluateTx(
+	gledger.Transaction,
+) (uint64, common.ExUnits, map[common.RedeemerKey]common.ExUnits, error) {
+	return 0, common.ExUnits{}, nil, fmt.Errorf(
+		"evaluate: %w", ledger.ErrEvaluationBusy,
+	)
+}
+
+func TestEvalTxOverloadReturnsResourceExhausted(t *testing.T) {
+	t.Parallel()
+
+	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: evalBusyLedgerStub{}}),
+	}
+
+	_, err := server.EvalTx(
+		context.Background(),
+		connect.NewRequest(&submit.EvalTxRequest{
+			Tx: &submit.AnyChainTx{
+				Type: &submit.AnyChainTx_Raw{Raw: txCbor},
+			},
+		}),
+	)
+
+	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
 }

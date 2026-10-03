@@ -8645,7 +8645,8 @@ shared strict pagination parser (count 1–100, page 1–21474836).
 The root document is served only at the literal `/` path (`GET /{$}`); any
 other unregistered path falls through to a catch-all `404` handler instead
 of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+routes. `GET /addresses/{address}/transactions` honors the inclusive
+`from`/`to` block range through the same parser as the account endpoint.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -8863,6 +8864,20 @@ retract a confirmation already sent.
 applies before logging, point allocation, or ledger lookup, including duplicate
 references. Empty lists retain the current-tip fallback.
 
+`WaitForTx` rejects more than `MaxTxRefs` (default 1000) distinct references
+before subscribing or reading the ledger, and one `ServerTimeout` deadline
+covers the durable lookups as well as the wait. `FollowTip`, `WatchTx` and
+`WatchMempool` take a slot from a shared limiter (`MaxStreams` process-wide,
+`MaxStreamsPerClient` per remote host) and answer `ResourceExhausted` when
+none is free. `WatchTx` and `WatchMempool` reject a predicate with more than
+`MaxPredicateNodes` nodes, and `WatchTx` rejects an intersect more than
+`MaxReplayBlocks` blocks behind the tip, all before subscribing or reading
+history. `WatchMempool`'s event callback only decodes, matches and offers to a
+bounded queue; the request goroutine is the only sender, and a client that
+fills the queue is cut off with `ResourceExhausted`. `DumpHistory` uses
+`HistoryPageItems` (default 100) when `max_items` is omitted, and stops a page
+at `MaxHistoryBytes` of serialized blocks with a `next_token`.
+
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3
 `uint64` with the same "unknown" ambiguity `height` has (see the UTxO RPC
@@ -8877,7 +8892,22 @@ rollback within that history builds its `Undo` responses without reading
 persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
-returned as a stream error.
+returned as a stream error. That walk reads at most the ledger's security
+parameter plus one blocks, the deepest rollback a follower can need.
+
+Transaction evaluation (`LedgerState.EvaluateTx`, shared by the Blockfrost and
+UTxO RPC front ends) admits at most `LedgerStateConfig.MaxConcurrentEvaluations`
+(default `GOMAXPROCS`) calls at once and returns `ErrEvaluationBusy` instead of
+queuing; Blockfrost reports it as `429` and UTxO RPC as `ResourceExhausted`.
+Each redeemer is evaluated against the part of `MaxTxExUnits` the earlier
+redeemers have not used, so a transaction's total work stays within the
+protocol limit. `safedecode.Transaction` rejects bytes after the single
+transaction, so the bytes hashed, validated and relayed are the bytes that
+decoded. Its callers are the Mesh, Blockfrost and UTxO RPC
+submit and evaluate paths, mempool admission and re-validation (and so
+node-to-node and node-to-client submissions), and endorser-block transaction
+decoding. Mesh
+`details.error` is omitted for internal errors; the cause goes to the log.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 

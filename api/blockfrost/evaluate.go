@@ -228,6 +228,15 @@ func (b *Blockfrost) evaluateTransaction(
 			)
 			return
 		}
+		if errors.Is(err, ErrEvaluationOverloaded) {
+			writeError(
+				w,
+				http.StatusTooManyRequests,
+				"Too Many Requests",
+				"transaction evaluation is at capacity, try again later",
+			)
+			return
+		}
 		if errors.Is(err, ErrInvalidTransaction) {
 			writeError(
 				w,

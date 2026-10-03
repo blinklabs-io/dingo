@@ -937,7 +937,7 @@ func (n *listPaginationNode) AccountWithdrawals(
 
 func (n *listPaginationNode) AccountTransactions(
 	_ string,
-	params AccountTransactionsParams,
+	params TransactionRangeParams,
 ) ([]AccountTransactionInfo, int, error) {
 	n.calls++
 	n.params = params.Pagination

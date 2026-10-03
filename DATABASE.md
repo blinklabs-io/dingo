@@ -3008,6 +3008,11 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND atx.staking_key = decode($3, 'hex');
 ```
 
+The optional inclusive range (`from`/`to` as `(slot, block_index)`) adds
+`AND (t.slot, t.block_index) >= ($4, $5)` and `<= ($6, $7)` to the outer
+`transaction` query; the exact-address candidate scan applies it before
+counting or paging.
+
 Payment-only Byron-style or enterprise-style lookups use the same condition Dingo uses:
 
 ```sql

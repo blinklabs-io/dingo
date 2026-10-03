@@ -947,7 +947,8 @@ type TransactionStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking credential pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering,
+	// optionally restricted to an inclusive (slot, block index) range.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
 		uint8, // credentialTag
@@ -955,6 +956,8 @@ type TransactionStore interface {
 		int, // limit
 		int, // offset
 		string, // order (asc|desc)
+		*models.AddressTransactionPosition, // from (inclusive, nil = unbounded)
+		*models.AddressTransactionPosition, // to (inclusive, nil = unbounded)
 		types.Txn,
 	) ([]models.Transaction, error)
 

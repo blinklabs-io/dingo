@@ -93,11 +93,12 @@ type BlockfrostNode interface {
 	) ([]AddressUTXOInfo, int, error)
 
 	// AddressTransactions returns the paginated transaction
-	// history for an address along with the total number of
-	// matching results before pagination.
+	// history for an address, optionally restricted to an
+	// inclusive from/to block-range position, along with the total
+	// number of matching results before pagination.
 	AddressTransactions(
 		address string,
-		params PaginationParams,
+		params TransactionRangeParams,
 	) ([]AddressTransactionInfo, int, error)
 
 	// MetadataTransactions returns the paginated transactions
@@ -239,7 +240,7 @@ type BlockfrostNode interface {
 	// inclusive from/to block-range position.
 	AccountTransactions(
 		string,
-		AccountTransactionsParams,
+		TransactionRangeParams,
 	) ([]AccountTransactionInfo, int, error)
 }
 
@@ -894,10 +895,10 @@ type BlockRangePosition struct {
 	Index *uint32
 }
 
-// AccountTransactionsParams holds query parameters for the account
-// transactions endpoint: standard pagination plus the optional
+// TransactionRangeParams holds query parameters for the account and
+// address transaction endpoints: standard pagination plus the optional
 // inclusive from/to block-range filter.
-type AccountTransactionsParams struct {
+type TransactionRangeParams struct {
 	Pagination PaginationParams
 	From       *BlockRangePosition
 	To         *BlockRangePosition

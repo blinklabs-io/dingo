@@ -465,3 +465,71 @@ func TestPointsEqual(t *testing.T) {
 		),
 	)
 }
+
+// securityParamProbe backs a rollback walk over a fixed block list and
+// counts how many blocks the walk reads.
+type securityParamProbe struct {
+	UtxorpcLedgerState
+	k      int
+	byHash map[string]models.Block
+	reads  int
+}
+
+func (p *securityParamProbe) SecurityParam() int { return p.k }
+
+func (p *securityParamProbe) BlockByHash(hash []byte) (models.Block, error) {
+	p.reads++
+	blk, ok := p.byHash[string(hash)]
+	if !ok {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return blk, nil
+}
+
+func TestWatchTxRollbackWalkDepthIsSecurityParam(t *testing.T) {
+	t.Parallel()
+
+	const k = 3
+	blocks := loadTestChainBlocks(t, 12)
+	byHash := make(map[string]models.Block, len(blocks))
+	for _, b := range blocks {
+		byHash[string(b.Hash)] = b
+	}
+	tip := len(blocks) - 1
+	pointAt := func(depth int) ocommon.Point {
+		b := blocks[tip-depth]
+		return ocommon.NewPoint(b.Slot, b.Hash)
+	}
+	for _, tc := range []struct {
+		name      string
+		depth     int
+		wantErr   bool
+		wantReads int
+	}{
+		{"one below the depth", k - 1, false, k},
+		{"exactly the depth", k, false, k + 1},
+		{"one past the depth", k + 1, true, k + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := &securityParamProbe{k: k, byHash: byHash}
+			s := &watchServiceServer{
+				utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: probe}),
+			}
+
+			_, err := s.watchTxFetchRollbackUndoFromBlocks(
+				context.Background(),
+				blocks[tip].Hash,
+				pointAt(tc.depth),
+				func(gledger.Transaction) bool { return true },
+			)
+
+			if tc.wantErr {
+				require.ErrorContains(t, err, "rollback fetch exceeded")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, tc.wantReads, probe.reads)
+		})
+	}
+}

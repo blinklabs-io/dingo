@@ -1539,7 +1539,7 @@ func evaluateTxConway(
 			purpose,
 			redeemer,
 			datum,
-			tmpPparams.MaxTxExUnits,
+			remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 			tmpPparams,
 			txInfos,
 			false,

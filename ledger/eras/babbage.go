@@ -591,7 +591,7 @@ func EvaluateTxBabbage(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				tmpPparams.MaxTxExUnits,
+				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
 			if err != nil {
@@ -646,7 +646,7 @@ func EvaluateTxBabbage(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				tmpPparams.MaxTxExUnits,
+				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
 			if err != nil {

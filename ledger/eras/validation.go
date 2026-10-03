@@ -647,6 +647,17 @@ func resolveUtxoValidationSkipIndex(
 	return found
 }
 
+// remainingExUnits returns the part of limit not yet consumed, floored at zero
+// in each dimension. Evaluating each redeemer against it keeps the
+// transaction's total work within the limit instead of granting every
+// redeemer the whole limit.
+func remainingExUnits(limit, used lcommon.ExUnits) lcommon.ExUnits {
+	return lcommon.ExUnits{
+		Memory: max(limit.Memory-used.Memory, 0),
+		Steps:  max(limit.Steps-used.Steps, 0),
+	}
+}
+
 // SafeAddExUnits adds two ExUnits values with
 // overflow detection. Returns an error if either
 // the Memory or Steps sum would exceed

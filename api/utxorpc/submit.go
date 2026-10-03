@@ -143,6 +143,15 @@ func (s *submitServiceServer) waitForTx(
 		if _, exists := pending[hash]; exists {
 			continue
 		}
+		if len(pending) >= s.utxorpc.config.MaxTxRefs {
+			return connect.NewError(
+				connect.CodeInvalidArgument,
+				fmt.Errorf(
+					"too many transaction references: more than %d distinct",
+					s.utxorpc.config.MaxTxRefs,
+				),
+			)
+		}
 		pending[hash] = r
 		uniqueRefs = append(uniqueRefs, r)
 	}
@@ -164,6 +173,11 @@ func (s *submitServiceServer) waitForTx(
 			hash: hash,
 		}
 	}
+
+	// One deadline covers the durable lookups and the wait that follows.
+	serverTimeout := s.utxorpc.config.ServerTimeout
+	waitCtx, cancelWait := context.WithTimeout(ctx, serverTimeout)
+	defer cancelWait()
 
 	subId := s.utxorpc.config.EventBus.SubscribeFunc(
 		ledger.TransactionEventType,
@@ -199,6 +213,9 @@ func (s *submitServiceServer) waitForTx(
 			if !stillPending {
 				continue
 			}
+			if waitCtx.Err() != nil {
+				return waitForTxStopError(ctx, serverTimeout)
+			}
 			txRecord, err := s.utxorpc.config.LedgerState.TransactionByHash(r)
 			if err != nil {
 				return fmt.Errorf(
@@ -212,10 +229,6 @@ func (s *submitServiceServer) waitForTx(
 			}
 		}
 	}
-
-	serverTimeout := s.utxorpc.config.ServerTimeout
-	timeout := time.NewTimer(serverTimeout)
-	defer timeout.Stop()
 
 	// The request goroutine is the sole stream sender. EventBus dispatch only
 	// classifies and queues confirmations, so a slow client cannot stall it.
@@ -247,19 +260,33 @@ func (s *submitServiceServer) waitForTx(
 				"WaitForTx client disconnected",
 			)
 			return ctx.Err()
-		case <-timeout.C:
-			s.utxorpc.config.Logger.Warn(
-				"WaitForTx timed out",
-				"timeout", serverTimeout,
-				"pending", confirmationTarget-confirmed,
-			)
-			return connect.NewError(
-				connect.CodeDeadlineExceeded,
-				fmt.Errorf("wait for tx timed out after %s", serverTimeout),
-			)
+		case <-waitCtx.Done():
+			if ctx.Err() == nil {
+				s.utxorpc.config.Logger.Warn(
+					"WaitForTx timed out",
+					"timeout", serverTimeout,
+					"pending", confirmationTarget-confirmed,
+				)
+			}
+			return waitForTxStopError(ctx, serverTimeout)
 		}
 	}
 	return nil
+}
+
+// waitForTxStopError reports why a WaitForTx wait ended: the client's own
+// context, or the server-side deadline.
+func waitForTxStopError(
+	ctx context.Context,
+	timeout time.Duration,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return connect.NewError(
+		connect.CodeDeadlineExceeded,
+		fmt.Errorf("wait for tx timed out after %s", timeout),
+	)
 }
 
 // EvalTx
@@ -291,6 +318,9 @@ func (s *submitServiceServer) EvalTx(
 	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
 		tx,
 	)
+	if errors.Is(err, ledger.ErrEvaluationBusy) {
+		return nil, connect.NewError(connect.CodeResourceExhausted, err)
+	}
 	// Populate response
 	redeemerData := redeemerPlutusDataByKey(tx)
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
@@ -384,14 +414,25 @@ func (s *submitServiceServer) ReadMempool(
 	return connect.NewResponse(resp), nil
 }
 
+// watchMempoolQueueSize bounds the responses buffered for one WatchMempool
+// client before it is dropped as too slow.
+const watchMempoolQueueSize = 256
+
 // WatchMempool subscribes to mempool add-transaction events and streams
 // matching transactions to the client. It blocks until the client
-// disconnects.
+// disconnects. The event callback only decodes, matches and queues; this
+// goroutine is the sole stream sender.
 func (s *submitServiceServer) WatchMempool(
 	ctx context.Context,
 	req *connect.Request[submit.WatchMempoolRequest],
 	stream *connect.ServerStream[submit.WatchMempoolResponse],
 ) error {
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 
@@ -406,14 +447,13 @@ func (s *submitServiceServer) WatchMempool(
 	var predTree *txPredicateNode
 	if predicate != nil {
 		predTree = txPredicateFromSubmit(predicate)
+		if err := s.utxorpc.checkPredicateBudget(predTree); err != nil {
+			return err
+		}
 	}
-	// Channel to propagate errors from the event handler
+	queue := newMempoolStreamQueue(watchMempoolQueueSize)
+	// Carries a slow-consumer refusal from the event handler.
 	errCh := make(chan error, 1)
-
-	// Mutex to protect stream.Send which is not goroutine-safe.
-	// The stopped flag prevents sends after the function returns.
-	var streamMu sync.Mutex
-	var stopped bool
 
 	// Subscribe to mempool add-transaction events
 	subId := s.utxorpc.config.EventBus.SubscribeFunc(
@@ -460,27 +500,17 @@ func (s *submitServiceServer) WatchMempool(
 				)
 				return
 			}
-			resp := &submit.WatchMempoolResponse{}
-			record := &submit.TxInMempool{
-				NativeBytes: txRawBytes,
-				Stage:       submit.Stage_STAGE_MEMPOOL,
-			}
-			resp.Tx = record
-
 			shouldSend := predicate == nil ||
 				s.utxorpc.matchTxPredicateNode(tx, predTree)
 			if !shouldSend {
 				return
 			}
-
-			streamMu.Lock()
-			if stopped {
-				streamMu.Unlock()
-				return
-			}
-			err = stream.Send(resp)
-			streamMu.Unlock()
-			if err != nil {
+			if err := queue.offer(&submit.WatchMempoolResponse{
+				Tx: &submit.TxInMempool{
+					NativeBytes: txRawBytes,
+					Stage:       submit.Stage_STAGE_MEMPOOL,
+				},
+			}); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -492,28 +522,24 @@ func (s *submitServiceServer) WatchMempool(
 		mempool.AddTransactionEventType,
 		subId,
 	)
-	// Prevent event handler from calling stream.Send
-	// after this function returns and the stream is torn
-	// down. Registered after the Unsubscribe defer so
-	// LIFO ordering sets stopped=true before Unsubscribe.
-	defer func() {
-		streamMu.Lock()
-		stopped = true
-		streamMu.Unlock()
-	}()
 
-	// Block until client disconnects or an error occurs
-	select {
-	case err := <-errCh:
-		if ctx.Err() != nil {
+	for {
+		select {
+		case resp := <-queue.responses:
+			if err := stream.Send(resp); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return err
+			}
+		case err := <-errCh:
+			return err
+		case <-ctx.Done():
+			s.utxorpc.config.Logger.Debug(
+				"WatchMempool client disconnected",
+			)
 			return ctx.Err()
 		}
-		return err
-	case <-ctx.Done():
-		s.utxorpc.config.Logger.Debug(
-			"WatchMempool client disconnected",
-		)
-		return ctx.Err()
 	}
 }
 

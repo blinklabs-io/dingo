@@ -135,7 +135,9 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 
 	hash := append([]byte(nil), startHash...)
 	out := make([]*watch.WatchTxResponse, 0, 64)
-	const maxWalkBlocks = 2160
+	// A rollback is at most k blocks deep, so the point sits at depth <= k:
+	// k+1 blocks are read counting the tip, and none beyond that.
+	maxWalkBlocks := max(s.utxorpc.config.LedgerState.SecurityParam(), 0) + 1
 	for range maxWalkBlocks {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -199,6 +201,12 @@ func (s *watchServiceServer) WatchTx(
 	req *connect.Request[watch.WatchTxRequest],
 	stream *connect.ServerStream[watch.WatchTxResponse],
 ) error {
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	predicate := req.Msg.GetPredicate() // Predicate
 	fieldMask := req.Msg.GetFieldMask()
 	intersect := req.Msg.GetIntersect() // []*BlockRef
@@ -225,6 +233,9 @@ func (s *watchServiceServer) WatchTx(
 	var predTree *txPredicateNode
 	if predicate != nil {
 		predTree = txPredicateFromWatch(predicate)
+		if err := s.utxorpc.checkPredicateBudget(predTree); err != nil {
+			return err
+		}
 	}
 
 	// Get our points
@@ -256,6 +267,9 @@ func (s *watchServiceServer) WatchTx(
 			"nil point returned",
 		)
 		return errors.New("nil point returned")
+	}
+	if err := s.utxorpc.checkReplayDistance(*point); err != nil {
+		return err
 	}
 
 	// Create our chain iterator

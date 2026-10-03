@@ -998,7 +998,11 @@ func (b *Blockfrost) handleAddressTransactions(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	params, ok := parsePaginationOrWriteError(w, r)
+	pagination, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	params, ok := parseTransactionRangeOrWriteError(w, r, pagination)
 	if !ok {
 		return
 	}
@@ -1018,7 +1022,7 @@ func (b *Blockfrost) handleAddressTransactions(
 		return
 	}
 
-	SetPaginationHeaders(w, total, params)
+	SetPaginationHeaders(w, total, pagination)
 	resp := make([]AddressTransactionResponse, 0, len(txs))
 	for _, tx := range txs {
 		resp = append(resp, AddressTransactionResponse{
