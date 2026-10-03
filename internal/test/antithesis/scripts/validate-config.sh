@@ -10,10 +10,13 @@ validate_compose() {
   docker compose -f "$compose_file" config >"$rendered"
 
   grep -Eq 'CARDANO_PRIVATE_BIND_ADDR:[[:space:]]*"?0\.0\.0\.0"?' "$rendered"
-  grep -Eq 'TXPUMP_STARTUP_TIMEOUT:[[:space:]]*"?60"?' "$rendered"
+  grep -Eq 'TXPUMP_STARTUP_TIMEOUT:[[:space:]]*"?0"?' "$rendered"
   grep -Eq 'TXPUMP_TYPES:[[:space:]]*"?payment,delegation,governance,plutus"?' "$rendered"
   if [[ "$compose_file" == *dingo-praos* ]]; then
     grep -Eq 'TXPUMP_NODE_ADDR:[[:space:]]*"?p1\.example:3002"?' "$rendered"
+    grep -Eq 'TXPUMP_FALLBACK_ADDR:[[:space:]]*"?p2\.example:3002"?' "$rendered"
+    grep -Fq 'UNIX-CONNECT:/ipc/node.socket' "$rendered"
+    [[ "$(grep -c 'com.antithesis.exclude_from_faults' "$rendered")" -eq 2 ]]
   else
     grep -Eq 'TXPUMP_NODE_ADDR:[[:space:]]*"?/ipc/dingo\.socket"?' "$rendered"
   fi

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +140,90 @@ func TestAnalyzerReadNewLines_DoesNotReprocessRenamedLog(t *testing.T) {
 	snap := analyzer.metrics.Snapshot()
 	require.Equal(t, 2, snap.TotalBlocksForged)
 	require.Equal(t, 2, snap.BlocksByNode["p1"])
+}
+
+// TestAnalyzerReadNewLines_TouchedLogIsNotReplayed reproduces a node restart:
+// the entrypoint touches the log before appending, which changes its mtime
+// without changing its content. Re-reading it from the start would count
+// every earlier forged block again and report each as a slot regression.
+func TestAnalyzerReadNewLines_TouchedLogIsNotReplayed(t *testing.T) {
+	logDir := t.TempDir()
+	active := filepath.Join(logDir, "p1.log")
+	record := func(slot int) string {
+		return fmt.Sprintf(
+			`{"msg":"block produced","slot":%d,"block_hash":"h%d"}`+"\n",
+			slot, slot,
+		)
+	}
+	require.NoError(t, os.WriteFile(active, []byte(record(10)+record(11)), 0o644))
+	analyzer := NewAnalyzer(
+		&Config{LogDir: logDir},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	analyzer.readNewLines()
+
+	later := time.Now().Add(time.Minute)
+	require.NoError(t, os.Chtimes(active, later, later))
+	analyzer.readNewLines()
+
+	snap := analyzer.metrics.Snapshot()
+	require.Equal(t, 2, snap.TotalBlocksForged)
+	require.Empty(t, snap.SlotRegressions)
+}
+
+// TestAnalyzerReadNewLines_RewrittenLogIsReadFromStart checks that a log a
+// restarted process truncates and rewrites is read from its start, even when
+// the new content is no shorter than what was already consumed.
+func TestAnalyzerReadNewLines_RewrittenLogIsReadFromStart(t *testing.T) {
+	logDir := t.TempDir()
+	active := filepath.Join(logDir, "p1.log")
+	record := func(slot int) string {
+		return fmt.Sprintf(
+			`{"msg":"block produced","slot":%d,"block_hash":"h%d"}`+"\n",
+			slot, slot,
+		)
+	}
+	require.NoError(t, os.WriteFile(active, []byte(record(10)), 0o644))
+	analyzer := NewAnalyzer(
+		&Config{LogDir: logDir},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	analyzer.readNewLines()
+
+	require.NoError(t, os.WriteFile(active, []byte(record(20)+record(21)), 0o644))
+	analyzer.readNewLines()
+
+	snap := analyzer.metrics.Snapshot()
+	require.Equal(t, 3, snap.TotalBlocksForged)
+	require.Equal(t, uint64(21), snap.MaxSlotByNode["p1"])
+}
+
+// TestAnalyzerReadNewLines_RewrittenLogWithSameBannerIsReadFromStart covers
+// cardano-node, which truncates its log on restart and always begins it with
+// the same long configuration banner.
+func TestAnalyzerReadNewLines_RewrittenLogWithSameBannerIsReadFromStart(t *testing.T) {
+	logDir := t.TempDir()
+	active := filepath.Join(logDir, "p2.log")
+	banner := "Node configuration: " + strings.Repeat("x", 600) + "\n"
+	forged := func(slot int) string {
+		return fmt.Sprintf(
+			`{"msg":"","ns":["cardano.node.Forge"],"data":{"val":{"kind":"TraceForgedBlock","slot":%d,"block":"h%d"}}}`+"\n",
+			slot, slot,
+		)
+	}
+	require.NoError(t, os.WriteFile(active, []byte(banner+forged(10)), 0o644))
+	analyzer := NewAnalyzer(
+		&Config{LogDir: logDir},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	analyzer.readNewLines()
+
+	require.NoError(t, os.WriteFile(active, []byte(banner+forged(20)+forged(21)), 0o644))
+	analyzer.readNewLines()
+
+	snap := analyzer.metrics.Snapshot()
+	require.Equal(t, 3, snap.BlocksByNode["p2"])
+	require.Empty(t, snap.SlotRegressions)
 }
 
 func TestLogRole_RecognizesRotationsAndRejectsUnrelatedFiles(t *testing.T) {

@@ -37,6 +37,12 @@ type UTxOKey struct {
 	Address []byte // raw Cardano address bytes (for use as change address)
 }
 
+// canSign reports whether k carries the Ed25519 key material needed to
+// produce a VKey witness.
+func (k *UTxOKey) canSign() bool {
+	return k != nil && len(k.SKey) == ed25519.SeedSize && len(k.VKey) == ed25519.PublicKeySize
+}
+
 // cardanoKeyFile is the JSON format emitted by cardano-cli for key files.
 type cardanoKeyFile struct {
 	CborHex string `json:"cborHex"`
@@ -169,12 +175,13 @@ type vkeyWit struct {
 
 // BuildWitnessMap computes Ed25519 VKey witnesses for the CBOR-encoded tx body
 // and returns a map[any]any ready for use as the witness set field of a Conway
-// transaction.  Duplicate keys (by VKey hex) are silently skipped.
-// Returns an empty map if no non-nil keys are provided.
+// transaction.  Duplicate keys (by VKey hex) and keys without signing
+// material are silently skipped. Returns an empty map if no usable keys are
+// provided.
 func BuildWitnessMap(bodyBytes []byte, keys ...*UTxOKey) map[any]any {
 	var nonNilKeys []*UTxOKey
 	for _, k := range keys {
-		if k != nil {
+		if k.canSign() {
 			nonNilKeys = append(nonNilKeys, k)
 		}
 	}

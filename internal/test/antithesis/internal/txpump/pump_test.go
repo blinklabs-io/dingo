@@ -145,10 +145,12 @@ func TestDeriveTestTxIDUsesCardanoTransactionBodyHash(t *testing.T) {
 		}},
 		make([]byte, 28),
 		make([]byte, 28),
+		0,
 		MinFee,
 		// A payment-key-hash enterprise address: the 0x60 header and a
 		// 28-byte hash. A shorter payload is rejected by any real decoder.
 		append([]byte{0x60}, make([]byte, 28)...),
+		nil,
 	)
 	require.NoError(t, err)
 

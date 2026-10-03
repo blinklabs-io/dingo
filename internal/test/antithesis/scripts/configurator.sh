@@ -228,26 +228,10 @@ cp /configs/1/configs/shelley-genesis.json /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.skey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
-
-# Keep generated stake material in a stable location. txpump derives the
-# delegation and pool hashes at startup. Select the generator's first
-# lexically ordered stake verification key and expose only that key under a
-# stable name; an unconstrained find otherwise makes the selected credential
-# depend on filesystem traversal order.
-mkdir -p /configs/utxo-keys/stake
-stake_vkey="$(find /tmp/testnet -type f -name '*stake*.vkey' -print 2>/dev/null | sort | head -n 1)"
-if [ -z "$stake_vkey" ]; then
-    echo "no generated delegation stake verification key found" >&2
-    exit 1
-fi
-cp "$stake_vkey" /configs/utxo-keys/stake/txpump.stake.vkey
-if ! cardano-cli latest stake-address key-hash \
-    --stake-verification-key-file /configs/utxo-keys/stake/txpump.stake.vkey \
-    >/tmp/txpump-stake-key-hash; then
-    echo "generated delegation stake verification key is invalid: $stake_vkey" >&2
-    exit 1
-fi
-test -s /tmp/txpump-stake-key-hash
+# txpump reads the PlutusV3 cost model for Plutus unlocks. Keep it out of the
+# top-level directory, where every *.json file is parsed as UTxO data.
+mkdir -p /configs/utxo-keys/genesis
+cp /configs/1/configs/conway-genesis.json /configs/utxo-keys/genesis/
 
 # Copy testnet.yaml to shared volume for analysis/txpump genesis config
 echo "copying testnet.yaml to /testnet-config/testnet.yaml"
@@ -260,21 +244,12 @@ fi
 find /configs -type d -exec chmod 0755 {} +
 find /configs -type f -exec chmod 0644 {} +
 
-# cardano-node refuses to start when vrf.skey has "other" read permissions,
-# so the cardano-node pools must be 0700/0600. Pool 1 is consumed by the
-# dingo container, which runs as a non-root user, so those test-only keys must
-# stay world-readable.
-for pool_dir in /configs/[0-9]*; do
-    if [ "$(basename "$pool_dir")" = "1" ]; then
-        continue
-    fi
-    keys_dir="$pool_dir/keys"
+# Both cardano-node and dingo refuse to load signing keys that grant group or
+# other access, so every pool's keys must be 0700/0600. The dingo antithesis
+# image runs as root, so owner-only keys stay readable there.
+for keys_dir in /configs/[0-9]*/keys; do
     if [ -d "$keys_dir" ]; then
         chmod 0700 "$keys_dir"
         find "$keys_dir" -type f -exec chmod 0600 {} +
     fi
 done
-if [ -d /configs/1/keys ]; then
-    chmod 0755 /configs/1/keys
-    find /configs/1/keys -type f -exec chmod 0644 {} +
-fi

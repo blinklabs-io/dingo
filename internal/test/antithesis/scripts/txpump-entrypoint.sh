@@ -7,19 +7,17 @@ set -eu
 # Delegation credentials are only needed when "delegation" is an enabled
 # workload type (see internal/txpump: Config.delegationEnabled() and
 # pump.go enabledTypes()). For payment-only runs the pump never touches
-# delegation, so requiring/deriving the stake+cold key hashes would abort a
-# perfectly valid run. Gate the requirement on TXPUMP_TYPES accordingly.
+# delegation, so requiring/deriving the pool key hash would abort a perfectly
+# valid run. txpump uses its funding keys as stake credentials. Gate the requirement on TXPUMP_TYPES accordingly.
 case ",${TXPUMP_TYPES:-},"  in
   *,delegation,*)
-    stake_key="/utxo-keys/stake/txpump.stake.vkey"
     pool_key="/configs/keys/cold.vkey"
-    if [ ! -f "${stake_key}" ] || [ ! -f "${pool_key}" ]; then
-      echo "txpump: delegation credentials are missing" >&2
+    if [ ! -f "${pool_key}" ]; then
+      echo "txpump: delegation pool key is missing" >&2
       exit 1
     fi
-    TXPUMP_DELEGATION_STAKE_KEY_HASH="$(cardano-cli latest stake-address key-hash --stake-verification-key-file "${stake_key}")"
-    TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli stake-pool id --cold-verification-key-file "${pool_key}" --output-format hex)"
-    export TXPUMP_DELEGATION_STAKE_KEY_HASH TXPUMP_DELEGATION_POOL_KEY_HASH
+    TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli latest stake-pool id --cold-verification-key-file "${pool_key}" --output-hex)"
+    export TXPUMP_DELEGATION_POOL_KEY_HASH
     ;;
 esac
 

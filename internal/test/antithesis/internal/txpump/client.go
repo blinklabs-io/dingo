@@ -117,9 +117,17 @@ func (c *NodeClient) SubmitTx(eraID uint16, txBytes []byte) error {
 // reconciliation keeps inputs reserved across one ambiguous absence because a
 // Dingo producer can remove a forged transaction from the mempool before its
 // spend is visible to LSQ.
+//
+// With checkPending false the mempool is not consulted: a pending transaction
+// with an output in the snapshot is reported absent (confirmed) and any other
+// is reported present, keeping its inputs reserved. Use it for a
+// cardano-node: gouroboros' LocalTxMonitor HasTx sends a bare transaction ID
+// where cardano-node expects an era-tagged one, so cardano-node closes the
+// connection.
 func (c *NodeClient) ReconcileWallet(
 	addresses [][]byte,
 	txIDs []string,
+	checkPending bool,
 ) (snapshot []UTxO, presence map[string]bool, retErr error) {
 	if c == nil || c.conn == nil {
 		return nil, nil, errors.New(
@@ -146,47 +154,49 @@ func (c *NodeClient) ReconcileWallet(
 		addrs = append(addrs, addr)
 	}
 	presence = make(map[string]bool, len(txIDs))
-	monitor := c.conn.LocalTxMonitor()
-	if monitor == nil || monitor.Client == nil {
-		return nil, nil, fmt.Errorf(
-			"node %s: LocalTxMonitor protocol not available",
-			c.addr,
-		)
-	}
-	if err := monitor.Client.Acquire(); err != nil {
-		return nil, nil, fmt.Errorf(
-			"node %s: acquire tx monitor: %w",
-			c.addr,
-			err,
-		)
-	}
-	defer func() {
-		if err := monitor.Client.Release(); err != nil && retErr == nil {
-			snapshot = nil
-			presence = nil
-			retErr = fmt.Errorf("node %s: release tx monitor: %w", c.addr, err)
-		}
-	}()
-	for _, txID := range txIDs {
-		rawID, err := hex.DecodeString(txID)
-		if err != nil {
+	if checkPending {
+		monitor := c.conn.LocalTxMonitor()
+		if monitor == nil || monitor.Client == nil {
 			return nil, nil, fmt.Errorf(
-				"node %s: decode pending tx %s: %w",
+				"node %s: LocalTxMonitor protocol not available",
 				c.addr,
-				txID,
+			)
+		}
+		if err := monitor.Client.Acquire(); err != nil {
+			return nil, nil, fmt.Errorf(
+				"node %s: acquire tx monitor: %w",
+				c.addr,
 				err,
 			)
 		}
-		present, err := monitor.Client.HasTx(rawID)
-		if err != nil {
-			return nil, nil, fmt.Errorf(
-				"node %s: check pending tx %s: %w",
-				c.addr,
-				txID,
-				err,
-			)
+		defer func() {
+			if err := monitor.Client.Release(); err != nil && retErr == nil {
+				snapshot = nil
+				presence = nil
+				retErr = fmt.Errorf("node %s: release tx monitor: %w", c.addr, err)
+			}
+		}()
+		for _, txID := range txIDs {
+			rawID, err := hex.DecodeString(txID)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"node %s: decode pending tx %s: %w",
+					c.addr,
+					txID,
+					err,
+				)
+			}
+			present, err := monitor.Client.HasTx(rawID)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"node %s: check pending tx %s: %w",
+					c.addr,
+					txID,
+					err,
+				)
+			}
+			presence[txID] = present
 		}
-		presence[txID] = present
 	}
 	// Observe transaction presence before acquiring the UTxO snapshot. The
 	// observations are independent: a forged transaction can leave the mempool
@@ -239,6 +249,18 @@ func (c *NodeClient) ReconcileWallet(
 				address: raw,
 			},
 		)
+	}
+	if !checkPending {
+		// Without the mempool, a pending transaction counts as confirmed (absent)
+		// once one of its outputs is in the snapshot, and otherwise stays
+		// present so its inputs remain reserved.
+		confirmed := make(map[string]bool, len(snapshot))
+		for _, u := range snapshot {
+			confirmed[u.TxHash] = true
+		}
+		for _, txID := range txIDs {
+			presence[txID] = !confirmed[txID]
+		}
 	}
 	return snapshot, presence, nil
 }

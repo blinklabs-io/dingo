@@ -59,6 +59,20 @@ x-cardano-node-shell-command: &cardano-node-shell-command
     --shelley-operational-certificate /configs/keys/opcert.cert --port 3001
     > "$$NODE_LOG_FILE" 2>&1
 
+# p2 also bridges its local (N2C) socket to TCP 3002 so txpump has a fallback
+# when p1 is down: cardano-node serves N2C only over a Unix socket, and the
+# socket cannot be shared across containers under Moog.
+x-cardano-node-bridged-shell-command: &cardano-node-bridged-shell-command
+  - >-
+    umask 022; socat TCP-LISTEN:3002,fork,reuseaddr
+    UNIX-CONNECT:/ipc/node.socket & exec cardano-node run
+    --config /configs/configs/config.json
+    --topology /configs/configs/topology.json --database-path /data/db
+    --socket-path /ipc/node.socket --shelley-kes-key /configs/keys/kes.skey
+    --shelley-vrf-key /configs/keys/vrf.skey
+    --shelley-operational-certificate /configs/keys/opcert.cert --port 3001
+    > "$$NODE_LOG_FILE" 2>&1
+
 x-cardano-node: &cardano-node
   image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-11.0.1}
   init: true
@@ -85,7 +99,7 @@ services:
   # configurator — generates pool keys and genesis files from testnet.yaml
   # --------------------------------------------------------------------------
   configurator:
-    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-configurator:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
     environment:
       NODE_DATABASE_PATH: /data/db
@@ -105,7 +119,7 @@ services:
   # p1 — Dingo instrumented block producer (pool 1)
   # --------------------------------------------------------------------------
   p1:
-    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-main}-antithesis
+    image: ghcr.io/blinklabs-io/dingo:${IMAGE_TAG:-fix-antithesis-ci}-antithesis
     init: true
     hostname: p1.example
     depends_on:
@@ -146,7 +160,7 @@ services:
     <<: *cardano-node
     hostname: p2.example
     entrypoint: ["/bin/sh", "-c"]
-    command: *cardano-node-shell-command
+    command: *cardano-node-bridged-shell-command
     environment:
       <<: *cn-env
       NODE_LOG_FILE: /logs/p2.log
@@ -199,31 +213,37 @@ services:
       - logs:/logs
 
   # --------------------------------------------------------------------------
-  # txpump — submits transactions via Dingo's N2C TCP port
-  # Note: cardano-node N2C is socket-only; Moog has no shared-socket support,
-  #       so txpump targets p1's TCP N2C endpoint exclusively (no fallback).
+  # txpump — submits transactions via Dingo's N2C TCP port, falling back to
+  # p2's bridged N2C port while p1 is unreachable. It drives the workload
+  # rather than being under test, so it is excluded from fault injection.
   # --------------------------------------------------------------------------
   txpump:
-    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-txpump:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
     # Named Docker volumes are root-owned on first mount; txpump writes
     # /logs/txpump.log for the analysis container.
     user: "0:0"
+    labels:
+      com.antithesis.exclude_from_faults: "network,kill,pause,stop"
     depends_on:
       p1:
         condition: service_healthy
     environment:
       TXPUMP_NODE_ADDR: "p1.example:3002"
+      TXPUMP_FALLBACK_ADDR: "p2.example:3002"
       TXPUMP_NETWORK_MAGIC: "42"
       TXPUMP_TX_COUNT_MIN: "10"
       TXPUMP_TX_COUNT_MAX: "50"
       TXPUMP_COOLDOWN_MIN: "5"
       TXPUMP_COOLDOWN_MAX: "15"
       TXPUMP_TYPES: "payment,delegation,governance,plutus"
-      TXPUMP_STARTUP_TIMEOUT: "60"
+      # No readiness deadline: faults can keep p1 down for minutes before the
+      # first submission, and an exited txpump never comes back.
+      TXPUMP_STARTUP_TIMEOUT: "0"
       TXPUMP_LOG_DIR: "/logs"
       TXPUMP_GENESIS_FILE: "/testnet-config/testnet.yaml"
       TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+      TXPUMP_CONWAY_GENESIS_FILE: "/utxo-keys/genesis/conway-genesis.json"
     volumes:
       - logs:/logs
       - p1-configs:/configs:ro
@@ -236,8 +256,12 @@ services:
   # analysis — reads node logs, evaluates safety/liveness properties
   # --------------------------------------------------------------------------
   analysis:
-    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-main}
+    image: ghcr.io/blinklabs-io/dingo-analysis:${IMAGE_TAG:-fix-antithesis-ci}
     init: true
+    # The analyzer observes the system under test; faults on it would only
+    # lose or replay observations.
+    labels:
+      com.antithesis.exclude_from_faults: "network,kill,pause,stop"
     depends_on:
       p1:
         condition: service_healthy
