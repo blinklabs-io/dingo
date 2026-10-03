@@ -856,6 +856,45 @@ func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
 	})
 }
 
+func TestLeiosPersistenceLifecycleOperationsSerialize(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+	o.leiosPersistLifecycleMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			o.leiosPersistLifecycleMu.Unlock()
+		}
+	}()
+
+	closeDone := make(chan error, 1)
+	pauseDone := make(chan error, 1)
+	go func() { closeDone <- o.Close() }()
+	go func() { pauseDone <- o.PauseLeiosPersistWriterForLiveLifecycleOp() }()
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close bypassed the persistence lifecycle lock: %v", err)
+	case err := <-pauseDone:
+		t.Fatalf("Pause bypassed the persistence lifecycle lock: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	o.leiosPersistLifecycleMu.Unlock()
+	locked = false
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not finish after the persistence lifecycle lock was released")
+	}
+	select {
+	case err := <-pauseDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Pause did not finish after the persistence lifecycle lock was released")
+	}
+}
+
 // TestLeiosPersistStopDrainTimesOut verifies that the shutdown drain wait is
 // bounded: if the writer's drain is stuck (e.g. the blob store hangs inside
 // SetLeiosEB, so leiosPersistDone is never closed), stopLeiosPersistWriter

@@ -555,6 +555,8 @@ func (o *Ouroboros) drainLeiosPersist() {
 // time; callers that must confirm the drain should use Close. Safe when
 // neither worker started and idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }
 
@@ -663,8 +665,17 @@ func (o *Ouroboros) stopLeiosPersistenceGC(drainTimeout time.Duration) bool {
 // or replace storage in that case; it must escalate to a supervised restart,
 // the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
+	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+
 	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
 		return ErrLeiosPersistDrainUnconfirmed
+	}
+	o.leiosPersistMu.Lock()
+	closed := o.leiosPersistClosed
+	o.leiosPersistMu.Unlock()
+	if closed {
+		return nil
 	}
 	o.leiosPersistOnce = sync.Once{}
 	o.leiosPersistStopOnce = sync.Once{}
