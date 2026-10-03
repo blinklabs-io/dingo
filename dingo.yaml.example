@@ -268,6 +268,9 @@
 # whenever the database lifecycle service is enabled (barkPort set alongside
 # databaseLifecycle.snapshotDir below): every DatabaseService RPC requires a
 # certificate verified against this CA. ArchiveService remains public.
+# Setting this together with barkOperatorCertificateFingerprints also mounts the
+# remote LifecycleService (Stop, Restart, GetStatus), which Bark then binds to
+# loopback unless barkHost is set.
 # Also requires tlsCertFilePath/tlsKeyFilePath above to be set. dingoctl's
 # --client-cert/--client-key/--ca-cert flags are the client side of this.
 # Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
@@ -276,7 +279,8 @@
 
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
-# VerifySnapshot, Restore, Truncate, CancelOperation). Hex is matched
+# VerifySnapshot, Restore, Truncate, CancelOperation) and LifecycleService
+# RPCs (Stop, Restart). Hex is matched
 # case-insensitively and may contain colons. At least one is required whenever
 # the database lifecycle service is enabled; a CA-valid certificate not in this
 # list may use read-only DatabaseService RPCs but receives PERMISSION_DENIED for

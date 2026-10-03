@@ -57,6 +57,54 @@ func waitForSignalOrError(
 	}
 }
 
+// waitForStop is waitForSignalOrError plus the remote lifecycle request that
+// ended the run, if any. The request is queued before signalCtx is cancelled,
+// and Node.Run returns nil on that cancellation, which can reach errChan
+// before the cancellation is observed; so the request is checked whenever the
+// run ended without an error, not only on the signaled branch.
+func waitForStop(
+	signalCtx context.Context,
+	errChan <-chan error,
+	remoteRequest <-chan dingo.ShutdownRequest,
+) (*dingo.ShutdownRequest, bool, error) {
+	err, signaled := waitForSignalOrError(signalCtx, errChan)
+	if err != nil {
+		return nil, signaled, err
+	}
+	select {
+	case req := <-remoteRequest:
+		return &req, signaled, nil
+	default:
+		return nil, signaled, nil
+	}
+}
+
+// runRequestedShutdown performs a stop or restart accepted over the remote
+// lifecycle service. The graceful shutdown is abandoned once req.Timeout
+// elapses so the request can never leave the process hanging, and a restart
+// re-executes the process even then.
+func runRequestedShutdown(
+	req dingo.ShutdownRequest,
+	shutdown func() error,
+	reExec func() error,
+) error {
+	done := make(chan error, 1)
+	go func() { done <- shutdown() }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(req.Timeout):
+		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
+	}
+	if !req.Restart {
+		return err
+	}
+	if reExecErr := reExec(); reExecErr != nil {
+		return errors.Join(err, reExecErr)
+	}
+	return err
+}
+
 func gracefulShutdown(
 	logger *slog.Logger,
 	metricsServer *http.Server,
@@ -512,6 +560,17 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
+	// A remote stop or restart ends the run exactly like a signal does; the
+	// request is recorded first so the shutdown below can tell them apart.
+	remoteRequest := make(chan dingo.ShutdownRequest, 1)
+	go func() {
+		select {
+		case req := <-d.ShutdownRequests():
+			remoteRequest <- req
+			signalCtxStop()
+		case <-signalCtx.Done():
+		}
+	}()
 	go func() {
 		//nolint:contextcheck
 		err := d.Run(signalCtx)
@@ -524,19 +583,29 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 	}()
 
-	// Wait for signal or error
-	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if signaled {
-		logger.Info("signal received, initiating graceful shutdown")
-
-		if err := gracefulShutdown(
+	// Wait for signal, remote request or error
+	req, signaled, err := waitForStop(signalCtx, errChan, remoteRequest)
+	shutdown := func() error {
+		return gracefulShutdown(
 			logger,
 			metricsServer,
 			debugServer,
 			healthServer,
 			d,
 			shutdownTimeout,
-		); err != nil {
+		)
+	}
+	if req != nil {
+		logger.Info(
+			"remote lifecycle request received, initiating graceful shutdown",
+			"restart", req.Restart,
+			"timeout", req.Timeout,
+		)
+		return runRequestedShutdown(*req, shutdown, dingo.ReExec)
+	}
+	if signaled {
+		logger.Info("signal received, initiating graceful shutdown")
+		if err := shutdown(); err != nil {
 			return err
 		}
 		logger.Info("shutdown complete")
@@ -545,17 +614,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 
 	if err == nil {
 		logger.Info("node stopped")
-		if err := gracefulShutdown(
-			logger,
-			metricsServer,
-			debugServer,
-			healthServer,
-			d,
-			shutdownTimeout,
-		); err != nil {
-			return err
-		}
-		return nil
+		return shutdown()
 	}
 
 	logger.Error("node error", "error", err)
