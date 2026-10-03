@@ -577,9 +577,8 @@ func (f *blockfetchRangeFixture) point(idx int) ocommon.Point {
 	return ocommon.NewPoint(f.blocks[idx].Slot, f.blocks[idx].Hash)
 }
 
-// readMessageTypes reads count response segments and returns the message type
-// byte of each. Every blockfetch server message is a CBOR array whose first
-// element is the message type, so the second payload byte identifies it.
+// readMessageTypes decodes messages independently of muxer segment boundaries:
+// one segment may contain several messages, or only part of a message.
 func (f *blockfetchRangeFixture) readMessageTypes(
 	t *testing.T,
 	count int,
@@ -587,10 +586,10 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 	t.Helper()
 	types := make([]byte, 0, count)
 	for range count {
-		segment := f.peer.readResponse(t, 5*time.Second)
-		require.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
-		require.GreaterOrEqual(t, len(segment.Payload), 2)
-		types = append(types, segment.Payload[1])
+		protocolID, message := f.peer.readMessage(t, 5*time.Second)
+		require.Equal(t, blockfetch.ProtocolId, protocolID)
+		require.GreaterOrEqual(t, len(message), 2)
+		types = append(types, message[1])
 	}
 	return types
 }
