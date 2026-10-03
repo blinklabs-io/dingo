@@ -14688,12 +14688,16 @@ primary chain or metadata was already rewound. This also ensures the ordinary
 case where the primary chain is behind the ledger tip emits the missing undo
 notifications before forward processing resumes.
 
+Block application writes a `block_nonce` row for every applied block, with a
+NULL nonce for an era that has no evolving nonce (Byron's BFT/PoA consensus
+has none), so `reconciliationUndoBlocks`, `durableAppliedFloor` and
+`latestLedgerPrimaryChainAncestor` all see Byron applied points.
+
 `reconciliationUndoBlocks` also detects, and counts separately via
 `reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
-row at all in its undo range — the shape of a Byron-era block, since
-Byron's BFT/PoA consensus writes no VRF nonce — distinct from
-`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap.
-It cannot name or resolve that block (there
+row at all in its undo range — the shape of a Byron-era block applied by a
+release that wrote rows only for eras with an evolving nonce — distinct from
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap. It cannot name or resolve that block (there
 is no row to read a hash from, and falling back to whatever the primary
 chain's blob store currently holds at that slot would risk resolving the
 wrong branch's block, the exact failure mode this function exists to
