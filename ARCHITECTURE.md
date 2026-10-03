@@ -4515,9 +4515,11 @@ claim even when the corroborating frontier sits up to `securityParam` below
 it, and the entry is cleared once the connection is accepted.
 A lone far peer therefore stays rejected, and two connections delivering
 frontiers more than `securityParam` apart do not corroborate each other. The
-check counts connections, not operators, so it is not a Sybil defence;
-acceptance only admits the frontier to chain selection, and the ledger still
-verifies every applied header, completing deferred verification at apply time.
+check counts connections, not operators, so it is not a Sybil defence. Passing
+this plausibility check only stages a ChainSync candidate; its frontier cannot
+drive selection until the ledger admits the accompanying header. The ledger
+still verifies every applied header, completing deferred verification at apply
+time.
 Genesis exit may consult the advertised slot only through the separately
 documented delivered-frontier gate below. A RollBackward restores the
 delivered frontier from a bounded `k+1` header history; if the point is no longer retained, the
@@ -4794,17 +4796,39 @@ it. Dingo implements this as a **corroboration gate**
   ledger genuinely stalls. Observation happening before the apply gate is what
   avoids a deadlock (a peer must be observed to become corroborated). While the
   gate is active the observation is made **synchronously** with the gate
-  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to update chain selection in
-  the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
-  apply decision reflects the header currently being admitted rather than a tip
-  update that has not been processed yet — an async observation could otherwise
-  let a header slip through in the window before it revoked corroboration. The
+  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to stage chain-selection
+  state in the roll-forward handler), so the apply decision reflects the header
+  currently being admitted rather than a tip update that has not been processed
+  yet — an async observation could otherwise let a header slip through in the
+  window before it revoked corroboration. A staged candidate cannot become a
+  selectable peer frontier until the ledger accepts a header at its point, but
+  it does count as corroboration evidence before admission: the gate checks the
+  applicant's own staged frontier and counts every other connection's staged
+  frontier, so connections from distinct hosts that stage the same points
+  open the apply gate for each other even when no peer has been admitted yet.
+  Staged peers share the selector's tracked-peer limit, with at most 256
+  pending header observations per peer. A staged candidate resolves with its
+  point rather than with the connection that delivered it, because a header
+  delivered by several connections is published to the ledger once. Admitting
+  the point promotes every staged candidate at that point, including the
+  copies whose publish was suppressed as duplicates and the copies of
+  apply-denied peers, each advancing its peer's frontier to that header only;
+  earlier withheld observations do not enter the committed frontier. Rejecting
+  the point removes the candidate at that point and everything staged after it
+  on every connection, since later headers depend on the rejected prefix, and
+  reevaluates selection before the rejection callback returns. Apply-denied
+  headers that are neither admitted nor rejected stay corroboration evidence
+  without steering selection. Ledger admission advances the tracked ChainSync
+  cursor and publishes the accepted peer-tip event. This staged
+  admission path applies when Genesis corroboration is disabled too, so a
+  rejected or discarded header cannot advance the selector frontier. The
   roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
   (wired to apply the rollback into chain selection, skipping the async
   `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
   change its corroboration status, so the rollback apply decision must reflect
   the post-rollback state rather than pre-trim corroboration. With the gate
-  disabled both paths use the async path unchanged.
+  disabled, rollback keeps its existing async observation path; roll-forward
+  still stages and resolves tips around ledger admission.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.

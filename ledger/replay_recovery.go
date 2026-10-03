@@ -1924,8 +1924,10 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 		)
 		return fmt.Errorf("%s: %w", errContext, errHaltLedgerPipeline)
 	}
+	var pending pendingPublishes
+	defer pending.flush()
 	ls.chainsyncMutex.Lock()
-	ls.resetChainsyncResyncState()
+	ls.resetChainsyncResyncState(&pending)
 	ls.setChainsyncState(SyncingChainsyncState)
 	ls.chainsyncMutex.Unlock()
 	if ls.config.EventBus != nil {

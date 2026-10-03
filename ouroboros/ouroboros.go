@@ -97,6 +97,7 @@ type Ouroboros struct {
 	// lastOriginOnlyIntersectWarn throttles warnOriginOnlyIntersectRescued.
 	// Unix nanoseconds; 0 means "never warned".
 	lastOriginOnlyIntersectWarn atomic.Int64
+	chainsyncAdmissionSequence  atomic.Uint64
 	// leiosAnnouncementLedger is the narrow synchronous ledger view used by
 	// LeiosNotify. It returns validation facts only; this package owns peer,
 	// publication, and relay semantics.
@@ -368,15 +369,16 @@ type OuroborosConfig struct {
 	// is observed but cannot steer the ledger. When nil, every ingress-
 	// eligible peer is apply-eligible (no behavior change).
 	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
-	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
-	// handled the observation synchronously, in which case the caller MUST NOT
-	// also publish the async PeerTipUpdateEvent (avoids a double update). This
-	// lets the node update chain-selection state synchronously before the
-	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
-	// currently being admitted (closing the race where an async tip update that
-	// revokes corroboration is not yet processed). Returning false (or nil hook)
-	// falls back to the async PeerTipUpdateEvent path.
+	// ChainsyncObservePeerTip stages a candidate update before the
+	// ChainsyncApplyEligible gate. It returns true when the node staged the
+	// candidate synchronously and the caller should skip publishing a duplicate
+	// candidate event. Candidates may inform Genesis corroboration but must not
+	// affect selection until the ledger admits the accompanying header.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncResolvePeerTip synchronously resolves a staged candidate after
+	// definite header admission or rejection. Deferred buffered headers are not
+	// resolved until replay.
+	ChainsyncResolvePeerTip func(chainselection.PeerTipUpdateEvent, bool)
 	// ChainsyncSyncTarget snapshots the policy-bounded target for one observed
 	// peer-tip event. Its result is carried with that event into ledger
 	// admission; ledger must not reread mutable selector state.
