@@ -7370,7 +7370,8 @@ Two artifact backends are supported, selected by `mithril.backend`
   artifact's self-hash is checked, the certificate chain is verified, then the
   immutable-file digest list is fetched and authenticated by rebuilding its
   merkle root (a Blake2s-256 Merkle Mountain Range over the digest strings,
-  `merkle_tree.go`) and comparing it with the `cardano_database_merkle_root`
+  ordered by immutable file number and then file name, `merkle_tree.go`)
+  and comparing it with the `cardano_database_merkle_root`
   protocol message part certified by the leaf certificate. Per-immutable
   archives are then downloaded with a bounded worker pool
   (`bootstrap_v2.go`), each extracted trio is SHA-256-verified against the
@@ -7418,6 +7419,14 @@ ordinary header rejection can retain an existing in-budget partial file for a
 different mirror, while a malformed-range restart truncates the prefix before
 checking the replacement response. This is not an aggregate budget
 across archives, mirrors, retries, or a bootstrap's extracted files.
+
+Without an `ExpectedSize`, which v2 artifacts cannot supply, a resume request
+for a file already at the server's size is answered 416 and the cached file
+is accepted as complete. A v2 bootstrap therefore removes a fully downloaded
+digests or ancillary archive once it fails extraction or verification, so the
+next run fetches it again instead of re-accepting the same bad bytes. A failed
+download keeps its partial file for resumption, and a cancelled run keeps its
+archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`.
 
