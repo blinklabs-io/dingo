@@ -168,3 +168,49 @@ func TestFreedSlotPromotesConnectedRoot(t *testing.T) {
 		"the freed slot must go to the connected root",
 	)
 }
+
+// A slot freed by demoting a client to an observer also goes to a connected
+// root that was holding an observer slot.
+func TestDemotionPromotesConnectedRoot(t *testing.T) {
+	t.Parallel()
+	state := chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		IsRoot: func(connId ouroboros.ConnectionId) bool {
+			return connId.RemoteAddr.(*net.TCPAddr).Port >= 100
+		},
+	})
+	first, second := newTestConnId(100), newTestConnId(101)
+	require.True(t, state.TryAddClientConnIdWithDirection(first, 1, true))
+	require.True(t, state.TryAddObservedClientConnIdWithDirection(second, true))
+
+	require.True(t, state.SetClientObservabilityOnly(first, true))
+
+	assert.False(
+		t,
+		observabilityOnly(t, state, second),
+		"the slot freed by the demotion must go to the connected root",
+	)
+}
+
+// Demoting a root must not hand the slot it freed straight back to it.
+func TestDemotedRootIsNotRepromoted(t *testing.T) {
+	t.Parallel()
+	state := chainsync.NewStateWithConfig(nil, nil, chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: chainsync.DefaultStallTimeout,
+		IsRoot: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	root := newTestConnId(100)
+	require.True(t, state.TryAddClientConnIdWithDirection(root, 1, true))
+
+	require.True(t, state.SetClientObservabilityOnly(root, true))
+
+	assert.True(
+		t,
+		observabilityOnly(t, state, root),
+		"a demoted root must stay an observer",
+	)
+}

@@ -562,7 +562,7 @@ func (s *State) RemoveClientConnId(
 ) {
 	removedEvent, wasEligible := s.removeClientConnId(connId)
 	if wasEligible {
-		s.promoteObservedRoot()
+		s.promoteObservedRoot(connId)
 	}
 	if removedEvent == nil {
 		return
@@ -585,17 +585,18 @@ func (s *State) publishAsyncDetached(eventType event.EventType, evt event.Event)
 	go s.eventBus.PublishAsync(eventType, evt)
 }
 
-// promoteObservedRoot hands a free eligible slot to a connected root that is
-// only observing, so a root does not wait for its own next message to be
-// admitted after a slot frees.
-func (s *State) promoteObservedRoot() {
+// promoteObservedRoot hands a free eligible slot to a connected root other
+// than freed that is only observing, so a root does not wait for its own next
+// message to be admitted after a slot frees. freed is the connection whose
+// removal or demotion freed the slot; promoting it would undo the demotion.
+func (s *State) promoteObservedRoot(freed ouroboros.ConnectionId) {
 	if s.config.IsRoot == nil {
 		return
 	}
 	s.clientConnIdMutex.RLock()
 	var root *ouroboros.ConnectionId
 	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly && s.config.IsRoot(id) {
+		if id != freed && tc.ObservabilityOnly && s.config.IsRoot(id) {
 			root = &id
 			break
 		}
@@ -868,7 +869,8 @@ func (s *State) SetClientStartedAsOutbound(
 // the eligible chainsync pool. Promoting an observability-only client back into
 // the eligible pool respects MaxClients: when the pool is full a configured
 // root displaces a non-root client, and any other client remains
-// observability-only and this method returns false.
+// observability-only and this method returns false. Demoting an eligible
+// client hands the freed slot to another connected root that is observing.
 func (s *State) SetClientObservabilityOnly(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
@@ -876,6 +878,7 @@ func (s *State) SetClientObservabilityOnly(
 	var notifyType event.EventType
 	var notify *event.Event
 	var preempted *ClientRemovedEvent
+	var freedSlot bool
 	ok := func() bool {
 		s.clientConnIdMutex.Lock()
 		defer s.clientConnIdMutex.Unlock()
@@ -900,6 +903,7 @@ func (s *State) SetClientObservabilityOnly(
 			*s.activeClientConnId == connId
 		wasEligible := !tc.ObservabilityOnly
 		tc.ObservabilityOnly = observabilityOnly
+		freedSlot = wasEligible && observabilityOnly
 		if wasPrimary && observabilityOnly {
 			s.activeClientConnId = nil
 		}
@@ -926,6 +930,9 @@ func (s *State) SetClientObservabilityOnly(
 	s.publishClientRemoved(preempted)
 	if notify != nil {
 		s.publishAsyncDetached(notifyType, *notify)
+	}
+	if freedSlot {
+		s.promoteObservedRoot(connId)
 	}
 	return ok
 }
