@@ -21,12 +21,15 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -803,5 +806,137 @@ func TestHeaderValidationRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
 	case <-f.resyncEvents:
 		t.Fatal("a declined recovery must not publish a resync")
 	default:
+	}
+}
+
+// TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer pins that a
+// deterministic deferred-validation failure targets the connection that
+// supplied the block, and nothing else: a failure with no recorded source, or
+// one caused by local state rather than the block, penalizes no peer.
+func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
+	t.Parallel()
+
+	source := testConnectionId(6101, 3001)
+	for _, tc := range []struct {
+		name      string
+		source    ouroboros.ConnectionId
+		cause     error
+		wantBlame bool
+	}{
+		{
+			"invalid block from a known peer",
+			source,
+			errors.New("VRF leader value exceeds threshold"),
+			true,
+		},
+		{
+			"unknown source",
+			ouroboros.ConnectionId{},
+			errors.New("VRF leader value exceeds threshold"),
+			false,
+		},
+		{
+			"local snapshot gap",
+			source,
+			fmt.Errorf("gap: %w", errLeaderStakeSnapshotUnavailable),
+			false,
+		},
+		{
+			"still deferred",
+			source,
+			fmt.Errorf("wait: %w", errHeaderVerificationDeferred),
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+			require.NoError(t, err)
+			t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+
+			blocks := make([]models.Block, 0, 5)
+			for slot := uint64(1); slot <= 5; slot++ {
+				block := makeTestBlock(slot, slot)
+				if len(blocks) > 0 {
+					block.PrevHash = append(
+						[]byte(nil), blocks[len(blocks)-1].Hash...,
+					)
+				}
+				blocks = append(blocks, block)
+				require.NoError(t, db.BlockCreate(block, nil))
+			}
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+			require.NoError(
+				t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+			)
+			ledgerTip := ochainsync.Tip{
+				Point:       makeTestPoint(blocks[2]),
+				BlockNumber: blocks[2].Number,
+			}
+			require.NoError(t, db.SetTip(ledgerTip, nil))
+
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Close)
+			_, resyncEvents := bus.Subscribe(event.ChainsyncResyncEventType)
+			ls := &LedgerState{
+				db:    db,
+				chain: cm.PrimaryChain(),
+				config: LedgerStateConfig{
+					ChainManager: cm,
+					EventBus:     bus,
+					Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				},
+			}
+			ls.currentTip = ledgerTip
+			ls.metrics.init(prometheus.NewRegistry())
+			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+
+			recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
+				&headerValidationError{
+					BlockPoint: makeTestPoint(blocks[3]),
+					Cause:      tc.cause,
+					Source:     tc.source,
+				},
+			)
+			require.NoError(t, recoverErr)
+			require.True(t, recovered)
+
+			first := testutil.RequireReceive(
+				t, resyncEvents, 2*time.Second, "general resync",
+			)
+			general, ok := first.Data.(event.ChainsyncResyncEvent)
+			require.True(t, ok)
+			require.Equal(
+				t,
+				event.ChainsyncResyncReasonHeaderValidationRecovery,
+				general.Reason,
+			)
+			require.Equal(t, ouroboros.ConnectionId{}, general.ConnectionId)
+
+			if !tc.wantBlame {
+				require.Never(
+					t,
+					func() bool { return len(resyncEvents) > 0 },
+					100*time.Millisecond,
+					10*time.Millisecond,
+					"no peer may be penalized",
+				)
+				return
+			}
+			second := testutil.RequireReceive(
+				t, resyncEvents, 2*time.Second, "peer penalty",
+			)
+			penalty, ok := second.Data.(event.ChainsyncResyncEvent)
+			require.True(t, ok)
+			require.Equal(
+				t,
+				event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+				penalty.Reason,
+			)
+			require.Equal(t, tc.source, penalty.ConnectionId)
+			require.Equal(t, blocks[2].Slot, penalty.Point.Slot)
+		})
 	}
 }

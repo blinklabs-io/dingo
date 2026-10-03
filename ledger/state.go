@@ -1243,8 +1243,26 @@ type LedgerState struct {
 	// consumeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node. The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
-	// cleanup pass (the floor is a lower-watermark recomputed each pass).
-	deferredHeaderValidation    map[string]struct{}
+	// cleanup pass (the floor is a lower-watermark recomputed each pass). Each
+	// value is the connection that supplied the block, or the zero value when
+	// unknown (markers restored after a restart carry none).
+	deferredHeaderValidation map[string]ouroboros.ConnectionId
+	// deferredHeaderValidationFloor is the highest slot below which a block
+	// needs full header verification at apply even without a marker, because
+	// its marker may have been evicted to bound the set. Guarded by
+	// deferredHeaderValidationMu.
+	deferredHeaderValidationFloor uint64
+	// maxDeferredHeaderMarkers overrides defaultMaxDeferredHeaderMarkers
+	// when non-zero.
+	maxDeferredHeaderMarkers int
+	// admissionVerified maps the slot of each block whose header passed full
+	// admission verification to its hash key, until block-pipeline replay
+	// consumes it. Guarded by admissionVerifiedMu.
+	admissionVerified   map[uint64]string
+	admissionVerifiedMu sync.Mutex
+	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
+	// non-zero.
+	maxAdmissionVerified        int
 	deferredHeaderValidationMu  sync.Mutex
 	checkpointWrittenForEpoch   bool
 	closed                      atomic.Bool
@@ -6447,6 +6465,12 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 			"error",
 			err,
 		)
+	case errors.Is(err, errBlockPipelineAdmissionVerified):
+		ls.config.Logger.Debug(
+			"block-processing pipeline: validate stage skipped for a header verified at admission",
+			"error",
+			err,
+		)
 	case errors.Is(err, errHeaderVerificationDeferred):
 		ls.metrics.incBlockPipelineDeferredEpochCacheError()
 		ls.config.Logger.Debug(
@@ -6594,6 +6618,9 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			continue
 		}
 		block := item.Block()
+		point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+		admissionVerified := ls.config.BlockPipelineValidateEnabled &&
+			ls.consumeAdmissionVerified(point)
 		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
 		// to validate against (blockPipelineEta0Provider always fails the
 		// nonce lookup for them), matching the serial path's
@@ -6603,7 +6630,23 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		if ls.config.BlockPipelineValidateEnabled &&
 			block.Era().Id != byron.EraIdByron &&
 			ls.shouldEnforceBlockPipelineCrypto(block.SlotNumber()) {
-			if valErr := item.ValidationError(); valErr != nil {
+			// Admission already verified this exact header; the nonce
+			// provider told the validate stage to skip it.
+			if admissionVerified {
+				decoded = append(decoded, block)
+				continue
+			}
+			valErr := item.ValidationError()
+			if errors.Is(valErr, errBlockPipelineAdmissionVerified) {
+				// The slot's admission record was for a different hash, so
+				// the validate stage did not check this block.
+				_, valErr = ls.verifyBlockHeaderStatelessCrypto(block, false)
+				if valErr == nil {
+					decoded = append(decoded, block)
+					continue
+				}
+			}
+			if valErr != nil {
 				// The validation-state snapshot can change between the gate
 				// above and the provider's lookup. A missing/deferred nonce is
 				// not evidence that the block is invalid; admission or the
@@ -6619,14 +6662,12 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: fmt.Errorf(
 						"block pipeline header crypto validation: %w",
 						valErr,
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
@@ -6636,13 +6677,11 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: errors.New(
 						"block failed pipeline header crypto validation",
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
@@ -6658,14 +6697,12 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: fmt.Errorf(
 						"block pipeline operational certificate validation: %w",
 						opCertErr,
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
