@@ -72,15 +72,11 @@ var leiosPersistShutdownDrainTimeout = 5 * time.Second
 
 const leiosPersistGCInterval = time.Hour
 
-// ErrLeiosPersistDrainUnconfirmed is returned by
-// PauseLeiosPersistWriterForLiveLifecycleOp when its bounded wait gave up
-// before confirming the writer goroutine actually exited. Unlike a normal
-// permanent StopLeiosPersistWriter timeout (best-effort, the process is
-// exiting anyway), a live restore/truncate's caller must not treat this as
-// safe to proceed: the old writer may still be running drainLeiosPersist
-// against the about-to-close database and the shared pending map.
+// ErrLeiosPersistDrainUnconfirmed is returned when a bounded wait gives up
+// before confirming the persistence writer and GC workers exited. Callers
+// must not close or replace storage while either worker may still use it.
 var ErrLeiosPersistDrainUnconfirmed = errors.New(
-	"leios persist writer drain not confirmed before timeout",
+	"leios persistence worker drain not confirmed before timeout",
 )
 
 // leiosPersistJob is one endorser block queued for best-effort blob-store
@@ -145,7 +141,9 @@ func (o *Ouroboros) enqueueLeiosPersist(
 		return
 	}
 	o.startLeiosPersistenceGC(0, false)
-	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
+	if !o.startLeiosPersistWriterIfOpen() {
+		return
+	}
 	// The caller's transaction slices, not a copy: they are only measured
 	// here, and are cloned below if and only if the job is admitted.
 	var txsRaw []cbor.RawMessage
@@ -225,6 +223,9 @@ func (o *Ouroboros) reserveLeiosPersistBytes(
 ) (bool, string) {
 	o.leiosPersistMu.Lock()
 	defer o.leiosPersistMu.Unlock()
+	if o.leiosPersistClosed {
+		return false, ""
+	}
 	// Reject work once the writer is stopping. The shutdown drain runs only
 	// after leiosPersistStop is closed and reads the pending map under this same
 	// mutex; a job added after the drain has emptied the map would be stranded
@@ -292,6 +293,10 @@ func (o *Ouroboros) installLeiosPersistJob(
 	// The in-flight phase ends either way: the bytes are held by the
 	// installed job from here on, or released below.
 	o.leiosPersistReserved--
+	if o.leiosPersistClosed {
+		o.leiosPersistBytes -= job.size
+		return false
+	}
 	select {
 	case <-o.leiosPersistStop:
 		// Stop was signalled while this job was being copied. Installing it
@@ -362,6 +367,16 @@ func (o *Ouroboros) startLeiosPersistWriter() {
 	go o.leiosPersistLoop()
 }
 
+func (o *Ouroboros) startLeiosPersistWriterIfOpen() bool {
+	o.leiosPersistMu.Lock()
+	defer o.leiosPersistMu.Unlock()
+	if o.leiosPersistClosed {
+		return false
+	}
+	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
+	return true
+}
+
 // startLeiosPersistenceGC starts the optional pruning worker independently of
 // the persistence writer. initialMaxSlot is supplied after the startup
 // watermark scan so enabling GC does not repeat that full scan immediately.
@@ -377,9 +392,16 @@ func (o *Ouroboros) startLeiosPersistenceGC(
 		stop := make(chan struct{})
 		done := make(chan struct{})
 		o.leiosPersistGCMu.Lock()
+		o.leiosPersistMu.Lock()
+		if o.leiosPersistClosed {
+			o.leiosPersistMu.Unlock()
+			o.leiosPersistGCMu.Unlock()
+			return
+		}
 		o.leiosPersistGCStop = stop
 		o.leiosPersistGCDone = done
 		o.leiosPersistGCStarted.Store(true)
+		o.leiosPersistMu.Unlock()
 		o.leiosPersistGCMu.Unlock()
 		go o.leiosPersistGCLoop(stop, done, initialMaxSlot, initialMaxKnown)
 	})
@@ -529,8 +551,9 @@ func (o *Ouroboros) drainLeiosPersist() {
 }
 
 // StopLeiosPersistWriter stops the background persistence and GC workers,
-// sharing one bounded wait across both. Safe when neither worker started and
-// idempotent across multiple calls.
+// sharing one bounded wait across both. It logs if a worker does not stop in
+// time; callers that must confirm the drain should use Close. Safe when
+// neither worker started and idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {
 	o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout)
 }

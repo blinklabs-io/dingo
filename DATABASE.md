@@ -2199,7 +2199,7 @@ Leios historical-serving persistence is kept indefinitely by default. A positive
 `DINGO_LEIOS_PERSISTENCE_RETENTION_SLOTS`) opts into pruning records older than
 `max persisted Leios EB slot - retention slots`; the cutoff slot itself is
 retained. The asynchronous GC scans the shared `e` prefix, deletes `em` and
-`et` keys in batches of 256, and runs after startup restores the Leios slot
+`et` keys one per transaction, and runs after startup restores the Leios slot
 watermark and then hourly. It also removes legacy hash-only records when their
 embedded slot is older than the cutoff, plus unpaired legacy transaction
 records. A malformed legacy manifest has no trustworthy slot, so it and its

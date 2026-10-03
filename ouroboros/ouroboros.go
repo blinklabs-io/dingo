@@ -300,6 +300,7 @@ type Ouroboros struct {
 	leiosPersistStopOnce sync.Once
 	leiosPersistStarted  atomic.Bool
 	leiosPersistMu       sync.Mutex
+	leiosPersistClosed   bool // guarded by leiosPersistMu; permanent after Close
 	leiosPersistPending  map[string]*leiosPersistJob
 	// leiosPersistBytes is the aggregate reserved size of the queue: the sum
 	// of leiosPersistPending's job sizes plus every reservation whose payload

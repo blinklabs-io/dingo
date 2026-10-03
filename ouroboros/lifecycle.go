@@ -135,6 +135,17 @@ func (o *Ouroboros) subscribeTracked(
 // Close is idempotent, so Run()'s deferred shutdown and an explicit
 // live-restore teardown can both call it.
 func (o *Ouroboros) Close() error {
+	return o.close()
+}
+
+func (o *Ouroboros) close() error {
+	// Serialize closure against lazy worker startup and queue admission. A
+	// callback that passed this gate before Close may still finish cloning, but
+	// reserve/install reject it after closure; no worker can start afterward.
+	o.leiosPersistMu.Lock()
+	o.leiosPersistClosed = true
+	o.leiosPersistMu.Unlock()
+
 	o.leiosValidationMu.Lock()
 	o.leiosValidationClosed = true
 	if o.leiosValidationCancel != nil {
@@ -160,7 +171,10 @@ func (o *Ouroboros) Close() error {
 			o.eventBus.UnsubscribeAndWait(sub.eventType, sub.id)
 		}
 	}
-	o.StopLeiosPersistWriter()
+	var closeErr error
+	if !o.stopLeiosPersistenceWorkers(leiosPersistShutdownDrainTimeout) {
+		closeErr = ErrLeiosPersistDrainUnconfirmed
+	}
 	o.registerer.unregisterAll()
-	return nil
+	return closeErr
 }

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/plugin"
 )
 
@@ -128,6 +129,18 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 	return 30 * time.Second
 }
 
+var closeOuroborosInstance = func(ouro *ouroborosPkg.Ouroboros) error {
+	return ouro.Close()
+}
+
+var closeOuroborosForShutdown = func(ouro *ouroborosPkg.Ouroboros) error {
+	err := closeOuroborosInstance(ouro)
+	if errors.Is(err, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+		return errors.Join(errStorageDrainUnconfirmed, err)
+	}
+	return err
+}
+
 // shutdownPhase1ComponentStops is every phase-1 component whose Stop cancels
 // its own context and then waits for a goroutine to exit with no deadline of
 // its own. Live restore/truncate already bounds this style of wait, but the
@@ -151,7 +164,7 @@ func (n *Node) configuredShutdownTimeout() time.Duration {
 // direct calls after this list (chainSelector.Stop only cancels and does not
 // wait; peerGov.Stop already honors ctx).
 func (n *Node) shutdownPhase1ComponentStops() []namedStop {
-	return append([]namedStop{
+	stops := append([]namedStop{
 		{
 			name: "chainsync stall recycler",
 			stop: func() error { n.waitChainsyncStallRecycler(); return nil },
@@ -161,6 +174,13 @@ func (n *Node) shutdownPhase1ComponentStops() []namedStop {
 			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
 		},
 	}, n.quiesceComponentStops()...)
+	if ouro := n.ouroboros(); ouro != nil {
+		stops = append(stops, namedStop{
+			name: "ouroboros",
+			stop: func() error { return closeOuroborosForShutdown(ouro) },
+		})
+	}
+	return stops
 }
 
 // componentStopsForShutdownPhase1 is (*Node).shutdownPhase1ComponentStops,

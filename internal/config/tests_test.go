@@ -658,6 +658,14 @@ func TestLoadLeiosPersistenceRetentionSlots(t *testing.T) {
 	fromYAML, err := LoadConfig(configFile)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(7200), fromYAML.LeiosPersistenceRetentionSlots)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--leios-persistence-retention-slots=900",
+	}))
+	require.NoError(t, ApplyFlags(cmd, fromYAML))
+	assert.Equal(t, uint64(900), fromYAML.LeiosPersistenceRetentionSlots)
 }
 
 // defaultMithrilBackendAtInit captures the production default before

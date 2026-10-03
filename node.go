@@ -496,6 +496,10 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// goroutine may be using -- mirrors node_shutdown.go's shutdown()
 	// ledgerStateDrainConfirmed guard on the normal signal-driven path.
 	ledgerStateDrainConfirmed := true
+	// Set false if Ouroboros cannot confirm its persistence workers stopped.
+	// The DB and storage-provider cleanup below must then leave their backing
+	// storage open, just as they do for an unconfirmed ledger-state drain.
+	leiosPersistenceDrainConfirmed := true
 	defer func() {
 		if !startupGateHeld {
 			return
@@ -554,9 +558,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// ledgerState.Close and db.Close stops below, so it observes
 		// ledgerStateDrainConfirmed's final value -- mirrors
 		// node_shutdown.go's shutdown() phase 3 guard on pluginHost.Stop.
-		if !ledgerStateDrainConfirmed {
+		if !ledgerStateDrainConfirmed || !leiosPersistenceDrainConfirmed {
 			n.config.logger.Error(
-				"skipping plugin host shutdown during startup-failure cleanup because ledger state drain was not confirmed",
+				"skipping plugin host shutdown during startup-failure cleanup because a storage user drain was not confirmed",
 			)
 			return
 		}
@@ -649,9 +653,9 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// closure runs after that one in LIFO order (registered first, so
 	// stopped last), so it observes the flag's final value.
 	started = append(started, func() {
-		if !ledgerStateDrainConfirmed {
+		if !ledgerStateDrainConfirmed || !leiosPersistenceDrainConfirmed {
 			n.config.logger.Error(
-				"skipping database close during startup-failure cleanup because ledger state drain was not confirmed",
+				"skipping database close during startup-failure cleanup because a storage user drain was not confirmed",
 			)
 			return
 		}
@@ -1297,6 +1301,24 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
 	}
+	closeOuroboros := func() error {
+		closeErr := ouro.Close()
+		if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+			leiosPersistenceDrainConfirmed = false
+		}
+		return closeErr
+	}
+	// Close this instance before storage cleanup on any startup rollback,
+	// including a failure while attaching its handlers.
+	defer func() { _ = closeOuroboros() }()
+	started = append(started, func() {
+		if closeErr := closeOuroboros(); closeErr != nil {
+			n.config.logger.Error(
+				"failed to close ouroboros during startup-failure cleanup",
+				"error", closeErr,
+			)
+		}
+	})
 	// The Leios managers were started earlier in Run, before this instance
 	// existed, so their handlers are attached here rather than at their own
 	// construction. reinitializeNetworkingCore does the same after its
@@ -1308,8 +1330,14 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Close stops Leios persistence and optional GC workers and releases its
 	// EventBus subscriptions and Prometheus collectors. Register it on both
 	// the unwind stack and a defer for startup failure and graceful shutdown.
-	defer func() { _ = n.ouroboros().Close() }()
-	started = append(started, func() { _ = n.ouroboros().Close() })
+	defer func() {
+		if current := n.ouroboros(); current != nil {
+			closeErr := current.Close()
+			if errors.Is(closeErr, ouroborosPkg.ErrLeiosPersistDrainUnconfirmed) {
+				leiosPersistenceDrainConfirmed = false
+			}
+		}
+	}()
 	// A closure, not a method value, even though n.ouroboros already exists
 	// here: a live restore replaces the instance, and a method value would
 	// pin this subscription to the replaced one forever, so outbound

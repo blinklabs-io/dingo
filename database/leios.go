@@ -328,18 +328,22 @@ func (d *Database) SetLeiosEB(
 	return nil
 }
 
-const leiosEBPruneBatchSize = 256
+// Cloud blob transactions spool every prior object value before applying
+// deletes so they can compensate a partial commit. The BlobItem interface
+// does not expose value sizes; keeping one delete per transaction bounds that
+// spool to one object without downloading every value just to measure it.
+const leiosEBPruneBatchSize = 1
 
 // PruneLeiosEBBeforeSlot removes persisted Leios manifests and transaction
 // lists strictly older than beforeSlot. The caller chooses the retention
 // frontier; this method does not infer one from chain state.
 //
 // It scans the shared "e" prefix once because the manifest and transaction
-// prefixes are adjacent. Deletes commit in bounded blob-only transactions so
-// a large history cannot exceed Badger's transaction limit or stage an
-// unbounded cloud transaction. Repeating the same call is safe after a partial
-// cloud commit. The returned count includes only keys from fully committed
-// batches; on error it is a lower bound.
+// prefixes are adjacent. Deletes commit in blob-only transactions containing
+// at most one key. Cloud stores spool prior object values for compensation, so
+// this avoids aggregating many large values into one local spool. Repeating the
+// same call is safe after a partial cloud commit. The returned count includes
+// only keys from fully committed transactions; on error it is a lower bound.
 func (d *Database) PruneLeiosEBBeforeSlot(
 	ctx context.Context,
 	beforeSlot uint64,

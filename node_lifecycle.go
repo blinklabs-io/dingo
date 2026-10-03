@@ -193,12 +193,12 @@ var componentStopsForQuiesce = (*Node).quiesceComponentStops
 // decision.
 //
 // An unfinished wait escalates to errStorageDrainUnconfirmed rather than being
-// reported as an ordinary failure, matching connManager.Stop, the leios
-// persist writer's drain, and the storage providers below. The distinction is
-// what the caller does next: a component that reports a failure has stopped,
-// while one that never returned may still be reading or writing n.db, so
-// Restore/Truncate must abandon the operation and force a supervised restart
-// instead of reopening storage underneath it.
+// reported as an ordinary failure, matching connManager.Stop, the Leios
+// persistence/GC worker drain, and the storage providers below. The
+// distinction is what the caller does next: a component reporting a failure
+// has stopped. A stop that has not returned may still be reading or writing
+// n.db. Restore/Truncate must abandon the operation and force a supervised
+// restart instead of reopening storage underneath it.
 //
 // The abandoned goroutine is deliberately left running. It cannot be
 // interrupted from here, and the escalation brings the process down anyway, so

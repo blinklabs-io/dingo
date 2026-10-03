@@ -785,6 +785,77 @@ func TestLeiosPersistWriterStopIsSafeWithoutStart(t *testing.T) {
 	})
 }
 
+func TestCloseReportsUnconfirmedLeiosPersistenceGCDrain(t *testing.T) {
+	o := newTestOuroborosWithLeiosDB(t)
+
+	originalTimeout := leiosPersistShutdownDrainTimeout
+	leiosPersistShutdownDrainTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { leiosPersistShutdownDrainTimeout = originalTimeout })
+
+	o.leiosPersistGCMu.Lock()
+	o.leiosPersistGCStop = make(chan struct{})
+	o.leiosPersistGCDone = make(chan struct{})
+	o.leiosPersistGCMu.Unlock()
+	o.leiosPersistGCStarted.Store(true)
+
+	require.ErrorIs(t, o.Close(), ErrLeiosPersistDrainUnconfirmed)
+	close(o.leiosPersistGCDone)
+	require.NoError(t, o.Close())
+}
+
+func TestClosePreventsLeiosPersistenceFromStartingOrInstalling(t *testing.T) {
+	t.Run("close before first enqueue", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		o.config.LeiosPersistenceRetentionSlots = 100
+		require.NoError(t, o.Close())
+
+		point, blockRaw, data, _ := leiosPersistTestEntry(t, 0, 1, 4)
+		o.enqueueLeiosPersist(point, blockRaw, data)
+
+		require.False(t, o.leiosPersistStarted.Load())
+		require.False(t, o.leiosPersistGCStarted.Load())
+		require.Empty(t, o.leiosPersistPending)
+	})
+
+	t.Run("enqueue admitted before close", func(t *testing.T) {
+		o := newTestOuroborosWithLeiosDB(t)
+		point, blockRaw, data, _ := leiosPersistTestEntry(t, 1, 1, 4)
+		reserved := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+		o.leiosPersistAfterReserve = func() {
+			close(reserved)
+			<-release
+		}
+
+		enqueueDone := make(chan struct{})
+		go func() {
+			o.enqueueLeiosPersist(point, blockRaw, data)
+			close(enqueueDone)
+		}()
+		select {
+		case <-reserved:
+		case <-time.After(5 * time.Second):
+			t.Fatal("enqueue did not reach its reserved-copy phase")
+		}
+
+		require.NoError(t, o.Close())
+		releaseOnce.Do(func() { close(release) })
+		select {
+		case <-enqueueDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("in-flight enqueue did not finish after close")
+		}
+
+		o.leiosPersistMu.Lock()
+		defer o.leiosPersistMu.Unlock()
+		require.Empty(t, o.leiosPersistPending)
+		require.Zero(t, o.leiosPersistBytes)
+		require.Zero(t, o.leiosPersistReserved)
+	})
+}
+
 // TestLeiosPersistStopDrainTimesOut verifies that the shutdown drain wait is
 // bounded: if the writer's drain is stuck (e.g. the blob store hangs inside
 // SetLeiosEB, so leiosPersistDone is never closed), stopLeiosPersistWriter
