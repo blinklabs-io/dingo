@@ -139,6 +139,11 @@ type Host struct {
 	// concurrent Resolve can detect that the capability it just started is
 	// being torn down and unwind its own instance instead of leaking it.
 	stopping map[Capability]int
+	// stopCapabilityWG tracks StopCapability teardown that has already removed
+	// its providers from started, so Stop can wait for it. Add happens under mu
+	// while stopped is false; Stop sets stopped under mu before it Waits.
+	stopCapabilityWG  sync.WaitGroup
+	capabilityStopErr error
 }
 
 // NewHost returns an empty plugin host.
@@ -422,7 +427,8 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; subsequent calls return the first call's result.
+// idempotent; subsequent calls return the first call's result. It also waits
+// for StopCapability teardown already in flight.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -438,7 +444,15 @@ func (h *Host) Stop(ctx context.Context) error {
 			h.mu.Unlock()
 			return err
 		case <-ctx.Done():
-			return ctx.Err()
+			select {
+			case <-done:
+				h.mu.Lock()
+				err := h.stopErr
+				h.mu.Unlock()
+				return err
+			default:
+				return ctx.Err()
+			}
 		}
 	}
 	h.stopped = true
@@ -446,8 +460,39 @@ func (h *Host) Stop(ctx context.Context) error {
 	started := h.started
 	h.started = nil
 	h.mu.Unlock()
-	err := stopReverse(ctx, started)
+	var err error
+	// stopping counts in-flight StopCapability calls under mu, and none can
+	// start once stopped is set, so an empty map means there is nothing to
+	// wait for even when ctx has already ended.
 	h.mu.Lock()
+	inFlight := len(h.stopping) > 0
+	h.mu.Unlock()
+	if inFlight {
+		capabilitiesDone := make(chan struct{})
+		go func() {
+			h.stopCapabilityWG.Wait()
+			close(capabilitiesDone)
+		}()
+		select {
+		case <-capabilitiesDone:
+		case <-ctx.Done():
+			select {
+			case <-capabilitiesDone:
+			default:
+				h.mu.Lock()
+				if len(h.stopping) > 0 {
+					err = ctx.Err()
+				}
+				h.mu.Unlock()
+			}
+		}
+	}
+	// Dependencies must stay alive while capability consumers drain.
+	if err == nil {
+		err = stopReverse(ctx, started)
+	}
+	h.mu.Lock()
+	err = errors.Join(err, h.capabilityStopErr)
 	h.stopErr = err
 	close(h.stopDone)
 	h.mu.Unlock()
@@ -473,6 +518,7 @@ func (h *Host) StopCapability(
 	// that completes while stopReverse runs unwinds its own instance instead
 	// of appending it behind our back.
 	h.stopping[capability]++
+	h.stopCapabilityWG.Add(1)
 	selected := make([]startedInstance, 0, 1)
 	remaining := make([]startedInstance, 0, len(h.started))
 	for _, item := range h.started {
@@ -486,10 +532,12 @@ func (h *Host) StopCapability(
 	h.mu.Unlock()
 	err := stopReverse(ctx, selected)
 	h.mu.Lock()
+	h.capabilityStopErr = errors.Join(h.capabilityStopErr, err)
 	h.stopping[capability]--
 	if h.stopping[capability] <= 0 {
 		delete(h.stopping, capability)
 	}
+	h.stopCapabilityWG.Done()
 	h.mu.Unlock()
 	return err
 }

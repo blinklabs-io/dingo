@@ -184,11 +184,26 @@ type EventBus struct {
 	handlerProgressInterval time.Duration
 }
 
-// NewEventBus creates a new EventBus with async worker pool
+// NewEventBus creates a new EventBus with async worker pool. It panics if
+// the bus metrics cannot be registered on promRegistry; use TryNewEventBus to
+// receive that error instead.
 func NewEventBus(
 	promRegistry prometheus.Registerer,
 	logger *slog.Logger,
 ) *EventBus {
+	e, err := TryNewEventBus(promRegistry, logger)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// TryNewEventBus is NewEventBus returning a metrics registration error. On
+// error nothing is left registered and no goroutine is started.
+func TryNewEventBus(
+	promRegistry prometheus.Registerer,
+	logger *slog.Logger,
+) (*EventBus, error) {
 	e := &EventBus{
 		subscribers: make(
 			map[EventType]map[EventSubscriberId]Subscriber,
@@ -202,7 +217,9 @@ func NewEventBus(
 		handlerProgressInterval: handlerProgressWarnInterval,
 	}
 	if promRegistry != nil {
-		e.initMetrics(promRegistry)
+		if err := e.initMetrics(promRegistry); err != nil {
+			return nil, fmt.Errorf("register event bus metrics: %w", err)
+		}
 	}
 	// Start async worker pool
 	for range AsyncWorkerPoolSize {
@@ -211,7 +228,7 @@ func NewEventBus(
 	}
 	e.asyncWg.Add(1)
 	go e.handlerProgressWatchdog(e.stopCh)
-	return e
+	return e, nil
 }
 
 // asyncWorker processes events from the async queue
@@ -1427,6 +1444,60 @@ func (e *EventBus) Close() {
 	e.shutdown(false)
 }
 
+// CloseContext is Close bounded by ctx. Close waits for every in-flight
+// SubscribeFunc handler to return, so a handler that never returns would hold
+// it forever. When ctx ends first, CloseContext stops waiting and returns an
+// error wrapping ctx.Err() that names the event types whose handlers are
+// still running. When no handler is running at that point, it first allows
+// the close a bounded grace to finish. The abandoned Close keeps running in its own goroutine and
+// finishes once those handlers return.
+func (e *EventBus) CloseContext(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		e.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+	}
+	// A ctx that was already done on entry gives Close no time at all. With
+	// no handler running, Close is only finishing bookkeeping, so allow it a
+	// short bounded grace instead of reporting a drain that never stalled.
+	running := e.runningHandlerTypes()
+	if len(running) == 0 {
+		grace := time.NewTimer(closeContextIdleGrace)
+		defer grace.Stop()
+		select {
+		case <-done:
+			return nil
+		case <-grace.C:
+		}
+		running = e.runningHandlerTypes()
+	}
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	if len(running) == 0 {
+		return fmt.Errorf(
+			"event bus close bookkeeping did not finish: %w",
+			ctx.Err(),
+		)
+	}
+	return fmt.Errorf(
+		"event bus close abandoned with handlers still running for %v: %w",
+		running,
+		ctx.Err(),
+	)
+}
+
+// closeContextIdleGrace bounds how long CloseContext keeps waiting past its
+// deadline when no handler is running.
+const closeContextIdleGrace = time.Second
+
 func (e *EventBus) shutdown(restart bool) {
 	if e == nil {
 		return
@@ -1478,8 +1549,16 @@ func (e *EventBus) shutdown(restart bool) {
 
 	// Close subscribers outside of lock
 	discardQueued := !restart
-	for _, evtTypeSubs := range subsCopy {
+	for eventType, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
+			if e.metrics != nil {
+				kind := "remote"
+				if _, ok := sub.(*channelSubscriber); ok {
+					kind = "in-memory"
+				}
+				e.metrics.subscribers.WithLabelValues(string(eventType), kind).
+					Dec()
+			}
 			if chSub, ok := sub.(*channelSubscriber); ok {
 				chSub.close(discardQueued)
 			} else {
@@ -1511,11 +1590,6 @@ func (e *EventBus) shutdown(restart bool) {
 		}
 	}
 	e.mu.Unlock()
-
-	// Reset subscriber metrics if they exist
-	if e.metrics != nil {
-		e.metrics.subscribers.Reset()
-	}
 
 	// Every ordered-lane worker watched the stop channel closed above and
 	// has exited (asyncWg.Wait covered them alongside the shared pool), so

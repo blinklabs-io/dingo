@@ -62,7 +62,7 @@ type Bark struct {
 	// draining an in-flight request that itself calls Acquire) — see
 	// Acquire's doc comment for why its config.DB read deliberately does
 	// NOT take mu, to avoid exactly that deadlock.
-	mu           sync.Mutex
+	mu           lifecycleMutex
 	server       *http.Server
 	config       BarkConfig
 	listenerAddr net.Addr
@@ -76,6 +76,49 @@ type Bark struct {
 	// read-locks it (via TryRLock, never blocking) for the duration of one
 	// request. See Acquire's doc comment for the full race this prevents.
 	dbGate sync.RWMutex
+	// beforePreflight is a test hook, nil in production, called at the start
+	// of startServer so a test can hold Start inside its TLS/listen
+	// preflight while another goroutine races it.
+	beforePreflight func()
+}
+
+// lifecycleMutex keeps preflight and publication atomic while allowing Stop
+// to abandon its wait when the caller's shutdown budget expires.
+type lifecycleMutex struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (m *lifecycleMutex) init() {
+	m.once.Do(
+		func() { m.token = make(chan struct{}, 1); m.token <- struct{}{} },
+	)
+}
+
+func (m *lifecycleMutex) Lock() { m.init(); <-m.token }
+func (m *lifecycleMutex) TryLock() bool {
+	m.init()
+	select {
+	case <-m.token:
+		return true
+	default:
+		return false
+	}
+}
+func (m *lifecycleMutex) Unlock() { m.token <- struct{}{} }
+func (m *lifecycleMutex) lockContext(ctx context.Context) error {
+	m.init()
+	select {
+	case <-m.token:
+		return nil
+	default:
+	}
+	select {
+	case <-m.token:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type BarkConfig struct {
@@ -257,9 +300,12 @@ func barkListenAddr(host string, port uint) string {
 }
 
 func (b *Bark) Start(ctx context.Context) error {
+	// mu is held through the TLS/listen preflight and until the server is
+	// published, so Stop and a concurrent Start observe either no server or
+	// a fully started one.
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.server != nil {
-		b.mu.Unlock()
 		return errors.New("server already started")
 	}
 
@@ -272,7 +318,6 @@ func (b *Bark) Start(ctx context.Context) error {
 	// constructor would reject a composition path that was never actually
 	// exposed over the network in the first place.
 	if b.config.Lifecycle != nil && b.config.TlsClientCAFilePath == "" {
-		b.mu.Unlock()
 		return errors.New(
 			"bark: TlsClientCAFilePath is required to start with lifecycle set — " +
 				"the DatabaseService's destructive RPCs (CreateSnapshot/" +
@@ -282,7 +327,6 @@ func (b *Bark) Start(ctx context.Context) error {
 	}
 	if b.config.Lifecycle != nil &&
 		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
-		b.mu.Unlock()
 		return errors.New(
 			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
 				"with lifecycle set — mTLS client-certificate verification has " +
@@ -290,7 +334,6 @@ func (b *Bark) Start(ctx context.Context) error {
 		)
 	}
 	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
-		b.mu.Unlock()
 		return errors.New(
 			"bark: at least one OperatorCertificateFingerprint is required to " +
 				"start with lifecycle set — verified client identity alone does " +
@@ -376,15 +419,10 @@ func (b *Bark) Start(ctx context.Context) error {
 			IdleTimeout:       120 * time.Second,
 		}
 	}
-	b.server = server
-	b.mu.Unlock()
-
 	if err := b.startServer(server); err != nil {
-		b.mu.Lock()
-		b.server = nil
-		b.mu.Unlock()
 		return err
 	}
+	b.server = server
 
 	go func() { //nolint:gosec // G118: goroutine intentionally outlives ctx to perform graceful shutdown
 		<-ctx.Done()
@@ -427,8 +465,11 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 // detection. It validates TLS configuration, binds the listening
 // socket and pre-loads any TLS keypair synchronously so port and
 // certificate errors surface before returning, then serves in a
-// background goroutine.
+// background goroutine. The caller must hold b.mu.
 func (b *Bark) startServer(server *http.Server) error {
+	if b.beforePreflight != nil {
+		b.beforePreflight()
+	}
 	if (b.config.TlsCertFilePath != "") != (b.config.TlsKeyFilePath != "") {
 		return errors.New(
 			"failed to start bark gRPC server: both tls cert and key must be specified",
@@ -497,9 +538,7 @@ func (b *Bark) startServer(server *http.Server) error {
 		return fmt.Errorf("failed to start bark gRPC %s server: %w",
 			serverType, err)
 	}
-	b.mu.Lock()
 	b.listenerAddr = ln.Addr()
-	b.mu.Unlock()
 	go func() {
 		var serveErr error
 		if useTLS {
@@ -545,7 +584,9 @@ func (b *Bark) handleServeExit(
 }
 
 func (b *Bark) Stop(ctx context.Context) error {
-	b.mu.Lock()
+	if err := b.mu.lockContext(ctx); err != nil {
+		return err
+	}
 	defer b.mu.Unlock()
 
 	if b.server != nil {
