@@ -114,6 +114,12 @@ type Node struct {
 	// without recomputing them and drifting from Run.
 	ouroborosConfig ouroborosPkg.OuroborosConfig
 	blockForger     *forging.BlockForger
+	// blockProducerCreds is the live credential set the forger, builder and
+	// leader election draw on. The node owns it: it is the target of a
+	// credential reload and is closed, zeroizing the keys, when the forging
+	// path stops. An atomic pointer because the reload trigger runs on its
+	// own goroutine, concurrently with a live lifecycle teardown.
+	blockProducerCreds atomic.Pointer[forging.PoolCredentials]
 	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
 	// either serve-key or sign mode. validateBlockProducerStartup owns
 	// dialing/closing it (closing the prior one before replacing it, so a

@@ -185,3 +185,90 @@ func TestReinitializeCoreStorageForgetsTipGap(t *testing.T) {
 	assert.False(t, ok)
 	assert.Zero(t, gap)
 }
+
+// TestEventLoopResponsiveReportsAStoppedSlotClock pins the liveness signal:
+// the slot-tick loop that feeds the tip gap is the node's heartbeat. A node
+// that has not ticked yet is starting or bootstrapping and is alive; one whose
+// ticks stopped after they began is wedged; a live restore that forgets the
+// reading returns the node to "not ticked yet" rather than wedged.
+func TestEventLoopResponsiveReportsAStoppedSlotClock(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{}
+	require.NoError(t, n.EventLoopResponsive(), "no tick yet is not a stall")
+
+	n.health.recordTipGap(n.health.currentGeneration(), 3)
+	require.NoError(t, n.EventLoopResponsive(), "a fresh tick is responsive")
+	n.health.mu.Lock()
+	recorded := n.health.lastTick
+	n.health.mu.Unlock()
+	require.WithinDuration(
+		t,
+		time.Now(),
+		recorded,
+		time.Minute,
+		"a tick must be timestamped when it is recorded",
+	)
+
+	n.health.mu.Lock()
+	n.health.lastTick = time.Now().Add(-2 * eventLoopStallLimit)
+	n.health.mu.Unlock()
+	require.ErrorContains(t, n.EventLoopResponsive(), "slot clock")
+
+	n.health.forgetTipGap()
+	require.NoError(t, n.EventLoopResponsive())
+}
+
+// TestLedgerStateConfigKeepsTheHeartbeatWhileTicksArePaused covers a node
+// whose tip falls behind the era-history horizon after it has ticked: the
+// slot clock pauses its ticks there, which is not a stopped clock and must
+// not fail liveness. The pause keeps the heartbeat without reporting a tip
+// gap, never starts one, and cannot be kept alive by a superseded ledger.
+func TestLedgerStateConfigKeepsTheHeartbeatWhileTicksArePaused(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{
+		config: Config{cfg: &internalconfig.Config{}},
+	}
+	cfg := n.ledgerStateConfig()
+	require.NotNil(t, cfg.ReportSlotClockAliveFunc)
+	lastTick := func() time.Time {
+		n.health.mu.Lock()
+		defer n.health.mu.Unlock()
+		return n.health.lastTick
+	}
+	stall := func() {
+		n.health.mu.Lock()
+		n.health.lastTick = time.Now().Add(-2 * eventLoopStallLimit)
+		n.health.mu.Unlock()
+	}
+
+	cfg.ReportSlotClockAliveFunc()
+	require.True(t, lastTick().IsZero(), "a pause must not start a heartbeat")
+
+	cfg.ReportTipGapFunc(3)
+	stall()
+	require.Error(t, n.EventLoopResponsive())
+	cfg.ReportSlotClockAliveFunc()
+	require.NoError(
+		t,
+		n.EventLoopResponsive(),
+		"a paused slot clock is running, not stopped",
+	)
+	gap, ok := n.TipGapSlots()
+	require.True(t, ok)
+	require.Equal(t, uint64(3), gap, "a pause must not report a tip gap")
+
+	n.health.forgetTipGap()
+	rebuilt := n.ledgerStateConfig()
+	rebuilt.ReportTipGapFunc(3)
+	stall()
+	require.Error(t, n.EventLoopResponsive())
+	cfg.ReportTipGapFunc(5)
+	cfg.ReportSlotClockAliveFunc()
+	require.Error(
+		t,
+		n.EventLoopResponsive(),
+		"a superseded ledger must not refresh the new heartbeat",
+	)
+}

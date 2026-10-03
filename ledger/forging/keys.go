@@ -83,9 +83,13 @@ type PoolCredentials struct {
 	opCertExpiryKES  uint64
 	opCertValidated  bool
 	generation       uint64
+	materialRevision uint64
 	identitySet      bool
 	identityPoolID   lcommon.PoolId
 	identityVRFVKey  []byte
+	// closed is set by Close and never cleared: no load or replacement may
+	// put key material back into credentials the owner has torn down.
+	closed bool
 
 	mu    sync.RWMutex
 	kesMu sync.RWMutex
@@ -98,6 +102,7 @@ type PoolCredentials struct {
 type credentialGeneration struct {
 	owner            *PoolCredentials
 	id               uint64
+	materialRevision uint64
 	loaded           bool
 	vrfSKey          []byte
 	vrfVerification  []byte
@@ -321,6 +326,98 @@ func (pc *PoolCredentials) clearUnsafe() {
 	pc.opCertValidated = false
 }
 
+// Close zeroizes the VRF seed and the KES secret key and leaves the
+// credentials permanently unloaded: every later load or replacement fails. It
+// advances the generation, so an attempt that already selected a snapshot is
+// abandoned, and it is safe to call more than once.
+func (pc *PoolCredentials) Close() {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	pc.generation++
+	pc.closed = true
+	pc.clearUnsafe()
+}
+
+var errCredentialsClosed = errors.New("pool credentials are closed")
+
+// credentialSwapMu serializes two-object moves so reciprocal replacements
+// cannot each hold one credential lock while waiting for the other.
+var credentialSwapMu sync.Mutex
+
+// ReplaceWith moves next's validated material into pc in one critical
+// section and leaves next empty. Nothing is changed unless next is complete,
+// carries a validated KES lifetime, belongs to the same pool and VRF key, and
+// has an opcert counter no lower than the one loaded.
+//
+// Unlike every other mutation this does not advance the generation. An
+// attempt that already holds a snapshot owns a private copy of the outgoing
+// material, which is still validly signed at the slot it was selected for, so
+// abandoning it would forfeit a leader slot for no safety gain. An attempt
+// begun after the swap acquires the new material.
+func (pc *PoolCredentials) ReplaceWith(next *PoolCredentials) error {
+	if next == nil || next == pc {
+		return errors.New(
+			"replacement credentials must be distinct and non-nil",
+		)
+	}
+	credentialSwapMu.Lock()
+	defer credentialSwapMu.Unlock()
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	next.mu.Lock()
+	defer next.mu.Unlock()
+	if pc.closed {
+		return errCredentialsClosed
+	}
+	if !next.isLoadedUnsafe() ||
+		!next.opCertValidated ||
+		next.maxKESEvolutions == 0 ||
+		next.opCertExpiryKES == 0 {
+		return errors.New("replacement credentials are not validated")
+	}
+	if pc.identitySet &&
+		(pc.identityPoolID != next.poolID ||
+			!bytes.Equal(pc.identityVRFVKey, next.vrfVKey)) {
+		return errors.New(
+			"runtime credential reload cannot change pool or VRF identity",
+		)
+	}
+	if pc.opCert != nil &&
+		next.opCert.IssueNumber < pc.opCert.IssueNumber {
+		return fmt.Errorf(
+			"opcert counter %d is below the loaded counter %d",
+			next.opCert.IssueNumber,
+			pc.opCert.IssueNumber,
+		)
+	}
+	pc.materialRevision++
+	pc.clearUnsafe()
+	pc.poolID = next.poolID
+	pc.vrfSKey = next.vrfSKey
+	pc.vrfVKey = next.vrfVKey
+	pc.kesSKey = next.kesSKey
+	pc.kesVKey = next.kesVKey
+	pc.remoteSigner = next.remoteSigner
+	pc.remoteKESPeriod = next.remoteKESPeriod
+	pc.opCert = next.opCert
+	pc.maxKESEvolutions = next.maxKESEvolutions
+	pc.opCertStartKES = next.opCertStartKES
+	pc.opCertExpiryKES = next.opCertExpiryKES
+	pc.opCertValidated = true
+	if !pc.identitySet {
+		pc.identitySet = true
+		pc.identityPoolID = next.poolID
+		pc.identityVRFVKey = append([]byte(nil), next.vrfVKey...)
+	}
+	// Ownership moved: drop next's references without wiping them.
+	next.vrfSKey = nil
+	next.kesSKey = nil
+	next.remoteSigner = nil
+	next.opCert = nil
+	next.opCertValidated = false
+	return nil
+}
+
 // LoadFromFiles loads all pool credentials from the specified file paths.
 // Uses Bursa to parse cardano-cli format key files. The full loaded material
 // replaces the prior generation atomically. A failed reload invalidates the
@@ -434,6 +531,10 @@ func (pc *PoolCredentials) installLoadedUnsafe(
 	remoteSigner RemoteKESSigner,
 ) error {
 	pc.generation++
+	if pc.closed {
+		loaded.zeroize()
+		return errCredentialsClosed
+	}
 	if err != nil {
 		pc.clearUnsafe()
 		return err
@@ -879,6 +980,7 @@ func (pc *PoolCredentials) acquireCredentialGeneration() *credentialGeneration {
 	generation := &credentialGeneration{
 		owner:            pc,
 		id:               pc.generation,
+		materialRevision: pc.materialRevision,
 		loaded:           pc.isLoadedUnsafe(),
 		vrfSKey:          append([]byte(nil), pc.vrfSKey...),
 		vrfVerification:  append([]byte(nil), pc.vrfVKey...),
@@ -948,6 +1050,34 @@ func (g *credentialGeneration) validatedKESProtocolLifetime() (
 		nil
 }
 
+// usableAtKESPeriod reports why the credentials could not sign at period, from
+// the validated lifetime alone. Unlike a snapshot it copies no key material,
+// which matters for a check that runs on every probe and scrape.
+func (pc *PoolCredentials) usableAtKESPeriod(period uint64) error {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+	pc.kesMu.RLock()
+	defer pc.kesMu.RUnlock()
+	view := credentialGeneration{
+		loaded:           pc.isLoadedUnsafe(),
+		maxKESEvolutions: pc.maxKESEvolutions,
+		opCertStartKES:   pc.opCertStartKES,
+		opCertExpiryKES:  pc.opCertExpiryKES,
+		opCertValidated:  pc.opCertValidated,
+	}
+	if err := view.validateKESPeriod(period); err != nil {
+		return err
+	}
+	if pc.remoteSigner != nil {
+		checker, ok := pc.remoteSigner.(interface{ CheckReady() error })
+		if !ok {
+			return errors.New("remote KES signer readiness is unavailable")
+		}
+		return checker.CheckReady()
+	}
+	return view.validateKESPeriod(period)
+}
+
 func (g *credentialGeneration) validateKESPeriod(period uint64) error {
 	start, maxEvolutions, expiry, err := g.validatedKESProtocolLifetime()
 	if err != nil {
@@ -982,7 +1112,7 @@ func (g *credentialGeneration) periodsRemaining(currentPeriod uint64) uint64 {
 }
 
 func (g *credentialGeneration) updateKESPeriod(period uint64) error {
-	if err := g.owner.updateKESPeriodForGeneration(g.id, period); err != nil {
+	if err := g.owner.updateKESPeriodForGeneration(g.id, g.materialRevision, period); err != nil {
 		return err
 	}
 	if period < g.opCertStartKES {
@@ -1038,6 +1168,7 @@ func (g *credentialGeneration) updateKESPeriod(period uint64) error {
 
 func (pc *PoolCredentials) updateKESPeriodForGeneration(
 	generation uint64,
+	materialRevision uint64,
 	period uint64,
 ) error {
 	pc.mu.RLock()
@@ -1049,6 +1180,11 @@ func (pc *PoolCredentials) updateKESPeriodForGeneration(
 			generation,
 			pc.generation,
 		)
+	}
+	// A replacement preserves the validity of outgoing snapshots, but they
+	// must never evolve the newly installed key using the outgoing lifetime.
+	if pc.materialRevision != materialRevision {
+		return nil
 	}
 	return pc.updateKESPeriodUnsafe(period)
 }

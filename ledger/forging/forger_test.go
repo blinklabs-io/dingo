@@ -45,8 +45,9 @@ import (
 // fakeRemoteKESSigner is a minimal RemoteKESSigner for exercising the
 // agent-backed kesSign/updateKESPeriod paths without a real kesagent.Client.
 type fakeRemoteKESSigner struct {
-	signFunc func(period uint64, message []byte) ([]byte, error)
-	calls    []uint64
+	signFunc     func(period uint64, message []byte) ([]byte, error)
+	calls        []uint64
+	readinessErr error
 }
 
 func (f *fakeRemoteKESSigner) Sign(
@@ -58,6 +59,29 @@ func (f *fakeRemoteKESSigner) Sign(
 		return f.signFunc(period, message)
 	}
 	return append([]byte(nil), message...), nil
+}
+
+func (f *fakeRemoteKESSigner) CheckReady() error { return f.readinessErr }
+
+func TestRemoteCredentialsReadinessDetectsAgentLoss(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	t.Cleanup(pc.Close)
+	signer := &fakeRemoteKESSigner{}
+	require.NoError(t, pc.LoadFromAgentSign(vrfPath, opCertPath, signer))
+	require.NoError(t, pc.ValidateOpCert())
+	require.NoError(
+		t,
+		pc.ValidateKESPeriod(
+			synthGenesis(1, 3, time.Second, time.Unix(0, 0)),
+			0,
+		),
+	)
+	require.NoError(t, pc.usableAtKESPeriod(0))
+	signer.readinessErr = errors.New("agent is unavailable")
+	require.ErrorIs(t, pc.usableAtKESPeriod(0), signer.readinessErr)
+	require.Empty(t, signer.calls, "readiness must not sign")
 }
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the
@@ -554,7 +578,13 @@ func TestForgeProceedsWithinBlockAndSlotBounds(t *testing.T) {
 // parameter cannot widen the local transaction-state safety limit.
 func TestForgeRejectsLocalBlockGapAboveSmallBound(t *testing.T) {
 	var logs bytes.Buffer
-	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 100, 183, &logs)
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200,
+		100,
+		183,
+		&logs,
+	)
 	forger.slotClock = forgerTestSlotClock{
 		currentSlot:           200,
 		chainTipSlot:          100,
@@ -583,7 +613,13 @@ func TestForgeRejectsLocalBlockGapAboveSmallBound(t *testing.T) {
 
 func TestForgeRejectsLocalSlotGapBeyondPrefilter(t *testing.T) {
 	var logs bytes.Buffer
-	forger, builder, broadcaster := newStaleTipTestForger(t, 200, 49, 150, &logs)
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t,
+		200,
+		49,
+		150,
+		&logs,
+	)
 	forger.slotClock = forgerTestSlotClock{
 		currentSlot:           200,
 		chainTipSlot:          49,
@@ -1484,7 +1520,10 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 						slotsPerKESPeriod:  100,
 					}
 
-					require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+					require.NoError(
+						t,
+						forger.checkAndForgeProduction(context.Background()),
+					)
 					require.Equal(t, 1, builder.calls)
 					require.Equal(
 						t,
@@ -1493,9 +1532,15 @@ func TestForgeDoesNotTreatUnknownUpstreamAsStalenessEvidence(t *testing.T) {
 					)
 					require.Zero(
 						t,
-						testutil.ToFloat64(forger.metrics.forgeStaleTipSkipAppliedStale),
+						testutil.ToFloat64(
+							forger.metrics.forgeStaleTipSkipAppliedStale,
+						),
 					)
-					require.NotContains(t, logs.String(), `"stale_source":"wall_clock"`)
+					require.NotContains(
+						t,
+						logs.String(),
+						`"stale_source":"wall_clock"`,
+					)
 				})
 			}
 		}
