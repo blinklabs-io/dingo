@@ -5674,3 +5674,67 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 		})
 	}
 }
+
+// TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer
+// pins that a deferred-header failure attributed to one of two connected peers
+// closes and denies that peer only.
+func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	require.True(t, chainsyncResyncRequiresFreshConnection(
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+	))
+	require.True(t, chainsyncResyncDeniesPeer(
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+	))
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	o := newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
+	o.eventBus = bus
+	o.peerGov = peerGov
+	o.SubscribeChainsyncResync(t.Context())
+
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+		require.NoError(t, err)
+		remoteAddr, err := net.ResolveTCPAddr("tcp", remote)
+		require.NoError(t, err)
+		return ouroboros.ConnectionId{
+			LocalAddr: localAddr, RemoteAddr: remoteAddr,
+		}
+	}
+	bad := connFor("10.0.0.1:3001")
+	honest := connFor("10.0.0.2:3001")
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: bad,
+				Reason: event.
+					ChainsyncResyncReasonDeferredHeaderValidationFailure,
+			},
+		),
+	)
+
+	require.Eventually(
+		t,
+		func() bool { return peerGov.IsDenied(bad.RemoteAddr.String()) },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.Never(
+		t,
+		func() bool { return peerGov.IsDenied(honest.RemoteAddr.String()) },
+		200*time.Millisecond,
+		20*time.Millisecond,
+	)
+}

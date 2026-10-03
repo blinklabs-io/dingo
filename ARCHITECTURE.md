@@ -3746,9 +3746,10 @@ There is therefore no reference-node case in which cardano-node *accepts* a
 non-genesis-delegate block at a `d=1` overlay slot, and the defer never makes
 dingo accept one either: `verifyGenesisDelegateHeader` defers only while
 `allowStateDefer && ledgerTipBehindSlot(slot)`, and at ledger apply
-`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderStateWithEpochAdvance(
-block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — with the defer
-switch off, so the stateful genesis-delegate check runs to an authoritative
+`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderCryptoWithEpochAdvance(
+block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — the VRF, KES and
+operational-certificate signature checks followed by the stateful ones, with the
+defer switch off, so the stateful genesis-delegate check runs to an authoritative
 accept/reject verdict before the block can be adopted. The deferral moves *when*
 the verdict is computed, not *whether* it is enforced; the marker
 (`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
@@ -5272,6 +5273,17 @@ active or while corroboration is incomplete.
 #### Header Verification Handoff
 
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
+
+#### Deferred Header Validation Bounds and Attribution
+
+Four rules shape the deferred-header path beyond the marker itself.
+
+- **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `sync_state` markers. Eviction first raises `deferredHeaderValidationFloor` past every evicted slot and persists it as `deferred_header_validation_floor`; a non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
+- **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
+- **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
+- **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
+
+Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 
 #### Leios CertRB Serving (NtC)
 

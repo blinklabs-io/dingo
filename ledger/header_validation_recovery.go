@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -45,6 +46,9 @@ import (
 type headerValidationError struct {
 	BlockPoint ocommon.Point
 	Cause      error
+	// Source is the connection that supplied the block, or the zero value when
+	// it is not known (a marker restored after restart carries none).
+	Source ouroboros.ConnectionId
 }
 
 func (e *headerValidationError) Error() string {
@@ -244,8 +248,37 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 				},
 			),
 		)
+		if validationErr.Source != (ouroboros.ConnectionId{}) &&
+			headerFailureBlamesPeer(validationErr.Cause) {
+			ls.config.EventBus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: validationErr.Source,
+						Reason: event.
+							ChainsyncResyncReasonDeferredHeaderValidationFailure,
+						Point: rewindPoint,
+					},
+				),
+			)
+		}
 	}
 	return true, nil
+}
+
+// headerFailureBlamesPeer reports whether a header validation failure is a
+// verdict on the block a peer supplied. Failures that only say this node lacks
+// the state to decide (still deferred, a missing or pruned snapshot, no nonce,
+// a failed state read) are not: they clear once local state catches up, and
+// penalizing the peer would punish an honest one.
+func headerFailureBlamesPeer(cause error) bool {
+	return !IsHeaderVerificationDeferred(cause) &&
+		!errors.Is(cause, errLeaderStakeSnapshotUnavailable) &&
+		!errors.Is(cause, errVrfKeyRegistrationHistoryUnavailable) &&
+		!errors.Is(cause, errPoolSnapshotPruned) &&
+		!errors.Is(cause, errHeaderStateLookupFailed) &&
+		!errors.Is(cause, errBlockPipelineEta0Unavailable)
 }
 
 // yieldedToChainSelection reports whether err says the primary chain no
