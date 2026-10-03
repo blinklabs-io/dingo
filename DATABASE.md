@@ -1884,7 +1884,8 @@ it, so it rolls the ledger back to the blob tip instead. That rollback can be
 arbitrarily deep and, on a Mithril-bootstrapped node, can reach the
 `mithril_ledger_slot` trust boundary, past which no rollback is possible at all.
 
-Each SQLite connection also sets `journal_size_limit=67108864` (64 MiB).
+Each SQLite connection in the read and write pools also sets
+`journal_size_limit=67108864` (64 MiB).
 After a checkpoint resets the WAL, SQLite can shrink the retained file to this
 limit instead of preserving a larger burst indefinitely. This is not a ceiling
 on an active WAL: a transaction can grow it beyond 64 MiB, and a reader holding
