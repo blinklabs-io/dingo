@@ -234,7 +234,7 @@ jobs:
             mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
             --sync-binlog=0 --skip-log-bin
           for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
-            while true; do
+            for attempt in {1..60}; do
               if ! status="$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$container")"; then
                 echo "Cannot inspect database container $container" >&2
                 docker logs "$container"
@@ -242,7 +242,14 @@ jobs:
               fi
               case "$status" in
                 'running healthy') break ;;
-                'running starting') sleep 1 ;;
+                'running starting')
+                  if (( attempt == 60 )); then
+                    echo "Database container $container did not become healthy" >&2
+                    docker logs "$container"
+                    exit 1
+                  fi
+                  sleep 1
+                  ;;
                 *) docker logs "$container"; exit 1 ;;
               esac
             done
