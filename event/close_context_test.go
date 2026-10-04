@@ -30,6 +30,7 @@ func TestCloseContextAbandonsBlockedHandlerAndNamesItsType(t *testing.T) {
 	bus := NewEventBus(nil, nil)
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	handlerDone := make(chan struct{})
 	var releaseDone bool
 	releaseHandler := func() {
 		if !releaseDone {
@@ -41,6 +42,7 @@ func TestCloseContextAbandonsBlockedHandlerAndNamesItsType(t *testing.T) {
 	bus.SubscribeFunc(stuckType, func(Event) {
 		close(entered)
 		<-release
+		close(handlerDone)
 	})
 	bus.Publish(stuckType, NewEvent(stuckType, struct{}{}))
 	testutil.RequireReceive(t, entered, 5*time.Second, "handler never started")
@@ -59,6 +61,12 @@ func TestCloseContextAbandonsBlockedHandlerAndNamesItsType(t *testing.T) {
 	require.ErrorContains(t, err, string(stuckType))
 
 	releaseHandler()
+	testutil.RequireReceive(
+		t,
+		handlerDone,
+		5*time.Second,
+		"abandoned Close did not drain the released handler",
+	)
 	require.NoError(t, bus.CloseContext(context.Background()))
 }
 

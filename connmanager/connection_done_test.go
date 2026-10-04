@@ -48,7 +48,7 @@ func TestConnectionDoneReleasesHandlersWhileManagerKeepsErrorValue(
 	conn := newUnstartedConnection(t)
 	require.True(t, cm.AddConnection(conn, false, "1.2.3.4:3001"))
 
-	got, done := cm.GetConnectionWithDone(conn.Id())
+	got, done, closeErr := cm.GetConnectionWithDoneAndError(conn.Id())
 	require.Same(t, conn, got)
 	requireOpen(t, done, "done closed before any connection error")
 
@@ -71,6 +71,8 @@ func TestConnectionDoneReleasesHandlersWhileManagerKeepsErrorValue(
 		injected,
 		"the manager must receive the error value itself",
 	)
+	<-done
+	require.ErrorIs(t, closeErr(), injected)
 	waitForConnectionManagerWatchers(t, cm)
 }
 

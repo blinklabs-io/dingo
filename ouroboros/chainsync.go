@@ -938,13 +938,15 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		return err
 	}
 	// Wait for next block and send
-	rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+	rawConn, connDone, closeErr := o.connManager.GetConnectionWithDoneAndError(
+		ctx.ConnectionId,
+	)
 	if rawConn == nil {
 		return fmt.Errorf("connection %s not found", ctx.ConnectionId.String())
 	}
 	go o.chainsyncServerAwaitNext(
 		ctx,
-		connWithDone{conn: rawConn, done: connDone},
+		connWithDone{conn: rawConn, done: connDone, closeErr: closeErr},
 		clientState,
 	)
 	return nil
@@ -978,12 +980,22 @@ func (o *Ouroboros) chainsyncServerAwaitNext(
 		// The connection manager has already consumed the connection's
 		// error, so the close is idempotent.
 		clientState.ChainIter.Cancel()
+		closeReason := error(errChainsyncAwaitConnectionClosed)
+		if closeErr, ok := conn.(interface{ CloseError() error }); ok {
+			if actualErr := closeErr.CloseError(); actualErr != nil {
+				closeReason = fmt.Errorf(
+					"%w: %w",
+					errChainsyncAwaitConnectionClosed,
+					actualErr,
+				)
+			}
+		}
 		o.closeChainsyncServerConn(
 			conn,
 			ctx.ConnectionId.String(),
 			fmt.Errorf(
 				"connection torn down while peer awaited a reply: %w",
-				errChainsyncAwaitConnectionClosed,
+				closeReason,
 			),
 		)
 		return

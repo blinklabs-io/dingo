@@ -2971,8 +2971,9 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 // the actual transport and the harness can observe the parked peer being
 // released.
 type stubChainsyncServerConnection struct {
-	done    chan struct{}
-	closeFn func() error
+	done     chan struct{}
+	closeFn  func() error
+	closeErr error
 
 	mu         sync.Mutex
 	closeCalls int
@@ -2989,6 +2990,10 @@ func newStubChainsyncServerConnection(
 
 func (c *stubChainsyncServerConnection) Done() <-chan struct{} {
 	return c.done
+}
+
+func (c *stubChainsyncServerConnection) CloseError() error {
+	return c.closeErr
 }
 
 func (c *stubChainsyncServerConnection) Close() error {
@@ -3046,6 +3051,7 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 	clientState := f.registerClientAtOrigin(t)
 
 	conn := newStubChainsyncServerConnection(f.conn.Close)
+	conn.closeErr = errors.New("peer reset")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -3077,6 +3083,7 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 		errChainsyncAwaitConnectionClosed.Error(),
 		"the teardown must be logged as a closed connection",
 	)
+	require.Contains(t, logBuf.String(), conn.closeErr.Error())
 }
 
 // TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection pins the one

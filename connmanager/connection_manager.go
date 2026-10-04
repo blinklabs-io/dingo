@@ -69,7 +69,8 @@ type connectionInfo struct {
 	// done is closed by the connection's watcher once it has consumed the
 	// connection's error, so protocol handlers learn of teardown without
 	// receiving from the one-shot error channel themselves.
-	done chan struct{}
+	done     chan struct{}
+	closeErr error
 }
 
 type ConnectionManager struct {
@@ -970,6 +971,7 @@ func (c *ConnectionManager) addConnectionImplWithTrust(
 		} else {
 			err = <-conn.ErrorChan()
 		}
+		info.closeErr = err
 		close(info.done)
 		if info.ntcBufferTracker != nil {
 			info.ntcBufferTracker.close(c)
@@ -1165,6 +1167,20 @@ func (c *ConnectionManager) GetConnectionWithDone(
 		return info.conn, info.done
 	}
 	return nil, nil
+}
+
+// GetConnectionWithDoneAndError returns the connection, its teardown signal,
+// and an accessor for the error consumed by the manager. Call the accessor
+// after done is closed so the error write is synchronized with the read.
+func (c *ConnectionManager) GetConnectionWithDoneAndError(
+	connId ouroboros.ConnectionId,
+) (*ouroboros.Connection, <-chan struct{}, func() error) {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	if info, exists := c.connections[connId]; exists {
+		return info.conn, info.done, func() error { return info.closeErr }
+	}
+	return nil, nil, nil
 }
 
 // LeiosFetchConnectionIds returns the IDs of connections that currently have a

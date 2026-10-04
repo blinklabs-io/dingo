@@ -155,13 +155,21 @@ type managedConnection interface {
 // connWithDone adapts a manager-owned *ouroboros.Connection and the teardown
 // signal from GetConnectionWithDone to managedConnection.
 type connWithDone struct {
-	conn *ouroboros.Connection
-	done <-chan struct{}
+	conn     *ouroboros.Connection
+	done     <-chan struct{}
+	closeErr func() error
 }
 
 func (c connWithDone) Done() <-chan struct{} { return c.done }
 
 func (c connWithDone) Close() error { return c.conn.Close() }
+
+func (c connWithDone) CloseError() error {
+	if c.closeErr == nil {
+		return nil
+	}
+	return c.closeErr()
+}
 
 // blockFetchKey identifies one outstanding RequestRange call. gouroboros'
 // nextRequestId is scoped per connection, so requestId alone is not globally

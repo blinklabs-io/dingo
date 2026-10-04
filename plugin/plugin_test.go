@@ -661,15 +661,31 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	t.Parallel()
 
 	host := NewHost()
-	var dependencyStopped atomic.Bool
+	dependencyStopStarted := make(chan struct{}, 1)
+	consumerStopStarted := make(chan struct{})
+	consumerFinished := make(chan struct{})
+	releaseConsumerStop := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseConsumer := func() {
+		releaseOnce.Do(func() { close(releaseConsumerStop) })
+	}
+	defer releaseConsumer()
+	var dependencyStoppedAfterConsumer atomic.Bool
+	consumerStopErr := errors.New("consumer stop failed")
+	dependencyStopErr := errors.New("dependency stop failed")
 	err := Register(
 		host,
 		Descriptor{Capability: CapabilityStorageBlob, Name: "dependency"},
 		func() testConfig { return testConfig{} },
 		func(context.Context, testConfig, testDeps) (string, Instance, error) {
 			return "dependency", Lifecycle{StopFunc: func(context.Context) error {
-				dependencyStopped.Store(true)
-				return nil
+				select {
+				case <-consumerFinished:
+					dependencyStoppedAfterConsumer.Store(true)
+				default:
+				}
+				dependencyStopStarted <- struct{}{}
+				return dependencyStopErr
 			}}, nil
 		},
 	)
@@ -682,22 +698,17 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stopStarted := make(chan struct{})
-	releaseStop := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseStop) }) }
-	defer release()
-
 	err = Register(
 		host,
-		Descriptor{Capability: CapabilityMempool, Name: "blocked"},
+		Descriptor{Capability: CapabilityMempool, Name: "consumer"},
 		func() testConfig { return testConfig{} },
 		func(context.Context, testConfig, testDeps) (string, Instance, error) {
-			return "blocked", Lifecycle{
+			return "consumer", Lifecycle{
 				StopFunc: func(context.Context) error {
-					close(stopStarted)
-					<-releaseStop
-					return nil
+					close(consumerStopStarted)
+					<-releaseConsumerStop
+					close(consumerFinished)
+					return consumerStopErr
 				},
 			}, nil
 		},
@@ -706,15 +717,23 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Resolve[string](
-		context.Background(), host, CapabilityMempool, "blocked", nil, testDeps{},
+		context.Background(), host, CapabilityMempool, "consumer", nil, testDeps{},
 	); err != nil {
 		t.Fatal(err)
 	}
 	capStopDone := make(chan error, 1)
 	go func() {
-		capStopDone <- host.StopCapability(context.Background(), CapabilityMempool)
+		capStopDone <- host.StopCapability(
+			context.Background(),
+			CapabilityMempool,
+		)
 	}()
-	testutil.RequireReceive(t, stopStarted, 3*time.Second, "provider stop")
+	testutil.RequireReceive(
+		t,
+		consumerStopStarted,
+		3*time.Second,
+		"consumer provider stop",
+	)
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -724,12 +743,36 @@ func TestHostStopHonorsContextWhileWaitingForStopCapability(t *testing.T) {
 	if err := host.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Host.Stop error = %v, want deadline exceeded", err)
 	}
-	if !dependencyStopped.Load() {
-		t.Fatal("Host.Stop did not stop remaining providers after the capability wait timed out")
+	select {
+	case <-dependencyStopStarted:
+		t.Fatal("Host.Stop stopped a dependency before consumer teardown finished")
+	default:
 	}
-	release()
-	if err := testutil.RequireReceive(t, capStopDone, 3*time.Second, "capability stop"); err != nil {
-		t.Fatal(err)
+
+	releaseConsumer()
+	if err := testutil.RequireReceive(
+		t,
+		capStopDone,
+		3*time.Second,
+		"capability stop",
+	); !errors.Is(err, consumerStopErr) {
+		t.Fatalf("StopCapability error = %v, want consumer stop error", err)
+	}
+	testutil.RequireReceive(
+		t,
+		dependencyStopStarted,
+		3*time.Second,
+		"dependency stop after consumer teardown",
+	)
+	if !dependencyStoppedAfterConsumer.Load() {
+		t.Fatal("dependency stop started before consumer teardown finished")
+	}
+	if err := host.Stop(context.Background()); !errors.Is(err, context.DeadlineExceeded) ||
+		!errors.Is(err, consumerStopErr) || !errors.Is(err, dependencyStopErr) {
+		t.Fatalf(
+			"completed Host.Stop error = %v, want deadline and both provider stop errors",
+			err,
+		)
 	}
 }
 

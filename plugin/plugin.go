@@ -411,8 +411,9 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; subsequent calls return the first call's result. It also waits
-// for StopCapability teardown already in flight.
+// idempotent; if ctx expires before teardown completes, Stop returns ctx.Err
+// and the host continues teardown in the background. A later call waits for
+// that teardown and returns its accumulated result.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -421,67 +422,59 @@ func (h *Host) Stop(ctx context.Context) error {
 	if h.stopped {
 		done := h.stopDone
 		h.mu.Unlock()
+		return h.waitForStop(ctx, done)
+	}
+	h.stopped = true
+	h.stopDone = make(chan struct{})
+	done := h.stopDone
+	if len(h.stopping) == 0 && len(h.started) == 0 {
+		h.stopErr = h.capabilityStopErr
+		close(done)
+		err := h.stopErr
+		h.mu.Unlock()
+		return err
+	}
+	h.mu.Unlock()
+	go h.finishStop(ctx)
+	return h.waitForStop(ctx, done)
+}
+
+func (h *Host) waitForStop(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		h.mu.Lock()
+		err := h.stopErr
+		h.mu.Unlock()
+		return err
+	case <-ctx.Done():
 		select {
 		case <-done:
 			h.mu.Lock()
 			err := h.stopErr
 			h.mu.Unlock()
 			return err
-		case <-ctx.Done():
-			select {
-			case <-done:
-				h.mu.Lock()
-				err := h.stopErr
-				h.mu.Unlock()
-				return err
-			default:
-				return ctx.Err()
-			}
+		default:
+			return ctx.Err()
 		}
 	}
-	h.stopped = true
-	h.stopDone = make(chan struct{})
+}
+
+func (h *Host) finishStop(ctx context.Context) {
+	// StopCapability removes its providers from started before stopping them.
+	// Wait for those consumers before taking the remaining dependencies out of
+	// the host, and retain their references here until their stops complete.
+	h.stopCapabilityWG.Wait()
+	h.mu.Lock()
 	started := h.started
 	h.started = nil
+	err := h.capabilityStopErr
 	h.mu.Unlock()
-	var err error
-	// stopping counts in-flight StopCapability calls under mu, and none can
-	// start once stopped is set, so an empty map means there is nothing to
-	// wait for even when ctx has already ended.
-	h.mu.Lock()
-	inFlight := len(h.stopping) > 0
-	h.mu.Unlock()
-	if inFlight {
-		capabilitiesDone := make(chan struct{})
-		go func() {
-			h.stopCapabilityWG.Wait()
-			close(capabilitiesDone)
-		}()
-		select {
-		case <-capabilitiesDone:
-		case <-ctx.Done():
-			select {
-			case <-capabilitiesDone:
-			default:
-				h.mu.Lock()
-				if len(h.stopping) > 0 {
-					err = ctx.Err()
-				}
-				h.mu.Unlock()
-			}
-		}
-	}
-	// Normally capability consumers drain before their dependencies stop. If
-	// the shared shutdown context expires first, still give every remaining
-	// provider the same context so its Stop can do bounded best-effort cleanup.
-	// Skipping this pass would discard the only references to those providers.
 	err = errors.Join(err, stopReverse(ctx, started))
+	err = errors.Join(err, ctx.Err())
 	h.mu.Lock()
-	err = errors.Join(err, h.capabilityStopErr)
 	h.stopErr = err
 	close(h.stopDone)
 	h.mu.Unlock()
-	return err
 }
 
 // StopCapability stops successfully started providers for one capability in
