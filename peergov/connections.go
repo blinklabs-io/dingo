@@ -168,7 +168,7 @@ func isChainsyncStallError(err error) bool {
 	return err != nil &&
 		strings.Contains(
 			strings.ToLower(err.Error()),
-			"chain-sync: timeout waiting on transition",
+			"chain-sync: timeout waiting on transition from protocol state mustreply",
 		)
 }
 
@@ -764,7 +764,17 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	if p.isDeniedLocked(normalized) {
+	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
+	hostKey := inboundFlapHostKey(normalized)
+	history, hasHistory := p.inboundFlapHistory[hostKey]
+	if hasHistory && !now.Before(history.expiresAt) {
+		delete(p.inboundFlapHistory, hostKey)
+		hasHistory = false
+	}
+	isTopologyMatch := peerIdx >= 0 && p.peers[peerIdx] != nil &&
+		p.isTopologyPeer(p.peers[peerIdx].Source)
+	if p.isDeniedLocked(normalized) ||
+		(!isTopologyMatch && hasHistory && now.Before(history.cooldownUntil)) {
 		p.recordInboundLifecycle("denied")
 		p.config.Logger.Info(
 			"denied inbound peer during cooldown",
@@ -791,7 +801,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		}
 		return
 	}
-	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
@@ -838,6 +847,14 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		if topologyGroupID != "" && tmpPeer.InboundTopologyMatch == "" {
 			tmpPeer.InboundTopologyMatch = topologyGroupID
 		}
+	}
+	if tmpPeer.Source == PeerSourceInboundConn && hasHistory &&
+		!now.Before(history.cooldownUntil) {
+		if tmpPeer.InboundShortLivedCount < history.shortLivedCount {
+			tmpPeer.InboundShortLivedCount = history.shortLivedCount
+			tmpPeer.inboundFlapHistoryCarried = true
+		}
+		delete(p.inboundFlapHistory, hostKey)
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
@@ -948,7 +965,8 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			peer.LastInboundSessionDuration = connDur
 			// Reset burst when reconnects are no longer clustered inside the
 			// inbound cooldown window.
-			if !peer.LastInboundDisconnect.IsZero() &&
+			if !peer.inboundFlapHistoryCarried &&
+				!peer.LastInboundDisconnect.IsZero() &&
 				connClosedAt.Sub(
 					peer.LastInboundDisconnect,
 				) >= p.config.InboundCooldown {
@@ -966,6 +984,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			}
 			peer.LastInboundDisconnect = connClosedAt
 			peer.InboundConnectedAt = time.Time{}
+			peer.inboundFlapHistoryCarried = false
 		}
 		peer.Connection = nil
 		p.recordPeerStateChange(peer.State, PeerStateCold)

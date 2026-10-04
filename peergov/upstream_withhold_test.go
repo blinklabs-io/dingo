@@ -328,3 +328,18 @@ func TestWithheldWarmPeerIsNotPromoted(t *testing.T) {
 		})
 	}
 }
+
+func TestSetPeerHotByConnIdSkipsWithheldPeer(t *testing.T) {
+	t.Parallel()
+	for _, denied := range []bool{false, true} {
+		f := newWithholdFixture(t, PeerSourceTopologyLocalRoot)
+		if denied {
+			f.pg.DenyPeer(f.peerAddr(), time.Minute)
+		}
+		f.pg.handleInboundConnectionEvent(f.arrival)
+		f.pg.SetPeerHotByConnId(f.connId)
+		peers := f.pg.GetPeers()
+		require.Len(t, peers, 1)
+		assert.Equal(t, !denied, peers[0].State == PeerStateHot)
+	}
+}

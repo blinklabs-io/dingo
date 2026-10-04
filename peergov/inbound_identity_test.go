@@ -225,9 +225,9 @@ func TestInboundShortSessionEndedByPeerErrorIsCounted(t *testing.T) {
 	assert.Equal(t, uint32(3), peers[0].InboundShortLivedCount)
 }
 
-// Pruning a flapping warm peer cools down its tuple, but the host's next
-// connection from another port is still admitted.
-func TestInboundFlappingPruneDoesNotRefuseNewPort(t *testing.T) {
+// Pruning a flapping warm peer keeps the host cooldown and escalation even
+// when its next connection uses a different source port.
+func TestInboundFlappingPruneKeepsHostHistory(t *testing.T) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -254,9 +254,31 @@ func TestInboundFlappingPruneDoesNotRefuseNewPort(t *testing.T) {
 	require.Equal(t, 0, len(pg.GetPeers()), "flapping peer is pruned")
 
 	pg.handleInboundConnectionEvent(inboundArrival(t, "44.0.0.1:51001"))
+	assert.Equal(t, float64(1), deniedInboundCount(pg))
+	assert.Empty(t, pg.GetPeers())
 
-	assert.Equal(t, float64(0), deniedInboundCount(pg))
-	assert.Equal(t, 1, len(pg.GetPeers()))
+	pg.mu.Lock()
+	hostKey := inboundFlapHostKey("44.0.0.1:51001")
+	history := pg.inboundFlapHistory[hostKey]
+	require.Equal(t, uint32(4), history.shortLivedCount)
+	history.cooldownUntil = time.Now().Add(-time.Second)
+	pg.inboundFlapHistory[hostKey] = history
+	pg.mu.Unlock()
+
+	arrival := inboundArrival(t, "44.0.0.1:51002")
+	pg.handleInboundConnectionEvent(arrival)
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, uint32(4), peers[0].InboundShortLivedCount)
+	pg.mu.Lock()
+	flapping, _ := pg.inboundFlappingStateLocked(pg.peers[0], time.Now())
+	pg.mu.Unlock()
+	assert.False(t, flapping, "the admitted session can prove stability")
+	closeInbound(t, pg, arrival, nil)
+	peers = pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, uint32(5), peers[0].InboundShortLivedCount)
+
 }
 
 // A denied topology peer that reconnects from a new source port keeps its

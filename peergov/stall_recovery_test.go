@@ -33,7 +33,7 @@ var errChainsyncStall = errors.New(
 		"protocol state MustReply",
 )
 
-func closeStalledPeer(pg *PeerGovernor, peer *Peer) {
+func closePeerWithError(pg *PeerGovernor, peer *Peer, closeErr error) {
 	connId := outboundTestConnId()
 	pg.mu.Lock()
 	peer.Connection = &PeerConnection{Id: connId, IsClient: true}
@@ -46,7 +46,7 @@ func closeStalledPeer(pg *PeerGovernor, peer *Peer) {
 		connmanager.ConnectionClosedEventType,
 		connmanager.ConnectionClosedEvent{
 			ConnectionId: connId,
-			Error:        errChainsyncStall,
+			Error:        closeErr,
 		},
 	))
 }
@@ -85,7 +85,7 @@ func TestHandleConnectionClosedEvent_ChainsyncStallEscalatesReconnectDelay(
 		pg.mu.Lock()
 		peer.ReconnectDelay = 0
 		pg.mu.Unlock()
-		closeStalledPeer(pg, peer)
+		closePeerWithError(pg, peer, errChainsyncStall)
 		pg.mu.Lock()
 		got := peer.ReconnectDelay
 		pg.mu.Unlock()
@@ -129,7 +129,7 @@ func TestHandleConnectionClosedEvent_ChainsyncStallDialsColdAlternate(
 	pg.mu.Unlock()
 	t.Cleanup(func() { _ = pg.Stop(context.Background()) })
 
-	closeStalledPeer(pg, stalled)
+	closePeerWithError(pg, stalled, errChainsyncStall)
 
 	require.Eventually(
 		t,
@@ -169,4 +169,42 @@ func TestRedialRankCompare_RecentChainsyncStallRanksLast(t *testing.T) {
 
 	assert.Positive(t, pg.redialRankCompare(stalled, alternate))
 	assert.Negative(t, pg.redialRankCompare(alternate, stalled))
+}
+
+func TestIsChainsyncStallErrorOnlyMatchesMustReply(t *testing.T) {
+	t.Parallel()
+	assert.True(t, isChainsyncStallError(errChainsyncStall))
+	assert.False(t, isChainsyncStallError(errors.New(
+		"protocol error: chain-sync: timeout waiting on transition from protocol state Idle",
+	)))
+	assert.False(t, isChainsyncStallError(errors.New(
+		"protocol error: chain-sync: timeout waiting on transition from protocol state CanAwait",
+	)))
+}
+
+func TestHandleConnectionClosedEvent_OtherChainsyncTimeoutDoesNotPenalizeStablePeer(
+	t *testing.T,
+) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceP2PGossip,
+		Reconnecting:      true,
+		ReconnectDelay:    time.Second,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+	closePeerWithError(pg, peer, errors.New(
+		"protocol error: chain-sync: timeout waiting on transition from protocol state Idle",
+	))
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.Zero(t, peer.ReconnectDelay)
+	assert.Zero(t, peer.OutboundShortLivedCount)
+	assert.True(t, peer.LastChainsyncStall.IsZero())
 }

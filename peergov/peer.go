@@ -158,6 +158,9 @@ type Peer struct {
 	// sessions (duration < minStableConnectionDuration). This drives
 	// flapping cooldown decisions.
 	InboundShortLivedCount uint32
+	// inboundFlapHistoryCarried delays the next reset until the newly
+	// admitted session has proved whether it is stable.
+	inboundFlapHistoryCarried bool
 	// LastInboundDisconnect is when the most recent inbound connection
 	// for this peer closed.
 	LastInboundDisconnect time.Time

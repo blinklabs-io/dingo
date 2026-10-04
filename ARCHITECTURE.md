@@ -5472,11 +5472,16 @@ when a peer reconnects from a new port, keeping its short-session history. A
 session counts toward that history whenever it is short, whatever the close
 error: the connection layer reports a remote close as clean when every protocol
 is still idle, so a peer that handshakes and disconnects arrives with no error.
-Inbound admission refuses only an arrival whose exact connection tuple is
-denied: refusing by host would cut off a downstream that reconnects because this
-node closed its sessions. A denial on a configured peer is instead applied to
-its upstream role. While the peer is denied, its open connection has
-`PeerConnection.UpstreamWithheld` set and `chainSelectionEligible` excludes it,
+Inbound admission refuses an arrival whose exact connection tuple is denied.
+When a repeatedly short-lived inbound-only peer is pruned, a bounded host
+record also keeps its cooldown and escalation count across source-port changes.
+The record expires after the cooldown and one more admission window; the first
+admitted session consumes it. This host cooldown does not apply to a configured
+topology identity, so an ordinary peer denial does not cut off a downstream
+that reconnects because this node closed its sessions. A denial on a configured
+peer is instead applied to its upstream role. While the peer is denied, its
+open connection has `PeerConnection.UpstreamWithheld` set and
+`chainSelectionEligible` excludes it,
 while the connection stays open so the peer can still consume from this node.
 The withhold is read against the live denial (`upstreamWithheldLocked`), so an
 expired denial restores eligibility immediately; `syncUpstreamWithholdLocked`,

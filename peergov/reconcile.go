@@ -41,6 +41,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
+	p.cleanupInboundFlapHistoryLocked(now)
 	p.cleanupNetworkMismatchDenyList()
 	events = p.syncUpstreamWithholdLocked(events)
 
@@ -767,6 +768,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 		}
 		if applyCooldown {
 			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+			p.rememberInboundFlapLocked(peer, now, cooldownDuration)
 			p.recordInboundLifecycle("cooled-down")
 		}
 		p.config.Logger.Info(
