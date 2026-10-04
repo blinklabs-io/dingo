@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -122,6 +123,12 @@ var errLocalStateQueryLedgerUnavailable = errors.New(
 	"local-state-query: ledger state unavailable",
 )
 
+// localStateQueryAcquireWait bounds how long an Acquire waits for a ledger
+// snapshot when every snapshot the database admits is already held. It
+// matches the Acquire timeout gouroboros clients use by default, past which
+// the client has given up on the reply anyway.
+const localStateQueryAcquireWait = 5 * time.Second
+
 // defaultLocalStateQueryViewMaxLifetime bounds how long a connection may hold
 // one acquired ledger snapshot when OuroborosConfig does not say otherwise.
 const defaultLocalStateQueryViewMaxLifetime = 5 * time.Minute
@@ -194,7 +201,12 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	// ErrAcquireFailurePointNotOnChain/PointTooOld into one), but a rejection
 	// surfacing later, from the Query callback, has no such path and tears
 	// down the whole connection instead.
-	view, err := o.ledgerState.AcquireQueryView(point)
+	acquireCtx, cancel := context.WithTimeout(
+		context.Background(),
+		localStateQueryAcquireWait,
+	)
+	view, err := o.ledgerState.AcquireQueryView(acquireCtx, point)
+	cancel()
 	if err != nil {
 		return o.mapLocalStateQueryAcquireError(ctx, isSpecific, err)
 	}
@@ -254,8 +266,9 @@ func (o *Ouroboros) mapLocalStateQueryAcquireError(
 		}
 	}
 	// An error matching neither sentinel means something unexpected (a real
-	// database error, say) happened while opening the snapshot rather than
-	// the point genuinely being unqueryable. gouroboros treats any other
+	// database error, say, or no snapshot admitted within
+	// localStateQueryAcquireWait) happened while opening the snapshot rather
+	// than the point genuinely being unqueryable. gouroboros treats any other
 	// error from Acquire as a fatal protocol error and tears the connection
 	// down, so for a specific point it is mapped to the same
 	// AcquireFailurePointTooOld a well-behaved client already handles (retry

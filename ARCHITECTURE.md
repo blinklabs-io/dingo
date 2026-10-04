@@ -4206,9 +4206,10 @@ at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
 
 **Acquired ledger snapshots.** Every `Acquire` -- specific point, volatile tip
 or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits for any
-epoch-boundary job, opens one read-only database transaction, reads once to
-fix its snapshot (SQLite starts a deferred transaction's snapshot at its first
-read), and validates the point against it with `VerifyPointQueryable`. The
+epoch-boundary job, opens a coordinated read snapshot
+(`database.NewReadSnapshotContext`, whose blob and metadata views are fixed at
+one commit boundary), and validates the point against it with
+`VerifyPointQueryable`. The
 returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
 beside the acquired point and owner maps, and every `Query` on the connection
 is answered by `QueryView.Query`, which runs the ordinary query handlers
@@ -4229,7 +4230,11 @@ SQLite used when no data directory is configured gives readers table locks
 rather than a snapshot, so snapshot isolation applies to on-disk databases.
 
 A snapshot pins a database read transaction (holding back WAL checkpoints and
-one read connection), so its lifetime is bounded. It is closed on `Release`,
+one read connection), so both its number and its lifetime are bounded. It
+counts against the database's read-snapshot admission cap, which always leaves
+one metadata read connection free for the rest of the node; once the cap is
+reached an `Acquire` waits up to five seconds for a snapshot to close and then
+fails. It is closed on `Release`,
 on re-`Acquire` (only after the new snapshot opened: a failed `Acquire` leaves
 the previous session in place), on the connection closing, and on
 `Ouroboros.Close`. A snapshot still held after

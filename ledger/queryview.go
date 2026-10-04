@@ -15,7 +15,9 @@
 package ledger
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -37,6 +39,10 @@ type QueryView struct {
 	ls  *LedgerState
 	at  QueryPoint
 	txn *database.Txn
+	// cancel ends the context txn's metadata transaction is bound to. The
+	// database cancels a transaction whose context ends, so the view owns
+	// that context rather than inheriting the caller's.
+	cancel context.CancelFunc
 
 	mu       sync.Mutex
 	inFlight int
@@ -48,26 +54,45 @@ type QueryView struct {
 // must pass VerifyPointQueryable, and its error is returned unchanged so the
 // caller can map the ErrPointNotOnChain and ErrHistoricalStateUnavailable
 // sentinels to protocol-level Acquire failures.
-func (ls *LedgerState) AcquireQueryView(at QueryPoint) (*QueryView, error) {
+//
+// The snapshot is a database.NewReadSnapshotContext: its blob and metadata
+// views are opened at one commit boundary, and it counts against the read
+// snapshot admission cap, which keeps one metadata read connection free for
+// the rest of the node however many views are held. When the cap is reached
+// AcquireQueryView waits for a view to close, and returns ctx's error if ctx
+// ends first. ctx bounds only opening the view, not the view's lifetime.
+func (ls *LedgerState) AcquireQueryView(
+	ctx context.Context,
+	at QueryPoint,
+) (*QueryView, error) {
 	// The latest boundary's mark snapshot and RATIFY marks may still be
 	// written by its background job; open the snapshot only after it has
 	// decided, so the view never freezes a half-written boundary.
 	if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
 		return nil, err
 	}
-	txn := ls.db.Transaction(false)
-	// SQLite starts a deferred read transaction's snapshot at its first
-	// read, not at BEGIN, so read once now to freeze the state this Acquire
-	// observed.
-	if _, err := ls.db.GetTip(txn); err != nil {
-		txn.Release()
+	viewCtx, cancelView := context.WithCancel(context.WithoutCancel(ctx))
+	stopWatch := context.AfterFunc(ctx, cancelView)
+	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
+	if !stopWatch() {
+		// ctx ended while the snapshot was opening and cancelled viewCtx,
+		// which also ends a transaction that did open.
+		if err == nil {
+			txn.Release()
+		}
+		cancelView()
+		return nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
+	}
+	if err != nil {
+		cancelView()
 		return nil, err
 	}
 	if err := ls.VerifyPointQueryable(txn, at); err != nil {
 		txn.Release()
+		cancelView()
 		return nil, err
 	}
-	return &QueryView{ls: ls, at: at, txn: txn}, nil
+	return &QueryView{ls: ls, at: at, txn: txn, cancel: cancelView}, nil
 }
 
 // Query answers a decoded LocalStateQuery message from the view's snapshot.
@@ -92,7 +117,7 @@ func (v *QueryView) finishQuery() {
 	defer v.mu.Unlock()
 	v.inFlight--
 	if v.closed && v.inFlight == 0 {
-		v.txn.Release()
+		v.release()
 	}
 }
 
@@ -107,6 +132,11 @@ func (v *QueryView) Close() {
 	}
 	v.closed = true
 	if v.inFlight == 0 {
-		v.txn.Release()
+		v.release()
 	}
+}
+
+func (v *QueryView) release() {
+	v.txn.Release()
+	v.cancel()
 }

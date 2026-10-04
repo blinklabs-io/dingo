@@ -16,11 +16,14 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -112,7 +115,7 @@ func TestQueryViewIsolatedFromLaterCommits(t *testing.T) {
 		return len(set)
 	}
 
-	view, err := ls.AcquireQueryView(QueryPoint{})
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 
@@ -164,7 +167,7 @@ func TestQueryViewChainTipIsAcquireTip(t *testing.T) {
 		BlockNumber: 3,
 	}, nil))
 
-	view, err := ls.AcquireQueryView(QueryPoint{})
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 
@@ -203,11 +206,12 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 	point := QueryPoint{Slot: 300, Hash: pointHash}
 
 	_, err := ls.AcquireQueryView(
+		t.Context(),
 		QueryPoint{Slot: 300, Hash: bytes.Repeat([]byte{0xCD}, 32)},
 	)
 	require.ErrorIs(t, err, ErrPointNotOnChain)
 
-	view, err := ls.AcquireQueryView(point)
+	view, err := ls.AcquireQueryView(t.Context(), point)
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 
@@ -237,7 +241,7 @@ func TestQueryViewClose(t *testing.T) {
 	t.Parallel()
 
 	ls, _ := newDiskTestLedger(t)
-	view, err := ls.AcquireQueryView(QueryPoint{})
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 
 	released := make(chan struct{})
@@ -293,7 +297,7 @@ func freezeEpochThenCrossBoundary(
 	ls.currentEpoch = models.Epoch{EpochId: 3}
 	ls.publishSnapshotsLocked()
 
-	view, err := ls.AcquireQueryView(QueryPoint{})
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 
@@ -469,7 +473,7 @@ func TestQueryViewEraHistoryUsesFrozenTip(t *testing.T) {
 
 	before, err := ls.Query(query, QueryPoint{})
 	require.NoError(t, err)
-	view, err := ls.AcquireQueryView(QueryPoint{})
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
 	require.NoError(t, err)
 	t.Cleanup(view.Close)
 	setTip(530_000)
@@ -483,4 +487,53 @@ func TestQueryViewEraHistoryUsesFrozenTip(t *testing.T) {
 	viewed, err := view.Query(query, 0)
 	require.NoError(t, err)
 	require.Equal(t, before, viewed)
+}
+
+// TestQueryViewLeavesAReadConnectionForOtherReaders proves acquired views
+// cannot occupy the whole metadata read pool. A view holds its read
+// connection for its whole lifetime, so without a cap as many clients as
+// there are connections would block every other reader in the node -- chain
+// sync, APIs, rollback -- until their views expire. Once the cap is reached
+// an Acquire fails when its context ends instead of taking the last
+// connection. The context passed to AcquireQueryView bounds only that wait.
+func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(1_000, repeatedBytes(32, 0x0B)),
+	}, nil))
+
+	// Every connection but one can hold a view. The acquire contexts end as
+	// soon as each view is open.
+	views := make([]*QueryView, 0, sqlite.DefaultMaxConnections-1)
+	for range sqlite.DefaultMaxConnections - 1 {
+		ctx, cancel := context.WithCancel(t.Context())
+		view, err := ls.AcquireQueryView(ctx, QueryPoint{})
+		cancel()
+		require.NoError(t, err)
+		t.Cleanup(view.Close)
+		views = append(views, view)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	_, err := ls.AcquireQueryView(ctx, QueryPoint{})
+	cancel()
+	require.ErrorIs(
+		t, err, context.DeadlineExceeded,
+		"the last read connection must stay free",
+	)
+
+	// The context only bounds the wait to acquire: a view outlives it.
+	for _, view := range views {
+		_, err := view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+		require.NoError(t, err)
+	}
+
+	ctx, cancel = context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	txn := db.TransactionContext(ctx, false)
+	defer txn.Release()
+	_, err = db.GetTip(txn)
+	require.NoError(t, err, "a reader outside the views must still get a connection")
 }
