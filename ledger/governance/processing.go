@@ -239,6 +239,7 @@ func TransactionHasGovernanceEffects(tx lcommon.Transaction) bool {
 func ProcessTransactionEffects(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	drepInactivityPeriod uint64,
 	govActionLifetime uint64,
@@ -268,7 +269,7 @@ func ProcessTransactionEffects(
 	}
 	if len(tx.ProposalProcedures()) > 0 {
 		if err := persistGovernanceProposals(
-			tx, point, currentEpoch, govActionLifetime, db, txn,
+			tx, point, txIndex, currentEpoch, govActionLifetime, db, txn,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}
