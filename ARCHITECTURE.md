@@ -14420,8 +14420,9 @@ embedder that builds a `LedgerStateConfig` directly and skips validation.
 
 The generic stage receives no protocol parameters or ledger state, so
 `blockPipelineVerifyConfig` skips its body-hash, transaction, stake-pool, and
-block-limit checks. Those rules, including the Conway per-block
-reference-script total, run in `ledgerProcessBlock`. Left on, the block-limit
+block-limit checks. The pipeline's decode stage has already checked the body
+hash; the other rules, including the Conway per-block reference-script total,
+run in `ledgerProcessBlock`. Left on, the block-limit
 step rejects every Conway block that carries a transaction.
 
 `NewLedgerState` fails startup when this stage is enabled without a nonzero
