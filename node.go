@@ -54,6 +54,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -272,14 +273,24 @@ func New(cfg Config) (*Node, error) {
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
-	n.registerBuildInfo()
-	n.registerRTSMetrics()
-	n.registerChainSelectionMetrics()
+	metricsRegistration := promutil.NewRegistration(n.config.promRegistry)
+	n.registerBuildInfo(metricsRegistration)
+	n.registerRTSMetrics(metricsRegistration)
+	n.registerChainSelectionMetrics(metricsRegistration)
+	if err := metricsRegistration.Err(); err != nil {
+		metricsRegistration.Rollback()
+		return nil, fmt.Errorf("register metrics: %w", err)
+	}
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
-	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
+	eventBus, err := event.TryNewEventBus(n.config.promRegistry, n.config.logger)
+	if err != nil {
+		metricsRegistration.Rollback()
+		return nil, err
+	}
+	n.eventBus = eventBus
 	// Everything registered above (build info, RTS gauges, the EventBus)
 	// lives for the node's entire lifetime and is never rebuilt, so it's
 	// registered directly against the pre-wrap registerer. Everything
@@ -1857,11 +1868,18 @@ func taintValue(relaxed bool) string {
 
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
-	_ bool,
-	_ error,
+	isNtC bool,
+	err error,
 ) {
 	if conn == nil {
 		return
+	}
+	if isNtC && err != nil && n.config.logger != nil {
+		n.config.logger.Warn(
+			"node-to-client connection closed",
+			"connection_id", conn.Id().String(),
+			"error", err,
+		)
 	}
 	var chainsyncOwner *ochainsync.Server
 	if protocol := conn.ChainSync(); protocol != nil {
