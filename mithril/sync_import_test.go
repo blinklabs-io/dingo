@@ -83,7 +83,7 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.True(
 		t, pending,
-		"the deferred-index pending marker must survive ClearSyncState "+
+		"the deferred-index pending marker must survive sync-state cleanup "+
 			"so the first serve builds the lazy manifest entries",
 	)
 	marker, err := db.GetSyncState(deferred.SyncStateKey, nil)

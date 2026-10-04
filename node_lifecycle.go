@@ -1325,6 +1325,8 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	// running, so a failure below would otherwise leave that loop installing
 	// key pushes into credentials no forger holds, against an agent
 	// connection nothing reaches until the node shuts down.
+	// If teardown could not confirm the old consumers stopped, intentionally
+	// retain their credentials without closing them: they may still use the keys.
 	n.blockProducerCreds.Store(creds)
 	defer func() {
 		if retErr != nil {

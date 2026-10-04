@@ -1055,9 +1055,7 @@ func (g *credentialGeneration) validatedKESProtocolLifetime() (
 // which matters for a check that runs on every probe and scrape.
 func (pc *PoolCredentials) usableAtKESPeriod(period uint64) error {
 	pc.mu.RLock()
-	defer pc.mu.RUnlock()
 	pc.kesMu.RLock()
-	defer pc.kesMu.RUnlock()
 	view := credentialGeneration{
 		loaded:           pc.isLoadedUnsafe(),
 		maxKESEvolutions: pc.maxKESEvolutions,
@@ -1065,17 +1063,21 @@ func (pc *PoolCredentials) usableAtKESPeriod(period uint64) error {
 		opCertExpiryKES:  pc.opCertExpiryKES,
 		opCertValidated:  pc.opCertValidated,
 	}
+	signer := pc.remoteSigner
+	pc.kesMu.RUnlock()
+	pc.mu.RUnlock()
+	// The agent handshake must not hold locks needed to evolve signing keys.
 	if err := view.validateKESPeriod(period); err != nil {
 		return err
 	}
-	if pc.remoteSigner != nil {
-		checker, ok := pc.remoteSigner.(interface{ CheckReady() error })
+	if signer != nil {
+		checker, ok := signer.(interface{ CheckReady() error })
 		if !ok {
 			return errors.New("remote KES signer readiness is unavailable")
 		}
 		return checker.CheckReady()
 	}
-	return view.validateKESPeriod(period)
+	return nil
 }
 
 func (g *credentialGeneration) validateKESPeriod(period uint64) error {

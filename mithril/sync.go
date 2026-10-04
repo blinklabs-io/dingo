@@ -932,7 +932,7 @@ func Sync(
 		// The import is about to mutate the database. Record the catch-up so
 		// an interrupted run resumes with catch-up semantics (reconcile)
 		// instead of a plain bootstrap — a markerless catch-up leaves no
-		// other trace. Wiped by ClearSyncState on completion.
+		// other trace. Deleted by completion cleanup.
 		if err := setCatchUpActive(db); err != nil {
 			return SyncResult{}, err
 		}

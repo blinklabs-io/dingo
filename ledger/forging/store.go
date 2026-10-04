@@ -28,8 +28,8 @@ const (
 	syncStateForgeFencePrefix = "forge_fence"
 
 	// ForgeFenceSyncKeyPrefix begins the sync_state key of every pool's
-	// fence. Code that clears sync_state wholesale has to carry these rows
-	// across the clear: the fence is not chain state, and losing it
+	// fence. Sync-state cleanup must leave these rows untouched, including
+	// concurrent writes: the fence is not chain state, and losing it
 	// re-opens slots whose blocks may already have been signed.
 	ForgeFenceSyncKeyPrefix = syncStateForgeFencePrefix + ":"
 

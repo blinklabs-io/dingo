@@ -18,6 +18,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -143,32 +144,33 @@ func TestReloadBlockProducerCredentialsRotatesTheLiveCredentials(t *testing.T) {
 	require.Contains(t, reloaded, "new_opcert_kes_period")
 }
 
-func TestReloadBlockProducerCredentialsDefersKESClockOutsideConfirmedHistory(
+func TestReloadBlockProducerCredentialsRefusesClockOutsideConfirmedHistory(
 	t *testing.T,
 ) {
 	t.Parallel()
-	r := newReloadTestNode(t, 1)
-	futurePeriod := uint64(5)
-	r.rotateTo(t, 2, &futurePeriod)
-	require.NoError(
-		t,
-		r.reloadBlockProducerCredentials(
-			0,
-			false,
-			func(*forging.PoolCredentials) error { return nil },
-		),
-	)
-	r.requireLiveCounter(t, 2)
+	for _, period := range []uint64{0, 5} {
+		t.Run(fmt.Sprintf("start period %d", period), func(t *testing.T) {
+			t.Parallel()
+			r := newReloadTestNode(t, 1)
+			r.rotateTo(t, 2, &period)
+			require.ErrorContains(t, r.reloadBlockProducerCredentials(
+				100000000, false,
+				func(*forging.PoolCredentials) error { return nil },
+			), "confirmed era history")
+			r.requireLiveCounter(t, 1)
+			require.NotContains(t, r.logs.String(), "credentials reloaded")
+		})
+	}
 }
 
-func TestReloadBlockProducerCredentialsExportedEntryRotates(t *testing.T) {
+func TestReloadBlockProducerCredentialsExportedEntryRefusesUnconfirmedClock(t *testing.T) {
 	t.Parallel()
 	started := newStartupCleanupProducerNode(t)
 	r := newReloadTestNode(t, 1)
 	r.ledgerState = started.ledgerState
 	r.rotateTo(t, 2, nil)
-	require.NoError(t, r.ReloadBlockProducerCredentials())
-	r.requireLiveCounter(t, 2)
+	require.ErrorContains(t, r.ReloadBlockProducerCredentials(), "confirmed era history")
+	r.requireLiveCounter(t, 1)
 }
 
 // TestReloadBlockProducerCredentialsRejectsAndKeepsTheLoadedOnes covers every

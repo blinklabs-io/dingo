@@ -45,9 +45,10 @@ import (
 // fakeRemoteKESSigner is a minimal RemoteKESSigner for exercising the
 // agent-backed kesSign/updateKESPeriod paths without a real kesagent.Client.
 type fakeRemoteKESSigner struct {
-	signFunc     func(period uint64, message []byte) ([]byte, error)
-	calls        []uint64
-	readinessErr error
+	signFunc      func(period uint64, message []byte) ([]byte, error)
+	calls         []uint64
+	readinessErr  error
+	readinessFunc func() error
 }
 
 func (f *fakeRemoteKESSigner) Sign(
@@ -61,7 +62,12 @@ func (f *fakeRemoteKESSigner) Sign(
 	return append([]byte(nil), message...), nil
 }
 
-func (f *fakeRemoteKESSigner) CheckReady() error { return f.readinessErr }
+func (f *fakeRemoteKESSigner) CheckReady() error {
+	if f.readinessFunc != nil {
+		return f.readinessFunc()
+	}
+	return f.readinessErr
+}
 
 func TestRemoteCredentialsReadinessDetectsAgentLoss(t *testing.T) {
 	t.Parallel()
@@ -82,6 +88,41 @@ func TestRemoteCredentialsReadinessDetectsAgentLoss(t *testing.T) {
 	signer.readinessErr = errors.New("agent is unavailable")
 	require.ErrorIs(t, pc.usableAtKESPeriod(0), signer.readinessErr)
 	require.Empty(t, signer.calls, "readiness must not sign")
+}
+
+func TestRemoteReadinessDoesNotBlockKESEvolution(t *testing.T) {
+	t.Parallel()
+	vrfPath, _, opCertPath := createTestKeys(t)
+	pc := NewPoolCredentials()
+	t.Cleanup(pc.Close)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	signer := &fakeRemoteKESSigner{readinessFunc: func() error {
+		close(entered)
+		<-release
+		return nil
+	}}
+	require.NoError(t, pc.LoadFromAgentSign(vrfPath, opCertPath, signer))
+	require.NoError(t, pc.ValidateOpCert())
+	require.NoError(t, pc.ValidateKESPeriod(
+		synthGenesis(1, 3, time.Second, time.Unix(0, 0)), 0,
+	))
+	snapshot := pc.acquireCredentialGeneration()
+	defer snapshot.release()
+	ready := make(chan error, 1)
+	go func() { ready <- pc.usableAtKESPeriod(0) }()
+	defer func() {
+		close(release)
+		require.NoError(t, dingotestutil.RequireReceive(t, ready, 5*time.Second, "readiness completes after release"))
+	}()
+	dingotestutil.RequireReceive(t, entered, 5*time.Second, "readiness handshake entered")
+	evolved := make(chan error, 1)
+	go func() {
+		evolved <- pc.updateKESPeriodForGeneration(
+			snapshot.id, snapshot.materialRevision, 1,
+		)
+	}()
+	require.NoError(t, dingotestutil.RequireReceive(t, evolved, time.Second, "KES evolution must not wait for readiness I/O"))
 }
 
 // TestCredentialGenerationKesSignRejectsExpiredPeriod proves the

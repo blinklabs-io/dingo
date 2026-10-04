@@ -1120,8 +1120,10 @@ not durably adopted:
   (1 when the loaded credentials could sign at the current slot). The next
   certificate to issue carries counter `dingo_forge_opcert_counter_onchain + 1`.
   `dingo_forge_missed_leader_slots_total` counts leader slots this node won
-  and did not turn into a block of its own on the chain: a build, validation or
-  adoption failure, a refused slot, or an equal-slot alternative that lost.
+  and did not turn into a block of its own on the chain after leader selection:
+  a build, validation or adoption failure, a post-selection refusal, or an
+  equal-slot alternative that lost. KES and tip safety refusals before leader
+  selection are excluded.
 
 ```mermaid
 sequenceDiagram
@@ -1620,11 +1622,15 @@ outgoing instance and silently lost.
 ### Shutdown Flow
 
 Credential zeroization is skipped if an earlier component's drain is unconfirmed,
-so abandoned key consumers retain their signing material. Hot credential swaps
+so abandoned key consumers retain their signing material. Reinitialization
+intentionally does not close such retained credentials when publishing a new
+set. Hot credential swaps
 serialize reciprocal moves and distinguish material revisions from invalidation
 generations: an outgoing attempt evolves its private KES snapshot without
 mutating the newly installed key. Remote signer readiness checks availability
 with a fresh bounded agent Hello handshake without signing or evolving a key.
+The handshake holds neither the credential lock nor the KES lock, so readiness
+I/O cannot block signing-key evolution.
 
 
 Graceful shutdown proceeds in phases:
@@ -7114,7 +7120,9 @@ successful reload logs the old and new counter and certificate KES period.
 Credentials sourced from a KES agent are rotated through the agent, and a
 reload against them is refused. A reload is also refused while startup,
 shutdown, or a live restore or truncate holds the lifecycle gates, since those
-replace the ledger state and the live credentials the reload reads.
+replace the ledger state and the live credentials the reload reads. Unlike
+initial startup, reload refuses a wall-clock slot outside confirmed era history:
+it cannot replace working keys without verifying the replacement's KES window.
 
 `ReplaceWith` deliberately does not advance the credential generation. A forge
 attempt that already holds a snapshot owns a private copy of the outgoing
@@ -8020,7 +8028,7 @@ hash, and — once the certified ImmutableDB is open — the certified tip slot)
 The pin is written from `BootstrapConfig.OnArtifactSelected`, which both
 backends invoke after the artifact is identity-checked and, when enabled,
 certificate-verified, and before the first byte is downloaded. It is ephemeral:
-`ClearSyncState` on sync completion wipes it, so its presence means a run is
+Mithril completion cleanup deletes it, so its presence means a run is
 mid-flight against that artifact.
 
 A resuming run (`sync_status` non-empty) passes the pinned digest to
@@ -8308,15 +8316,12 @@ manifest. The metadata plugin exposes
 critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the rebuild
-paths clear the marker only after the full manifest has been rebuilt, but they
-are not the only writer of that row. `ClearSyncState`
-(`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
-that clear through `updateMithrilReadyState` immediately after the critical
-rebuild. It therefore re-writes every row a completed sync still needs —
-`mithril_ledger_slot`, `mithril_ledger_hash`, and the deferred-index marker —
-back after the clear; without the last of those, every Mithril-bootstrapped
-database loses the marker moments after `BuildCritical` set it and never builds
-the lazy manifest entries at all. Core-mode startup still
+paths clear the marker only after the full manifest has been rebuilt. Mithril
+completion cleanup leaves the deferred-index marker and forge fences untouched,
+and deletes transient keys individually. It writes `mithril_ledger_slot` and
+`mithril_ledger_hash` after cleanup. This preserves the pending marker set by
+`BuildCritical` so a bootstrapped database still builds the lazy manifest.
+Core-mode startup still
 repairs the full manifest synchronously before serving. Both repair entry
 points also restore any missing critical index when no cycle is pending at all:
 the marker records that a cycle was interrupted, not which indexes exist, and a

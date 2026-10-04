@@ -531,6 +531,11 @@ func (n *Node) reloadBlockProducerCredentials(
 			"block producer credentials come from a KES agent; rotate the key through the agent",
 		)
 	}
+	if !supported {
+		return errors.New(
+			"credential reload requires a wall-clock slot supported by confirmed era history",
+		)
+	}
 	next, err := n.validateBlockProducerStartupForClock(slot, supported)
 	if err != nil {
 		return fmt.Errorf("validate reloaded credentials: %w", err)
