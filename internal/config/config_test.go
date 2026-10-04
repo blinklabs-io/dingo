@@ -1260,6 +1260,10 @@ plugins:
       provider: builtin
       config:
         port: 8080
+    kupo:
+      provider: builtin
+      config:
+        port: 1443
     utxorpc:
       provider: builtin
       config:
@@ -1289,6 +1293,9 @@ network: "preview"
 			"expected Blockfrost port to be 8080, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 1443 {
+		t.Errorf("expected Kupo port to be 1443, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
@@ -1379,6 +1386,9 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 			"expected BlockfrostPort default to be 3000, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 0 {
+		t.Errorf("expected KupoPort default to be disabled, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
@@ -2108,4 +2118,21 @@ config:
 		)
 		assert.Equal(t, expected, err.Error())
 	})
+}
+
+func TestCloneConfigIsolatesMCP(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Plugins: defaultPluginsConfig()}
+	cfg.Plugins.API.Mcp.Config["tls"] = map[string]any{"enabled": true}
+	clone := cloneConfig(cfg)
+	clone.Plugins.API.Mcp.Config["port"] = 8088
+	clone.Plugins.API.Mcp.Config["authToken"] = "override"
+	clone.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"] = false
+	require.Equal(t, 0, cfg.Plugins.API.Mcp.Config["port"])
+	require.NotContains(t, cfg.Plugins.API.Mcp.Config, "authToken")
+	require.Equal(
+		t,
+		true,
+		cfg.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"],
+	)
 }

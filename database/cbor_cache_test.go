@@ -895,3 +895,173 @@ func TestCacheMetricsRegisterNil(t *testing.T) {
 	assert.Equal(t, uint64(1), metrics.BlockLRUMisses.Load())
 	assert.Equal(t, uint64(1), metrics.ColdExtractions.Load())
 }
+
+func TestSetGenesisCborWarmsCacheForOpenBatchTransaction(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		CacheConfig: CborCacheConfig{
+			BlockLRUEntries: 16,
+		},
+	})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	chunkTxn := db.BlobTxn(true)
+	t.Cleanup(chunkTxn.Release)
+	var txID [32]byte
+	txID[0] = 1
+	var blockHash [32]byte
+	blockHash[0] = 2
+	const blockSlot = 42
+	want := []byte{0x82, 0x01, 0x02}
+	blockCbor := append([]byte{0x00}, want...)
+	offset := &CborOffset{
+		BlockSlot:  blockSlot,
+		BlockHash:  blockHash,
+		ByteOffset: 1,
+		ByteLength: uint32(len(want)),
+	}
+	require.NoError(t, store.SetUtxo(
+		chunkTxn.Blob(),
+		txID[:],
+		0,
+		EncodeUtxoOffset(offset),
+	))
+
+	// The block commits in its own transaction while the chunk transaction
+	// remains open. Resolving the offset must not read the new blob key through
+	// the older Badger transaction.
+	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
+	blockCbor[1] = 0xff
+
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, chunkTxn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Equal(t, uint64(1), db.CborCache().Metrics().BlockLRUHits.Load())
+	require.Zero(t, db.CborCache().Metrics().ColdExtractions.Load())
+	require.NoError(t, chunkTxn.Commit())
+}
+
+func TestResolveUtxoCborUsesFreshSnapshotAfterLRUEviction(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		CacheConfig: CborCacheConfig{
+			BlockLRUEntries: 1,
+		},
+	})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	chunkTxn := db.BlobTxn(true)
+	t.Cleanup(chunkTxn.Release)
+	var txID [32]byte
+	txID[0] = 1
+	var blockHash [32]byte
+	blockHash[0] = 2
+	const blockSlot = 42
+	want := []byte{0x82, 0x01, 0x02}
+	blockCbor := append([]byte{0x00}, want...)
+	offset := &CborOffset{
+		BlockSlot:  blockSlot,
+		BlockHash:  blockHash,
+		ByteOffset: 1,
+		ByteLength: uint32(len(want)),
+	}
+	require.NoError(t, store.SetUtxo(
+		chunkTxn.Blob(),
+		txID[:],
+		0,
+		EncodeUtxoOffset(offset),
+	))
+	require.NoError(t, db.SetGenesisCbor(blockSlot, blockHash[:], blockCbor, nil))
+	chunkTxn.MarkBlockCborCommittedSeparately(blockSlot, blockHash)
+
+	// A fresh blob snapshot must resolve this after the shared LRU evicts it.
+	var otherHash [32]byte
+	otherHash[0] = 3
+	db.CborCache().blockLRU.Put(blockSlot+1, otherHash, newCachedBlock([]byte{0x01}))
+	blockCbor[1] = 0xff
+	_, ok := db.CborCache().blockLRU.Get(blockSlot, blockHash)
+	require.False(t, ok)
+
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, chunkTxn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	require.Equal(t, uint64(1), db.CborCache().Metrics().ColdExtractions.Load())
+	_, ok = db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.False(t, ok)
+	require.NoError(t, chunkTxn.Commit())
+	require.Empty(t, chunkTxn.separatelyCommittedBlocks)
+}
+
+func TestResolveUtxoCborDoesNotCacheRolledBackUtxo(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
+	var txID [32]byte
+	txID[0] = 1
+	want := []byte{0x82, 0x01, 0x02}
+	require.NoError(t, store.SetUtxo(txn.Blob(), txID[:], 0, want))
+
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, txn)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	_, ok := db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.False(t, ok)
+	require.NoError(t, txn.Rollback())
+
+	_, err = db.CborCache().ResolveUtxoCbor(txID[:], 0)
+	require.Error(t, err)
+}
+
+func TestResolveUtxoCborCachesCommittedUtxoInReadWriteTxn(t *testing.T) {
+	t.Parallel()
+
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	store := db.Blob()
+	require.NotNil(t, store)
+
+	var txID [32]byte
+	txID[0] = 1
+	committed := []byte{0x82, 0x01, 0x02}
+	seed := db.BlobTxn(true)
+	require.NoError(t, store.SetUtxo(seed.Blob(), txID[:], 0, committed))
+	require.NoError(t, store.SetUtxo(seed.Blob(), txID[:], 1, committed))
+	require.NoError(t, seed.Commit())
+
+	// An output committed before the batch began is not staged by it, so its
+	// lookups keep using the shared hot cache.
+	batch := db.BlobTxn(true)
+	t.Cleanup(batch.Release)
+	got, err := db.CborCache().ResolveUtxoCbor(txID[:], 0, batch)
+	require.NoError(t, err)
+	require.Equal(t, committed, got)
+	cached, ok := db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 0))
+	require.True(t, ok)
+	require.Equal(t, committed, cached)
+
+	// Overwriting the row inside the batch makes the batch's value staged:
+	// it must be served to the batch but never reach the shared cache.
+	staged := []byte{0x82, 0x03, 0x04}
+	overwrite := db.BlobTxn(true)
+	t.Cleanup(overwrite.Release)
+	require.NoError(t, store.SetUtxo(overwrite.Blob(), txID[:], 1, staged))
+	got, err = db.CborCache().ResolveUtxoCbor(txID[:], 1, overwrite)
+	require.NoError(t, err)
+	require.Equal(t, staged, got)
+	_, ok = db.CborCache().hotUtxo.Get(makeUtxoKey(txID[:], 1))
+	require.False(t, ok)
+}

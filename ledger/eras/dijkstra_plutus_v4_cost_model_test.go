@@ -61,40 +61,19 @@ type v4TestLevel int
 const (
 	v4TopLevel v4TestLevel = iota
 	v4ChildLevel
-	// v4TopLevelMint places a mint redeemer on the top-level transaction.
-	v4TopLevelMint
 )
 
-func plutusScriptForVersion(
-	version lang.LanguageVersion,
-	source []byte,
-) lcommon.Script {
-	if version == lang.LanguageVersionV4 {
-		return lcommon.PlutusV4Script(source)
-	}
-	return lcommon.PlutusV3Script(source)
-}
-
 func witnessSetWithScript(
-	script lcommon.Script,
+	script lcommon.PlutusV4Script,
 	redeemers map[lcommon.RedeemerKey]lcommon.RedeemerValue,
 ) gdijkstra.DijkstraTransactionWitnessSet {
-	ws := gdijkstra.DijkstraTransactionWitnessSet{
+	return gdijkstra.DijkstraTransactionWitnessSet{
 		WsRedeemers: gdijkstra.DijkstraRedeemers{Redeemers: redeemers},
-	}
-	switch s := script.(type) {
-	case lcommon.PlutusV4Script:
-		ws.WsPlutusV4Scripts = cbor.NewSetType(
-			[]lcommon.PlutusV4Script{s},
+		WsPlutusV4Scripts: cbor.NewSetType(
+			[]lcommon.PlutusV4Script{script},
 			false,
-		)
-	case lcommon.PlutusV3Script:
-		ws.WsPlutusV3Scripts = cbor.NewSetType(
-			[]lcommon.PlutusV3Script{s},
-			false,
-		)
+		),
 	}
-	return ws
 }
 
 // newDijkstraPlutusLevelTx builds a transaction whose single Plutus redeemer
@@ -103,7 +82,7 @@ func witnessSetWithScript(
 func newDijkstraPlutusLevelTx(
 	t *testing.T,
 	level v4TestLevel,
-	script lcommon.Script,
+	script lcommon.PlutusV4Script,
 	exUnits lcommon.ExUnits,
 ) *gdijkstra.DijkstraTransaction {
 	t.Helper()
@@ -126,20 +105,6 @@ func newDijkstraPlutusLevelTx(
 				script,
 				map[lcommon.RedeemerKey]lcommon.RedeemerValue{
 					{Tag: lcommon.RedeemerTagGuarding, Index: 0}: {
-						ExUnits: exUnits,
-					},
-				},
-			),
-			TxIsValid: true,
-		}
-	}
-	if level == v4TopLevelMint {
-		return &gdijkstra.DijkstraTransaction{
-			Body: gdijkstra.DijkstraTransactionBody{TxMint: &mint},
-			WitnessSet: witnessSetWithScript(
-				script,
-				map[lcommon.RedeemerKey]lcommon.RedeemerValue{
-					{Tag: lcommon.RedeemerTagMint, Index: 0}: {
 						ExUnits: exUnits,
 					},
 				},
@@ -245,22 +210,13 @@ func TestValidateTxDijkstraPlutusV4CostModel(t *testing.T) {
 	}
 }
 
-func TestValidateTxDijkstraPlutusV4BudgetExhaustionNamesBudget(t *testing.T) {
+func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {
 	// Not t.Parallel: withoutDijkstraPhase1 replaces a package-level rule list.
 	withoutDijkstraPhase1(t)
-	baseModel := defaultMachineCostModel(t, lang.LanguageVersionV4)
-	plain := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
-	tx := newDijkstraPlutusLevelTx(t, v4TopLevel, plain, v4TestBudget)
+	dijkstraPhase1UtxoValidationRules = []indexedUtxoValidationRule{
+		{validationFunc: gdijkstra.UtxoValidateCostModelsPresent},
+	}
 
-	err := ValidateTxDijkstra(
-		tx, 0, newMockLedgerState(),
-		dijkstraV4TestParams(t, scaledCostModel(baseModel, 1_000_000)),
-	)
-	require.ErrorContains(t, err, "budget")
-}
-
-func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {
-	t.Parallel()
 	plain := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
 	for _, level := range []struct {
 		name  string
@@ -270,14 +226,18 @@ func TestValidateTxDijkstraPlutusV4RequiresCostModelKey3(t *testing.T) {
 		{"child", v4ChildLevel},
 	} {
 		t.Run(level.name, func(t *testing.T) {
-			t.Parallel()
 			tx := newDijkstraPlutusLevelTx(t, level.level, plain, v4TestBudget)
 			for name, params := range map[string]*gdijkstra.DijkstraProtocolParameters{
 				"absent": dijkstraV4TestParams(t, nil),
 				"empty":  dijkstraV4TestParams(t, []int64{}),
 			} {
 				t.Run(name, func(t *testing.T) {
-					err := ValidateTxDijkstra(tx, 0, newMockLedgerState(), params)
+					err := ValidateTxDijkstra(
+						tx,
+						0,
+						newMockLedgerState(),
+						params,
+					)
 					var missing lcommon.MissingCostModelError
 					require.ErrorAs(t, err, &missing)
 					require.Equal(t, uint(3), missing.Version)
@@ -293,7 +253,12 @@ func TestValidateTxDijkstraPlutusV4OnlyBuiltin(t *testing.T) {
 	program := plutusProgramBytes(t, v4OnlyBuiltinProgram)
 	wrongLength := plutusProgramBytes(
 		t,
-		strings.Replace(v4OnlyBuiltinProgram, "(con integer 3)", "(con integer 4)", 1),
+		strings.Replace(
+			v4OnlyBuiltinProgram,
+			"(con integer 3)",
+			"(con integer 4)",
+			1,
+		),
 	)
 	params := dijkstraV4TestParams(
 		t, defaultMachineCostModel(t, lang.LanguageVersionV4),
@@ -307,9 +272,7 @@ func TestValidateTxDijkstraPlutusV4OnlyBuiltin(t *testing.T) {
 	} {
 		t.Run(level.name, func(t *testing.T) {
 			v4 := newDijkstraPlutusLevelTx(
-				t, level.level,
-				plutusScriptForVersion(lang.LanguageVersionV4, program),
-				v4TestBudget,
+				t, level.level, lcommon.PlutusV4Script(program), v4TestBudget,
 			)
 			require.NoError(t, ValidateTxDijkstra(
 				v4, 0, newMockLedgerState(), params,
@@ -318,8 +281,9 @@ func TestValidateTxDijkstraPlutusV4OnlyBuiltin(t *testing.T) {
 			// above comes from the builtin's result and not from the
 			// script ignoring it.
 			wrong := newDijkstraPlutusLevelTx(
-				t, level.level,
-				plutusScriptForVersion(lang.LanguageVersionV4, wrongLength),
+				t,
+				level.level,
+				lcommon.PlutusV4Script(wrongLength),
 				v4TestBudget,
 			)
 			var failed conway.PlutusScriptFailedError
@@ -354,4 +318,17 @@ func TestDijkstraParameterChangeOfCostModelKey3ChangesOutcome(t *testing.T) {
 		ValidateTxDijkstra(tx, 0, newMockLedgerState(), updated),
 		&failed,
 	)
+}
+func TestValidateTxDijkstraPlutusV4BudgetExhaustionNamesBudget(t *testing.T) {
+	// Not t.Parallel: withoutDijkstraPhase1 replaces a package-level rule list.
+	withoutDijkstraPhase1(t)
+	baseModel := defaultMachineCostModel(t, lang.LanguageVersionV4)
+	plain := lcommon.PlutusV4Script(plutusProgramBytes(t, v4PlainProgram))
+	tx := newDijkstraPlutusLevelTx(t, v4TopLevel, plain, v4TestBudget)
+
+	err := ValidateTxDijkstra(
+		tx, 0, newMockLedgerState(),
+		dijkstraV4TestParams(t, scaledCostModel(baseModel, 1_000_000)),
+	)
+	require.ErrorContains(t, err, "budget")
 }

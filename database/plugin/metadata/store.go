@@ -773,6 +773,18 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
 
+	// GetUtxosWithHistory returns both live and spent UTxOs matching q,
+	// including their producing transaction position and producing/spending
+	// block hashes. Snapshot-imported outputs without a producing transaction
+	// retain AddedSlot as their position and have an empty producing block
+	// hash. Exact-address patterns are coarse-filtered here and completed by
+	// the coordinated Database after it resolves output CBOR. q must be
+	// non-nil.
+	GetUtxosWithHistory(
+		*models.UtxoHistoryQuery,
+		types.Txn,
+	) ([]models.UtxoWithHistory, error)
+
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
 	// matching q's coarse SQL predicate, without materializing rows. It
 	// errors if q's address patterns require CBOR-based exact-address
@@ -2929,7 +2941,17 @@ type BulkLoadOptimizer interface {
 }
 
 // PlannerStatsUpdater is an optional interface for metadata stores that can
-// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+// collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
+// refreshes statistics through deferred-index maintenance instead.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
 }
+
+// ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
+type ContextPlannerStatsUpdater interface {
+	UpdatePlannerStatsContext(context.Context) error
+}
+
+// PlannerStatsBackfillSyncKey records the completed backfill whose planner
+// statistics were refreshed after rebuilding critical indexes.
+const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

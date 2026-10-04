@@ -1380,7 +1380,7 @@ func drepStatus(
 		expiry = lastActive + inactivityPeriod
 		expiryKnown = true
 	}
-	expired = !retired && expiryKnown && expiry <= currentEpoch
+	expired = !retired && expiryKnown && expiry < currentEpoch
 	return retired, expired, lastActive
 }
 
