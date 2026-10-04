@@ -247,6 +247,19 @@ func parseSTMSignerVerificationKey(encoded string) ([]byte, error) {
 	)
 }
 
+// Minimum encoded sizes, mirroring the parsers below: a single signature
+// is nrIndexes (8) + sigma (48) + signer index (8); a signature with its
+// registered party adds the party length prefix (8), the party entry
+// (96-byte key + 8-byte stake) and the signature length prefix (8); each
+// aggregate entry is additionally preceded by its own length prefix (8).
+const (
+	stmMinSingleSignatureSize      = 8 + 48 + 8
+	stmClosedRegistrationEntrySize = 96 + 8
+	stmMinSigWithPartySize         = 8 + stmClosedRegistrationEntrySize +
+		8 + stmMinSingleSignatureSize
+	minSigSize = 8 + stmMinSigWithPartySize
+)
+
 func parseSTMAggregateSignatureBytes(
 	raw []byte,
 ) (*stmAggregateSignature, error) {
@@ -268,11 +281,9 @@ func parseSTMAggregateSignatureBytes(
 		return nil, err
 	}
 	offset += 8
-	// Each signature requires at least 8 bytes (size prefix), so cap the
-	// pre-allocation against the remaining payload length to prevent OOM
-	// from a malformed totalSigs value.
+	// Cap the pre-allocation against the remaining payload length to
+	// prevent OOM from a malformed totalSigs value.
 	remaining := len(raw) - offset
-	const minSigSize = 8
 	//nolint:gosec // remaining is non-negative.
 	maxSigs := uint64(remaining / minSigSize)
 	if totalSigs > maxSigs {

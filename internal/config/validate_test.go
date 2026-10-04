@@ -219,6 +219,29 @@ func TestValidate(t *testing.T) {
 			wantErr: "metricsPort must be set",
 		},
 		{
+			name:    "MCP port range in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, 65536) },
+			wantErr: "invalid plugins.api.mcp.config.port",
+		},
+		{
+			name:    "MCP collision in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "MCP empty host inherits node bind address",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.Plugins.API.Mcp.Config["host"] = ""
+				setPluginPort(&c.Plugins.API.Mcp, c.RelayPort)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name:   "MCP distinct host avoids collision",
+			modify: func(c *Config) { c.BindAddr = "127.0.0.2"; setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+		},
+		{
 			name: "optional port disabled with zero",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
@@ -238,7 +261,7 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			// UTxORPC/Blockfrost/Mesh/Midnight bind only under API storage
+			// UTxORPC/Blockfrost/Kupo/Mesh/Midnight bind only under API storage
 			// mode; in core mode their ports never bind, so even an
 			// out-of-range or privileged value must not be rejected.
 			name: "core mode skips inactive API port validation",
