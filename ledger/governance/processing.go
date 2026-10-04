@@ -217,6 +217,7 @@ func ProcessProposals(
 func ProcessHistoricalProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	db *database.Database,
@@ -225,6 +226,7 @@ func ProcessHistoricalProposals(
 	return persistGovernanceProposals(
 		tx,
 		point,
+		txIndex,
 		currentEpoch,
 		govActionLifetime,
 		true,
