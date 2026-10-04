@@ -5602,3 +5602,132 @@ func TestChainsyncClientRollBackwardUpdatesTrackedClient(t *testing.T) {
 		})
 	}
 }
+
+// TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer
+// pins that a deferred-header failure attributed to one of two connected peers
+// closes and denies that peer only.
+type chainsyncResyncTestConn struct {
+	net.Conn
+	localAddr  net.Addr
+	remoteAddr net.Addr
+}
+
+func (c chainsyncResyncTestConn) LocalAddr() net.Addr  { return c.localAddr }
+func (c chainsyncResyncTestConn) RemoteAddr() net.Addr { return c.remoteAddr }
+
+func newChainsyncResyncTestConnection(
+	t *testing.T,
+	remote string,
+) *ouroboros.Connection {
+	t.Helper()
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", remote)
+	require.NoError(t, err)
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		ouroboros_mock.ConversationKeepAlive,
+	)
+	conn, err := ouroboros.New(
+		ouroboros.WithConnection(chainsyncResyncTestConn{
+			Conn:       mockConn,
+			localAddr:  localAddr,
+			remoteAddr: remoteAddr,
+		}),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(keepalive.NewConfig(
+			keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
+			keepalive.WithPeriod(30*time.Second),
+			keepalive.WithTimeout(15*time.Second),
+		)),
+	)
+	require.NoError(t, err)
+	return conn
+}
+
+func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	require.True(t, chainsyncResyncRequiresFreshConnection(
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+	))
+	require.True(t, chainsyncResyncDeniesPeer(
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+	))
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			EventBus: bus,
+			Logger:   logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
+	badConn := newChainsyncResyncTestConnection(t, "10.0.0.1:3001")
+	honestConn := newChainsyncResyncTestConnection(t, "10.0.0.2:3001")
+	require.True(t, connManager.AddConnection(
+		badConn,
+		false,
+		"10.0.0.1:3001",
+	))
+	require.True(t, connManager.AddConnection(
+		honestConn,
+		false,
+		"10.0.0.2:3001",
+	))
+	o := newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
+	o.eventBus = bus
+	o.peerGov = peerGov
+	o.connManager = connManager
+	o.SubscribeChainsyncResync(t.Context())
+	bad := badConn.Id()
+	honest := honestConn.Id()
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: bad,
+				Reason: event.
+					ChainsyncResyncReasonDeferredHeaderValidationFailure,
+			},
+		),
+	)
+
+	require.Eventually(
+		t,
+		func() bool { return peerGov.IsDenied(bad.RemoteAddr.String()) },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.Eventually(
+		t,
+		func() bool { return connManager.GetConnectionById(bad) == nil },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.NotNil(t, connManager.GetConnectionById(honest))
+	require.Never(
+		t,
+		func() bool { return peerGov.IsDenied(honest.RemoteAddr.String()) },
+		200*time.Millisecond,
+		20*time.Millisecond,
+	)
+}
