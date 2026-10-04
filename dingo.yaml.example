@@ -29,8 +29,9 @@
       # config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
-        # Full VACUUM can pause SQLite writers. It is disabled by default;
-        # set an interval in seconds only when that maintenance pause is acceptable.
+        # Space reclaim is disabled by default. Its first run converts the
+        # database with one full VACUUM, which pauses SQLite writers for the
+        # whole rewrite; later runs release free pages in short steps.
         # vacuumIntervalSeconds: 86400
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:

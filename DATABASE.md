@@ -2061,7 +2061,7 @@ high-water mark under `wal_autocheckpoint` alone. With `journal_size_limit`
 configured, reset WALs can be capped at 64 MiB, while `checkpointWAL` is the
 operation that can reduce the file to zero: a `Store.Checkpoint` callback (a
 hook alongside `Store.Maintenance`, on its own two-minute ticker independent
-of `Maintenance`'s 24-hour VACUUM cadence — see `sqlstore.Config.Checkpoint`)
+of the `Maintenance` and `Vacuum` cadences — see `sqlstore.Config.Checkpoint`)
 attempts `PRAGMA wal_checkpoint(TRUNCATE)` every two minutes. Before
 truncating, `checkpointWAL` runs PASSIVE and proceeds to TRUNCATE only when
 PASSIVE reports every WAL frame checkpointed. If a reader
