@@ -60,6 +60,26 @@ func (d *Database) RebuildRewardLiveStakeFromRunningTotals(
 	slot uint64,
 	txn *Txn,
 ) error {
+	if txn == nil {
+		if finalizer, ok := d.metadata.(interface {
+			RebuildRewardLiveStakeFromRunningTotalsInBatches(
+				uint64,
+				func(func(types.Txn) error) error,
+			) error
+		}); ok {
+			// Keep transaction creation here so each committed range participates
+			// in Database's commit barrier instead of pinning one WAL snapshot
+			// across the full rebuild.
+			return finalizer.RebuildRewardLiveStakeFromRunningTotalsInBatches(
+				slot,
+				func(runBatch func(types.Txn) error) error {
+					return d.withMetadataWriteTxn(nil, func(t *Txn) error {
+						return runBatch(t.Metadata())
+					})
+				},
+			)
+		}
+	}
 	finalizer, ok := d.metadata.(interface {
 		RebuildRewardLiveStakeFromRunningTotals(uint64, types.Txn) error
 	})
