@@ -229,7 +229,8 @@ jobs:
             --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
             --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
             --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
-            --health-interval 10s --health-timeout 5s --health-retries 5 \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
             mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
             --sync-binlog=0 --skip-log-bin
           for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
@@ -814,6 +815,16 @@ jobs:
         run: >-
           npm version "${PACKAGE_RELEASE_TAG#v}" --no-git-tag-version
           --ignore-scripts --allow-same-version
+      - name: Embed finalized release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/dingo-release-assets"
+          mkdir -p "$asset_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$asset_dir" --pattern "dingo-${RELEASE_TAG}-*.tar.gz"
+          ASSET_DIR="$asset_dir" node npm/generate-checksums.js
       - name: Validate package installation and invocation
         run: npm test
       - name: Validate finalized release asset

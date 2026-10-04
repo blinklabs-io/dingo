@@ -14,12 +14,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { once } = require('node:events');
+const { releaseFilenames } = require('../generate-checksums');
 const exec = promisify(execFile);
 const root = process.env.DINGO_NPM_TEST_PACKAGE_ROOT || path.join(__dirname, '..', '..');
 
@@ -28,13 +30,6 @@ test('packed package installs through local, global and npx entry points', { tim
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const cache = path.join(dir, 'cache');
   const { version } = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
-  const packed = JSON.parse((await exec('npm', [
-    'pack', '--ignore-scripts', '--json', '--pack-destination', dir, '--cache', cache,
-  ], { cwd: root })).stdout)[0];
-  assert.deepEqual(packed.files.map((file) => file.path).sort(), [
-    'LICENSE', 'README.md', 'npm/bin/dingo.js', 'npm/install.js', 'npm/postinstall.js', 'package.json',
-  ]);
-  const archive = path.join(dir, packed.filename);
   const fixtures = path.join(dir, 'fixture');
   await fs.mkdir(fixtures);
   await fs.writeFile(path.join(fixtures, 'dingo'), `#!/usr/bin/env node
@@ -54,6 +49,32 @@ if (process.argv[2] === 'wait') {
 `);
   const release = path.join(dir, 'release.tar.gz');
   await exec('tar', ['-czf', release, '-C', fixtures, 'dingo']);
+  const packageRoot = path.join(dir, 'package');
+  await fs.mkdir(path.join(packageRoot, 'npm', 'bin'), { recursive: true });
+  for (const filename of ['.npmignore', 'LICENSE', 'README.md', 'package.json']) {
+    await fs.copyFile(path.join(root, filename), path.join(packageRoot, filename));
+  }
+  for (const filename of ['install.js', 'postinstall.js']) {
+    await fs.copyFile(path.join(root, 'npm', filename), path.join(packageRoot, 'npm', filename));
+  }
+  await fs.copyFile(path.join(root, 'npm', 'bin', 'dingo.js'),
+    path.join(packageRoot, 'npm', 'bin', 'dingo.js'));
+  const releaseName = `dingo-v${version}-${process.platform}-${process.arch === 'x64' ? 'amd64' : process.arch}.tar.gz`;
+  const releaseDigest = crypto.createHash('sha256').update(await fs.readFile(release)).digest('hex');
+  const releaseNames = releaseFilenames(version);
+  const checksums = Object.fromEntries(releaseNames.map((filename) => [filename, releaseDigest]));
+  await fs.writeFile(path.join(packageRoot, 'npm', 'checksums.json'),
+    `${JSON.stringify(checksums, null, 2)}\n`);
+  assert.deepEqual(Object.keys(checksums).sort(), releaseNames);
+  assert.equal(checksums[releaseName], releaseDigest);
+  const packed = JSON.parse((await exec('npm', [
+    'pack', '--ignore-scripts', '--json', '--pack-destination', dir, '--cache', cache,
+  ], { cwd: packageRoot })).stdout)[0];
+  assert.deepEqual(packed.files.map((file) => file.path).sort(), [
+    'LICENSE', 'README.md', 'npm/bin/dingo.js', 'npm/checksums.json', 'npm/install.js',
+    'npm/postinstall.js', 'package.json',
+  ]);
+  const archive = path.join(dir, packed.filename);
   const hook = path.join(dir, 'https-fixture.cjs');
   await fs.writeFile(hook, `const https = require('node:https');
 const fs = require('node:fs'); const { EventEmitter } = require('node:events');

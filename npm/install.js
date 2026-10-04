@@ -12,15 +12,21 @@
 // limitations under the License.
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const https = require('node:https');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 
-function releaseURL(version, platform = process.platform, arch = process.arch) {
+const MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
+const MAX_BINARY_BYTES = 512 * 1024 * 1024;
+const RETRY_DELAYS_MS = [100, 500];
+
+function releaseTarget(version, platform = process.platform, arch = process.arch) {
   const targets = {
     linux: { x64: 'amd64', arm64: 'arm64' },
     freebsd: { x64: 'amd64', arm64: 'arm64' },
@@ -32,10 +38,31 @@ function releaseURL(version, platform = process.platform, arch = process.arch) {
     throw new Error(`Invalid Dingo package version: ${version}`);
   }
   const filename = `dingo-v${version}-${platform}-${goArch}.tar.gz`;
-  return `https://github.com/blinklabs-io/dingo/releases/download/v${version}/${filename}`;
+  return {
+    filename,
+    url: `https://github.com/blinklabs-io/dingo/releases/download/v${version}/${filename}`,
+  };
 }
 
-function download(url, destination, get = https.get, redirects = 0) {
+function releaseURL(version, platform = process.platform, arch = process.arch) {
+  return releaseTarget(version, platform, arch).url;
+}
+
+function byteLimit(maxBytes, description) {
+  let received = 0;
+  return new Transform({
+    transform(chunk, encoding, callback) {
+      received += chunk.length;
+      if (received > maxBytes) {
+        callback(new Error(`${description} exceeds ${maxBytes} bytes`));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
+
+function downloadOnce(url, destination, get, redirects, maxBytes) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:') {
@@ -56,38 +83,86 @@ function download(url, destination, get = https.get, redirects = 0) {
           reject(error);
           return;
         }
-        download(redirect, destination, get, redirects + 1)
+        downloadOnce(redirect, destination, get, redirects + 1, maxBytes)
           .then(resolve, reject);
         return;
       }
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(`Dingo release download returned HTTP ${response.statusCode}`));
+        const error = new Error(`Dingo release download returned HTTP ${response.statusCode}`);
+        error.retryable = response.statusCode >= 500 && response.statusCode <= 599;
+        reject(error);
         return;
       }
-      pipeline(response, fs.createWriteStream(destination, { flags: 'wx' }))
-        .then(resolve, reject);
+      response.on('error', (error) => { error.retryable = true; });
+      pipeline(
+        response,
+        byteLimit(maxBytes, 'Dingo release archive'),
+        fs.createWriteStream(destination, { flags: 'wx' }),
+      ).then(resolve, reject);
     });
-    request.on('error', reject);
+    request.on('error', (error) => {
+      error.retryable = true;
+      reject(error);
+    });
     request.setTimeout(30_000, () => request.destroy(new Error('Dingo release download timed out')));
   });
 }
 
-async function extractBinary(archive, destination) {
+async function download(url, destination, get = https.get, options = {}) {
+  const delays = options.retryDelays ?? RETRY_DELAYS_MS;
+  const wait = options.wait ?? ((milliseconds) => new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  }));
+  const maxBytes = options.maxBytes ?? MAX_ARCHIVE_BYTES;
+  for (let attempt = 0; ; attempt += 1) {
+    await fsp.rm(destination, { force: true });
+    try {
+      await downloadOnce(url, destination, get, 0, maxBytes);
+      return;
+    } catch (error) {
+      await fsp.rm(destination, { force: true });
+      if (!error.retryable || attempt >= delays.length) throw error;
+      await wait(delays[attempt]);
+    }
+  }
+}
+
+async function sha256(filename) {
+  const digest = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filename), digest);
+  return digest.digest('hex');
+}
+
+async function extractBinary(archive, destination, maxBytes = MAX_BINARY_BYTES) {
   // Stream only the shipped member: archive paths never become filesystem paths.
   const child = spawn('tar', ['-xzOf', archive, 'dingo'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let diagnostic = '';
   child.stderr.on('data', (chunk) => { diagnostic = (diagnostic + chunk).slice(-8192); });
-  const exited = new Promise((resolve, reject) => {
-    child.once('error', reject);
+  const exited = new Promise((resolve) => {
+    child.once('error', (error) => resolve({ error }));
     child.once('close', (code, signal) => {
-      if (code === 0) resolve();
-      else reject(new Error(`Cannot extract Dingo release (${signal || code}): ${diagnostic.trim()}`));
+      resolve({ code, signal });
     });
   });
-  const copied = pipeline(child.stdout, fs.createWriteStream(destination, { flags: 'wx', mode: 0o755 }))
-    .catch((error) => { child.kill(); throw error; });
-  await Promise.all([exited, copied]);
+  try {
+    await pipeline(
+      child.stdout,
+      byteLimit(maxBytes, 'Dingo release binary'),
+      fs.createWriteStream(destination, { flags: 'wx', mode: 0o755 }),
+    );
+    const result = await exited;
+    if (result.error) throw result.error;
+    if (result.code !== 0) {
+      throw new Error(
+        `Cannot extract Dingo release (${result.signal || result.code}): ${diagnostic.trim()}`,
+      );
+    }
+  } catch (error) {
+    child.kill();
+    await exited;
+    throw error;
+  }
   if ((await fsp.stat(destination)).size === 0) throw new Error('Dingo release binary is empty');
 }
 
@@ -97,17 +172,33 @@ function binaryPath(packageRoot) {
 
 async function install(packageRoot, options = {}) {
   const { version } = JSON.parse(await fsp.readFile(path.join(packageRoot, 'package.json'), 'utf8'));
-  const url = releaseURL(version, options.platform, options.arch);
+  const targetRelease = releaseTarget(version, options.platform, options.arch);
+  const checksums = options.checksums ?? JSON.parse(
+    await fsp.readFile(path.join(packageRoot, 'npm', 'checksums.json'), 'utf8'),
+  );
+  const expected = checksums[targetRelease.filename];
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    throw new Error(`No valid checksum for ${targetRelease.filename}`);
+  }
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'dingo-npm-'));
   let pending;
   try {
     const archive = path.join(directory, 'release.tar.gz');
-    await (options.download || download)(url, archive);
+    await (options.download || download)(targetRelease.url, archive);
+    const archiveSize = (await fsp.stat(archive)).size;
+    const maxArchiveBytes = options.maxArchiveBytes ?? MAX_ARCHIVE_BYTES;
+    if (archiveSize > maxArchiveBytes) {
+      throw new Error(`Dingo release archive exceeds ${maxArchiveBytes} bytes`);
+    }
+    const actual = await sha256(archive);
+    if (!crypto.timingSafeEqual(Buffer.from(actual, 'hex'), Buffer.from(expected, 'hex'))) {
+      throw new Error(`Checksum mismatch for ${targetRelease.filename}`);
+    }
     const target = binaryPath(packageRoot);
     await fsp.mkdir(path.dirname(target), { recursive: true });
     pending = await fsp.mkdtemp(path.join(path.dirname(target), '.install-'));
     const extracted = path.join(pending, 'dingo');
-    await extractBinary(archive, extracted);
+    await extractBinary(archive, extracted, options.maxBinaryBytes);
     await fsp.chmod(extracted, 0o755);
     await fsp.rename(extracted, target);
     return target;

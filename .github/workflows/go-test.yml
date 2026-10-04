@@ -263,7 +263,8 @@ jobs:
             --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
             --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
             --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
-            --health-interval 10s --health-timeout 5s --health-retries 5 \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
             mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
             --sync-binlog=0 --skip-log-bin
           for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
