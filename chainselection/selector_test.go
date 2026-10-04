@@ -672,6 +672,15 @@ func TestRollbackRegisteredIncumbentDoesNotPinOutDeliveredChallenger(
 	)
 }
 
+// forkTipAt builds a tip whose block number equals its slot, so a sequence of
+// calls describes a dense chain fragment.
+func forkTipAt(slot uint64, hash string) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+		BlockNumber: slot,
+	}
+}
+
 func newTestConnectionId(n int) ouroboros.ConnectionId {
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
 	remoteAddr, _ := net.ResolveTCPAddr(
@@ -5478,16 +5487,10 @@ func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
 
 	connA := newTestConnectionId(1)
 	connB := newTestConnectionId(2)
-	tipAt := func(slot uint64, hash string) ochainsync.Tip {
-		return ochainsync.Tip{
-			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
-			BlockNumber: slot,
-		}
-	}
 
 	// Both peers share slots 1-2 and fork at slot 3; B ends up longer.
 	for _, tip := range []ochainsync.Tip{
-		tipAt(1, "c1"), tipAt(2, "c2"), tipAt(3, "a3"), tipAt(4, "a4"),
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"), forkTipAt(4, "a4"),
 	} {
 		cs.UpdatePeerTip(connA, tip, nil)
 	}
@@ -5495,8 +5498,8 @@ func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
 	drainChainSwitchesUntilBest(t, evtCh, connA)
 
 	for _, tip := range []ochainsync.Tip{
-		tipAt(1, "c1"), tipAt(2, "c2"), tipAt(3, "b3"), tipAt(4, "b4"),
-		tipAt(5, "b5"),
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
+		forkTipAt(5, "b5"),
 	} {
 		cs.UpdatePeerTip(connB, tip, nil)
 	}
@@ -5527,17 +5530,11 @@ func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
 
 	connA := newTestConnectionId(1)
 	connB := newTestConnectionId(2)
-	tipAt := func(slot uint64, hash string) ochainsync.Tip {
-		return ochainsync.Tip{
-			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
-			BlockNumber: slot,
-		}
-	}
 
 	// The fragments share no (slot, hash) point, so the selector cannot
 	// establish an intersection and must not report one.
 	for _, tip := range []ochainsync.Tip{
-		tipAt(1, "a1"), tipAt(2, "a2"), tipAt(3, "a3"),
+		forkTipAt(1, "a1"), forkTipAt(2, "a2"), forkTipAt(3, "a3"),
 	} {
 		cs.UpdatePeerTip(connA, tip, nil)
 	}
@@ -5545,7 +5542,7 @@ func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
 	drainChainSwitchesUntilBest(t, evtCh, connA)
 
 	for _, tip := range []ochainsync.Tip{
-		tipAt(1, "b1"), tipAt(2, "b2"), tipAt(3, "b3"), tipAt(4, "b4"),
+		forkTipAt(1, "b1"), forkTipAt(2, "b2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
 	} {
 		cs.UpdatePeerTip(connB, tip, nil)
 	}
@@ -5559,4 +5556,88 @@ func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
 	require.Equal(t, connB, switchEvt.NewConnectionId)
 	require.Equal(t, connA, switchEvt.PreviousConnectionId)
 	assert.Nil(t, switchEvt.RollbackPoint)
+}
+
+func TestChainSelectorRemoveBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	cs.RemovePeer(connA)
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "disconnect switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestChainSelectorStaleBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          eventBus,
+		SecurityParam:     10,
+		StaleTipThreshold: 50 * time.Millisecond,
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	bTips := []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	}
+	for _, tip := range bTips {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	advancePastStale(t, cs, clk, connA, 100*time.Millisecond)
+	cs.UpdatePeerTip(connB, bTips[len(bTips)-1], nil)
+	cs.cleanupStalePeers()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "stale cleanup switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
 }
