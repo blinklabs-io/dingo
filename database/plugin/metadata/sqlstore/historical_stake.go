@@ -863,7 +863,7 @@ active_delegator_stake AS (
  LEFT JOIN utxo
    ON utxo.credential_tag = active_delegation.credential_tag
   AND utxo.staking_key = active_delegation.staking_key
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.transaction_id), utxo.added_slot) <= ?
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
 ` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate
@@ -889,7 +889,7 @@ active_delegator_stake AS (
   AND pointer_resolution.staking_key = active_delegation.staking_key
  JOIN utxo
    ON utxo.id = pointer_resolution.utxo_id
-  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = utxo.transaction_id), utxo.added_slot) <= ?
+  AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id)), utxo.added_slot) <= ?
   AND (utxo.deleted_slot = 0 OR COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" spent_tx ON spent_tx.id = lc.transaction_id WHERE spent_tx.hash = utxo.spent_at_tx_id), utxo.deleted_slot) > ?)
 ` + expiryJoin + `
  WHERE ` + expiryPredicate + predicate

@@ -1194,6 +1194,19 @@ func TestDedupeStakeInputsTieBreaks(t *testing.T) {
 
 func TestHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name             string
+		collateralReturn bool
+	}{{"output", false}, {"collateral return", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHistoricalBoundaryStakeIncludesUntickedClosure(t, tc.collateralReturn)
+		})
+	}
+}
+
+func runHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T, collateralReturn bool) {
+	t.Helper()
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{{EpochId: 0, StartSlot: 0, LengthInSlots: 1000}})
 	poolHash := bytes.Repeat([]byte{0x81}, 28)
@@ -1216,10 +1229,17 @@ func TestHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T) {
 	for i, hash := range [][]byte{closureHash, rankingHash} {
 		var id uint
 		require.NoError(t, raw.QueryRow(`SELECT id FROM "transaction" WHERE hash = ?`, hash).Scan(&id))
-		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+		output := &models.Utxo{
 			TransactionID: &id, TxId: hash, StakingKey: key,
 			AddedSlot: 1020, Amount: types.Uint64(2_000_000 + i*1_000_000),
-		}))
+		}
+		if i == 0 && collateralReturn {
+			output.TransactionID = nil
+			output.CollateralReturnForTxID = &id
+			_, err := raw.Exec(`UPDATE "transaction" SET valid = FALSE WHERE id = ?`, id)
+			require.NoError(t, err)
+		}
+		require.NoError(t, db.CreateUtxo(nil, output))
 	}
 	calc := NewCalculator(db)
 	txn := db.Transaction(false)
