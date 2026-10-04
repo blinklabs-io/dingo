@@ -392,15 +392,45 @@ func importLedgerState(
 	beyondCertifiedTip bool,
 	err error,
 ) {
+	prepared, err := prepareLedgerStateImport(logger, result, maxTrustedSlot)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer prepared.Close()
+	return importPreparedLedgerState(
+		ctx, db, logger, nodeCfg, result, prepared, reconcile, onLedger,
+	)
+}
+
+type preparedLedgerStateImport struct {
+	snapshot           *ledgerstate.SnapshotFiles
+	state              *ledgerstate.RawLedgerState
+	stateDir           string
+	beyondCertifiedTip bool
+}
+
+func (p *preparedLedgerStateImport) Close() {
+	if p != nil {
+		p.snapshot.Close()
+	}
+}
+
+func prepareLedgerStateImport(
+	logger *slog.Logger,
+	result *BootstrapResult,
+	maxTrustedSlot uint64,
+) (_ *preparedLedgerStateImport, err error) {
 	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
 		logger, result, maxTrustedSlot,
 	)
 	if err != nil {
-		return 0, nil, false, err
+		return nil, err
 	}
-	// Held open for the whole import: the UTxO stream is read from the table
-	// handle, and closing early would put a name back in its place.
-	defer snapshot.Close()
+	defer func() {
+		if err != nil {
+			snapshot.Close()
+		}
+	}()
 	lstatePath := filepath.Join(
 		stateDir, filepath.FromSlash(snapshot.StatePath),
 	)
@@ -424,20 +454,20 @@ func importLedgerState(
 	// One buffer leaves nothing to change.
 	stateBytes, err := io.ReadAll(snapshot.State)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("reading ledger state: %w", err)
+		return nil, fmt.Errorf("reading ledger state: %w", err)
 	}
 	if signedBy != nil {
 		if err := verifySignedState(
 			snapshot.StatePath, stateBytes, signedBy,
 		); err != nil {
-			return 0, nil, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"verifying ledger state in %s: %w", stateDir, err,
 			)
 		}
 	}
 	state, err := ledgerstate.ParseSnapshotBytes(stateBytes)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("parsing ledger state: %w", err)
+		return nil, fmt.Errorf("parsing ledger state: %w", err)
 	}
 
 	// UTxO-HD keeps the UTxO set in a table beside the state; discovery opened
@@ -446,7 +476,7 @@ func importLedgerState(
 		if err := attachSignedTable(
 			state, snapshot, stateDir, signedBy,
 		); err != nil {
-			return 0, nil, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"verifying ledger state in %s: %w", stateDir, err,
 			)
 		}
@@ -458,7 +488,7 @@ func importLedgerState(
 	}
 
 	if state.Tip == nil {
-		return 0, nil, false, errors.New(
+		return nil, errors.New(
 			"parsed ledger state has no tip (Origin snapshot)",
 		)
 	}
@@ -477,6 +507,33 @@ func importLedgerState(
 		"era_bound_epoch", state.EraBoundEpoch,
 		"epoch_nonce", nonceHex,
 	)
+	return &preparedLedgerStateImport{
+		snapshot:           snapshot,
+		state:              state,
+		stateDir:           stateDir,
+		beyondCertifiedTip: beyondCertifiedTip,
+	}, nil
+}
+
+func importPreparedLedgerState(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	nodeCfg *cardano.CardanoNodeConfig,
+	result *BootstrapResult,
+	prepared *preparedLedgerStateImport,
+	reconcile bool,
+	onLedger func(ledgerstate.ImportProgress),
+) (
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+	beyondCertifiedTip bool,
+	err error,
+) {
+	// The prepared object keeps the selected files open from verification
+	// through import, so the UTxO table and state are the checked files.
+	state := prepared.state
+	beyondCertifiedTip = prepared.beyondCertifiedTip
 
 	// Build import key for resume tracking. A catch-up reconcile must run the
 	// full import pass (so its snapshot key set is complete), so resume is

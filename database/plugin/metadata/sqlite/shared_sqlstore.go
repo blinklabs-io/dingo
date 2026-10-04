@@ -95,6 +95,11 @@ func sqliteVacuum(
 // is not a new, unvalidated setting -- only its use outside of bulk mode is
 // new.
 //
+// journal_size_limit(67108864) lets SQLite shrink a reset WAL to at most
+// 64 MiB. It does not bound an active WAL or one that cannot reset because a
+// reader still holds an older snapshot; checkpointWAL's periodic TRUNCATE
+// remains the path that can bring an idle WAL all the way to zero.
+//
 // Durability: per DATABASE.md's Cross-Store Durability Contract, synchronous
 // NORMAL under WAL mode means SQLite fsyncs the WAL at checkpoint boundaries,
 // not after every commit -- a committed transaction survives an application
@@ -113,6 +118,7 @@ func sqliteVacuum(
 const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=wal_autocheckpoint(10000)" +
+	"&_pragma=journal_size_limit(67108864)" +
 	"&_pragma=cache_size(-50000)" +
 	"&_pragma=foreign_keys(1)" +
 	"&_pragma=mmap_size(268435456)"
@@ -123,8 +129,9 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // wal_autocheckpoint only ever runs a PASSIVE checkpoint (that is what
 // SQLite's auto-checkpoint mechanism invokes internally), and PASSIVE -- like
 // FULL and RESTART -- backfills WAL frames into metadata.sqlite and lets
-// future writes reuse the reclaimed space, but never calls ftruncate on the
-// -wal file itself: only SQLITE_CHECKPOINT_TRUNCATE does that. Verified
+// future writes reuse the reclaimed space, but does not shrink the -wal file
+// itself. journal_size_limit can shrink the file when SQLite resets the WAL;
+// SQLITE_CHECKPOINT_TRUNCATE can bring it to zero. Verified
 // directly against a copy of a live, actively-growing metadata.sqlite: with
 // zero readers blocking it (every attempt reported busy=0 with
 // checkpointed==log, i.e. a fully successful checkpoint), PASSIVE, FULL, and
@@ -133,14 +140,13 @@ const sqliteCommonPragmas = "&_pragma=busy_timeout(30000)" +
 // plain os.Stat of that file -- see metrics.go) can never show a single
 // decrease under wal_autocheckpoint alone, no matter how well passive
 // checkpointing is working underneath -- the file's on-disk footprint is a
-// high-water mark that only grows or holds steady until something truncates
-// it. checkpointWAL is that something: a periodic, independent TRUNCATE
-// checkpoint attempt so the WAL's on-disk size can be brought back down on a
-// schedule instead of only ever growing to whatever the largest
-// inter-checkpoint write burst has been so far. This is best-effort, not an
-// unconditional ceiling: a reader holding an old snapshot can make a given
-// attempt busy (see checkpointBusyTimeout below), in which case the file
-// stays at its current size until a later tick succeeds.
+// high-water mark under wal_autocheckpoint alone. The configured
+// journal_size_limit caps a reset WAL at 64 MiB; checkpointWAL is the path
+// that can bring it to zero, using a periodic, independent TRUNCATE
+// checkpoint attempt. This is best-effort, not an unconditional ceiling: a
+// reader holding an old snapshot can prevent WAL reset and make a given
+// TRUNCATE attempt busy (see checkpointBusyTimeout below), in which case the
+// file stays at its current size until a later reset or tick succeeds.
 const checkpointInterval = 2 * time.Minute
 
 // checkpointBusyTimeout bounds how long a single checkpoint attempt waits for

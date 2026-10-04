@@ -160,13 +160,8 @@ func (r *backendResetter) Close() error {
 }
 
 // nonEmptyTables returns the subset of qualified that currently holds at least
-// one row, in a single round trip.
-//
-// The query is one UNION ALL of EXISTS probes, selecting each table's index
-// rather than its name so no identifier ever has to survive being embedded in
-// a string literal. Asking per table instead would trade the per-table
-// TRUNCATE this exists to avoid for a per-table SELECT, which is cheaper but
-// still O(tables) round trips; this stays at one regardless of schema size.
+// one row. Batching the UNION ALL probes bounds compound-query parsing while
+// keeping database round trips low.
 //
 // EXISTS stops at the first row, so a probe against a large table is no more
 // expensive than against a small one.
@@ -186,44 +181,52 @@ func nonEmptyTables(
 		return nil, nil
 	}
 
-	var query strings.Builder
-	for i, table := range qualified {
-		if i > 0 {
-			query.WriteString(" UNION ALL ")
-		}
-		// The literal is a decimal index this function generated, never
-		// caller or operator input.
-		query.WriteString("SELECT '")
-		query.WriteString(strconv.Itoa(i))
-		query.WriteString("' AS i WHERE EXISTS ")
-		query.WriteString("(SELECT 1 FROM ")
-		query.WriteString(table)
-		query.WriteString(")")
-	}
-
-	rows, err := db.QueryContext(ctx, query.String())
-	if err != nil {
-		return nil, fmt.Errorf("probe non-empty tables: %w", err)
-	}
-	defer rows.Close()
-
 	var dirty []string
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, fmt.Errorf("scan non-empty table index: %w", err)
+	const batchSize = 16
+	for start := 0; start < len(qualified); start += batchSize {
+		end := min(start+batchSize, len(qualified))
+		var query strings.Builder
+		for i := start; i < end; i++ {
+			if i > start {
+				query.WriteString(" UNION ALL ")
+			}
+			// The literal is a decimal index this function generated, never
+			// caller or operator input.
+			query.WriteString("SELECT '")
+			query.WriteString(strconv.Itoa(i))
+			query.WriteString("' AS i WHERE EXISTS ")
+			query.WriteString("(SELECT 1 FROM ")
+			query.WriteString(qualified[i])
+			query.WriteString(")")
 		}
-		idx, err := strconv.Atoi(raw)
-		if err != nil || idx < 0 || idx >= len(qualified) {
-			return nil, fmt.Errorf(
-				"non-empty table probe returned unusable index %q",
-				raw,
-			)
+
+		rows, err := db.QueryContext(ctx, query.String())
+		if err != nil {
+			return nil, fmt.Errorf("probe non-empty tables: %w", err)
 		}
-		dirty = append(dirty, qualified[idx])
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("probe non-empty tables: %w", err)
+		for rows.Next() {
+			var raw string
+			if err := rows.Scan(&raw); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan non-empty table index: %w", err)
+			}
+			idx, err := strconv.Atoi(raw)
+			if err != nil || idx < start || idx >= end {
+				_ = rows.Close()
+				return nil, fmt.Errorf(
+					"non-empty table probe returned unusable index %q",
+					raw,
+				)
+			}
+			dirty = append(dirty, qualified[idx])
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("probe non-empty tables: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close non-empty table probe: %w", err)
+		}
 	}
 	return dirty, nil
 }

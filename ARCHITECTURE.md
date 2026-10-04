@@ -72,12 +72,13 @@ wal_checkpoint(TRUNCATE)` attempt against a dedicated short-timeout
 connection (never the write pool) — see `checkpointWAL` and
 `Store.Checkpoint` in DATABASE.md's write-amplification discussion for why
 the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
-on-disk size even when it fully succeeds, and why an active reader can leave
-a given TRUNCATE attempt busy. The tagged PostgreSQL/MySQL
-factories configure their direct drivers, pools, advisory migration locks, and
-repeatable-read snapshots. All three return `*sqlstore.Store`; metadata
-business behavior is implemented once in `sqlstore` and dialect translation is
-limited to SQL mechanics.
+on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
+WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
+reader can prevent either operation from reclaiming space. The tagged
+PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
+migration locks, and repeatable-read snapshots. All three return
+`*sqlstore.Store`; metadata business behavior is implemented once in
+`sqlstore` and dialect translation is limited to SQL mechanics.
 
 Metadata indexing treats raw CBOR as the lossless storage and API JSON as an
 optional representation. A label whose map keys collide after JSON
@@ -3196,6 +3197,19 @@ list, so a repeated input is valid, while balances restrict the UTxO to the
 input set and are bounded Lovelace sums; witness `i` must authorize input `i`,
 pairing the two lists as `zip` does; and a witness's address root is hashed
 over the canonical encoding of the address's decoded attributes.
+
+Byron output indexes are Word16. The reference `txOutputUTxO` zips a
+transaction's outputs with `[0 ..] :: [Word16]`, so only outputs 0 through
+65535 enter the UTxO set, and its fee balance and UTxO update use that set.
+gouroboros `ByronTransaction.Produced()` returns the same set, and every
+storage path builds UTxOs from `Produced()`. `byronOutputBalance` therefore
+sums `Produced()`, so the output value that value conservation and the fee
+balance subtract is exactly the value that is stored. The required minimum fee
+is still computed from the size of the whole serialized transaction, every
+output included, as the reference sizes the whole `TxAux`, and the output
+address rules (`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`)
+still cover every output. Later outputs remain in the transaction body and its
+ID, and a transaction is not rejected for having more outputs.
 
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and
@@ -7294,13 +7308,31 @@ Successful bootstrap clears the tracked PID before the entrypoint hands off to
 `serve`, so the same lifecycle contract applies on both sides of startup.
 
 When a legacy imported database is marked for reward-state repair, `serve`
-blocks node startup until Mithril v2 reconciles the database against a
-certificate-backed artifact. The repair preserves configured artifact pins and
-resolves an omitted network name from the configured network magic. Its active
-marker is written before repair writes begin, so restart accepts only an
-interrupted sync that is positively identified as this repair. API-mode resumes
-continue from their immutable import marker only while the pending repair marker
-remains; ordinary API-mode metadata replacement is rejected.
+blocks node startup until Mithril v2 reconciles the database against a verified
+artifact. The repair preserves configured artifact pins and resolves an omitted
+network name from the configured network magic. Its active marker is written
+before repair writes begin, so restart accepts only an interrupted sync that is
+positively identified as this repair. API-mode resumes continue from their
+immutable import marker only while the pending repair marker remains; ordinary
+API-mode metadata replacement is rejected. A certified artifact may trail the
+local tip. Repair verifies that the artifact's immutable tip is an ancestor of
+the local chain and that the selected state is not earlier than the database's
+existing stable Mithril ledger point. A selected state beyond the local tip
+goes through the existing gap validation.
+Before replay, every repair rolls metadata back to the selected state slot,
+including restoring UTxOs spent afterward. When the local tip is beyond the
+certified tip, repair also verifies that state point on the local chain and
+retains only its canonical block tail for ordinary replay, discarding other
+volatile blocks. It rebuilds critical deferred indexes before the metadata
+rollback so foreign-key checks and rollback queries remain indexed. Legacy
+anchors that predate stored Mithril block hashes resolve the anchor hash from
+the block stored at the recorded slot. A stored gap that does not reach the
+signed state, or fails continuity validation, is cleaned before importing an
+ancillary state beyond the certified immutable tip, so rollback removes stale
+gap metadata before the snapshot UTxOs are written.
+If the selected state predates the existing stable point, repair does not alter
+block or ledger contents, keeps the marker pending, and retries for a newer
+artifact.
 
 Two artifact backends are supported, selected by `mithril.backend`
 (`--mithril-backend`, `DINGO_MITHRIL_BACKEND`):
@@ -8022,9 +8054,15 @@ When serving a database marked for legacy Mithril reward-state repair, startup
 runs a v2 certified catch-up before exposing the node. The catch-up verifies
 the existing chain against the selected artifact before mutating ledger rows;
 API storage also resets and reruns historical metadata backfill through the
-certified ledger anchor. The repair marker remains until import and deferred
-index rebuilding complete, so an interrupted repair resumes with startup
-blocked instead of serving partially reconciled state.
+certified ledger anchor. The artifact may trail the live local tip if its
+immutable tip is on that chain and the selected state does not precede the
+existing stable Mithril ledger point. In that case, repair retains only local
+canonical block blobs after the selected state point, clears their derived
+metadata for normal ledger replay, and discards unrelated volatile blocks. A
+selected state behind the stable point is not imported; startup leaves the
+repair marker pending and retries. The repair marker remains until import and
+deferred index rebuilding complete, so an interrupted repair resumes with
+startup blocked instead of serving partially reconciled state.
 
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
@@ -12588,16 +12626,19 @@ Mithril databases for repair when the anchor has no fee basis, including
 older imports that left no anchor reward-pot row. Before
 `dingo serve` starts, core- and API-mode databases with that marker automatically
 run a Mithril v2 catch-up against the latest certified state. Catch-up verifies
-the existing chain intersection before reconciling ledger rows, retains the local
-block history, and clears the marker only on completion. During reconciliation,
+the existing chain intersection before reconciling ledger rows and clears the
+marker only on completion. When the artifact trails the local tip, repair also
+checks the selected state against the prior stable Mithril point; it preserves
+only the canonical block tail beyond that state for ordinary ledger replay and
+removes the tail's derived metadata before replay. During reconciliation,
 the certified live UTxO set and each output's CBOR are restored together, so
 outputs live at the anchor remain available when replaying post-anchor blocks
 that spent them; UTxO-HD MemPack outputs are converted back to ledger TxOut
 CBOR for this purpose. API mode also rebuilds
 its historical metadata through the certified ledger anchor. If the selected
-artifact does not cover the local tip, startup remains blocked and the database
-is left intact while Dingo retries the repair every five minutes; it is never
-treated as a clean bootstrap. Cancelling startup stops the retry without
+state predates the prior stable Mithril point, startup remains blocked without
+changing block or ledger contents while Dingo retries every five minutes. It is
+never treated as a clean bootstrap. Cancelling startup stops the retry without
 changing the pending repair marker.
 
 The per-credential reward basis is seeded from the same import: mark, set and
