@@ -7858,3 +7858,91 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 		})
 	}
 }
+
+// A genesis key delegation certificate is checked against the delegations in
+// force and the ones still inside the stability window, through the real
+// LedgerView and the Shelley validation entry point.
+func TestGenesisKeyDelegationThroughEraValidation(t *testing.T) {
+	t.Parallel()
+
+	var keys [5]ed25519.PrivateKey
+	for i := range keys {
+		seed := make([]byte, ed25519.SeedSize)
+		seed[0] = byte(0xb0 + i)
+		keys[i] = ed25519.NewKeyFromSeed(seed)
+	}
+	delegateOf := func(i int) lcommon.Blake2b224 {
+		return lcommon.Blake2b224Hash(keys[i].Public().(ed25519.PublicKey))
+	}
+	genesisKey := func(seed byte) []byte {
+		return bytes.Repeat([]byte{seed}, lcommon.Blake2b224Size)
+	}
+	lv := mirQuorumTestView(
+		t,
+		[3]ed25519.PublicKey{
+			keys[0].Public().(ed25519.PublicKey),
+			keys[1].Public().(ed25519.PublicKey),
+			keys[2].Public().(ed25519.PublicKey),
+		},
+	)
+	// Genesis key 0x11 certified a new delegate at slot 100, which stays
+	// pending for the whole stability window.
+	seedGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
+		GenesisHash:         genesisKey(0x11),
+		GenesisDelegateHash: delegateOf(3).Bytes(),
+		VrfKeyHash:          bytes.Repeat([]byte{0xf1}, lcommon.Blake2b256Size),
+		AddedSlot:           100,
+	})
+
+	validate := func(
+		genesis []byte,
+		delegate lcommon.Blake2b224,
+		vrf byte,
+	) error {
+		cert := &lcommon.GenesisKeyDelegationCertificate{
+			CertType: uint(
+				lcommon.CertificateTypeGenesisKeyDelegation,
+			),
+			GenesisHash:         genesis,
+			GenesisDelegateHash: delegate.Bytes(),
+		}
+		copy(
+			cert.VrfKeyHash[:],
+			bytes.Repeat([]byte{vrf}, lcommon.Blake2b256Size),
+		)
+		tx := &shelley.ShelleyTransaction{
+			Body: shelley.ShelleyTransactionBody{
+				TxCertificates: []lcommon.CertificateWrapper{{
+					Type: uint(
+						lcommon.CertificateTypeGenesisKeyDelegation,
+					),
+					Certificate: cert,
+				}},
+			},
+		}
+		return eras.ValidateTxShelley(
+			tx, 200, lv, &shelley.ShelleyProtocolParameters{},
+		)
+	}
+
+	var notInMapping eras.GenesisKeyNotInMappingError
+	var duplicateDelegate eras.DuplicateGenesisDelegateError
+	var duplicateVRF eras.DuplicateGenesisVRFError
+
+	err := validate(genesisKey(0x44), delegateOf(3), 0xf9)
+	require.ErrorAs(t, err, &notInMapping)
+
+	err = validate(genesisKey(0x22), delegateOf(2), 0xf9)
+	require.ErrorAs(t, err, &duplicateDelegate, "delegate in force")
+
+	err = validate(genesisKey(0x22), delegateOf(3), 0xf9)
+	require.ErrorAs(t, err, &duplicateDelegate, "delegate pending")
+
+	err = validate(genesisKey(0x22), delegateOf(4), 0xf1)
+	require.ErrorAs(t, err, &duplicateVRF, "VRF key pending")
+
+	// The genesis key that certified the pending delegation may repeat it.
+	err = validate(genesisKey(0x11), delegateOf(3), 0xf1)
+	require.False(t, errors.As(err, &duplicateDelegate), "%v", err)
+	require.False(t, errors.As(err, &duplicateVRF), "%v", err)
+}
