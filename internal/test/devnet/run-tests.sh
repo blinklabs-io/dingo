@@ -23,6 +23,7 @@
 #   4. Tears down the DevNet and reports results
 #
 # Usage:
+#   ./run-tests.sh --runtime container --accelerated
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
 #   ./run-tests.sh --accelerated      # Run accelerated timeline and governance scenarios
@@ -40,6 +41,30 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dispatch before probing Docker or allocating Linux-only topology paths.
+RUNTIME="${DEVNET_RUNTIME:-docker}"
+RUNTIME_ARGS=()
+while (( $# > 0 )); do
+  case "$1" in
+    --runtime)
+      if (( $# < 2 )); then
+        echo "--runtime requires docker or container" >&2
+        exit 2
+      fi
+      RUNTIME="$2"
+      shift 2
+      ;;
+    --runtime=*) RUNTIME="${1#*=}"; shift ;;
+    *) RUNTIME_ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"}"
+case "${RUNTIME}" in
+  docker) ;;
+  container) exec bash "${SCRIPT_DIR}/run-tests-container.sh" "$@" ;;
+  *) echo "Unsupported runtime: ${RUNTIME} (use docker or container)" >&2; exit 2 ;;
+esac
+
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 # shellcheck source=compose-project.sh
