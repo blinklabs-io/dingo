@@ -39,7 +39,9 @@ test('release targets match the shipped archive names and reject absent targets'
     assert.throws(() => releaseURL('1.2.3', platform, arch), /No Dingo release binary/);
   }
   assert.throws(() => releaseURL('../other', 'linux', 'x64'), /Invalid Dingo package version/);
-  assert.throws(() => releaseURL('1.2.3+build.7', 'linux', 'x64'), /Invalid Dingo package version/);
+  assert.equal(releaseURL('1.2.3+build.7', 'linux', 'x64'),
+    'https://github.com/blinklabs-io/dingo/releases/download/v1.2.3+build.7/' +
+    'dingo-v1.2.3+build.7-linux-amd64.tar.gz');
 });
 
 function requests(responses) {

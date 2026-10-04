@@ -34,7 +34,7 @@ function releaseTarget(version, platform = process.platform, arch = process.arch
   };
   const goArch = targets[platform]?.[arch];
   if (!goArch) throw new Error(`No Dingo release binary for ${platform}/${arch}`);
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error(`Invalid Dingo package version: ${version}`);
   }
   const filename = `dingo-v${version}-${platform}-${goArch}.tar.gz`;
