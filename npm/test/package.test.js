@@ -43,6 +43,11 @@ if (process.argv[2] === 'wait' || process.argv[2] === 'wait-default') {
     process.on('SIGTERM', () => { console.log('forwarded'); process.exit(23); });
   }
   console.log('ready'); setInterval(() => {}, 1000);
+} else if (process.argv[2] === 'stdio') {
+  let input = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { input += chunk; });
+  process.stdin.on('end', () => process.stderr.write(input));
 } else {
   console.log(JSON.stringify(process.argv.slice(2))); process.exit(Number(process.env.FIXTURE_EXIT || 0));
 }
@@ -71,6 +76,15 @@ https.get = (url, callback) => {
   const executable = path.join(local, 'node_modules', '.bin', 'dingo');
   assert.equal((await exec(executable, ['one', 'two words', '--flag=value'])).stdout,
     '["one","two words","--flag=value"]\n');
+  const streams = spawn(executable, ['stdio'], { stdio: ['pipe', 'ignore', 'pipe'] });
+  t.after(() => { if (streams.exitCode === null) streams.kill('SIGKILL'); });
+  let stderr = '';
+  streams.stderr.setEncoding('utf8');
+  streams.stderr.on('data', (chunk) => { stderr += chunk; });
+  const streamsClosed = once(streams, 'close');
+  streams.stdin.end('forwarded input');
+  assert.deepEqual(await streamsClosed, [0, null]);
+  assert.equal(stderr, 'forwarded input');
   await assert.rejects(exec(executable, ['exit'], {
     env: { ...process.env, FIXTURE_EXIT: '17' },
   }), (error) => error.code === 17);
