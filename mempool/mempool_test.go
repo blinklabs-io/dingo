@@ -327,7 +327,7 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	require.NotEmpty(t, tx.Inputs())
 	require.NotEmpty(t, tx.Collateral())
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx)
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx, nil)
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
 		assert.NotContains(t, overlay.consumed, key,
@@ -4123,7 +4123,7 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 	require.NoError(t, err, "TX-A should pass overlay validation")
 
 	// Apply TX-A to the overlay
-	overlay.applyTx(txA.Hash().String(), 0, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify input is now consumed
 	_, consumed := overlay.consumed[utxoKey]
@@ -4166,7 +4166,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 	)
 	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass")
-	overlay.applyTx(txA.Hash().String(), 0, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA, nil)
 
 	// Verify TX-A's output is in the overlay created set
 	inputFromA := buildMockInput(t, txHashA, 0)
@@ -4187,7 +4187,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		err,
 		"TX-B should pass (spends TX-A output from overlay)",
 	)
-	overlay.applyTx(txB.Hash().String(), 0, txB)
+	overlay.applyTx(txB.Hash().String(), 0, txB, nil)
 
 	// Verify both TXs are tracked
 	assert.Len(t, overlay.applied, 2)

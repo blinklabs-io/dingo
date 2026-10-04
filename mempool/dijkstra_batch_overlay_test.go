@@ -152,7 +152,7 @@ func TestUtxoOverlayApplyTxCoversEveryDijkstraBatchLevel(t *testing.T) {
 		outputs:      []uint64{2_000_000},
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx, nil)
 
 	require.Contains(t, overlay.consumed, refKey(childIn))
 	require.Contains(t, overlay.consumed, refKey(topIn))
@@ -184,7 +184,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 		invalid:          true,
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx, nil)
 
 	require.Equal(
 		t,
@@ -227,6 +227,7 @@ func TestUtxoOverlayPrunesDescendantOfBatchChildOutput(t *testing.T) {
 			entry.tx.Hash().String(),
 			uint(dijkstra.TxTypeDijkstra),
 			entry.tx,
+			entry.cbor,
 		)
 	}
 	require.Contains(t, overlay.consumed, childOutput)

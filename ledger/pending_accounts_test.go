@@ -388,3 +388,49 @@ func TestValidateForgedTxsAcceptsDeregistrationOfEarlierRegistration(
 		"deregistering a credential no transaction registered must fail",
 	)
 }
+
+func TestValidateTxWithOverlayRejectsSpendOfStoredOutputAlreadySpent(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newPendingAccountsFixtureWithRule(
+		t, 100, shelley.UtxoValidateBadInputsUtxo,
+		&shelley.ShelleyProtocolParameters{},
+	)
+	out, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(f.address.String()).WithLovelace(5).Build()
+	require.NoError(t, err)
+	// Stored tx: changes account state, so the overlay records it, and
+	// creates the output the others spend.
+	stored := mockledger.NewTransactionBuilder().WithType(int(f.ls.currentEra.Id))
+	stored.WithId(bytes.Repeat([]byte{0x0b}, 32))
+	stored.WithOutputs(out)
+	stored.WithWithdrawals(map[*lcommon.Address]uint64{&f.address: 10})
+	var storedTx lcommon.Transaction = stored
+	require.True(t, utxoref.ChangesState(storedTx))
+	produced := storedTx.Produced()[0]
+	key := utxoref.ForUtxo(produced)
+
+	// The mempool's UTxO maps already hold a UTxO-only pending tx that
+	// spent the stored tx's output.
+	consumed := map[utxoref.Key]struct{}{key: {}}
+	created := map[utxoref.Key]lcommon.Utxo{key: produced}
+	overlay := utxoref.NewStateOverlay()
+	overlay.Apply(storedTx)
+
+	spender := mockledger.NewTransactionBuilder().WithType(int(f.ls.currentEra.Id))
+	spender.WithId(bytes.Repeat([]byte{0x0d}, 32))
+	spender.WithInputs(produced.Id)
+	var spenderTx lcommon.Transaction = spender
+
+	require.Error(
+		t,
+		f.ls.ValidateTxWithOverlay(spenderTx, consumed, created, nil),
+		"control: without the state overlay the double spend is rejected",
+	)
+	require.Error(
+		t,
+		f.ls.ValidateTxWithOverlay(spenderTx, consumed, created, overlay),
+		"a second spend of a stored tx's output must be rejected",
+	)
+}

@@ -302,7 +302,7 @@ func (c *revalidationCandidate) add(
 	tx *MempoolTransaction,
 	decoded gledger.Transaction,
 ) {
-	c.overlay.applyTx(at.hash, at.txType, decoded)
+	c.overlay.applyTx(at.hash, at.txType, decoded, tx.Cbor)
 	c.transactions = append(c.transactions, tx)
 	c.txByHash[at.hash] = tx
 	c.sizeBytes += int64(len(tx.Cbor))
@@ -320,9 +320,12 @@ type appliedTx struct {
 	txType   uint
 	consumed []utxoref.Key                // UTxO keys consumed by this TX
 	created  map[utxoref.Key]lcommon.Utxo // UTxO keys created by this TX
-	// stateTx is the decoded transaction, kept only when it changes ledger
-	// state beyond UTxOs, so the overlay can be rebuilt from survivors.
-	stateTx lcommon.Transaction
+	// stateCbor is the pool entry's own CBOR slice, shared and not copied,
+	// kept only when the transaction changes ledger state beyond UTxOs so the
+	// state overlay can be rebuilt from survivors. Its bytes are the ones
+	// currentSizeBytes already counts.
+	stateCbor []byte
+	stateType uint
 }
 
 func cloneAppliedTx(at appliedTx) appliedTx {
@@ -363,11 +366,13 @@ func newUtxoOverlay() *utxoOverlay {
 	}
 }
 
-// applyTx adds a validated transaction's UTxO effects to the overlay.
+// applyTx adds a validated transaction's effects to the overlay. cbor must be
+// the pool entry's retained CBOR; the overlay shares it rather than copying.
 func (o *utxoOverlay) applyTx(
 	hash string,
 	txType uint,
 	tx lcommon.Transaction,
+	cbor []byte,
 ) {
 	at := appliedTx{
 		hash:    hash,
@@ -375,8 +380,9 @@ func (o *utxoOverlay) applyTx(
 		created: make(map[utxoref.Key]lcommon.Utxo),
 	}
 	if utxoref.ChangesState(tx) {
-		at.stateTx = tx
-		o.accounts.Apply(tx)
+		at.stateCbor = cbor
+		at.stateType = txType
+		o.accounts.ApplyEncoded(txType, cbor)
 	}
 	// Consumed is the consensus spent set: regular inputs for valid
 	// transactions and collateral for phase-2-invalid transactions. Using
@@ -403,13 +409,23 @@ func (o *utxoOverlay) reset() {
 }
 
 // rebuildAggregates rebuilds consumed/created maps from the applied list.
-func (o *utxoOverlay) rebuildAggregates() {
-	o.consumed, o.created, o.accounts = aggregateApplied(o.applied)
+// keepState lets the state overlay survive when no state-changing transaction
+// was dropped; pass false when the ledger state under it may have moved.
+func (o *utxoOverlay) rebuildAggregates(keepState bool) {
+	previous := o.accounts
+	if !keepState {
+		previous = nil
+	}
+	o.consumed, o.created, o.accounts = aggregateApplied(o.applied, previous)
 }
 
 // aggregateApplied folds ordered applied transactions into the overlay maps.
+// applied must be a subsequence of the transactions previous was built from.
+// When none of the dropped transactions changed ledger state, previous is
+// still the right state overlay and is reused with everything it has folded.
 func aggregateApplied(
 	applied []appliedTx,
+	previous *utxoref.StateOverlay,
 ) (
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
@@ -418,14 +434,19 @@ func aggregateApplied(
 	consumed := make(map[utxoref.Key]struct{})
 	created := make(map[utxoref.Key]lcommon.Utxo)
 	accounts := utxoref.NewStateOverlay()
+	stateful := 0
 	for _, at := range applied {
 		for _, key := range at.consumed {
 			consumed[key] = struct{}{}
 		}
 		maps.Copy(created, at.created)
-		if at.stateTx != nil {
-			accounts.Apply(at.stateTx)
+		if at.stateCbor != nil {
+			stateful++
+			accounts.ApplyEncoded(at.stateType, at.stateCbor)
 		}
+	}
+	if previous != nil && previous.Len() == stateful {
+		accounts = previous
 	}
 	return consumed, created, accounts
 }
@@ -441,7 +462,7 @@ func (o *utxoOverlay) removeByHashes(hashes map[string]struct{}) {
 		}
 	}
 	o.applied = remaining
-	o.rebuildAggregates()
+	o.rebuildAggregates(false)
 }
 
 // removeBatchWithDescendants removes the specified TXs from the applied list,
@@ -494,7 +515,7 @@ func (o *utxoOverlay) removeBatchWithDescendants(
 		}
 	}
 
-	o.rebuildAggregates()
+	o.rebuildAggregates(true)
 	return pruned
 }
 
@@ -546,7 +567,7 @@ func (o *utxoOverlay) simulateRemoveBatch(
 			remaining = newRemaining
 		}
 	}
-	return aggregateApplied(remaining)
+	return aggregateApplied(remaining, o.accounts)
 }
 
 // ErrNilValidator is returned by runtime mempool operations that require
@@ -1646,7 +1667,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			evictedEvents = m.evictOldestLocked(targetBytes)
 		}
 		txCbor := slices.Clone(txBytes)
-		m.overlay.applyTx(txHash, txType, tmpTx)
+		m.overlay.applyTx(txHash, txType, tmpTx, txCbor)
 		added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
 		if m.dag != nil {
 			applied := m.overlay.applied[len(m.overlay.applied)-1]

@@ -1563,10 +1563,16 @@ transactions that change ledger state beyond UTxOs: reward withdrawals,
 certificates, direct deposits and governance proposals. The overlay layers
 them over the ledger view with gouroboros `BlockLedgerState`, so a transaction
 is checked against the balances, registrations and deposits those leave rather
-than the stored ones. The overlay stores the transactions, not a folded state,
-because the pool removes and evicts arbitrary members and rebuilds from the
-survivors. A UTxO-only transaction is not stored. A stored transaction keeps
-its decoded form, which is not counted by the pool's byte counter.
+than the stored ones. The overlay folds each recorded transaction once, on the
+next validation, so a pool of k such transactions costs k applications in total
+and a pool rebuild costs k, not k per validation. The folded state tracks no
+UTxOs: spent and created outputs come from the UTxO overlay, which covers every
+pending transaction. The pool records a state-changing transaction as its own
+retained CBOR slice, shared with the pool entry and counted once by the pool's
+byte counter; the transaction is decoded only while it is folded. The overlay
+cannot drop a transaction, so a removal rebuilds it from the survivors, except
+that removing transactions with no state effects keeps the folded state. A
+UTxO-only transaction is not recorded.
 
 ### Ouroboros Dependency Wiring
 

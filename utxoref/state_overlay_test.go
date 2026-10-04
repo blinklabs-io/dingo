@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/utxoref"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
@@ -151,4 +152,65 @@ func TestStateOverlayViewAppliesTransactionsInOrder(t *testing.T) {
 	view, err = reversed.View(base, nil)
 	require.NoError(t, err)
 	require.True(t, view.IsStakeCredentialRegistered(overlayCredential))
+}
+
+func TestStateOverlayViewCarriesGovernanceAndPoolEffects(t *testing.T) {
+	t.Parallel()
+	base := mockledger.NewLedgerStateBuilder().Build()
+	drepCred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xd2},
+	}
+	operator := lcommon.PoolKeyHash{0x0a}
+	vrfKey := lcommon.Blake2b256{0x0b}
+	proposer := lcommon.Address{}
+	proposalTx := overlayTx(0x21).WithProposalProcedures(
+		&conway.ConwayProposalProcedure{
+			PPDeposit:       1,
+			PPRewardAccount: proposer,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeInfo),
+				Action: &lcommon.InfoGovAction{},
+			},
+		},
+	)
+	drepTx := overlayTx(0x22).WithCertificates(
+		&lcommon.RegistrationDrepCertificate{
+			CertType:       uint(lcommon.CertificateTypeRegistrationDrep),
+			DrepCredential: drepCred,
+			Amount:         5,
+		},
+	)
+	poolTx := overlayTx(0x23).WithCertificates(
+		&lcommon.PoolRegistrationCertificate{
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   operator,
+			VrfKeyHash: vrfKey,
+		},
+	)
+
+	overlay := utxoref.NewStateOverlay()
+	require.False(t, base.GovActionExists(lcommon.GovActionId{
+		TransactionId: proposalTx.Hash(),
+	}))
+	require.False(t, base.IsPoolRegistered(operator))
+	for _, tx := range []lcommon.Transaction{proposalTx, drepTx, poolTx} {
+		overlay.Apply(tx)
+	}
+	require.Equal(t, 3, overlay.Len())
+
+	view, err := overlay.View(base, nil)
+	require.NoError(t, err)
+	require.True(t, view.GovActionExists(lcommon.GovActionId{
+		TransactionId: proposalTx.Hash(),
+		GovActionIdx:  0,
+	}), "a pending proposal is visible to a later transaction")
+	reg, err := view.DRepRegistration(drepCred)
+	require.NoError(t, err)
+	require.NotNil(t, reg, "a pending DRep registration is visible")
+	require.True(t, view.IsPoolRegistered(operator))
+	inUse, owner, err := view.IsVrfKeyInUse(vrfKey)
+	require.NoError(t, err)
+	require.True(t, inUse)
+	require.Equal(t, operator, owner)
 }

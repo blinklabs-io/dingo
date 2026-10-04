@@ -68,6 +68,20 @@ func withdrawalTxCbor(
 // balance, seen through whatever the pending-state overlay has applied.
 type balanceValidator struct {
 	balance atomic.Uint64
+	// reads counts reward balance reads against the stored state.
+	reads atomic.Int64
+}
+
+type countingLedger struct {
+	lcommon.LedgerState
+	reads *atomic.Int64
+}
+
+func (l countingLedger) RewardAccountBalance(
+	cred lcommon.Credential,
+) (*uint64, error) {
+	l.reads.Add(1)
+	return l.LedgerState.RewardAccountBalance(cred)
 }
 
 func (v *balanceValidator) ValidateTx(tx gledger.Transaction) error {
@@ -82,9 +96,12 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 ) error {
 	var stakeKey lcommon.Blake2b224
 	copy(stakeKey[:], withdrawalStakeKey)
-	base := mockledger.NewLedgerStateBuilder().
-		WithRewardAccountBalance(stakeKey, v.balance.Load()).
-		Build()
+	base := countingLedger{
+		LedgerState: mockledger.NewLedgerStateBuilder().
+			WithRewardAccountBalance(stakeKey, v.balance.Load()).
+			Build(),
+		reads: &v.reads,
+	}
 	state, err := pending.View(base, nil)
 	if err != nil {
 		return err
@@ -200,4 +217,75 @@ func TestRevalidationAccountsForPendingWithdrawals(t *testing.T) {
 			)
 		})
 	}
+}
+
+func TestPendingStateWorkGrowsLinearlyWithPoolSize(t *testing.T) {
+	t.Parallel()
+	const count = 40
+	pool, validator := newWithdrawalPool(t, ImplementationFIFO, 100)
+	for i := range count {
+		amount := uint64(0)
+		if i == 0 {
+			amount = 100
+		}
+		require.NoError(
+			t,
+			pool.AddTransaction(
+				uint(conway.EraIdConway),
+				withdrawalTxCbor(t, byte(i+1), withdrawalStakeKey, amount),
+			),
+		)
+	}
+	// Each validation folds the one transaction admitted since the last and
+	// reads a constant number of balances; replaying the whole pool each time
+	// would read about count*count/2.
+	const perValidation = 6
+	require.LessOrEqual(
+		t,
+		validator.reads.Load(),
+		int64(count*perValidation),
+		"admission re-applied pending transactions it had already folded",
+	)
+
+	validator.reads.Store(0)
+	require.NoError(t, pool.rebuildOverlay())
+	require.LessOrEqual(
+		t,
+		validator.reads.Load(),
+		int64(count*perValidation),
+		"revalidation work must grow linearly with the pool",
+	)
+}
+
+func TestRemovalKeepsStateOverlayUnlessStatefulTxDropped(t *testing.T) {
+	t.Parallel()
+	pool, _ := newWithdrawalPool(t, ImplementationFIFO, 100)
+	utxoOnly, _, utxoOnlyHash, _ := getDependentTestTxBytes(t)
+	require.NoError(
+		t,
+		pool.AddTransaction(uint(conway.EraIdConway), utxoOnly),
+	)
+	stateful := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100)
+	require.NoError(
+		t,
+		pool.AddTransaction(uint(conway.EraIdConway), stateful),
+	)
+	statefulTx, err := gledger.NewTransactionFromCbor(
+		uint(conway.EraIdConway),
+		stateful,
+	)
+	require.NoError(t, err)
+	before := pool.overlay.accounts
+
+	pool.RemoveTransaction(utxoOnlyHash)
+	require.Same(
+		t,
+		before,
+		pool.overlay.accounts,
+		"dropping a transaction with no state effects must keep the folded state",
+	)
+
+	pool.RemoveTransaction(statefulTx.Hash().String())
+	require.NotSame(t, before, pool.overlay.accounts)
+	require.Zero(t, pool.overlay.accounts.Len())
 }

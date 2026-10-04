@@ -38,7 +38,7 @@ func pendingFixture(
 	require.NoError(t, err)
 	hash := tx.Hash().String()
 	overlay := newUtxoOverlay()
-	overlay.applyTx(hash, uint(conway.EraIdConway), tx)
+	overlay.applyTx(hash, uint(conway.EraIdConway), tx, txBytes)
 	return overlay.applied[0], &MempoolTransaction{
 		Hash: hash,
 		Type: uint(conway.EraIdConway),
@@ -118,13 +118,13 @@ func TestPendingUtxoOnlyTransactionRetainsNoDecodedForm(t *testing.T) {
 	t.Parallel()
 	parentBytes, _, _, _ := getDependentTestTxBytes(t)
 	at, _ := pendingFixture(t, parentBytes)
-	require.Nil(t, at.stateTx)
+	require.Nil(t, at.stateCbor)
 
 	withdrawal, _ := pendingFixture(
 		t,
 		withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 1),
 	)
-	require.NotNil(t, withdrawal.stateTx)
+	require.NotNil(t, withdrawal.stateCbor)
 }
 
 func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
@@ -218,15 +218,28 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 
 	// Overlay entries must not carry a raw copy of the transaction bytes,
 	// which currentSizeBytes would not count. A transaction that changes
-	// account state is the one exception: it keeps its decoded form so the
-	// state overlay can be rebuilt (see TestPendingUtxoOnlyTransactionRetainsNoDecodedForm).
+	// account state keeps the pool entry's own slice so the state overlay can
+	// be rebuilt; that slice must alias the pool's, not duplicate it.
 	appliedType := reflect.TypeFor[appliedTx]()
 	for field := range appliedType.Fields() {
 		kind := field.Type.Kind()
 		isBytes := kind == reflect.String ||
 			(kind == reflect.Slice && field.Type.Elem().Kind() == reflect.Uint8)
-		if field.Name != "hash" {
+		if field.Name != "hash" && field.Name != "stateCbor" {
 			require.Falsef(t, isBytes, "appliedTx.%s retains raw bytes", field.Name)
 		}
+	}
+	pool.RLock()
+	defer pool.RUnlock()
+	for _, at := range pool.overlay.applied {
+		require.NotEmpty(t, at.stateCbor)
+		tx := pool.txByHash[at.hash]
+		require.NotNil(t, tx)
+		require.Same(
+			t,
+			&tx.Cbor[0],
+			&at.stateCbor[0],
+			"stateCbor must share the pool entry's bytes",
+		)
 	}
 }

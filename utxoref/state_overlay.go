@@ -16,7 +16,9 @@ package utxoref
 
 import (
 	"fmt"
+	"sync"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -26,14 +28,41 @@ import (
 // proposals. View folds them into a lcommon.BlockLedgerState, so a later
 // transaction is validated against the state its predecessors leave.
 //
-// It stores the transactions rather than a folded state because the mempool
-// removes and evicts arbitrary members and rebuilds from the survivors, and a
-// BlockLedgerState cannot undo a transaction. A transaction that changes only
-// UTxOs is not stored; the consumed and created maps carry it.
+// The fold is incremental: View applies only the transactions recorded since
+// the previous View, so a pool of k transactions costs k applications in
+// total rather than k per validation. The folded state reads from whichever
+// base the latest View received, which is sound because a base change (a new
+// block) rebuilds the overlay from scratch. A transaction recorded with
+// ApplyEncoded is held only as the caller's CBOR slice and is decoded when
+// folded, so the overlay retains no decoded transaction and adds no bytes the
+// caller does not already count.
+//
+// The folded state does not model UTxOs: the mempool's consumed and created
+// maps already cover every pending transaction, and a second copy that
+// answered UtxoById would let an output a stored transaction created resolve
+// after an unstored one spent it. A transaction that changes only UTxOs is
+// not recorded.
+//
+// An overlay cannot drop a transaction; the mempool builds a new overlay from
+// the survivors instead. View must not run concurrently with another View on
+// the same overlay, and the returned state is valid only until the next View.
 //
 // A nil overlay holds no transactions.
 type StateOverlay struct {
-	txs []lcommon.Transaction
+	mu      sync.Mutex
+	entries []stateEntry
+	// folded counts the entries applied to state.
+	folded int
+	state  *lcommon.BlockLedgerState
+	base   *swappableState
+}
+
+type stateEntry struct {
+	txType uint
+	cbor   []byte
+	// tx is set only for entries recorded decoded, which are short-lived
+	// block-building overlays.
+	tx lcommon.Transaction
 }
 
 // NewStateOverlay returns an empty overlay.
@@ -74,11 +103,24 @@ func ChangesState(tx lcommon.Transaction) bool {
 }
 
 // Apply records tx after it is accepted. A transaction that changes no
-// state beyond the UTxO set is ignored.
+// state beyond the UTxO set is ignored. The overlay keeps the decoded
+// transaction, so use ApplyEncoded for anything long-lived.
 func (o *StateOverlay) Apply(tx lcommon.Transaction) {
-	if ChangesState(tx) {
-		o.txs = append(o.txs, tx)
+	if !ChangesState(tx) {
+		return
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.entries = append(o.entries, stateEntry{tx: tx})
+}
+
+// ApplyEncoded records a transaction for which ChangesState is true, given
+// as the CBOR the caller already retains. The overlay keeps the slice itself,
+// not a copy, so the caller must not modify it and must not count it twice.
+func (o *StateOverlay) ApplyEncoded(txType uint, cbor []byte) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.entries = append(o.entries, stateEntry{txType: txType, cbor: cbor})
 }
 
 // Len returns the number of recorded transactions.
@@ -86,28 +128,98 @@ func (o *StateOverlay) Len() int {
 	if o == nil {
 		return 0
 	}
-	return len(o.txs)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.entries)
 }
 
 // View returns base with the recorded transactions applied. With nothing
 // recorded it returns base unchanged. pp supplies the key deposit that a
 // pre-Conway stake registration certificate records.
+//
+// A failure to decode or apply a recorded transaction fails the View, and
+// the next View refolds from the first transaction.
 func (o *StateOverlay) View(
 	base lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (lcommon.LedgerState, error) {
-	if o == nil || len(o.txs) == 0 {
+	if o == nil {
 		return base, nil
 	}
-	view := lcommon.NewBlockLedgerState(base)
-	for _, tx := range o.txs {
-		if err := view.ApplyTransaction(tx, pp); err != nil {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.entries) == 0 {
+		return base, nil
+	}
+	if o.state == nil {
+		o.base = &swappableState{}
+		o.state = lcommon.NewBlockLedgerState(o.base)
+		o.folded = 0
+	}
+	o.base.LedgerState = base
+	for o.folded < len(o.entries) {
+		entry := o.entries[o.folded]
+		tx := entry.tx
+		if tx == nil {
+			var err error
+			tx, err = safedecode.Transaction(entry.txType, entry.cbor)
+			if err != nil {
+				o.state = nil
+				return nil, fmt.Errorf("decode pending transaction: %w", err)
+			}
+		}
+		if err := o.state.ApplyTransaction(effectsOnly(tx), pp); err != nil {
+			// A failed application can leave the transaction half applied.
+			o.state = nil
 			return nil, fmt.Errorf(
 				"apply pending transaction %s: %w",
 				tx.Hash(),
 				err,
 			)
 		}
+		o.folded++
 	}
-	return view, nil
+	return o.state, nil
+}
+
+// swappableState is the base of the folded state. The overlay outlives the
+// LedgerState it validates against, so each View points it at the current
+// one. UnwrapLedgerState lets capability lookups reach that state.
+type swappableState struct {
+	lcommon.LedgerState
+}
+
+func (s *swappableState) UnwrapLedgerState() lcommon.LedgerState {
+	return s.LedgerState
+}
+
+// effectsOnlyTx hides a transaction's UTxO effects from BlockLedgerState, so
+// that UtxoById resolves only through the base and the caller's own maps.
+type effectsOnlyTx struct {
+	lcommon.Transaction
+}
+
+func (effectsOnlyTx) Consumed() []lcommon.TransactionInput { return nil }
+
+func (effectsOnlyTx) Produced() []lcommon.Utxo { return nil }
+
+// leveledEffectsOnlyTx keeps the staged effects of a LeveledTransaction.
+type leveledEffectsOnlyTx struct {
+	effectsOnlyTx
+	leveled lcommon.LeveledTransaction
+}
+
+func (t leveledEffectsOnlyTx) LedgerEffectLevels() (
+	[]lcommon.LedgerEffectLevel,
+	error,
+) {
+	return t.leveled.LedgerEffectLevels()
+}
+
+func effectsOnly(tx lcommon.Transaction) lcommon.Transaction {
+	stripped := effectsOnlyTx{Transaction: tx}
+	if leveled, ok := tx.(lcommon.LeveledTransaction); ok {
+		return leveledEffectsOnlyTx{effectsOnlyTx: stripped, leveled: leveled}
+	}
+	return stripped
 }
