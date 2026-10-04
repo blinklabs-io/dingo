@@ -770,15 +770,11 @@ type LedgerStateConfig struct {
 	// effect only in Dijkstra and later. Enable a nonzero value only on a
 	// network where every node also enables the same value.
 	MinPoolMargin uint
-	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage reward cap. It
-	// is a consensus-affecting feature gate that defaults false; enable it only
-	// on a network where every node also enables it (mainnet and the public
-	// testnets keep it off). Unlike the Musashi-derived toggles above it is set
-	// from operator config in node.go, not derived from the network.
+	// PledgeLeverageEnabled enables the experimental pre-Dijkstra pledge
+	// leverage override. Dijkstra uses the enacted protocol parameter instead.
 	PledgeLeverageEnabled bool
-	// PledgeLeverage is L, the CIP-50 maximum ratio of total stake to pledge,
-	// in the range [1, 10000]. It is used only when PledgeLeverageEnabled is
-	// true.
+	// PledgeLeverage is the experimental pre-Dijkstra L value. It is used only
+	// when PledgeLeverageEnabled is true.
 	PledgeLeverage uint
 	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
 	// entire epoch reward pot is apportioned across pools that earned a base
@@ -1617,7 +1613,7 @@ type LedgerState struct {
 // combine an active flag from one peer with a target from another peer.
 type upstreamSyncState struct {
 	connectionKey string
-	targetSlot    uint64
+	target        ochainsync.Tip
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -1829,7 +1825,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
-	ls.epochCache = ls.epochCache[:len(ls.epochCache):len(ls.epochCache)]
+	ls.epochCache = slices.Clip(ls.epochCache)
 	ls.consensus.Store(&consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
@@ -2328,8 +2324,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 				"failed to rollback ledger: %w",
 				err,
 			)
-			var committedErr *rollbackCommittedError
-			if !errors.As(err, &committedErr) {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
 				return wrappedErr
 			}
 			// The metadata truncate committed even though an in-memory reload
@@ -2544,7 +2539,10 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if pool == nil {
 		return [32]byte{}, false, nil
 	}
-	registeredVrfHash, ok := registeredPoolVrfKeyHash(pool)
+	registeredVrfHash, ok, err := registeredPoolVrfKeyHash(pool)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
 	if !ok {
 		return [32]byte{}, false, nil
 	}
@@ -3682,6 +3680,22 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	}
 }
 
+// withDestructiveDatabaseTransition keeps coordinated API and lifecycle
+// snapshots from opening while a logical rollback deletes primary-chain blobs
+// in one transaction and truncates the metadata they back in a later one.
+// Ordinary writes keep using the commit barrier independently; this scope is
+// only for the cross-transaction destructive boundary.
+func (ls *LedgerState) withDestructiveDatabaseTransition(
+	op func() error,
+) error {
+	if ls.db == nil {
+		return op()
+	}
+	finish := ls.db.BeginDestructiveTransition()
+	defer finish()
+	return op()
+}
+
 // utxoPruningDeferredForCatchup reports whether cleanupConsumedUtxos would
 // defer a run at tipSlot/stabilityWindow right now, mirroring its own two
 // defer conditions above (unknown upstream target, or known but not yet
@@ -4629,6 +4643,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			resolved.Slot,
 			pruneFloor,
 		)
+	}
+	// The prune-floor and Mithril refusals above are reads taken before the
+	// destructive boundary opens, so a refused rollback never blocks a
+	// coordinated snapshot.
+	if ls.db != nil {
+		defer ls.db.BeginDestructiveTransition()()
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
@@ -9732,13 +9752,24 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 	era eras.EraDesc,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	if era.DecodePParamsFunc == nil {
+	return ls.loadPersistedProtocolParametersWith(
+		epoch, era, era.DecodePParamsFunc, txn,
+	)
+}
+
+func (ls *LedgerState) loadPersistedProtocolParametersWith(
+	epoch uint64,
+	era eras.EraDesc,
+	decode func([]byte) (lcommon.ProtocolParameters, error),
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if decode == nil {
 		return nil, nil
 	}
 	pparams, err := ls.db.GetPParams(
 		epoch,
 		era.Id,
-		era.DecodePParamsFunc,
+		decode,
 		txn,
 	)
 	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
@@ -10388,11 +10419,17 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.withDestructiveDatabaseTransition(
+			ls.reconcilePrimaryChainTipWithLedgerTipLocked,
+		)
+	})
+}
+
+func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
@@ -11615,6 +11652,14 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
 }
 
+// ForgeTipSnapshot returns the applied tip and its era's security parameter
+// from matching published ledger generations.
+func (ls *LedgerState) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	consensusState, tipState := ls.loadStateSnapshots()
+	return cloneTip(tipState.currentTip),
+		ls.securityParamForEraOrDefault(consensusState.currentEra.Id)
+}
+
 // SlotsBehindHead reports how many slots the applied ledger tip is behind the
 // wall-clock head (0 if at or ahead of it, or if the wall slot is unknown).
 // Unlike IsAtTip it distinguishes "chainsync reached the head" from "the ledger
@@ -11651,6 +11696,20 @@ func (ls *LedgerState) PrimaryChainTip() ochainsync.Tip {
 	return chain.Tip()
 }
 
+// PrimaryChainTipRelation checks point against one locked snapshot of the
+// primary chain and returns that snapshot's tip and block distance.
+func (ls *LedgerState) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	ls.RLock()
+	chain := ls.chain
+	ls.RUnlock()
+	if chain == nil {
+		return ochainsync.Tip{}, 0, false, errors.New("primary chain is nil")
+	}
+	return chain.TipRelation(point)
+}
+
 // PrimaryChainTipSlot returns the slot number of the primary chain tip. This
 // can be ahead of ChainTipSlot() while the ledger pipeline is still replaying
 // blocks into committed metadata state.
@@ -11673,7 +11732,7 @@ func (ls *LedgerState) UpstreamTipSlot() uint64 {
 	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0
 	}
-	return state.targetSlot
+	return state.target.Point.Slot
 }
 
 // UpstreamSyncStatus reports whether a live upstream is selected and its
@@ -11691,7 +11750,26 @@ func (ls *LedgerState) UpstreamSyncStatus() (uint64, bool) {
 	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
 		return 0, true
 	}
-	return state.targetSlot, true
+	return state.target.Point.Slot, true
+}
+
+// UpstreamSyncTip returns the corroborated upstream tip with its block number
+// while preserving the active-connection generation check used by
+// UpstreamSyncStatus.
+func (ls *LedgerState) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	if ls.config.GetActiveConnectionFunc == nil {
+		slot := ls.UpstreamTipSlot()
+		return ochainsync.Tip{Point: ocommon.Point{Slot: slot}}, slot != 0
+	}
+	activeConnId := ls.config.GetActiveConnectionFunc()
+	if activeConnId == nil || !ls.isConnectionLive(*activeConnId) {
+		return ochainsync.Tip{}, false
+	}
+	state := ls.syncUpstreamState.Load()
+	if state == nil || state.connectionKey != connIdKey(*activeConnId) {
+		return ochainsync.Tip{}, true
+	}
+	return cloneTip(state.target), true
 }
 
 func (ls *LedgerState) advanceUpstreamTipSlot(slot uint64) {
@@ -11752,7 +11830,7 @@ func (ls *LedgerState) publishAdmittedUpstreamTarget(e ChainsyncEvent) {
 	}
 	ls.syncUpstreamState.Store(&upstreamSyncState{
 		connectionKey: connIdKey(connId),
-		targetSlot:    e.SyncTarget.Point.Slot,
+		target:        cloneTip(e.SyncTarget),
 	})
 }
 

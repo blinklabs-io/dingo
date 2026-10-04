@@ -146,7 +146,7 @@ The canonical specs are deliberately *not* accelerated: they are what soak
 and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
 someone quietly speeds them up.
 
-## Prerequisites
+## Docker runtime prerequisites
 
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
@@ -160,6 +160,50 @@ someone quietly speeds them up.
   by Compose.
 
 ## Building Dingo
+
+### Apple Container on macOS
+
+`run-tests.sh` optionally uses [Apple Container](https://github.com/apple/container)
+on an Apple silicon Mac with the Apple Container CLI installed and its system running. A host Go installation and host Docker are not required. Docker remains the default runtime:
+
+```bash
+container system start
+./internal/test/devnet/run-tests.sh --runtime container --accelerated
+./internal/test/devnet/run-tests.sh --runtime container --accelerated --conformance
+# Equivalent environment selection; an explicit --runtime flag takes precedence:
+DEVNET_RUNTIME=container ./internal/test/devnet/run-tests.sh --accelerated
+```
+
+This runs Docker Engine and Compose **inside an Apple Container Linux VM**.
+Docker Desktop and a host Docker daemon are not required. The existing Linux
+harness, bridge networking, health checks, named volumes, and disruption tests
+run unchanged inside that VM. Apple Container 1.4.1 is the tested CLI version;
+the runner needs its capability and path-mask options for the nested engine.
+The Docker API listens only on a Unix socket inside the VM.
+
+The VM receives 6 CPUs and 12 GiB of RAM by default. Set
+`DEVNET_CONTAINER_CPUS` and `DEVNET_CONTAINER_MEMORY` before the first run to
+change those allocations. A stopped VM retains its filesystem, including
+images, build caches, and the Go toolchain selected by this repository. It is
+reused for the same checkout and stopped after tests finish. Delete the stopped
+runner with `container delete <runner-name>` to reclaim its disk or change its
+resource allocation. The runner name is printed at startup. Concurrent runs
+against the same checkout are rejected by a lock directory.
+
+The checkout is mounted at the same absolute path inside Linux. Failure
+artifacts default to `.devnet/apple-container/run.XXXXXX` on the Mac and survive
+VM shutdown. `DEVNET_ARTIFACT_DIR` must be inside the checkout. Other file-path
+overrides must also refer to files available inside the VM; arbitrary host
+directories are not mounted. Test configuration environment variables
+(`DEVNET_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, and `MODE`) are forwarded.
+
+`--keep-up` leaves both the network and VM running after success. Use
+`container exec -e COMPOSE_PROJECT_NAME=<project-name> -w <checkout-path> <runner-name> bash internal/test/devnet/stop.sh`
+(using the project name selected for the run and adding `--conformance` if selected) to tear the network down, then
+`container stop <runner-name>` to stop the VM. Run manual queries inside the
+VM with `container exec`; its DevNet ports are not published to macOS.
+
+### Docker
 
 You do not need to `make build` Dingo locally — Compose builds the Dingo
 node images (`dingo-1`/`dingo-2`/`dingo-3`/`dingo-relay` in dingo mode,
@@ -306,7 +350,7 @@ its first parity check.
 ```bash
 ./run-tests.sh                              # dingo mode (default): bring up, run devnet tests, tear down
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
-./run-tests.sh --accelerated                # fast event-driven scenario timeline (see below)
+./run-tests.sh --accelerated                # fast timeline, including Conway governance scenarios
 ./run-tests.sh --accelerated --conformance  # the same timeline against the reference topology
 ./run-tests.sh --leios                      # Dijkstra/Leios producer-to-peer path
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
@@ -346,8 +390,9 @@ than falling back to `testnet.yaml`.
 
 `--accelerated` is the fast path used for scheduled and release
 integration evidence. It brings the network up on the accelerated spec and
-runs one test — `TestAcceleratedScenarioTimeline` — instead of the full
-suite.
+runs `TestAcceleratedScenarioTimeline` and, in all-Dingo mode,
+`TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` instead of the
+full suite.
 
 What makes it fast is not just the shorter slots. The canonical suite
 queries each node's tip by opening a fresh Node-to-Node connection every
@@ -660,6 +705,7 @@ conformance mode:
 | `TestSustainedConsensus` | All nodes stay in agreement across multiple sampling intervals |
 | `TestEpochBoundaryConsensus` | All nodes remain in consensus across at least one epoch boundary (exercises candidate-nonce freeze, lab nonce roll, and new-epoch VRF verification) |
 | `TestAcceleratedScenarioTimeline` | The accelerated scenario timeline: readiness, block and transaction propagation, chain agreement, an epoch transition, a peer interruption with recovery, and a relay restart — all on one shared clock, driven by streamed ChainSync events. Skipped unless `DEVNET_ACCELERATED=1`; see Accelerated scenario timeline above. |
+| `TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` | Moves delegated stake across pools, ratifies and enacts an above-threshold no-confidence action, then checks that its below-threshold committee-update child remains active. Requires the accelerated all-Dingo run and its exposed test keys. |
 
 Reference-conformance scenario
 (`//go:build linux && devnet && devnet_conformance`) runs only with

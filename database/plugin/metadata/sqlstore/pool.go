@@ -2370,20 +2370,40 @@ ORDER BY p.id DESC`,
 				registration.ID,
 			)
 		}
+		operator, err := lcommon.NewBlake2b224Checked(registration.PoolKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations operator (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
+		vrfKeyHash, err := lcommon.NewBlake2b256Checked(registration.VrfKeyHash)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations VRF key hash (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
+		rewardAccount, err := lcommon.NewBlake2b224Checked(
+			registration.RewardAccount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"get pool registrations reward account (id=%d): %w",
+				registration.ID,
+				err,
+			)
+		}
 		certificate := lcommon.PoolRegistrationCertificate{
-			CertType: uint(lcommon.CertificateTypePoolRegistration),
-			Operator: lcommon.PoolKeyHash(
-				lcommon.NewBlake2b224(registration.PoolKeyHash),
-			),
-			VrfKeyHash: lcommon.VrfKeyHash(
-				lcommon.NewBlake2b256(registration.VrfKeyHash),
-			),
-			Pledge: uint64(registration.Pledge),
-			Cost:   uint64(registration.Cost),
-			Margin: lcommon.GenesisRat{Rat: registration.Margin.Rat},
-			RewardAccount: lcommon.AddrKeyHash(
-				lcommon.NewBlake2b224(registration.RewardAccount),
-			),
+			CertType:      uint(lcommon.CertificateTypePoolRegistration),
+			Operator:      lcommon.PoolKeyHash(operator),
+			VrfKeyHash:    lcommon.VrfKeyHash(vrfKeyHash),
+			Pledge:        uint64(registration.Pledge),
+			Cost:          uint64(registration.Cost),
+			Margin:        lcommon.GenesisRat{Rat: registration.Margin.Rat},
+			RewardAccount: lcommon.AddrKeyHash(rewardAccount),
 		}
 		if len(registration.LeiosKeyPublic) > 0 {
 			certificate.LeiosKey = &lcommon.LeiosKey{
@@ -2392,9 +2412,18 @@ ORDER BY p.id DESC`,
 			}
 		}
 		for _, owner := range registration.Owners {
+			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"get pool registrations owner key hash (registration id=%d, owner id=%d): %w",
+					registration.ID,
+					owner.ID,
+					err,
+				)
+			}
 			certificate.PoolOwners = append(
 				certificate.PoolOwners,
-				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+				lcommon.AddrKeyHash(ownerKeyHash),
 			)
 		}
 		for _, relay := range registration.Relays {

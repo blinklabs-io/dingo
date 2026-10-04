@@ -310,7 +310,7 @@ func (h *peerHeaderHistoryCandidateHeap) Pop() any {
 	old := *h
 	last := len(old) - 1
 	candidate := old[last]
-	old[last] = nil
+	clear(old[last:])
 	candidate.index = -1
 	*h = old[:last]
 	return candidate
@@ -1758,10 +1758,8 @@ func (ls *LedgerState) makePeerHeaderHistoryRoom(
 	recordBytes int,
 	protectedKey string,
 ) bool {
-	var (
-		evictable peerHeaderHistoryCandidateHeap
-		retirable peerHeaderHistoryCandidateHeap
-	)
+	evictable := make(peerHeaderHistoryCandidateHeap, 0)
+	retirable := make(peerHeaderHistoryCandidateHeap, 0)
 	retirableByKey := make(
 		map[string]*peerHeaderHistoryCandidate,
 		len(ls.peerHeaderHistory),
@@ -4528,12 +4526,13 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 	// this entire group of checks.
 	if !ls.slotCoveredByMithril(e.Point.Slot) {
 		var verifyErr error
-		// Chainsync may already have verified the queued header before
-		// blockfetch started. When the fetched block matches that first
-		// verified queued header by point, a second verification is
-		// redundant. Chain insertion still checks that the block matches the
-		// queued header hash before accepting it.
-		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+		// Chainsync may already have verified this block's queued header.
+		// Fetched blocks wait in pendingBlockfetchEvents before insertion, so
+		// that header is usually behind the queue head; match it by point
+		// anywhere in the queue. The block hash is the hash of the header
+		// bytes, so a match means the same header, and chain insertion still
+		// checks the block against the queue head before accepting it.
+		headerAlreadyVerified := ls.chain.QueuedVerifiedHeaderMatchesPoint(
 			e.Point,
 		)
 		if !headerAlreadyVerified &&
@@ -4541,7 +4540,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			if err := ls.flushPendingBlockfetchBlocksDeferred(pubs); err != nil {
 				return err
 			}
-			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+			headerAlreadyVerified = ls.chain.QueuedVerifiedHeaderMatchesPoint(
 				e.Point,
 			)
 		}
@@ -7309,6 +7308,16 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
+	// applyEpochDonations credits these after governance; RATIFY still
+	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
+	pendingDonations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		currentEpoch.EpochId, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"sum donations for epoch %d: %w", currentEpoch.EpochId, err,
+		)
+	}
 	var govOut *governance.EpochOutput
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "governance", func() error {
@@ -7328,6 +7337,7 @@ func (ls *LedgerState) processEpochRollover(
 				CurrentBoundarySPOState:  currentBoundarySPOState,
 				DeferRatification:        true,
 				BoundarySPOStateDeferred: snapDeferred,
+				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
 		},
@@ -7386,9 +7396,9 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
-	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
-	// withdrawal is checked against the pre-donation treasury and the donation
-	// is reflected for subsequent epochs' accounting.
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
+	// enacted withdrawal is checked against the pre-donation treasury, while
+	// the RATIFY pass already counted them through PendingTreasuryDonations.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "donations", func() error {
 			return ls.applyEpochDonations(

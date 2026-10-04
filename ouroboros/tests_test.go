@@ -655,8 +655,11 @@ func testDijkstraAnnouncementHeaderRawFor(
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
+	// A Dijkstra header body has exactly 12 fields; the last two are
+	// leios_certified and eb_references_announcement, so replace them.
+	require.Len(t, headerBody, 12)
 	headerBody = append(
-		headerBody,
+		headerBody[:10],
 		mustCbor(t, false),
 		mustCbor(t, []any{ebHash.Bytes(), ebSize}),
 	)
