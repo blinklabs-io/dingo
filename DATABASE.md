@@ -2569,9 +2569,27 @@ transactions and the leader-election stake snapshot treat inputs the endorser
 block should have produced as missing (the `utxo not found` repair loop and the
 `pool has no stake in epoch snapshot` header rejection). Positive
 donations from valid endorser transactions are accumulated in `network_donation`
-under the ranking block's slot/epoch so the treasury update at the epoch boundary
-matches the CIP path. Replayed endorser transactions (hashes already present) are
+under the ranking block's slot, using the epoch in which the closure executes.
+Replayed endorser transactions (hashes already present) are
 skipped so certificate, governance, and UTxO effects are not applied twice.
+
+On the Musashi prototype path, a certified closure executes on the parent's
+unticked ledger before the certifying ranking block's epoch transition. A closure
+crossing that boundary therefore contributes to the ended epoch's fees and the
+new mark snapshot. `leios_transaction_context` records its transactions' parent
+ledger slot separately from the certifying block's physical slot. Fee sums,
+historical stake and reward reconstruction, pool lifecycle cuts, and key-age
+snapshot reads use that execution context; transaction and effect rows retain
+their physical slots so rollback removes them with the certifier. The context
+rows cascade with their owning transactions. The ordinary ranking body and the
+CIP path have no context override.
+
+Closure effects and the epoch rollover commit together. Transaction Apply events
+wait for the certifying block's commit, survive a failed body retry, and are
+discarded when rollback removes the unpublished closure. Even a rollback to the
+unchanged parent tip must remove those pending effects. The migration does not
+reconstruct contexts or reward rounds previously computed with the old ordering;
+affected historical state requires replay from before its first affected boundary.
 On the forward/CIP path, decode/build failures are ignored before storage is
 touched; once the blob or transaction rows start writing, the caller aborts the
 enclosing block transaction rather than committing a partial endorser-block

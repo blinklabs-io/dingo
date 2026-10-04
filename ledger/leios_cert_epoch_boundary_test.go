@@ -24,7 +24,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -33,6 +35,7 @@ import (
 	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -109,15 +112,20 @@ func TestLedgerProcessBlocksDefersLeiosCertificateCheckPastEpochBoundary(
 
 	t.Run("same era", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, false)
+		runLeiosCertEpochBoundaryCase(t, false, false)
 	})
 	t.Run("hard fork", func(t *testing.T) {
 		t.Parallel()
-		runLeiosCertEpochBoundaryCase(t, true)
+		runLeiosCertEpochBoundaryCase(t, true, false)
 	})
 }
 
-func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
+func TestLedgerProcessBlocksAppliesCertifiedClosureBeforeEpochSnapshot(t *testing.T) {
+	t.Parallel()
+	runLeiosCertEpochBoundaryCase(t, false, true)
+}
+
+func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool, crossingClosure bool) {
 	t.Helper()
 	const epochLength = 1_000
 	ebHash := leiosTestHash(0xE4)
@@ -126,15 +134,19 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 	// the batch opens at the boundary instead.
 	var blocks []gledger.Block
 	var prevHash lcommon.Blake2b256
-	if !hardFork {
+	if !hardFork && !crossingClosure {
 		last := leiosBoundaryTestBlock(
 			t, 0, epochLength-10, lcommon.Blake2b256{}, false, nil,
 		)
 		blocks = append(blocks, last)
 		prevHash = last.Hash()
 	}
+	announceSlot := uint64(epochLength + 10)
+	if crossingClosure {
+		announceSlot = epochLength - 10
+	}
 	announcer := leiosBoundaryTestBlock(
-		t, uint64(len(blocks)), epochLength+10, prevHash, false, ebHash,
+		t, uint64(len(blocks)), announceSlot, prevHash, false, ebHash,
 	)
 	certifier := leiosBoundaryTestBlock(
 		t, uint64(len(blocks))+1, epochLength+20, announcer.Hash(), true, nil,
@@ -193,6 +205,11 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 		validatedMu     sync.Mutex
 		validatedEpochs []uint64
 	)
+	var closureRaw cbor.RawMessage
+	var closureTx lcommon.Transaction
+	if crossingClosure {
+		closureRaw, closureTx = leiosApplyTestProducerTx(t, 0xA1)
+	}
 	nodeConfig := newTestShelleyGenesisCfg(t)
 	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
 	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
@@ -208,6 +225,9 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 			hash []byte,
 			_ uint64,
 		) ([]cbor.RawMessage, bool) {
+			if crossingClosure {
+				return []cbor.RawMessage{closureRaw}, bytes.Equal(hash, ebHash)
+			}
 			return []cbor.RawMessage{}, bytes.Equal(hash, ebHash)
 		},
 		ValidateLeiosCertificate: func(
@@ -232,6 +252,17 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 	ls.currentTipBlockNonce = nonce
 	ls.publishSnapshotsLocked()
 	require.NoError(t, cm.SetLedger(ls))
+	var closureVisibleAtSnap bool
+	if crossingClosure {
+		ls.SetEpochBoundarySnapshotStakeHook(func(txn *database.Txn, _ event.EpochTransitionEvent) error {
+			tx, err := db.GetTransactionByHash(closureTx.Hash().Bytes(), txn)
+			if err != nil {
+				return err
+			}
+			closureVisibleAtSnap = tx != nil
+			return nil
+		})
+	}
 
 	results := make(chan readChainResult, 1)
 	results <- readChainResult{blocks: blocks}
@@ -246,9 +277,31 @@ func runLeiosCertEpochBoundaryCase(t *testing.T, hardFork bool) {
 	require.Equal(t, certifier.SlotNumber(), ls.currentTip.Point.Slot)
 	validatedMu.Lock()
 	defer validatedMu.Unlock()
+	expectedEpochs := []uint64{1, 1}
+	if crossingClosure {
+		require.True(t, closureVisibleAtSnap, "the certified closure must be applied to the unticked ledger before SNAP")
+		fees, err := db.Metadata().SumTransactionFeesInSlotRange(0, epochLength-1, nil)
+		require.NoError(t, err)
+		require.Equal(t, closureTx.Fee().Uint64(), fees)
+		fees, err = db.Metadata().SumTransactionFeesInSlotRange(epochLength, 2*epochLength-1, nil)
+		require.NoError(t, err)
+		require.Zero(t, fees)
+		storedTx, err := db.GetTransactionByHash(closureTx.Hash().Bytes(), nil)
+		require.NoError(t, err)
+		require.Equal(t, certifier.SlotNumber(), storedTx.Slot, "rollback ownership remains with the certifying ranking block")
+		_, _, err = db.TruncateAfterSlot(ocommon.Point{Slot: announcer.SlotNumber(), Hash: announcer.Hash().Bytes()}, 0, nil)
+		require.NoError(t, err)
+		storedTx, err = db.GetTransactionByHash(closureTx.Hash().Bytes(), nil)
+		require.NoError(t, err)
+		require.Nil(t, storedTx, "rolling back the certifier removes its pre-tick closure")
+		fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, epochLength-1, nil)
+		require.NoError(t, err)
+		require.Zero(t, fees, "rollback removes the closure's fee context")
+		expectedEpochs = []uint64{0, 0, 0, 0}
+	}
 	require.Equal(
 		t,
-		[]uint64{1, 1},
+		expectedEpochs,
 		validatedEpochs,
 		"the pre-check and the apply must each validate the certificate "+
 			"against the epoch of its endorser block",

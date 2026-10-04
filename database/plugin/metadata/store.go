@@ -1065,6 +1065,10 @@ type TransactionStore interface {
 		types.Txn,
 	) error
 
+	// SetTransactionLeiosClosureInContext applies a closure using the parent's
+	// unticked slot while retaining point as its rollback owner.
+	SetTransactionLeiosClosureInContext(lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool, uint64, types.Txn) error
+
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
 	NewBatchAccumulator() types.MetadataBatchAccumulator

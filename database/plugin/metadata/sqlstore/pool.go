@@ -158,6 +158,7 @@ func poolRegistrationDepositHeld(
 	poolID int64,
 	at poolCertPosition,
 	charged *uint64,
+	executionSlot uint64,
 ) (*uint64, error) {
 	previous, found, err := latestPoolRegistrationBefore(ctx, db, poolID, at)
 	if err != nil {
@@ -182,7 +183,7 @@ func poolRegistrationDepositHeld(
 		// says the pool is gone.
 		return previous.held, nil
 	}
-	epoch, resolved, err := epochAtSlot(ctx, db, at.slot)
+	epoch, resolved, err := epochAtSlot(ctx, db, executionSlot)
 	if err != nil {
 		return nil, err
 	}
@@ -1494,7 +1495,7 @@ WITH reg_ranked AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
@@ -1511,7 +1512,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
 )
 SELECT p.pool_key_hash
 FROM pool p
@@ -1765,7 +1766,7 @@ WITH latest_reg AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
@@ -1782,7 +1783,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot <= ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) <= ?
 )
 SELECT p.pool_key_hash
 FROM pool p
@@ -2069,12 +2070,12 @@ WITH ranked AS (
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
     WHERE pr.pool_key_hash IN (`+
-			bindPlaceholders(end-start)+`) AND pr.added_slot <= ?
+			bindPlaceholders(end-start)+`) AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 )
 SELECT pr.margin, pr.metadata_url, pr.vrf_key_hash, pr.pool_key_hash,
        pr.reward_account, pr.reward_account_credential_tag, pr.metadata_hash,
        pr.pledge, pr.cost, pr.certificate_id, pr.id, pr.pool_id,
-       pr.added_slot, pr.deposit_amount, pr.leios_key_public,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot), pr.deposit_amount, pr.leios_key_public,
        pr.leios_key_possession_proof,
        pr.leios_key_registration_age_unknown,
        pr.leios_key_registration_epoch
@@ -2155,7 +2156,7 @@ WITH events AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE registration.pool_key_hash IN (`+
 			bindPlaceholders(len(hashes))+`)
-      AND registration.added_slot < ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) < ?
     UNION ALL
     SELECT retirement.pool_key_hash, 0, 1, retirement.added_slot,
            COALESCE(tx.block_index, 0),
@@ -2165,7 +2166,7 @@ WITH events AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE retirement.pool_key_hash IN (`+
 			bindPlaceholders(len(hashes))+`)
-      AND retirement.added_slot < ? AND retirement.epoch <= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = retirement.certificate_id), retirement.added_slot) < ? AND retirement.epoch <= ?
 ),
 ranked AS (
     SELECT pool_key_hash, registration_id, is_retirement,
@@ -2244,8 +2245,8 @@ WITH ranked AS (
     LEFT JOIN "transaction" tx ON tx.id = certs.transaction_id
     WHERE registration.pool_key_hash IN (`+
 			bindPlaceholders(end-start)+`)
-      AND registration.added_slot >= ?
-      AND registration.added_slot <= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) >= ?
+      AND COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = registration.certificate_id), registration.added_slot) <= ?
 )
 SELECT id FROM ranked WHERE rn = 1`,
 			args...,
@@ -2284,7 +2285,7 @@ SELECT id FROM ranked WHERE rn = 1`,
 		rows, err := db.QueryContext(ctx, `
 SELECT p.margin, p.metadata_url, p.vrf_key_hash, p.pool_key_hash, p.reward_account,
        p.reward_account_credential_tag, p.metadata_hash, p.pledge, p.cost,
-       p.certificate_id, p.id, p.pool_id, p.added_slot, p.deposit_amount,
+       p.certificate_id, p.id, p.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = p.certificate_id), p.added_slot), p.deposit_amount,
        p.leios_key_public, p.leios_key_possession_proof,
        p.leios_key_registration_age_unknown,
        p.leios_key_registration_epoch
@@ -2571,7 +2572,7 @@ WITH latest_reg AS (
     FROM pool_registration pr
     LEFT JOIN certs c ON c.id = pr.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE pr.added_slot < ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) < ?
 ),
 latest_ret AS (
     SELECT rt.pool_id, rt.added_slot, rt.epoch,
@@ -2588,7 +2589,7 @@ latest_ret AS (
     FROM pool_retirement rt
     LEFT JOIN certs c ON c.id = rt.certificate_id
     LEFT JOIN "transaction" t ON t.id = c.transaction_id
-    WHERE rt.added_slot < ?
+    WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = rt.certificate_id), rt.added_slot) < ?
 )
 SELECT p.pool_key_hash, reg.reward_account,
        reg.reward_account_credential_tag, reg.deposit_held

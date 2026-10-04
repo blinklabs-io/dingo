@@ -1191,3 +1191,78 @@ func TestDedupeStakeInputsTieBreaks(t *testing.T) {
 		require.Equal(t, uint64(70), got[0].Stake)
 	})
 }
+
+func TestHistoricalBoundaryStakeIncludesUntickedClosure(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{EpochId: 0, StartSlot: 0, LengthInSlots: 1000}})
+	poolHash := bytes.Repeat([]byte{0x81}, 28)
+	key := bytes.Repeat([]byte{0x82}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{{stakingKey: key, utxoAmounts: []types.Uint64{1_000_000}}}, 900)
+	raw := snapshotSQLDB(t, db)
+	closureHash := bytes.Repeat([]byte{0x83}, 32)
+	rankingHash := bytes.Repeat([]byte{0x84}, 32)
+	for _, hash := range [][]byte{closureHash, rankingHash} {
+		_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, fee, collateral_fee, valid, block_index) VALUES (?, 1020, '200000', '0', TRUE, 0)`, hash)
+		require.NoError(t, err)
+	}
+	_, err := raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, closureHash)
+	require.NoError(t, err)
+	_, err = raw.Exec(`UPDATE utxo SET deleted_slot = 1020, spent_at_tx_id = ? WHERE staking_key = ?`, closureHash, key)
+	require.NoError(t, err)
+	for i, hash := range [][]byte{closureHash, rankingHash} {
+		var id uint
+		require.NoError(t, raw.QueryRow(`SELECT id FROM "transaction" WHERE hash = ?`, hash).Scan(&id))
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TransactionID: &id, TxId: hash, StakingKey: key,
+			AddedSlot: 1020, Amount: types.Uint64(2_000_000 + i*1_000_000),
+		}))
+	}
+	calc := NewCalculator(db)
+	txn := db.Transaction(false)
+	defer txn.Rollback() //nolint:errcheck
+	dist, err := calc.calculateHistoricalBoundaryStakeDistributionInTxn(context.Background(), txn, 999, 1000, 0, 0)
+	require.NoError(t, err)
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	require.Equal(t, uint64(2_000_000), dist.PoolStakes[pool], "SNAP includes closure outputs and spent inputs, before the ranking body's effects")
+	require.Equal(t, uint64(2_000_000), dist.TotalStake)
+	require.Len(t, dist.StakeInputs, 1)
+	require.Equal(t, uint64(2_000_000), uint64(dist.StakeInputs[0].Stake))
+}
+
+func TestUntickedPoolRegistrationUsesContextAtBoundary(t *testing.T) {
+	t.Parallel()
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{{EpochId: 0, StartSlot: 0, LengthInSlots: 1000}})
+	poolHash := bytes.Repeat([]byte{0x91}, 28)
+	seedPoolAndDelegations(t, db, poolHash, nil, 1020)
+	raw := snapshotSQLDB(t, db)
+	hash := bytes.Repeat([]byte{0x92}, 32)
+	_, err := raw.Exec(`INSERT INTO "transaction" (hash, slot, valid, block_index) VALUES (?, 1020, TRUE, 0)`, hash)
+	require.NoError(t, err)
+	_, err = raw.Exec(`INSERT INTO leios_transaction_context (transaction_id, slot) SELECT id, 990 FROM "transaction" WHERE hash = ?`, hash)
+	require.NoError(t, err)
+	result, err := raw.Exec(`INSERT INTO certs (transaction_id, slot, cert_type, cert_index) SELECT id, 1020, 3, 0 FROM "transaction" WHERE hash = ?`, hash)
+	require.NoError(t, err)
+	certificateID, err := result.LastInsertId()
+	require.NoError(t, err)
+	_, err = raw.Exec(`UPDATE pool_registration SET certificate_id = ? WHERE pool_key_hash = ?`, certificateID, poolHash)
+	require.NoError(t, err)
+	keys, err := db.Metadata().GetActivePoolKeyHashesAtSlot(999, nil)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{poolHash}, keys)
+	var pool lcommon.PoolKeyHash
+	copy(pool[:], poolHash)
+	registrations, err := db.Metadata().GetPoolRegistrationsEffectiveForEpoch([]lcommon.PoolKeyHash{pool}, 0, 0, 999, nil)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Equal(t, uint64(990), registrations[0].AddedSlot, "key age resolves in the unticked epoch")
+	registrations, err = db.Metadata().GetPoolRegistrationsAtSlot([]lcommon.PoolKeyHash{pool}, 999, nil)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Equal(t, uint64(990), registrations[0].AddedSlot)
+}

@@ -391,7 +391,12 @@ func (d *Database) SetTransactionWithOpts(
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
 	setTxErr := error(nil)
-	if opts.SkipConsumedInputRecovery {
+	if opts.LedgerContextSlot != nil {
+		if !opts.SkipConsumedInputRecovery {
+			return errors.New("ledger context requires a prototype closure")
+		}
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot, txn.Metadata())
+	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,

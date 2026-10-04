@@ -202,6 +202,7 @@ var schemaVersions = []struct {
 		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
 	},
+	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
