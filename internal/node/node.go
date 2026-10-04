@@ -419,12 +419,14 @@ func Run(
 	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
+	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
 		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"mcp", mcpPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
@@ -655,6 +657,10 @@ func buildDingoConfig(
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIUtxorpc,
 			cfg.Plugins.API.Utxorpc,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIMcp,
+			cfg.Plugins.API.Mcp,
 		),
 		dingo.WithNetwork(cfg.Network),
 		dingo.WithNetworkMagic(cfg.NetworkMagic),

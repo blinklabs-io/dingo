@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
 	"github.com/blinklabs-io/dingo/api/kupo"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -354,6 +355,7 @@ var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIKupo:       "plugins.api.kupo.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
 	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
+	plugin.CapabilityAPIMcp:        "plugins.api.mcp.config",
 }
 
 // validateAPIProviderSecurityPolicy resolves and validates the merged
@@ -408,6 +410,7 @@ func (n *Node) apiPluginSelection(
 			plugin.CapabilityAPIKupo:       0,
 			plugin.CapabilityAPIMesh:       8080,
 			plugin.CapabilityAPIUtxorpc:    9090,
+			plugin.CapabilityAPIMcp:        0,
 		}
 		return selection, defaultPorts[capability], nil
 	}
@@ -1657,6 +1660,35 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		started = append(
 			started,
 			stopPluginCapability(plugin.CapabilityAPIMesh),
+		)
+	}
+
+	mcpSelection, mcpPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMcp,
+	)
+	if err != nil {
+		return err
+	}
+	if mcpPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
+			mcpSelection.Provider, mcpSelection.Config,
+			mcp.ProviderDependencies{
+				Logger:             n.config.logger,
+				Database:           n.db,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("resolve mcp API: %w", err)
+		}
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIMcp),
 		)
 	}
 

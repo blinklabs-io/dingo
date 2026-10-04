@@ -169,9 +169,11 @@ func checkSyncState(
 // repairPendingMithrilRewardState reconciles a legacy bootstrapped database
 // against a certified artifact before node startup. Mithril's catch-up path
 // verifies the existing chain intersection before writing and reconciles the
-// ledger rows in place. If no artifact covers the local tip yet, Sync returns
-// without consuming the durable repair marker and this function keeps the node
-// offline instead of serving inconsistent rewards.
+// ledger rows in place. A local chain tail beyond the artifact is kept for
+// ordinary ledger replay after the selected state passes the stable-anchor
+// check. If no artifact reaches that anchor, the durable repair marker remains
+// and this function keeps the node offline instead of serving inconsistent
+// rewards.
 func repairPendingMithrilRewardState(
 	ctx context.Context,
 	cfg *config.Config,
@@ -213,7 +215,7 @@ func repairPendingMithrilRewardState(
 		return errors.New(
 			"mithril reward-state repair did not reconcile the existing database; " +
 				"the database is preserved and node startup is blocked until a " +
-				"certified snapshot covers its tip",
+				"certified snapshot reaches its existing stable ledger point",
 		)
 	}
 	return nil
@@ -263,7 +265,7 @@ func retryMithrilRewardStateRepair(
 			return err
 		}
 		logger.Warn(
-			"latest certified snapshot does not cover the local tip; "+
+			"latest certified snapshot does not reach the existing stable ledger point; "+
 				"preserving the database and retrying in-place repair",
 			"component", "node",
 			"retry_after", mithrilRewardRepairRetryInterval,
@@ -295,8 +297,7 @@ func mithrilRewardRepairPending(
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
@@ -330,8 +331,7 @@ func checkMithrilInactivityCompat(
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
 		// A commit-timestamp mismatch is recovered downstream in node.Run;
 		// the marker read works on the partially-initialised handle.
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
@@ -363,8 +363,7 @@ func repairDeferredIndexes(
 	}
 	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}
@@ -461,6 +460,9 @@ func resumeBackfill(
 		if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 			return err
 		}
+		if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+			return err
+		}
 		return clearBackfillSyncStatus(db)
 	}
 
@@ -483,6 +485,9 @@ func resumeBackfill(
 	// crash between the two leaves both markers set and the next
 	// startup re-runs the rebuild.
 	if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
+		return err
+	}
+	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
 		return err
 	}
 	if err := clearBackfillSyncStatus(db); err != nil {

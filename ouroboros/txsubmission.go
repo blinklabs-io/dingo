@@ -320,8 +320,7 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		var fullErr *mempool.MempoolFullError
-		if !errors.As(err, &fullErr) {
+		if _, ok := errors.AsType[*mempool.MempoolFullError](err); !ok {
 			return err
 		}
 		retryStreak++

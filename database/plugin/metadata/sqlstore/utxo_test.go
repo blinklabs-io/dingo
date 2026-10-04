@@ -2198,3 +2198,32 @@ func utxoTxIDForGroup(group, index int) []byte {
 	txID[7] = byte(index)
 	return txID
 }
+
+func TestExactAddressOrderingUsesPaymentIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		0,
+		bytes.Repeat([]byte{1}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	pattern, err := models.ExactUtxoAddressPattern(address)
+	require.NoError(t, err)
+	predicate, args, err := utxoOrderingPredicate(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		true,
+	)
+	require.NoError(t, err)
+	plan := queryPlan(
+		t,
+		store.writeDB,
+		"SELECT utxo.id FROM utxo WHERE "+predicate,
+		args...)
+	require.Contains(t, plan, "idx_utxo_payment_key")
+	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
+	require.NotContains(t, plan, "SCAN utxo")
+}

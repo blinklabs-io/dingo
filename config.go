@@ -762,6 +762,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(9090)},
 					},
+					Mcp: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
+					},
 				},
 			},
 		},
@@ -908,6 +912,7 @@ func (c *Config) syncCompatFields() {
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
 		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
+		hostplugin.CapabilityAPIMcp: c.cfg.Plugins.API.Mcp,
 	}
 }
 
@@ -945,6 +950,8 @@ func WithPluginSelection(
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
 			c.cfg.Plugins.API.Utxorpc = selection
+		case hostplugin.CapabilityAPIMcp:
+			c.cfg.Plugins.API.Mcp = selection
 		default:
 			return
 		}

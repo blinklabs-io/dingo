@@ -3469,13 +3469,9 @@ func TestWALCheckpointTruncateIdleConnectionDoesNotBlock(t *testing.T) {
 	})
 }
 
-// TestOpenSharedSQLStoreWALAutocheckpoint pins the raised checkpoint
-// threshold discussed at length in sqliteCommonPragmas' doc comment: a
-// regression back to SQLite's compiled-in default of 1000 pages would
-// silently reintroduce the checkpoint-driven write amplification that
-// change fixed, without failing any functional test, since 1000 is itself a
-// valid, working value.
-func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
+// TestOpenSharedSQLStoreWALPragmas pins the checkpoint threshold and retained
+// WAL limit. Both pragmas are connection-local, so each pool must set them.
+func TestOpenSharedSQLStoreWALPragmas(t *testing.T) {
 	t.Parallel()
 	dataDir := t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
@@ -3494,7 +3490,93 @@ func TestOpenSharedSQLStoreWALAutocheckpoint(t *testing.T) {
 			"PRAGMA wal_autocheckpoint",
 		).Scan(&pages))
 		require.Equalf(t, 10000, pages, "%s wal_autocheckpoint", name)
+
+		var bytes int
+		require.NoError(t, db.QueryRow(
+			"PRAGMA journal_size_limit",
+		).Scan(&bytes))
+		require.Equalf(t, 67108864, bytes, "%s journal_size_limit", name)
 	}
+}
+
+func TestWALResetHonorsJournalSizeLimit(t *testing.T) {
+	t.Parallel()
+	const journalSizeLimit = 64 << 20
+	dataDir := t.TempDir()
+	store, writeDB, _, err := openSQLStore(
+		Config{},
+		metadata.ProviderDependencies{DataDir: dataDir},
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
+
+	ctx := context.Background()
+	conn, err := writeDB.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, conn.Close())
+	})
+	var limit int64
+	require.NoError(
+		t,
+		conn.QueryRowContext(ctx, "PRAGMA journal_size_limit").Scan(&limit),
+	)
+	require.Equal(t, int64(journalSizeLimit), limit)
+	_, err = conn.ExecContext(ctx, "PRAGMA wal_autocheckpoint=0")
+	require.NoError(t, err)
+	_, err = conn.ExecContext(
+		ctx,
+		`CREATE TABLE wal_size_limit (id INTEGER PRIMARY KEY, data BLOB)`,
+	)
+	require.NoError(t, err)
+
+	// One transaction ensures the active WAL grows beyond the limit before a
+	// reset can occur, leaving room for SQLite page and record overhead.
+	blob := bytes.Repeat([]byte{0xA5}, 1<<20)
+	tx, err := conn.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	for range 66 {
+		_, err = tx.ExecContext(
+			ctx,
+			`INSERT INTO wal_size_limit (data) VALUES (?)`,
+			blob,
+		)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+
+	walPath := filepath.Join(dataDir, "metadata.sqlite-wal")
+	walInfo, err := os.Stat(walPath)
+	require.NoError(t, err)
+	require.Greater(t, walInfo.Size(), int64(journalSizeLimit))
+
+	var busy, logFrames, checkpointedFrames int
+	require.NoError(
+		t,
+		conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(RESTART)").Scan(
+			&busy,
+			&logFrames,
+			&checkpointedFrames,
+		),
+	)
+	require.Zero(t, busy)
+	require.Equal(t, logFrames, checkpointedFrames)
+	// RESTART checkpoints and makes the next writer restart the WAL from the
+	// beginning. That subsequent commit performs the reset and applies the
+	// configured journal size limit to the oversized file.
+	_, err = conn.ExecContext(
+		ctx,
+		`INSERT INTO wal_size_limit (data) VALUES (?)`,
+		[]byte("reset"),
+	)
+	require.NoError(t, err)
+
+	walInfo, err = os.Stat(walPath)
+	require.NoError(t, err)
+	require.LessOrEqual(t, walInfo.Size(), int64(journalSizeLimit))
 }
 
 func TestOpenSharedSQLStoreMemoryIsolation(t *testing.T) {
