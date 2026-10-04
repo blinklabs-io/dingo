@@ -25,8 +25,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -484,4 +486,40 @@ func TestNodeStopBoundsPhase1StopsByOneShutdownDeadline(t *testing.T) {
 	// (2s); one shared deadline returns shortly after shutdownTimeout.
 	assert.Less(t, elapsed, wedgedStops/2*shutdownTimeout,
 		"phase 1 stops must share the one shutdown deadline")
+}
+
+// TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose proves a SubscribeFunc
+// handler that never returns cannot hold Node.Stop past its shutdown timeout,
+// and that the stuck handler suppresses the database close it may still be
+// using.
+func TestNodeStopBoundsEventBusCloseAndSkipsDatabaseClose(t *testing.T) {
+	t.Parallel()
+
+	const stuckType event.EventType = "test.shutdown_stuck_handler"
+	bus := event.NewEventBus(nil, nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	bus.SubscribeFunc(stuckType, func(event.Event) {
+		close(entered)
+		<-release
+	})
+	bus.Publish(stuckType, event.NewEvent(stuckType, struct{}{}))
+	testutil.RequireReceive(t, entered, 5*time.Second, "handler never started")
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+
+	n := &Node{db: db, eventBus: bus}
+	n.config = NewConfig(WithShutdownTimeout(50 * time.Millisecond))
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	done := make(chan error, 1)
+	go func() { done <- n.Stop() }()
+	stopErr := testutil.RequireReceive(t, done, 5*time.Second,
+		"Node.Stop did not return while an event handler was blocked")
+
+	require.ErrorIs(t, stopErr, errStorageDrainUnconfirmed)
+	assert.ErrorContains(t, stopErr, string(stuckType))
+	assert.ErrorContains(t, stopErr, "database close skipped")
 }

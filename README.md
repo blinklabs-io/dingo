@@ -59,6 +59,7 @@ environments, and profiling. For basic node setup and usage, follow the
 - [Development](docs/development.md)
 - [Architecture](ARCHITECTURE.md)
 - [Database](DATABASE.md)
+- [MCP integration](docs/mcp/README.md)
 - [Local DevNet](docs/devnet.md)
 - [Benchmarks and profiling](docs/benchmarks.md)
 - [Monitoring dashboards](docs/dashboards/README.md)

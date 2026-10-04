@@ -340,7 +340,7 @@ func TestDAGAdmissionHeadroomWaitsForRemoval(t *testing.T) {
 
 	entered := make(chan struct{})
 	result := make(chan bool, 1)
-	connectionDone := make(chan error)
+	connectionDone := make(chan struct{})
 	go func() {
 		close(entered)
 		result <- pool.WaitForAdmissionHeadroom(1, connectionDone)
