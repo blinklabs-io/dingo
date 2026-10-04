@@ -50,14 +50,17 @@ networking, node-to-node protocol, or end-to-end compatibility with
 | Deterministic consensus | Shared `ouroboros-mock/consensus` captured scenarios | `go test ./ouroboros/ -run TestConsensusConformance` | Final chain choice, within-k and beyond-k behavior, rollback/intersection points, tie-breaking, and downstream ChainSync observations | Live sockets, full block bodies, and cardano-node process behavior |
 | Reference node | DevNet `--conformance` profile | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` in the configured live topology | Not run by the ledger or deterministic consensus profiles |
 
-The deterministic corpus currently contains five scenarios: one origin
-roll-forward smoke test, one within-k fork, one longer fork using `local_tip`,
-one equal-length slot battle, and one beyond-k no-switch case. The tests log
-the exact scenario and ledger coverage counts; a passing ledger profile must
-not be summarized as complete node conformance. The release and Linux CI gates
-run the ledger and deterministic consensus profiles as part of `./...`; the
-reference-node profile is a separate DevNet check and is not represented as
-passing when it was not run.
+The deterministic corpus currently contains seven scenarios: one origin
+roll-forward smoke test, one non-origin intersection, one within-k fork, the
+same fork with the winning peer fed first, one longer fork using `local_tip`
+whose losing fork is denser after the fork point, one equal-length slot battle,
+and one beyond-k no-switch case. The corpus has no generated multi-peer
+schedules (see the Tweag runner below). The tests log the exact scenario and
+ledger coverage counts; a passing ledger profile must not be summarized as
+complete node conformance. The release and Linux CI gates run the ledger and
+deterministic consensus profiles as part of `./...`; the reference-node profile
+is a separate DevNet check and is not represented as passing when it was not
+run.
 
 The consensus replay feeds each peer's captured headers through Dingo's
 ChainSync client handlers into the real chain selector, then asserts the final
@@ -65,9 +68,11 @@ tip, the selector's reported rollback point on fork switches, and the ChainSync
 messages Dingo serves downstream. For the last, the selected peer's headers
 are added to a Dingo chain as header-only blocks (the replay has no block
 bodies, and a node-to-node `RollForward` carries only the header) and a
-node-to-node client syncs that chain from origin through Dingo's ChainSync
-server until it receives `AwaitReply`. Density and multi-peer scheduling
-scenarios are not in the corpus yet.
+node-to-node client syncs that chain through Dingo's ChainSync server until it
+receives `AwaitReply`. The client intersects where the selected peer's trace
+starts: at origin, or at the point of a leading `RollBackward`, in which case a
+stand-in block with that point's slot and hash anchors the chain below the
+first header and is never served.
 
 ### Tweag Node-vs-Environment runner
 
@@ -316,10 +321,10 @@ implementations for the committee-certificate, unknown-voter, Plutus, fee and
 PlutusV1/V2 feature rules; the pre-Alonzo eras replace the upstream fee and
 max-size rules outright).
 
-The pinned `ouroboros-mock v0.20.2` corpus contains 2,574 Blueprint vectors
-and one synthetic rollback fixture. A complete SQLite run therefore reports
-2,575/2,575, 100%, with the breakdown by era and rule family shown in the
-verbose test output.
+The pinned `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c` corpus
+contains 2,574 Blueprint vectors and one synthetic rollback fixture. A complete
+SQLite run therefore reports 2,575/2,575, 100%, with the breakdown by era and
+rule family shown in the verbose test output.
 
 `state_provider_test.go` closes that gap:
 
@@ -423,9 +428,9 @@ access patterns. That needs **one** pass per dialect, not several.
 ## Updating vectors
 
 The vectors themselves are **embedded in `ouroboros-mock`**, not in this repo.
-The current import is `ouroboros-mock v0.20.2`, whose `conformance/CORPUS.md`
-records Blueprint revision `0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive
-SHA-256
+The current import is `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c`,
+whose `conformance/CORPUS.md` records Blueprint revision
+`0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive SHA-256
 `574ff7a17857dfc1f0cf477f7eb9eba1c2a0f901453396a779de4b2392ef6863`, and
 the vector/protocol-parameter inventory. To update the corpus, bump the
 `ouroboros-mock` dependency in `go.mod`, update the expected count and this

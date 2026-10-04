@@ -66,7 +66,7 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	const expectedScenarioCount = 5
+	const expectedScenarioCount = 7
 	if len(vectors) != expectedScenarioCount {
 		t.Fatalf(
 			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
@@ -80,6 +80,8 @@ func TestConsensusConformanceVectors(t *testing.T) {
 		"fork_and_select_v1":               true,
 		"slot_battle_v1":                   true,
 		"exceeds_k_no_switch_v1":           true,
+		"intersect_non_origin_v1":          true,
+		"within_k_fork_winner_first_v1":    true,
 	}
 	profileCounts := map[string]int{
 		"single-peer": 0,
@@ -386,8 +388,13 @@ func (a *replayAdapter) Stabilize() {
 }
 
 // observeDownstream serves the selected peer's chain from Dingo's ChainSync
-// server to a node-to-node client that intersects at origin, and returns what
-// the server sent before its first AwaitReply.
+// server to a node-to-node client that intersects where the selected peer's
+// trace starts, and returns what the server sent before its first AwaitReply.
+// A trace that opens with a RollBackward to a block intersected above origin;
+// the server cannot find that point without a block there, so a stand-in
+// block with the point's slot and hash anchors the chain one block below the
+// first header served. The stand-in is never served: the client intersects at
+// it, and the first header must extend it.
 //
 // The replay has headers and no ledger, so the harness stands in for block
 // fetch: each header the selected peer rolled forward is added to the server's
@@ -405,11 +412,31 @@ func (a *replayAdapter) observeDownstream(
 	}
 	f := newChainsyncServerFixture(a.t, csmock.ModeNtN)
 	ls := f.o.ledgerState
+	intersect := ocommon.NewPointOrigin()
+	if m := selected[0]; m.MsgType == format.ChainSyncMsgRollBackward &&
+		len(m.Point.Hash) > 0 {
+		intersect = toGouroborosPoint(*m.Point)
+	}
+	anchored := len(intersect.Hash) == 0
 	for _, m := range selected {
 		switch m.MsgType {
 		case format.ChainSyncMsgRollForward:
 			hdr, err := gledger.NewBlockHeaderFromCbor(*m.Era, m.HeaderCbor)
 			require.NoError(a.t, err)
+			if !anchored {
+				require.Positive(a.t, hdr.BlockNumber(),
+					"header extending a non-origin intersect has block number 0")
+				require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+					BlockHeader: &testBlockHeader{
+						hash:        gledger.NewBlake2b256(intersect.Hash),
+						slotNumber:  intersect.Slot,
+						blockNumber: hdr.BlockNumber() - 1,
+					},
+					blockType: int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+					cbor:      []byte{0x80},
+				}, nil))
+				anchored = true
+			}
 			blockCbor, err := cbor.Encode([]cbor.RawMessage{
 				cbor.RawMessage(m.HeaderCbor),
 			})
@@ -420,6 +447,9 @@ func (a *replayAdapter) observeDownstream(
 				cbor:        blockCbor,
 			}, nil))
 		case format.ChainSyncMsgRollBackward:
+			if !anchored {
+				continue
+			}
 			require.NoError(a.t, ls.Chain().Rollback(toGouroborosPoint(*m.Point)))
 		}
 	}
@@ -427,9 +457,7 @@ func (a *replayAdapter) observeDownstream(
 	require.True(a.t, ok, "selector has no best tip")
 	ls.SetTipForTesting(toGouroborosTip(bestTip))
 
-	require.NoError(a.t, f.h.FindIntersect(
-		[]ocommon.Point{ocommon.NewPointOrigin()},
-	))
+	require.NoError(a.t, f.h.FindIntersect([]ocommon.Point{intersect}))
 	require.True(a.t, f.observe(a.t).IsIntersectFound(), "expected IntersectFound")
 	var served []format.ServedMessage
 	for {
@@ -598,11 +626,8 @@ func toGouroborosTip(t format.Tip) ochainsync.Tip {
 }
 
 func fromGouroborosTip(t ochainsync.Tip) format.Tip {
-	return format.Tip{
-		Slot:        t.Point.Slot,
-		Hash:        append(format.HexBytes(nil), t.Point.Hash...),
-		BlockNumber: t.BlockNumber,
-	}
+	p := fromGouroborosPoint(t.Point)
+	return format.Tip{Slot: p.Slot, Hash: p.Hash, BlockNumber: t.BlockNumber}
 }
 
 // testDijkstraAnnouncementHeaderRawFor builds a ranking-block header
