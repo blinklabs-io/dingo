@@ -3431,77 +3431,104 @@ var serviceDurability = []struct {
 	},
 }
 
-// serviceWorkflowJob is a job reduced to the service containers it declares.
+// serviceWorkflowJob includes the runnable startup and cleanup configuration.
 type serviceWorkflowJob struct {
-	Services map[string]struct {
-		Image   string `yaml:"image"`
-		Command string `yaml:"command"`
-	} `yaml:"services"`
+	Steps []struct {
+		Name string `yaml:"name"`
+		Run  string `yaml:"run"`
+		If   string `yaml:"if"`
+	} `yaml:"steps"`
 }
 
-// TestServiceContainersRelaxDurability checks that every PostgreSQL and MySQL
-// service container in both pipelines starts with relaxed durability. Both
-// files are checked because a run on main must not be slower than the pull
-// request that was reviewed; TestPipelineStagesMatch already keeps the job
-// definitions themselves identical.
+// TestServiceContainersRelaxDurability checks the actual Docker launch
+// arguments, health admission and cleanup in both pipelines.
 func TestServiceContainersRelaxDurability(t *testing.T) {
 	t.Parallel()
-
 	root := repoRoot(t)
-
 	for _, workflow := range []string{prPipeline, publishPipeline} {
 		var parsed struct {
 			Jobs map[string]serviceWorkflowJob `yaml:"jobs"`
 		}
-		raw := readRepoFile(t, root, workflow)
-		if err := yaml.Unmarshal([]byte(raw), &parsed); err != nil {
+		if err := yaml.Unmarshal([]byte(readRepoFile(t, root, workflow)), &parsed); err != nil {
 			t.Fatalf("parse %s: %v", workflow, err)
 		}
-
-		jobNames := make([]string, 0, len(parsed.Jobs))
-		for name := range parsed.Jobs {
-			jobNames = append(jobNames, name)
-		}
-		sort.Strings(jobNames)
-
 		seen := make(map[string]int)
-		for _, jobName := range jobNames {
-			for serviceName, service := range parsed.Jobs[jobName].Services {
-				for _, want := range serviceDurability {
-					if !strings.HasPrefix(service.Image, want.imagePrefix) {
+		for jobName, job := range parsed.Jobs {
+			started := false
+			cleaned := false
+			for _, step := range job.Steps {
+				if step.Name == "stop-test-databases" {
+					cleaned = step.If == "always()" &&
+						strings.Contains(
+							step.Run,
+							`if [ "$name" = "$container" ]`,
+						) &&
+						strings.Contains(
+							step.Run,
+							`docker rm --force "$container"`,
+						)
+				}
+				command := strings.ReplaceAll(step.Run, "\\\n", " ")
+				for _, line := range strings.Split(command, "\n") {
+					fields := strings.Fields(line)
+					if len(fields) < 3 || fields[0] != "docker" ||
+						fields[1] != "run" {
 						continue
 					}
-					seen[want.imagePrefix]++
-
-					// Padding with spaces turns a substring search into a
-					// whole-token match at both ends.
-					command := " " +
-						strings.Join(strings.Fields(service.Command), " ") +
-						" "
-					for _, option := range want.options {
-						if !strings.Contains(command, " "+option+" ") {
-							t.Errorf(
-								"%s: job %s service %s (%s) does not set "+
-									"%q in its command; the conformance "+
-									"replays are fsync-bound on a slow "+
-									"runner disk",
-								workflow,
-								jobName,
-								serviceName,
-								service.Image,
-								option,
-							)
+					for _, want := range serviceDurability {
+						for i, field := range fields {
+							if !strings.HasPrefix(field, want.imagePrefix) {
+								continue
+							}
+							started = true
+							seen[want.imagePrefix]++
+							arguments := " " + strings.Join(
+								fields[i+1:],
+								" ",
+							) + " "
+							for _, option := range want.options {
+								if !strings.Contains(
+									arguments,
+									" "+option+" ",
+								) {
+									t.Errorf(
+										"%s: job %s Docker %s lacks %q",
+										workflow,
+										jobName,
+										field,
+										option,
+									)
+								}
+							}
+							for _, admission := range []string{
+								"docker inspect --format", "'running healthy') break",
+								`docker logs "$container"`, "exit 1",
+							} {
+								if !strings.Contains(step.Run, admission) {
+									t.Errorf(
+										"%s: job %s lacks health admission %q",
+										workflow,
+										jobName,
+										admission,
+									)
+								}
+							}
 						}
 					}
 				}
 			}
+			if started && !cleaned {
+				t.Errorf(
+					"%s: job %s does not always clean its owned database containers",
+					workflow,
+					jobName,
+				)
+			}
 		}
-
 		for _, want := range serviceDurability {
 			if seen[want.imagePrefix] == 0 {
 				t.Errorf(
-					"%s declares no %s service, so its durability options "+
-						"cannot be checked",
+					"%s starts no %s database container",
 					workflow,
 					want.imagePrefix,
 				)

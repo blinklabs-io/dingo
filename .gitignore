@@ -34,6 +34,7 @@ go.work
 
 # node_modules for npm publishing
 node_modules/
+/npm/vendor/
 
 # IDEs
 .idea/

@@ -42,6 +42,18 @@ provides pluggable storage and client interfaces.
 
 ## Build and test
 
+The `@blinklabs/dingo` NPM package installs the matching release binary for
+Linux or FreeBSD on amd64/arm64, and macOS on arm64. It requires Node.js 22 or
+later and `tar`. Run it with `npx @blinklabs/dingo --help`, or install it with
+`npm install --global @blinklabs/dingo` and run `dingo --help`. Arguments, exit
+codes and termination signals are passed to the release binary. Installation
+fails if the platform has no released binary or the archive cannot be fetched
+and extracted. If install scripts were disabled, `npm rebuild @blinklabs/dingo`
+runs the installer.
+
+`npm test` checks the packed package and local, global and npx invocation using
+an isolated release archive fixture.
+
 Use Go 1.26 or later and `make`:
 
 ```sh
