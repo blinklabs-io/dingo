@@ -144,3 +144,13 @@ func TestValidateDijkstraPParamsDataRejectsZeroMultiplier(t *testing.T) {
 	require.NoError(t, err)
 	require.ErrorContains(t, validatePParamsData(int(ldijkstra.EraIdDijkstra), data), "refScriptCostMultiplier")
 }
+
+func TestValidateDijkstraPParamsDataAcceptsRefScriptFeeDefaults(t *testing.T) {
+	t.Parallel()
+	params := &ldijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: *testConwayPParams(),
+	}
+	data, err := cbor.Encode(params)
+	require.NoError(t, err)
+	require.NoError(t, validatePParamsData(int(ldijkstra.EraIdDijkstra), data))
+}

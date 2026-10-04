@@ -31,9 +31,9 @@ import (
 // wider than their wire types and would otherwise be accepted unchecked.
 // Other eras are returned unchecked.
 //
-// Only domains are checked. Conway's proposal-only non-zero rules do not
-// apply to complete parameters. Dijkstra fields with positive domains must
-// still be positive.
+// Only domains are checked. Proposal-only non-zero rules do not apply to
+// complete parameters. A zero Dijkstra reference-script stride and a nil
+// multiplier use the Conway fee defaults when consumed.
 func ValidateProtocolParameterDomains(pp lcommon.ProtocolParameters) error {
 	var params *conway.ConwayProtocolParameters
 	var dijkstraParams *gdijkstra.DijkstraProtocolParameters
@@ -95,9 +95,6 @@ func ValidateProtocolParameterDomains(pp lcommon.ProtocolParameters) error {
 	}
 	if dijkstraParams == nil {
 		return nil
-	}
-	if dijkstraParams.RefScriptCostStride == 0 {
-		return errors.New("refScriptCostStride must be positive")
 	}
 	if rat := dijkstraParams.RefScriptCostMultiplier; rat != nil {
 		if err := lcommon.ValidateNonNegativeInterval(rat, false); err != nil {
