@@ -1020,6 +1020,7 @@ func (m *DingoStateManager) ApplyTransaction(
 				context.Background(),
 				level,
 				point,
+				storageIndex,
 				m.currentEpoch,
 				govActionLifetime,
 				m.db,

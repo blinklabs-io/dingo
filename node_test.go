@@ -43,6 +43,7 @@ import (
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/chain"
@@ -1445,6 +1446,24 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
 	)
 }
 
+func TestHandleConnManagerClosedOwnerLogsNtCCloseCause(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	n := &Node{config: Config{
+		logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}}
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	cause := errors.New("local client reset")
+	n.handleConnManagerClosedOwner(conn, true, cause)
+
+	require.Contains(t, logs.String(), cause.Error())
+	require.Contains(t, logs.String(), conn.Id().String())
+}
+
 // TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
 // connmanager path used for both NtC and NtN. The EventBus path deliberately no
 // longer removes server-side state by connection ID because a delayed event
@@ -1755,6 +1774,20 @@ func registerAPIProbe(
 				return name, probe.instance(), nil
 			},
 		)
+	case plugin.CapabilityAPIMcp:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps mcp.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
 	default:
 		t.Fatalf("unsupported API capability %s", capability)
 	}
@@ -1921,6 +1954,7 @@ func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
 		plugin.CapabilityAPIBlockfrost: 3000,
 		plugin.CapabilityAPIMesh:       8080,
 		plugin.CapabilityAPIUtxorpc:    9090,
+		plugin.CapabilityAPIMcp:        0,
 	}
 	for capability, wantPort := range want {
 		n := &Node{
@@ -1947,6 +1981,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 		plugin.CapabilityAPIUtxorpc:    {},
 		plugin.CapabilityAPIBlockfrost: {},
 		plugin.CapabilityAPIMesh:       {},
+		plugin.CapabilityAPIMcp:        {},
 	}
 	for capability, probe := range probes {
 		registerAPIProbe(t, n.pluginHost, capability, "probe", probe)
@@ -1954,7 +1989,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 	}
 	// Force a deterministic failure after the API startup section so Run
 	// returns without requiring an external shutdown signal. Reaching block
-	// producer validation proves all three zero-port decisions were exercised.
+	// producer validation proves all four zero-port decisions were exercised.
 	n.config.blockProducer = true
 
 	require.ErrorIs(

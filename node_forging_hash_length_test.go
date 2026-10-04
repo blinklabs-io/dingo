@@ -15,7 +15,7 @@
 package dingo
 
 import (
- "context"
+	"context"
 	"strings"
 	"testing"
 
@@ -30,7 +30,7 @@ func TestLeiosPipelineAdapterParentAnnouncementRejectsWrongLengthTipHash(
 	t *testing.T,
 ) {
 	t.Parallel()
-	parent := legacyLeiosParentBlock(t, testLeiosHash(0x41), 8192)
+	parent := leiosParentBlock(t, testLeiosHash(0x41), 8192)
 	adapter := &leiosPipelineAdapter{
 		chain: testLeiosParentChain{
 			tip: ochainsync.Tip{

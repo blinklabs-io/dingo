@@ -118,9 +118,10 @@ func (d *Database) GetResignedCommitteeMembers(
 	)
 }
 
-// GetCommitteeActiveCount returns the number of active (non-resigned)
-// committee members.
-func (d *Database) GetCommitteeActiveCount(
+// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+// committee members that hold a current hot-key authorization. Members
+// without a hot key are not counted and term expiry is not applied.
+func (d *Database) GetCommitteeAuthorizedCount(
 	ctx context.Context,
 	txn *Txn,
 ) (int, error) {
@@ -128,7 +129,7 @@ func (d *Database) GetCommitteeActiveCount(
 		txn = d.MetadataTxn(ctx, false)
 		defer txn.Release()
 	}
-	return d.governanceStore().GetCommitteeActiveCount(txn.Metadata())
+	return d.governanceStore().GetCommitteeAuthorizedCount(txn.Metadata())
 }
 
 // SetCommitteeMembers upserts governance-enacted committee members. Used

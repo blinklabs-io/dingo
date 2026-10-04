@@ -128,6 +128,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				context.Background(),
 				tx,
 				ocommon.Point{Slot: 100},
+				0,
 				100,
 				20,
 				db,

@@ -365,7 +365,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 
 	txn := db.Transaction(context.Background(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.processGovernance(context.Background(), ls, tx, txn)
+		return delta.processGovernance(context.Background(), ls, tx, 0, txn)
 	}))
 
 	got, err := db.GetGovernanceProposal(
@@ -540,6 +540,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 			context.Background(),
 			ls,
 			tx,
+			0,
 			txn,
 		)
 	}))
@@ -622,6 +623,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 					context.Background(),
 					ls,
 					tx,
+					0,
 					nil,
 				)
 			})

@@ -54,11 +54,9 @@ func (ls *LedgerState) queueRewardCreditCompaction(ctx context.Context) {
 		return
 	}
 	ls.rewardCreditCompacting = true
-	ls.rewardCreditCompactionWG.Add(1)
 	// The job outlives the request that queued it and stops on ls.closed.
 	jobCtx := context.WithoutCancel(ctx)
-	go func() {
-		defer ls.rewardCreditCompactionWG.Done()
+	ls.rewardCreditCompactionWG.Go(func() {
 		retryDelay := rewardCreditCompactionRetryInitial
 		for {
 			err := ls.compactRewardCreditRounds(jobCtx)
@@ -110,7 +108,7 @@ func (ls *LedgerState) queueRewardCreditCompaction(ctx context.Context) {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // compactRewardCreditRounds folds, one bounded transaction at a time, every

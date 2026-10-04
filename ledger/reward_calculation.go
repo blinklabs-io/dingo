@@ -24,7 +24,6 @@ import (
 	"math/big"
 	"slices"
 	"sort"
-	"strconv"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -4076,7 +4075,7 @@ func (ls *LedgerState) rewardBlockCounts(
 	if err != nil {
 		return nil, 0, false, err
 	}
-	return ls.mergeImportedBlockCounts(
+	return database.MergeImportedPoolBlockCounts(
 		meta,
 		metaTxn,
 		performanceEpoch,
@@ -4084,99 +4083,6 @@ func (ls *LedgerState) rewardBlockCounts(
 		counts,
 		total,
 	)
-}
-
-// mergeImportedBlockCounts adds the block counts carried by a bootstrap
-// snapshot to the counts this node observed for the same epoch, and reports
-// whether the epoch's counts are known at all.
-//
-// The two sources are disjoint by construction. A bootstrap applies no block at
-// or below its anchor, and CountPoolBlocksInSlotRange raises its start slot past
-// the recorded anchor for exactly that reason, so the observed counts cover
-// (anchor, epochEnd] and the imported nesBcur covers [epochStart, anchor]. For
-// the epoch before the anchor's the observed side is empty and the imported
-// nesBprev is the whole epoch. Both sides already exclude TPraos overlay slots:
-// the reference's incrBlocks skips them when it increments nesBcur, and
-// rewardBlockCountsExcludingOverlaySlots skips them here.
-//
-// The per-pool counts are merged only for pools the caller asked about, while
-// the epoch total takes every imported pool, because the total is the
-// denominator of every pool's beta and the reference sums the whole BlocksMade
-// map to obtain it.
-func (ls *LedgerState) mergeImportedBlockCounts(
-	meta metadata.MetadataStore,
-	metaTxn types.Txn,
-	performanceEpoch uint64,
-	epochStartSlot uint64,
-	counts map[string]uint64,
-	totalBlocks uint64,
-) (map[string]uint64, uint64, bool, error) {
-	// Read the anchor from the same sync state, in the same transaction, that
-	// CountPoolBlocksInSlotRange raised its start slot with, rather than from
-	// the in-memory copy: the two must agree about which slots the observed
-	// counts cover. A malformed value is an error here for the reason it is
-	// one there -- read as "no anchor" it would restore the uncounted-epoch
-	// zero at exactly the moment the anchor could not be confirmed.
-	value, err := meta.GetSyncState(mithrilLedgerSlotSyncKey, metaTxn)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf(
-			"read Mithril trust boundary: %w",
-			err,
-		)
-	}
-	if value == "" {
-		return counts, totalBlocks, true, nil
-	}
-	mithrilLedgerSlot, err := strconv.ParseUint(value, 10, 64)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf(
-			"parse Mithril trust boundary %q: %w",
-			value,
-			err,
-		)
-	}
-	if mithrilLedgerSlot < epochStartSlot {
-		return counts, totalBlocks, true, nil
-	}
-	imported, importedTotal, importedKnown, err := meta.GetImportedPoolBlockCounts(
-		performanceEpoch,
-		metaTxn,
-	)
-	if err != nil {
-		return nil, 0, false, fmt.Errorf(
-			"get imported pool block counts for epoch %d: %w",
-			performanceEpoch, err,
-		)
-	}
-	if !importedKnown {
-		return nil, 0, false, nil
-	}
-	for poolKey, blocks := range imported {
-		observed, ok := counts[poolKey]
-		if !ok {
-			continue
-		}
-		merged, overflow := addRewardUint64(observed, blocks)
-		if overflow {
-			return nil, 0, false, fmt.Errorf(
-				"imported block count overflow for epoch %d pool %x",
-				performanceEpoch,
-				poolKey,
-			)
-		}
-		counts[poolKey] = merged
-	}
-	// The epoch total takes every imported pool, not only the ones asked
-	// about, because it is the denominator of every pool's beta and the
-	// reference sums the whole BlocksMade map to obtain it.
-	totalBlocks, overflow := addRewardUint64(totalBlocks, importedTotal)
-	if overflow {
-		return nil, 0, false, fmt.Errorf(
-			"imported block total overflow for epoch %d",
-			performanceEpoch,
-		)
-	}
-	return counts, totalBlocks, true, nil
 }
 
 func rewardBlockCountsExcludingOverlaySlots(
@@ -5047,7 +4953,8 @@ func rewardParametersFromPParams(
 // miss the pre-anchor fees entirely or double-count them once
 // the historical backfill has stored pre-anchor transactions locally.
 // The two ranges are disjoint by construction, the same way
-// mergeImportedBlockCounts's imported and observed block counts are.
+// database.MergeImportedPoolBlockCounts's imported and observed block counts
+// are.
 //
 // A row with no ImportedEpochFees -- every row a live boundary writes, and
 // every imported row written before the field existed -- keeps the

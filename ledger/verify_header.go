@@ -968,6 +968,20 @@ func parseShelleyGenesisDelegations(
 	return ret, nil
 }
 
+// genesisDelegationWindow is the delay between a genesis key delegation
+// certificate's slot and the slot it takes effect: the Shelley stability
+// window, which every Shelley-family era takes from Shelley genesis.
+func (ls *LedgerState) genesisDelegationWindow() (uint64, error) {
+	window, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("genesis delegation stability window: %w", err)
+	}
+	return window, nil
+}
+
 func (ls *LedgerState) activeGenesisDelegationForSlot(
 	initial genesisDelegation,
 	slot uint64,
@@ -985,9 +999,14 @@ func (ls *LedgerState) activeGenesisDelegationForSlotWithTxn(
 			"genesis delegation state has no metadata database",
 		)
 	}
+	window, err := ls.genesisDelegationWindow()
+	if err != nil {
+		return genesisDelegation{}, err
+	}
 	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
 		initial.genesisHash,
 		slot,
+		window,
 		txn,
 	)
 	if err != nil {
@@ -1059,6 +1078,85 @@ func (ls *LedgerState) genesisDelegateKeyHashes(
 	slices.SortFunc(ret, func(a, b lcommon.Blake2b224) int {
 		return bytes.Compare(a[:], b[:])
 	})
+	return ret, nil
+}
+
+// genesisDelegState returns the genesis delegations in force at slot and those
+// certified but still inside the stability window, the state the reference's
+// DELEG rule validates genesis key delegation certificates against.
+func (ls *LedgerState) genesisDelegState(
+	slot uint64,
+	txn types.Txn,
+) (eras.GenesisDelegState, error) {
+	var ret eras.GenesisDelegState
+	if ls.config.CardanoNodeConfig == nil {
+		return ret, errors.New("unable to get cardano node config")
+	}
+	genesis, err := parseShelleyGenesisDelegations(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	if err != nil {
+		return ret, err
+	}
+	ret.StabilityWindow, err = ls.genesisDelegationWindow()
+	if err != nil {
+		return ret, err
+	}
+	ret.Current = make(
+		map[lcommon.Blake2b224]eras.GenesisDelegPair,
+		len(genesis),
+	)
+	for _, initial := range genesis {
+		active, err := ls.activeGenesisDelegationForSlotWithTxn(
+			initial,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return ret, err
+		}
+		genesisKey := lcommon.NewBlake2b224(initial.genesisHash)
+		ret.Current[genesisKey] = eras.GenesisDelegPair{
+			Delegate: lcommon.NewBlake2b224(active.delegateHash),
+			Vrf:      lcommon.NewBlake2b256(active.vrfHash),
+		}
+	}
+	// A certificate takes effect at its slot plus the window, so the pending
+	// ones are those certified in the last window slots that have not yet
+	// reached it.
+	fromSlot := uint64(0)
+	if slot >= ret.StabilityWindow {
+		fromSlot = slot - ret.StabilityWindow + 1
+	}
+	pending, err := ls.db.Metadata().GetGenesisDelegationsInSlotRange(
+		fromSlot,
+		slot,
+		txn,
+	)
+	if err != nil {
+		return ret, fmt.Errorf("get pending genesis delegations: %w", err)
+	}
+	ret.Future = make(
+		map[eras.FutureGenesisDelegKey]eras.GenesisDelegPair,
+		len(pending),
+	)
+	for _, row := range pending {
+		if len(row.GenesisHash) != lcommon.Blake2b224Size ||
+			len(row.GenesisDelegateHash) != lcommon.Blake2b224Size ||
+			len(row.VrfKeyHash) != lcommon.Blake2b256Size {
+			return ret, fmt.Errorf(
+				"invalid pending genesis delegation for genesis key %x",
+				row.GenesisHash,
+			)
+		}
+		ret.Future[eras.FutureGenesisDelegKey{
+			Slot:    row.AddedSlot + ret.StabilityWindow,
+			Genesis: lcommon.NewBlake2b224(row.GenesisHash),
+		}] = eras.GenesisDelegPair{
+			Delegate: lcommon.NewBlake2b224(row.GenesisDelegateHash),
+			Vrf:      lcommon.NewBlake2b256(row.VrfKeyHash),
+		}
+	}
 	return ret, nil
 }
 

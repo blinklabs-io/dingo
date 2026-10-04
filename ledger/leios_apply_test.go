@@ -840,6 +840,58 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
+// The Haskell-conformant path commits the endorser-block blob in its own blob
+// transaction, which the shared batch transaction's snapshot predates. Reading
+// an endorser-produced output back through that batch after the shared block
+// cache has evicted the blob must therefore use a fresh snapshot, which only
+// applyEndorserBlock's separate-commit mark enables.
+func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		CacheConfig: database.CborCacheConfig{BlockLRUEntries: 1},
+	})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
+	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
+
+	txn := db.Transaction(t.Context(), true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x7a),
+			1,
+			430,
+			leiosApplyTestEbHash(0x6d),
+			[]cbor.RawMessage{rawTx},
+		)
+		if err != nil {
+			return err
+		}
+		// A later block commit evicts the endorser block from the one-entry
+		// shared cache, so the read below reaches the blob store.
+		require.NoError(t, db.SetGenesisCbor(
+			431,
+			leiosApplyTestEbHash(0x6e),
+			[]byte{0x01},
+			nil,
+		))
+		got, err := db.CborCache().ResolveUtxoCbor(tx.Hash().Bytes(), 0, txn)
+		require.NoError(t, err)
+		require.Equal(t, tx.Produced()[0].Output.Cbor(), got)
+		return nil
+	}))
+}
+
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 

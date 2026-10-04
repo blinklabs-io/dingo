@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -407,4 +409,64 @@ func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
 		gates["storage_mode"],
 		"dev mode's preflight open must have already latched api, not core",
 	)
+}
+
+func TestResumeBackfillFinalizesStatsBeforeClearingSync(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{
+		RunMode:           config.RunModeServe,
+		StorageMode:       "api",
+		Network:           "preview",
+		DatabasePath:      t.TempDir(),
+		Plugins:           testStoragePlugins(),
+		BackfillBatchSize: 100,
+		DatabaseWorkers:   1,
+	}
+	logger := slog.New(slog.DiscardHandler)
+	runtime, err := openConfiguredDatabase(t.Context(), cfg, logger, 1)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		runtime.Database.Metadata().
+			SetBackfillCheckpoint(&models.BackfillCheckpoint{Phase: "metadata", Completed: true, UpdatedAt: time.Now().UTC()}, nil),
+	)
+	require.NoError(
+		t,
+		runtime.Database.SetSyncState("sync_status", syncStatusBackfill, nil),
+	)
+	raw, err := dbtest.RawSQLiteMetadata(t, runtime.Database)
+	require.NoError(t, err)
+	_, err = raw.Exec(
+		`CREATE TRIGGER fail_stats_marker BEFORE INSERT ON sync_state WHEN NEW.sync_key='metadata_planner_stats_backfill' BEGIN SELECT RAISE(ABORT,'marker interrupted'); END`,
+	)
+	require.NoError(t, err)
+	require.NoError(t, runtime.Close(t.Context()))
+	require.ErrorContains(
+		t,
+		resumeBackfill(t.Context(), cfg, logger),
+		"marker interrupted",
+	)
+	var status string
+	require.NoError(
+		t,
+		raw.QueryRow("SELECT value FROM sync_state WHERE sync_key='sync_status'").
+			Scan(&status),
+	)
+	require.Equal(t, syncStatusBackfill, status)
+	_, err = raw.Exec("DROP TRIGGER fail_stats_marker")
+	require.NoError(t, err)
+	require.NoError(t, resumeBackfill(t.Context(), cfg, logger))
+	var count int
+	require.NoError(
+		t,
+		raw.QueryRow("SELECT COUNT(*) FROM sync_state WHERE sync_key='sync_status'").
+			Scan(&count),
+	)
+	require.Zero(t, count)
+	require.NoError(
+		t,
+		raw.QueryRow("SELECT value FROM sync_state WHERE sync_key=?", metadata.PlannerStatsBackfillSyncKey).
+			Scan(&status),
+	)
+	require.NotEmpty(t, status)
 }

@@ -350,9 +350,10 @@ type GovernanceStore interface {
 		types.Txn,
 	) (map[string]bool, error)
 
-	// GetCommitteeActiveCount returns the number of active (non-resigned)
-	// committee members.
-	GetCommitteeActiveCount(types.Txn) (int, error)
+	// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+	// committee members that hold a current hot-key authorization. Members
+	// without a hot key are not counted and term expiry is not applied.
+	GetCommitteeAuthorizedCount(types.Txn) (int, error)
 
 	// Snapshot-imported committee member methods
 
@@ -772,6 +773,18 @@ type UtxoStore interface {
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
+
+	// GetUtxosWithHistory returns both live and spent UTxOs matching q,
+	// including their producing transaction position and producing/spending
+	// block hashes. Snapshot-imported outputs without a producing transaction
+	// retain AddedSlot as their position and have an empty producing block
+	// hash. Exact-address patterns are coarse-filtered here and completed by
+	// the coordinated Database after it resolves output CBOR. q must be
+	// non-nil.
+	GetUtxosWithHistory(
+		*models.UtxoHistoryQuery,
+		types.Txn,
+	) ([]models.UtxoWithHistory, error)
 
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
 	// matching q's coarse SQL predicate, without materializing rows. It
@@ -1383,12 +1396,23 @@ type CertificateStore interface {
 	) ([]lcommon.StakeRegistrationCertificate, error)
 
 	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
-	// certificate for genesisHash before the supplied block slot.
+	// certificate for genesisHash that has taken effect by blockSlot: one
+	// whose certificate slot plus stabilityWindow is at or below it.
 	GetGenesisDelegationForSlot(
 		[]byte, // genesisHash
 		uint64, // blockSlot
+		uint64, // stabilityWindow
 		types.Txn,
 	) (*models.GenesisDelegation, error)
+
+	// GetGenesisDelegationsInSlotRange returns the genesis-key delegation
+	// certificates with a certificate slot from fromSlot through uptoSlot
+	// inclusive, oldest first.
+	GetGenesisDelegationsInSlotRange(
+		uint64, // fromSlot
+		uint64, // uptoSlot
+		types.Txn,
+	) ([]models.GenesisDelegation, error)
 
 	// GetAccountDelegationHistoryByCredential retrieves delegation history
 	// rows for a stake credential tag/hash pair.
@@ -2929,7 +2953,17 @@ type BulkLoadOptimizer interface {
 }
 
 // PlannerStatsUpdater is an optional interface for metadata stores that can
-// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+// collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
+// refreshes statistics through deferred-index maintenance instead.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
 }
+
+// ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
+type ContextPlannerStatsUpdater interface {
+	UpdatePlannerStatsContext(context.Context) error
+}
+
+// PlannerStatsBackfillSyncKey records the completed backfill whose planner
+// statistics were refreshed after rebuilding critical indexes.
+const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

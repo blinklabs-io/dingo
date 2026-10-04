@@ -1762,7 +1762,7 @@ func (m *Mempool) maxAdmissionHeadroomBytesLocked() int64 {
 // happen under the same read lock, so a concurrent removal cannot be missed.
 func (m *Mempool) waitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	if minBytes < 0 || minBytes > m.MaxAdmissionHeadroomBytes() {
 		return false

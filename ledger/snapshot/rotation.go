@@ -1035,6 +1035,28 @@ func rewardPoolBlockCounts(
 			err,
 		)
 	}
+	// The observed counts of an epoch the Mithril anchor falls in cover only
+	// the blocks above it; the snapshot's own counts supply the rest. When the
+	// epoch is covered by neither, the counts stay NULL rather than recording
+	// the tail as a smaller epoch.
+	counts, total, known, err := database.MergeImportedPoolBlockCounts(
+		meta,
+		metaTxn,
+		evt.PreviousEpoch,
+		startSlot,
+		counts,
+		total,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"merge imported reward pool blocks in epoch %d: %w",
+			evt.PreviousEpoch,
+			err,
+		)
+	}
+	if !known {
+		return nil, nil, nil
+	}
 	return counts, &total, nil
 }
 

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"math/big"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -988,4 +990,96 @@ func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 			epoch,
 		)
 	}
+}
+
+// rewardPoolBlockCountsFixture seeds an epoch [100, 200) whose blocks above a
+// mid-epoch Mithril anchor were observed locally.
+func rewardPoolBlockCountsFixture(
+	t *testing.T,
+	withImported bool,
+) (*database.Database, []lcommon.PoolKeyHash) {
+	t.Helper()
+	const anchorSlot = uint64(150)
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 2, StartSlot: 100, LengthInSlots: 100},
+	})
+	meta := db.Metadata()
+	var poolA, poolB lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x91}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x92}, len(poolB)))
+	require.NoError(t, meta.SetSyncState(
+		"mithril_ledger_slot", strconv.FormatUint(anchorSlot, 10), nil,
+	))
+	for _, slot := range []uint64{160, 170} {
+		require.NoError(t, db.UpdatePoolOpCertSequence(poolA, slot, slot, nil))
+	}
+	require.NoError(t, db.UpdatePoolOpCertSequence(poolB, 180, 180, nil))
+	if withImported {
+		retired := bytes.Repeat([]byte{0x93}, len(poolA))
+		require.NoError(t, meta.SaveImportedPoolBlockCounts(
+			[]models.ImportedPoolBlockCount{
+				{
+					Epoch:          2,
+					PoolKeyHash:    poolA[:],
+					BlocksProduced: 5,
+					CapturedSlot:   anchorSlot,
+				},
+				{
+					Epoch:          2,
+					PoolKeyHash:    poolB[:],
+					BlocksProduced: 3,
+					CapturedSlot:   anchorSlot,
+				},
+				{
+					Epoch:          2,
+					PoolKeyHash:    retired,
+					BlocksProduced: 2,
+					CapturedSlot:   anchorSlot,
+				},
+			},
+			nil,
+		))
+		require.NoError(
+			t,
+			meta.SaveImportedEpochBlockTotal(2, 10, anchorSlot, nil),
+		)
+	}
+	return db, []lcommon.PoolKeyHash{poolA, poolB}
+}
+
+// An epoch the Mithril anchor falls inside must record the whole epoch's
+// counts, not the blocks above the anchor.
+func TestRewardPoolBlockCountsIncludeImportedCountsBelowAnchor(t *testing.T) {
+	t.Parallel()
+
+	db, pools := rewardPoolBlockCountsFixture(t, true)
+	counts, total, err := rewardPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		pools,
+		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, total)
+	assert.Equal(t, uint64(2+5), counts[string(pools[0][:])])
+	assert.Equal(t, uint64(1+3), counts[string(pools[1][:])])
+	assert.Equal(t, uint64(3+10), *total)
+}
+
+// An anchored epoch with no imported counts is unknown, which is recorded as
+// NULL rather than as a smaller epoch.
+func TestRewardPoolBlockCountsUnknownWithoutImportedCounts(t *testing.T) {
+	t.Parallel()
+
+	db, pools := rewardPoolBlockCountsFixture(t, false)
+	counts, total, err := rewardPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		pools,
+		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},
+	)
+	require.NoError(t, err)
+	assert.Nil(t, counts)
+	assert.Nil(t, total)
 }

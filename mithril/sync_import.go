@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledger/eras"
@@ -155,37 +156,25 @@ func updateMithrilReadyState(
 	txn := db.MetadataTxn(ctx, true)
 	if err := txn.Do(func(txn *database.Txn) error {
 		if clearSyncState {
-			// ClearSyncState is an unqualified DELETE FROM sync_state, so
-			// every row a completed sync still needs has to be carried
-			// across it explicitly — mithril_ledger_slot and
-			// mithril_ledger_hash below, and the deferred-index marker
-			// here. Mithril sync rebuilds only the critical subset
-			// (BuildCritical, sync.go) and deliberately leaves
-			// deferred.SyncStateKey set so the first serve's maintenance
-			// pass finishes the lazy manifest. Dropping it here erases
-			// that instruction moments after it was written, and the lazy
-			// entries are then never built on a Mithril-bootstrapped
-			// database.
-			deferredIndexesPending, err := db.GetSyncState(
-				deferred.SyncStateKey, txn,
-			)
-			if err != nil {
-				return fmt.Errorf(
-					"reading deferred-index marker: %w", err,
-				)
+			// ClearSyncState removes every row; maintenance state must survive
+			// the transition from bootstrap to serving.
+			keys := []string{deferred.SyncStateKey, metadata.PlannerStatsBackfillSyncKey}
+			values := make([]string, len(keys))
+			for i, key := range keys {
+				value, err := db.GetSyncState(key, txn)
+				if err != nil {
+					return fmt.Errorf("read maintenance marker %s: %w", key, err)
+				}
+				values[i] = value
 			}
 			if err := db.ClearSyncState(txn); err != nil {
 				return fmt.Errorf("cleaning up sync state: %w", err)
 			}
-			if deferredIndexesPending != "" {
-				if err := db.SetSyncState(
-					deferred.SyncStateKey,
-					deferredIndexesPending,
-					txn,
-				); err != nil {
-					return fmt.Errorf(
-						"restoring deferred-index marker: %w", err,
-					)
+			for i, key := range keys {
+				if values[i] != "" {
+					if err := db.SetSyncState(key, values[i], txn); err != nil {
+						return fmt.Errorf("restore maintenance marker %s: %w", key, err)
+					}
 				}
 			}
 		} else if syncStatus != "" {
@@ -395,15 +384,45 @@ func importLedgerState(
 	beyondCertifiedTip bool,
 	err error,
 ) {
+	prepared, err := prepareLedgerStateImport(logger, result, maxTrustedSlot)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer prepared.Close()
+	return importPreparedLedgerState(
+		ctx, db, logger, nodeCfg, result, prepared, reconcile, onLedger,
+	)
+}
+
+type preparedLedgerStateImport struct {
+	snapshot           *ledgerstate.SnapshotFiles
+	state              *ledgerstate.RawLedgerState
+	stateDir           string
+	beyondCertifiedTip bool
+}
+
+func (p *preparedLedgerStateImport) Close() {
+	if p != nil {
+		p.snapshot.Close()
+	}
+}
+
+func prepareLedgerStateImport(
+	logger *slog.Logger,
+	result *BootstrapResult,
+	maxTrustedSlot uint64,
+) (_ *preparedLedgerStateImport, err error) {
 	snapshot, stateDir, signedBy, beyondCertifiedTip, err := selectLedgerStateSnapshot(
 		logger, result, maxTrustedSlot,
 	)
 	if err != nil {
-		return 0, nil, false, err
+		return nil, err
 	}
-	// Held open for the whole import: the UTxO stream is read from the table
-	// handle, and closing early would put a name back in its place.
-	defer snapshot.Close()
+	defer func() {
+		if err != nil {
+			snapshot.Close()
+		}
+	}()
 	lstatePath := filepath.Join(
 		stateDir, filepath.FromSlash(snapshot.StatePath),
 	)
@@ -427,20 +446,20 @@ func importLedgerState(
 	// One buffer leaves nothing to change.
 	stateBytes, err := io.ReadAll(snapshot.State)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("reading ledger state: %w", err)
+		return nil, fmt.Errorf("reading ledger state: %w", err)
 	}
 	if signedBy != nil {
 		if err := verifySignedState(
 			snapshot.StatePath, stateBytes, signedBy,
 		); err != nil {
-			return 0, nil, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"verifying ledger state in %s: %w", stateDir, err,
 			)
 		}
 	}
 	state, err := ledgerstate.ParseSnapshotBytes(stateBytes)
 	if err != nil {
-		return 0, nil, false, fmt.Errorf("parsing ledger state: %w", err)
+		return nil, fmt.Errorf("parsing ledger state: %w", err)
 	}
 
 	// UTxO-HD keeps the UTxO set in a table beside the state; discovery opened
@@ -449,7 +468,7 @@ func importLedgerState(
 		if err := attachSignedTable(
 			state, snapshot, stateDir, signedBy,
 		); err != nil {
-			return 0, nil, false, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"verifying ledger state in %s: %w", stateDir, err,
 			)
 		}
@@ -461,7 +480,7 @@ func importLedgerState(
 	}
 
 	if state.Tip == nil {
-		return 0, nil, false, errors.New(
+		return nil, errors.New(
 			"parsed ledger state has no tip (Origin snapshot)",
 		)
 	}
@@ -480,6 +499,33 @@ func importLedgerState(
 		"era_bound_epoch", state.EraBoundEpoch,
 		"epoch_nonce", nonceHex,
 	)
+	return &preparedLedgerStateImport{
+		snapshot:           snapshot,
+		state:              state,
+		stateDir:           stateDir,
+		beyondCertifiedTip: beyondCertifiedTip,
+	}, nil
+}
+
+func importPreparedLedgerState(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	nodeCfg *cardano.CardanoNodeConfig,
+	result *BootstrapResult,
+	prepared *preparedLedgerStateImport,
+	reconcile bool,
+	onLedger func(ledgerstate.ImportProgress),
+) (
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+	beyondCertifiedTip bool,
+	err error,
+) {
+	// The prepared object keeps the selected files open from verification
+	// through import, so the UTxO table and state are the checked files.
+	state := prepared.state
+	beyondCertifiedTip = prepared.beyondCertifiedTip
 
 	// Build import key for resume tracking. A catch-up reconcile must run the
 	// full import pass (so its snapshot key set is complete), so resume is

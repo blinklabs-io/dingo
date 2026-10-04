@@ -263,12 +263,14 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
 			}
 			if level.IsValid() {
-				if err := d.processGovernance(ctx, ls, level, txn); err != nil {
-					return fmt.Errorf(
-						"process transaction body %d governance: %w",
-						levelIndex,
-						err,
-					)
+				if err := d.processGovernance(
+					ctx,
+					ls,
+					level,
+					uint32(storageIndex), //nolint:gosec
+					txn,
+				); err != nil {
+					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
 			}
 		}
@@ -449,6 +451,7 @@ func (d *LedgerDelta) processGovernance(
 	ctx context.Context,
 	ls *LedgerState,
 	tx lcommon.Transaction,
+	txIndex uint32,
 	txn *database.Txn,
 ) error {
 	proposals := tx.ProposalProcedures()
@@ -482,6 +485,7 @@ func (d *LedgerDelta) processGovernance(
 			ctx,
 			tx,
 			d.Point,
+			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
 			ls.db,
