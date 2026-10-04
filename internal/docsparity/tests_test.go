@@ -3678,54 +3678,93 @@ func TestPullRequestPipelineRunsBlockPipelineDevnet(t *testing.T) {
 	}
 }
 
-// TestLintAnalyzersAreAdvisory checks that findings from nilaway and modernize
-// cannot fail `make lint` while a run that never analyzed anything still does,
-// and that the contributor instructions say so. Both tools have an unrepaired
-// baseline on main; a failing nilaway also stops make before modernize runs,
-// so a gate here would report one tool and hide the other.
-func TestLintAnalyzersAreAdvisory(t *testing.T) {
+// TestLintGatesNilawayAndModernize checks that nilaway and modernize fail
+// `make lint` on any finding, and that the lint job of both pipelines runs
+// them from pinned installs. A findings exit tolerated in the Makefile, or a
+// pipeline that never runs the tools, lets the baseline grow again.
+func TestLintGatesNilawayAndModernize(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
+	makefile := readRepoFile(t, root, "Makefile")
 
-	var recipe []string
-	inLint := false
-	for _, line := range strings.Split(readRepoFile(t, root, "Makefile"), "\n") {
+	recipes := map[string][]string{}
+	current := ""
+	for _, line := range strings.Split(makefile, "\n") {
 		switch {
-		case strings.HasPrefix(line, "lint:"):
-			inLint = true
-		case inLint && !strings.HasPrefix(line, "\t"):
-			inLint = false
-		case inLint:
-			recipe = append(recipe, strings.TrimPrefix(line, "\t"))
+		case strings.HasPrefix(line, "\t"):
+			if current != "" {
+				recipes[current] = append(
+					recipes[current],
+					strings.TrimPrefix(line, "\t"),
+				)
+			}
+		case line == "" || strings.HasPrefix(line, "#"):
+		default:
+			current, _, _ = strings.Cut(line, ":")
 		}
 	}
+
 	for _, tool := range []string{"nilaway", "modernize"} {
 		found := false
-		for _, line := range recipe {
-			if !strings.Contains(line, tool+" ") {
+		for _, line := range recipes[tool] {
+			if !strings.HasPrefix(line, tool+" ") {
 				continue
 			}
 			found = true
-			// Exit 3 is the go/analysis status for "diagnostics reported".
-			// Any other failure (a missing binary, a package that does not
-			// load) means the analysis never ran and must fail the target.
-			if strings.HasPrefix(line, "-") ||
-				!strings.HasSuffix(line, "|| [ $$? -eq 3 ]") {
-				t.Errorf(
-					"make lint must tolerate only %s's findings exit (3): %q",
-					tool,
-					line,
-				)
+			if strings.Contains(line, "||") || strings.Contains(line, "-eq") {
+				t.Errorf("make %s tolerates a failing exit: %q", tool, line)
 			}
 		}
 		if !found {
-			t.Errorf("make lint no longer runs %s", tool)
+			t.Errorf("make %s never runs %s", tool, tool)
+		}
+		ran := false
+		for _, line := range recipes["lint"] {
+			if strings.HasPrefix(line, "$(MAKE)") &&
+				strings.Contains(line, tool) &&
+				!strings.Contains(line, "||") {
+				ran = true
+			}
+		}
+		if !ran {
+			t.Errorf("make lint does not run %s as a gate", tool)
+		}
+	}
+
+	installs := map[string]string{
+		"nilaway":   "go.uber.org/nilaway/cmd/nilaway@",
+		"modernize": "golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@",
+	}
+	for _, workflow := range lintWorkflows {
+		job, ok := pipelineJobs(t, root, workflow)["lint"]
+		if !ok {
+			t.Fatalf("%s has no lint job", workflow)
+		}
+		var runs []string
+		for _, step := range jobSteps(t, workflow, "lint", job) {
+			run, _ := step["run"].(string)
+			runs = append(runs, run)
+		}
+		all := strings.Join(runs, "\n")
+		for tool, pkg := range installs {
+			if !strings.Contains(all, "make "+tool) {
+				t.Errorf("%s lint job never runs `make %s`", workflow, tool)
+			}
+			_, version, ok := strings.Cut(all, pkg)
+			if !ok {
+				t.Errorf("%s lint job never installs %s", workflow, tool)
+				continue
+			}
+			version, _, _ = strings.Cut(version, "\n")
+			if version == "" || version == "latest" {
+				t.Errorf("%s installs %s at %q; pin a version", workflow, tool, version)
+			}
 		}
 	}
 
 	for _, doc := range []string{"AGENTS.md", "CLAUDE.md"} {
-		if !strings.Contains(readRepoFile(t, root, doc), "advisory") {
-			t.Errorf("%s does not say nilaway and modernize are advisory", doc)
+		if strings.Contains(readRepoFile(t, root, doc), "advisory") {
+			t.Errorf("%s calls a lint analyzer advisory", doc)
 		}
 	}
 }

@@ -19,7 +19,7 @@ The default target formats and builds; tests are a separate target.
 ## Pre-commit
 
 ```
-make lint         # gates: import-boundaries, golangci-lint per module; advisory: nilaway, modernize
+make lint         # import-boundaries, all modules, windows, nilaway, modernize
 make docs-parity
 make config-parity
 make golines

@@ -54,7 +54,7 @@ NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # run modernize only against hand-written packages to avoid generator drift.
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
-.PHONY: all build help install uninstall mod-tidy clean format golines lint import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help install uninstall mod-tidy clean format golines lint nilaway modernize import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -92,20 +92,22 @@ golines: ## Enforce 80-character line limit
 # .github/workflows/go-test.yml and .github/workflows/publish.yml;
 # internal/docsparity's
 # TestLintCoversEveryGoModule fails until every go.mod has a step in both.
-lint: import-boundaries ## Run import-boundaries and golangci-lint (gates), then nilaway and modernize (advisory)
+lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and modernize
 	@for dir in $(GO_MODULE_DIRS); do \
 		echo "golangci-lint run ./... ($$dir)"; \
 		(cd $$dir && golangci-lint run ./...) || exit 1; \
 	done
-	# The two analyzers below are advisory: main carries an unrepaired baseline
-	# for both, so their findings are printed without failing the target. Exit
-	# 3 is the go/analysis status for "diagnostics reported"; any other failure
-	# (a missing binary, a package that does not load) means nothing was
-	# analyzed and still fails. Test fixtures establish preconditions with
-	# testify assertions that NilAway cannot track across calls, so only
-	# production code is analyzed.
-	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./... || [ $$? -eq 3 ]
-	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES) || [ $$? -eq 3 ]
+	$(MAKE) nilaway modernize
+
+# nilaway and modernize are gates, not advisories. CI runs these same targets
+# in the lint job after installing pinned binaries.
+nilaway: ## Fail on NilAway findings in production code
+	# Test fixtures establish preconditions with testify assertions that nilaway
+	# cannot track across calls; analyze production code here.
+	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
+
+modernize: ## Fail on modernize findings in hand-written packages
+	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
