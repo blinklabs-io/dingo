@@ -2165,7 +2165,7 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 			}
 			hash, ok, err := registeredPoolVrfKeyHash(pool)
 			if err != nil {
-				return lcommon.Blake2b256{}, false, err
+				return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 			}
 			if ok {
 				return hash, true, nil
@@ -2183,7 +2183,8 @@ func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
 	if err != nil {
 		return lcommon.Blake2b256{}, false, headerStateLookupErr(err)
 	}
-	return registeredPoolVrfKeyHash(pool)
+	hash, ok, err := registeredPoolVrfKeyHash(pool)
+	return hash, ok, headerStateLookupErr(err)
 }
 
 // electingPoolParamsCutoffSlot reports the slot up to which pool registrations

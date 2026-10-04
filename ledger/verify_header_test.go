@@ -2044,8 +2044,22 @@ func (s *deferredFloorWriteGateStore) SetSyncState(
 
 type malformedVrfKeyHashStore struct {
 	metadata.MetadataStore
-	cutoffHash   []byte
-	earliestHash []byte
+	cutoffHash           []byte
+	earliestHash         []byte
+	malformedCurrentPool bool
+}
+
+func (s *malformedVrfKeyHashStore) GetPool(
+	pkh lcommon.PoolKeyHash,
+	includeInactive bool,
+	txn types.Txn,
+) (*models.Pool, error) {
+	pool, err := s.MetadataStore.GetPool(pkh, includeInactive, txn)
+	if err != nil || pool == nil || !s.malformedCurrentPool {
+		return pool, err
+	}
+	pool.Registration[0].VrfKeyHash = []byte{0x01}
+	return pool, nil
 }
 
 func (s *malformedVrfKeyHashStore) GetPoolVrfKeyHashAtSlot(
@@ -2235,6 +2249,57 @@ func TestMalformedVrfKeyMetadataDoesNotBlamePeer(t *testing.T) {
 				poolKeyHash,
 				epochCache,
 				snapshot,
+			)
+			require.ErrorIs(t, err, errHeaderStateLookupFailed)
+			assert.False(t, headerFailureBlamesPeer(err))
+		})
+	}
+}
+
+func TestMalformedCurrentPoolVrfKeyDoesNotBlamePeer(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		snapshot bool
+	}{
+		{name: "no snapshot"},
+		{name: "Mithril bootstrap snapshot", snapshot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := &malformedVrfKeyHashStore{malformedCurrentPool: true}
+			db, err := dbtest.NewDatabaseWithMetadataWrapper(
+				t,
+				dbtest.Options{
+					Config: &database.Config{DataDir: t.TempDir()},
+				},
+				func(inner metadata.MetadataStore) metadata.MetadataStore {
+					store.MetadataStore = inner
+					return store
+				},
+			)
+			require.NoError(t, err)
+			tb := createTestBlock(t, [32]byte{71}, 0, tamperNone)
+			ls := newEligibilityTestLedgerOnDB(t, tb.epochNonce, db)
+			poolKeyHash := lcommon.PoolKeyHash(tb.block.IssuerVkey().Hash())
+			seedBlockPoolRegistration(t, db, tb.block)
+
+			var snap electingSnapshot
+			var epochCache []models.Epoch
+			if tc.snapshot {
+				epochCache = []models.Epoch{{
+					EpochId:       5,
+					StartSlot:     1_000,
+					LengthInSlots: 1_000,
+					EraId:         eras.ShelleyEraDesc.Id,
+				}}
+				snap.row = &models.PoolStakeSnapshot{CapturedSlot: 1_500}
+				ls.mithrilLedgerSlot = 1_500
+			}
+
+			_, _, err = ls.electingVrfKeyHashFromSnapshot(
+				poolKeyHash, epochCache, snap,
 			)
 			require.ErrorIs(t, err, errHeaderStateLookupFailed)
 			assert.False(t, headerFailureBlamesPeer(err))
