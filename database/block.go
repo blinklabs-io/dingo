@@ -184,6 +184,13 @@ func (d *Database) SetGenesisCbor(
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf("SetGenesisCbor: failed to commit txn: %w", err)
 		}
+		if len(hash) == 32 {
+			// Resolve later offset reads from memory instead of adding this key
+			// to an older, concurrently open Badger batch transaction's read set.
+			var blockHash [32]byte
+			copy(blockHash[:], hash)
+			d.cborCache.cacheBlockCbor(slot, blockHash, cborData)
+		}
 	}
 	return nil
 }

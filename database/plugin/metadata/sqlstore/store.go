@@ -32,12 +32,17 @@ import (
 
 var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Config contains backend-neutral dependencies for a Store.
+// Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
-	WriteDB *sql.DB
-	ReadDB  *sql.DB
-	Dialect Dialect
-	Logger  *slog.Logger
+	// SQLitePath identifies the file opened by the provider, including its
+	// dataDir override. Reconstructing it from the node's global directory
+	// could point introspection clients at a different database. It is empty
+	// for in-memory SQLite and other backends, and immutable after construction.
+	SQLitePath string
+	WriteDB    *sql.DB
+	ReadDB     *sql.DB
+	Dialect    Dialect
+	Logger     *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -124,6 +129,7 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	sqlitePath  string
 	writeDB     *sql.DB
 	readDB      *sql.DB
 	dialect     Dialect
@@ -269,6 +275,7 @@ func New(config Config) (*Store, error) {
 	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
+		sqlitePath:                  config.SQLitePath,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
@@ -1237,14 +1244,19 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
+	return s.UpdatePlannerStatsContext(context.Background())
+}
+
+// UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
+func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkMu.RLock()
 	defer s.bulkMu.RUnlock()
 	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 	}
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
 }
 
 func (t *sqlTxn) bindBatch(accumulator *transactionBatchAccumulator) error {
@@ -1272,3 +1284,8 @@ func (t *sqlTxn) restoreBatches(checkpoint map[*transactionBatchAccumulator]rowB
 		accumulator.rows = rows.clone()
 	}
 }
+
+// SQLitePath returns the active provider's on-disk SQLite location, if any.
+// This optional capability lets clients own separate read-only pools without
+// exposing the provider's pools or requiring it on every MetadataStore.
+func (s *Store) SQLitePath() string { return s.sqlitePath }

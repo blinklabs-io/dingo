@@ -68,6 +68,7 @@ const (
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 	committeeHotAuthorizationPruneOrderSchemaRelease    = "committee-hot-authorization-prune-order"
 )
 
@@ -199,8 +200,13 @@ var schemaVersions = []struct {
 	},
 	{
 		Version: 33,
-		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
+	},
+	{
+		Version: 34,
+		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
+		Dir:     "v34",
 	},
 }
 

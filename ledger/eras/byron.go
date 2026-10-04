@@ -513,10 +513,15 @@ func byronInputBalance(
 	return balance, redeemOnly
 }
 
+// byronOutputBalance sums the outputs the transaction adds to the UTxO set. The
+// reference balances txOutputUTxO (Cardano/Chain/UTxO/UTxO.hs), which indexes
+// outputs with a Word16 and so drops every output past index 65535. Produced
+// is that same set, so the fee and value checks see exactly the outputs that
+// are stored; the address rules still cover every output.
 func byronOutputBalance(tx lcommon.Transaction) *big.Int {
 	balance := new(big.Int)
-	for _, output := range tx.Outputs() {
-		if amount := output.Amount(); amount != nil {
+	for _, utxo := range tx.Produced() {
+		if amount := utxo.Output.Amount(); amount != nil {
 			balance.Add(balance, amount)
 		}
 	}

@@ -141,6 +141,24 @@ type Ouroboros struct {
 	// one and only terminal callback has already run.
 	blockFetchDoneEarly map[blockFetchKey]struct{}
 	blockFetchMutex     sync.Mutex
+	// blockfetchForward holds, per connection, the blockfetch events
+	// received but not yet published to the ledger; see
+	// blockfetch_forward.go.
+	blockfetchForward   map[ouroboros.ConnectionId]*blockfetchForwardState
+	blockfetchForwardMu sync.Mutex
+	// blockfetchForwardSpawn and blockfetchForwardBeforePublish are nil in
+	// production. Tests set them to observe forwarder starts and to hold a
+	// forwarder inside its publish.
+	blockfetchForwardSpawn         func(ouroboros.ConnectionId, func(ouroboros.ConnectionId))
+	blockfetchForwardBeforePublish func(ouroboros.ConnectionId, event.Event)
+	// blockfetchForwardMaxBytes and blockfetchForwardMaxEvents override the
+	// per-connection forward queue bounds when positive; tests lower them.
+	// blockfetchForwardClose, when set, replaces blockfetchForwardCloseLive
+	// for a connection whose queue reached a bound; tests set it to observe
+	// the close.
+	blockfetchForwardMaxBytes  int
+	blockfetchForwardMaxEvents int
+	blockfetchForwardClose     func(ouroboros.ConnectionId)
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -482,8 +500,25 @@ type blockfetchMetrics struct {
 	// dingo_ledger_block_stage_duration_seconds in the ledger package for
 	// the header-verify/validate/apply stages that follow once a decoded
 	// block reaches the ledger.
-	stageDuration *prometheus.HistogramVec
-	stageDecode   prometheus.Observer
+	//
+	// "enqueue" is the time the blockfetch receive callbacks spend handing
+	// an event to the per-connection forward queue. "ledger_publish" is the
+	// time the forwarder spends in EventBus.Publish delivering it to the
+	// ledger, which includes any ledger backpressure.
+	stageDuration      *prometheus.HistogramVec
+	stageDecode        prometheus.Observer
+	stageEnqueue       prometheus.Observer
+	stageLedgerPublish prometheus.Observer
+	// inFlightBytes/inFlightBlocks are the aggregate size and count of
+	// blockfetch events received from peers but not yet handed to the
+	// ledger by the per-connection forwarder (blockfetch_forward.go).
+	// Aggregated across every connection rather than labelled by
+	// connection_id, whose series would grow without bound with reconnects.
+	inFlightBytes  prometheus.Gauge
+	inFlightBlocks prometheus.Gauge
+	// forwardOverflows counts connections closed because their forward
+	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
+	forwardOverflows prometheus.Counter
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -669,6 +704,28 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
 		WithLabelValues("decode")
+	o.blockfetchMetrics.stageEnqueue = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("enqueue")
+	o.blockfetchMetrics.stageLedgerPublish = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("ledger_publish")
+	o.blockfetchMetrics.inFlightBytes = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_bytes",
+			Help: "aggregate bytes of blockfetch blocks received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.inFlightBlocks = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_blocks",
+			Help: "aggregate count of blockfetch events (blocks and batch-done markers) received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.forwardOverflows = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_forward_overflow_total",
+			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
+		},
+	)
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
@@ -938,6 +995,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 
+	// Counts keep-alive pong timeouts.
+	if classifyKeepaliveTimeoutClose(e.Error) {
+		o.recordKeepaliveTimeout()
+	}
+
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
 	if o.peerGov != nil {
@@ -978,6 +1040,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
+	o.releaseBlockfetchForwardOverflow(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
