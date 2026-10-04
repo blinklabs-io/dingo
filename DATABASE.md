@@ -2573,6 +2573,10 @@ under the ranking block's slot, using the epoch in which the closure executes.
 Replayed endorser transactions (hashes already present) are
 skipped so certificate, governance, and UTxO effects are not applied twice.
 
+Earlier ranking-block deltas are applied before processing the next Leios
+closure, including during unvalidated historical sync. This preserves input
+availability and stake accounting independently of read-batch boundaries.
+
 On the Musashi prototype path, a certified closure executes on the parent's
 unticked ledger before the certifying ranking block's epoch transition. A closure
 crossing that boundary therefore contributes to the ended epoch's fees and the

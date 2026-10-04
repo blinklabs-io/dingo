@@ -50,13 +50,22 @@ func leiosBoundaryTestBlock(
 	prevHash lcommon.Blake2b256,
 	certifies bool,
 	announce []byte,
+	transactions ...cbor.RawMessage,
 ) *gdijkstra.DijkstraBlock {
 	t.Helper()
 	var certField any
 	if certifies {
 		certField = []any{[]byte{0x80}, make([]byte, 48)}
 	}
-	bodyCbor, err := cbor.Encode([]any{[]any{}, certField, nil})
+	blockTransactions := make([]any, 0, len(transactions))
+	for _, raw := range transactions {
+		var fields []cbor.RawMessage
+		_, err := cbor.Decode(raw, &fields)
+		require.NoError(t, err)
+		require.Len(t, fields, 4)
+		blockTransactions = append(blockTransactions, []cbor.RawMessage{fields[0], fields[1], fields[3], fields[2]})
+	}
+	bodyCbor, err := cbor.Encode([]any{blockTransactions, certField, nil})
 	require.NoError(t, err)
 	var body gdijkstra.DijkstraBlockBody
 	_, err = cbor.Decode(bodyCbor, &body)
@@ -329,4 +338,69 @@ func TestBlocksBeforeEpochEnd(t *testing.T) {
 	uninitialized := epoch
 	uninitialized.SlotLength = 0
 	require.Empty(t, blocksBeforeEpochEnd(blocks, uninitialized))
+}
+
+func TestLedgerProcessBlocksAppliesRankingTransactionsBeforeNextClosure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		batchSize int
+	}{{"separate batches", 1}, {"shared batch", 2}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runRankingTransactionsBeforeNextClosure(t, tc.batchSize)
+		})
+	}
+}
+
+func runRankingTransactionsBeforeNextClosure(t *testing.T, batchSize int) {
+	t.Helper()
+	producerRaw, producer := leiosApplyTestProducerTx(t, 0xB1)
+	spenderRaw, spender := leiosApplyTestSpendingTx(t, 0xB2, producer.Hash().Bytes(), 0)
+	ebHash := leiosTestHash(0xE5)
+	announcer := leiosBoundaryTestBlock(t, 0, 10, lcommon.Blake2b256{}, false, ebHash, producerRaw)
+	certifier := leiosBoundaryTestBlock(t, 1, 20, announcer.Hash(), true, nil)
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	for _, block := range []gledger.Block{announcer, certifier} {
+		require.NoError(t, cm.PrimaryChain().AddBlock(block, nil))
+	}
+	nonce := bytes.Repeat([]byte{0x42}, 32)
+	epoch := models.Epoch{EpochId: 0, StartSlot: 0, SlotLength: 1000, LengthInSlots: 1000, EraId: eras.DijkstraEraDesc.Id, Nonce: nonce, EvolvingNonce: nonce}
+	require.NoError(t, db.SetEpoch(0, 0, nonce, nonce, nil, nil, epoch.EraId, epoch.SlotLength, epoch.LengthInSlots, nil))
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().NetworkId = "Testnet"
+	cfg.ShelleyGenesisHash = strings.Repeat("42", 32)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm, CardanoNodeConfig: cfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), PromRegistry: prometheus.NewRegistry(),
+		EnableDijkstra: true, ManualBlockProcessing: true,
+		EndorserBlockProvider: func(hash []byte, _ uint64) ([]cbor.RawMessage, bool) {
+			return []cbor.RawMessage{spenderRaw}, bytes.Equal(hash, ebHash)
+		},
+		ValidateLeiosCertificate: func(uint64, []byte, []byte, []byte) error { return nil },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentEra = eras.DijkstraEraDesc
+	ls.currentPParams = dijkstraTestProtocolParameters()
+	ls.currentEpoch = epoch
+	ls.epochCache = []models.Epoch{epoch}
+	ls.currentTipBlockNonce = nonce
+	ls.publishSnapshotsLocked()
+	require.NoError(t, cm.SetLedger(ls))
+	blocks := []gledger.Block{announcer, certifier}
+	batches := make(chan []gledger.Block, len(blocks))
+	for i := 0; i < len(blocks); i += batchSize {
+		batches <- blocks[i : i+batchSize]
+	}
+	close(batches)
+	require.NoError(t, ls.ProcessTrustedBlockBatches(t.Context(), batches))
+	stored, err := db.GetTransactionByHash(spender.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Len(t, stored.Inputs, 1, "the closure must consume the earlier ranking-block output even in a shared batch")
+	require.Equal(t, certifier.SlotNumber(), stored.Inputs[0].DeletedSlot)
+	require.Equal(t, spender.Hash().Bytes(), []byte(stored.Inputs[0].SpentAtTxId))
 }

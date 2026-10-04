@@ -7946,10 +7946,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						if reachedTipRegion {
 							wantEnableValidation = true
 						}
-						// Flush accumulated deltas before the first validated
-						// block so that UTxOs created by earlier non-validated
-						// blocks are visible during validation lookups.
-						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
+						// A certified closure applies inside ledgerProcessBlock,
+						// before its ranking-block delta. Earlier ranking effects
+						// must be visible to that closure even without validation.
+						flushBeforeClosure := dijkstraEraGate(snapshotEra) &&
+							ls.config.EndorserBlockProvider != nil
+						if (shouldValidateBlock || flushBeforeClosure) && len(deltaBatch.deltas) > 0 {
 							applyStart := time.Now()
 							err := deltaBatch.apply(ls, txn)
 							ls.metrics.observeBlockStage(
