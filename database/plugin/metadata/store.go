@@ -350,9 +350,10 @@ type GovernanceStore interface {
 		types.Txn,
 	) (map[string]bool, error)
 
-	// GetCommitteeActiveCount returns the number of active (non-resigned)
-	// committee members.
-	GetCommitteeActiveCount(types.Txn) (int, error)
+	// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+	// committee members that hold a current hot-key authorization. Members
+	// without a hot key are not counted and term expiry is not applied.
+	GetCommitteeAuthorizedCount(types.Txn) (int, error)
 
 	// Snapshot-imported committee member methods
 
@@ -1405,12 +1406,23 @@ type CertificateStore interface {
 	) ([]lcommon.StakeRegistrationCertificate, error)
 
 	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
-	// certificate for genesisHash before the supplied block slot.
+	// certificate for genesisHash that has taken effect by blockSlot: one
+	// whose certificate slot plus stabilityWindow is at or below it.
 	GetGenesisDelegationForSlot(
 		[]byte, // genesisHash
 		uint64, // blockSlot
+		uint64, // stabilityWindow
 		types.Txn,
 	) (*models.GenesisDelegation, error)
+
+	// GetGenesisDelegationsInSlotRange returns the genesis-key delegation
+	// certificates with a certificate slot from fromSlot through uptoSlot
+	// inclusive, oldest first.
+	GetGenesisDelegationsInSlotRange(
+		uint64, // fromSlot
+		uint64, // uptoSlot
+		types.Txn,
+	) ([]models.GenesisDelegation, error)
 
 	// GetAccountDelegationHistoryByCredential retrieves delegation history
 	// rows for a stake credential tag/hash pair.
