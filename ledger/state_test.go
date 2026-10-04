@@ -13926,3 +13926,13 @@ func TestEvaluateTxRefusesWhenEvaluationSlotsAreInUse(t *testing.T) {
 	require.ErrorIs(t, err, ErrEvaluationBusy)
 	require.Len(t, ls.evalSlots, 2, "a refused call must not take a slot")
 }
+
+func TestNewLedgerStateRejectsNegativeEvaluationCapacity(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	_, err = NewLedgerState(LedgerStateConfig{
+		Database: db, ChainManager: cm, MaxConcurrentEvaluations: -1,
+	})
+	require.ErrorContains(t, err, "MaxConcurrentEvaluations must not be negative")
+}

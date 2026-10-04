@@ -3670,12 +3670,15 @@ func (a *NodeAdapter) AddressTransactions(
 	if !fromSatisfiable {
 		return []AddressTransactionInfo{}, 0, nil
 	}
-	to, _, err := a.resolveBlockRangeBound(params.To, false)
+	to, toSatisfiable, err := a.resolveBlockRangeBound(params.To, false)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve address transactions to range: %w",
 			err,
 		)
+	}
+	if !toSatisfiable {
+		return []AddressTransactionInfo{}, 0, nil
 	}
 
 	total, err := a.ledgerState.CountTransactionsByAddress(addr, from, to)

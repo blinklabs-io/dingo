@@ -483,7 +483,7 @@ func EvaluateTxAlonzo(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				tmpPparams.MaxTxExUnits,
+				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
 			if err != nil {

@@ -115,6 +115,11 @@ func (s *submitServiceServer) WaitForTx(
 			)
 		}
 	}
+	release, err := s.utxorpc.admitStream(req.Peer())
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	s.utxorpc.config.Logger.Info(
 		fmt.Sprintf(
@@ -446,10 +451,11 @@ func (s *submitServiceServer) WatchMempool(
 
 	var predTree *txPredicateNode
 	if predicate != nil {
-		predTree = txPredicateFromSubmit(predicate)
-		if err := s.utxorpc.checkPredicateBudget(predTree); err != nil {
-			return err
+		remaining := s.utxorpc.config.MaxPredicateNodes
+		if !predicateProtoWithinBudget(predicate, isNilPtr[submit.TxPredicate], &remaining, 0) {
+			return predicateBudgetError(s.utxorpc.config.MaxPredicateNodes)
 		}
+		predTree = txPredicateFromSubmit(predicate)
 	}
 	queue := newMempoolStreamQueue(watchMempoolQueueSize)
 	// Carries a slow-consumer refusal from the event handler.
@@ -533,6 +539,9 @@ func (s *submitServiceServer) WatchMempool(
 				return err
 			}
 		case err := <-errCh:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		case <-ctx.Done():
 			s.utxorpc.config.Logger.Debug(

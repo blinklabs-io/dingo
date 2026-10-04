@@ -478,17 +478,16 @@ func (s *Store) GetTransactionsByAddress(
 	query := `SELECT ` + sqliteTransactionColumns + `
 FROM "transaction"
 WHERE id IN (
-    SELECT DISTINCT transaction_id FROM address_transaction WHERE ` +
-		predicate + `
-)`
+    SELECT DISTINCT transaction_id FROM address_transaction WHERE ` + predicate
 	if from != nil {
-		query += " AND (slot, block_index) >= (?, ?)"
+		query += " AND (slot, tx_index) >= (?, ?)"
 		args = append(args, from.Slot, from.TxIndex)
 	}
 	if to != nil {
-		query += " AND (slot, block_index) <= (?, ?)"
+		query += " AND (slot, tx_index) <= (?, ?)"
 		args = append(args, to.Slot, to.TxIndex)
 	}
+	query += "\n)"
 	query += `
 ORDER BY slot ` + direction + `, block_index ` + direction + `,
          id ` + direction

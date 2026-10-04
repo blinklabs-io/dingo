@@ -111,7 +111,7 @@ type UtxorpcConfig struct {
 	// MaxTxRefs caps the distinct transaction references in one WaitForTx
 	// request (0 = use default).
 	MaxTxRefs int
-	// MaxStreams caps concurrent FollowTip, WatchTx and WatchMempool streams
+	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
 	// across all clients; MaxStreamsPerClient caps them per remote host
 	// (0 = use default).
 	MaxStreams          int

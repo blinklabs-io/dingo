@@ -232,10 +232,11 @@ func (s *watchServiceServer) WatchTx(
 
 	var predTree *txPredicateNode
 	if predicate != nil {
-		predTree = txPredicateFromWatch(predicate)
-		if err := s.utxorpc.checkPredicateBudget(predTree); err != nil {
-			return err
+		remaining := s.utxorpc.config.MaxPredicateNodes
+		if !predicateProtoWithinBudget(predicate, isNilPtr[watch.TxPredicate], &remaining, 0) {
+			return predicateBudgetError(s.utxorpc.config.MaxPredicateNodes)
 		}
+		predTree = txPredicateFromWatch(predicate)
 	}
 
 	// Get our points

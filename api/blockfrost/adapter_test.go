@@ -812,6 +812,30 @@ func TestNodeAdapterNextBlockHash(t *testing.T) {
 	assert.Nil(t, next)
 }
 
+func TestResolveBlockRangeUpperBoundInSparseChain(t *testing.T) {
+	t.Parallel()
+	adapter, _, db := newDBBackedAdapter(t)
+	for _, block := range []struct{ height, slot uint64 }{{1, 10}, {3, 30}} {
+		require.NoError(t, db.BlockCreate(models.Block{
+			Hash: fill32(byte(block.height)), Slot: block.slot,
+			Number: block.height, ID: block.height + database.BlockInitialIndex,
+			Type: 0, Cbor: []byte{byte(block.height)},
+		}, nil))
+	}
+
+	bound, ok, err := adapter.resolveBlockRangeBound(&BlockRangePosition{Block: 2}, false)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NotNil(t, bound)
+	require.Equal(t, uint64(10), bound.Slot)
+	require.Equal(t, uint32(math.MaxUint32), bound.TxIndex)
+
+	bound, ok, err = adapter.resolveBlockRangeBound(&BlockRangePosition{Block: 0}, false)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, bound)
+}
+
 // TestNodeAdapterPoolMetadataOffchainStoreError guards the error path at the
 // PoolMetadata boundary: a failing off-chain metadata store query must
 // propagate as an error rather than degrade into a successful URL/hash-only

@@ -256,12 +256,15 @@ func (a *NodeAdapter) AccountTransactions(
 	if !fromSatisfiable {
 		return []AccountTransactionInfo{}, 0, nil
 	}
-	to, _, err := a.resolveBlockRangeBound(params.To, false)
+	to, toSatisfiable, err := a.resolveBlockRangeBound(params.To, false)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"resolve account transactions to range: %w",
 			err,
 		)
+	}
+	if !toSatisfiable {
+		return []AccountTransactionInfo{}, 0, nil
 	}
 
 	offset := (params.Pagination.Page - 1) * params.Pagination.Count
@@ -391,11 +394,9 @@ func (a *NodeAdapter) AccountTransactions(
 //     import gap). If no block at or after it exists at all (the position
 //     is beyond every known block), the range is unsatisfiable and the
 //     caller should return an empty result without querying further.
-//   - for an upper ("to") bound, there is no equivalent "last existing
-//     block at or before" index lookup available, so the bound is instead
-//     treated as unconstrained. This can only return more rows than a
-//     literal reading of an unresolvable "to" would (never fewer), which
-//     is the safe direction for an inclusive range filter.
+//   - for an upper ("to") bound in an import gap, the preceding existing
+//     block is used. If there is no preceding block, the range is empty.
+//     A bound beyond the latest block resolves to the latest block.
 //
 // An explicit ":index" sub-position is honored only when the exact block
 // was found; a gap-fallback ignores it and defaults to the start (from)
@@ -432,7 +433,14 @@ func (a *NodeAdapter) resolveBlockRangeBound(
 		}, true, nil
 	case errors.Is(err, models.ErrBlockNotFound):
 		if !lower {
-			return nil, true, nil
+			prev, prevErr := a.ledgerState.Database().BlockAtOrBeforeIndex(idx, nil)
+			if errors.Is(prevErr, models.ErrBlockNotFound) {
+				return nil, false, nil
+			}
+			if prevErr != nil {
+				return nil, false, fmt.Errorf("resolve block at or before %d: %w", pos.Block, prevErr)
+			}
+			return &models.AddressTransactionPosition{Slot: prev.Slot, TxIndex: math.MaxUint32}, true, nil
 		}
 		next, err := a.ledgerState.Database().BlockAtOrAfterIndex(idx, nil)
 		if err == nil {

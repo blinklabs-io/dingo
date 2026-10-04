@@ -8866,9 +8866,10 @@ references. Empty lists retain the current-tip fallback.
 
 `WaitForTx` rejects more than `MaxTxRefs` (default 1000) distinct references
 before subscribing or reading the ledger, and one `ServerTimeout` deadline
-covers the durable lookups as well as the wait. `FollowTip`, `WatchTx` and
-`WatchMempool` take a slot from a shared limiter (`MaxStreams` process-wide,
-`MaxStreamsPerClient` per remote host) and answer `ResourceExhausted` when
+covers the durable lookups as well as the wait. `FollowTip`, `WatchTx`,
+`WatchMempool`, and `WaitForTx` take a slot from a shared limiter
+(`MaxStreams` process-wide, `MaxStreamsPerClient` per remote host) and answer
+`ResourceExhausted` when
 none is free. `WatchTx` and `WatchMempool` reject a predicate with more than
 `MaxPredicateNodes` nodes, and `WatchTx` rejects an intersect more than
 `MaxReplayBlocks` blocks behind the tip, all before subscribing or reading
@@ -8876,7 +8877,9 @@ history. `WatchMempool`'s event callback only decodes, matches and offers to a
 bounded queue; the request goroutine is the only sender, and a client that
 fills the queue is cut off with `ResourceExhausted`. `DumpHistory` uses
 `HistoryPageItems` (default 100) when `max_items` is omitted, and stops a page
-at `MaxHistoryBytes` of serialized blocks with a `next_token`.
+at `MaxHistoryBytes` of serialized blocks with a `next_token`. A single block
+larger than the byte cap is returned whole; at tip that response has no
+`next_token` because no further block exists.
 
 `FollowTip` populates `Timestamp` on a `Reset` block reference and on every
 response's `Tip` from `LedgerState.SlotToTime`. `Timestamp` is a plain proto3

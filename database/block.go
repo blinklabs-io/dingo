@@ -1281,6 +1281,65 @@ func (d *Database) BlockAtOrAfterIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+// BlockAtOrBeforeIndex returns the last indexed block at or before blockIndex.
+// It seeks the ordered index so gaps and stale mappings do not select raw
+// block blobs that are absent from the current chain index.
+func (d *Database) BlockAtOrBeforeIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (models.Block, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.BlobStore()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobIndexKeyPrefix)
+	it := blob.NewIterator(blobTxn, types.BlobIteratorOptions{
+		Reverse: true,
+		Prefix:  prefix,
+	})
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	for it.Seek(types.BlockBlobIndexKey(blockIndex)); it.ValidForPrefix(prefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		indexKey := item.Key()
+		if indexKey == nil {
+			continue
+		}
+		blockKey, err := item.ValueCopy(nil)
+		if err != nil {
+			return models.Block{}, err
+		}
+		block, err := blockByKey(txn, blockKey)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return models.Block{}, err
+		}
+		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(block.ID)) {
+			continue
+		}
+		return block, nil
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 func BlocksRecent(db *Database, count int) ([]models.Block, error) {
 	var ret []models.Block
 	txn := db.Transaction(false)

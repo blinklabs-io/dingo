@@ -887,7 +887,7 @@ type AccountWithdrawalInfo struct {
 	BlockHeight int64
 }
 
-// BlockRangePosition holds a parsed Blockfrost account-transactions
+// BlockRangePosition holds a parsed Blockfrost account or address transactions
 // from/to query value: a block number and an optional transaction
 // index within that block (the "block:index" form).
 type BlockRangePosition struct {

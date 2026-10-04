@@ -62,7 +62,10 @@ func TestStreamLimiterEnforcesTotalAndPerClientCaps(t *testing.T) {
 func TestConnect_StreamsRefusedAtAdmissionLimit(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
 		numBlocks: 25,
-		tune:      func(cfg *UtxorpcConfig) { cfg.MaxStreams = 1 },
+		tune: func(cfg *UtxorpcConfig) {
+			cfg.MaxStreams = 1
+			cfg.ServerTimeout = time.Second
+		},
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -104,6 +107,13 @@ func TestConnect_StreamsRefusedAtAdmissionLimit(t *testing.T) {
 	assert.Equal(
 		t, connect.CodeResourceExhausted, connect.CodeOf(watchMempool.Err()),
 	)
+	waitForTx, err := submitClient.WaitForTx(
+		ctx,
+		connect.NewRequest(&submit.WaitForTxRequest{Ref: [][]byte{make([]byte, 32)}}),
+	)
+	require.NoError(t, err)
+	require.False(t, waitForTx.Receive())
+	assert.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(waitForTx.Err()))
 
 	// With the slot free, a stream is admitted again.
 	release()

@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/stretchr/testify/require"
 )
 
@@ -110,6 +112,23 @@ func TestTransaction(t *testing.T) {
 		tx, err := safedecode.Transaction(9999, []byte{0x80})
 		require.Error(t, err)
 		require.NotErrorIs(t, err, safedecode.ErrDecodePanic)
+		require.Nil(t, tx)
+	})
+	t.Run("single transaction and trailing data", func(t *testing.T) {
+		t.Parallel()
+		body := map[uint]any{
+			0: []any{[]any{make([]byte, 32), uint64(0)}},
+			1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+			2: uint64(200_000),
+			3: uint64(100),
+		}
+		valid, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
+		require.NoError(t, err)
+		tx, err := safedecode.Transaction(uint(alonzo.EraIdAlonzo), valid)
+		require.NoError(t, err)
+		require.NotNil(t, tx)
+		tx, err = safedecode.Transaction(uint(alonzo.EraIdAlonzo), append(valid, 0))
+		require.ErrorIs(t, err, safedecode.ErrTrailingData)
 		require.Nil(t, tx)
 	})
 }

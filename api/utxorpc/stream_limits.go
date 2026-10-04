@@ -33,7 +33,8 @@ const (
 	DefaultMaxReplayBlocks     = 10000
 )
 
-// streamLimiter admits long-lived streams (FollowTip, WatchTx, WatchMempool)
+// streamLimiter admits long-lived streams (FollowTip, WatchTx, WatchMempool,
+// WaitForTx)
 // under a process-wide and a per-client cap. A client is the remote host, so
 // clients behind one proxy share a budget.
 type streamLimiter struct {
@@ -91,20 +92,6 @@ func (l *streamLimiter) acquire(peerAddr string) (func(), error) {
 	}, nil
 }
 
-// txPredicateNodeCount returns the number of nodes in the predicate tree.
-func txPredicateNodeCount(n *txPredicateNode) int {
-	if n == nil {
-		return 0
-	}
-	count := 1
-	for _, group := range [][]*txPredicateNode{n.not, n.allOf, n.anyOf} {
-		for _, child := range group {
-			count += txPredicateNodeCount(child)
-		}
-	}
-	return count
-}
-
 // mempoolStreamQueue hands WatchMempool responses from the event bus
 // callback to the request goroutine, the only stream sender. offer never
 // blocks, so a slow client cannot hold up event delivery; a client that lets
@@ -137,20 +124,11 @@ func (u *Utxorpc) admitStream(peer connect.Peer) (func(), error) {
 	return u.streams.acquire(peer.Addr)
 }
 
-// checkPredicateBudget refuses a predicate whose total node count exceeds
-// MaxPredicateNodes.
-func (u *Utxorpc) checkPredicateBudget(n *txPredicateNode) error {
-	if count := txPredicateNodeCount(n); count > u.config.MaxPredicateNodes {
-		return connect.NewError(
-			connect.CodeInvalidArgument,
-			fmt.Errorf(
-				"predicate has %d nodes, exceeding the maximum of %d",
-				count,
-				u.config.MaxPredicateNodes,
-			),
-		)
-	}
-	return nil
+func predicateBudgetError(limit int) error {
+	return connect.NewError(
+		connect.CodeInvalidArgument,
+		fmt.Errorf("predicate exceeds the maximum of %d nodes", limit),
+	)
 }
 
 // checkReplayDistance refuses a WatchTx start point more than MaxReplayBlocks

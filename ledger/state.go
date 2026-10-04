@@ -1678,6 +1678,9 @@ type EpochRolloverResult struct {
 }
 
 func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
+	if cfg.MaxConcurrentEvaluations < 0 {
+		return nil, errors.New("MaxConcurrentEvaluations must not be negative")
+	}
 	if cfg.ChainManager == nil {
 		return nil, errors.New("a ChainManager is required")
 	}
