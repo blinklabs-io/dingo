@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -1036,7 +1037,7 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	n := &Node{config: Config{promRegistry: reg}}
-	n.registerRTSMetrics()
+	n.registerRTSMetrics(promutil.NewRegistration(reg))
 	require.NotNil(
 		t,
 		n.rtsMetrics,

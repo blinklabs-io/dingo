@@ -1200,13 +1200,13 @@ func (c testLeiosParentChain) BlockByPoint(
 	return c.block, nil
 }
 
-func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
+func TestLeiosPipelineAdapterParentAnnouncementUsesHeaderAnnouncement(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	ebHashBytes := testLeiosHash(0x40)
-	parent := legacyLeiosParentBlock(t, ebHashBytes, 8192)
+	parent := leiosParentBlock(t, ebHashBytes, 8192)
 	adapter := &leiosPipelineAdapter{
 		chain: testLeiosParentChain{
 			tip: ochainsync.Tip{
@@ -1245,7 +1245,7 @@ func testLeiosHash(seed byte) []byte {
 	return hash
 }
 
-func legacyLeiosParentBlock(
+func leiosParentBlock(
 	t *testing.T,
 	ebHash []byte,
 	ebSize uint64,
@@ -1280,6 +1280,7 @@ func legacyLeiosParentBlock(
 		babbage.BabbageProtoVersion{
 			Major: dijkstra.MinProtocolVersionDijkstra,
 		},
+		false,
 		[]any{ebHash, ebSize},
 	}
 	headerCbor, err := cbor.Encode([]any{headerBody, make([]byte, 448)})

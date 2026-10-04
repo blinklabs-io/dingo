@@ -86,6 +86,10 @@
         #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
+    # kupo:
+      # provider: "builtin"
+      # config:
+        # port: 1442
     # mesh:
       # provider: "builtin"
       # config:
@@ -94,13 +98,22 @@
       # provider: "builtin"
       # config:
         # port: 9090
+    # mcp:
+      # Built-in Model Context Protocol (MCP) server for AI agent integration.
+      # SQL tools require plugins.storage.metadata.provider: "sqlite".
+      # Port 0 skips MCP startup; set 8088 to enable it on loopback.
+      # MCP is opt-in because authentication is unset by default.
+      # provider: "builtin"
+      # config:
+        # port: 0
 
 # Shared optional TLS default for every selected plugins.api.* provider
-# (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# (Blockfrost, Kupo, Mesh, UTxO RPC, MCP). Each field resolves independently:
 # plugins.api.<name>.config.tls overrides a field for that provider only
 # (see the commented example above). Leaving this section out keeps the API
-# listeners plaintext. API listeners use the root bindAddr, whose default is
-# 0.0.0.0. CORS remains operator-chosen through corsAllowedOrigins.
+# listeners plaintext. Blockfrost, Kupo, Mesh, and UTxO RPC use the root bindAddr,
+# whose default is 0.0.0.0. MCP defaults to its own host: 127.0.0.1.
+# CORS remains operator-chosen through corsAllowedOrigins; MCP ignores "*".
 #
 # api:
 #   tls:
@@ -230,9 +243,9 @@
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
-#   block producers and relay nodes. API ports are ignored in core mode.
+#   block producers and relay nodes. Only MCP can serve API requests in core mode.
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
-#   redeemers). All APIs start automatically on their default ports.
+#   redeemers). APIs with nonzero configured ports start; MCP is opt-in.
 #
 # Storage mode also controls how long per-account reward history is kept: in
 # "core" mode, per-account reward rows (reward_account_output) are pruned to
@@ -248,7 +261,7 @@
 # storageMode: "core"
 
 # API ports are configured under plugins.api above. Set a port to 0 to
-# disable that API. APIs remain inactive outside API storage mode.
+# disable that API. Other APIs remain inactive outside API storage mode; MCP supports both modes.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for

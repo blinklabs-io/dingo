@@ -216,10 +216,22 @@ var flagSpecs = []flagSpec{
 		"Blockfrost API provider",
 	),
 	stringFlag(
+		"Plugins.API.Kupo.Provider",
+		"kupo-provider",
+		"",
+		"Kupo API provider",
+	),
+	stringFlag(
 		"Plugins.API.Mesh.Provider",
 		"mesh-provider",
 		"",
 		"Mesh API provider",
+	),
+	stringFlag(
+		"Plugins.API.Mcp.Provider",
+		"mcp-provider",
+		"",
+		"MCP API provider",
 	),
 	stringSliceFlag(
 		"CORSAllowedOrigins",

@@ -537,6 +537,40 @@ func ImportLedgerState(
 		)
 	}
 
+	// A UTxO created strictly after this snapshot's anchor by local block
+	// replay never appears in the snapshot's live set at all -- the anchor
+	// predates it -- so it never reaches hydrateImportedUtxo's ON CONFLICT
+	// clear above, which only ever sees a row the snapshot's live set
+	// conflicts with. A reconcile pass (below) cannot repair it either: it is
+	// equally absent from the reconcile key set, so reconcile tombstones a
+	// still-live one and leaves an already-spent one untouched either way.
+	// Either shape leaves the row permanently wrong, and the next real
+	// replay of the block that spends it halts with "utxo not found".
+	//
+	// Roll the row back entirely instead of patching its deleted_slot:
+	// UtxosDeleteRolledback (the same primitive deleteBlobBlocksAboveSlot
+	// uses to discard a rejected gap-block range) deletes every UTxO with
+	// added_slot > slot outright, so the ordinary replay that follows this
+	// import re-creates it at its real slot with insertUtxoModelChecked's
+	// inserted=true, contributing its live-stake delta exactly when replay
+	// reaches it. Patching deleted_slot in place at import time instead would
+	// be wrong: ComputeEpochBoundarySnapshot's mark-snapshot read
+	// (GetLiveStakeInputsForPools) has no tip gate and no slot argument, so a
+	// row made live at import time would count toward every mark snapshot
+	// crossed between the anchor and the slot replay actually re-creates it
+	// at -- corrupting reward/leader-stake inputs instead of only failing the
+	// halt this exists to fix. Run before reconcile, so reconcile's live-row
+	// scan never has to reason about a post-anchor row it cannot correctly
+	// judge either way. The rollback is unconditional because it is
+	// idempotent and a no-op on a fresh database, which has no post-anchor
+	// rows.
+	if err := cfg.Database.UtxosDeleteRolledback(slot, nil); err != nil {
+		return fmt.Errorf(
+			"rolling back post-anchor-created UTxOs: %w",
+			err,
+		)
+	}
+
 	// Import cert state (accounts, pools, DReps)
 	certStatePoolsImported := false
 	certStatePhaseRan := false
@@ -3829,7 +3863,7 @@ func importGovState(
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
 			metaTxn := txn.Metadata()
-			for _, prop := range govState.Proposals {
+			for position, prop := range govState.Proposals {
 				select {
 				case <-ctx.Done():
 					return fmt.Errorf(
@@ -3842,6 +3876,7 @@ func importGovState(
 					cfg,
 					prop.ProposedIn,
 				)
+				orderIndex := uint32(position) //nolint:gosec // bounded by the decoded proposal array
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
 				_, ratified := ratifiedIds[govActionIdKey(
@@ -3875,7 +3910,12 @@ func importGovState(
 						GovActionCbor:   prop.GovActionCbor,
 						RatifiedEpoch:   ratifiedEpoch,
 						RatifiedSlot:    ratifiedSlot,
-						AddedSlot:       proposedSlot,
+						// The snapshot lists proposals in submission order,
+						// and every proposal of one epoch shares its anchor
+						// slot, so this position stands in for the block
+						// order RATIFY needs.
+						TxIndex:   &orderIndex,
+						AddedSlot: proposedSlot,
 					},
 					metaTxn,
 				); err != nil {
