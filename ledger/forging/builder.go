@@ -112,6 +112,7 @@ type TxValidator interface {
 		tx ledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		accounts *utxoref.AccountOverlay,
 	) error
 }
 
@@ -119,6 +120,7 @@ type TxValidationFunc = func(
 	tx ledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.AccountOverlay,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -579,6 +581,9 @@ func (b *DefaultBlockBuilder) buildBlock(
 	// Passed to ValidateTxWithOverlay so later transactions in the
 	// same block can spend outputs from earlier intra-block txs.
 	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+	// Track reward-account effects of already-selected transactions so a
+	// later transaction is validated against the balances they leave.
+	pendingAccounts := utxoref.NewAccountOverlay()
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -749,7 +754,12 @@ func (b *DefaultBlockBuilder) buildBlock(
 			// withTxValidationSession above/below), so every
 			// transaction in this candidate is checked against the
 			// same UTxO set and protocol parameters.
-			if err := validate(fullTx, consumedInputs, createdOutputs); err != nil {
+			if err := validate(
+				fullTx,
+				consumedInputs,
+				createdOutputs,
+				pendingAccounts,
+			); err != nil {
 				b.logger.Debug(
 					"skipping transaction - failed re-validation",
 					"component", "forging",
@@ -921,6 +931,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 			for _, utxo := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
 			}
+			pendingAccounts.Apply(utxoref.AccountEffects(fullTx))
 
 			b.logger.Debug(
 				"added transaction to block candidate lists",
@@ -966,6 +977,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 				_ ledger.Transaction,
 				_ map[utxoref.Key]struct{},
 				_ map[utxoref.Key]lcommon.Utxo,
+				_ *utxoref.AccountOverlay,
 			) error {
 				return nil
 			},

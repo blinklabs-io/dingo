@@ -85,6 +85,7 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	return nil
 }
@@ -95,6 +96,7 @@ func (v *changingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -105,6 +107,7 @@ func (v *changingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error {
 			return nil
 		},
@@ -127,6 +130,7 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	return nil
 }
@@ -137,6 +141,7 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -146,6 +151,7 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
+		*utxoref.AccountOverlay,
 	) error {
 		<-v.release
 		return nil
@@ -168,6 +174,7 @@ func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -192,6 +199,7 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.AccountOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -319,7 +327,7 @@ func TestUtxoOverlayUsesConsensusConsumedInputsForInvalidTx(t *testing.T) {
 	require.NotEmpty(t, tx.Inputs())
 	require.NotEmpty(t, tx.Collateral())
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx.Cbor(), tx)
+	overlay.applyTx(tx.Hash().String(), uint(conway.EraIdConway), tx)
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
 		assert.NotContains(t, overlay.consumed, key,
@@ -3992,13 +4000,14 @@ func newOverlayValidator(
 func (v *overlayValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.AccountOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -4110,11 +4119,11 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass overlay validation")
 
 	// Apply TX-A to the overlay
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA)
 
 	// Verify input is now consumed
 	_, consumed := overlay.consumed[utxoKey]
@@ -4127,7 +4136,7 @@ func TestOverlayDoubleSpendRejection(t *testing.T) {
 		[]lcommon.TransactionInput{sharedInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 900000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-B should be rejected (double-spend)")
 	assert.Contains(t, err.Error(), "already consumed")
 }
@@ -4155,9 +4164,9 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{baseInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1800000)},
 	)
-	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created)
+	err := v.ValidateTxWithOverlay(txA, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(t, err, "TX-A should pass")
-	overlay.applyTx(txA.Hash().String(), 0, nil, txA)
+	overlay.applyTx(txA.Hash().String(), 0, txA)
 
 	// Verify TX-A's output is in the overlay created set
 	inputFromA := buildMockInput(t, txHashA, 0)
@@ -4172,13 +4181,13 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{inputFromA},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 1600000)},
 	)
-	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txB, overlay.consumed, overlay.created, overlay.accounts)
 	require.NoError(
 		t,
 		err,
 		"TX-B should pass (spends TX-A output from overlay)",
 	)
-	overlay.applyTx(txB.Hash().String(), 0, nil, txB)
+	overlay.applyTx(txB.Hash().String(), 0, txB)
 
 	// Verify both TXs are tracked
 	assert.Len(t, overlay.applied, 2)
@@ -4195,7 +4204,7 @@ func TestOverlayDependentTxChaining(t *testing.T) {
 		[]lcommon.TransactionInput{unknownInput},
 		[]lcommon.TransactionOutput{buildMockOutput(t, 500000)},
 	)
-	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created)
+	err = v.ValidateTxWithOverlay(txC, overlay.consumed, overlay.created, overlay.accounts)
 	require.Error(t, err, "TX-C should fail (input not found)")
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -4561,6 +4570,7 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	return nil
 }
@@ -4571,6 +4581,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -4580,6 +4591,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 		tx gledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
+		_ *utxoref.AccountOverlay,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {

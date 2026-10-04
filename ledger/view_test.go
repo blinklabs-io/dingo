@@ -3512,10 +3512,11 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 			tx lcommon.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error {
-		return validate(tx, nil, nil)
+		return validate(tx, nil, nil, nil)
 	})
 
 	require.Error(t, err)

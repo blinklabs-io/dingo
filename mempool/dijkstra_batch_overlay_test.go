@@ -145,14 +145,14 @@ func TestUtxoOverlayApplyTxCoversEveryDijkstraBatchLevel(t *testing.T) {
 	t.Parallel()
 	childIn := batchInput(0x11, 0)
 	topIn := batchInput(0x12, 0)
-	tx, txCbor := buildDijkstraBatch(t, batchSpec{
+	tx, _ := buildDijkstraBatch(t, batchSpec{
 		childInputs:  [][]batchOutRef{{childIn}},
 		childOutputs: [][]uint64{{1_000_000}},
 		inputs:       []batchOutRef{topIn},
 		outputs:      []uint64{2_000_000},
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), txCbor, tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx)
 
 	require.Contains(t, overlay.consumed, refKey(childIn))
 	require.Contains(t, overlay.consumed, refKey(topIn))
@@ -174,7 +174,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 	childIn := batchInput(0x21, 0)
 	topIn := batchInput(0x22, 0)
 	collateral := batchInput(0x23, 0)
-	tx, txCbor := buildDijkstraBatch(t, batchSpec{
+	tx, _ := buildDijkstraBatch(t, batchSpec{
 		childInputs:      [][]batchOutRef{{childIn}},
 		childOutputs:     [][]uint64{{1_000_000}},
 		inputs:           []batchOutRef{topIn},
@@ -184,7 +184,7 @@ func TestUtxoOverlayApplyTxReservesOnlyCollateralForInvalidBatch(
 		invalid:          true,
 	})
 	overlay := newUtxoOverlay()
-	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), txCbor, tx)
+	overlay.applyTx(tx.Hash().String(), uint(dijkstra.TxTypeDijkstra), tx)
 
 	require.Equal(
 		t,
@@ -226,7 +226,6 @@ func TestUtxoOverlayPrunesDescendantOfBatchChildOutput(t *testing.T) {
 		overlay.applyTx(
 			entry.tx.Hash().String(),
 			uint(dijkstra.TxTypeDijkstra),
-			entry.cbor,
 			entry.tx,
 		)
 	}
@@ -257,6 +256,7 @@ func (v *chainedOverlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.AccountOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

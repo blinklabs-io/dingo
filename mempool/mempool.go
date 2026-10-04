@@ -115,6 +115,7 @@ type TxValidator interface {
 		tx gledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
+		accounts *utxoref.AccountOverlay,
 	) error
 }
 
@@ -128,6 +129,7 @@ type TxValidationSessionProvider interface {
 			tx gledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error) error
@@ -232,7 +234,10 @@ type revalidationCandidate struct {
 	txByHash     map[string]*MempoolTransaction
 	sizeBytes    int64
 	invalid      map[string]*MempoolTransaction
-	invalidUtxos map[utxoref.Key]struct{}
+	// invalidUtxos maps each output of a rejected transaction to that
+	// transaction's hash, so removing a rejected transaction clears the
+	// markers it left.
+	invalidUtxos map[utxoref.Key]string
 }
 
 func newRevalidationCandidate() *revalidationCandidate {
@@ -240,7 +245,7 @@ func newRevalidationCandidate() *revalidationCandidate {
 		overlay:      newUtxoOverlay(),
 		txByHash:     make(map[string]*MempoolTransaction),
 		invalid:      make(map[string]*MempoolTransaction),
-		invalidUtxos: make(map[utxoref.Key]struct{}),
+		invalidUtxos: make(map[utxoref.Key]string),
 	}
 }
 
@@ -252,7 +257,7 @@ func (c *revalidationCandidate) reject(
 		c.invalid[at.hash] = tx
 	}
 	for utxo := range at.created {
-		c.invalidUtxos[utxo] = struct{}{}
+		c.invalidUtxos[utxo] = at.hash
 	}
 }
 
@@ -270,6 +275,12 @@ func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
 		return
 	}
 	c.overlay.removeByHashes(hashes)
+	// A removed transaction was confirmed or expired, so a rejected one's
+	// outputs no longer make its descendants invalid.
+	maps.DeleteFunc(c.invalidUtxos, func(_ utxoref.Key, owner string) bool {
+		_, removed := hashes[owner]
+		return removed
+	})
 	remaining := make([]*MempoolTransaction, 0, len(c.transactions))
 	for _, tx := range c.transactions {
 		if _, remove := hashes[tx.Hash]; remove {
@@ -291,7 +302,7 @@ func (c *revalidationCandidate) add(
 	tx *MempoolTransaction,
 	decoded gledger.Transaction,
 ) {
-	c.overlay.applyTx(at.hash, at.txType, at.cbor, decoded)
+	c.overlay.applyTx(at.hash, at.txType, decoded)
 	c.transactions = append(c.transactions, tx)
 	c.txByHash[at.hash] = tx
 	c.sizeBytes += int64(len(tx.Cbor))
@@ -301,20 +312,22 @@ func (c *revalidationCandidate) add(
 	}
 }
 
-// appliedTx records a pending transaction and its UTxO effects for overlay rebuild.
+// appliedTx records a pending transaction and its UTxO effects for overlay
+// rebuild. It holds no copy of the transaction bytes: the pool entry's Cbor is
+// the only retained representation, and currentSizeBytes counts exactly it.
 type appliedTx struct {
 	hash     string
 	txType   uint
-	cbor     []byte
 	consumed []utxoref.Key                // UTxO keys consumed by this TX
 	created  map[utxoref.Key]lcommon.Utxo // UTxO keys created by this TX
+	accounts []utxoref.AccountEffect      // reward-account effects of this TX
 }
 
 func cloneAppliedTx(at appliedTx) appliedTx {
 	ret := at
-	ret.cbor = slices.Clone(at.cbor)
 	ret.consumed = slices.Clone(at.consumed)
 	ret.created = maps.Clone(at.created)
+	ret.accounts = slices.Clone(at.accounts)
 	return ret
 }
 
@@ -337,6 +350,7 @@ func (m *Mempool) recordMutationLocked(mutation mempoolMutation) {
 type utxoOverlay struct {
 	consumed map[utxoref.Key]struct{}     // all inputs consumed by pending TXs
 	created  map[utxoref.Key]lcommon.Utxo // all outputs created by pending TXs
+	accounts *utxoref.AccountOverlay      // reward-account effects of pending TXs
 	applied  []appliedTx                  // ordered list for rebuild
 }
 
@@ -344,6 +358,7 @@ func newUtxoOverlay() *utxoOverlay {
 	return &utxoOverlay{
 		consumed: make(map[utxoref.Key]struct{}),
 		created:  make(map[utxoref.Key]lcommon.Utxo),
+		accounts: utxoref.NewAccountOverlay(),
 	}
 }
 
@@ -351,15 +366,15 @@ func newUtxoOverlay() *utxoOverlay {
 func (o *utxoOverlay) applyTx(
 	hash string,
 	txType uint,
-	cbor []byte,
 	tx lcommon.Transaction,
 ) {
 	at := appliedTx{
-		hash:    hash,
-		txType:  txType,
-		cbor:    cbor,
-		created: make(map[utxoref.Key]lcommon.Utxo),
+		hash:     hash,
+		txType:   txType,
+		created:  make(map[utxoref.Key]lcommon.Utxo),
+		accounts: utxoref.AccountEffects(tx),
 	}
+	o.accounts.Apply(at.accounts)
 	// Consumed is the consensus spent set: regular inputs for valid
 	// transactions and collateral for phase-2-invalid transactions. Using
 	// Inputs here would incorrectly reserve an input the ledger does not spend.
@@ -380,19 +395,34 @@ func (o *utxoOverlay) applyTx(
 func (o *utxoOverlay) reset() {
 	o.consumed = make(map[utxoref.Key]struct{})
 	o.created = make(map[utxoref.Key]lcommon.Utxo)
+	o.accounts = utxoref.NewAccountOverlay()
 	o.applied = nil
 }
 
 // rebuildAggregates rebuilds consumed/created maps from the applied list.
 func (o *utxoOverlay) rebuildAggregates() {
-	o.consumed = make(map[utxoref.Key]struct{})
-	o.created = make(map[utxoref.Key]lcommon.Utxo)
-	for _, at := range o.applied {
+	o.consumed, o.created, o.accounts = aggregateApplied(o.applied)
+}
+
+// aggregateApplied folds ordered applied transactions into the overlay maps.
+func aggregateApplied(
+	applied []appliedTx,
+) (
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
+) {
+	consumed := make(map[utxoref.Key]struct{})
+	created := make(map[utxoref.Key]lcommon.Utxo)
+	accounts := utxoref.NewAccountOverlay()
+	for _, at := range applied {
 		for _, key := range at.consumed {
-			o.consumed[key] = struct{}{}
+			consumed[key] = struct{}{}
 		}
-		maps.Copy(o.created, at.created)
+		maps.Copy(created, at.created)
+		accounts.Apply(at.accounts)
 	}
+	return consumed, created, accounts
 }
 
 // removeByHashes removes the specified TXs from the overlay without cascading
@@ -468,7 +498,11 @@ func (o *utxoOverlay) removeBatchWithDescendants(
 // the overlay. Used to validate incoming TXs before committing eviction.
 func (o *utxoOverlay) simulateRemoveBatch(
 	hashes map[string]struct{},
-) (map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) {
+) (
+	map[utxoref.Key]struct{},
+	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
+) {
 	// Remove specified TXs and collect their created UTxOs
 	orphanedUtxos := make(map[utxoref.Key]struct{})
 	remaining := make([]appliedTx, 0, len(o.applied))
@@ -507,16 +541,7 @@ func (o *utxoOverlay) simulateRemoveBatch(
 			remaining = newRemaining
 		}
 	}
-	// Rebuild maps from surviving TXs
-	consumed := make(map[utxoref.Key]struct{})
-	created := make(map[utxoref.Key]lcommon.Utxo)
-	for _, at := range remaining {
-		for _, key := range at.consumed {
-			consumed[key] = struct{}{}
-		}
-		maps.Copy(created, at.created)
-	}
-	return consumed, created
+	return aggregateApplied(remaining)
 }
 
 // ErrNilValidator is returned by runtime mempool operations that require
@@ -1115,6 +1140,7 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error {
@@ -1325,6 +1351,7 @@ func (m *Mempool) revalidateAppliedTx(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
+		*utxoref.AccountOverlay,
 	) error,
 ) {
 	if tx == nil {
@@ -1346,7 +1373,7 @@ func (m *Mempool) revalidateAppliedTx(
 		candidate.reject(at, tx)
 		return
 	}
-	tmpTx, err := safedecode.Transaction(at.txType, at.cbor)
+	tmpTx, err := safedecode.Transaction(at.txType, tx.Cbor)
 	if err != nil {
 		candidate.reject(at, tx)
 		m.logger.Error(
@@ -1361,6 +1388,7 @@ func (m *Mempool) revalidateAppliedTx(
 		tmpTx,
 		candidate.overlay.consumed,
 		candidate.overlay.created,
+		candidate.overlay.accounts,
 	); err != nil {
 		candidate.reject(at, tx)
 		m.logger.Warn(
@@ -1380,6 +1408,7 @@ func (m *Mempool) withTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -1567,6 +1596,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		}
 		validConsumed := m.overlay.consumed
 		validCreated := m.overlay.created
+		validAccounts := m.overlay.accounts
 		var needsEviction bool
 		var targetBytes int64
 		evictionThreshold := int64(
@@ -1584,7 +1614,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 				evictedBytes += int64(len(m.transactions[i].Cbor))
 				evictedHashes[m.transactions[i].Hash] = struct{}{}
 			}
-			validConsumed, validCreated = m.overlay.simulateRemoveBatch(
+			validConsumed, validCreated, validAccounts = m.overlay.simulateRemoveBatch(
 				evictedHashes,
 			)
 		}
@@ -1596,6 +1626,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			tmpTx,
 			validConsumed,
 			validCreated,
+			validAccounts,
 		); validateErr != nil {
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
@@ -1609,9 +1640,8 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		if needsEviction {
 			evictedEvents = m.evictOldestLocked(targetBytes)
 		}
-		overlayCbor := slices.Clone(txBytes)
 		txCbor := slices.Clone(txBytes)
-		m.overlay.applyTx(txHash, txType, overlayCbor, tmpTx)
+		m.overlay.applyTx(txHash, txType, tmpTx)
 		added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
 		if m.dag != nil {
 			applied := m.overlay.applied[len(m.overlay.applied)-1]

@@ -249,7 +249,7 @@ func TestDijkstraSpendReferenceOverlapLedgerAdmissionAndForging(t *testing.T) {
 	t.Parallel()
 	fixture := newDijkstraReferenceOverlapFixture(t)
 	require.NoError(t, fixture.ls.ValidateTx(fixture.tx))
-	require.NoError(t, fixture.ls.ValidateTxWithOverlay(fixture.tx, nil, nil))
+	require.NoError(t, fixture.ls.ValidateTxWithOverlay(fixture.tx, nil, nil, nil))
 	require.NoError(t, fixture.ls.validateForgedTxs(fixture.block))
 }
 

@@ -75,13 +75,14 @@ type benchmarkValidator struct {
 }
 
 func (v benchmarkValidator) ValidateTx(tx gledger.Transaction) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v benchmarkValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.AccountOverlay,
 ) error {
 	for _, input := range tx.Inputs() {
 		key := utxoref.ForInput(input)
@@ -1208,6 +1209,7 @@ func (v dijkstraOverlapValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.AccountOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -1268,13 +1270,14 @@ type fifoRevalidationBenchmarkValidator struct {
 func (v *fifoRevalidationBenchmarkValidator) ValidateTx(
 	tx gledger.Transaction,
 ) error {
-	return v.ValidateTxWithOverlay(tx, nil, nil)
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
 }
 
 func (v *fifoRevalidationBenchmarkValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	if delay := time.Duration(v.delayNS.Load()); delay > 0 {
 		start := time.Now()
@@ -1290,6 +1293,7 @@ func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.AccountOverlay,
 		) error,
 		func() bool,
 	) error,

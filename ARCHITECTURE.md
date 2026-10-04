@@ -1556,6 +1556,14 @@ journal and replayed in bounded batches before the candidate is published. A
 busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
+Mempool admission, revalidation, block-candidate selection and forged-block
+validation each validate a transaction against the UTxO overlay and an account
+overlay (`utxoref.AccountOverlay`) holding the reward withdrawals, direct
+deposits and stake registration changes of the earlier pending or selected transactions, so a
+transaction is checked against the balance those leave rather than the stored
+one. The overlay entries retain no transaction bytes; the pool's size counter
+covers the single stored copy of each transaction.
+
 ### Ouroboros Dependency Wiring
 
 Three components consume callbacks from `ouroboros.Ouroboros`, which makes it

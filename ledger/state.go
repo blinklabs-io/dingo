@@ -12936,12 +12936,13 @@ func (ls *LedgerState) WithTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,
 ) error {
 	return ls.withTxValidationSession(nil, nil, false, func(
-		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error,
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.AccountOverlay) error,
 		stillCurrent func() bool,
 		_ txValidationApplyFunc,
 	) error {
@@ -12958,6 +12959,7 @@ func (ls *LedgerState) withTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.AccountOverlay,
 		) error,
 		stillCurrent func() bool,
 		applyTx txValidationApplyFunc,
@@ -12981,6 +12983,7 @@ func (ls *LedgerState) withTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
+			accounts *utxoref.AccountOverlay,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -13014,6 +13017,7 @@ func (ls *LedgerState) withTxValidationSession(
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
+				pendingAccounts: accounts,
 				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
@@ -13127,6 +13131,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				tx ledger.Transaction,
 				consumedUtxos map[utxoref.Key]struct{},
 				createdUtxos map[utxoref.Key]lcommon.Utxo,
+				accounts *utxoref.AccountOverlay,
 			) error,
 			stillCurrent func() bool,
 			applyTx txValidationApplyFunc,
@@ -13150,7 +13155,9 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				if err != nil {
 					return fmt.Errorf("decode leios endorser transaction %d: %w", i, err)
 				}
-				if err := validate(tx, consumed, created); err != nil {
+				// applyTx stages account effects in the session's write
+				// transaction, so no separate account overlay is passed.
+				if err := validate(tx, consumed, created, nil); err != nil {
 					return fmt.Errorf(
 						"leios endorser transaction %d at slot %d: %w",
 						i,
@@ -13264,6 +13271,7 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
+	accounts *utxoref.AccountOverlay,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -13271,6 +13279,7 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 			ls:              ls,
 			intraBlockUtxos: createdUtxos,
 			consumedUtxos:   consumedUtxos,
+			pendingAccounts: accounts,
 		}
 	})
 }
@@ -13562,6 +13571,7 @@ func (ls *LedgerState) forgeBlock() {
 
 		consumedInputs := make(map[utxoref.Key]struct{})
 		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
+		pendingAccounts := utxoref.NewAccountOverlay()
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -13607,6 +13617,7 @@ func (ls *LedgerState) forgeBlock() {
 				fullTx,
 				consumedInputs,
 				createdOutputs,
+				pendingAccounts,
 			); err != nil {
 				ls.config.Logger.Debug(
 					"skipping transaction - failed re-validation",
@@ -13707,6 +13718,7 @@ func (ls *LedgerState) forgeBlock() {
 			for _, output := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(output)] = output
 			}
+			pendingAccounts.Apply(utxoref.AccountEffects(fullTx))
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing
 			// candidateExUnits above.

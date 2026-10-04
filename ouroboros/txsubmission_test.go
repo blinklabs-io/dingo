@@ -229,6 +229,7 @@ func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
+	*utxoref.AccountOverlay,
 ) error {
 	return nil
 }
@@ -252,6 +253,7 @@ func (v txsubmissionSelectiveRejectingValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
+	_ *utxoref.AccountOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
