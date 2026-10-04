@@ -13973,6 +13973,18 @@ Rewards omitted by the filter return to reserves. Calculated rewards that fail
 the application-time account-registration check are unspendable and go to
 treasury. Spendable rewards are credited through `account_reward_delta`.
 
+`ValidateTxDijkstra` builds its rule list from the upstream Dijkstra descriptors
+and rule functions, whose phase-2-valid-only rules (governance, certificate and
+entity semantics) are already no-ops for an `is_valid=false` transaction; the
+always-run rules (collateral, redeemer, witness, value and structural rules)
+still apply. Dingo's own replacements for the committee-certificate and
+unknown-voter rules, and the pool-margin floor, carry the same phase as the rule
+they replace: each returns before any upstream call or state query when the
+transaction is declared invalid. Declared-invalid transactions reach no other
+path with governance effects: the mempool wire form has no `is_valid` field, and
+block application records only the collateral input and collateral return for
+them.
+
 CIP-23 minimum pool margin is an optional, consensus-affecting operator setting
 that defaults off (0) and takes effect only in Dijkstra and later. When
 `LedgerStateConfig.MinPoolMargin` (basis points) is nonzero, `rewardParameters`
