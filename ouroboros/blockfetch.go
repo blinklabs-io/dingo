@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -141,9 +142,33 @@ type blockfetchSendDrainWaiter interface {
 	WaitSendQueueDrained(time.Duration) bool
 }
 
-type blockfetchConnection interface {
-	ErrorChan() chan error
+// managedConnection is what a protocol handler may do with a connection the
+// connection manager owns: wait for its teardown and drop the transport. It
+// deliberately has no ErrorChan: the manager is the only receiver of that
+// one-shot channel, so a handler that received from it could take the error
+// the manager's cleanup is waiting for.
+type managedConnection interface {
+	Done() <-chan struct{}
 	Close() error
+}
+
+// connWithDone adapts a manager-owned *ouroboros.Connection and the teardown
+// signal from GetConnectionWithDone to managedConnection.
+type connWithDone struct {
+	conn     *ouroboros.Connection
+	done     <-chan struct{}
+	closeErr func() error
+}
+
+func (c connWithDone) Done() <-chan struct{} { return c.done }
+
+func (c connWithDone) Close() error { return c.conn.Close() }
+
+func (c connWithDone) CloseError() error {
+	if c.closeErr == nil {
+		return nil
+	}
+	return c.closeErr()
 }
 
 // blockFetchKey identifies one outstanding RequestRange call. gouroboros'
@@ -437,11 +462,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
-		if conn == nil {
+		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+		if rawConn == nil {
 			chainIter.Cancel()
 			return
 		}
+		conn := connWithDone{conn: rawConn, done: connDone}
 		err := o.blockfetchServerSendBatch(
 			ctx.ConnectionId.String(),
 			start,
@@ -470,7 +496,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	end ocommon.Point,
 	chainIter blockfetchRangeIterator,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
 	maxBlocks int,
 ) error {
 	defer chainIter.Cancel()
@@ -497,7 +523,7 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 Loop:
 	for {
 		select {
-		case <-conn.ErrorChan():
+		case <-conn.Done():
 			return nil
 		default:
 			next, iterErr := chainIter.Next(false)
@@ -635,7 +661,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 	start ocommon.Point,
 	end ocommon.Point,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
 	phase string,
 ) error {
 	drainWaiter, ok := server.(blockfetchSendDrainWaiter)
@@ -646,7 +672,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 		return nil
 	}
 	select {
-	case <-conn.ErrorChan():
+	case <-conn.Done():
 		return nil
 	default:
 	}
@@ -671,7 +697,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 }
 
 func (o *Ouroboros) reportBlockfetchServerAsyncError(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	start ocommon.Point,
 	end ocommon.Point,
@@ -700,7 +726,7 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 }
 
 func (o *Ouroboros) closeBlockfetchConnection(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	reason string,
 ) {
@@ -926,8 +952,10 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// This runs on the blockfetch receive goroutine, which must not wait
+		// on the ledger; see enqueueBlockfetchEvent.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -942,6 +970,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
@@ -971,8 +1000,10 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Same per-connection queue as the blocks, so this BatchDone reaches
+		// the ledger after every block the connection delivered before it.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -982,6 +1013,7 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil

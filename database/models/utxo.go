@@ -391,6 +391,17 @@ type UtxoOrderingCursor struct {
 	TxId       []byte
 }
 
+// UtxoAddressPage contains matches and the last fully examined candidate.
+// Progress includes nonmatches so an empty page can still resume a bounded
+// scan without repeating candidates or skipping unexamined ones.
+// Next is nil only when the candidate set was exhausted. Pages observe live
+// ledger state independently; they do not form a cross-request snapshot.
+type UtxoAddressPage struct {
+	Utxos   []UtxoWithOrdering
+	Next    *UtxoOrderingCursor
+	Scanned int
+}
+
 // UtxoWithOrderingQuery drives GetUtxosByAddressWithOrdering (single MetadataStore entry).
 //
 // Address matching (exactly one of these applies):

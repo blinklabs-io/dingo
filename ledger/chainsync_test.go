@@ -5248,6 +5248,78 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	assert.Equal(t, evt.RawBlock, rejectedRaw)
 }
 
+// TestHandleEventBlockfetchBlockRecordsAdmissionVerification pins that only a
+// block whose header verification completed is recorded for replay to skip; a
+// deferred one is not.
+func TestHandleEventBlockfetchBlockRecordsAdmissionVerification(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		seedPool     bool
+		wantVerified bool
+	}{
+		{"verified at admission", true, true},
+		{"deferred at admission", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := createTestBlock(t, [32]byte{67}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			if tc.seedPool {
+				poolKeyHash := tb.block.IssuerVkey().Hash()
+				seedBlockPoolRegistration(t, db, tb.block)
+				seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+			}
+			ls.validationEnabled = true
+			ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+			ls.chain = &chain.Chain{}
+			connId := ouroboros.ConnectionId{
+				LocalAddr: &net.TCPAddr{
+					IP: net.ParseIP("127.0.0.1"), Port: 6002,
+				},
+				RemoteAddr: &net.TCPAddr{
+					IP: net.ParseIP("127.0.0.1"), Port: 3001,
+				},
+			}
+			ls.activeBlockfetchConnId = connId
+			ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+			ls.config.BlockPipelineValidateEnabled = true
+			ls.publishSnapshotsLocked()
+
+			require.NoError(t, handleEventBlockfetchBlockDeferred(
+				ls,
+				BlockfetchEvent{
+					ConnectionId: connId,
+					Block:        tb.block,
+					Point: ocommon.Point{
+						Slot: tb.block.SlotNumber(),
+						Hash: tb.block.Hash().Bytes(),
+					},
+				},
+				nil,
+			))
+			assert.Equal(
+				t,
+				tc.wantVerified,
+				ls.admissionVerifiedSlot(tb.block.SlotNumber()),
+			)
+			if !tc.wantVerified {
+				assert.Equal(
+					t,
+					connId,
+					ls.deferredHeaderSource(ocommon.NewPoint(
+						tb.block.SlotNumber(),
+						tb.block.Hash().Bytes(),
+					)),
+					"a deferred marker must name the supplying connection",
+				)
+			}
+		})
+	}
+}
+
 func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	t *testing.T,
 ) {

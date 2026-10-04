@@ -137,47 +137,12 @@ func parseCertStateConway(
 		}
 	}
 
-	// Find the DState: largest map element whose keys decode as
-	// credentials ([type, hash] arrays). We sort map candidates by
-	// size descending and pick the first that passes validation.
-	// This prevents misidentifying the pool deposit map as DState
-	// on networks where pools outnumber delegators.
+	// An empty DState has no accounts to import and must not claim a DRep
+	// or resignation map. Nonempty maps are identified by their value shape.
 	dIdx := -1
-	type mapCandidate struct {
-		idx  int
-		size int
-	}
-	var mapCandidates []mapCandidate
 	for i, elem := range certState {
-		if len(elem) == 0 {
-			continue
-		}
-		major := elem[0] >> 5
-		isMap := major == 5 || elem[0] == 0xbf
-		if isMap {
-			mapCandidates = append(
-				mapCandidates,
-				mapCandidate{idx: i, size: len(elem)},
-			)
-		}
-	}
-	// Sort by size descending
-	slices.SortFunc(
-		mapCandidates,
-		func(a, b mapCandidate) int {
-			return cmp.Compare(b.size, a.size)
-		},
-	)
-	for _, mc := range mapCandidates {
-		// ccHotKeys is also credential-keyed, so size alone would pick it when
-		// DState is empty or the smaller of the two. Its values are
-		// credentials, which an account state is not, so skip it here and let
-		// the committee scan below claim it.
-		if looksLikeCommitteeCredentialMap(certState[mc.idx]) {
-			continue
-		}
-		if looksLikeCredentialMap(certState[mc.idx]) {
-			dIdx = mc.idx
+		if looksLikeAccountMap(elem) {
+			dIdx = i
 			break
 		}
 	}
@@ -195,14 +160,8 @@ func parseCertStateConway(
 		}
 		major := elem[0] >> 5
 		isMap := major == 5 || elem[0] == 0xbf
-		// The VState drep map is a map that is smaller than
-		// the DState credential map. Pre-filter with
-		// looksLikeCredentialMap to avoid misidentifying
-		// non-credential maps (e.g. pool deposits) as DReps.
 		if isMap &&
-			(dIdx < 0 ||
-				len(elem) < len(certState[dIdx])) &&
-			looksLikeCredentialMap(elem) {
+			looksLikeDRepMap(elem) {
 			dreps, vErr := parseDRepMap(elem)
 			if vErr != nil {
 				warnings = append(warnings, vErr)
@@ -256,7 +215,9 @@ func parseCertStateConway(
 
 	// Parse PState if found
 	if pIdx >= 0 {
-		pools, retirements, err := parsePStateConwayWithRetirements(certState[pIdx])
+		pools, retirements, err := parsePStateConwayWithRetirements(
+			certState[pIdx],
+		)
 		if err != nil {
 			if pools == nil {
 				return nil, fmt.Errorf(
@@ -614,6 +575,12 @@ func parseLegacyUMElem(
 }
 
 func parseUint64(data []byte) (uint64, bool) {
+	// The decoder reads null as zero, and a null is what puts an anchorless
+	// DRepState in the shape of an account: only a CBOR unsigned integer is
+	// accepted.
+	if len(data) == 0 || data[0]>>5 != 0 {
+		return 0, false
+	}
 	var value uint64
 	if _, err := cbor.Decode(data, &value); err != nil {
 		return 0, false
@@ -879,7 +846,10 @@ func mergePoolRetirements(
 				continue
 			}
 			pools[j].RetiringEpoch = &epoch
-			result[epoch] = append(result[epoch], slices.Clone(pools[j].PoolKeyHash))
+			result[epoch] = append(
+				result[epoch],
+				slices.Clone(pools[j].PoolKeyHash),
+			)
 		}
 		for keyHash, epoch := range retiring {
 			if _, ok := known[keyHash]; !ok {
@@ -998,7 +968,10 @@ func parsePoolParams(
 		)
 	}
 
-	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 2)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(
+		params,
+		2,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1113,7 +1086,10 @@ func parsePoolParamsWithoutOperator(
 		VrfKeyHash:  vrfKeyHash,
 	}
 
-	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(params, 1)
+	leiosOffset, leiosKey, keyRegistrationEpoch, err := optionalLeiosKeyOffset(
+		params,
+		1,
+	)
 	if err != nil {
 		return nil, true, err
 	}
@@ -2045,6 +2021,34 @@ func parseDRepMap(data []byte) ([]ParsedDRep, error) {
 	return dreps, warning
 }
 
+// looksLikeDRepMap separates valid DRep states from account balances and
+// committee authorization tags, including when DState is empty.
+func looksLikeDRepMap(data []byte) bool {
+	entry, ok := firstMapEntry(data)
+	if !ok || !isCredentialArray(entry.KeyRaw) || looksLikeAccountMap(data) ||
+		looksLikeCommitteeCredentialMap(data) {
+		return false
+	}
+	return parseDRepState(entry.ValueRaw, &ParsedDRep{}) == nil
+}
+
+// looksLikeAccountMap reports whether a map's first value decodes as an
+// account state, which separates DState from the DRep and committee maps.
+// A DRepState leads with an expiry followed by an anchor or null, so it fails
+// every account encoding.
+func looksLikeAccountMap(data []byte) bool {
+	entry, ok := firstMapEntry(data)
+	if !ok || !isCredentialArray(entry.KeyRaw) {
+		return false
+	}
+	var elem []cbor.RawMessage
+	if _, err := cbor.Decode(entry.ValueRaw, &elem); err != nil {
+		return false
+	}
+	_, ok = parseAccountState(elem, &ParsedAccount{})
+	return ok
+}
+
 // parseDRepState decodes DRepState = [expiry, anchor, deposit, ...] into
 // drep. The anchor is optional (null, or [url, hash] possibly wrapped in a
 // one-element array); every other field must decode, since a zeroed expiry
@@ -2097,26 +2101,6 @@ func parseDRepState(data []byte, drep *ParsedDRep) error {
 		return fmt.Errorf("DRep deposit: %w", err)
 	}
 	return nil
-}
-
-// looksLikeCredentialMap samples up to 3 keys from a CBOR map
-// and returns true if at least one decodes as a credential
-// array ([type, hash] where type=0|1 and hash is 28 bytes).
-// Only the array form is accepted — plain 28-byte byte strings
-// (like pool key hashes) are rejected to distinguish the DState
-// credential map from pool deposit maps.
-func looksLikeCredentialMap(data []byte) bool {
-	entries, err := decodeMapEntries(data)
-	if err != nil || len(entries) == 0 {
-		return false
-	}
-	limit := min(len(entries), 3)
-	for i := range limit {
-		if isCredentialArray(entries[i].KeyRaw) {
-			return true
-		}
-	}
-	return false
 }
 
 // isCredentialArray returns true if data decodes as a CBOR
