@@ -187,7 +187,24 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// the point and the point being recorded below. Released on
 		// rejection, so a refused point holds nothing.
 		release := o.ledgerState.PinAcquiredPoint(point.Slot)
+		pending := &pendingAcquirePin{release: release, owner: ctx.Server}
+		o.localstatequeryAcquireMutex.Lock()
+		if o.localstatequeryPendingPins == nil {
+			o.localstatequeryPendingPins = make(
+				map[ouroboros.ConnectionId]*pendingAcquirePin,
+			)
+		}
+		o.localstatequeryPendingPins[ctx.ConnectionId] = pending
+		o.localstatequeryAcquireMutex.Unlock()
+		if o.localstatequeryVerifyHook != nil {
+			o.localstatequeryVerifyHook()
+		}
 		if err := o.ledgerState.VerifyPointQueryable(nil, point); err != nil {
+			o.localstatequeryAcquireMutex.Lock()
+			if o.localstatequeryPendingPins[ctx.ConnectionId] == pending {
+				delete(o.localstatequeryPendingPins, ctx.ConnectionId)
+			}
+			o.localstatequeryAcquireMutex.Unlock()
 			release()
 			if errors.Is(err, ledger.ErrPointNotOnChain) {
 				return fmt.Errorf(
@@ -228,6 +245,15 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 			)
 		}
 		o.localstatequeryAcquireMutex.Lock()
+		// Checked in the same lock hold as the recording below, so close
+		// cleanup runs either before it -- and has released the pin, which is
+		// seen here -- or after it, and finds the point recorded.
+		if o.localstatequeryPendingPins[ctx.ConnectionId] != pending {
+			o.localstatequeryAcquireMutex.Unlock()
+			release()
+			return errLocalStateQueryClosedDuringAcquire
+		}
+		delete(o.localstatequeryPendingPins, ctx.ConnectionId)
 		// A re-Acquire replaces the previous pin only now that the new point
 		// has verified: on a failed re-Acquire the client keeps its previous
 		// point (see above), so that point's pin must survive with it.
@@ -256,6 +282,22 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	o.localstatequeryAcquireMutex.Unlock()
 	return nil
 }
+
+// pendingAcquirePin is an Acquire's pin while its point is being verified,
+// before the point is recorded. Verify runs outside
+// localstatequeryAcquireMutex and opens a database transaction, so the
+// connection can close during it; close cleanup then finds no recorded point,
+// and without this the pin would be recorded afterwards for a dead connection
+// and hold pruning back until the backstop. Close cleanup releases a pending
+// pin instead, and Acquire sees that and records nothing.
+type pendingAcquirePin struct {
+	release func()
+	owner   *olocalstatequery.Server
+}
+
+var errLocalStateQueryClosedDuringAcquire = errors.New(
+	"local-state-query connection closed during Acquire",
+)
 
 // clearAcquiredPointLocked forgets connId's acquired point and releases the
 // ledger pin holding pruning off it. Every path that clears an acquired point
@@ -303,6 +345,13 @@ func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
 ) {
 	o.localstatequeryAcquireMutex.Lock()
 	defer o.localstatequeryAcquireMutex.Unlock()
+	// Before the early return below: a connection closed while its Acquire
+	// is still verifying has no recorded point yet, only a pending pin.
+	if p := o.localstatequeryPendingPins[connId]; p != nil &&
+		(p.owner == nil || p.owner == owner) {
+		delete(o.localstatequeryPendingPins, connId)
+		p.release()
+	}
 	_, ok := o.localstatequeryAcquiredPoints[connId]
 	currentOwner := o.localstatequeryOwners[connId]
 	if !ok || (currentOwner != nil && currentOwner != owner) {
@@ -328,6 +377,10 @@ func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
 	connId ouroboros.ConnectionId,
 ) {
 	o.localstatequeryAcquireMutex.Lock()
+	if p := o.localstatequeryPendingPins[connId]; p != nil {
+		delete(o.localstatequeryPendingPins, connId)
+		p.release()
+	}
 	o.clearAcquiredPointLocked(connId)
 	o.localstatequeryAcquireMutex.Unlock()
 }

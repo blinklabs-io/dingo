@@ -176,7 +176,14 @@ type Ouroboros struct {
 	// the ledger pin that keeps pruning off the acquired point's state
 	// (ledger.LedgerState.PinAcquiredPoint). Every path that clears an
 	// acquired point must call it, or the pin outlives the session.
-	localstatequeryPinReleases  map[ouroboros.ConnectionId]func()
+	localstatequeryPinReleases map[ouroboros.ConnectionId]func()
+	// localstatequeryPendingPins holds an Acquire's pin while its point is
+	// still being verified, before it is recorded above, so connection close
+	// can release it. See pendingAcquirePin.
+	localstatequeryPendingPins map[ouroboros.ConnectionId]*pendingAcquirePin
+	// localstatequeryVerifyHook, when set, runs just before Acquire
+	// verifies its point. Tests use it to act at that exact moment.
+	localstatequeryVerifyHook   func()
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range

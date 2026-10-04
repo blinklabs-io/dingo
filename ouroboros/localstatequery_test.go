@@ -544,3 +544,44 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 		require.True(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
 	})
 }
+
+// TestLocalstatequeryAcquire_PinHeldWhileVerifying is the ordering half of the
+// acquire-versus-prune fix, checked at the caller. VerifyPointQueryable is only
+// race-free if the point is already pinned when it runs; the ledger tests call
+// PinAcquiredPoint themselves, so on their own they would still pass if the
+// Acquire handler pinned after verifying. The hook runs at the moment verify
+// starts, and the pin must already be there.
+func TestLocalstatequeryAcquire_PinHeldWhileVerifying(t *testing.T) {
+	o, point := newPinTestOuroboros(t)
+	pinsAtVerify := -1
+	o.localstatequeryVerifyHook = func() {
+		pinsAtVerify = o.ledgerState.AcquiredPointPinCountForTesting()
+	}
+	require.NoError(t, acquireSpecific(
+		t, o, ouroboros.ConnectionId{}, point, false,
+	))
+	require.Equal(t, 1, pinsAtVerify,
+		"the point must be pinned before it is verified, or a prune can "+
+			"run between verify approving it and the point being recorded")
+}
+
+// TestLocalstatequeryAcquire_CloseDuringVerifyLeavesNoPin covers a client that
+// disconnects while its Acquire is still verifying. Close cleanup runs on its
+// own goroutine; at that moment the point is not yet recorded, so cleanup
+// used to find nothing and return, after which Acquire recorded the point and
+// its pin for a connection that no longer existed. Nothing released that pin,
+// so it held pruning back until the backstop. The hook closes the connection
+// at exactly that moment.
+func TestLocalstatequeryAcquire_CloseDuringVerifyLeavesNoPin(t *testing.T) {
+	o, point := newPinTestOuroboros(t)
+	connID := ouroboros.ConnectionId{}
+	o.localstatequeryVerifyHook = func() {
+		o.ReleaseLocalStateQueryAcquiredPointOwner(connID, nil)
+	}
+	err := acquireSpecific(t, o, connID, point, false)
+	require.ErrorIs(t, err, errLocalStateQueryClosedDuringAcquire)
+	require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+		"a connection closed mid-verify must not leave a pin behind")
+	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(connID),
+		"nor a recorded point for the dead connection")
+}

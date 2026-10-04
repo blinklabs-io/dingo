@@ -4397,7 +4397,11 @@ earlier design of the pool-snapshot guard on SQLite's single write connection.
 
 Every path that clears an acquired point — Release, an Acquire of a tip, a
 re-Acquire, connection close — releases its pin through one helper
-(`clearAcquiredPointLocked`). A re-Acquire releases the previous pin only once
+(`clearAcquiredPointLocked`). A connection can also close while its Acquire is
+still verifying, before the point is recorded, so the pin is tracked as
+pending during verify (`pendingAcquirePin`): close cleanup releases a pending
+pin, and Acquire checks for that in the same lock hold as recording the point,
+so it never records a pin for a connection that is already gone. A re-Acquire releases the previous pin only once
 the new point has verified, since a rejected re-Acquire leaves the client on
 its previous point. A pin cannot hold pruning back without limit: the UTxO
 floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
@@ -4407,7 +4411,9 @@ Protocol-parameter rows need no pin; they are only ever deleted on rollback.
 
 Two cases still end in the connection teardown above. A rollback that removes
 the acquired point's block cannot be retained against, so its next Query fails.
-And a Query long after Acquire is still checked against the *live* retention
+And a retention-bounded Query long after Acquire -- the UTxO and stake
+distribution queries, which check their own window at query time; epoch number
+stays answerable at any point -- is still checked against the *live* retention
 window, so a point held past that window is refused even though its pin kept
 the underlying rows: the pin protects the data, but the query-time check does
 not yet consult it. Both are tracked in #4234.

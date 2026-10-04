@@ -197,3 +197,27 @@ func newPinnedPointLedger(t *testing.T) (*LedgerState, QueryPoint) {
 	}, nil))
 	return ls, QueryPoint{Slot: 350, Hash: hash}
 }
+
+// TestVerifyPointQueryable_PoolSnapshotPruneAnnouncedBeforePin_IsRejected is
+// the pool-snapshot counterpart of the prune-first test above. The snapshot
+// guard announced a boundary that removes the point's mark snapshot, and its
+// delete has not committed. The epoch-relative retention check still accepts
+// the point here, so only the announced pool-snapshot floor can refuse it.
+func TestVerifyPointQueryable_PoolSnapshotPruneAnnouncedBeforePin_IsRejected(
+	t *testing.T,
+) {
+	t.Parallel()
+	ls, at := newPinnedPointLedger(t)
+	// The point is in epoch 3, so it needs the mark snapshot from epoch 2.
+	// No pins yet, so the boundary is announced as given.
+	ls.capPoolSnapshotPruneBefore(3, 0, func(uint64) (uint64, bool) {
+		return 3, true
+	})
+
+	release := ls.PinAcquiredPoint(at.Slot)
+	defer release()
+	err := ls.VerifyPointQueryable(nil, at)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable,
+		"a point whose snapshot is below an announced boundary must be "+
+			"refused at Acquire")
+}
