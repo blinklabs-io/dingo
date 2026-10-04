@@ -521,7 +521,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 	hasOverlap := false
 	for levelIndex := range levels {
 		level := &levels[levelIndex]
-		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(level.body)
+		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(
+			level.body,
+		)
 		hasOverlap = hasOverlap || level.hasOverlap
 	}
 	if !hasOverlap {
@@ -531,7 +533,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 		return nil
 	}
 	if ls == nil {
-		return errors.New("ledger state is required for Dijkstra script validation")
+		return errors.New(
+			"ledger state is required for Dijkstra script validation",
+		)
 	}
 
 	available := make(map[lcommon.ScriptHash]lcommon.Script)
@@ -670,7 +674,14 @@ func EvaluateTxDijkstra(
 	}
 	dijkstraTx, ok := tx.(*gdijkstra.DijkstraTransaction)
 	if !ok || dijkstraTx == nil {
-		return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
+		stride, multiplier := dijkstraRefScriptTiers(tmpPparams)
+		return evaluateTxConway(
+			tx,
+			ls,
+			&tmpPparams.ConwayProtocolParameters,
+			stride,
+			multiplier,
+		)
 	}
 	if syntheticV2CostModelInEffect(ls) {
 		if err := dijkstraSyntheticV2CostModelGuard(
@@ -728,17 +739,31 @@ func dijkstraEvaluationFee(
 	if err != nil {
 		return 0, err
 	}
-	var multiplier *big.Rat
-	if pp.RefScriptCostMultiplier != nil {
-		multiplier = pp.RefScriptCostMultiplier.ToBigRat()
-	}
+	stride, multiplier := dijkstraRefScriptTiers(pp)
 	return saturatedAddUint64(
 		evaluationMinFee(tx, &pp.ConwayProtocolParameters, exUnits),
 		calculateTieredRefScriptFee(
 			refScriptSize,
 			refScriptCostPerByteRat(&pp.ConwayProtocolParameters),
-			uint64(pp.RefScriptCostStride),
+			stride,
 			multiplier,
 		),
 	), nil
+}
+
+// dijkstraRefScriptTiers returns the reference-script stride and multiplier
+// from the protocol parameters, falling back to the fixed Conway values for
+// any the parameters leave unset.
+func dijkstraRefScriptTiers(
+	pp *gdijkstra.DijkstraProtocolParameters,
+) (uint64, *big.Rat) {
+	stride := uint64(pp.RefScriptCostStride)
+	if stride == 0 {
+		stride = conwayRefScriptCostStride
+	}
+	multiplier := big.NewRat(6, 5)
+	if pp.RefScriptCostMultiplier != nil {
+		multiplier = pp.RefScriptCostMultiplier.ToBigRat()
+	}
+	return stride, multiplier
 }

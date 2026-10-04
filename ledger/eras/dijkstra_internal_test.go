@@ -1110,5 +1110,4 @@ func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1_000+250), fee,
 		"absent Dijkstra tiers retain Conway reference-script pricing")
-
 }
