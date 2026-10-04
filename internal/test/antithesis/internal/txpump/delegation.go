@@ -63,9 +63,9 @@ type conwayTxWithCerts struct {
 }
 
 // BuildDelegationTx constructs a minimal CBOR-encoded Conway transaction that
-// includes a stake-delegation certificate (type 2).  The transaction has no
-// witnesses so it will be rejected by a live node, but it exercises the full
-// submission path for Antithesis testing.
+// includes a stake-delegation certificate (type 2).  witnessKeys must contain
+// the payment key of every input and the signing key of the stake credential;
+// the node rejects the transaction when any of those witnesses is missing.
 //
 // The certificate encodes as: [2, [0, stakeKeyHash], poolKeyHash]
 func BuildDelegationTx(
@@ -74,6 +74,7 @@ func BuildDelegationTx(
 	poolKeyHash []byte,
 	fee uint64,
 	changeAddr []byte,
+	witnessKeys ...*UTxOKey,
 ) ([]byte, error) {
 	if len(inputs) == 0 {
 		return nil, errors.New("delegation: at least one input required")
@@ -157,9 +158,13 @@ func BuildDelegationTx(
 		Certs:   []delegCert{cert},
 	}
 
+	bodyBytes, err := cbor.Encode(body)
+	if err != nil {
+		return nil, fmt.Errorf("delegation: body encoding failed: %w", err)
+	}
 	tx := conwayTxWithCerts{
 		Body:    body,
-		Witness: map[any]any{},
+		Witness: BuildWitnessMap(bodyBytes, witnessKeys...),
 		IsValid: true,
 		AuxData: nil,
 	}

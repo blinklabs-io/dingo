@@ -444,6 +444,16 @@ func (a *Analyzer) reportSafetyAssertions(snap *MetricsSnapshot) {
 		},
 	)
 
+	// The delegation workload is built to be valid, so the node rejecting one
+	// means the workload, not the node, is wrong.
+	Always(
+		snap.DelegationsRejected == 0,
+		"delegation-accepted",
+		map[string]interface{}{
+			"delegations_rejected": snap.DelegationsRejected,
+		},
+	)
+
 	// Confirmed removals are emitted by the node only after block inclusion.
 	// Keep this as progress because node and txpump logs are ingested
 	// independently and can arrive in either order.

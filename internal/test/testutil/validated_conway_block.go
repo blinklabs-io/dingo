@@ -343,13 +343,12 @@ func buildValidatedConwayBlockBytes(
 		}
 		var raw []byte
 		if withTransaction {
-			raw, encErr = cbor.Encode([]any{
-				block.BlockHeader,
-				bodyComps[0],
-				bodyComps[1],
-				bodyComps[2],
-				bodyComps[3],
-			})
+			parts := make([]any, 1, 1+len(bodyComps))
+			parts[0] = block.BlockHeader
+			for _, comp := range bodyComps {
+				parts = append(parts, comp)
+			}
+			raw, encErr = cbor.Encode(parts)
 		} else {
 			raw, encErr = cbor.Encode(block)
 		}

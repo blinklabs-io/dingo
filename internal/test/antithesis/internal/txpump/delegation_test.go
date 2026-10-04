@@ -15,8 +15,14 @@
 package txpump
 
 import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -144,4 +150,51 @@ func TestBuildDelegationTx_IsDeterministic(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, a, b, "BuildDelegationTx must be deterministic")
+}
+
+func testUTxOKey(seedByte byte) *UTxOKey {
+	seed := bytes.Repeat([]byte{seedByte}, ed25519.SeedSize)
+	return &UTxOKey{
+		VKey: ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey),
+		SKey: seed,
+	}
+}
+
+// A delegation certificate is authorised by the stake credential's signature,
+// and the inputs by their payment key's, so the node accepts the transaction
+// only if the witness set carries both, each signing the body hash.
+func TestBuildDelegationTxWitnessesInputAndStakeKeys(t *testing.T) {
+	t.Parallel()
+	inputKey := testUTxOKey(1)
+	stakeKey := testUTxOKey(2)
+	stakeHash := common.Blake2b224Hash(stakeKey.VKey)
+
+	txBytes, err := BuildDelegationTx(
+		sampleDelegInputs(),
+		stakeHash.Bytes(),
+		samplePoolKeyHash,
+		MinFee,
+		sampleAddr,
+		inputKey,
+		stakeKey,
+	)
+	require.NoError(t, err)
+
+	var tx conway.ConwayTransaction
+	_, err = cbor.Decode(txBytes, &tx)
+	require.NoError(t, err)
+	txHash := tx.Hash()
+	witnesses := tx.Witnesses().Vkey()
+	require.Len(t, witnesses, 2, "input and stake keys must each witness")
+	signers := map[string]bool{}
+	for _, w := range witnesses {
+		require.True(
+			t,
+			ed25519.Verify(w.Vkey, txHash[:], w.Signature),
+			"witness signature must cover the transaction body hash",
+		)
+		signers[hex.EncodeToString(w.Vkey)] = true
+	}
+	require.True(t, signers[hex.EncodeToString(inputKey.VKey)])
+	require.True(t, signers[hex.EncodeToString(stakeKey.VKey)])
 }

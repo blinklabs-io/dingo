@@ -17,6 +17,7 @@ package analysis
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -47,7 +48,8 @@ type Config struct {
 	CheckInterval time.Duration
 
 	// MaxForkDepth is the maximum number of slots that may separate two
-	// nodes' chain tips before a fork-depth safety violation is reported.
+	// nodes' chain tips. Read from the genesis config as the security
+	// parameter k in slots (k/activeSlotsCoeff) unless set explicitly.
 	// Default: 40
 	MaxForkDepth int
 
@@ -158,8 +160,11 @@ func LoadConfig() (*Config, error) {
 		}
 		if os.Getenv("ANALYSIS_MAX_FORK_DEPTH") == "" &&
 			gcfg.SecurityParam > 0 {
-			// SecurityParam always fits in int.
-			cfg.MaxForkDepth = int(gcfg.SecurityParam) //nolint:gosec
+			// k counts blocks; MaxForkDepth is a slot distance, and k blocks
+			// span k/f slots.
+			cfg.MaxForkDepth = int( //nolint:gosec // k/f is far below MaxInt
+				math.Ceil(float64(gcfg.SecurityParam) / gcfg.ActiveSlotsCoeff),
+			)
 		}
 		if gcfg.EpochLength == 0 {
 			return nil, errors.New(

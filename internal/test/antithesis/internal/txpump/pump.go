@@ -15,7 +15,9 @@
 package txpump
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
 // Pump orchestrates the main transaction-generation loop.
@@ -484,6 +487,12 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		return false
 	}
 
+	stakeKey, err := p.loadDelegationStakeKey(stakeKeyHash)
+	if err != nil {
+		p.logger.Error("invalid delegation stake signing key", "err", err)
+		return false
+	}
+
 	required := MinFee
 	inputs, change, err := p.wallet.SelectCoins(required)
 	if err != nil {
@@ -497,12 +506,21 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 
 	changeAddr := controlledChangeAddr(inputs)
 
+	witnessKeys := make([]*UTxOKey, 0, len(inputs)+1)
+	for _, u := range inputs {
+		if u.SigningKey != nil {
+			witnessKeys = append(witnessKeys, u.SigningKey)
+		}
+	}
+	witnessKeys = append(witnessKeys, stakeKey)
+
 	txBytes, err := BuildDelegationTx(
 		inputs,
 		stakeKeyHash,
 		poolKeyHash,
 		MinFee,
 		changeAddr,
+		witnessKeys...,
 	)
 	if err != nil {
 		p.logger.Error("build delegation failed", "err", err)
@@ -520,9 +538,13 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		BatchSize: batchSize,
 	}
 	if submitErr != nil {
-		entry.Status = "rejected"
+		entry.Status = "error"
+		var rejected localtxsubmission.TransactionRejectedError
+		if errors.As(submitErr, &rejected) {
+			entry.Status = "rejected"
+		}
 		entry.ErrorMsg = submitErr.Error()
-		p.logger.Warn("delegation tx rejected", "tx_id", txID, "err", submitErr)
+		p.logger.Warn("delegation tx not accepted", "tx_id", txID, "err", submitErr)
 		p.wallet.ReturnUTxOs(inputs)
 	} else {
 		entry.Status = "submitted"
@@ -539,6 +561,27 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 		}
 	}
 	return submitErr == nil
+}
+
+// loadDelegationStakeKey returns the stake credential's signing key, or nil
+// when no key file is configured. A key whose hash is not the configured
+// credential would produce a witness the node rejects, so it is an error.
+func (p *Pump) loadDelegationStakeKey(stakeKeyHash []byte) (*UTxOKey, error) {
+	if p.cfg.DelegationStakeSKeyFile == "" {
+		return nil, nil
+	}
+	seed, err := parseKeyFile(p.cfg.DelegationStakeSKeyFile)
+	if err != nil {
+		return nil, err
+	}
+	vkey := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	if got := common.Blake2b224Hash(vkey); !bytes.Equal(got.Bytes(), stakeKeyHash) {
+		return nil, fmt.Errorf(
+			"%s hashes to %s, not the configured stake key hash",
+			p.cfg.DelegationStakeSKeyFile, got,
+		)
+	}
+	return &UTxOKey{VKey: vkey, SKey: seed}, nil
 }
 
 // submitGovernance builds and submits either a DRep registration or a vote

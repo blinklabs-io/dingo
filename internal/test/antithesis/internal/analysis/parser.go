@@ -51,6 +51,10 @@ const (
 	// The TxType field on BlockEvent identifies the tx type (payment,
 	// delegation, governance, plutus).
 	EventTxSubmitted
+
+	// EventTxRejected indicates the node explicitly rejected a transaction
+	// txpump submitted. Transport failures are not rejections.
+	EventTxRejected
 )
 
 // BlockEvent is the normalised representation of a single log line.
@@ -257,8 +261,13 @@ func componentIs(raw map[string]interface{}, expected string) bool {
 // Format: {"ts":"...","tx_id":"...","tx_type":"payment","status":"submitted",...}
 func parseTxpumpLine(raw map[string]interface{}) *BlockEvent {
 	status, _ := raw["status"].(string)
-	if status != "submitted" {
-		return nil // only count successful submissions
+	evType := EventTxSubmitted
+	switch status {
+	case "submitted":
+	case "rejected":
+		evType = EventTxRejected
+	default:
+		return nil
 	}
 	txType, _ := raw["tx_type"].(string)
 	if txType == "" {
@@ -266,7 +275,7 @@ func parseTxpumpLine(raw map[string]interface{}) *BlockEvent {
 	}
 
 	ev := &BlockEvent{
-		Type:   EventTxSubmitted,
+		Type:   evType,
 		TxType: txType,
 		TxID:   stringValue(raw["tx_id"]),
 	}

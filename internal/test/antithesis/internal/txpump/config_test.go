@@ -183,6 +183,7 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_GENESIS_FILE",
 		"TXPUMP_DELEGATION_STAKE_KEY_HASH",
 		"TXPUMP_DELEGATION_POOL_KEY_HASH",
+		"TXPUMP_DELEGATION_STAKE_SKEY_FILE",
 	} {
 		t.Setenv(key, "")
 	}

@@ -17,15 +17,20 @@ package txpump
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	"github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
@@ -49,7 +54,7 @@ func TestWorkloadSubmissionsKeepControlledChangeAddress(t *testing.T) {
 			pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
 			pump.wallet.Add(UTxO{
 				TxHash: sampleHash, Index: 0, Amount: 600_000_000,
-				SigningKey: &UTxOKey{Address: controlled},
+				SigningKey: signingKeyAt(controlled),
 			})
 			submitted := make(chan []byte, 1)
 			cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
@@ -125,6 +130,74 @@ func TestPlutusUnlockReturnsChangeToLockedWalletAddress(t *testing.T) {
 	change, err := outputs[0].Address().Bytes()
 	require.NoError(t, err)
 	require.Equal(t, controlled, change, "Plutus unlock change must remain queryable by the wallet")
+}
+
+func signingKeyAt(addr []byte) *UTxOKey {
+	key := testUTxOKey(3)
+	key.Address = addr
+	return key
+}
+
+// The stake credential's own signing key must reach the delegation
+// transaction's witness set next to the input key, loaded from the configured
+// cardano-cli key file; a mismatched file must not be submitted.
+func TestSubmitDelegationWitnessesInputsAndStakeKey(t *testing.T) {
+	t.Parallel()
+	inputKey := signingKeyAt(
+		append([]byte{0x60}, bytes.Repeat([]byte{0x42}, 28)...),
+	)
+	stakeKey := testUTxOKey(2)
+	stakeHash := common.Blake2b224Hash(stakeKey.VKey)
+	skeyFile := filepath.Join(t.TempDir(), "stake.skey")
+	require.NoError(t, os.WriteFile(
+		skeyFile,
+		[]byte(`{"cborHex":"5820`+hex.EncodeToString(stakeKey.SKey)+`"}`),
+		0o600,
+	))
+
+	newPump := func(stakeHash []byte) *Pump {
+		pump := testPump(time.Now().Add(-time.Second), time.Second)
+		pump.cfg.DelegationStakeKeyHash = hex.EncodeToString(stakeHash)
+		pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
+		pump.cfg.DelegationStakeSKeyFile = skeyFile
+		pump.wallet.Add(UTxO{
+			TxHash: sampleHash, Index: 0, Amount: 600_000_000,
+			SigningKey: inputKey,
+		})
+		return pump
+	}
+
+	submitted := make(chan []byte, 1)
+	cfg := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(_ localtxsubmission.CallbackContext, tx localtxsubmission.MsgSubmitTxTransaction) error {
+			submitted <- tx.Raw.Content.([]byte)
+			return nil
+		},
+	))
+	client := newProtocolTestClient(t, ouroboros.WithLocalTxSubmissionConfig(cfg))
+
+	require.False(
+		t,
+		newPump(samplePoolKeyHash).submitDelegation(client, 1),
+		"a key file that does not match the configured stake hash is refused",
+	)
+	require.True(t, newPump(stakeHash.Bytes()).submitDelegation(client, 1))
+	var raw []byte
+	select {
+	case raw = <-submitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("submission callback was not reached")
+	}
+	var tx conway.ConwayTransaction
+	_, err := cbor.Decode(raw, &tx)
+	require.NoError(t, err)
+	signers := map[string]bool{}
+	for _, w := range tx.Witnesses().Vkey() {
+		signers[hex.EncodeToString(w.Vkey)] = true
+	}
+	require.Len(t, signers, 2)
+	require.True(t, signers[hex.EncodeToString(inputKey.VKey)])
+	require.True(t, signers[hex.EncodeToString(stakeKey.VKey)])
 }
 
 // TestUnsignedWorkloadSubmissionsKeepDeterministicChangeAddress pins the
@@ -384,4 +457,53 @@ func newProtocolTestClient(t *testing.T, serverOptions ...ouroboros.ConnectionOp
 	require.NotNil(t, serverConn)
 	t.Cleanup(func() { _ = serverConn.Close() })
 	return &NodeClient{conn: clientConn, addr: "pipe"}
+}
+
+// The analyzer treats a "rejected" delegation as a failing workload, so the
+// log must say "rejected" only when the node refused the transaction; a
+// submission that never reached a node is "error".
+func TestSubmitDelegationLogsRejectionOnlyForNodeRefusal(t *testing.T) {
+	t.Parallel()
+	refusing := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(localtxsubmission.CallbackContext, localtxsubmission.MsgSubmitTxTransaction) error {
+			return errors.New("refused")
+		},
+	))
+	for _, tc := range []struct {
+		name   string
+		client func(t *testing.T) *NodeClient
+		want   string
+	}{
+		{
+			"node refuses",
+			func(t *testing.T) *NodeClient {
+				return newProtocolTestClient(
+					t, ouroboros.WithLocalTxSubmissionConfig(refusing),
+				)
+			},
+			"rejected",
+		},
+		{"no connection", func(*testing.T) *NodeClient { return &NodeClient{} }, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logDir := t.TempDir()
+			txlog, err := NewTxLogger(logDir)
+			require.NoError(t, err)
+			defer txlog.Close()
+			pump := testPump(time.Now().Add(-time.Second), time.Second)
+			pump.txlog = txlog
+			pump.cfg.DelegationStakeKeyHash = hex.EncodeToString(sampleStakeKeyHash)
+			pump.cfg.DelegationPoolKeyHash = hex.EncodeToString(samplePoolKeyHash)
+			pump.wallet.Add(UTxO{TxHash: sampleHash, Index: 0, Amount: 600_000_000})
+
+			require.False(t, pump.submitDelegation(tc.client(t), 1))
+
+			raw, err := os.ReadFile(filepath.Join(logDir, "txpump.log"))
+			require.NoError(t, err)
+			var entry TxLog
+			require.NoError(t, json.Unmarshal(raw, &entry))
+			require.Equal(t, tc.want, entry.Status)
+		})
+	}
 }

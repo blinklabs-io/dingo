@@ -16,6 +16,8 @@ package analysis
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -64,4 +66,29 @@ func TestLoadConfigAnalysisDurations(t *testing.T) {
 	require.NoError(t, err)
 	require.Zero(t, cfg.InitialWait)
 	require.Equal(t, time.Second, cfg.CheckInterval)
+}
+
+// The genesis security parameter k counts blocks, while MaxForkDepth bounds a
+// slot distance; at active slot coefficient f a k-block window spans k/f slots.
+// Not t.Parallel: t.Setenv makes this test process-global.
+func TestLoadConfigForkDepthIsGenesisKInSlots(t *testing.T) {
+	genesisFile := filepath.Join(t.TempDir(), "testnet.yaml")
+	require.NoError(t, os.WriteFile(genesisFile, []byte(`---
+poolCount: 5
+---
+protocolConsts:
+  k: 40
+---
+epochLength: 500
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 40
+`), 0o600))
+	t.Setenv("ANALYSIS_GENESIS_FILE", genesisFile)
+	t.Setenv("ANALYSIS_MAX_FORK_DEPTH", "")
+	t.Setenv("ANALYSIS_POOLS", "")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, 100, cfg.MaxForkDepth)
 }

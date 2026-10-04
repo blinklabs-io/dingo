@@ -302,3 +302,15 @@ func TestMetrics_SnapshotIsIndependent(t *testing.T) {
 
 	require.Equal(t, 1, snap.TotalBlocksForged)
 }
+
+func TestMetrics_CountsRejectedDelegations(t *testing.T) {
+	t.Parallel()
+	m := NewMetrics()
+	m.RecordEvent(&BlockEvent{Type: EventTxRejected, TxType: "delegation"})
+	m.RecordEvent(&BlockEvent{Type: EventTxRejected, TxType: "payment"})
+	m.RecordEvent(&BlockEvent{Type: EventTxSubmitted, TxType: "delegation"})
+
+	snap := m.Snapshot()
+	require.Equal(t, 1, snap.DelegationsRejected)
+	require.Equal(t, 1, snap.DelegationsProcessed)
+}

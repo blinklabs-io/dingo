@@ -212,3 +212,19 @@ func TestParseLine_MalformedSlotJSON(t *testing.T) {
 		})
 	}
 }
+
+// Only an explicit node rejection of a delegation is a workload failure: a
+// transport error carries status "error" and must not be reported as one.
+func TestParseLine_TxpumpRejection(t *testing.T) {
+	t.Parallel()
+	ev := ParseLogLine(
+		`{"tx_id":"ab","tx_type":"delegation","status":"rejected"}`,
+	)
+	require.NotNil(t, ev)
+	require.Equal(t, EventTxRejected, ev.Type)
+	require.Equal(t, "delegation", ev.TxType)
+
+	require.Nil(t, ParseLogLine(
+		`{"tx_id":"ab","tx_type":"delegation","status":"error"}`,
+	))
+}

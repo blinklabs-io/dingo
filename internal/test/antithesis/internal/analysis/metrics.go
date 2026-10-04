@@ -83,6 +83,8 @@ type Metrics struct {
 
 	// delegationsProcessed counts submitted delegation transactions from txpump logs.
 	delegationsProcessed int
+	// delegationsRejected counts delegation transactions the node rejected.
+	delegationsRejected int
 
 	// governanceProcessed counts submitted governance transactions from txpump logs.
 	governanceProcessed int
@@ -130,6 +132,10 @@ func (m *Metrics) RecordEvent(ev *BlockEvent) {
 		}
 	case EventTxSubmitted:
 		m.recordTxSubmitted(ev)
+	case EventTxRejected:
+		if ev.TxType == "delegation" {
+			m.delegationsRejected++
+		}
 	case EventUnknown, EventBlockReceived:
 		// ignored
 	}
@@ -213,6 +219,7 @@ type MetricsSnapshot struct {
 	SlotRegressions           []SlotRegression
 	MempoolTxCount            int
 	DelegationsProcessed      int
+	DelegationsRejected       int
 	GovernanceProcessed       int
 	PlutusProcessed           int
 	MempoolConfirmedCount     int
@@ -240,6 +247,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		),
 		MempoolTxCount:            m.MempoolTxCount,
 		DelegationsProcessed:      m.delegationsProcessed,
+		DelegationsRejected:       m.delegationsRejected,
 		GovernanceProcessed:       m.governanceProcessed,
 		PlutusProcessed:           m.plutusProcessed,
 		MempoolConfirmedCount:     m.MempoolConfirmedCount,

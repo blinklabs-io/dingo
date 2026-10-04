@@ -252,7 +252,6 @@ services:
     environment:
       ANALYSIS_LOG_DIR: "/logs"
       ANALYSIS_POOLS: "5"
-      ANALYSIS_MAX_FORK_DEPTH: "40"
       ANALYSIS_GENESIS_FILE: "/testnet-config/testnet.yaml"
     volumes:
       - logs:/logs

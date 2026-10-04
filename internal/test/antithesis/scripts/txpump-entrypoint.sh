@@ -12,14 +12,16 @@ set -eu
 case ",${TXPUMP_TYPES:-},"  in
   *,delegation,*)
     stake_key="/utxo-keys/stake/txpump.stake.vkey"
+    stake_skey="/utxo-keys/stake/txpump.stake.skey"
     pool_key="/configs/keys/cold.vkey"
-    if [ ! -f "${stake_key}" ] || [ ! -f "${pool_key}" ]; then
+    if [ ! -f "${stake_key}" ] || [ ! -f "${stake_skey}" ] || [ ! -f "${pool_key}" ]; then
       echo "txpump: delegation credentials are missing" >&2
       exit 1
     fi
     TXPUMP_DELEGATION_STAKE_KEY_HASH="$(cardano-cli latest stake-address key-hash --stake-verification-key-file "${stake_key}")"
     TXPUMP_DELEGATION_POOL_KEY_HASH="$(cardano-cli stake-pool id --cold-verification-key-file "${pool_key}" --output-format hex)"
-    export TXPUMP_DELEGATION_STAKE_KEY_HASH TXPUMP_DELEGATION_POOL_KEY_HASH
+    TXPUMP_DELEGATION_STAKE_SKEY_FILE="${stake_skey}"
+    export TXPUMP_DELEGATION_STAKE_KEY_HASH TXPUMP_DELEGATION_POOL_KEY_HASH TXPUMP_DELEGATION_STAKE_SKEY_FILE
     ;;
 esac
 

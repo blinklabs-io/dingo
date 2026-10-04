@@ -241,6 +241,13 @@ if [ -z "$stake_vkey" ]; then
     exit 1
 fi
 cp "$stake_vkey" /configs/utxo-keys/stake/txpump.stake.vkey
+# txpump signs delegation certificates with the matching signing key.
+stake_skey="${stake_vkey%.vkey}.skey"
+if [ ! -f "$stake_skey" ]; then
+    echo "no signing key beside delegation stake verification key: $stake_vkey" >&2
+    exit 1
+fi
+cp "$stake_skey" /configs/utxo-keys/stake/txpump.stake.skey
 if ! cardano-cli latest stake-address key-hash \
     --stake-verification-key-file /configs/utxo-keys/stake/txpump.stake.vkey \
     >/tmp/txpump-stake-key-hash; then

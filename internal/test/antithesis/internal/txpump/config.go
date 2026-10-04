@@ -102,6 +102,11 @@ type Config struct {
 	// with DelegationStakeKeyHash.
 	DelegationPoolKeyHash string
 
+	// DelegationStakeSKeyFile is the optional path to the cardano-cli signing
+	// key of the delegating stake credential. Delegation transactions carry
+	// its witness; without it the node rejects them.
+	DelegationStakeSKeyFile string
+
 	// EpochLength is the number of slots per epoch. Default: 500.
 	EpochLength uint64
 
@@ -140,6 +145,9 @@ func LoadConfig() (*Config, error) {
 		),
 		DelegationPoolKeyHash: envString(
 			"TXPUMP_DELEGATION_POOL_KEY_HASH", "",
+		),
+		DelegationStakeSKeyFile: envString(
+			"TXPUMP_DELEGATION_STAKE_SKEY_FILE", "",
 		),
 		EpochLength: 500,
 	}
