@@ -2119,3 +2119,20 @@ config:
 		assert.Equal(t, expected, err.Error())
 	})
 }
+
+func TestCloneConfigIsolatesMCP(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Plugins: defaultPluginsConfig()}
+	cfg.Plugins.API.Mcp.Config["tls"] = map[string]any{"enabled": true}
+	clone := cloneConfig(cfg)
+	clone.Plugins.API.Mcp.Config["port"] = 8088
+	clone.Plugins.API.Mcp.Config["authToken"] = "override"
+	clone.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"] = false
+	require.Equal(t, 0, cfg.Plugins.API.Mcp.Config["port"])
+	require.NotContains(t, cfg.Plugins.API.Mcp.Config, "authToken")
+	require.Equal(
+		t,
+		true,
+		cfg.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"],
+	)
+}
