@@ -511,3 +511,35 @@ func TestNewUpdateCommitteeGovActionQuorum(t *testing.T) {
 		require.NoError(t, err, tc.name)
 	}
 }
+
+// TestDRepUnknownDiscriminatorIsNotShapeError keeps the two rejection classes
+// apart: an unknown discriminator names the type, and a malformed shape of a
+// known type never reports an unknown type.
+func TestDRepUnknownDiscriminatorIsNotShapeError(t *testing.T) {
+	t.Parallel()
+	decode := func(drep any) error {
+		raw, err := cbor.Encode(drep)
+		require.NoError(t, err)
+		var d lcommon.Drep
+		return d.UnmarshalCBOR(raw)
+	}
+	for _, drep := range []any{
+		[]any{4}, []any{4, shapeHash(28, 0x44)}, []any{255},
+	} {
+		err := decode(drep)
+		require.ErrorContains(t, err, "unknown drep type")
+		require.NotContains(t, err.Error(), "exactly")
+		require.NotContains(t, err.Error(), "drep credential")
+	}
+	for _, drep := range []any{
+		[]any{0, shapeHash(27, 0x44)},
+		[]any{1, shapeHash(29, 0x44)},
+		[]any{0},
+		[]any{2, shapeHash(28, 0x44)},
+		[]any{3, uint64(1)},
+	} {
+		err := decode(drep)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "unknown drep type")
+	}
+}
