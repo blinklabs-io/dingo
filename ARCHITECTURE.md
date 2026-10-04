@@ -8411,7 +8411,9 @@ those indexes in place while deferring the remaining manifest entries.
 bootstrap: they produce the artifact format `dingo mithril sync` consumes (a
 Mithril Cardano database, v2) and serve it through the aggregator artifact API.
 Neither starts the node; both read the `mithril.server` configuration, and the
-server binds the shared `bindAddr` with no credentials.
+server binds the shared `bindAddr`. Artifact reads are public. When the
+aggregator is enabled, signer registration and registration closure require an
+operator bearer token; non-loopback binds require TLS.
 
 **Production** (`mithril.CreateSnapshot`) takes a sealed cardano-node database
 directory. Immutable file numbers must be contiguous from 0 with a chunk,
@@ -8451,13 +8453,17 @@ yet, since a verifying client bootstraps from the newest listed one.
 
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
-configured network. `POST /register-signer` takes a BLS verification key with
-its proof of possession and stake; the first call to `GET /certificate-pending`
-or `POST /register-signatures` with a snapshot awaiting a certificate closes
-registration, orders the signers as the reference key registry does, builds the
-registration Merkle commitment and aggregate verification key, and issues a
-genesis certificate at `epoch-1` signed with the genesis key. The pending
-message binds the oldest uncertified snapshot's digest Merkle root; if
+configured network. `POST /register-signer` and
+`POST /close-registrations` require the bearer token in the
+`Authorization` header, loaded from
+`mithril.server.aggregator.operatorTokenFile`; the token must contain at least
+32 random bytes, and a non-loopback bind requires server TLS. Pending reads and
+signature submissions do not close registration. The operator closes it only
+after a snapshot awaits a certificate and at least one signer has registered;
+the aggregator then orders the signers as the reference key registry does,
+builds the registration Merkle commitment and aggregate verification key, and
+issues a genesis certificate at `epoch-1` signed with the genesis key. The
+pending message binds the oldest uncertified snapshot's digest Merkle root; if
 retention prunes that snapshot while it is open, signing moves on to the next
 one rather than certifying it. Each
 `POST /register-signatures` single signature is verified (key, lottery wins,
@@ -8470,7 +8476,7 @@ certificate-chain verification of a Cardano database artifact reads. The closed
 signer set and chain head are stored in `aggregator.json` and restored on
 start; changing the epoch or parameters afterwards is refused. Signing itself is
 not part of the aggregator, and certificates carry no KES operational
-certificates: registration is trust-on-first-registration for the epoch.
+certificates. The operator supplies and authorizes the epoch's signer stakes.
 
 After a completed metadata backfill, `internal/node.FinalizeBackfillPlannerStats`
 refreshes planner statistics after critical index repair and before either

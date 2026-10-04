@@ -806,6 +806,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 					"when the aggregator is enabled",
 			))
 		}
+		if agg.OperatorTokenFile == "" {
+			errs = append(errs, errors.New(
+				"mithril.server.aggregator.operatorTokenFile is required "+
+					"when the aggregator is enabled",
+			))
+		}
+		if !isLoopbackListenHost(c.BindAddr) && !c.Mithril.Server.TLSEnabled {
+			errs = append(errs, errors.New(
+				"mithril.server.tlsEnabled is required when the aggregator "+
+					"uses a non-loopback bindAddr",
+			))
+		}
 	}
 
 	if c.DelegatorInactivityEnabled &&
@@ -1020,6 +1032,12 @@ func normalizeBindAddr(addr string) string {
 		return addr
 	}
 	return parsed.Unmap().String()
+}
+
+func isLoopbackListenHost(host string) bool {
+	literal := strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	addr, err := netip.ParseAddr(literal)
+	return err == nil && addr.Unmap().IsLoopback()
 }
 
 // isWildcardAddr reports whether a bind address selects all interfaces. The

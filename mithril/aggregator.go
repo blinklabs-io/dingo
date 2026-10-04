@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +31,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +41,7 @@ const (
 	certificateVersion        = "0.1.0"
 	maxAggregatorRequestBytes = 1 << 20
 	stmVerificationKeyBytes   = 96
+	minOperatorTokenBytes     = 32
 )
 
 var (
@@ -59,15 +63,19 @@ type AggregatorConfig struct {
 	GenesisSigningKey ed25519.PrivateKey
 	// Store holds the snapshots to certify and receives the certificates.
 	Store ArtifactStore
+	// OperatorToken authorizes signer registration and registration closure.
+	// Use at least 32 unpredictable bytes and transport it over TLS.
+	OperatorToken string
 }
 
 // Aggregator collects signer registrations and individual STM signatures over
 // stored snapshots, and publishes a certificate for a snapshot once the
-// signatures cover the quorum. The signer set for the epoch is fixed when the
-// first snapshot is opened for signing: that closes registration, derives the
-// aggregate verification key, and issues the genesis certificate.
+// signatures cover the quorum. An operator explicitly closes the epoch's
+// signer set before signing starts; closure derives the aggregate verification
+// key and issues the genesis certificate.
 type Aggregator struct {
-	cfg AggregatorConfig
+	cfg               AggregatorConfig
+	operatorTokenHash [sha256.Size]byte
 
 	mu     sync.Mutex
 	regs   map[string]stmRegistration
@@ -134,11 +142,19 @@ func NewAggregator(
 			"aggregator parameter phi_f=%v must be in (0, 1]",
 			cfg.Parameters.PhiF,
 		)
+	case len(cfg.OperatorToken) < minOperatorTokenBytes:
+		return nil, fmt.Errorf(
+			"aggregator operator token must be at least %d bytes",
+			minOperatorTokenBytes,
+		)
 	}
+	tokenHash := sha256.Sum256([]byte(cfg.OperatorToken))
+	cfg.OperatorToken = ""
 	a := &Aggregator{
-		cfg:  cfg,
-		regs: make(map[string]stmRegistration),
-		now:  time.Now,
+		cfg:               cfg,
+		operatorTokenHash: tokenHash,
+		regs:              make(map[string]stmRegistration),
+		now:               time.Now,
 	}
 	found, err := getJSON(ctx, cfg.Store, aggregatorStateKey, &a.state)
 	if err != nil {
@@ -201,6 +217,7 @@ func closeRegistrations(regs []stmRegistration) *sealedRegistration {
 
 func (a *Aggregator) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register-signer", a.handleRegisterSigner)
+	mux.HandleFunc("POST /close-registrations", a.handleCloseRegistrations)
 	mux.HandleFunc("GET /certificate-pending", a.handlePending)
 	mux.HandleFunc("POST /register-signatures", a.handleRegisterSignatures)
 	mux.HandleFunc(
@@ -294,6 +311,9 @@ func (a *Aggregator) handleRegisterSigner(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
+	if !a.authorizeOperator(w, r) {
+		return
+	}
 	var req registerSignerRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		writeAPIError(w, err)
@@ -304,6 +324,41 @@ func (a *Aggregator) handleRegisterSigner(
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (a *Aggregator) handleCloseRegistrations(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if !a.authorizeOperator(w, r) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.closeRegistrations(r.Context()); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *Aggregator) authorizeOperator(
+	w http.ResponseWriter,
+	r *http.Request,
+) bool {
+	header := r.Header.Get("Authorization")
+	scheme, token, ok := strings.Cut(header, " ")
+	if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
+		candidate := sha256.Sum256([]byte(token))
+		if subtle.ConstantTimeCompare(
+			candidate[:], a.operatorTokenHash[:],
+		) == 1 {
+			return true
+		}
+	}
+	w.Header().Set("WWW-Authenticate", "Bearer")
+	http.Error(w, "operator authorization required", http.StatusUnauthorized)
+	return false
 }
 
 func (a *Aggregator) registerSigner(req registerSignerRequest) error {
@@ -408,10 +463,9 @@ func (a *Aggregator) handlePending(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ensureOpen returns the message to sign, closing registration and issuing
-// the genesis certificate first if that has not happened. It returns nil when
-// there is nothing to sign: no registered signers, or no snapshot of the
-// aggregator's network awaiting a certificate. The caller holds a.mu.
+// ensureOpen returns the message to sign after registration has been closed.
+// It returns nil when registration remains open or no snapshot awaits a
+// certificate. The caller holds a.mu.
 func (a *Aggregator) ensureOpen(ctx context.Context) (*openMessage, error) {
 	if a.open != nil {
 		// Retention may have pruned the open snapshot. Certifying it would
@@ -431,22 +485,44 @@ func (a *Aggregator) ensureOpen(ctx context.Context) (*openMessage, error) {
 		return nil, err
 	}
 	if a.sealed == nil {
-		if len(a.regs) == 0 {
-			return nil, nil
-		}
-		if err := a.seal(ctx); err != nil {
-			return nil, err
-		}
+		return nil, nil
 	}
+	a.open = a.newOpenMessage(*snapshot)
+	return a.open, nil
+}
+
+func (a *Aggregator) closeRegistrations(ctx context.Context) error {
+	if a.sealed != nil {
+		return nil
+	}
+	if len(a.regs) == 0 {
+		return conflict("no signers are registered")
+	}
+	snapshot, err := a.oldestUncertified(ctx)
+	if err != nil {
+		return err
+	}
+	if snapshot == nil {
+		return conflict("no snapshot is awaiting a certificate")
+	}
+	if err := a.seal(ctx); err != nil {
+		return err
+	}
+	a.open = a.newOpenMessage(*snapshot)
+	return nil
+}
+
+func (a *Aggregator) newOpenMessage(
+	snapshot CardanoDatabaseSnapshot,
+) *openMessage {
 	protocol := a.protocolMessage(a.cfg.Epoch, snapshot.MerkleRoot)
-	a.open = &openMessage{
-		snapshot:      *snapshot,
+	return &openMessage{
+		snapshot:      snapshot,
 		protocol:      protocol,
 		signedMessage: protocol.ComputeHash(),
 		initiatedAt:   a.now().UTC(),
 		sigs:          make(map[string]stmSingleSignature),
 	}
-	return a.open, nil
 }
 
 func (a *Aggregator) oldestUncertified(

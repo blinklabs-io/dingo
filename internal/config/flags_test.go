@@ -205,6 +205,23 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 	}
 }
 
+func TestMithrilAggregatorOperatorTokenFileEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(
+		"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE",
+		"/run/secrets/mithril-operator-token",
+	)
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"/run/secrets/mithril-operator-token",
+		cfg.Mithril.Server.Aggregator.OperatorTokenFile,
+	)
+}
+
 func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)

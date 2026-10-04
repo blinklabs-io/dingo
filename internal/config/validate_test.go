@@ -700,9 +700,35 @@ func TestValidate(t *testing.T) {
 			wantErr: "mithril.server.aggregator.genesisSigningKeyFile",
 		},
 		{
+			name: "enabled mithril aggregator needs an operator token file",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.OperatorTokenFile = ""
+				c.BindAddr = "127.0.0.1"
+			},
+			wantErr: "mithril.server.aggregator.operatorTokenFile",
+		},
+		{
+			name: "public mithril aggregator requires tls",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+			},
+			wantErr: "mithril.server.tlsEnabled is required",
+		},
+		{
 			name: "enabled mithril aggregator fully configured",
 			modify: func(c *Config) {
 				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.BindAddr = "127.0.0.1"
+			},
+		},
+		{
+			name: "public mithril aggregator with tls",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.TLSEnabled = true
+				c.TlsCertFilePath = "server.crt"
+				c.TlsKeyFilePath = "server.key"
 			},
 		},
 		{
@@ -1510,5 +1536,6 @@ func validMithrilAggregator() MithrilAggregatorConfig {
 		M:                     40,
 		PhiF:                  0.5,
 		GenesisSigningKeyFile: "genesis.skey",
+		OperatorTokenFile:     "operator.token",
 	}
 }

@@ -282,6 +282,12 @@ func aggregatorTestConfig(t *testing.T) *config.Config {
 	require.NoError(t, os.WriteFile(
 		keyFile, []byte(hex.EncodeToString(key.Seed())), 0o600,
 	))
+	tokenFile := filepath.Join(dir, "operator.token")
+	require.NoError(t, os.WriteFile(
+		tokenFile,
+		[]byte("aggregator-test-operator-token-0123456789\n"),
+		0o600,
+	))
 	cfg.Mithril.Server.Aggregator = config.MithrilAggregatorConfig{
 		Enabled:               true,
 		Epoch:                 10,
@@ -289,6 +295,7 @@ func aggregatorTestConfig(t *testing.T) *config.Config {
 		M:                     40,
 		PhiF:                  0.5,
 		GenesisSigningKeyFile: keyFile,
+		OperatorTokenFile:     tokenFile,
 	}
 	return cfg
 }

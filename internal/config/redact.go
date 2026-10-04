@@ -222,6 +222,7 @@ var logPlainConfigFields = []string{
 	"Mithril.Server.Aggregator.K",
 	"Mithril.Server.Aggregator.M",
 	"Mithril.Server.Aggregator.PhiF",
+	"Mithril.Server.Aggregator.OperatorTokenFile",
 	"Mithril.Server.AncillarySigningKeyFile",
 	"Mithril.Server.ArtifactStore",
 	"Mithril.Server.KeepSnapshots",

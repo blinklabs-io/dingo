@@ -852,8 +852,9 @@
   # verifyCertificates: true
   # Snapshot production and serving: 'dingo mithril snapshot create --db-dir
   # <cardano-node db>' writes a Mithril snapshot artifact to artifactStore, and
-  # 'dingo mithril serve' serves those artifacts over HTTP on bindAddr and
-  # server.port. The server is public and unauthenticated.
+  # 'dingo mithril serve' serves those artifacts on bindAddr and server.port.
+  # Artifact reads are public. Aggregator registration and registration closure
+  # require a bearer token; non-loopback aggregator binds require TLS.
   # server:
     # Port for 'dingo mithril serve' (default: 8080)
     # CLI: --mithril-server-port
@@ -892,6 +893,10 @@
       # Ed25519 genesis signing key file (Mithril JSON-hex format)
       # CLI: --mithril-aggregator-genesis-signing-key-file
       # genesisSigningKeyFile: ""
+      # File containing at least 32 random bytes for signer registration and
+      # registration closure.
+      # CLI: --mithril-aggregator-operator-token-file
+      # operatorTokenFile: ""
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)

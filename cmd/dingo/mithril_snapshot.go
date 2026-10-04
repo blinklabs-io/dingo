@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -148,9 +149,10 @@ func mithrilServeCommand() *cobra.Command {
 		Short: "Serve Mithril snapshot artifacts over HTTP",
 		Long: `Serve the snapshots in mithril.server.artifactStore through the
 Mithril aggregator artifact API, with range request support, on the shared
-bindAddr and mithril.server.port. The endpoint is public and unauthenticated.
-With mithril.server.aggregator.enabled it also accepts signer registrations and
-signatures and certifies the stored snapshots.`,
+bindAddr and mithril.server.port. Artifact reads and signature submissions are
+public. With mithril.server.aggregator.enabled, signer registration and explicit
+registration closure require the configured operator bearer token; the
+aggregator certifies stored snapshots.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -239,6 +241,11 @@ func newMithrilAggregator(
 	if err != nil {
 		return nil, err
 	}
+	tokenData, err := os.ReadFile(agg.OperatorTokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading aggregator operator token: %w", err)
+	}
+	operatorToken := strings.TrimSpace(string(tokenData))
 	network := cfg.Network
 	if network == "" {
 		network = "preview"
@@ -251,6 +258,7 @@ func newMithrilAggregator(
 		},
 		GenesisSigningKey: key,
 		Store:             store,
+		OperatorToken:     operatorToken,
 	})
 }
 

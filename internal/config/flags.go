@@ -973,6 +973,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"file holding the Ed25519 Mithril genesis signing key",
 	),
+	stringFlag(
+		"Mithril.Server.Aggregator.OperatorTokenFile",
+		"mithril-aggregator-operator-token-file",
+		"",
+		"file holding the bearer token for aggregator signer registration",
+	),
 
 	// Database lifecycle (snapshot/restore/truncate)
 	boolFlag(

@@ -33,23 +33,26 @@ import (
 
 var lotteryParams = ProtocolParameters{K: 5, M: 40, PhiF: 0.5}
 
+const testAggregatorOperatorToken = "aggregator-test-operator-token-0123456789"
+
 // aggregatorFixture is an aggregator and artifact server over one store,
 // reachable over HTTP. Snapshots are produced into the same store.
 type aggregatorFixture struct {
-	t          *testing.T
-	store      ArtifactStore
-	dir        string
-	aggregator *Aggregator
-	url        string
-	client     *Client
-	genesisPub ed25519.PublicKey
-	genesisKey ed25519.PrivateKey
-	ancPub     ed25519.PublicKey
-	ancKey     ed25519.PrivateKey
-	params     ProtocolParameters
-	epoch      uint64
-	network    string
-	created    int
+	t             *testing.T
+	store         ArtifactStore
+	dir           string
+	aggregator    *Aggregator
+	url           string
+	client        *Client
+	genesisPub    ed25519.PublicKey
+	genesisKey    ed25519.PrivateKey
+	ancPub        ed25519.PublicKey
+	ancKey        ed25519.PrivateKey
+	params        ProtocolParameters
+	epoch         uint64
+	network       string
+	operatorToken string
+	created       int
 }
 
 func newAggregatorFixture(
@@ -61,16 +64,17 @@ func newAggregatorFixture(
 	ancPub, ancKey := newSigningKey(t)
 	store, dir := newLocalStore(t)
 	f := &aggregatorFixture{
-		t:          t,
-		store:      store,
-		dir:        dir,
-		genesisPub: genesisPub,
-		genesisKey: genesisKey,
-		ancPub:     ancPub,
-		ancKey:     ancKey,
-		params:     params,
-		epoch:      10,
-		network:    "preprod",
+		t:             t,
+		store:         store,
+		dir:           dir,
+		genesisPub:    genesisPub,
+		genesisKey:    genesisKey,
+		ancPub:        ancPub,
+		ancKey:        ancKey,
+		params:        params,
+		epoch:         10,
+		network:       "preprod",
+		operatorToken: testAggregatorOperatorToken,
 	}
 	f.start()
 	return f
@@ -85,6 +89,7 @@ func (f *aggregatorFixture) start() {
 		Parameters:        f.params,
 		GenesisSigningKey: f.genesisKey,
 		Store:             f.store,
+		OperatorToken:     f.operatorToken,
 	})
 	require.NoError(f.t, err)
 	f.aggregator = agg
@@ -117,6 +122,21 @@ func (f *aggregatorFixture) snapshotOf(db string) *CardanoDatabaseSnapshot {
 }
 
 func (f *aggregatorFixture) post(path string, body any) (int, string) {
+	return f.postWithOperatorToken(path, body, f.operatorToken)
+}
+
+func (f *aggregatorFixture) postUnauthenticated(
+	path string,
+	body any,
+) (int, string) {
+	return f.postWithOperatorToken(path, body, "")
+}
+
+func (f *aggregatorFixture) postWithOperatorToken(
+	path string,
+	body any,
+	token string,
+) (int, string) {
 	f.t.Helper()
 	data, err := json.Marshal(body)
 	require.NoError(f.t, err)
@@ -126,6 +146,9 @@ func (f *aggregatorFixture) post(path string, body any) (int, string) {
 	)
 	require.NoError(f.t, err)
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(f.t, err)
 	t := f.t
@@ -133,16 +156,34 @@ func (f *aggregatorFixture) post(path string, body any) (int, string) {
 	return resp.StatusCode, string(getBody(t, resp))
 }
 
+func (f *aggregatorFixture) closeRegistrations() (int, string) {
+	f.t.Helper()
+	return f.post("/close-registrations", nil)
+}
+
 func (f *aggregatorFixture) register(s *testSTMSigner) (int, string) {
+	return f.registerWithToken(s, f.operatorToken)
+}
+
+func (f *aggregatorFixture) registerUnauthenticated(
+	s *testSTMSigner,
+) (int, string) {
+	return f.registerWithToken(s, "")
+}
+
+func (f *aggregatorFixture) registerWithToken(
+	s *testSTMSigner,
+	token string,
+) (int, string) {
 	reg := s.registration()
-	return f.post("/register-signer", registerSignerRequest{
+	return f.postWithOperatorToken("/register-signer", registerSignerRequest{
 		Epoch:   f.epoch,
 		PartyID: reg.PartyID,
 		VerificationKey: hex.EncodeToString(
 			append(bytes.Clone(reg.VerificationKey), reg.ProofOfPossession...),
 		),
 		Stake: reg.Stake,
-	})
+	}, token)
 }
 
 func (f *aggregatorFixture) registerAll(signers []*testSTMSigner) {
@@ -155,6 +196,15 @@ func (f *aggregatorFixture) registerAll(signers []*testSTMSigner) {
 
 func (f *aggregatorFixture) pending() (int, *pendingCertificate) {
 	f.t.Helper()
+	f.aggregator.mu.Lock()
+	needsClose := f.aggregator.sealed == nil && len(f.aggregator.regs) > 0
+	f.aggregator.mu.Unlock()
+	if needsClose {
+		code, body := f.closeRegistrations()
+		if code != http.StatusNoContent {
+			f.t.Fatalf("close registrations: status %d: %s", code, body)
+		}
+	}
 	resp := get(f.t, f.url+"/certificate-pending")
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, nil
@@ -416,7 +466,28 @@ func TestAggregatorRegistrationValidation(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, code)
 }
 
-func TestAggregatorReRegistrationReplacesStake(t *testing.T) {
+func TestAggregatorReRegistrationRequiresOperator(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	f.newSnapshot(2)
+	s := newTestSTMSigner(1, 100)
+	code, body := f.register(s)
+	require.Equal(t, http.StatusCreated, code, body)
+	s.stake = 250
+	code, body = f.registerUnauthenticated(s)
+	require.Equal(t, http.StatusUnauthorized, code, body)
+	code, body = f.registerWithToken(s, f.operatorToken+"wrong")
+	require.Equal(t, http.StatusUnauthorized, code, body)
+	code, body = f.closeRegistrations()
+	require.Equal(t, http.StatusNoContent, code, body)
+	status, pc := f.pending()
+	require.Equal(t, http.StatusOK, status)
+	require.NotNil(t, pc)
+	require.Len(t, pc.Signers, 1)
+	require.Equal(t, uint64(100), pc.Signers[0].Stake)
+}
+
+func TestAggregatorOperatorCanUpdateRegistration(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)
 	f.newSnapshot(2)
@@ -427,10 +498,65 @@ func TestAggregatorReRegistrationReplacesStake(t *testing.T) {
 	code, body = f.register(s)
 	require.Equal(t, http.StatusCreated, code, body)
 
+	code, body = f.closeRegistrations()
+	require.Equal(t, http.StatusNoContent, code, body)
 	_, pc := f.pending()
 	require.NotNil(t, pc)
 	require.Len(t, pc.Signers, 1)
 	require.Equal(t, uint64(250), pc.Signers[0].Stake)
+}
+
+func TestAggregatorPendingReadDoesNotCloseRegistration(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	f.newSnapshot(2)
+	code, body := f.register(newTestSTMSigner(1, 100))
+	require.Equal(t, http.StatusCreated, code, body)
+
+	resp := get(t, f.url+"/certificate-pending")
+	// The former behavior returned an opened certificate (200); the assertion
+	// below pins that reading it must not freeze the signer set.
+	require.Contains(t, []int{http.StatusNoContent, http.StatusOK}, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	code, body = f.register(newTestSTMSigner(2, 100))
+	require.Equal(t, http.StatusCreated, code, body,
+		"pending read must leave registration open")
+}
+
+func TestAggregatorInvalidSignatureDoesNotCloseRegistration(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	f.newSnapshot(2)
+	code, body := f.register(newTestSTMSigner(1, 100))
+	require.Equal(t, http.StatusCreated, code, body)
+	code, body = f.postUnauthenticated(
+		"/register-signatures", registerSignatureRequest{},
+	)
+	require.Equal(t, http.StatusConflict, code, body)
+
+	code, body = f.register(newTestSTMSigner(2, 100))
+	require.Equal(t, http.StatusCreated, code, body,
+		"invalid signature request must leave registration open")
+}
+
+func TestAggregatorRegistrationClosureRequiresOperator(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	f.newSnapshot(2)
+	code, body := f.register(newTestSTMSigner(1, 100))
+	require.Equal(t, http.StatusCreated, code, body)
+	code, body = f.postUnauthenticated("/close-registrations", nil)
+	require.Equal(t, http.StatusUnauthorized, code, body)
+	code, body = f.register(newTestSTMSigner(2, 100))
+	require.Equal(t, http.StatusCreated, code, body,
+		"unauthorized closure must leave registration open")
+	code, body = f.closeRegistrations()
+	require.Equal(t, http.StatusNoContent, code, body)
+
+	status, pending := f.pending()
+	require.Equal(t, http.StatusOK, status)
+	require.Len(t, pending.Signers, 2)
 }
 
 func TestAggregatorRefusesRegistrationOnceClosed(t *testing.T) {
@@ -607,6 +733,7 @@ func TestNewAggregatorRejectsChangedParametersAfterClose(t *testing.T) {
 		Parameters:        ProtocolParameters{K: 1, M: 2, PhiF: 1},
 		GenesisSigningKey: f.genesisKey,
 		Store:             f.store,
+		OperatorToken:     f.operatorToken,
 	})
 	require.ErrorContains(t, err, "parameters")
 }
@@ -622,6 +749,7 @@ func TestNewAggregatorValidatesConfig(t *testing.T) {
 			Parameters:        lotteryParams,
 			GenesisSigningKey: priv,
 			Store:             store,
+			OperatorToken:     testAggregatorOperatorToken,
 		}
 	}
 	_, err := NewAggregator(context.Background(), newBase())
@@ -635,6 +763,9 @@ func TestNewAggregatorValidatesConfig(t *testing.T) {
 		"zero m":      func(c *AggregatorConfig) { c.Parameters.M = 0 },
 		"bad phi":     func(c *AggregatorConfig) { c.Parameters.PhiF = 1.5 },
 		"no store":    func(c *AggregatorConfig) { c.Store = nil },
+		"short operator token": func(c *AggregatorConfig) {
+			c.OperatorToken = "short"
+		},
 	} {
 		cfg := newBase()
 		mutate(&cfg)
@@ -652,8 +783,9 @@ func TestAggregatorIgnoresSnapshotsOfOtherNetworks(t *testing.T) {
 	code, body := f.register(newTestSTMSigner(1, 100))
 	require.Equal(t, http.StatusCreated, code, body)
 
-	status, _ := f.pending()
-	require.Equal(t, http.StatusNoContent, status)
+	resp := get(t, f.url+"/certificate-pending")
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
 	code, body = f.register(newTestSTMSigner(2, 100))
 	require.Equal(t, http.StatusCreated, code,
 		"nothing was opened, so registration must still be open: %s", body)

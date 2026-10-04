@@ -1174,8 +1174,8 @@ type MithrilConfig struct {
 }
 
 // MithrilServerConfig holds configuration for producing Mithril snapshot
-// artifacts and serving them over HTTP. The server binds the shared BindAddr
-// and requires no credentials.
+// artifacts and serving them over HTTP. Artifact reads are public; aggregator
+// signer registration and registration closure require operator credentials.
 type MithrilServerConfig struct {
 	// Port is the TCP port `dingo mithril serve` listens on.
 	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
@@ -1195,8 +1195,8 @@ type MithrilServerConfig struct {
 	// manifest of produced snapshots, in the Mithril JSON-hex key format.
 	AncillarySigningKeyFile string `yaml:"ancillarySigningKeyFile" envconfig:"DINGO_MITHRIL_SERVER_ANCILLARY_SIGNING_KEY_FILE"`
 	// TLSEnabled serves HTTPS using the shared tlsCertFilePath and
-	// tlsKeyFilePath. It is off by default; the server is public and
-	// unauthenticated either way.
+	// tlsKeyFilePath. It is off by default; aggregator-enabled servers bound
+	// outside loopback require it to protect the operator bearer token.
 	TLSEnabled bool `yaml:"tlsEnabled"              envconfig:"DINGO_MITHRIL_SERVER_TLS_ENABLED"`
 	// Aggregator configures certificate production for the stored snapshots.
 	Aggregator MithrilAggregatorConfig `yaml:"aggregator"`
@@ -1219,6 +1219,9 @@ type MithrilAggregatorConfig struct {
 	// GenesisSigningKeyFile holds the Ed25519 genesis signing key, in the
 	// Mithril JSON-hex key format, that signs the genesis certificate.
 	GenesisSigningKeyFile string `yaml:"genesisSigningKeyFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_GENESIS_SIGNING_KEY_FILE"`
+	// OperatorTokenFile holds the bearer token for signer registration and
+	// registration closure. Use a file containing at least 32 random bytes.
+	OperatorTokenFile string `yaml:"operatorTokenFile" envconfig:"DINGO_MITHRIL_AGGREGATOR_OPERATOR_TOKEN_FILE"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
