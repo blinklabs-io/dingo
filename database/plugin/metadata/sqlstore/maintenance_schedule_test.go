@@ -182,9 +182,11 @@ func TestStoreRetriesPostponedJobWithTickDelay(t *testing.T) {
 func TestJitteredIntervalStaysWithinBoundsAndVaries(t *testing.T) {
 	t.Parallel()
 	const every = 24 * time.Hour
+	// A store built by New must schedule with the jittered delay by default.
+	store := newScheduledStore(t, scheduledJobs[0], every, &atomic.Uint32{})
 	seen := map[time.Duration]struct{}{}
 	for range 64 {
-		delay := jitteredInterval(every)
+		delay := store.tickDelay(every)
 		require.GreaterOrEqual(t, delay, every)
 		require.LessOrEqual(t, delay, every+every/10)
 		seen[delay] = struct{}{}
