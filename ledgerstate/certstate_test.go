@@ -340,7 +340,10 @@ func TestParsePStateRetainsUnparsedRetirementKeys(t *testing.T) {
 	}
 	keys, ok := retirements[659]
 	if !ok || len(keys) != 1 || !bytes.Equal(keys[0], unparsedHash) {
-		t.Fatalf("unparsed retirement key was not retained: %x", retirements[659])
+		t.Fatalf(
+			"unparsed retirement key was not retained: %x",
+			retirements[659],
+		)
 	}
 }
 
@@ -765,7 +768,10 @@ func TestParsePStateDijkstraLeiosKeyField(t *testing.T) {
 			}
 			if tc.wantEpoch == nil {
 				if pool.LeiosKeyRegistrationEpoch != nil {
-					t.Fatalf("unexpected registration epoch: %d", *pool.LeiosKeyRegistrationEpoch)
+					t.Fatalf(
+						"unexpected registration epoch: %d",
+						*pool.LeiosKeyRegistrationEpoch,
+					)
 				}
 			} else if pool.LeiosKeyRegistrationEpoch == nil || *pool.LeiosKeyRegistrationEpoch != *tc.wantEpoch {
 				t.Fatalf("registration epoch mismatch: %v", pool.LeiosKeyRegistrationEpoch)
@@ -1356,6 +1362,146 @@ func TestParseCertStateConwayCommitteeSurvivesSmallDState(t *testing.T) {
 	}
 }
 
+// DState and the DRep map are both credential-keyed, so picking DState by map
+// size alone claimed the DRep map whenever it had more bytes, dropping every
+// stake account.
+func TestParseCertStateConwayAccountsSurviveLargerDRepMap(t *testing.T) {
+	t.Parallel()
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+
+	encodeCredential := func(tag byte) []byte {
+		t.Helper()
+		out, err := cbor.Encode(
+			[]any{uint64(0), bytes.Repeat([]byte{tag}, 28)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	encodeValue := func(value any) []byte {
+		t.Helper()
+		out, err := cbor.Encode(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// DRepState = [expiry, anchor, deposit, delegators]
+	drepMap := []byte{0xa3}
+	for _, tag := range []byte{0x21, 0x22, 0x23} {
+		drepMap = append(drepMap, encodeCredential(tag)...)
+		drepMap = append(drepMap, encodeValue([]any{
+			uint64(500),
+			[]any{"https://example.com/drep", bytes.Repeat([]byte{tag}, 32)},
+			uint64(500000000),
+			[]any{},
+		})...)
+	}
+
+	// ConwayAccountState = [balance, deposit, pool, drep]
+	accountKey := encodeCredential(0x31)
+	dstate := append([]byte{0xa1}, accountKey...)
+	dstate = append(dstate, encodeValue([]any{
+		uint64(7), uint64(2000000), bytes.Repeat([]byte{0x41}, 28), nil,
+	})...)
+	if len(dstate) >= len(drepMap) {
+		t.Fatalf(
+			"fixture must make DState (%d bytes) smaller than "+
+				"the DRep map (%d)",
+			len(dstate), len(drepMap),
+		)
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap,
+		hotMap,
+		resignMap,
+		poolState,
+		dstate,
+		{0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	if result == nil {
+		t.Fatal("no parsed cert state")
+	}
+	if len(result.Accounts) != 1 {
+		t.Fatalf("stake accounts were dropped: %#v", result.Accounts)
+	}
+	if result.Accounts[0].Reward != 7 {
+		t.Fatalf("account reward = %d, want 7", result.Accounts[0].Reward)
+	}
+	if len(result.DReps) != 3 {
+		t.Fatalf("DReps = %d, want 3", len(result.DReps))
+	}
+	if len(result.CommitteeHotKeys) != 1 {
+		t.Fatalf(
+			"committee hot keys = %d, want 1",
+			len(result.CommitteeHotKeys),
+		)
+	}
+}
+
+// A DRep registered without an anchor encodes it as null, which leaves its
+// state reading as [uint, null, uint, set]. A null must not decode as an
+// account's deposit, or a larger anchorless DRep map is taken for DState.
+func TestParseCertStateConwayAccountsSurviveLargerAnchorlessDRepMap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	hotMap, resignMap := committeeVStateFixture(t)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	encode := func(value any) []byte {
+		t.Helper()
+		out, err := cbor.Encode(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	credential := func(tag byte) []byte {
+		return encode([]any{uint64(0), bytes.Repeat([]byte{tag}, 28)})
+	}
+
+	drepMap := []byte{0xa3}
+	for _, tag := range []byte{0x21, 0x22, 0x23} {
+		drepMap = append(drepMap, credential(tag)...)
+		drepMap = append(drepMap, encode([]any{
+			uint64(500), nil, uint64(500000000), []any{},
+		})...)
+	}
+	dstate := append([]byte{0xa1}, credential(0x31)...)
+	dstate = append(dstate, encode([]any{
+		uint64(7), uint64(2000000), bytes.Repeat([]byte{0x41}, 28), nil,
+	})...)
+	if len(dstate) >= len(drepMap) {
+		t.Fatalf("DState (%d bytes) must be smaller than the DRep map (%d)",
+			len(dstate), len(drepMap))
+	}
+
+	result, err := parseCertStateConway([][]byte{
+		drepMap, hotMap, resignMap, poolState, dstate, {0x00},
+	})
+	if err != nil {
+		t.Logf("parse warnings: %v", err)
+	}
+	if result == nil {
+		t.Fatal("no parsed cert state")
+	}
+	if len(result.Accounts) != 1 || result.Accounts[0].Reward != 7 {
+		t.Fatalf("stake accounts were dropped: %#v", result.Accounts)
+	}
+	if len(result.DReps) != 3 {
+		t.Fatalf("DReps = %d, want 3", len(result.DReps))
+	}
+}
+
 // TestParseCommitteeVStateAuthorizationSumType covers the encoding mainnet
 // actually uses. The committee map's values are the CommitteeAuthorization sum
 // type, [0, hot_credential] for an authorization and [1, maybe_anchor] for a
@@ -1552,7 +1698,9 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 		}
 	}
 
-	shortHash, err := cbor.Encode([]any{uint64(1), cbor.RawMessage(anchorCBOR(t, 31))})
+	shortHash, err := cbor.Encode(
+		[]any{uint64(1), cbor.RawMessage(anchorCBOR(t, 31))},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1561,13 +1709,23 @@ func TestParseCommitteeAuthorizationRejectsMalformedAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	threeField, err := cbor.Encode(
-		[]any{uint64(1), []any{"https://example.com", bytes.Repeat([]byte{0x77}, 32), uint64(9)}},
+		[]any{
+			uint64(1),
+			[]any{
+				"https://example.com",
+				bytes.Repeat([]byte{0x77}, 32),
+				uint64(9),
+			},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	swapped, err := cbor.Encode(
-		[]any{uint64(1), []any{bytes.Repeat([]byte{0x77}, 32), "https://example.com"}},
+		[]any{
+			uint64(1),
+			[]any{bytes.Repeat([]byte{0x77}, 32), "https://example.com"},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1660,7 +1818,9 @@ func TestParseCommitteeVStateRejectsMalformedResignationMap(t *testing.T) {
 	m = append(m, malformed...)
 
 	if looksLikeCommitteeCredentialMap(m) {
-		t.Fatal("a malformed-resignation map must not look like a committee map")
+		t.Fatal(
+			"a malformed-resignation map must not look like a committee map",
+		)
 	}
 	if _, _, err := parseCommitteeVState([][]byte{m, {0x00}}); err == nil {
 		t.Fatal("a committee map of undecodable entries must fail the import")
@@ -1690,7 +1850,9 @@ func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
 	}
 
 	goodKey := enc([]any{uint64(1), coldGood})
-	goodVal := enc([]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))})
+	goodVal := enc(
+		[]any{uint64(0), cbor.RawMessage(enc([]any{uint64(1), hot}))},
+	)
 	badKey := enc([]any{uint64(1), coldBad})
 
 	for name, badVal := range map[string][]byte{
@@ -1730,5 +1892,57 @@ func TestParseCommitteeVStateFailsOnPartiallyUndecodableMap(t *testing.T) {
 				len(resignations),
 			)
 		}
+	}
+}
+
+func TestParseCertStateConwayDRepsWithEmptyDState(t *testing.T) {
+	t.Parallel()
+	credential, err := cbor.Encode(
+		[]any{uint64(0), bytes.Repeat([]byte{0x71}, 28)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := cbor.Encode(
+		[]any{uint64(500), nil, uint64(500000000), []any{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drepMap := append(append([]byte{0xa1}, credential...), state...)
+	resignMap := append(append([]byte{0xa1}, credential...), 0xf6)
+	poolState := []byte{0x87, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0, 0xa0}
+	for _, test := range []struct {
+		name  string
+		dreps []byte
+		count int
+	}{
+		{"registered DRep", drepMap, 1}, {"resignation is not DRep", []byte{0xa0}, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := parseCertStateConway(
+				[][]byte{
+					test.dreps,
+					{0xa0},
+					resignMap,
+					poolState,
+					{0xa0},
+					{0x00},
+				},
+			)
+			if result == nil {
+				t.Fatalf("no parsed cert state: %v", err)
+			}
+			if len(result.DReps) != test.count {
+				t.Fatalf("DReps = %d, want %d", len(result.DReps), test.count)
+			}
+			if len(result.Accounts) != 0 {
+				t.Fatalf("unexpected accounts: %#v", result.Accounts)
+			}
+		})
+	}
+	dreps, err := parseDRepMap(resignMap)
+	if err == nil || len(dreps) != 0 {
+		t.Fatalf("malformed DRep accepted: %#v, %v", dreps, err)
 	}
 }
