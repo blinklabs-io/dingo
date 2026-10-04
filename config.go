@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -39,7 +40,6 @@ import (
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type ListenerConfig = connmanager.ListenerConfig
@@ -53,7 +53,7 @@ const (
 	// are skipped. Suitable for block producers with no APIs.
 	StorageModeCore StorageMode = "core"
 	// StorageModeAPI stores everything needed for API queries
-	// (blockfrost, utxorpc, mesh) in addition to core data.
+	// (blockfrost, utxorpc, mesh, kupo) in addition to core data.
 	StorageModeAPI StorageMode = "api"
 )
 
@@ -335,17 +335,17 @@ func (n *Node) configWrapPromRegistry() {
 
 // registerBuildInfo registers a dingo_build_info gauge with version and
 // commit labels. The gauge is always set to 1; Grafana reads the labels.
-func (n *Node) registerBuildInfo() {
+func (n *Node) registerBuildInfo(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	promauto.With(n.config.promRegistry).NewGaugeVec(
+	promutil.Register(r, prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dingo_build_info",
 			Help: "dingo build information",
 		},
 		[]string{"version", "commit", "goversion"},
-	).WithLabelValues(
+	)).WithLabelValues(
 		version.GetVersionString(),
 		version.CommitHash,
 		runtime.Version(),
@@ -375,28 +375,27 @@ type rtsMetrics struct {
 // registry. Safe to call when promRegistry is nil — in that case it
 // returns early and leaves n.rtsMetrics nil, matching the registerBuildInfo
 // nil-guard pattern.
-func (n *Node) registerRTSMetrics() {
+func (n *Node) registerRTSMetrics(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	factory := promauto.With(n.config.promRegistry)
 	n.rtsMetrics = &rtsMetrics{
-		gcLiveBytes: factory.NewGauge(prometheus.GaugeOpts{
+		gcLiveBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcLiveBytes_int",
 			Help: "live heap bytes currently in use (Go runtime.MemStats.HeapAlloc)",
-		}),
-		gcHeapBytes: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcHeapBytes: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcHeapBytes_int",
 			Help: "heap memory bytes obtained from the OS (Go runtime.MemStats.HeapSys)",
-		}),
-		gcMajorNum: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcMajorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcMajorNum_int",
 			Help: "count of forced GCs (Go runtime.MemStats.NumForcedGC)",
-		}),
-		gcMinorNum: factory.NewGauge(prometheus.GaugeOpts{
+		})),
+		gcMinorNum: promutil.Register(r, prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_RTS_gcMinorNum_int",
 			Help: "count of automatic GCs (Go runtime.MemStats.NumGC - NumForcedGC)",
-		}),
+		})),
 	}
 }
 
@@ -745,6 +744,15 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(3000)},
 					},
+					// Port 0 leaves Kupo disabled unless an operator
+					// configures one, matching internal/config's default.
+					// The provider still has to be named here:
+					// apiPluginSelection rejects an empty Provider, and it
+					// runs before the port gate that makes the API optional.
+					Kupo: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
+					},
 					Mesh: hostplugin.Selection{
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(8080)},
@@ -752,6 +760,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 					Utxorpc: hostplugin.Selection{
 						Provider: "builtin",
 						Config:   map[string]any{"port": uint(9090)},
+					},
+					Mcp: hostplugin.Selection{
+						Provider: "builtin",
+						Config:   map[string]any{"port": uint(0)},
 					},
 				},
 			},
@@ -898,7 +910,9 @@ func (c *Config) syncCompatFields() {
 	c.pluginSelections = map[hostplugin.Capability]hostplugin.Selection{
 		hostplugin.CapabilityStorageBlob: c.cfg.Plugins.Storage.Blob, hostplugin.CapabilityStorageMetadata: c.cfg.Plugins.Storage.Metadata,
 		hostplugin.CapabilityMempool: c.cfg.Plugins.Mempool, hostplugin.CapabilityAPIBlockfrost: c.cfg.Plugins.API.Blockfrost,
+		hostplugin.CapabilityAPIKupo: c.cfg.Plugins.API.Kupo,
 		hostplugin.CapabilityAPIMesh: c.cfg.Plugins.API.Mesh, hostplugin.CapabilityAPIUtxorpc: c.cfg.Plugins.API.Utxorpc,
+		hostplugin.CapabilityAPIMcp: c.cfg.Plugins.API.Mcp,
 	}
 }
 
@@ -930,10 +944,14 @@ func WithPluginSelection(
 			c.cfg.Plugins.Mempool = selection
 		case hostplugin.CapabilityAPIBlockfrost:
 			c.cfg.Plugins.API.Blockfrost = selection
+		case hostplugin.CapabilityAPIKupo:
+			c.cfg.Plugins.API.Kupo = selection
 		case hostplugin.CapabilityAPIMesh:
 			c.cfg.Plugins.API.Mesh = selection
 		case hostplugin.CapabilityAPIUtxorpc:
 			c.cfg.Plugins.API.Utxorpc = selection
+		case hostplugin.CapabilityAPIMcp:
+			c.cfg.Plugins.API.Mcp = selection
 		default:
 			return
 		}
@@ -1075,7 +1093,7 @@ func WithCardanoNodeConfig(
 }
 
 // WithBindAddr specifies the IP address used by relay, metrics, and public
-// Blockfrost, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
+// Blockfrost, Kupo, Mesh, and UTxO RPC listeners. The default is 0.0.0.0.
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BindAddr = addr
@@ -1174,8 +1192,8 @@ func WithUtxorpcPort(port uint) ConfigOptionFunc {
 }
 
 // WithAPIConfig sets the shared api.tls policy applied to every
-// selected plugins.api.* provider (Blockfrost, Mesh, UTxORPC) unless that
-// provider's own plugins.api.<name>.config.tls overrides a field.
+// selected plugins.api.* provider (Blockfrost, Kupo, Mesh, UTxORPC) unless
+// that provider's own plugins.api.<name>.config.tls overrides a field.
 // See internal/apiconfig and ARCHITECTURE.md's "API security" section.
 func WithAPIConfig(cfg internalconfig.APIConfig) ConfigOptionFunc {
 	return func(c *Config) {

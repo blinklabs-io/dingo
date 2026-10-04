@@ -264,3 +264,19 @@ func TestSignedEntityTypeCardanoDatabase(t *testing.T) {
 	// Mismatched accessor returns nil
 	assert.Nil(t, entity.CardanoImmutableFilesFull())
 }
+
+func TestCertificateCardanoDatabaseFixtureSTMVerifies(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(
+		filepath.Join("testdata", "v2", "cardano_database_certificate.json"),
+	)
+	require.NoError(t, err)
+	var cert Certificate
+	require.NoError(t, json.Unmarshal(data, &cert))
+
+	require.NoError(t, verifySTMCertificate(&cert))
+
+	cert.SignedMessage = "00" + cert.SignedMessage[2:]
+	require.Error(t, verifySTMCertificate(&cert))
+}

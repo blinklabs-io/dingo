@@ -211,14 +211,19 @@ func immutableFileNumberFromName(name string) (uint64, bool) {
 }
 
 // digestMerkleLeaves filters the digest list to entries at or below
-// maxImmutable, sorts by immutable file name (the order Mithril
-// builds its merkle tree in), and returns the digest strings as leaf
+// maxImmutable, sorts by immutable file number then name (the order
+// Mithril builds its merkle tree in; names alone diverge once numbers
+// grow past five digits), and returns the digest strings as leaf
 // byte slices. Entries with unparseable names are rejected.
 func digestMerkleLeaves(
 	entries []CardanoDatabaseDigestEntry,
 	maxImmutable uint64,
 ) ([][]byte, error) {
-	filtered := make([]CardanoDatabaseDigestEntry, 0, len(entries))
+	type numbered struct {
+		entry CardanoDatabaseDigestEntry
+		num   uint64
+	}
+	filtered := make([]numbered, 0, len(entries))
 	for _, entry := range entries {
 		num, ok := immutableFileNumberFromName(entry.ImmutableFileName)
 		if !ok {
@@ -230,17 +235,23 @@ func digestMerkleLeaves(
 		if num > maxImmutable {
 			continue
 		}
-		filtered = append(filtered, entry)
+		filtered = append(filtered, numbered{entry: entry, num: num})
 	}
 	slices.SortFunc(
 		filtered,
-		func(a, b CardanoDatabaseDigestEntry) int {
-			return cmp.Compare(a.ImmutableFileName, b.ImmutableFileName)
+		func(a, b numbered) int {
+			if c := cmp.Compare(a.num, b.num); c != 0 {
+				return c
+			}
+			return cmp.Compare(
+				a.entry.ImmutableFileName,
+				b.entry.ImmutableFileName,
+			)
 		},
 	)
 	leaves := make([][]byte, 0, len(filtered))
 	for _, entry := range filtered {
-		leaves = append(leaves, []byte(entry.Digest))
+		leaves = append(leaves, []byte(entry.entry.Digest))
 	}
 	return leaves, nil
 }

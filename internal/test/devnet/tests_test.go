@@ -1245,6 +1245,7 @@ func cleanRunnerEnv(overrides map[string]string) []string {
 		"PATH":                               {},
 		"STAKE_KEYS_HOST_DIR":                {},
 		"TMPDIR":                             {},
+		"DEVNET_RUNTIME":                     {},
 	}
 	env := make([]string, 0, len(os.Environ())+len(overrides))
 	for _, item := range os.Environ() {
