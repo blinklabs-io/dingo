@@ -472,6 +472,7 @@ func (d *LedgerDelta) processGovernance(
 			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
+			pparams,
 			ls.db,
 			txn,
 		); err != nil {

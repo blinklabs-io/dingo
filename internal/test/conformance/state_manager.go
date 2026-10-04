@@ -1017,6 +1017,7 @@ func (m *DingoStateManager) ApplyTransaction(
 				storageIndex,
 				m.currentEpoch,
 				govActionLifetime,
+				m.protocolParams,
 				m.db,
 				txn,
 			); err != nil {

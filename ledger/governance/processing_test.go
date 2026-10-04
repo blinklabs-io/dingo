@@ -129,6 +129,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				0,
 				100,
 				20,
+				testConwayProtocolParameters(),
 				db,
 				nil,
 			)

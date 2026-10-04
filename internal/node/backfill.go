@@ -667,7 +667,7 @@ func (b *Backfill) processBlockGovernanceLevel(
 		if err := governance.ProcessProposals(
 			tx, point, txIndex, epochId,
 			conwayPP.GovActionValidityPeriod,
-			b.db, txn,
+			conwayPP, b.db, txn,
 		); err != nil {
 			return fmt.Errorf(
 				"governance proposals: %w", err,

@@ -702,6 +702,7 @@ func processGapBlockTransactions(
 					uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 					epochId,
 					conwayPParams.GovActionValidityPeriod,
+					pparams,
 					db,
 					txn,
 				); err != nil {

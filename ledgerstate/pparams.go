@@ -223,5 +223,10 @@ func decodePParamsData(
 			"decoding %s protocol parameters: %w", era.Name, err,
 		)
 	}
+	if err := eras.ValidateProtocolParameterDomains(decoded); err != nil {
+		return nil, fmt.Errorf(
+			"validating %s protocol parameters: %w", era.Name, err,
+		)
+	}
 	return decoded, nil
 }

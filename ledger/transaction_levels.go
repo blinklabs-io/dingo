@@ -31,6 +31,11 @@ type transactionBodyLevel struct {
 	hasBodyMetadata  bool
 }
 
+// EnclosingTransaction returns the whole transaction this level belongs to.
+func (t transactionBodyLevel) EnclosingTransaction() common.Transaction {
+	return t.Transaction
+}
+
 func (t transactionBodyLevel) Cbor() []byte { return t.body.Cbor() }
 func (t transactionBodyLevel) Hash() common.Blake2b256 {
 	return t.body.Id()

@@ -118,15 +118,24 @@ func ProcessDRepActivityCertificates(
 // The govActionLifetime parameter determines how many epochs a proposal remains
 // active before expiring. txIndex is the transaction's position in its block;
 // Conway RATIFY orders equal-priority actions by it within a slot.
+//
+// pp is the protocol parameters in force for the transaction. A ParameterChange
+// that the era's proposal rule refuses (zero-valued fields, out-of-domain
+// widths) is rejected here, before anything is stored, so replay and backfill
+// reach the same decision as mempool admission and live block validation.
 func ProcessProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
+	pp lcommon.ProtocolParameters,
 	db *database.Database,
 	txn *database.Txn,
 ) error {
+	if err := validateParameterChanges(tx, point.Slot, currentEpoch, pp); err != nil {
+		return fmt.Errorf("proposal well-formedness: %w", err)
+	}
 	return persistGovernanceProposals(
 		tx,
 		point,
@@ -135,6 +144,59 @@ func ProcessProposals(
 		govActionLifetime,
 		db,
 		txn,
+	)
+}
+
+// enclosingTransaction is implemented by a transaction level (a Dijkstra
+// sub-transaction body or the enclosing body) that carries the transaction it
+// belongs to.
+type enclosingTransaction interface {
+	EnclosingTransaction() lcommon.Transaction
+}
+
+// epochOnlyLedgerState answers the one ledger query the proposal rule makes
+// outside the transaction itself: which epoch a slot falls in.
+type epochOnlyLedgerState struct {
+	lcommon.LedgerState
+	epoch uint64
+}
+
+func (s epochOnlyLedgerState) EpochForSlot(uint64) (uint64, error) {
+	return s.epoch, nil
+}
+
+// validateParameterChanges runs the era's transaction-level proposal rule over
+// the whole enclosing transaction when the level being processed carries a
+// ParameterChange. Dijkstra validates every sub-transaction body together, so
+// a single level cannot be judged on its own.
+func validateParameterChanges(
+	tx lcommon.Transaction,
+	slot uint64,
+	currentEpoch uint64,
+	pp lcommon.ProtocolParameters,
+) error {
+	hasParameterChange := false
+	for _, proposal := range tx.ProposalProcedures() {
+		switch proposal.GovAction().(type) {
+		case *conway.ConwayParameterChangeGovAction,
+			*gdijkstra.DijkstraParameterChangeGovAction:
+			hasParameterChange = true
+		}
+	}
+	if !hasParameterChange || !tx.IsValid() {
+		return nil
+	}
+	if pp == nil {
+		return errors.New("protocol parameters unavailable")
+	}
+	if level, ok := tx.(enclosingTransaction); ok {
+		tx = level.EnclosingTransaction()
+	}
+	return gdijkstra.UtxoValidateProposalProcedures(
+		tx,
+		slot,
+		epochOnlyLedgerState{epoch: currentEpoch},
+		pp,
 	)
 }
 
