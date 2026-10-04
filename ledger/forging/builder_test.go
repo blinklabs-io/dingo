@@ -3281,7 +3281,7 @@ func (v *mockTxValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -4314,7 +4314,7 @@ func (v *sessionMockTxValidator) ValidateTxWithOverlay(
 	_ ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -4325,7 +4325,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 			tx ledger.Transaction,
 			consumed map[utxoref.Key]struct{},
 			created map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,
@@ -4336,7 +4336,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 		tx ledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
-		_ *utxoref.AccountOverlay,
+		_ *utxoref.StateOverlay,
 	) error {
 		v.validateCalls++
 		if v.onValidate != nil {

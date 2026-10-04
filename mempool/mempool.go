@@ -115,7 +115,7 @@ type TxValidator interface {
 		tx gledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
-		accounts *utxoref.AccountOverlay,
+		accounts *utxoref.StateOverlay,
 	) error
 }
 
@@ -129,7 +129,7 @@ type TxValidationSessionProvider interface {
 			tx gledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error) error
@@ -320,14 +320,15 @@ type appliedTx struct {
 	txType   uint
 	consumed []utxoref.Key                // UTxO keys consumed by this TX
 	created  map[utxoref.Key]lcommon.Utxo // UTxO keys created by this TX
-	accounts []utxoref.AccountEffect      // reward-account effects of this TX
+	// stateTx is the decoded transaction, kept only when it changes ledger
+	// state beyond UTxOs, so the overlay can be rebuilt from survivors.
+	stateTx lcommon.Transaction
 }
 
 func cloneAppliedTx(at appliedTx) appliedTx {
 	ret := at
 	ret.consumed = slices.Clone(at.consumed)
 	ret.created = maps.Clone(at.created)
-	ret.accounts = slices.Clone(at.accounts)
 	return ret
 }
 
@@ -350,7 +351,7 @@ func (m *Mempool) recordMutationLocked(mutation mempoolMutation) {
 type utxoOverlay struct {
 	consumed map[utxoref.Key]struct{}     // all inputs consumed by pending TXs
 	created  map[utxoref.Key]lcommon.Utxo // all outputs created by pending TXs
-	accounts *utxoref.AccountOverlay      // reward-account effects of pending TXs
+	accounts *utxoref.StateOverlay        // reward-account effects of pending TXs
 	applied  []appliedTx                  // ordered list for rebuild
 }
 
@@ -358,7 +359,7 @@ func newUtxoOverlay() *utxoOverlay {
 	return &utxoOverlay{
 		consumed: make(map[utxoref.Key]struct{}),
 		created:  make(map[utxoref.Key]lcommon.Utxo),
-		accounts: utxoref.NewAccountOverlay(),
+		accounts: utxoref.NewStateOverlay(),
 	}
 }
 
@@ -369,12 +370,14 @@ func (o *utxoOverlay) applyTx(
 	tx lcommon.Transaction,
 ) {
 	at := appliedTx{
-		hash:     hash,
-		txType:   txType,
-		created:  make(map[utxoref.Key]lcommon.Utxo),
-		accounts: utxoref.AccountEffects(tx),
+		hash:    hash,
+		txType:  txType,
+		created: make(map[utxoref.Key]lcommon.Utxo),
 	}
-	o.accounts.Apply(at.accounts)
+	if utxoref.ChangesState(tx) {
+		at.stateTx = tx
+		o.accounts.Apply(tx)
+	}
 	// Consumed is the consensus spent set: regular inputs for valid
 	// transactions and collateral for phase-2-invalid transactions. Using
 	// Inputs here would incorrectly reserve an input the ledger does not spend.
@@ -395,7 +398,7 @@ func (o *utxoOverlay) applyTx(
 func (o *utxoOverlay) reset() {
 	o.consumed = make(map[utxoref.Key]struct{})
 	o.created = make(map[utxoref.Key]lcommon.Utxo)
-	o.accounts = utxoref.NewAccountOverlay()
+	o.accounts = utxoref.NewStateOverlay()
 	o.applied = nil
 }
 
@@ -410,17 +413,19 @@ func aggregateApplied(
 ) (
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) {
 	consumed := make(map[utxoref.Key]struct{})
 	created := make(map[utxoref.Key]lcommon.Utxo)
-	accounts := utxoref.NewAccountOverlay()
+	accounts := utxoref.NewStateOverlay()
 	for _, at := range applied {
 		for _, key := range at.consumed {
 			consumed[key] = struct{}{}
 		}
 		maps.Copy(created, at.created)
-		accounts.Apply(at.accounts)
+		if at.stateTx != nil {
+			accounts.Apply(at.stateTx)
+		}
 	}
 	return consumed, created, accounts
 }
@@ -501,7 +506,7 @@ func (o *utxoOverlay) simulateRemoveBatch(
 ) (
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) {
 	// Remove specified TXs and collect their created UTxOs
 	orphanedUtxos := make(map[utxoref.Key]struct{})
@@ -1140,7 +1145,7 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error {
@@ -1351,7 +1356,7 @@ func (m *Mempool) revalidateAppliedTx(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
-		*utxoref.AccountOverlay,
+		*utxoref.StateOverlay,
 	) error,
 ) {
 	if tx == nil {
@@ -1408,7 +1413,7 @@ func (m *Mempool) withTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,

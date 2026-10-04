@@ -17,7 +17,6 @@ package mempool
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -26,6 +25,8 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -63,8 +64,8 @@ func withdrawalTxCbor(
 	return txCbor
 }
 
-// balanceValidator applies the exact reward-withdrawal rule to a stored
-// balance, reduced by whatever the pending-account overlay already drains.
+// balanceValidator runs the Shelley reward-withdrawal rule against a stored
+// balance, seen through whatever the pending-state overlay has applied.
 type balanceValidator struct {
 	balance atomic.Uint64
 }
@@ -77,23 +78,18 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	pending *utxoref.StateOverlay,
 ) error {
-	for address, amount := range tx.Withdrawals() {
-		credential, ok := address.StakeCredential()
-		if !ok {
-			continue
-		}
-		available := accounts.Balance(credential, v.balance.Load())
-		if amount.Uint64() > available {
-			return fmt.Errorf(
-				"withdrawal %s exceeds balance %d",
-				amount,
-				available,
-			)
-		}
+	var stakeKey lcommon.Blake2b224
+	copy(stakeKey[:], withdrawalStakeKey)
+	base := mockledger.NewLedgerStateBuilder().
+		WithRewardAccountBalance(stakeKey, v.balance.Load()).
+		Build()
+	state, err := pending.View(base, nil)
+	if err != nil {
+		return err
 	}
-	return nil
+	return shelley.UtxoValidateWithdrawals(tx, 0, state, nil)
 }
 
 func (v *balanceValidator) WithTxValidationSession(
@@ -102,7 +98,7 @@ func (v *balanceValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -147,13 +143,15 @@ func TestAdmissionAccountsForPendingWithdrawals(t *testing.T) {
 			)
 
 			err := pool.AddTransaction(uint(conway.EraIdConway), second)
-			require.ErrorContains(
+			var incorrect shelley.IncorrectWithdrawalAmountError
+			require.ErrorAs(
 				t,
 				err,
-				"exceeds balance 0",
+				&incorrect,
 				"a second withdrawal must be checked against the balance "+
 					"the pending one leaves",
 			)
+			require.Zero(t, incorrect.Balance)
 			require.Len(t, pool.Transactions(), 1)
 
 			firstTx, err := gledger.NewTransactionFromCbor(
@@ -179,9 +177,9 @@ func TestRevalidationAccountsForPendingWithdrawals(t *testing.T) {
 	} {
 		t.Run(string(implementation), func(t *testing.T) {
 			t.Parallel()
-			pool, validator := newWithdrawalPool(t, implementation, 1000)
-			first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 60)
-			second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 60)
+			pool, _ := newWithdrawalPool(t, implementation, 100)
+			first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100)
+			second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 0)
 			require.NoError(
 				t,
 				pool.AddTransaction(uint(conway.EraIdConway), first),
@@ -189,24 +187,17 @@ func TestRevalidationAccountsForPendingWithdrawals(t *testing.T) {
 			require.NoError(
 				t,
 				pool.AddTransaction(uint(conway.EraIdConway), second),
+				"the first withdrawal drains the account the second reads",
 			)
 
-			validator.balance.Store(100)
 			require.NoError(t, pool.rebuildOverlay())
-
-			firstTx, err := gledger.NewTransactionFromCbor(
-				uint(conway.EraIdConway),
-				first,
-			)
-			require.NoError(t, err)
-			remaining := pool.Transactions()
 			require.Len(
 				t,
-				remaining,
-				1,
-				"the second withdrawal no longer fits the balance left by the first",
+				pool.Transactions(),
+				2,
+				"revalidation must apply the first withdrawal before the second, "+
+					"or the stored balance makes the second one invalid",
 			)
-			require.Equal(t, firstTx.Hash().String(), remaining[0].Hash)
 		})
 	}
 }

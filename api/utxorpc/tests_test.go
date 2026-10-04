@@ -722,7 +722,7 @@ func (noopTxValidator) ValidateTxWithOverlay(
 	_ gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	return nil
 }

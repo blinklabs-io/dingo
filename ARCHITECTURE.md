@@ -1557,12 +1557,16 @@ busy pass that cannot catch up leaves the live pool unchanged and is retried
 after a later chain update; it is not a failed admission or a partial swap.
 
 Mempool admission, revalidation, block-candidate selection and forged-block
-validation each validate a transaction against the UTxO overlay and an account
-overlay (`utxoref.AccountOverlay`) holding the reward withdrawals, direct
-deposits and stake registration changes of the earlier pending or selected transactions, so a
-transaction is checked against the balance those leave rather than the stored
-one. The overlay entries retain no transaction bytes; the pool's size counter
-covers the single stored copy of each transaction.
+validation each validate a transaction against the UTxO overlay and a state
+overlay (`utxoref.StateOverlay`) holding the earlier pending or selected
+transactions that change ledger state beyond UTxOs: reward withdrawals,
+certificates, direct deposits and governance proposals. The overlay layers
+them over the ledger view with gouroboros `BlockLedgerState`, so a transaction
+is checked against the balances, registrations and deposits those leave rather
+than the stored ones. The overlay stores the transactions, not a folded state,
+because the pool removes and evicts arbitrary members and rebuilds from the
+survivors. A UTxO-only transaction is not stored. A stored transaction keeps
+its decoded form, which is not counted by the pool's byte counter.
 
 ### Ouroboros Dependency Wiring
 

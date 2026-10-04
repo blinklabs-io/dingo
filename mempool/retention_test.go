@@ -59,7 +59,7 @@ func TestRevalidationCandidateKeepsDescendantOfRemovedRejectedParent(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
-		*utxoref.AccountOverlay,
+		*utxoref.StateOverlay,
 	) error {
 		return errors.New("input already spent")
 	}
@@ -67,7 +67,7 @@ func TestRevalidationCandidateKeepsDescendantOfRemovedRejectedParent(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
-		*utxoref.AccountOverlay,
+		*utxoref.StateOverlay,
 	) error {
 		return nil
 	}
@@ -98,7 +98,7 @@ func TestRevalidationCandidateRejectsDescendantOfRejectedParent(
 		tx gledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
-		_ *utxoref.AccountOverlay,
+		_ *utxoref.StateOverlay,
 	) error {
 		if tx.Hash().String() == parentHash {
 			return errors.New("input already spent")
@@ -114,14 +114,25 @@ func TestRevalidationCandidateRejectsDescendantOfRejectedParent(
 	require.Empty(t, candidate.txByHash)
 }
 
+func TestPendingUtxoOnlyTransactionRetainsNoDecodedForm(t *testing.T) {
+	t.Parallel()
+	parentBytes, _, _, _ := getDependentTestTxBytes(t)
+	at, _ := pendingFixture(t, parentBytes)
+	require.Nil(t, at.stateTx)
+
+	withdrawal, _ := pendingFixture(
+		t,
+		withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 1),
+	)
+	require.NotNil(t, withdrawal.stateTx)
+}
+
 func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	t.Parallel()
 	first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 1)
 	second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 1)
-	validator := &balanceValidator{}
-	validator.balance.Store(100)
 	pool, err := NewFIFO(MempoolConfig{
-		Validator:       validator,
+		Validator:       newMockValidator(),
 		MempoolCapacity: int64(len(first)),
 		PromRegistry:    prometheus.NewRegistry(),
 	})
@@ -162,10 +173,8 @@ func retainedTxBytes(pool *Mempool) (int64, int) {
 
 func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 	t.Parallel()
-	validator := &balanceValidator{}
-	validator.balance.Store(1_000)
 	pool, err := NewFIFO(MempoolConfig{
-		Validator:       validator,
+		Validator:       newMockValidator(),
 		MempoolCapacity: 1 << 20,
 		PromRegistry:    prometheus.NewRegistry(),
 	})
@@ -190,6 +199,14 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 		retained, applied := retainedTxBytes(pool.Mempool)
 		require.Equal(t, wantTxs, applied, stage)
 		require.Equal(t, retained, pool.currentSizeBytes, stage)
+		require.Equal(
+			t,
+			wantTxs,
+			pool.overlay.accounts.Len(),
+			"%s: every withdrawal is retained once for the state overlay, "+
+				"and removal releases it",
+			stage,
+		)
 	}
 	check("after admission", 3)
 
@@ -199,8 +216,10 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 	require.NoError(t, pool.rebuildOverlay())
 	check("after revalidation", 2)
 
-	// Overlay entries must not carry a second copy of the transaction bytes,
-	// which currentSizeBytes would not count.
+	// Overlay entries must not carry a raw copy of the transaction bytes,
+	// which currentSizeBytes would not count. A transaction that changes
+	// account state is the one exception: it keeps its decoded form so the
+	// state overlay can be rebuilt (see TestPendingUtxoOnlyTransactionRetainsNoDecodedForm).
 	appliedType := reflect.TypeFor[appliedTx]()
 	for field := range appliedType.Fields() {
 		kind := field.Type.Kind()

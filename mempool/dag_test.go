@@ -58,7 +58,7 @@ func (v *countingFailValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	v.calls++
 	if tx.Hash().String() == v.failHash {
@@ -86,7 +86,7 @@ func (v *oneShotBlockingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	v.calls.Add(1)
 	if v.advanceEveryCall.Load() {
@@ -105,7 +105,7 @@ func (v *oneShotBlockingValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,

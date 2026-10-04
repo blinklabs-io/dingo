@@ -3512,7 +3512,7 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 			tx lcommon.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error {

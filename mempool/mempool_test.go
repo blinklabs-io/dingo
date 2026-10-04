@@ -85,7 +85,7 @@ func (v *changingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -96,7 +96,7 @@ func (v *changingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -107,7 +107,7 @@ func (v *changingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error {
 			return nil
 		},
@@ -130,7 +130,7 @@ func (v *blockingSessionValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -141,7 +141,7 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -151,7 +151,7 @@ func (v *blockingSessionValidator) WithTxValidationSession(
 		gledger.Transaction,
 		map[utxoref.Key]struct{},
 		map[utxoref.Key]lcommon.Utxo,
-		*utxoref.AccountOverlay,
+		*utxoref.StateOverlay,
 	) error {
 		<-v.release
 		return nil
@@ -174,7 +174,7 @@ func (v *blockingOverlayValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	if v.shouldBlock.Load() {
 		v.startOnce.Do(func() { close(v.started) })
@@ -199,7 +199,7 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	return v.ValidateTx(tx)
 }
@@ -4007,7 +4007,7 @@ func (v *overlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	accounts *utxoref.StateOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -4570,7 +4570,7 @@ func (v *blockingRejectingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	return nil
 }
@@ -4581,7 +4581,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		func() bool,
 	) error,
@@ -4591,7 +4591,7 @@ func (v *blockingRejectingValidator) WithTxValidationSession(
 		tx gledger.Transaction,
 		_ map[utxoref.Key]struct{},
 		_ map[utxoref.Key]lcommon.Utxo,
-		_ *utxoref.AccountOverlay,
+		_ *utxoref.StateOverlay,
 	) error {
 		<-v.release
 		if tx != nil && tx.Hash().String() == v.rejectHash {

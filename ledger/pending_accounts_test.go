@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/utxoref"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -47,6 +48,21 @@ type pendingAccountsFixture struct {
 func newPendingAccountsFixture(
 	t *testing.T,
 	balance uint64,
+) *pendingAccountsFixture {
+	t.Helper()
+	return newPendingAccountsFixtureWithRule(
+		t,
+		balance,
+		shelley.UtxoValidateWithdrawals,
+		&shelley.ShelleyProtocolParameters{},
+	)
+}
+
+func newPendingAccountsFixtureWithRule(
+	t *testing.T,
+	balance uint64,
+	rule lcommon.UtxoValidationRuleFunc,
+	pparams lcommon.ProtocolParameters,
 ) *pendingAccountsFixture {
 	t.Helper()
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
@@ -71,7 +87,7 @@ func newPendingAccountsFixture(
 			state lcommon.LedgerState,
 			pparams lcommon.ProtocolParameters,
 		) error {
-			return shelley.UtxoValidateWithdrawals(tx, slot, state, pparams)
+			return rule(tx, slot, state, pparams)
 		},
 	}
 	tip := ochainsync.Tip{
@@ -89,7 +105,7 @@ func newPendingAccountsFixture(
 			LengthInSlots: 1_000,
 			EraId:         era.Id,
 		},
-		currentPParams:    &shelley.ShelleyProtocolParameters{},
+		currentPParams:    pparams,
 		currentTip:        tip,
 		validationEnabled: true,
 		config: LedgerStateConfig{
@@ -116,12 +132,21 @@ func (f *pendingAccountsFixture) withdrawalTx(
 	)
 }
 
+func (f *pendingAccountsFixture) certificateTx(
+	seed byte,
+	certs ...lcommon.Certificate,
+) lcommon.Transaction {
+	tx := mockledger.NewTransactionBuilder().WithType(int(f.ls.currentEra.Id))
+	tx.WithId(bytes.Repeat([]byte{seed}, 32))
+	return tx.WithCertificates(certs...)
+}
+
 func (f *pendingAccountsFixture) overlayAfter(
 	txs ...lcommon.Transaction,
-) *utxoref.AccountOverlay {
-	overlay := utxoref.NewAccountOverlay()
+) *utxoref.StateOverlay {
+	overlay := utxoref.NewStateOverlay()
 	for _, tx := range txs {
-		overlay.Apply(utxoref.AccountEffects(tx))
+		overlay.Apply(tx)
 	}
 	return overlay
 }
@@ -147,15 +172,31 @@ func TestValidateTxWithOverlayAccountsForPendingWithdrawals(t *testing.T) {
 	require.Zero(t, incorrect.Balance)
 }
 
+// directDepositTx is a transaction whose single effect level credits direct
+// deposits, which the mock transaction builder cannot express.
+type directDepositTx struct {
+	lcommon.Transaction
+	deposits []lcommon.DirectDeposit
+}
+
+func (d directDepositTx) LedgerEffectLevels() ([]lcommon.LedgerEffectLevel, error) {
+	return []lcommon.LedgerEffectLevel{{
+		Id:             d.Hash(),
+		Body:           d.Transaction,
+		DirectDeposits: d.deposits,
+	}}, nil
+}
+
 func TestValidateTxWithOverlayAccountsForPendingDirectDeposit(t *testing.T) {
 	t.Parallel()
 	f := newPendingAccountsFixture(t, 100)
-	pending := utxoref.NewAccountOverlay()
-	pending.Apply([]utxoref.AccountEffect{{
-		Credential: f.credential,
-		Kind:       utxoref.AccountDirectDeposit,
-		Amount:     50,
-	}})
+	deposit := directDepositTx{
+		Transaction: f.certificateTx(0x03),
+		deposits: []lcommon.DirectDeposit{
+			{Credential: f.credential, Amount: 50},
+		},
+	}
+	pending := f.overlayAfter(deposit)
 
 	var incorrect shelley.IncorrectWithdrawalAmountError
 	require.ErrorAs(
@@ -182,13 +223,13 @@ func TestTxValidationSessionAccountsForPendingWithdrawals(t *testing.T) {
 			gledger.Transaction,
 			map[utxoref.Key]struct{},
 			map[utxoref.Key]lcommon.Utxo,
-			*utxoref.AccountOverlay,
+			*utxoref.StateOverlay,
 		) error,
 		_ func() bool,
 	) error {
-		overlay := utxoref.NewAccountOverlay()
+		overlay := utxoref.NewStateOverlay()
 		require.NoError(t, validate(first, nil, nil, overlay))
-		overlay.Apply(utxoref.AccountEffects(first))
+		overlay.Apply(first)
 		var incorrect shelley.IncorrectWithdrawalAmountError
 		require.ErrorAs(t, validate(second, nil, nil, overlay), &incorrect)
 		return nil
@@ -200,27 +241,26 @@ func TestValidateTxWithOverlayAccountsForPendingRegistration(t *testing.T) {
 	t.Parallel()
 	f := newPendingAccountsFixture(t, 0)
 	tx := f.withdrawalTx(0x01, 0)
+	deregister := f.certificateTx(0x02, &lcommon.StakeDeregistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeStakeDeregistration),
+		StakeCredential: f.credential,
+	})
+	register := f.certificateTx(0x03, &lcommon.RegistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: f.credential,
+	})
 
-	deregistered := utxoref.NewAccountOverlay()
-	deregistered.Apply([]utxoref.AccountEffect{{
-		Credential: f.credential,
-		Kind:       utxoref.AccountDeregistration,
-	}})
 	var unregistered shelley.WithdrawalFromUnregisteredRewardAccountError
 	require.ErrorAs(
 		t,
-		f.ls.ValidateTxWithOverlay(tx, nil, nil, deregistered),
+		f.ls.ValidateTxWithOverlay(tx, nil, nil, f.overlayAfter(deregister)),
 		&unregistered,
 	)
-
-	reregistered := utxoref.NewAccountOverlay()
-	reregistered.Apply([]utxoref.AccountEffect{
-		{Credential: f.credential, Kind: utxoref.AccountDeregistration},
-		{Credential: f.credential, Kind: utxoref.AccountRegistration},
-	})
 	require.NoError(
 		t,
-		f.ls.ValidateTxWithOverlay(tx, nil, nil, reregistered),
+		f.ls.ValidateTxWithOverlay(
+			tx, nil, nil, f.overlayAfter(deregister, register),
+		),
 		"a pending re-registration leaves an empty registered account",
 	)
 }
@@ -257,4 +297,94 @@ func TestValidateForgedTxsAccountsForEarlierWithdrawals(t *testing.T) {
 
 	block.txs = block.txs[:1]
 	require.NoError(t, f.ls.validateForgedTxs(block))
+}
+
+const pendingKeyDeposit = 2_000_000
+
+// TestValidateTxWithOverlayDeregistersPendingRegistration runs the Conway
+// certificate-deposit rule, which reads the deposit held for a registered
+// credential, against a registration that is still pending.
+func TestValidateTxWithOverlayDeregistersPendingRegistration(t *testing.T) {
+	t.Parallel()
+	f := newPendingAccountsFixtureWithRule(
+		t,
+		0,
+		conway.UtxoValidateCertificateDeposits,
+		&conway.ConwayProtocolParameters{
+			KeyDeposit:  pendingKeyDeposit,
+			DRepDeposit: 500_000_000,
+		},
+	)
+	fresh := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xc7},
+	}
+	register := f.certificateTx(0x01, &lcommon.RegistrationCertificate{
+		CertType:        uint(lcommon.CertificateTypeRegistration),
+		StakeCredential: fresh,
+		Amount:          pendingKeyDeposit,
+	})
+	deregister := func(amount int64) lcommon.Transaction {
+		return f.certificateTx(0x02, &lcommon.DeregistrationCertificate{
+			CertType:        uint(lcommon.CertificateTypeDeregistration),
+			StakeCredential: fresh,
+			Amount:          amount,
+		})
+	}
+	pending := f.overlayAfter(register)
+
+	require.NoError(
+		t,
+		f.ls.ValidateTxWithOverlay(deregister(pendingKeyDeposit), nil, nil, pending),
+		"a credential registered by a pending transaction holds that deposit",
+	)
+	var mismatch conway.CertificateRefundIncorrectError
+	require.ErrorAs(
+		t,
+		f.ls.ValidateTxWithOverlay(deregister(pendingKeyDeposit+1), nil, nil, pending),
+		&mismatch,
+		"a refund that differs from the pending deposit is rejected",
+	)
+}
+
+func TestValidateForgedTxsAcceptsDeregistrationOfEarlierRegistration(
+	t *testing.T,
+) {
+	t.Parallel()
+	f := newPendingAccountsFixtureWithRule(
+		t,
+		0,
+		conway.UtxoValidateCertificateDeposits,
+		&conway.ConwayProtocolParameters{
+			KeyDeposit:  pendingKeyDeposit,
+			DRepDeposit: 500_000_000,
+		},
+	)
+	fresh := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.CredentialHash{0xc8},
+	}
+	block := pendingAccountsBlock{
+		stubValidateBlock: &stubValidateBlock{slot: 10},
+		txs: []lcommon.Transaction{
+			f.certificateTx(0x01, &lcommon.RegistrationCertificate{
+				CertType:        uint(lcommon.CertificateTypeRegistration),
+				StakeCredential: fresh,
+				Amount:          pendingKeyDeposit,
+			}),
+			f.certificateTx(0x02, &lcommon.DeregistrationCertificate{
+				CertType:        uint(lcommon.CertificateTypeDeregistration),
+				StakeCredential: fresh,
+				Amount:          pendingKeyDeposit,
+			}),
+		},
+	}
+	require.NoError(t, f.ls.validateForgedTxs(block))
+
+	block.txs = block.txs[1:]
+	require.Error(
+		t,
+		f.ls.validateForgedTxs(block),
+		"deregistering a credential no transaction registered must fail",
+	)
 }

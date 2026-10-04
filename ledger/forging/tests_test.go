@@ -4830,7 +4830,7 @@ func (v *leiosOverlayValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	accounts *utxoref.StateOverlay,
 ) error {
 	if _, reject := v.reject[tx.Hash().String()]; reject {
 		return errors.New("rejected parent")

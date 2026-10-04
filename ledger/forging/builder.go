@@ -112,7 +112,7 @@ type TxValidator interface {
 		tx ledger.Transaction,
 		consumedUtxos map[utxoref.Key]struct{},
 		createdUtxos map[utxoref.Key]lcommon.Utxo,
-		accounts *utxoref.AccountOverlay,
+		accounts *utxoref.StateOverlay,
 	) error
 }
 
@@ -120,7 +120,7 @@ type TxValidationFunc = func(
 	tx ledger.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	accounts *utxoref.StateOverlay,
 ) error
 
 // TxValidationSessionProvider pins an ordered validation pass to one ledger
@@ -583,7 +583,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 	createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
 	// Track reward-account effects of already-selected transactions so a
 	// later transaction is validated against the balances they leave.
-	pendingAccounts := utxoref.NewAccountOverlay()
+	pendingAccounts := utxoref.NewStateOverlay()
 
 	// selectTransactions iterates mempoolTxs and adds them to the block
 	// candidate lists (closed over below) until a limit is hit. It runs
@@ -931,7 +931,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 			for _, utxo := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(utxo)] = utxo
 			}
-			pendingAccounts.Apply(utxoref.AccountEffects(fullTx))
+			pendingAccounts.Apply(fullTx)
 
 			b.logger.Debug(
 				"added transaction to block candidate lists",
@@ -977,7 +977,7 @@ func (b *DefaultBlockBuilder) buildBlock(
 				_ ledger.Transaction,
 				_ map[utxoref.Key]struct{},
 				_ map[utxoref.Key]lcommon.Utxo,
-				_ *utxoref.AccountOverlay,
+				_ *utxoref.StateOverlay,
 			) error {
 				return nil
 			},

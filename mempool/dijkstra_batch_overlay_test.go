@@ -256,7 +256,7 @@ func (v *chainedOverlayValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	consumed map[utxoref.Key]struct{},
 	created map[utxoref.Key]lcommon.Utxo,
-	_ *utxoref.AccountOverlay,
+	_ *utxoref.StateOverlay,
 ) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

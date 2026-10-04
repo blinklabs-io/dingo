@@ -40,7 +40,7 @@ func (v *countingValidator) ValidateTxWithOverlay(
 	gledger.Transaction,
 	map[utxoref.Key]struct{},
 	map[utxoref.Key]lcommon.Utxo,
-	*utxoref.AccountOverlay,
+	*utxoref.StateOverlay,
 ) error {
 	v.calls.Add(1)
 	return nil

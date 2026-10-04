@@ -12936,13 +12936,13 @@ func (ls *LedgerState) WithTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 	) error,
 ) error {
 	return ls.withTxValidationSession(nil, nil, false, func(
-		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.AccountOverlay) error,
+		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
 		_ txValidationApplyFunc,
 	) error {
@@ -12959,7 +12959,7 @@ func (ls *LedgerState) withTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
 		applyTx txValidationApplyFunc,
@@ -12983,7 +12983,7 @@ func (ls *LedgerState) withTxValidationSession(
 			tx ledger.Transaction,
 			consumedUtxos map[utxoref.Key]struct{},
 			createdUtxos map[utxoref.Key]lcommon.Utxo,
-			accounts *utxoref.AccountOverlay,
+			accounts *utxoref.StateOverlay,
 		) error {
 			validationEra, err := resolveValidationEra(
 				tx,
@@ -13017,16 +13017,19 @@ func (ls *LedgerState) withTxValidationSession(
 				ls:              ls,
 				intraBlockUtxos: createdUtxos,
 				consumedUtxos:   consumedUtxos,
-				pendingAccounts: accounts,
+				pendingState:    accounts,
 				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			err = validationEra.ValidateTxFunc(
-				tx,
-				snapshot.referenceSlot,
-				lv,
-				pp,
-			)
+			state, err := lv.validationState(pp)
+			if err == nil {
+				err = validationEra.ValidateTxFunc(
+					tx,
+					snapshot.referenceSlot,
+					state,
+					pp,
+				)
+			}
 			err = storageFaultOrErr(lv, err)
 			if err != nil {
 				return fmt.Errorf(
@@ -13131,7 +13134,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				tx ledger.Transaction,
 				consumedUtxos map[utxoref.Key]struct{},
 				createdUtxos map[utxoref.Key]lcommon.Utxo,
-				accounts *utxoref.AccountOverlay,
+				accounts *utxoref.StateOverlay,
 			) error,
 			stillCurrent func() bool,
 			applyTx txValidationApplyFunc,
@@ -13236,10 +13239,14 @@ func (ls *LedgerState) validateTxCore(
 			lv.epochStartSlot = snapshot.currentEpochStartSlot
 			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
+			state, err := lv.validationState(pp)
+			if err != nil {
+				return err
+			}
 			return validationEra.ValidateTxFunc(
 				tx,
 				snapshot.referenceSlot,
-				lv,
+				state,
 				pp,
 			)
 		})
@@ -13271,7 +13278,7 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 	tx lcommon.Transaction,
 	consumedUtxos map[utxoref.Key]struct{},
 	createdUtxos map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	accounts *utxoref.StateOverlay,
 ) error {
 	return ls.validateTxCore(tx, func(txn *database.Txn) *LedgerView {
 		return &LedgerView{
@@ -13279,7 +13286,7 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 			ls:              ls,
 			intraBlockUtxos: createdUtxos,
 			consumedUtxos:   consumedUtxos,
-			pendingAccounts: accounts,
+			pendingState:    accounts,
 		}
 	})
 }
@@ -13571,7 +13578,7 @@ func (ls *LedgerState) forgeBlock() {
 
 		consumedInputs := make(map[utxoref.Key]struct{})
 		createdOutputs := make(map[utxoref.Key]lcommon.Utxo)
-		pendingAccounts := utxoref.NewAccountOverlay()
+		pendingAccounts := utxoref.NewStateOverlay()
 
 		// Iterate through transactions and add them until we hit limits
 		for _, mempoolTx := range mempoolTxs {
@@ -13718,7 +13725,7 @@ func (ls *LedgerState) forgeBlock() {
 			for _, output := range fullTx.Produced() {
 				createdOutputs[utxoref.ForUtxo(output)] = output
 			}
-			pendingAccounts.Apply(utxoref.AccountEffects(fullTx))
+			pendingAccounts.Apply(fullTx)
 			// Safe to assign: overflow was already checked
 			// via SafeAddExUnits when computing
 			// candidateExUnits above.

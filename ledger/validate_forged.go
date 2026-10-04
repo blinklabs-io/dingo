@@ -124,7 +124,7 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 	createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
 	// pendingAccounts: reward-account effects of earlier transactions in
 	// this block, so a later withdrawal sees the balance they leave.
-	pendingAccounts := utxoref.NewAccountOverlay()
+	pendingAccounts := utxoref.NewStateOverlay()
 
 	for _, tx := range txs {
 		if err := ls.ValidateTxWithOverlay(
@@ -152,7 +152,7 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 		for _, input := range tx.Consumed() {
 			consumedUtxos[utxoref.ForInput(input)] = struct{}{}
 		}
-		pendingAccounts.Apply(utxoref.AccountEffects(tx))
+		pendingAccounts.Apply(tx)
 	}
 
 	return nil

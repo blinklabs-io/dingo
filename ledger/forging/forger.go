@@ -4092,7 +4092,7 @@ func selectValidLeiosTransactions(
 		) error {
 			consumed := make(map[utxoref.Key]struct{})
 			created := make(map[utxoref.Key]lcommon.Utxo)
-			accounts := utxoref.NewAccountOverlay()
+			accounts := utxoref.NewStateOverlay()
 			for _, mempoolTx := range txs {
 				if !stillCurrent() {
 					// A ledger publication landed mid-pass. Every
@@ -4129,7 +4129,7 @@ func selectValidLeiosTransactions(
 				for _, utxo := range tx.Produced() {
 					created[utxoref.ForUtxo(utxo)] = utxo
 				}
-				accounts.Apply(utxoref.AccountEffects(tx))
+				accounts.Apply(tx)
 			}
 			if !stillCurrent() {
 				return errTxValidationSnapshotChanged

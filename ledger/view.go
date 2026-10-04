@@ -74,10 +74,10 @@ type LedgerView struct {
 	intraBlockUtxos map[utxoref.Key]lcommon.Utxo
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	consumedUtxos map[utxoref.Key]struct{}
-	// pendingAccounts holds the reward-account effects of the pending or
-	// already selected transactions behind the two overlays above; reads of
-	// account registration and balance apply them over the stored account.
-	pendingAccounts *utxoref.AccountOverlay
+	// pendingState holds the pending or already selected transactions that
+	// change ledger state beyond the UTxO set. validationState layers them
+	// over this view; the view's own reads never consult it.
+	pendingState *utxoref.StateOverlay
 	// utxoMemoMu guards utxoMemo. Production views are built per transaction
 	// or query and used from one goroutine; the lock keeps a future shared
 	// view safe at negligible cost next to the database read it saves.
@@ -540,13 +540,19 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 	)
 }
 
+// validationState returns the state an era validator reads: the view itself,
+// or the view with the pending transactions' withdrawals, certificates,
+// deposits and proposals applied.
+func (lv *LedgerView) validationState(
+	pp lcommon.ProtocolParameters,
+) (lcommon.LedgerState, error) {
+	return lv.pendingState.View(lv, pp)
+}
+
 // IsStakeCredentialRegistered checks if a stake credential is currently registered
 func (lv *LedgerView) IsStakeCredentialRegistered(
 	cred lcommon.Credential,
 ) bool {
-	if registered, decided := lv.pendingAccounts.Registration(cred); decided {
-		return registered
-	}
 	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 	if err != nil {
 		return false
@@ -584,11 +590,6 @@ func (lv *LedgerView) IsStakeCredentialRegistered(
 func (lv *LedgerView) StakeCredentialDeposit(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	// A pending registration's deposit is not recorded yet, so it reads as
-	// absent, as for an unregistered credential.
-	if _, decided := lv.pendingAccounts.Registration(cred); decided {
-		return nil, nil
-	}
 	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 	if err != nil {
 		return nil, err
@@ -965,9 +966,6 @@ func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 func (lv *LedgerView) IsRewardAccountRegistered(
 	cred lcommon.Credential,
 ) bool {
-	if registered, decided := lv.pendingAccounts.Registration(cred); decided {
-		return registered
-	}
 	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 	if err != nil {
 		return false
@@ -1004,13 +1002,6 @@ func (lv *LedgerView) IsRewardAccountRegistered(
 func (lv *LedgerView) RewardAccountBalance(
 	cred lcommon.Credential,
 ) (*uint64, error) {
-	if registered, decided := lv.pendingAccounts.Registration(cred); decided {
-		if !registered {
-			return nil, nil
-		}
-		balance := lv.pendingAccounts.Balance(cred, 0)
-		return &balance, nil
-	}
 	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
 	if err != nil {
 		return nil, err
@@ -1040,9 +1031,6 @@ func (lv *LedgerView) RewardAccountBalance(
 	if overflow {
 		return nil, errors.New("reward account balance overflow")
 	}
-	// Saturate: a pending withdrawal already confirmed in the stored balance
-	// must not wrap the difference.
-	balance = lv.pendingAccounts.Balance(cred, balance)
 	return &balance, nil
 }
 

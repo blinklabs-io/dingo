@@ -16,7 +16,6 @@ package forging
 
 import (
 	"bytes"
-	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -24,6 +23,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,8 +60,8 @@ func withdrawalTxCbor(
 	return txCbor
 }
 
-// balanceValidator applies the exact reward-withdrawal rule to a stored
-// balance, reduced by whatever the pending-account overlay already drains.
+// balanceValidator runs the Shelley reward-withdrawal rule against a stored
+// balance, seen through whatever the pending-state overlay has applied.
 type balanceValidator struct {
 	balance uint64
 }
@@ -73,23 +74,18 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 	tx ledger.Transaction,
 	_ map[utxoref.Key]struct{},
 	_ map[utxoref.Key]lcommon.Utxo,
-	accounts *utxoref.AccountOverlay,
+	pending *utxoref.StateOverlay,
 ) error {
-	for address, amount := range tx.Withdrawals() {
-		credential, ok := address.StakeCredential()
-		if !ok {
-			continue
-		}
-		available := accounts.Balance(credential, v.balance)
-		if amount.Uint64() > available {
-			return fmt.Errorf(
-				"withdrawal %s exceeds balance %d",
-				amount,
-				available,
-			)
-		}
+	var stakeKey lcommon.Blake2b224
+	copy(stakeKey[:], bytes.Repeat([]byte{0xa1}, 28))
+	base := mockledger.NewLedgerStateBuilder().
+		WithRewardAccountBalance(stakeKey, v.balance).
+		Build()
+	state, err := pending.View(base, nil)
+	if err != nil {
+		return err
 	}
-	return nil
+	return shelley.UtxoValidateWithdrawals(tx, 0, state, nil)
 }
 
 func twoWithdrawalsOfOneBalance(
