@@ -64,7 +64,7 @@ INSERT INTO vacuum_probe SELECT zeroblob(8192) FROM n`,
 	lockDB, err := sql.Open(
 		"sqlite",
 		sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))+
-			"?_pragma=busy_timeout(30000)",
+			"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = lockDB.Close() })
