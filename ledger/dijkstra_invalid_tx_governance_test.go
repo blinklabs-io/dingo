@@ -362,13 +362,19 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 
 		// The mempool transaction form has no is_valid field, so a
 		// declared-invalid transaction cannot reach mempool validation.
-		var body, witnesses any
 		bodyFields := map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)}
-		body, witnesses = bodyFields, map[uint]any{}
-		raw, err := cbor.Encode([]any{body, witnesses, false, nil})
-		require.NoError(t, err)
-		_, err = gdijkstra.NewDijkstraTransactionFromCbor(raw)
-		require.Error(t, err)
+		for _, declared := range []bool{true, false} {
+			raw, err := cbor.Encode(
+				[]any{bodyFields, map[uint]any{}, declared, nil},
+			)
+			require.NoError(t, err)
+			_, err = gdijkstra.NewDijkstraTransactionFromCbor(raw)
+			if declared {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "is_valid=false")
+			}
+		}
 	})
 
 	t.Run("replay and rollback reapply", func(t *testing.T) {

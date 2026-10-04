@@ -372,29 +372,33 @@ func TestValidateTxDijkstraInvalidTransactionStillFailsAlwaysRunRules(
 }
 
 // TestValidateTxDijkstraMalformedProposalFailsRegardlessOfValidity pins the
-// structural control: wire data that cannot decode is rejected before the
-// declared validity flag is consulted, and a decoded proposal that sets the
-// protocol version through ParameterChange is rejected for both declarations.
+// structural control: a transaction body carrying an undecodable proposal is
+// rejected by the body decoder, which never sees the validity flag, and a
+// decoded proposal that sets the protocol version through ParameterChange is
+// rejected for both declarations.
 func TestValidateTxDijkstraMalformedProposalFailsRegardlessOfValidity(
 	t *testing.T,
 ) {
 	t.Parallel()
+	decodeBody := func(proposals any) error {
+		fields := map[uint]any{0: []any{}, 1: []any{}, 2: uint64(0)}
+		if proposals != nil {
+			fields[20] = proposals
+		}
+		raw, err := cbor.Encode(fields)
+		require.NoError(t, err)
+		var body gdijkstra.DijkstraTransactionBody
+		_, err = cbor.Decode(raw, &body)
+		return err
+	}
+	require.NoError(t, decodeBody(nil))
+	// A proposal procedure is a four-element array; a truncated one is not a
+	// well-formed proposal.
+	require.Error(t, decodeBody([]any{[]any{uint64(1_000)}}))
+
 	for _, valid := range []bool{true, false} {
 		t.Run(fmt.Sprintf("is_valid=%t", valid), func(t *testing.T) {
 			t.Parallel()
-			// A proposal procedure is a four-element array; a truncated one
-			// is not a well-formed proposal whatever the transaction's flag.
-			body := map[uint]any{
-				0:  []any{},
-				1:  []any{},
-				2:  uint64(0),
-				20: []any{[]any{uint64(1_000)}},
-			}
-			raw, err := cbor.Encode([]any{body, map[uint]any{}, valid, nil})
-			require.NoError(t, err)
-			_, err = gdijkstra.NewDijkstraTransactionFromCbor(raw)
-			require.Error(t, err)
-
 			tx, state, params := newDijkstraScopingTx(
 				t, valid, func(b *gdijkstra.DijkstraTransactionBody) {
 					b.TxProposalProcedures = []gdijkstra.DijkstraProposalProcedure{
@@ -412,7 +416,7 @@ func TestValidateTxDijkstraMalformedProposalFailsRegardlessOfValidity(
 					}
 				},
 			)
-			err = ValidateTxDijkstra(tx, 0, state, params)
+			err := ValidateTxDijkstra(tx, 0, state, params)
 			var protocolVersionErr ParameterChangeProtocolVersionError
 			require.ErrorAs(t, err, &protocolVersionErr)
 		})
