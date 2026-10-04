@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -200,18 +202,115 @@ func TestBuildChainSelectorConfigWiresRollbackRegistrationCounter(
 func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Stop)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger, EventBus: bus},
+	)
+	t.Cleanup(func() {
+		assert.NoError(t, connManager.Stop(context.Background()))
+	})
+
+	localAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000}
+	remoteAddr := &net.TCPAddr{IP: net.IPv4(44, 0, 0, 1), Port: 3001}
+	localWire, peerWire := newLeiosNotifyTestConnPair(localAddr, remoteAddr)
+	t.Cleanup(func() {
+		_ = localWire.Close()
+		_ = peerWire.Close()
+	})
+	type connectionResult struct {
+		conn *ouroboros.Connection
+		err  error
+	}
+	localResult := make(chan connectionResult, 1)
+	peerResult := make(chan connectionResult, 1)
+	go func() {
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(localWire),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithNodeToNode(true),
+			ouroboros.WithServer(true),
+		)
+		localResult <- connectionResult{conn: conn, err: err}
+	}()
+	go func() {
+		conn, err := ouroboros.NewConnection(
+			ouroboros.WithConnection(peerWire),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithNodeToNode(true),
+		)
+		peerResult <- connectionResult{conn: conn, err: err}
+	}()
+	receiveConnection := func(ch <-chan connectionResult) connectionResult {
+		t.Helper()
+		select {
+		case result := <-ch:
+			return result
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for local Ouroboros handshake")
+			return connectionResult{}
+		}
+	}
+	local := receiveConnection(localResult)
+	peer := receiveConnection(peerResult)
+	require.NoError(t, local.err)
+	require.NoError(t, peer.err)
+	t.Cleanup(func() {
+		_ = local.conn.Close()
+		_ = peer.conn.Close()
+	})
+
+	conn := local.conn.Id()
+	require.Equal(t, localAddr.String(), conn.LocalAddr.String())
+	require.Equal(t, remoteAddr.String(), conn.RemoteAddr.String())
+	require.True(t, connManager.AddConnection(local.conn, true, remoteAddr.String()))
+
 	n, _ := newMetricsTestNode(t)
+	n.eventBus = bus
+	n.connManager = connManager
 	cfg := n.buildChainSelectorConfig(2160, true, 0)
 	require.NotNil(t, cfg.PeerIdentity)
 	peerGovs := []*peergov.PeerGovernor{
-		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{Logger: logger}),
-		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{Logger: logger}),
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger: logger, EventBus: bus, ConnManager: connManager,
+			DisableOutbound: true,
+		}),
+		peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+			Logger: logger, EventBus: bus, ConnManager: connManager,
+			DisableOutbound: true,
+		}),
 	}
-	conn := ouroboros.ConnectionId{
-		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
-		RemoteAddr: &net.TCPAddr{IP: net.IPv4(44, 0, 0, 1), Port: 3001},
+	const expectedGroup = "ipv4:44.0.0.0/24"
+	for _, peerGov := range peerGovs {
+		t.Cleanup(func() {
+			assert.NoError(t, peerGov.Stop(context.Background()))
+		})
+		require.NoError(t, peerGov.AddPeer(
+			remoteAddr.String(),
+			peergov.PeerSourceTopologyLocalRoot,
+		))
+		require.NoError(t, peerGov.Start(context.Background()))
+		n.setPeerGovernor(peerGov)
+		bus.Publish(
+			connmanager.InboundConnectionEventType,
+			event.NewEvent(
+				connmanager.InboundConnectionEventType,
+				connmanager.InboundConnectionEvent{
+					ConnectionId:         conn,
+					LocalAddr:            conn.LocalAddr,
+					RemoteAddr:           conn.RemoteAddr,
+					NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+				},
+			),
+		)
+		require.Eventually(t, func() bool {
+			return peerGov.DiversityGroupByConnId(conn) == expectedGroup &&
+				cfg.PeerIdentity(conn) == expectedGroup
+		}, time.Second, time.Millisecond)
+		require.NoError(t, peerGov.Stop(context.Background()))
 	}
-	assert.Empty(t, cfg.PeerIdentity(conn))
+	n.setPeerGovernor(peerGovs[0])
+	assert.Equal(t, expectedGroup, cfg.PeerIdentity(conn))
 
 	// Live restore replaces this pointer while the retained selector remains
 	// active. Exercise the same synchronized read alongside repeated replacement.
@@ -237,7 +336,7 @@ func TestBuildChainSelectorConfigWiresPeerIdentity(t *testing.T) {
 	workers.Wait()
 	close(groups)
 	for got := range groups {
-		assert.Empty(t, got)
+		assert.Equal(t, expectedGroup, got)
 	}
 }
 

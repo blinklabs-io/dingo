@@ -346,7 +346,6 @@ func (cs *ChainSelector) GenesisStatus() GenesisStatus {
 			Selectable: cs.isPeerSelectableLocked(
 				connId,
 				peerTip,
-				false,
 			),
 		})
 	}

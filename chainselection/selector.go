@@ -1268,7 +1268,7 @@ func (cs *ChainSelector) GetPeerSyncTarget(
 	cs.mutex.RLock()
 	defer cs.mutex.RUnlock()
 	peerTip := cs.peerTips[connId]
-	if !cs.isPeerSelectableLocked(connId, peerTip, false) {
+	if !cs.isPeerSelectableLocked(connId, peerTip) {
 		return ochainsync.Tip{}, false
 	}
 	observed := peerTip.SelectionTip()
@@ -1369,12 +1369,11 @@ func (cs *ChainSelector) SelectBestChain() *ouroboros.ConnectionId {
 func (cs *ChainSelector) isPeerSelectableLocked(
 	connId ouroboros.ConnectionId,
 	peerTip *PeerChainTip,
-	logSkip bool,
 ) bool {
 	return cs.isPeerSelectableWithBestKnownBlockLocked(
 		connId,
 		peerTip,
-		logSkip,
+		false,
 		nil,
 	)
 }
@@ -2028,7 +2027,7 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// a MANDATORY release, never subject to the switch-back debounce below:
 	// there is no "keeping" a connection that is gone, ineligible, stale, or
 	// implausible, whoever the challenger is.
-	if !cs.isPeerSelectableLocked(previousBest, incumbentTip, false) {
+	if !cs.isPeerSelectableLocked(previousBest, incumbentTip) {
 		return false
 	}
 
@@ -2200,7 +2199,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	if previousBest != nil && *previousBest != *newBest {
 		previousPeerTip, ok := cs.peerTips[*previousBest]
 		if ok &&
-			cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
+			cs.isPeerSelectableLocked(*previousBest, previousPeerTip) {
 			newPeerTip, ok := cs.peerTips[*newBest]
 			if !ok {
 				return false, nil, nil, corroborationEvent

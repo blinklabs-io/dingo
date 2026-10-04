@@ -311,7 +311,7 @@ func peerSelectable(
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.peerTips[connId]
 	require.True(t, ok, "peer must be tracked")
-	return cs.isPeerSelectableLocked(connId, peerTip, false)
+	return cs.isPeerSelectableLocked(connId, peerTip)
 }
 
 // TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable pins the

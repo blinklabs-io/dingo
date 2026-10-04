@@ -31,8 +31,10 @@ import (
 // maxEquivocationRolledBack bounds the rolled-back blocks retained for
 // comparison. A rollback is at most k blocks deep, so this covers the deepest
 // one and older entries cannot meet a block on the live chain again.
-const maxEquivocationRolledBack = 2160
-const maxEquivocationReportedPairs = 2160
+const (
+	maxEquivocationRolledBack    = 2160
+	maxEquivocationReportedPairs = 2160
+)
 
 // rolledBackBlock is a block that left the chain, kept to recognise a
 // competing block from the same pool.
