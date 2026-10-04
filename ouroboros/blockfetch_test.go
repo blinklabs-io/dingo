@@ -367,7 +367,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 			})
 			iter := &stubBlockfetchIterator{steps: test.steps}
 			server := &stubBlockfetchBatchServer{}
-			conn := &stubBlockfetchConnection{errChan: make(chan error)}
+			conn := &stubBlockfetchConnection{done: make(chan struct{})}
 			err := node.blockfetchServerSendBatch(
 				testConnId().String(),
 				test.steps[0].result.Point,
@@ -577,9 +577,8 @@ func (f *blockfetchRangeFixture) point(idx int) ocommon.Point {
 	return ocommon.NewPoint(f.blocks[idx].Slot, f.blocks[idx].Hash)
 }
 
-// readMessageTypes reads count response segments and returns the message type
-// byte of each. Every blockfetch server message is a CBOR array whose first
-// element is the message type, so the second payload byte identifies it.
+// readMessageTypes decodes messages independently of muxer segment boundaries:
+// one segment may contain several messages, or only part of a message.
 func (f *blockfetchRangeFixture) readMessageTypes(
 	t *testing.T,
 	count int,
@@ -587,10 +586,10 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 	t.Helper()
 	types := make([]byte, 0, count)
 	for range count {
-		segment := f.peer.readResponse(t, testutil.AsyncWait)
-		require.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
-		require.GreaterOrEqual(t, len(segment.Payload), 2)
-		types = append(types, segment.Payload[1])
+		protocolID, message := f.peer.readMessage(t, testutil.AsyncWait)
+		require.Equal(t, blockfetch.ProtocolId, protocolID)
+		require.GreaterOrEqual(t, len(message), 2)
+		types = append(types, message[1])
 	}
 	return types
 }
@@ -1488,13 +1487,13 @@ func (i *stubBlockfetchIterator) Cancel() {
 }
 
 type stubBlockfetchConnection struct {
-	errChan    chan error
+	done       chan struct{}
 	closeCalls int
 	closeErr   error
 }
 
-func (c *stubBlockfetchConnection) ErrorChan() chan error {
-	return c.errChan
+func (c *stubBlockfetchConnection) Done() <-chan struct{} {
+	return c.done
 }
 
 func (c *stubBlockfetchConnection) Close() error {
@@ -1654,7 +1653,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1687,7 +1686,7 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	iter := &stubBlockfetchIterator{}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1734,7 +1733,7 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1804,7 +1803,7 @@ func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
 	steps := sparseBlockfetchSteps(testMaxBlocks, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 	require.Greater(
@@ -1863,7 +1862,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
 	steps := sparseBlockfetchSteps(testMaxBlocks+1, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 
@@ -1961,7 +1960,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	}
 	server := &stubBlockfetchDrainBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2008,7 +2007,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		drainResults: []bool{true, false},
 	}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2043,7 +2042,7 @@ func TestReportBlockfetchServerAsyncError_ClosesConnection(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 	o.reportBlockfetchServerAsyncError(
@@ -2068,7 +2067,7 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	conn := &stubBlockfetchConnection{
-		errChan:  make(chan error),
+		done:     make(chan struct{}),
 		closeErr: errors.New("close failed"),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})

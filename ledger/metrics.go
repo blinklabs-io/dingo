@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
@@ -652,6 +653,21 @@ type blockComposition struct {
 	certificates int
 }
 
+// createdUtxoCount returns how many UTxOs tx adds. This runs inside the
+// block-apply DB transaction for every applied block, so for a valid
+// Shelley-era or later transaction the count is taken without building the
+// UTxOs: Produced() allocates an lcommon.Utxo per output, and those eras
+// produce exactly one UTxO per output. A Byron transaction is the exception,
+// since only outputs 0 through 65535 become UTxOs, and the phase-2-failed rule
+// differs by era (Alonzo produces nothing, Babbage onward at most a collateral
+// return), so both cases are read from Produced() rather than restated here.
+func createdUtxoCount(tx lcommon.Transaction) int {
+	if _, isByron := tx.(*byron.ByronTransaction); isByron || !tx.IsValid() {
+		return len(tx.Produced())
+	}
+	return len(tx.Outputs())
+}
+
 // computeBlockComposition derives a blockComposition from one applied block.
 // UTxO churn follows Produced()/Consumed() semantics, not raw
 // Outputs()/Inputs() -- see the utxoCreatedTotal/utxoConsumedTotal field doc
@@ -665,20 +681,7 @@ func computeBlockComposition(block lcommon.Block) blockComposition {
 	txs := block.Transactions()
 	c.transactions = len(txs)
 	for _, tx := range txs {
-		// This runs inside the block-apply DB transaction for every applied
-		// block, so the created-UTxO count is taken without building the
-		// UTxOs. Produced() allocates an lcommon.Utxo per output and
-		// round-trips the transaction hash through hex to construct each
-		// one's input reference; only its length is wanted here, and every
-		// era defines Produced() for a valid transaction as exactly one UTxO
-		// per output. The phase-2-failed rule differs by era (Alonzo produces
-		// nothing, Babbage onward at most a collateral return), so that case
-		// is still read from Produced() rather than restated here.
-		if tx.IsValid() {
-			c.utxoCreated += len(tx.Outputs())
-		} else {
-			c.utxoCreated += len(tx.Produced())
-		}
+		c.utxoCreated += createdUtxoCount(tx)
 		c.utxoConsumed += len(tx.Consumed())
 		c.certificates += len(tx.Certificates())
 		witnesses := tx.Witnesses()
