@@ -230,12 +230,15 @@ cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
 cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
 
 # Keep generated stake material in a stable location. txpump derives the
-# delegation and pool hashes at startup. Select the generator's first
-# lexically ordered stake verification key and expose only that key under a
-# stable name; an unconstrained find otherwise makes the selected credential
-# depend on filesystem traversal order.
+# delegation and pool hashes at startup. Select the first lexically ordered
+# UTxO stake key and expose only that key under a stable name; an
+# unconstrained find otherwise makes the selected credential depend on
+# filesystem traversal order. Only the UTxO stake keys are registered in the
+# genesis staking section; each pool's stake key is its reward account, which
+# genesis does not register, and a delegation certificate for an unregistered
+# credential is rejected.
 mkdir -p /configs/utxo-keys/stake
-stake_vkey="$(find /tmp/testnet -type f -name '*stake*.vkey' -print 2>/dev/null | sort | head -n 1)"
+stake_vkey="$(find /tmp/testnet/utxos/keys -type f -name 'stake.*.vkey' -print 2>/dev/null | sort | head -n 1)"
 if [ -z "$stake_vkey" ]; then
     echo "no generated delegation stake verification key found" >&2
     exit 1
@@ -255,6 +258,12 @@ if ! cardano-cli latest stake-address key-hash \
     exit 1
 fi
 test -s /tmp/txpump-stake-key-hash
+if ! jq -e --arg hash "$(cat /tmp/txpump-stake-key-hash)" \
+    '.staking.stake | has($hash)' \
+    /configs/utxo-keys/shelley-genesis.json >/dev/null; then
+    echo "delegation stake key is not registered in genesis: $stake_vkey" >&2
+    exit 1
+fi
 
 # Copy testnet.yaml to shared volume for analysis/txpump genesis config
 echo "copying testnet.yaml to /testnet-config/testnet.yaml"
