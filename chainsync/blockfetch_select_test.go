@@ -252,6 +252,26 @@ func TestSelectBlockfetchPeerCountsDecisionsAndHandoffs(t *testing.T) {
 	// newFetchPeers installs its own registry; build the measured State on
 	// this one instead so the metric can be read back.
 	f.state = chainsync.NewStateWithConfig(nil, nil, cfg)
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var decisionLabels []string
+	for _, family := range families {
+		if family.GetName() != "dingo_blockfetch_peer_selections_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			decisionLabels = append(
+				decisionLabels,
+				metric.GetLabel()[0].GetValue(),
+			)
+			assert.Zero(t, metric.GetCounter().GetValue())
+		}
+	}
+	assert.ElementsMatch(
+		t,
+		[]string{"only_holder", "explore", "model", "unmeasured"},
+		decisionLabels,
+	)
 	for i := range f.conns {
 		f.conns[i] = newTestConnId(uint(i + 1))
 		require.True(t, f.state.AddClientConnId(f.conns[i]))
@@ -276,7 +296,7 @@ func TestSelectBlockfetchPeerCountsDecisionsAndHandoffs(t *testing.T) {
 	f.sample(0, 5*time.Millisecond, 5*time.Millisecond)
 	require.Equal(t, 0, f.selectFrom(1))
 
-	families, err := reg.Gather()
+	families, err = reg.Gather()
 	require.NoError(t, err)
 	var decisions, handoffs float64
 	for _, family := range families {

@@ -77,11 +77,22 @@ func deniedInboundCount(pg *PeerGovernor) float64 {
 func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 	t.Parallel()
 	pg := newInboundIdentityGovernor(t)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(44, 0, 0, 9), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(44, 0, 0, 1), Port: 3001},
+	}
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: connId, IsClient: true}
+	pg.mu.Unlock()
 	first := inboundArrival(t, "44.0.0.1:51000")
 	pg.handleInboundConnectionEvent(first)
 	require.Equal(t, 1, len(pg.GetPeers()))
 
-	pg.DenyPeer("44.0.0.1:51000", time.Minute)
+	pg.DenyPeer("44.0.0.1:3001", time.Minute)
 
 	for port := 51001; port < 51006; port++ {
 		pg.handleInboundConnectionEvent(
@@ -95,6 +106,19 @@ func TestInboundHostDenialDoesNotRefuseArrival(t *testing.T) {
 		"a host denied on one source port must still be admitted on another",
 	)
 	assert.Equal(t, 1, len(pg.GetPeers()), "the host keeps one record")
+	assert.Equal(
+		t,
+		"local-root-0",
+		pg.GetPeers()[0].InboundTopologyMatch,
+		"the denied topology peer's new-port arrival remains admitted",
+	)
+	peers := pg.GetPeers()
+	require.NotNil(t, peers[0].Connection)
+	assert.True(
+		t,
+		sameConnectionId(connId, peers[0].Connection.Id),
+		"host-scoped denial must leave the existing peer connection intact",
+	)
 }
 
 // A host that flaps is not refused either: refusal also cuts off a

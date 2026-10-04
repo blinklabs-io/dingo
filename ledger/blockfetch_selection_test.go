@@ -244,6 +244,20 @@ func deliverBlocks(
 	}
 }
 
+func TestRecordBatchDeliverySkipsMixedPeerSamples(t *testing.T) {
+	t.Parallel()
+	ls, conn, samples := newThroughputFixture(t)
+	otherConn := testChainsyncConnId(6001, 3001)
+
+	ls.noteBatchBlockArrivalLocked(conn, 100)
+	ls.noteBatchBlockArrivalLocked(otherConn, 200)
+	ls.batchFirstBlockAt = time.Now().Add(-time.Second)
+	ls.batchLastBlockAt = time.Now()
+	ls.recordBatchDeliveryLocked(otherConn)
+
+	assert.Empty(t, *samples)
+}
+
 // A batch's rate is the bytes that followed its first block over the time
 // they took, so the first block's own latency is not counted twice.
 func TestBatchDoneRecordsDeliveryThroughput(t *testing.T) {

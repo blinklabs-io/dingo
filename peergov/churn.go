@@ -513,8 +513,8 @@ func (p *PeerGovernor) promoteFromWarmPublicRootsLocked(
 	for i := 0; i < len(warmPublicRoots) && promoted < count; i++ {
 		peer := warmPublicRoots[i]
 		// Only promote if connection exists and score is above threshold
-		if peer.Connection == nil {
-			continue // Skip peers without active connections
+		if peer.Connection == nil || p.isPeerDeniedLocked(peer) {
+			continue // Skip disconnected or denied roots
 		}
 		if peer.PerformanceScore >= p.config.MinScoreThreshold {
 			p.recordPeerStateChange(peer.State, PeerStateHot)

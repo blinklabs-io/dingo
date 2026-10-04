@@ -152,12 +152,18 @@ func recentlyStalled(peer *Peer) bool {
 }
 
 // redialRankCompare orders gossip/ledger redial candidates: recently stalled
-// and observed below-threshold peers last, then by score descending, so a
-// known-good peer is dialed before a never-observed one and both before a
-// known-bad one.
+// peers last, then observed below-threshold peers, then by score descending.
 func (p *PeerGovernor) redialRankCompare(a, b *Peer) int {
-	aBad := recentlyStalled(a) || p.observedBelowThreshold(a)
-	bBad := recentlyStalled(b) || p.observedBelowThreshold(b)
+	aStalled := recentlyStalled(a)
+	bStalled := recentlyStalled(b)
+	if aStalled != bStalled {
+		if aStalled {
+			return 1
+		}
+		return -1
+	}
+	aBad := p.observedBelowThreshold(a)
+	bBad := p.observedBelowThreshold(b)
 	if aBad != bBad {
 		if aBad {
 			return 1

@@ -17911,6 +17911,32 @@ func TestRecordRollbackBoundsHistory(t *testing.T) {
 	)
 }
 
+func TestRecordRollbackCountsRepeatAfterHistoryEviction(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	now := time.Now()
+	point := ocommon.NewPoint(7, []byte("repeated"))
+
+	assert.Equal(t, 1, ls.recordRollback("conn", point, now))
+	for i := range maxRollbackHistory {
+		ls.recordRollback(
+			"conn",
+			ocommon.NewPoint(
+				uint64(100+i),
+				[]byte{byte(i), byte(i >> 8)},
+			),
+			now,
+		)
+	}
+	assert.Equal(t, maxRollbackHistory, len(ls.rollbackHistory))
+	assert.Equal(
+		t,
+		2,
+		ls.recordRollback("conn", point, now),
+		"the loop count survives eviction of its first event record",
+	)
+}
+
 func TestRecordRollbackCountsRepeatsFromOneConnection(t *testing.T) {
 	t.Parallel()
 
@@ -18041,11 +18067,18 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 		"a coalesced request must not be published late",
 	)
 
+	fixture.ls.handleConnectionClosedEvent(event.Event{
+		Type: ConnectionClosedEventType,
+		Data: ConnectionClosedEvent{ConnectionId: fixture.connId},
+	})
+	fixture.ls.requestChainsyncResync(fixture.connId, "reconnected", nil)
+	waitFor(3, "a reused connection tuple starts a new episode after close")
+
 	// Once the window has passed the next divergence is a new episode.
 	fixture.ls.resyncCoalesceMutex.Lock()
 	fixture.ls.resyncCoalesce[connIdKey(fixture.connId)].at = time.Now().
 		Add(-2 * chainsyncResyncCoalesceWindow)
 	fixture.ls.resyncCoalesceMutex.Unlock()
 	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
-	waitFor(3, "a request after the window must be published")
+	waitFor(4, "a request after the window must be published")
 }

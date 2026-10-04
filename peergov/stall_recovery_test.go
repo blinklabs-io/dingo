@@ -58,7 +58,8 @@ func TestHandleConnectionClosedEvent_ChainsyncStallEscalatesReconnectDelay(
 ) {
 	t.Parallel()
 	pg := NewPeerGovernor(PeerGovernorConfig{
-		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinScoreThreshold: 0.5,
 	})
 	peer := &Peer{
 		Address:           "192.168.12.101:3003",
@@ -160,7 +161,11 @@ func TestRedialRankCompare_RecentChainsyncStallRanksLast(t *testing.T) {
 		PerformanceScore:   0.9,
 		LastChainsyncStall: time.Now(),
 	}
-	alternate := &Peer{Address: "alternate:3001", PerformanceScore: 0.4}
+	alternate := &Peer{
+		Address:          "alternate:3001",
+		PerformanceScore: 0.1,
+		ScoreLastUpdate:  time.Now(),
+	}
 
 	assert.Positive(t, pg.redialRankCompare(stalled, alternate))
 	assert.Negative(t, pg.redialRankCompare(alternate, stalled))

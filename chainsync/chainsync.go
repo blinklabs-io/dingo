@@ -387,6 +387,14 @@ func NewStateWithConfig(
 		},
 		[]string{"decision"},
 	)
+	for _, decision := range []string{
+		"only_holder",
+		"explore",
+		"model",
+		"unmeasured",
+	} {
+		s.blockfetchSelectionsCounter.WithLabelValues(decision)
+	}
 	s.blockfetchHandoffsCounter = promauto.With(cfg.PromRegistry).NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_blockfetch_peer_handoffs_total",

@@ -967,6 +967,17 @@ type rollbackRecord struct {
 	timestamp time.Time
 }
 
+type rollbackCountKey struct {
+	connKey string
+	slot    uint64
+	hash    string
+}
+
+type rollbackCountRecord struct {
+	first  time.Time
+	second time.Time
+}
+
 type forgedBlockCheckerHolder struct {
 	checker ForgedBlockChecker
 }
@@ -1212,9 +1223,11 @@ type LedgerState struct {
 	// current batch's blocks, and batchStreamBytes counts the bytes of every
 	// block after the first. Together they give the batch's delivery rate
 	// without charging it the first block's latency.
-	batchFirstBlockAt time.Time
-	batchLastBlockAt  time.Time
-	batchStreamBytes  uint64
+	batchFirstBlockAt   time.Time
+	batchLastBlockAt    time.Time
+	batchStreamBytes    uint64
+	batchDeliveryConnId ouroboros.ConnectionId
+	batchDeliveryMixed  bool
 
 	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
 	// held when the current batch was requested. A batch is fetched for the
@@ -1601,7 +1614,11 @@ type LedgerState struct {
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
-	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+	rollbackHistory []rollbackRecord // bounded recent rollback records
+	// rollbackCounts preserves exact per-connection/point loop counts across
+	// rollbackHistory's event cap. Each entry keeps only the two timestamps
+	// needed by the loop threshold and is pruned by rollbackLoopWindow.
+	rollbackCounts map[rollbackCountKey]rollbackCountRecord
 	// resyncCoalesce records the last resync request published per
 	// connection, so one divergence episode publishes a single request.
 	resyncCoalesce      map[string]*resyncCoalesceRecord

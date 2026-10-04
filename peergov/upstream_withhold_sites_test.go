@@ -187,3 +187,43 @@ func TestWithheldConnectionCallSites(t *testing.T) {
 		})
 	}
 }
+
+func TestDeniedConnectionIsIneligibleBeforeWithholdSync(t *testing.T) {
+	t.Parallel()
+	pg, connId := newWithholdSiteGov(
+		PeerSourceP2PGossip,
+		PeerStateHot,
+		1,
+		true,
+	)
+	pg.mu.Lock()
+	pg.peers[0].Connection.UpstreamWithheld = false
+	pg.mu.Unlock()
+
+	assert.False(t, pg.IsChainSelectionEligible(connId))
+}
+
+func TestDeniedWarmPublicRootIsNotHotPromoted(t *testing.T) {
+	t.Parallel()
+	pg, _ := newWithholdSiteGov(
+		PeerSourceTopologyPublicRoot,
+		PeerStateWarm,
+		1,
+		true,
+	)
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "10.3.0.1:3001",
+		NormalizedAddress: "10.3.0.1:3001",
+		Source:            PeerSourceTopologyPublicRoot,
+		State:             PeerStateHot,
+		PerformanceScore:  1,
+	})
+	pg.mu.Unlock()
+
+	pg.publicRootChurn()
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.Equal(t, PeerStateWarm, pg.peers[0].State)
+}

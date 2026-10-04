@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"hash/fnv"
 	"math"
+	"net"
 	"slices"
 	"sync"
 	"time"
@@ -209,7 +210,23 @@ func lowestTie(
 // blockfetchTie ranks connId among tied peers: stable for this node, but
 // different on nodes with different salts.
 func (s *State) blockfetchTie(connId ouroboros.ConnectionId) uint64 {
-	return s.saltedHash([]byte(connId.String()))
+	key := appendBlockfetchAddressKey(nil, connId.LocalAddr)
+	key = appendBlockfetchAddressKey(key, connId.RemoteAddr)
+	return s.saltedHash(key)
+}
+
+func appendBlockfetchAddressKey(key []byte, addr net.Addr) []byte {
+	if addr == nil {
+		return append(key, 0)
+	}
+	key = append(key, 1)
+	for _, part := range [...]string{addr.Network(), addr.String()} {
+		var length [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(length[:], uint64(len(part)))
+		key = append(key, length[:n]...)
+		key = append(key, part...)
+	}
+	return key
 }
 
 // saltedHash hashes data with this node's blockfetch salt.

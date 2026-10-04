@@ -803,9 +803,8 @@ func addressHost(address string) string {
 //     peer has a NormalizedAddress whose host portion equals the
 //     inbound's host portion. Supports the operator pattern where a
 //     configured topology peer dials us from an ephemeral source port.
-//     When two or more topology peers share the host we refuse to
-//     guess, because merging distinct configured identities would
-//     silently violate operator intent.
+//     When two or more topology peers share the host we decline topology
+//     attribution and continue to rule 3 rather than guessing.
 //
 //  3. Disconnected inbound entry from the same host: an earlier inbound
 //     entry with no live connection is reused, so a peer reconnecting from
@@ -859,8 +858,9 @@ func (p *PeerGovernor) resolveInboundIdentity(
 		if candidateIdx != -1 {
 			// More than one topology peer shares this host. Refuse to
 			// guess which configured identity the inbound is; the
-			// caller will create a new inbound entry.
-			return -1, ""
+			// caller will not attribute the arrival to a topology peer.
+			candidateIdx = -1
+			break
 		}
 		candidateIdx = i
 	}
@@ -984,14 +984,12 @@ func (p *PeerGovernor) withholdDeniedUpstreamLocked(peer *Peer) {
 	peer.Connection.UpstreamWithheld = p.isPeerDeniedLocked(peer)
 }
 
-// upstreamWithheldLocked reports whether peer's open connection is withheld
-// from upstream use right now. The stored flag records the last withhold
-// that was announced; the denial is what keeps it in force, so an expired
-// denial lifts the withhold before the next sync clears the flag. Must be
-// called with p.mu held.
+// upstreamWithheldLocked reports whether peer's open connection is denied
+// for upstream use right now. Eligibility follows the live denial state even
+// before syncUpstreamWithholdLocked updates the stored transition flag. Must
+// be called with p.mu held.
 func (p *PeerGovernor) upstreamWithheldLocked(peer *Peer) bool {
-	return peer != nil && peer.Connection != nil &&
-		peer.Connection.UpstreamWithheld && p.isPeerDeniedLocked(peer)
+	return peer != nil && peer.Connection != nil && p.isPeerDeniedLocked(peer)
 }
 
 // usableClientLocked reports whether peer has a client-capable connection

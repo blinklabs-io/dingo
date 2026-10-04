@@ -1151,6 +1151,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	ls.clearChainsyncResyncCoalesce(e.ConnectionId)
 	// This handler discards the header queue when the dead connection owned
 	// the header pipeline, which queues a chain.header invalidation on the
 	// chain-level sequencer. Register the drain before the mutexes are taken
@@ -2207,7 +2208,7 @@ func (ls *LedgerState) requestChainsyncResync(
 	pending *pendingPublishes,
 ) {
 	ls.headerMismatchCount = 0
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.bufferedHeaderMutex.Unlock()
@@ -2275,6 +2276,18 @@ func (ls *LedgerState) coalesceChainsyncResync(
 	}
 	ls.resyncCoalesce[key] = &resyncCoalesceRecord{at: now}
 	return false
+}
+
+func (ls *LedgerState) clearChainsyncResyncCoalesce(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	ls.resyncCoalesceMutex.Lock()
+	delete(ls.resyncCoalesce, key)
+	ls.resyncCoalesceMutex.Unlock()
 }
 
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
@@ -2625,6 +2638,20 @@ func (ls *LedgerState) recordRollback(
 	point ocommon.Point,
 	now time.Time,
 ) int {
+	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
+		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
+		for _, r := range ls.rollbackHistory {
+			key := rollbackCountKey{
+				connKey: r.connKey,
+				slot:    r.point.Slot,
+				hash:    string(r.point.Hash),
+			}
+			ls.rollbackCounts[key] = addRollbackOccurrence(
+				ls.rollbackCounts[key],
+				r.timestamp,
+			)
+		}
+	}
 	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
 		point: ocommon.Point{
 			Slot: point.Slot,
@@ -2644,13 +2671,54 @@ func (ls *LedgerState) recordRollback(
 		pruned = pruned[len(pruned)-maxRollbackHistory:]
 	}
 	ls.rollbackHistory = pruned
-	var count int
-	for _, r := range ls.rollbackHistory {
-		if r.connKey == connKey && pointMatches(r.point, point) {
-			count++
+	for key, record := range ls.rollbackCounts {
+		if !record.second.IsZero() && record.second.Before(cutoff) {
+			record = rollbackCountRecord{}
+		} else if !record.first.IsZero() && record.first.Before(cutoff) {
+			record.first = record.second
+			record.second = time.Time{}
+		}
+		if record.first.IsZero() {
+			delete(ls.rollbackCounts, key)
+		} else {
+			ls.rollbackCounts[key] = record
 		}
 	}
-	return count
+	if ls.rollbackCounts == nil {
+		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
+	}
+	key := rollbackCountKey{
+		connKey: connKey,
+		slot:    point.Slot,
+		hash:    string(point.Hash),
+	}
+	record := addRollbackOccurrence(ls.rollbackCounts[key], now)
+	ls.rollbackCounts[key] = record
+	if record.second.IsZero() {
+		return 1
+	}
+	return 2
+}
+
+func addRollbackOccurrence(
+	record rollbackCountRecord,
+	now time.Time,
+) rollbackCountRecord {
+	switch {
+	case record.first.IsZero():
+		record.first = now
+	case record.second.IsZero():
+		record.second = now
+	default:
+		record.first = record.second
+		record.second = now
+	}
+	return record
+}
+
+func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistory = nil
+	ls.rollbackCounts = nil
 }
 
 func (ls *LedgerState) handleEventChainsyncRollback(
@@ -3086,9 +3154,6 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
-	if len(ls.rollbackHistory) == 0 {
-		return
-	}
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
@@ -3097,6 +3162,11 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 		filtered = append(filtered, r)
 	}
 	ls.rollbackHistory = filtered
+	for key := range ls.rollbackCounts {
+		if key.slot == point.Slot && key.hash == string(point.Hash) {
+			delete(ls.rollbackCounts, key)
+		}
+	}
 }
 
 // resetChainsyncResyncState clears chainsync-local recovery state before a
@@ -3106,7 +3176,7 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 // Callers must hold chainsyncMutex before invoking this method to avoid races
 // with other chainsync operations.
 func (ls *LedgerState) resetChainsyncResyncState() {
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	ls.headerMismatchCount = 0
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -4362,7 +4432,7 @@ func (ls *LedgerState) tryResolveFork(
 			}
 		}
 		ls.headerMismatchCount = 0
-		ls.rollbackHistory = nil
+		ls.clearRollbackHistory()
 		if ls.config.BlockfetchRequestRangeFunc != nil &&
 			ls.chain.HeaderCount() > 0 {
 			ls.chainsyncBlockfetchMutex.Lock()
@@ -4410,7 +4480,7 @@ func (ls *LedgerState) tryResolveFork(
 				e.ConnectionId.String(),
 			)
 			ls.headerMismatchCount = 0
-			ls.rollbackHistory = nil
+			ls.clearRollbackHistory()
 			ls.requestChainsyncResync(
 				e.ConnectionId,
 				event.ChainsyncResyncReasonRollbackNotFound,
@@ -4464,7 +4534,7 @@ func (ls *LedgerState) tryResolveFork(
 			// Reset mismatch state so the fallback path in the
 			// caller does not fire a duplicate resync event.
 			ls.headerMismatchCount = 0
-			ls.rollbackHistory = nil
+			ls.clearRollbackHistory()
 			pending.add(
 				ls.config.EventBus,
 				event.ChainsyncResyncEventType,
@@ -4531,7 +4601,7 @@ func (ls *LedgerState) tryResolveFork(
 		}
 	}
 	ls.headerMismatchCount = 0
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	if ls.config.BlockfetchRequestRangeFunc != nil &&
 		ls.chain.HeaderCount() > 0 {
 		ls.chainsyncBlockfetchMutex.Lock()
@@ -4555,16 +4625,25 @@ func (ls *LedgerState) resetBatchDeliveryLocked() {
 	ls.batchFirstBlockAt = time.Time{}
 	ls.batchLastBlockAt = time.Time{}
 	ls.batchStreamBytes = 0
+	ls.batchDeliveryConnId = ouroboros.ConnectionId{}
+	ls.batchDeliveryMixed = false
 }
 
 // noteBatchBlockArrivalLocked counts an accepted block of the given size
 // toward the current batch. The first block only starts the clock: its
 // arrival time is the batch's latency, not its transfer rate.
-func (ls *LedgerState) noteBatchBlockArrivalLocked(size int) {
+func (ls *LedgerState) noteBatchBlockArrivalLocked(
+	connId ouroboros.ConnectionId,
+	size int,
+) {
 	now := time.Now()
 	if ls.batchBlocksReceived == 0 {
 		ls.batchFirstBlockAt = now
+		ls.batchDeliveryConnId = connId
 	} else {
+		if !sameConnectionId(ls.batchDeliveryConnId, connId) {
+			ls.batchDeliveryMixed = true
+		}
 		ls.batchStreamBytes += uint64(size) //nolint:gosec // len is non-negative
 		ls.batchLastBlockAt = now
 	}
@@ -4575,7 +4654,9 @@ func (ls *LedgerState) noteBatchBlockArrivalLocked(size int) {
 // peer selection. A batch of one block has no stream to measure.
 func (ls *LedgerState) recordBatchDeliveryLocked(connId ouroboros.ConnectionId) {
 	if ls.config.RecordBlockfetchThroughputFunc == nil ||
-		ls.batchBlocksReceived < 2 {
+		ls.batchBlocksReceived < 2 ||
+		ls.batchDeliveryMixed ||
+		!sameConnectionId(ls.batchDeliveryConnId, connId) {
 		return
 	}
 	ls.config.RecordBlockfetchThroughputFunc(
@@ -4717,7 +4798,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 		}
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
-	ls.noteBatchBlockArrivalLocked(len(e.RawBlock))
+	ls.noteBatchBlockArrivalLocked(e.ConnectionId, len(e.RawBlock))
 	// Range progress is noted where the block actually extends the chain,
 	// not here. Arrival alone is not progress: a block from a batch a
 	// rollback has superseded is discarded unapplied, and one that no
