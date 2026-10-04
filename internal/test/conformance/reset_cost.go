@@ -200,33 +200,41 @@ func nonEmptyTables(
 			query.WriteString(")")
 		}
 
-		rows, err := db.QueryContext(ctx, query.String())
+		batchDirty, err := func() (batchDirty []string, retErr error) {
+			rows, err := db.QueryContext(ctx, query.String())
+			if err != nil {
+				return nil, fmt.Errorf("probe non-empty tables: %w", err)
+			}
+			defer func() {
+				if err := rows.Close(); err != nil && retErr == nil {
+					retErr = fmt.Errorf("close non-empty table probe: %w", err)
+				}
+			}()
+			for rows.Next() {
+				var raw string
+				if err := rows.Scan(&raw); err != nil {
+					return nil, fmt.Errorf(
+						"scan non-empty table index: %w", err,
+					)
+				}
+				idx, err := strconv.Atoi(raw)
+				if err != nil || idx < start || idx >= end {
+					return nil, fmt.Errorf(
+						"non-empty table probe returned unusable index %q",
+						raw,
+					)
+				}
+				batchDirty = append(batchDirty, qualified[idx])
+			}
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("probe non-empty tables: %w", err)
+			}
+			return batchDirty, nil
+		}()
 		if err != nil {
-			return nil, fmt.Errorf("probe non-empty tables: %w", err)
+			return nil, err
 		}
-		for rows.Next() {
-			var raw string
-			if err := rows.Scan(&raw); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan non-empty table index: %w", err)
-			}
-			idx, err := strconv.Atoi(raw)
-			if err != nil || idx < start || idx >= end {
-				_ = rows.Close()
-				return nil, fmt.Errorf(
-					"non-empty table probe returned unusable index %q",
-					raw,
-				)
-			}
-			dirty = append(dirty, qualified[idx])
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("probe non-empty tables: %w", err)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("close non-empty table probe: %w", err)
-		}
+		dirty = append(dirty, batchDirty...)
 	}
 	return dirty, nil
 }

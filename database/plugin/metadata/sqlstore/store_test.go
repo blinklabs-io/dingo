@@ -803,3 +803,15 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 		retained,
 	)
 }
+
+func TestUpdatePlannerStatsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.NoError(t, store.UpdatePlannerStatsContext(t.Context()))
+}

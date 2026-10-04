@@ -926,8 +926,10 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// This runs on the blockfetch receive goroutine, which must not wait
+		// on the ledger; see enqueueBlockfetchEvent.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -942,6 +944,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
@@ -971,8 +974,10 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Same per-connection queue as the blocks, so this BatchDone reaches
+		// the ledger after every block the connection delivered before it.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -982,6 +987,7 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil
