@@ -210,6 +210,12 @@ var flagSpecs = []flagSpec{
 		"Blockfrost API provider",
 	),
 	stringFlag(
+		"Plugins.API.Kupo.Provider",
+		"kupo-provider",
+		"",
+		"Kupo API provider",
+	),
+	stringFlag(
 		"Plugins.API.Mesh.Provider",
 		"mesh-provider",
 		"",
@@ -410,7 +416,7 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
-	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(
 		"KoiosParity.Enabled",
@@ -757,11 +763,6 @@ var flagSpecs = []flagSpec{
 		"slot gap threshold for stale slot clock alerts",
 	),
 	uint64Flag(
-		"ForgePrimaryChainTipToleranceSlots",
-		"forge-primary-chain-tip-tolerance-slots",
-		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
-	),
-	uint64Flag(
 		"ForgeUpstreamStalenessSlots",
 		"forge-upstream-staleness-slots",
 		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
@@ -769,7 +770,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"ForgeAppliedTipStalenessSlots",
 		"forge-applied-tip-staleness-slots",
-		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+		"maximum slot lag for the applied tip when a corroborated upstream target exists (0 disables)",
 	),
 	uint64Flag(
 		"ForgeEndorserBlockStalenessSlots",
@@ -826,16 +827,16 @@ var flagSpecs = []flagSpec{
 		"CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)",
 	),
 
-	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	// Experimental pre-Dijkstra CIP-50 override (consensus-affecting; default off)
 	boolFlag(
 		"PledgeLeverageEnabled",
 		"pledge-leverage-enabled",
-		"enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)",
+		"enable the experimental pre-Dijkstra pledge-leverage cap (match across local-network nodes)",
 	),
 	uintFlag(
 		"PledgeLeverage",
 		"pledge-leverage",
-		"CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)",
+		"experimental pre-Dijkstra max pledge leverage L in [1,10000]",
 	),
 
 	// Leios voting (experimental)

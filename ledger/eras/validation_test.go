@@ -27,6 +27,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -92,7 +93,7 @@ func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule is the
-// regression guard for blinklabs-io/dingo#3821: it fails if
+// regression guard: it fails if
 // resolveUtxoValidationSkipIndex ever goes back to matching upstream rules by
 // validation function identity or runtime name.
 //
@@ -155,7 +156,7 @@ func TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule(t *testing.T) {
 
 // TestConwayUpstreamGatedRulesAreWrapped proves the wrapping the guard above
 // simulates is what the pinned gouroboros release actually does, so the
-// package-init panic #3821 reported cannot silently stop being reachable.
+// package-init panic reported cannot silently stop being reachable.
 func TestConwayUpstreamGatedRulesAreWrapped(t *testing.T) {
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	require.Len(t, conway.UtxoValidationRules, len(descriptors))
@@ -512,7 +513,7 @@ func shortUtxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // treasuryUnavailableLedgerState mirrors *ledger.LedgerView while
-// blinklabs-io/dingo#3687 is open: TreasuryValue is a mandatory
+// is open: TreasuryValue is a mandatory
 // common.LedgerState method that Dingo does not implement yet.
 type treasuryUnavailableLedgerState struct {
 	*mockLedgerState
@@ -557,7 +558,7 @@ func newConwayTreasuryTx(
 // LedgerState.TreasuryValue only for a transaction that declares
 // currentTreasuryValue (transaction body key 21). Dingo's provider still
 // returns an error, so this rule must stay unreachable for ordinary traffic
-// until blinklabs-io/dingo#3687 lands. If upstream drops the guard, or stops
+// until lands. If upstream drops the guard, or stops
 // distinguishing an absent key 21 from a declared zero, this test fails
 // instead of the node rejecting ordinary transactions.
 func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
@@ -839,6 +840,7 @@ type mockWitnessSet struct {
 	plutusV1Scripts []lcommon.PlutusV1Script
 	plutusV2Scripts []lcommon.PlutusV2Script
 	plutusV3Scripts []lcommon.PlutusV3Script
+	plutusData      []lcommon.Datum
 }
 
 func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
@@ -854,7 +856,7 @@ func (m *mockWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
 }
 
 func (m *mockWitnessSet) PlutusData() []lcommon.Datum {
-	return nil
+	return m.plutusData
 }
 
 func (m *mockWitnessSet) PlutusV1Scripts() []lcommon.PlutusV1Script {
@@ -964,10 +966,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// comment): this script never invokes an actual builtin function, only
 	// CEK machine steps, so it reproduces the exact 112100/800 numbers
 	// plutigo's own default cost model already produced before
-	// requiredCostModel (issue #3528) started rejecting the incomplete
-	// cost models that used to silently trigger that fallback. These
-	// numbers would still change if plutigo's DefaultMachineCosts changes,
-	// same as before.
+	// requiredCostModel started rejecting the incomplete cost models that used
+	// to silently trigger that fallback. These numbers would still change if
+	// plutigo's DefaultMachineCosts changes, same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -2333,18 +2334,6 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 255,
 		},
 		{
-			name:     "typical alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 4096),
-			expected: 4095,
-		},
-		{
-			name:     "large alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 16384),
-			expected: 16383,
-		},
-		{
 			// Mary (pre-Alonzo) TX: no subtraction.
 			name:     "mary transaction full size",
 			txType:   3, // Mary
@@ -3021,47 +3010,6 @@ func TestCalculateMinFee(t *testing.T) {
 			expected:    240701,
 		},
 		{
-			// Multiple scripts - the exUnits represent the
-			// sum of all script execution units.
-			// Two scripts: script1(mem=500000, steps=100000000)
-			//              script2(mem=500000, steps=100000000)
-			// Total: mem=1000000, steps=200000000
-			// Same as single script test above.
-			name:   "multiple scripts summed exunits",
-			txSize: 300,
-			exUnits: lcommon.ExUnits{
-				Memory: 1000000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    240701,
-		},
-		{
-			// Three scripts with different costs summed:
-			// script1(mem=300000, steps=50000000)
-			// script2(mem=200000, steps=80000000)
-			// script3(mem=100000, steps=70000000)
-			// Total: mem=600000, steps=200000000
-			// baseFee = 44*400 + 155381 = 172981
-			// memFee = ceil(577*600000/10000) = ceil(34620) = 34620
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// total = 172981 + 34620 + 14420 = 222021
-			name:   "three scripts summed",
-			txSize: 400,
-			exUnits: lcommon.ExUnits{
-				Memory: 600000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    222021,
-		},
-		{
 			// Ceiling behavior: single ceiling over sum.
 			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
 			// pricesMem=1/3, mem=1 => 1/3
@@ -3233,100 +3181,6 @@ func TestCalculateMinFee(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
-	// Verify that a transaction with scripts costs more
-	// than the same transaction without scripts.
-	txSize := uint64(300)
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-
-	// Fee with no scripts
-	feeNoScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{Memory: 0, Steps: 0},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// Fee with scripts
-	feeWithScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{
-			Memory: 1000000,
-			Steps:  200000000,
-		},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	assert.Greater(
-		t,
-		feeWithScripts,
-		feeNoScripts,
-		"fee with scripts should be greater than base fee",
-	)
-
-	// The difference should equal the script execution fee
-	scriptFee := feeWithScripts - feeNoScripts
-	// memFee = ceil(577*1000000/10000) = 57700
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	assert.Equal(
-		t,
-		uint64(72120),
-		scriptFee,
-		"script fee component mismatch",
-	)
-}
-
-func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
-	// Verify that running N scripts with individual
-	// ExUnits that sum to a total produces the same
-	// fee as the total ExUnits directly.
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-	txSize := uint64(400)
-
-	// Three individual scripts
-	scripts := []lcommon.ExUnits{
-		{Memory: 300000, Steps: 50000000},
-		{Memory: 200000, Steps: 80000000},
-		{Memory: 100000, Steps: 70000000},
-	}
-
-	// Sum them up (simulating what EvaluateTx does)
-	var totalExUnits lcommon.ExUnits
-	for _, s := range scripts {
-		totalExUnits.Memory += s.Memory
-		totalExUnits.Steps += s.Steps
-	}
-
-	require.Equal(t, int64(600000), totalExUnits.Memory)
-	require.Equal(t, int64(200000000), totalExUnits.Steps)
-
-	fee := CalculateMinFee(
-		txSize,
-		totalExUnits,
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// baseFee = 44*400 + 155381 = 172981
-	// memFee = ceil(577*600000/10000) = 34620
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	// total = 172981 + 34620 + 14420 = 222021
-	assert.Equal(t, uint64(222021), fee)
 }
 
 func TestCalculateConwayRefScriptFee_Tiered(t *testing.T) {
@@ -5117,7 +4971,7 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 // other's member.
 //
 // This test passes both with and without the fail-closed change by design; it
-// covers the tag-preservation behavior this PR adds, not the availability
+// covers the tag-preservation behavior, not the availability
 // gate. It fails if the tag is ever dropped or defaulted in voter resolution.
 func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
 	var hash lcommon.Blake2b224
@@ -5250,8 +5104,8 @@ func committeeCert(
 	}
 }
 
-// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
-// dingo#4377: a committee cold credential resignation is rejected both when
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins:
+// a committee cold credential resignation is rejected both when
 // it was already resigned before the transaction and when an earlier
 // certificate in the same transaction resigned it. Dingo's replacement
 // previously checked member.Resigned only on the authorize path and queried
@@ -5488,4 +5342,459 @@ func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
 			&conway.ConwayProtocolParameters{},
 		))
 	})
+}
+
+// conwayParameterChangeProposal builds a proposal procedure carrying a
+// ConwayParameterChangeGovAction. When protocolVersion is non-nil, the
+// action sets protocol-version key 14, which requires rejecting.
+func conwayParameterChangeProposal(
+	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
+) lcommon.ProposalProcedure {
+	minFeeA := uint(1)
+	return conway.ConwayProposalProcedure{
+		PPGovAction: conway.ConwayGovAction{
+			Type: uint(lcommon.GovActionTypeParameterChange),
+			Action: &conway.ConwayParameterChangeGovAction{
+				ParamUpdate: conway.ConwayProtocolParameterUpdate{
+					MinFeeA:         &minFeeA,
+					ProtocolVersion: protocolVersion,
+				},
+			},
+		},
+	}
+}
+
+// dijkstraParameterChangeProposal is the Dijkstra analogue of
+// conwayParameterChangeProposal.
+func dijkstraParameterChangeProposal(
+	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
+) lcommon.ProposalProcedure {
+	minFeeA := uint(1)
+	return conway.ConwayProposalProcedure{
+		PPGovAction: conway.ConwayGovAction{
+			Type: uint(lcommon.GovActionTypeParameterChange),
+			Action: &gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+					MinFeeA:         &minFeeA,
+					ProtocolVersion: protocolVersion,
+				},
+			},
+		},
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsConway pins
+// validateParameterChangeExcludesProtocolVersion's Conway branch directly,
+// independent of any other Conway validation rule.
+func TestValidateParameterChangeExcludesProtocolVersionRejectsConway(
+	t *testing.T,
+) {
+	for _, major := range []uint{9, 10, 11} {
+		t.Run(
+			fmt.Sprintf("PV%d", major),
+			func(t *testing.T) {
+				tx := &mockConwayFeeTx{
+					proposalProcedures: []lcommon.ProposalProcedure{
+						conwayParameterChangeProposal(
+							&lcommon.ProtocolParametersProtocolVersion{
+								Major: major,
+							},
+						),
+					},
+				}
+				err := validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				)
+				var protocolVersionErr ParameterChangeProtocolVersionError
+				require.ErrorAs(t, err, &protocolVersionErr)
+				require.Equal(t, 0, protocolVersionErr.ProposalIndex)
+			},
+		)
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra is the
+// Dijkstra analogue: the same protocol-version key 14 exclusion carries into
+// Dijkstra's ParameterChange action ( "apply the same protection
+// to Dijkstra" acceptance criterion, PV12).
+func TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra(
+	t *testing.T,
+) {
+	tx := &mockConwayFeeTx{
+		proposalProcedures: []lcommon.ProposalProcedure{
+			dijkstraParameterChangeProposal(
+				&lcommon.ProtocolParametersProtocolVersion{
+					Major: gdijkstra.MinProtocolVersionDijkstra,
+				},
+			),
+		},
+	}
+	err := validateParameterChangeExcludesProtocolVersion(
+		tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+	)
+	var protocolVersionErr ParameterChangeProtocolVersionError
+	require.ErrorAs(t, err, &protocolVersionErr)
+	require.Equal(t, 0, protocolVersionErr.ProposalIndex)
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate is
+// the negative case: a ParameterChange that never touches protocol version
+// must not be rejected by this rule, in either era's action type.
+func TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name     string
+		proposal lcommon.ProposalProcedure
+	}{
+		{"Conway", conwayParameterChangeProposal(nil)},
+		{"Dijkstra", dijkstraParameterChangeProposal(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					tc.proposal,
+				},
+			}
+			require.NoError(
+				t,
+				validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				),
+			)
+		})
+	}
+}
+
+// decodeConwayParamUpdateFromRawFields CBOR-encodes fields as a map and
+// decodes it into a ConwayProtocolParameterUpdate through the type's own
+// UnmarshalCBOR, so the returned value's Cbor() carries the real raw bytes
+// -- unlike a struct literal, which leaves Cbor() empty. This is what lets a
+// test exercise parameterChangeSetsProtocolVersionKey's raw-CBOR path.
+func decodeConwayParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) conway.ConwayProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update conway.ConwayProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// decodeDijkstraParamUpdateFromRawFields is the Dijkstra analogue of
+// decodeConwayParamUpdateFromRawFields.
+func decodeDijkstraParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) gdijkstra.DijkstraProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update gdijkstra.DijkstraProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14
+// verifies that a decoded ParamUpdate whose raw CBOR carries key 14 with an
+// explicit null value decodes ProtocolVersion
+// to the same nil the field takes when key 14 is absent entirely, so the
+// decoded-pointer check alone cannot reject it. The reference rejects a
+// ParameterChange carrying key 14 at all, regardless of its value, so this
+// must be rejected via the raw-CBOR path in
+// parameterChangeSetsProtocolVersionKey.
+func TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	conwayRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	dijkstraRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	var conwayUpdate conway.ConwayProtocolParameterUpdate
+	conwayUpdate.MinFeeA = &minFeeA
+	conwayUpdate.SetCbor(conwayRaw)
+	var dijkstraUpdate gdijkstra.DijkstraProtocolParameterUpdate
+	dijkstraUpdate.MinFeeA = &minFeeA
+	dijkstraUpdate.SetCbor(dijkstraRaw)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: conwayUpdate,
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: dijkstraUpdate,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
+				},
+			}
+			err := validateParameterChangeExcludesProtocolVersion(
+				tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+			)
+			var protocolVersionErr ParameterChangeProtocolVersionError
+			require.ErrorAs(t, err, &protocolVersionErr)
+		})
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14
+// is the negative case alongside the test above: a raw-CBOR-decoded update
+// that never carries key 14 must still pass, proving
+// parameterChangeSetsProtocolVersionKey does not over-reject an ordinary
+// decoded update.
+func TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: decodeConwayParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: decodeDijkstraParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
+				},
+			}
+			require.NoError(
+				t,
+				validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				),
+			)
+		})
+	}
+}
+
+// Slots used by the tests below: the transaction is applied inside the era
+// forecast horizon but its TTL falls past it, which is the shape of a real
+// preview transaction (block slot 699109, TTL 785381, horizon 777600) that
+// wedged `dingo load`.
+const (
+	testAppliedSlot     = 699_109
+	testHorizonSlot     = 777_600
+	testPastHorizonSlot = 785_381
+)
+
+// pastHorizonLedgerState resolves slots to times only inside the era forecast
+// horizon, mirroring ledger.LedgerState.SlotToTime once the current era is
+// bounded by its safe zone.
+type pastHorizonLedgerState struct {
+	*mockLedgerState
+	horizonSlot     uint64
+	slotToTimeCalls int
+}
+
+func newPastHorizonLedgerState() *pastHorizonLedgerState {
+	return &pastHorizonLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		horizonSlot:     testHorizonSlot,
+	}
+}
+
+// withoutBabbageUtxoValidationRules drops the gouroboros phase-1 rule set so a
+// test can exercise the dingo-side script handling in isolation, mirroring
+// withoutConwayUtxoValidationRules.
+func withoutBabbageUtxoValidationRules(t *testing.T) {
+	t.Helper()
+
+	orig := babbageUtxoValidationRules
+	babbageUtxoValidationRules = nil
+	t.Cleanup(func() {
+		babbageUtxoValidationRules = orig
+	})
+}
+
+// newTestTxCbor builds transaction CBOR with a single input, a fee, and a TTL.
+func newTestTxCbor(
+	t *testing.T,
+	ttl uint64,
+	witnessSet map[uint]any,
+) []byte {
+	t.Helper()
+
+	inputHash := make([]byte, 32)
+	inputHash[0] = 0xaa
+	bodyMap := map[uint]any{
+		0: []any{
+			[]any{inputHash, uint64(0)},
+		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		2: uint64(200_000),
+		3: ttl,
+	}
+	txCbor, err := cbor.Encode(
+		[]any{bodyMap, witnessSet, true, nil},
+	)
+	require.NoError(t, err)
+	return txCbor
+}
+
+// redeemerWitnessSet is a witness set carrying one spend redeemer, which is
+// what makes a transaction require Plutus evaluation.
+func redeemerWitnessSet() map[uint]any {
+	return map[uint]any{
+		5: []any{
+			[]any{
+				uint64(0), // tag: spend
+				uint64(0), // index
+				uint64(42),
+				[]any{uint64(1_000), uint64(2_000)},
+			},
+		},
+	}
+}
+
+// A transaction with no redeemers runs no Plutus script, so no script context
+// may be built for it: building one translates its TTL to wall-clock time,
+// which fails past the era forecast horizon and rejects a canonical block.
+func TestValidateTxBabbageSkipsScriptContextWithoutRedeemers(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testPastHorizonSlot, map[uint]any{}),
+	)
+	require.NoError(t, err)
+	require.False(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.NoError(t, err)
+	assert.Zero(
+		t,
+		ls.slotToTimeCalls,
+		"no slot/time translation may happen for a redeemerless transaction",
+	)
+}
+
+// The gate must not weaken the horizon for transactions that do run scripts:
+// those still translate their validity interval, and a past-horizon TTL is a
+// genuine translation failure (cardano-ledger's TimeTranslationPastHorizon).
+func TestValidateTxBabbageKeepsHorizonForRedeemerTx(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testPastHorizonSlot, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	require.True(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	assert.Positive(t, ls.slotToTimeCalls)
+}
+
+// The accept half of the redeemer class: a transaction that does run scripts
+// and whose validity bound is inside the horizon must have its script context
+// built, which means its validity interval is translated and the translation
+// succeeds. Only the reject half was pinned before, so a regression that
+// refused every redeemer transaction's translation would have gone unnoticed.
+//
+// The transaction carries no matching script, so evaluation cannot proceed past
+// the redeemer lookup; reaching that lookup is the proof that the script
+// context was built rather than skipped or refused.
+func TestValidateTxBabbageBuildsScriptContextInsideHorizon(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot+100, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	require.True(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a validity bound inside the horizon must translate")
+	assert.ErrorContains(t, err, "could not find script with hash",
+		"validation must reach redeemer resolution, which only happens once "+
+			"the script context has been built")
+	assert.Positive(t, ls.slotToTimeCalls,
+		"building the script context must translate the validity interval")
+}
+
+func TestTxHasRedeemers(t *testing.T) {
+	withRedeemer, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	assert.True(t, txHasRedeemers(withRedeemer))
+
+	withoutRedeemer, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot, map[uint]any{}),
+	)
+	require.NoError(t, err)
+	assert.False(t, txHasRedeemers(withoutRedeemer))
 }

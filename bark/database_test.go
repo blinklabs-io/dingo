@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,7 +49,7 @@ import (
 
 // barkFakeCloudDestination is a minimal stand-in for a real cloud
 // destination (S3/GCS), backed by an ordinary local directory — the same
-// pattern database/lifecycle/destination_c27ce77b_test.go uses, redeclared here
+// pattern database/lifecycle/destination_test.go uses, redeclared here
 // because Go test binaries are per-package: that file's "faketest" scheme
 // registration only exists inside database/lifecycle's own test binary,
 // not bark's.
@@ -1368,7 +1367,7 @@ func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
 }
 
 // TestRestoreClaimsBusyBeforeResolvingSource guards the reordering fix
-// for dingo#1651's finding that Restore used to resolve its snapshot
+// for the finding that Restore used to resolve its snapshot
 // source before claiming the busy flag DeleteSnapshot also uses, leaving
 // a window where a concurrent DeleteSnapshot could remove the very
 // snapshot Restore was about to read. If Restore still resolved the
@@ -1473,7 +1472,7 @@ func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 // the "more than one field set" cases this test used to also cover as a
 // synchronous RPC rejection, before blockRefToTarget started accepting any
 // combination of fields at the RPC level and deferring agreement-checking
-// to dblifecycle.ResolveTarget (dingo#1651 follow-up).
+// to dblifecycle.ResolveTarget.
 func TestTruncateRejectsInvalidTarget(t *testing.T) {
 	t.Parallel()
 
@@ -1798,7 +1797,7 @@ func TestListSnapshotsPaginates(t *testing.T) {
 
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one
 // snapshot's corrupted manifest.json doesn't hide every other, otherwise-
-// valid snapshot from ListSnapshots (dingo#1651 follow-up): this RPC used
+// valid snapshot from ListSnapshots: this RPC used
 // to fail the whole call whenever lifecycle.ListSnapshots reported ANY
 // per-entry problem, discarding the valid entries it had already
 // collected instead of using them.
@@ -2126,7 +2125,7 @@ func tamperManifestChecksum(t *testing.T, manifestPath string) {
 }
 
 // TestVerifySnapshotOfTamperedManifestReturnsDataLoss guards against a
-// misleading-error finding (dingo#1651 follow-up): a snapshot whose
+// misleading-error finding: a snapshot whose
 // manifest.json was corrupted/hand-edited (so it fails checksum
 // validation) used to be indistinguishable from a snapshot ID that never
 // existed at all — both surfaced as CodeNotFound. resolveSnapshotSource
@@ -2256,7 +2255,7 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 }
 
 // TestOperationsArePrunedOnceOverCap verifies that h.operations doesn't
-// grow without bound (dingo#1651 follow-up): once more than
+// grow without bound: once more than
 // maxRetainedOperations terminal operations have been registered, the
 // oldest ones are pruned so both the map's memory footprint and
 // GetOperationHistory's per-call sort over it stay bounded, rather than
@@ -2484,18 +2483,6 @@ func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
 	)
 }
 
-// freeTCPPort finds an OS-assigned free port by binding then immediately
-// closing a listener. NewBark substitutes its own default (9091) for
-// Port: 0, so this is how a test asks for "any free port" instead.
-func freeTCPPort(t *testing.T) uint {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := ln.Addr().(*net.TCPAddr).Port //nolint:forcetypeassert // always *net.TCPAddr for a "tcp" listener
-	require.NoError(t, ln.Close())
-	return uint(port)
-}
-
 // mtlsHTTPClient builds an HTTP/2-over-TLS client suitable for talking to a
 // bark.Bark server started with TlsCertFilePath/TlsKeyFilePath: it skips
 // verifying the server's certificate (these tests always use
@@ -2580,7 +2567,6 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		Lifecycle:           svc,
 		SnapshotDir:         t.TempDir(),
 		Host:                "127.0.0.1",
-		Port:                freeTCPPort(t),
 		TlsCertFilePath:     serverCertPath,
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,

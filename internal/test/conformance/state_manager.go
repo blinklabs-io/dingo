@@ -254,7 +254,7 @@ func newDingoStateManagerAt(dataDir string) (*DingoStateManager, error) {
 // mysqlProcessDatabase's in state_manager_mysql.go), so an individual
 // manager's Close must not drop a resource a sibling manager elsewhere in
 // the same process may still be using -- that cleanup belongs to TestMain
-// (tests_d4f17915_test.go), once, after every test in the process has
+// (conformance_postgres_test.go), once, after every test in the process has
 // finished.
 func (m *DingoStateManager) Close() error {
 	err := closeRealDatabase(m.db, m.host)
@@ -1014,6 +1014,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			if err := governance.ProcessProposals(
 				level,
 				point,
+				storageIndex,
 				m.currentEpoch,
 				govActionLifetime,
 				m.db,
@@ -1586,12 +1587,12 @@ func (m *DingoStateManager) ratifyProposals(
 			// tally: a vector can carry the same yes-voter shape (one DRep,
 			// one SPO) as another vector that must NOT ratify once active
 			// proposal deposits are counted as part of the depositor's
-			// active voting stake (CIP-1694). See issue #4007.
+			// active voting stake (CIP-1694).
 			//
 			// This must run before the zero-explicit-vote guard below: a
 			// DRep or silent pool delegated AlwaysNoConfidence casts an
 			// automatic yes on a NoConfidence action without ever appearing
-			// in proposal.Votes (see drepStakeForCommitteeAction/
+			// in proposal.Votes (see drepStakeForCommitteeAction and
 			// spoStakeForCommitteeAction), so a proposal backed only by that
 			// implicit vote must still reach committeeActionRatified.
 			var err error
@@ -1683,16 +1684,13 @@ func (m *DingoStateManager) inConwayBootstrap() bool {
 // threshold selection (MotionNoConfidence vs. CommitteeNormal/
 // CommitteeNoConfidence), the Conway bootstrap gate, and
 // committeeTermsWithinLimit under production's own tests instead of a second,
-// hand-maintained copy of each -- an earlier revision duplicated the
-// threshold selection and bootstrap gate here, and the duplication itself
-// went untested and drifted (see PR #4333 review history).
+// hand-maintained copy of each -- duplicating the threshold selection and
+// bootstrap gate here would let the harness drift from production.
 //
 // The one thing this cannot delegate to ShouldRatify is the tally itself:
-// production's DRep voting-power query does not yet add a proposal's own
-// deposit to its return account's DRep voting power (CIP-1694 counts an
-// active proposal's deposit as part of the depositor's active voting stake).
-// That gap is tracked separately as issue #4355 -- it affects every
-// DRep-gated action type's real ratification, not just these two.
+// the harness has no in-memory UTxO set, so it reads stake from the real
+// backend and adds active proposal deposits to the return account's voting
+// stake, matching CIP-1694.
 func (m *DingoStateManager) committeeActionRatified(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
@@ -1706,21 +1704,37 @@ func (m *DingoStateManager) committeeActionRatified(
 		)
 	}
 
-	deposits := m.activeProposalDeposits(currentEpoch)
+	activeProposalEpoch := currentEpoch
+	if activeProposalEpoch > 0 {
+		activeProposalEpoch--
+	}
+	deposits := m.activeProposalDeposits(activeProposalEpoch)
 	drepYes, drepTotal, err := m.drepStakeForCommitteeAction(
 		txn, proposal, deposits, currentEpoch,
 	)
 	if err != nil {
 		return false, err
 	}
-	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(txn, proposal)
+	spoYes, spoTotal, err := m.spoStakeForCommitteeAction(
+		txn, proposal, deposits,
+	)
 	if err != nil {
 		return false, err
 	}
 
-	committeeNoConfidence, err := m.committeeInNoConfidence(txn)
+	committeeRoot, err := m.committeePurposeRoot(txn)
 	if err != nil {
 		return false, err
+	}
+	committeeNoConfidence := committeeRoot != nil &&
+		common.GovActionType(committeeRoot.ActionType) ==
+			common.GovActionTypeNoConfidence
+	committeeAbsent := false
+	if committeeRoot != nil {
+		committeeAbsent = common.GovActionType(committeeRoot.ActionType) !=
+			common.GovActionTypeUpdateCommittee
+	} else {
+		committeeAbsent = len(m.govState.CommitteeMembers) == 0
 	}
 
 	// ShouldRatify's UpdateCommittee branch requires a decoded GovAction to
@@ -1744,34 +1758,25 @@ func (m *DingoStateManager) committeeActionRatified(
 		PParams:               conwayPP,
 		GovAction:             govAction,
 		CurrentEpoch:          currentEpoch,
+		CommitteeAbsent:       committeeAbsent,
 		MajorVersion:          conwayPP.ProtocolVersion.Major,
 		CommitteeNoConfidence: committeeNoConfidence,
 	})
 	return decision.Ratified, nil
 }
 
-// committeeInNoConfidence reports whether the current committee-purpose root
-// (the most recently enacted NoConfidence/UpdateCommittee action) is itself
-// a NoConfidence action, mirroring ledger/governance's unexported
-// committeeNoConfidenceState. ShouldRatify uses this, not simply whether a
-// committee member is currently seated, to select CommitteeNormal vs.
-// CommitteeNoConfidence for an UpdateCommittee proposal.
-func (m *DingoStateManager) committeeInNoConfidence(
+func (m *DingoStateManager) committeePurposeRoot(
 	txn *database.Txn,
-) (bool, error) {
+) (*models.GovernanceProposal, error) {
 	rootID := m.govState.Roots.ConstitutionalCommittee
 	if rootID == nil {
-		return false, nil
+		return nil, nil
 	}
 	root, err := m.lookupGovernanceProposal(txn, *rootID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if root == nil {
-		return false, nil
-	}
-	return common.GovActionType(root.ActionType) ==
-		common.GovActionTypeNoConfidence, nil
+	return root, nil
 }
 
 // syntheticUpdateCommitteeGovAction builds just enough of a
@@ -1922,17 +1927,10 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 // NoConfidence/UpdateCommittee proposal, for governance.ProposalTally's
 // SPOYesStake/SPOTotalStake. There is no Conway-bootstrap branch here:
 // ShouldRatify itself refuses both action types outright during bootstrap
-// before ever reading this tally, so a bootstrap-specific adjustment to the
-// tally would never run (an earlier revision carried one that PR #4333
-// review found was already dead code for exactly this reason).
+// before ever reading this tally, so bootstrap does not change this tally.
 //
-// Active-proposal deposits are deliberately excluded from this tally: a
-// deposit raises the return account's DRep voting power, not the delegated
-// stake behind a pool. Production reads SPO stake straight from the stake
-// distribution snapshot (tallySPOVotes over LoadSPOVotingState's Dist in
-// ledger/governance/tally.go), which carries no deposit adjustment, so
-// credentialVotingStake is called here with a nil deposit map while
-// drepStakeForCommitteeAction keeps the deposit-inclusive one. A silent
+// Active-proposal deposits are included for pools represented in the
+// snapshot distribution, matching the production SPO tally. A silent
 // pool whose reward account delegates AlwaysAbstain is excluded; one that
 // delegates AlwaysNoConfidence counts as an implicit Yes when the proposal
 // is a NoConfidence action (an implicit No otherwise, same as production's
@@ -1941,13 +1939,14 @@ func (m *DingoStateManager) drepStakeForCommitteeAction(
 func (m *DingoStateManager) spoStakeForCommitteeAction(
 	txn *database.Txn,
 	proposal *conformance.ProposalState,
+	deposits map[mockledger.RewardAccountKey]uint64,
 ) (uint64, uint64, error) {
 	poolStake := make(map[common.PoolKeyHash]*big.Int)
 	for credential, pool := range m.govState.PoolDelegationsByCredential {
 		if !m.govState.IsPoolRegistered(pool) {
 			continue
 		}
-		stake, err := m.credentialVotingStake(txn, credential, nil)
+		stake, err := m.credentialVotingStake(txn, credential, deposits)
 		if err != nil {
 			return 0, 0, err
 		}

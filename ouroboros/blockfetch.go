@@ -56,7 +56,7 @@ const blockfetchMaxInFlightBytes = 3 * ledger.BlockfetchMaxRangeBytes
 // a sparse or low-active-slot-coefficient custom network, a run of
 // consecutive real blocks can span far more slots than mainnet's 3k/f
 // stability window, so rejecting purely on slot distance discards valid
-// requests (#4354).
+// requests.
 //
 // It is not sized to Dingo's own chainsync client; it governs every peer,
 // and an honest peer's candidate fragment -- and so a legitimate BlockFetch
@@ -247,7 +247,7 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 // the decode is keyed by content hash and shared across connections: the
 // first connection to submit a given block's bytes decodes it, and every
 // other connection submitting the identical bytes -- concurrently or
-// afterward -- reuses that result instead of redoing the parse. See #489.
+// afterward -- reuses that result instead of redoing the parse.
 func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
@@ -306,7 +306,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	// Validate that start is not after end (#397)
+	// Validate that start is not after end
 	if start.Slot > end.Slot {
 		o.config.Logger.Warn(
 			"blockfetch: requested range has start after end, sending NoBlocks",
@@ -330,11 +330,11 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	}
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
-	// blocks can span far more slots than mainnet's stability window
-	// (#4354). Resource usage is instead bounded by actual block count,
+	// blocks can span far more slots than mainnet's stability window.
+	// Resource usage is instead bounded by actual block count,
 	// below, scaled to the network's own security parameter.
 	//
-	// Validate that the start point exists in our chain (#397)
+	// Validate that the start point exists in our chain
 	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		o.config.Logger.Debug(
@@ -389,7 +389,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	)
 	// maxBlockFetchBlocksForSecurityParam never returns negative.
 	maxBlocksU64 := uint64(maxBlocks) // #nosec G115
-	// Validate that the range does not exceed the block-count bound (#4354).
+	// Validate that the range does not exceed the block-count bound.
 	// This mirrors the other invalid-range rejections above instead of
 	// silently dropping the connection mid-batch: an honest peer whose range
 	// is genuinely larger than the network supports gets a clean, accounted
@@ -926,8 +926,10 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// This runs on the blockfetch receive goroutine, which must not wait
+		// on the ledger; see enqueueBlockfetchEvent.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -942,6 +944,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
@@ -971,8 +974,10 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Same per-connection queue as the blocks, so this BatchDone reaches
+		// the ledger after every block the connection delivered before it.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
@@ -982,6 +987,7 @@ func (o *Ouroboros) blockfetchClientRangeDone(
 					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil

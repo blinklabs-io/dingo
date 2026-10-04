@@ -118,7 +118,7 @@ func isRoutableAddr(address string) bool {
 // absent and pinned as accepted in TestIsRoutableIP: AS112 (192.31.196.0/24,
 // 2001:4:112::/48), AMT (192.52.193.0/24, 2001:3::/32), and NAT64
 // (64:ff9b::/96). This list has grown twice under review, which is the
-// argument in #3792 for expressing the policy as an allowlist of globally
+// argument for expressing the policy as an allowlist of globally
 // routable space instead of a denylist of reserved ranges.
 //
 // RFC 6598 shared address space is the one that matters: a carrier routes it

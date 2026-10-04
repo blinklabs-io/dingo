@@ -30,8 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestPostRejectsOversizedResponseAsPermanentNeverRetried proves dingo
-// #3099's response-size bound (readBodyLimited/koiosMaxResponseBytes):
+// TestPostRejectsOversizedResponseAsPermanentNeverRetried proves the
+// response-size bound (readBodyLimited/koiosMaxResponseBytes):
 // a response exceeding the cap must fail with an error that classifies as
 // ErrKoiosPermanent — never retried within the call (a response that big
 // won't get smaller on retry) and never automatically retried on a future
@@ -828,7 +828,7 @@ func TestNewKoiosTransportResponseHeaderTimeout(t *testing.T) {
 	client := &http.Client{
 		// Deliberately far larger than responseHeaderTimeout: if the
 		// request only failed once this fired, this test would prove
-		// nothing beyond what the client already did before this change.
+		// nothing beyond what the client already did by default.
 		Timeout: clientTimeout,
 		Transport: newKoiosTransport(
 			koiosDialTimeout,

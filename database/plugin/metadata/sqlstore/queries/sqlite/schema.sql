@@ -259,6 +259,7 @@ CREATE TABLE reward_pool_output (
     optimal_reward TEXT NOT NULL,
     total_reward TEXT NOT NULL,
     leader_reward TEXT NOT NULL,
+    leader_reward_deficit TEXT NOT NULL DEFAULT '0',
     member_reward_total TEXT NOT NULL,
     owner_stake TEXT NOT NULL,
     undistributed TEXT NOT NULL,

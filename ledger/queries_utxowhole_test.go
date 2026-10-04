@@ -152,15 +152,51 @@ func TestQueryShelleyUtxoWhole_EmptyLedger(t *testing.T) {
 	require.Empty(t, utxos)
 }
 
+func TestQueryShelleyUtxoWholeRejectsWrongLengthTransactionID(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		bytes.Repeat([]byte{0xA1}, lcommon.AddressHashSize),
+		nil,
+	)
+	require.NoError(t, err)
+	out := babbage.BabbageTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  mary.MaryTransactionOutputValue{Amount: 1_000_000},
+	}
+	cborBytes, err := cbor.Encode(&out)
+	require.NoError(t, err)
+	shortTxID := bytes.Repeat([]byte{0xA2}, 31)
+	paddedTxID := append(bytes.Clone(shortTxID), 0)
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      shortTxID,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	require.NoError(t, db.Blob().SetUtxo(
+		txn.Blob(), paddedTxID, 0, cborBytes,
+	))
+	require.NoError(t, txn.Commit())
+
+	ls := newPoolDistr2Ledger(t, db)
+	result, err := ls.queryShelleyUtxoWhole(QueryPoint{}, nil)
+	require.Error(t, err)
+	require.Nil(t, result)
+	require.Contains(t, err.Error(), "blake2b-256")
+}
+
 // TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery covers a live UTxO
 // row whose CBOR cannot be resolved even via recovery (no blob entry and no
 // producer transaction metadata to reconstruct it from): the whole query
 // must fail rather than silently return a reply missing that row.
-// GetUTxOWhole's contract is every live UTxO, and node-parity (#1900)
-// compares this reply against a real cardano-node -- a silently short reply
-// would read as a ledger divergence rather than the storage fault it
-// actually is, exactly like IterateLiveUtxos' own loadCbor path already
-// fails rather than omits.
+// GetUTxOWhole's contract is every live UTxO, and node-parity compares this
+// reply against a real cardano-node -- a silently short reply would read as a
+// ledger divergence rather than the storage fault it actually is, exactly like
+// IterateLiveUtxos' own loadCbor path already fails rather than omits.
 func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 	t.Parallel()
 
@@ -194,7 +230,7 @@ func TestQueryShelleyUtxoWhole_UnrecoverableRowFailsQuery(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess is the
-// regression test for a chrisguiney review finding on PR #4084: a panic
+// regression test for a worker panic: a panic
 // during a worker's resolve or decode step used to escape the worker
 // goroutine entirely and terminate the whole node process, where the
 // previous sequential implementation (running inside IterateLiveUtxos'
@@ -242,7 +278,7 @@ func TestQueryShelleyUtxoWhole_WorkerPanicDoesNotCrashProcess(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure is the regression
-// test for a chrisguiney review finding on PR #4084: once one row's
+// test for early abort: once one row's
 // resolve fails, the previous implementation kept feeding every remaining
 // row to the worker pool instead of stopping -- unlike the earlier
 // sequential implementation, which aborted its whole traversal on the
@@ -341,7 +377,7 @@ func TestQueryShelleyUtxoWhole_AbortsEarlyOnFirstFailure(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoWhole_PinnedPointExcludesUtxoCreatedAfterIt covers
-// the core blinklabs-io/dingo#382 fix: a pin must not report a UTxO
+// the core pinning fix: a pin must not report a UTxO
 // created after the pinned slot. Before this fix, queryShelleyUtxoWhole
 // took no point argument at all and always answered from live state --
 // confirmed live against a real Preview cardano-node during node-parity's

@@ -40,7 +40,7 @@ import (
 // An earlier version of this constructor used a single fixed "conformance"
 // schema and stable os.TempDir() path shared across every call, every
 // process, and every machine running this suite against the same server.
-// That sharing was unsafe on two fronts a reviewer caught: concurrent
+// That sharing was unsafe on two fronts: concurrent
 // `go test` invocations (a local run alongside CI, or two CI shards)
 // truncated or dropped each other's in-progress backend, since Reset and
 // teardown for one process's manager operated on state another process's
@@ -63,7 +63,7 @@ import (
 // actually fixes the concurrency/staleness problem. Neither is torn down
 // by an individual manager's Close -- a sibling manager elsewhere in this
 // same process may still be using them -- TestMain
-// (tests_d4f17915_test.go) drops the schema and removes the blob
+// (conformance_postgres_test.go) drops the schema and removes the blob
 // directory once, after every test in this process has finished.
 var (
 	postgresProcessSchema = fmt.Sprintf(
@@ -94,7 +94,7 @@ func ensurePostgresProcessBlobDir() (string, error) {
 //
 // An unreachable host or invalid DSN is a real construction error here,
 // not a swallowed no-op: this is what makes the "invalid DSN must fail"
-// acceptance tests in tests_d4f17915_test.go meaningful.
+// acceptance tests in conformance_postgres_test.go meaningful.
 func NewDingoPostgresStateManager(dsn string) (*DingoStateManager, error) {
 	blobDataDir, err := ensurePostgresProcessBlobDir()
 	if err != nil {
@@ -114,7 +114,7 @@ func NewDingoPostgresStateManager(dsn string) (*DingoStateManager, error) {
 // DingoStateManager using an explicit schema and local blob data directory,
 // for a caller that must manage that schema's lifecycle itself. The restart
 // test (TestNewDingoPostgresStateManagerRestartSurvivesReopen in
-// tests_d4f17915_test.go) is the one caller: it opens a second
+// conformance_postgres_test.go) is the one caller: it opens a second
 // manager against the same schema and blob directory after closing the
 // first, to prove state survives that round trip. Neither Close call drops
 // the schema -- DingoStateManager.Close never does, matching

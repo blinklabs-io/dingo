@@ -16,6 +16,7 @@ package eras
 
 import (
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -106,7 +107,7 @@ func previewBabbageProtocolParams(t *testing.T) *babbage.BabbageProtocolParamete
 // the reference evaluator sees one signatory; rendering both makes the spending
 // validator take 621 extra CEK steps and 16 extra builtin calls, for 16359467
 // CPU and 62240 memory over the declared budget, which rejects a block the
-// network accepted and wedges a preview replay. See blinklabs-io/dingo#3935.
+// network accepted and wedges a preview replay.
 //
 // The declared budget is an external oracle: cardano-node computed it with the
 // reference evaluator. Equality in both directions catches an overcharge, which
@@ -547,4 +548,317 @@ func TestValidateTxBabbageBuildsTxInfoOncePerLanguage(t *testing.T) {
 			)
 		})
 	}
+}
+
+// A redeemerless transaction whose TTL is inside the horizon behaves the same
+// either way, so the gate cannot be hiding a translation that used to succeed.
+func TestValidateTxBabbageWithoutRedeemersInsideHorizon(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot+100, map[uint]any{}),
+	)
+	require.NoError(t, err)
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	require.NoError(t, ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	))
+}
+
+func TestEvaluateTxBabbageSkipsScriptContextWithoutRedeemers(t *testing.T) {
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testPastHorizonSlot, map[uint]any{}),
+	)
+	require.NoError(t, err)
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	_, exUnits, redeemerExUnits, err := EvaluateTxBabbage(
+		tx,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, lcommon.ExUnits{}, exUnits)
+	assert.Empty(t, redeemerExUnits)
+	assert.Zero(t, ls.slotToTimeCalls)
+}
+
+type declaredValidityConwayTx struct {
+	*mockConwayFeeTx
+	valid bool
+}
+
+type validityOutcomeRedeemers struct {
+	*mockRedeemers
+}
+
+func newConwayValidityOutcomeTx(
+	t *testing.T,
+	valid bool,
+	version lang.LanguageVersion,
+	scriptFails bool,
+	exUnits lcommon.ExUnits,
+) *declaredValidityConwayTx {
+	t.Helper()
+	program := &syn.Program[syn.DeBruijn]{
+		Version: lang.LanguageVersionV1,
+		Term: &syn.Lambda[syn.DeBruijn]{
+			Body: &syn.Lambda[syn.DeBruijn]{
+				Body: &syn.Constant{Con: &syn.Unit{}},
+			},
+		},
+	}
+	flatProgram, err := syn.Encode(program)
+	require.NoError(t, err)
+	scriptBytes, err := cbor.Encode(flatProgram)
+	require.NoError(t, err)
+	if scriptFails {
+		// This malformed Flat payload reaches the evaluator rather than the
+		// budget check, exercising the execution-error outcome path.
+		scriptBytes = []byte{0x41, 0x00}
+	}
+
+	var script lcommon.Script
+	witnesses := &mockWitnessSet{redeemers: &validityOutcomeRedeemers{
+		mockRedeemers: &mockRedeemers{
+			entries: []struct {
+				key lcommon.RedeemerKey
+				val lcommon.RedeemerValue
+			}{
+				{
+					key: lcommon.RedeemerKey{
+						Tag:   lcommon.RedeemerTagMint,
+						Index: 0,
+					},
+					val: lcommon.RedeemerValue{ExUnits: exUnits},
+				},
+			},
+		},
+	}}
+	switch version {
+	case lang.LanguageVersionV1:
+		plutusScript := lcommon.PlutusV1Script(scriptBytes)
+		script = plutusScript
+		witnesses.plutusV1Scripts = []lcommon.PlutusV1Script{plutusScript}
+	case lang.LanguageVersionV2:
+		plutusScript := lcommon.PlutusV2Script(scriptBytes)
+		script = plutusScript
+		witnesses.plutusV2Scripts = []lcommon.PlutusV2Script{plutusScript}
+	default:
+		t.Fatalf("unsupported Plutus version %v", version)
+	}
+	scriptHash := script.Hash()
+	assetMint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
+			lcommon.Blake2b224(scriptHash): {
+				cbor.NewByteString([]byte("asset")): big.NewInt(1),
+			},
+		},
+	)
+	return &declaredValidityConwayTx{
+		valid: valid,
+		mockConwayFeeTx: &mockConwayFeeTx{
+			mockFeeTx: mockFeeTx{
+				txType:    txTypeAlonzo,
+				witnesses: witnesses,
+			},
+			assetMint: &assetMint,
+		},
+	}
+}
+
+// TestValidateTxBabbageRejectsPlutusV2WhenSynthetic covers:
+// real cardano-ledger rejects a transaction using a PlutusV2 script outright,
+// at the UTXOW level before any script evaluation runs, whenever PlutusV2 has
+// no real cost model configured yet (NoCostModel, the formal rule "languages
+// txw ⊆ dom(costmdls pp)"). Dingo's HardForkBabbage instead fabricates a
+// value specifically so internal validation always has one, which -- absent
+// this check -- would let Dingo accept the same transaction a real network
+// rejects.
+func TestValidateTxBabbageRejectsPlutusV2WhenSynthetic(t *testing.T) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxBabbage(
+		tx,
+		0,
+		ls,
+		&babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic covers the common case
+// once real data exists (or on a database predating this tracking, where the
+// bootstrap fallback resolves to false for a real, non-default value): the
+// same PlutusV2 transaction must validate exactly as it did before this
+// check existed.
+func TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
+	disablePhase1RulesForTest(t)
+
+	ls := newMockLedgerState()
+	// syntheticV2CostModel left at its zero value (false).
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxBabbage(
+		tx,
+		0,
+		ls,
+		&babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+			// A real (non-synthetic) PlutusV2 cost model, same as production
+			// carries once an on-chain update lands. requiredCostModel
+			// fails closed on a missing entry, so this must be
+			// populated for the "not synthetic" case to actually reach
+			// evaluation instead of being rejected before it ever does.
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		},
+	)
+
+	require.NoError(t, err)
+}
+
+// TestValidateTxBabbageAllowsPlutusV2WhenLedgerStateReportsNothing covers the
+// fail-safe default: an lcommon.LedgerState implementation that does not
+// implement syntheticV2CostModelReporter at all (any caller other than
+// ledger.LedgerView's own *ledger.LedgerView) must not be treated as
+// synthetic -- this check is additive and must never fire for a caller that
+// simply doesn't carry the signal.
+func TestValidateTxBabbageAllowsPlutusV2WhenLedgerStateReportsNothing(
+	t *testing.T,
+) {
+	disablePhase1RulesForTest(t)
+
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	err := ValidateTxBabbage(
+		tx,
+		0,
+		plainMockLedgerState{newMockLedgerState()},
+		&babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		},
+	)
+
+	require.NoError(t, err)
+}
+
+// plainMockLedgerState embeds the lcommon.LedgerState INTERFACE (not the
+// concrete *mockLedgerState type), so method promotion exposes exactly that
+// interface's method set and nothing more -- in particular, not
+// SyntheticV2CostModelInEffect, even though the concrete value stored in it
+// (a *mockLedgerState) happens to have that extra method. This stands in for
+// any lcommon.LedgerState implementation other than *ledger.LedgerView,
+// which is the only production type this check's type assertion expects to
+// see.
+type plainMockLedgerState struct {
+	lcommon.LedgerState
+}
+
+// TestEvaluateTxBabbageRejectsPlutusV2WhenSynthetic covers the fee/ex-units
+// estimation counterpart: a transaction ValidateTxBabbage would reject must
+// not be quoted a fee estimate implying it's valid.
+func TestEvaluateTxBabbageRejectsPlutusV2WhenSynthetic(t *testing.T) {
+	ls := newMockLedgerState()
+	ls.syntheticV2CostModel = true
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	_, _, _, err := EvaluateTxBabbage(
+		tx,
+		ls,
+		&babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestEvaluateTxBabbageAllowsPlutusV2WhenNotSynthetic mirrors
+// TestValidateTxBabbageAllowsPlutusV2WhenNotSynthetic for EvaluateTxBabbage.
+func TestEvaluateTxBabbageAllowsPlutusV2WhenNotSynthetic(t *testing.T) {
+	ls := newMockLedgerState()
+	tx := newConwayValidityOutcomeTx(
+		t,
+		true,
+		lang.LanguageVersionV2,
+		false,
+		lcommon.ExUnits{Steps: 10_000_000, Memory: 10_000_000},
+	)
+
+	_, _, _, err := EvaluateTxBabbage(
+		tx,
+		ls,
+		&babbage.BabbageProtocolParameters{
+			ProtocolMajor: 7,
+			MaxTxExUnits: lcommon.ExUnits{
+				Steps:  10_000_000,
+				Memory: 10_000_000,
+			},
+			CostModels: map[uint][]int64{
+				1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+			},
+		},
+	)
+
+	require.NoError(t, err)
 }

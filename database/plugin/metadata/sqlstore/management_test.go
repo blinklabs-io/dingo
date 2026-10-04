@@ -22,6 +22,7 @@ import (
 	"math"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
@@ -31,6 +32,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 func initialNodeSettingsGates() nodesettings.Values {
@@ -404,7 +406,7 @@ func TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner(
 }
 
 // TestGetPoolByVrfKeyHashPreservesActiveKeyDuringDeferredReRegistration is
-// the regression test for issue #4352: a pool re-registering with a new VRF
+// the regression test for this case: a pool re-registering with a new VRF
 // key mid-epoch must not free its old key before the epoch boundary, because
 // cardano-ledger defers a re-registration through psFutureStakePoolParams
 // until then.
@@ -585,7 +587,7 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 }
 
 // TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey is the
-// regression test for the PV11+ follow-up to #4352: after pool P cycles
+// regression test for the PV11+ follow-up case: after pool P cycles
 // A -> B -> C within one epoch, a later reuse of B (the superseded, no
 // longer pending value) must still be rejected, because psVRFKeyHashes
 // retains every key placed in psFutureStakePoolParams during the epoch, not
@@ -594,7 +596,7 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 // this same pool as the claimant and PoolCurrentState disagrees with the
 // requested key, so this method must report P as claiming B even though B
 // is neither P's effective (pre-boundary) key nor its current pending one.
-// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins dingo#4466: only a
+// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins that only a
 // pool's latest same-epoch registration reserves its key, not every key the
 // pool cycled through during the epoch.
 func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
@@ -692,8 +694,8 @@ func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 	require.Equal(t, poolKey, got.PoolKeyHash)
 }
 
-// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers dingo#4466's
-// "preserve rollback ... behavior" criterion: the fix ranks whatever
+// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers the
+// rollback-preservation criterion: the fix ranks whatever
 // pool_registration rows currently exist, so rolling back the superseding
 // registration (C) must make the previously-superseded key (B) the pool's
 // latest pending key again, not leave it incorrectly free.
@@ -771,8 +773,8 @@ func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
 }
 
 // TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction covers
-// dingo#4466's "cover one transaction and separate same-epoch transactions"
-// criterion. Every other test in this file writes each of P's re-
+// the one-transaction case (as against separate same-epoch transactions).
+// Every other test in this file writes each of P's re-
 // registrations through its own auto-committed call (mirroring cert-by-cert
 // application as blocks arrive on the live chain). This variant writes all
 // three -- A, then A -> B, then B -> C -- through one shared, explicitly
@@ -851,7 +853,7 @@ func TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction(
 }
 
 // TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey covers
-// dingo#4466's two-step case: with only one same-epoch re-registration (A ->
+// the two-step case: with only one same-epoch re-registration (A ->
 // B, no superseding C yet), B is still the pool's latest pending key and
 // must remain reserved alongside the still-effective A.
 func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
@@ -906,7 +908,7 @@ func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
 }
 
 // TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration
-// is the regression test for a human reviewer finding on this PR:
+// is the regression test for this case:
 // activePoolOrNil checked retirement against the live database tip, not
 // against epochStartSlot. A pool that retires and later submits a fresh
 // registration for a DIFFERENT key un-retires via that new registration
@@ -914,8 +916,7 @@ func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
 // re-registration, since the pool had left psStakePools). Checking
 // retirement against "now" let that pool's stale, pre-retirement
 // registration for its OLD key still resolve as active, reporting the old
-// key in use when the pool no longer holds it -- this PR's own bug class,
-// reintroduced.
+// key in use when the pool no longer holds it.
 func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration(
 	t *testing.T,
 ) {
@@ -1020,4 +1021,66 @@ func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 		StorageMode: types.StorageModeCore,
 		Network:     "preview",
 	}, settings)
+}
+
+// TestTransactionContextCancellationRollsBackWrites guards "preserve
+// transaction rollback on cancellation": a write issued through a
+// Transaction(ctx) must not survive once ctx is canceled mid-transaction,
+// and the connection it held must be released back to the pool rather than
+// leaked.
+//
+// This intentionally does not pin writeDB to a single connection: doing so
+// with SQLite's mode=memory&cache=shared DSN interacts badly with
+// database/sql discarding (rather than idling) a connection whose in-flight
+// statement failed from ctx cancellation -- a brief window with zero live
+// connections destroys the shared in-memory database out from under the
+// test, which is a SQLite test-fixture artifact, not the behavior under
+// test. Connection release is instead asserted directly against pool
+// stats.
+func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// database/sql discards (rather than idles) a pooled connection whose
+	// in-flight statement failed from ctx cancellation, and reopens a fresh
+	// one lazily on next use. For SQLite's mode=memory&cache=shared DSN, a
+	// window with zero live connections destroys the shared in-memory
+	// database along with it. Hold one extra, otherwise-unused connection
+	// open for the test's duration so the schema survives that window.
+	keepAlive, err := store.writeDB.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = keepAlive.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	txn := store.Transaction(ctx)
+	require.NoError(t, store.SetCommitTimestamp(42, txn))
+
+	cancel()
+
+	// database/sql rolls back a Tx once the ctx supplied to BeginTx is
+	// canceled, per BeginTx's documented contract -- but that happens on an
+	// internal watcher goroutine, not synchronously with cancel(), so poll
+	// rather than assert immediately. (In practice this also fails on the
+	// first attempt regardless of that goroutine's timing: dbFromTxn hands
+	// this statement the transaction's own now-canceled ctx directly.)
+	require.Eventually(t, func() bool {
+		return store.SetCommitTimestamp(43, txn) != nil
+	}, 2*time.Second, 5*time.Millisecond,
+		"transaction must stop accepting writes once its ctx is canceled")
+
+	require.Error(t, txn.Commit())
+
+	// The connection the aborted transaction held must come back to the
+	// pool rather than being leaked: only the keepAlive connection above
+	// should remain checked out.
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().InUse <= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"canceled transaction's connection must be released back to the pool")
+
+	// Neither the successful first write nor anything else from the
+	// canceled transaction may be durably visible.
+	persisted, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Zero(t, persisted)
 }

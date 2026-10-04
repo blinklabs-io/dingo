@@ -40,7 +40,7 @@ import (
 // An earlier version of this constructor used a single fixed database name
 // and stable os.TempDir() path shared across every call, every process,
 // and every machine running this suite against the same server. That
-// sharing was unsafe on two fronts a reviewer caught: concurrent `go test`
+// sharing was unsafe on two fronts: concurrent `go test`
 // invocations (a local run alongside CI, or two CI shards) truncated or
 // dropped each other's in-progress backend, since Reset and teardown for
 // one process's manager operated on state another process's manager was
@@ -63,7 +63,7 @@ import (
 // fixes the concurrency/staleness problem. Neither is torn down by an
 // individual manager's Close -- a sibling manager elsewhere in this same
 // process may still be using them -- TestMain
-// (tests_d4f17915_test.go) drops the database and removes the blob
+// (conformance_postgres_test.go) drops the database and removes the blob
 // directory once, after every test in this process has finished.
 var (
 	mysqlProcessDatabase = fmt.Sprintf(
@@ -89,7 +89,7 @@ func ensureMysqlProcessBlobDir() (string, error) {
 // MySQL metadata store (plus a local Badger blob store), composed through
 // the same plugin.Resolve path the production node uses at startup.
 // rootDSN must authenticate as an account with CREATE DATABASE privileges
-// (see mysqlConformanceRootDSN in tests_d4f17915_test.go): the mysql
+// (see mysqlConformanceRootDSN in conformance_postgres_test.go): the mysql
 // metadata plugin's own openStore provisions the generated database name
 // automatically (CREATE DATABASE IF NOT EXISTS, via its
 // ensureDatabaseExists step) whenever the DSN it's given names a database,
@@ -99,7 +99,7 @@ func ensureMysqlProcessBlobDir() (string, error) {
 //
 // An unreachable host or invalid credentials is a real construction error
 // here, not a swallowed no-op: this is what makes the "invalid DSN must
-// fail" acceptance tests in tests_d4f17915_test.go meaningful.
+// fail" acceptance tests in conformance_postgres_test.go meaningful.
 func NewDingoMysqlStateManager(rootDSN string) (*DingoStateManager, error) {
 	blobDataDir, err := ensureMysqlProcessBlobDir()
 	if err != nil {
@@ -119,7 +119,7 @@ func NewDingoMysqlStateManager(rootDSN string) (*DingoStateManager, error) {
 // DingoStateManager using an explicit database and local blob data
 // directory, for a caller that must manage that database's lifecycle
 // itself. The restart test (TestNewDingoMysqlStateManagerRestartSurvivesReopen
-// in tests_d4f17915_test.go) is the one caller: it opens a second manager
+// in conformance_postgres_test.go) is the one caller: it opens a second manager
 // against the same database and blob directory after closing the first, to
 // prove state survives that round trip. Neither Close call drops the
 // database -- DingoStateManager.Close never does, matching

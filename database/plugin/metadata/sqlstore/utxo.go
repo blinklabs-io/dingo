@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -691,6 +692,45 @@ WHERE tx_id = ? AND output_idx = ?
 			)
 		}
 	}
+	// A certified snapshot's live UTxO set declares this specific output live
+	// (DeletedSlot == 0) as of its anchor. If the conflicting local row still
+	// carries a spend, that spend can only have been recorded after the
+	// anchor: a row genuinely spent at or before the anchor would not appear
+	// in the snapshot's live set at all, so this branch never observes a
+	// settled pre-anchor spend. Clear it, scoped to this exact (tx_id,
+	// output_idx) reference only -- never a table-wide unspend -- so a later
+	// replay of the real post-anchor spending block finds the output live
+	// instead of failing with "utxo not found". Mirrors the columns
+	// SetUtxosNotDeletedAfterSlot's rollback path clears.
+	//
+	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
+	// conflict path) are also reached by database/transaction.go's
+	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
+	// recover a missing input's producer row from the blob store rather than
+	// hydrate a certified snapshot. Neither can trigger this clause in
+	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
+	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
+	// reaching this ON CONFLICT branch for it would require a concurrent
+	// writer to the same row within one block's write transaction -- which
+	// the single-writer block-apply pipeline does not have today. If that
+	// invariant ever changes, this clause would need a way to tell "a
+	// certified snapshot's own declaration" apart from "a locally
+	// reconstructed row that merely happens to declare DeletedSlot == 0".
+	if utxo.DeletedSlot == 0 {
+		if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET deleted_slot = 0, spent_at_tx_id = NULL
+WHERE tx_id = ? AND output_idx = ? AND deleted_slot > 0`,
+			utxo.TxId,
+			utxo.OutputIdx,
+		); err != nil {
+			return fmt.Errorf(
+				"clear stale spend on re-imported live UTxO: %w",
+				err,
+			)
+		}
+	}
 	return nil
 }
 
@@ -802,7 +842,7 @@ func (s *Store) refreshRewardLiveStakeDeltas(
 // conflicting output contributes 0: its amount is already inside the running
 // total that the row it collided with was counted into. Counting it again
 // would inflate the credential's live stake permanently, since the
-// incremental path has no scan to correct it (dingo #4421).
+// incremental path has no scan to correct it.
 //
 // amount is already bounded within int64 by CheckedUint64FromBigInt
 // (UtxoLedgerToModel's caller), well inside a real lovelace value's range
@@ -833,7 +873,7 @@ func producedStakeCredentialDelta(
 // tx_id values with the (tx_id, output_idx) pair filtered in Go, so SQLite's
 // planner stays on the unique tx_id_output_idx index instead of falling back
 // to a full idx_utxo_staking_deleted_amount scan once the batch has more than
-// a handful of terms (dingo #4067).
+// a handful of terms.
 func utxoStakeConsumedDeltaQuery(n int) string {
 	return "SELECT tx_id, output_idx, credential_tag, staking_key, amount " +
 		"FROM utxo WHERE tx_id IN (" +
@@ -854,7 +894,7 @@ func utxoStakeConsumedDeltaQuery(n int) string {
 // nothing in the utxo table, so subtracting its amount would drive the
 // credential's running total permanently below its real live stake, or fail
 // the write outright on applyUtxoStakeDelta's underflow guard. Those inputs
-// belong in the caller's zero-delta touch set instead (dingo #4421).
+// belong in the caller's zero-delta touch set instead.
 //
 // deleted_slot is not filtered on: ids names exactly the inputs this
 // transaction just spent, by (tx_id, output_idx), so the deleted_slot value
@@ -988,7 +1028,7 @@ func distinctUtxoTxIDs(
 // in the batch. The OR-of-pairs form defeats that index past a handful of
 // terms and falls back to a full scan of idx_utxo_deleted_staking_amount
 // once liveOnly's "deleted_slot = 0" looks like a cheaper driving predicate --
-// measured on an 11M-row live UTxO table in issue #4067, which starves block
+// measured on an 11M-row live UTxO table which starves block
 // application for minutes at a time. The caller filters the extra rows this
 // query can return (other outputs of the same transaction, and, for liveOnly,
 // already-deleted ones) down to the exact requested (tx_id, output_idx)
@@ -1218,7 +1258,7 @@ func utxoDeletionRowsByTxIDQuery(
 // plans the statement as SEARCH utxo USING INDEX
 // idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards
 // whenever sqlite_stat1 is absent -- every live row visited and "id IN (...)"
-// evaluated per row, which is the whole-table pass issue #4067 reports, moved
+// evaluated per row, which is the whole-table pass, moved
 // from the lookup to the update. Populated statistics change the plan, but a
 // long-running node's utxo statistics are stale or absent, so the plan has to
 // hold without them. Liveness is filtered in queryUtxoDeletionRows instead,
@@ -1430,7 +1470,7 @@ func scanUtxoRow(row *sql.Row) (sqlitequery.Utxo, error) {
 
 // utxoRefsByTxID looks up every utxo row for the distinct tx_id hashes in
 // refs -- the same tx_id-driven, index-friendly shape queryUtxoStakeRefs
-// uses (see its doc comment and issue #4067) -- and returns them alongside
+// uses (see its doc comment) -- and returns them alongside
 // the (tx_id, output_idx) index refs asked for, so the caller can filter the
 // extra rows (other outputs of the same transaction) down to exactly the
 // requested references in Go.
@@ -1972,6 +2012,206 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 	}
 	for i := range ret {
 		pointers = append(pointers, &ret[i].Utxo)
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+// GetUtxosWithHistory returns the retained lifecycle of matching outputs,
+// rather than limiting the query to the live UTxO set. The transaction joins
+// are deliberately separate: transaction_id or collateral_return_for_tx_id
+// identifies the producing row, while spent_at_tx_id stores the consuming
+// transaction hash.
+func (s *Store) GetUtxosWithHistory(
+	query *models.UtxoHistoryQuery,
+	txn types.Txn,
+) ([]models.UtxoWithHistory, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w",
+			models.ErrNilUtxoHistoryQuery,
+		)
+	}
+	if query.Status > models.UtxoHistoryStatusSpent {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w: %d",
+			models.ErrInvalidUtxoHistoryStatus,
+			query.Status,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	createdSlotExpr := `COALESCE(created_transaction.slot, utxo.added_slot)`
+	createdBlockIndexExpr := `COALESCE(created_transaction.block_index, 0)`
+	predicate := "1 = 1"
+	args := []any{}
+	switch {
+	case query.MatchAllAddresses:
+	case len(query.AddressPatterns) == 0:
+		predicate += " AND 1 = 0"
+	default:
+		branches := []string{}
+		for _, pattern := range query.AddressPatterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&branches,
+				&args,
+				pattern,
+			); err != nil {
+				return nil, fmt.Errorf("GetUtxosWithHistory: %w", err)
+			}
+		}
+		if len(branches) == 0 {
+			predicate += " AND 1 = 0"
+		} else {
+			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		}
+	}
+
+	switch query.Status {
+	case models.UtxoHistoryStatusAll:
+	case models.UtxoHistoryStatusUnspent:
+		predicate += " AND utxo.deleted_slot = 0"
+	case models.UtxoHistoryStatusSpent:
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.FilterByAsset {
+		if len(query.AssetPolicyID) == 0 {
+			return nil, fmt.Errorf(
+				"GetUtxosWithHistory: %w",
+				models.ErrEmptyAssetPolicyID,
+			)
+		}
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM asset
+     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
+		args = append(args, query.AssetPolicyID)
+		if query.AssetName != nil {
+			predicate += " AND asset.name = ?"
+			args = append(args, query.AssetName)
+		}
+		predicate += ")"
+	}
+	if len(query.TransactionID) > 0 {
+		predicate += " AND utxo.tx_id = ?"
+		args = append(args, query.TransactionID)
+	}
+	if query.OutputIndex != nil {
+		predicate += " AND utxo.output_idx = ?"
+		args = append(args, *query.OutputIndex)
+	}
+	if query.MetadataLabel != nil {
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM transaction_metadata_label AS metadata_label
+     WHERE metadata_label.transaction_id = COALESCE(
+         utxo.transaction_id,
+         utxo.collateral_return_for_tx_id
+     )
+       AND metadata_label.label = ?
+ )`
+		args = append(args, strconv.FormatUint(*query.MetadataLabel, 10))
+	}
+	if query.CreatedAfter != nil {
+		predicate += " AND " + createdSlotExpr + " >= ?"
+		args = append(args, *query.CreatedAfter)
+	}
+	if query.CreatedBefore != nil {
+		predicate += " AND " + createdSlotExpr + " <= ?"
+		args = append(args, *query.CreatedBefore)
+	}
+	if query.SpentAfter != nil || query.SpentBefore != nil {
+		// deleted_slot = 0 is the live sentinel and must not match an
+		// inclusive spent bound at slot zero.
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.SpentAfter != nil {
+		predicate += " AND utxo.deleted_slot >= ?"
+		args = append(args, *query.SpentAfter)
+	}
+	if query.SpentBefore != nil {
+		predicate += " AND utxo.deleted_slot <= ?"
+		args = append(args, *query.SpentBefore)
+	}
+	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
+		predicate += `
+ AND (
+     ` + createdSlotExpr + ` ` + comparison + ` ?
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
+ )`
+		args = append(
+			args,
+			query.After.Slot,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.TxId,
+		)
+	}
+
+	orderDirection := "ASC"
+	if query.Descending {
+		orderDirection = "DESC"
+	}
+	statement := `
+SELECT ` + qualifiedSQLiteUtxoColumns + `,
+       ` + createdSlotExpr + `,
+       ` + createdBlockIndexExpr + `,
+       created_transaction.block_hash,
+       spent_transaction.block_hash
+FROM utxo
+LEFT JOIN "transaction" AS created_transaction
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = created_transaction.id
+LEFT JOIN "transaction" AS spent_transaction
+    ON utxo.spent_at_tx_id = spent_transaction.hash
+WHERE ` + predicate + `
+ORDER BY ` + createdSlotExpr + ` ` + orderDirection + `,
+         ` + createdBlockIndexExpr + ` ` + orderDirection + `,
+         utxo.output_idx ` + orderDirection + `,
+         utxo.tx_id ` + orderDirection
+	statement, args = addLimitOffset(statement, args, query.Limit, 0)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(statement),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ret := []models.UtxoWithHistory{}
+	for rows.Next() {
+		item, err := scanUtxoWithHistory(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i].Utxo
 	}
 	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
 		return nil, err
@@ -2555,6 +2795,52 @@ func scanUtxoWithOrdering(
 		Utxo:         *utxo,
 		TxSlot:       uint64(slot.Int64),
 		TxBlockIndex: uint32(blockIndex.Int64),
+	}, nil
+}
+
+func scanUtxoWithHistory(
+	rows *sql.Rows,
+) (models.UtxoWithHistory, error) {
+	var raw sqlitequery.Utxo
+	var slot sql.NullInt64
+	var blockIndex sql.NullInt64
+	var createdBlockHash []byte
+	var spentBlockHash []byte
+	err := rows.Scan(
+		&raw.TransactionID,
+		&raw.CollateralReturnForTxID,
+		&raw.TxID,
+		&raw.PaymentKey,
+		&raw.StakingKey,
+		&raw.CredentialTag,
+		&raw.DatumHash,
+		&raw.SpentAtTxID,
+		&raw.ReferencedByTxID,
+		&raw.CollateralByTxID,
+		&raw.ID,
+		&raw.AddedSlot,
+		&raw.DeletedSlot,
+		&raw.Amount,
+		&raw.OutputIdx,
+		&raw.PaymentScript,
+		&slot,
+		&blockIndex,
+		&createdBlockHash,
+		&spentBlockHash,
+	)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	utxo, err := utxoFromSQLite(raw)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	return models.UtxoWithHistory{
+		Utxo:             *utxo,
+		TxSlot:           uint64(slot.Int64),
+		TxBlockIndex:     uint32(blockIndex.Int64),
+		CreatedBlockHash: createdBlockHash,
+		SpentBlockHash:   spentBlockHash,
 	}, nil
 }
 

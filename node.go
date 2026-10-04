@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -296,12 +297,12 @@ func New(cfg Config) (*Node, error) {
 	return n, nil
 }
 
-// legacyUtxorpcTLSPolicy expresses the pre-#2996 root tlsCertFilePath/
+// legacyUtxorpcTLSPolicy expresses the legacy root tlsCertFilePath/
 // tlsKeyFilePath fields as an apiconfig.TLSPolicy, for UTxORPC only. It
 // deliberately does not feed cfg.apiConfig.TLS (the shared api.tls default
 // every provider inherits from): UTxORPC was the only provider these root
 // fields ever configured TLS for, and promoting them to a shared default
-// would silently switch Blockfrost/Mesh from plaintext to TLS on upgrade
+// would silently switch Blockfrost/Kupo/Mesh from plaintext to TLS on upgrade
 // for any deployment that set them, breaking existing plaintext clients.
 // See ARCHITECTURE.md's "API security" section for this compatibility
 // decision. Returns the zero TLSPolicy (no effect on the merge) unless
@@ -354,6 +355,7 @@ func (c *Config) apiProviderConfig(
 // cfg.TLS.Resolve call, which uses the identical path.
 var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIBlockfrost: "plugins.api.blockfrost.config",
+	plugin.CapabilityAPIKupo:       "plugins.api.kupo.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
 	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
 }
@@ -407,6 +409,7 @@ func (n *Node) apiPluginSelection(
 	if !ok {
 		defaultPorts := map[plugin.Capability]uint{
 			plugin.CapabilityAPIBlockfrost: 3000,
+			plugin.CapabilityAPIKupo:       0,
 			plugin.CapabilityAPIMesh:       8080,
 			plugin.CapabilityAPIUtxorpc:    9090,
 		}
@@ -818,7 +821,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Unconditional and independent of history expiry: the committee
 	// hot-key authorization pruner in the metadata store always runs and
 	// always needs the live immutable-slot bound to be safe on a sparse
-	// chain (issue #4353). A sync failure here is not fatal -- the pruner
+	// chain. A sync failure here is not fatal -- the pruner
 	// falls back to its slot-window assumption when no live value has been
 	// pushed -- so this only logs.
 	n.committeeAuthSync = committeeauth.NewSyncer(committeeauth.SyncerConfig{
@@ -845,7 +848,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Create and start the Midnight indexer before LedgerState.Start so that
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
 	// (b) the EventBus subscription exists before any BlockActionApply events
-	// can be emitted, eliminating the startup gap identified in #2114. The
+	// can be emitted, eliminating the startup gap. The
 	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
 	// Ariadne/candidate rows. Both the explicit opt-in and API storage mode
 	// are required: the indexer depends on the api-mode indexes to function,
@@ -897,7 +900,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// When the Koios parity observer is enabled, retain reward_account_output
-	// without bound in CORE storage mode too (dingo #4188): the observer only
+	// without bound in CORE storage mode too: the observer only
 	// validates a closed epoch after fetching and comparing against Koios over
 	// the network, which can fall arbitrarily far behind chain progression
 	// during a from-genesis or catch-up sync, well past the fixed 4-epoch
@@ -910,7 +913,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission (issue #3727).
+	// floor selection is atomic with deferred-header admission.
 	// Set before Start; the pin is released automatically as headers resolve.
 	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
 		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
@@ -934,7 +937,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		},
 	)
 	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
-	// Wire governance's same-boundary SPO stake read (dingo#4441): RATIFY
+	// Wire governance's same-boundary SPO stake read: RATIFY
 	// tallies mark[NewEpoch] -- this same boundary's own mark snapshot -- but
 	// that row is not durably written until the hook above runs, later in
 	// the same rollover. Without this, governance would silently see zero
@@ -961,7 +964,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		},
 	)
 
-	// Optional in-process Koios reward-parity observer (dingo #3098). Wired
+	// Optional in-process Koios reward-parity observer. Wired
 	// (and, critically, subscribed to event.EpochTransitionEventType) before
 	// n.ledgerState.Start below, whose slot-clock/block-processing
 	// goroutines are what can first publish that event — see
@@ -1583,6 +1586,35 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 
+	// Resolve Kupo API only in API mode with a non-zero configured port.
+	kupoSelection, kupoPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIKupo,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		if err != nil {
+			return fmt.Errorf("creating kupo node adapter: %w", err)
+		}
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
+			kupoSelection.Provider, kupoSelection.Config,
+			kupo.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("resolve kupo API: %w", err)
+		}
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIKupo),
+		)
+	}
+
 	meshSelection, meshPort, err := n.apiPluginSelection(
 		plugin.CapabilityAPIMesh,
 	)
@@ -1875,7 +1907,7 @@ func (n *Node) subscribeChainsyncClientRemoveRequests() event.EventSubscriberId 
 // clearest case -- a connection whose leios-fetch request slot is permanently
 // abandoned can never answer again, so dropping its single recycle request
 // leaves that connection in the pool for the rest of its life and the by-point
-// fetch keeps re-trying a corpse (dingo #3552). Detaching this subscriber under
+// fetch keeps re-trying a corpse. Detaching this subscriber under
 // backpressure would do exactly that, so it stays attached until it drains or
 // node shutdown closes it.
 func (n *Node) subscribeConnectionRecycleRequests(
@@ -2226,7 +2258,7 @@ func (n *Node) enforceRecoveredNodeSettings() error {
 // repeated restarts during investigation of an unrelated issue), but unsafe
 // to leave enabled permanently since it is what catches a stale or
 // pre-migration reward_live_stake table -- and, since reward_live_stake.utxo_stake
-// became an incrementally maintained running total (dingo #4421), the only
+// became an incrementally maintained running total, the only
 // automatic reconciliation of that total against the live UTxO set.
 //
 // Both probes are read-only and run on the read-only metadata connection; the

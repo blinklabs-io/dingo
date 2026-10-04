@@ -306,7 +306,7 @@ its first parity check.
 ```bash
 ./run-tests.sh                              # dingo mode (default): bring up, run devnet tests, tear down
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
-./run-tests.sh --accelerated                # fast event-driven scenario timeline (see below)
+./run-tests.sh --accelerated                # fast timeline, including Conway governance scenarios
 ./run-tests.sh --accelerated --conformance  # the same timeline against the reference topology
 ./run-tests.sh --leios                      # Dijkstra/Leios producer-to-peer path
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
@@ -346,8 +346,9 @@ than falling back to `testnet.yaml`.
 
 `--accelerated` is the fast path used for scheduled and release
 integration evidence. It brings the network up on the accelerated spec and
-runs one test — `TestAcceleratedScenarioTimeline` — instead of the full
-suite.
+runs `TestAcceleratedScenarioTimeline` and, in all-Dingo mode,
+`TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` instead of the
+full suite.
 
 What makes it fast is not just the shorter slots. The canonical suite
 queries each node's tip by opening a fresh Node-to-Node connection every
@@ -445,6 +446,9 @@ Run the complete scenario with:
 ```bash
 ./run-tests.sh --leios
 ```
+
+The `devnet-leios` workflow runs this scenario daily and on manual dispatch,
+and uploads the failure artifacts described below when it fails.
 
 For a manually started network, `./start.sh --leios` prints the environment
 and Go command for the matching producer-to-peer test. The test-only signing
@@ -657,6 +661,7 @@ conformance mode:
 | `TestSustainedConsensus` | All nodes stay in agreement across multiple sampling intervals |
 | `TestEpochBoundaryConsensus` | All nodes remain in consensus across at least one epoch boundary (exercises candidate-nonce freeze, lab nonce roll, and new-epoch VRF verification) |
 | `TestAcceleratedScenarioTimeline` | The accelerated scenario timeline: readiness, block and transaction propagation, chain agreement, an epoch transition, a peer interruption with recovery, and a relay restart — all on one shared clock, driven by streamed ChainSync events. Skipped unless `DEVNET_ACCELERATED=1`; see Accelerated scenario timeline above. |
+| `TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` | Moves delegated stake across pools, ratifies and enacts an above-threshold no-confidence action, then checks that its below-threshold committee-update child remains active. Requires the accelerated all-Dingo run and its exposed test keys. |
 
 Reference-conformance scenario
 (`//go:build linux && devnet && devnet_conformance`) runs only with

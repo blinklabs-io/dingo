@@ -82,12 +82,12 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	accounts := accountsEnabled(cmd)
 	var accountsSource koiosparity.RewardParitySource
 	if accounts {
-		// #3097's address universe unions Koios's own list with Dingo's known
-		// addresses (see koiosparity.BuildAccountAddressUniverse) — open a
-		// read-only connection to Dingo's metadata DB for that purpose only;
-		// this is still the same direct, read-only SQL query this
-		// tool has always used for the Dingo side, never an HTTP call to
-		// Dingo's own API.
+		// The per-account address universe unions Koios's own list with Dingo's
+		// known addresses (see koiosparity.BuildAccountAddressUniverse) — open
+		// a read-only connection to Dingo's metadata DB for that purpose only;
+		// this is still the same direct, read-only SQL query this tool has
+		// always used for the Dingo side, never an HTTP call to Dingo's own
+		// API.
 		dingo, dingoErr := koiosparity.OpenDingoDB(resolveDingoDB(cmd))
 		if dingoErr != nil {
 			return fmt.Errorf(

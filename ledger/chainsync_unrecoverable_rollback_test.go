@@ -31,7 +31,7 @@ import (
 
 // freshUnrecoverableConnId returns a distinct connection ID for each call,
 // mimicking the new bearer that peer governance opens after every forced
-// reconnect during the issue #2728 rollback loop.
+// reconnect during the unrecoverable rollback loop.
 func freshUnrecoverableConnId(port int) ouroboros.ConnectionId {
 	return ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
@@ -40,12 +40,12 @@ func freshUnrecoverableConnId(port int) ouroboros.ConnectionId {
 }
 
 // TestUnrecoverableRollbackTrackerSurvivesResyncReset reproduces the core
-// gap behind issue #2728: a diverged node is asked to roll back to the same
-// canonical point it cannot cross to, and on every attempt it wipes
+// gap behind the rollback loop: a diverged node is asked to roll back to the
+// same canonical point it cannot cross to, and on every attempt it wipes
 // rollbackHistory (the resync reset) and reconnects with a fresh connection.
-// The per-connection rollback loop detector therefore never accumulates.
-// The point-keyed unrecoverableRollbacks tracker must accumulate instead, so
-// the stuck condition is eventually recognised.
+// The per-connection rollback loop detector therefore never accumulates. The
+// point-keyed unrecoverableRollbacks tracker must accumulate instead, so the
+// stuck condition is eventually recognised.
 func TestUnrecoverableRollbackTrackerSurvivesResyncReset(t *testing.T) {
 	t.Parallel()
 

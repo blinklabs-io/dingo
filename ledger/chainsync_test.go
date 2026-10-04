@@ -18,7 +18,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -28,6 +30,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,16 +46,21 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/blinklabs-io/gouroboros/protocol/blockfetch"
@@ -323,7 +331,7 @@ func TestStartQueuedBlockfetchReleasesMutexAroundRequest(t *testing.T) {
 
 // TestWaitForBlockfetchRequestLockedWithSignalWaitsForBothPipelinedRequests
 // pins the blockfetchRequestsInFlight generalization from a single channel to
-// a slice (issue #4651): with pipelining, two requests can be outstanding on
+// a slice: with pipelining, two requests can be outstanding on
 // the same connection at once (the active batch and one pre-queued "next"
 // request), and gouroboros resolves them strictly FIFO, so the wait must
 // drain both, in order, not return after only the first.
@@ -1905,10 +1913,10 @@ func newBlockfetchRollbackFixture(t *testing.T) *blockfetchRollbackFixture {
 			Level: slog.LevelDebug,
 		}),
 	)
-	// Header crypto runs for every slot a Mithril certificate does not cover
-	// (issue #3528), and these synthetic blocks carry no VRF/KES material. An
+	// Header crypto runs for every slot a Mithril certificate does not cover,
+	// and these synthetic blocks carry no VRF/KES material. An
 	// epoch the cache covers but whose nonce is not published yet is the
-	// state a catching-up node is actually in when #3771's wedge appears:
+	// state a catching-up node is actually in when wedge appears:
 	// headerVerificationEpoch reports errEpochNonceUnavailable, which
 	// IsHeaderVerificationDeferred accepts, so the body is admitted and
 	// buffered with its stateful verification deferred instead of being
@@ -2052,8 +2060,8 @@ func (f *blockfetchRollbackFixture) rollbackToAncestorAndQueueForkB(
 	require.Equal(t, 1, f.ls.chain.HeaderCount())
 }
 
-// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives is issue
-// #3771. Fork resolution rolls the chain back to the common ancestor, queues
+// TestForkRestartKeepsReplacementHeadersWhenAbandonedBatchArrives covers a
+// fork restart. Fork resolution rolls the chain back to the common ancestor, queues
 // the winning peer's header path from there, and only then restarts
 // blockfetch. That restart flushes whatever the abandoned batch had already
 // buffered, so the first body from the losing fork reached chain insertion
@@ -2155,7 +2163,7 @@ func TestForkRestartDropsAbandonedBodyArrivingAfterRestart(t *testing.T) {
 	require.Equal(t, point, f.ls.pendingBlockfetchEvents[0].Point)
 }
 
-// The bounded-recovery half of #3771: a batch that delivered bodies but
+// The bounded-recovery case: a batch that delivered bodies but
 // extended nothing, while headers stayed queued, must feed the same
 // same-range failure streak a NoBlocks reply feeds, so the range is dropped
 // and a fresh intersect requested rather than being re-requested forever.
@@ -2398,7 +2406,7 @@ func TestRefusedRollbackKeepsInFlightBatch(t *testing.T) {
 
 // loadRealByronEBB returns a genuine Byron epoch-boundary block from the
 // shared ouroboros-consensus golden fixtures, mirroring loadRealByronMainBlock
-// in tests_dd2e404c_test.go.
+// in block_pipeline_validate_test.go.
 func loadRealByronEBB(t *testing.T) models.Block {
 	t.Helper()
 	root, err := fixtures.ExtractEmbeddedFixtures(t.TempDir())
@@ -2428,7 +2436,7 @@ func loadRealByronEBB(t *testing.T) models.Block {
 // TestCompareIncomingHeaderToLocalTip_ByronEBBBeatsRegularTip exercises the
 // real chain-selection caller (ledger/chainsync.go's
 // compareIncomingHeaderToLocalTip) end to end for the exact scenario
-// blinklabs-io/dingo#4413 describes: a locally applied Byron regular tip
+// describes: a locally applied Byron regular tip
 // against a peer's EBB successor sharing its block number. Canonical Byron
 // PBFT counts the boundary block as an additional block despite the shared
 // number, so the incoming EBB must beat the local regular tip.
@@ -3113,7 +3121,7 @@ func TestHandleEventBlockfetch_WarnsOnUnexpectedEventDataType(t *testing.T) {
 // active-connection switch (the newly active connection's next header
 // almost never fits a header queue built by the connection it replaced),
 // and that function previously tore down ANY in-flight batch unconditionally
-// -- bypassing handoffPipelineOnSwitchLocked's #1922 "preserve in-flight
+// -- bypassing handoffPipelineOnSwitchLocked's "preserve in-flight
 // blockfetch batch across chain switch" protection through this side
 // channel. handleEventBlockfetchBlockDeferred only accepts blocks whose
 // connection matches the CURRENT activeBlockfetchConnId, so every block
@@ -3473,7 +3481,7 @@ func assertPeerHeaderHistoryByteAccounting(t *testing.T, ls *LedgerState) {
 // cap -- required to build a path that exceeds MaxQueuedHeaders (the
 // default floor is 10,000), matching the shape of the live-sync freeze this
 // file regression-tests (a single reconciliation event with several
-// thousand fork-path headers, issue #1894 phase 3).
+// thousand fork-path headers, phase 3).
 func buildOverflowForkPath(
 	fixture *chainsyncRollbackFixture,
 	connId ouroboros.ConnectionId,
@@ -3709,7 +3717,7 @@ func TestPeerHeaderHistoryRehydratesWireHeader(t *testing.T) {
 }
 
 // TestTryResolveForkExtensionRestartsBlockfetchAfterQueueOverflow pins the
-// fix for the #1894 phase 3 live-sync freeze: a fork-resolution path whose
+// fix for the phase 3 live-sync freeze: a fork-resolution path whose
 // length exceeds the header queue's capacity fails partway through
 // (chain.ErrHeaderQueueFull) appending onto the current chain tip. Before
 // the fix, tryResolveFork's "fork extends from current tip" loop returned
@@ -4198,7 +4206,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // not been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so
+// EventBus.PublishOrdered, so
 // HandlePeerTipUpdateEvent returns before the lane worker has handed the event
 // to any subscriber. A lane is a FIFO drained by exactly one worker, so a
 // sentinel enqueued after those switches is delivered after them: receiving it
@@ -4995,7 +5003,7 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 }
 
 // TestHandleEventChainsyncRollbackToBlockTipDoesNotPublishLedgerRollback
-// captures the wedge described in issue #2177. After the
+// captures the wedge described above. After the
 // "fork extends from current tip" branch queues headers, the chain's
 // header tip sits ahead of the block tip. If the peer then sends a
 // RollBackward to the block tip, the no-op shortcut in
@@ -5350,7 +5358,7 @@ func insertTestDijkstraBlock(
 
 // TestCompareIncomingHeaderToLocalTip_Dijkstra exercises the actual
 // chain-selection caller (ledger/chainsync.go's compareIncomingHeaderToLocalTip,
-// the mechanism issue #3075 identified as reachable from
+// the mechanism identified as reachable from
 // ledger/chainsync.go:1855-1904 and ouroboros/chainsync.go:758) end to end for
 // Dijkstra headers: the local tip is a real Dijkstra block round-tripped
 // through storage (database.BlockByHash -> models.Block.Decode), and the
@@ -5768,7 +5776,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(
 // TestBlockfetchHeaderVerificationRunsRegardlessOfValidationEnabled is a
 // regression test for a human-review finding: no test failed if
 // handleEventBlockfetchBlockDeferred's Mithril-slot gate were reverted to
-// the previous validationEnabled check. Issue #3528 made header crypto
+// the previous validationEnabled check. made header crypto
 // verification unconditional -- before it, an entire
 // ValidateHistorical=false bulk-sync run skipped VRF/KES/opcert
 // verification and stake-derived leader eligibility for every block. This
@@ -5872,6 +5880,80 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
 }
 
+// TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader pins the
+// blockfetch admission call site: a fetched block whose own header was
+// crypto-verified at chainsync ingress must not have its header crypto re-run
+// when that header is queued behind the head, while the same block queued
+// unverified still fails. The block carries a corrupted KES signature, so only
+// a skipped verification can admit it; the stateful half still runs and
+// defers against the empty stake state.
+func TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		verified bool
+	}{
+		{name: "verified", verified: true},
+		{name: "unverified", verified: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			connId := testRecycleConnId()
+			tb := createTestBlock(t, [32]byte{53}, 0, tamperKESSig)
+			ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+			ls.validationEnabled = true
+			ls.activeBlockfetchConnId = connId
+			ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+			ls.chain = &chain.Chain{}
+
+			fetched := tb.block.Header()
+			head := mockHeader{
+				hash:        fetched.PrevHash(),
+				blockNumber: fetched.BlockNumber() - 1,
+				slot:        fetched.SlotNumber() - 1,
+			}
+			require.NoError(t, ls.chain.AddVerifiedBlockHeader(head))
+			if tc.verified {
+				require.NoError(t, ls.chain.AddVerifiedBlockHeader(fetched))
+			} else {
+				require.NoError(t, ls.chain.AddBlockHeader(fetched))
+			}
+			point := ocommon.NewPoint(
+				fetched.SlotNumber(),
+				fetched.Hash().Bytes(),
+			)
+			require.False(t, ls.chain.FirstHeaderMatchesPoint(point))
+
+			err := handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
+				ConnectionId: connId,
+				Block:        tb.block,
+				Point:        point,
+			}, nil)
+			if !tc.verified {
+				require.Error(t, err)
+				assert.Contains(
+					t,
+					err.Error(),
+					"block header crypto verification failed",
+				)
+				assert.Empty(t, ls.pendingBlockfetchEvents)
+				return
+			}
+			require.NoError(
+				t,
+				err,
+				"verified queued header must not have its crypto re-run",
+			)
+			require.Len(t, ls.pendingBlockfetchEvents, 1)
+			assert.True(t, ls.consumeDeferredHeaderValidation(point))
+		})
+	}
+}
+
 // TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails is a
 // regression test for a human-review finding: handleEventBlockfetchBlockDeferred
 // checked errors.Is(verifyErr, errHeaderVerificationDeferred) directly
@@ -5918,7 +6000,7 @@ func TestBlockfetchHeaderVerificationEmptyEpochNonceDefersNotFails(
 	assert.True(t, ls.consumeDeferredHeaderValidation(point))
 }
 
-// --- non-extending-block flood demotion (issue #4272) ---
+// --- non-extending-block flood demotion ---
 
 // TestEvaluateNonExtendingBlockRejection exercises the pure threshold/window
 // decision directly against synthetic timestamps, matching
@@ -6351,7 +6433,7 @@ func TestFlushPendingBlockfetchNonExtendingHandfulNotRecycled(t *testing.T) {
 	)
 }
 
-// Regression for #2107: replayBufferedHeadersAsync must be a no-op once
+// Regression: replayBufferedHeadersAsync must be a no-op once
 // Close has been observed, so its goroutine can never reach DB reads
 // after the database is closed.
 func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
@@ -6379,7 +6461,7 @@ func TestReplayBufferedHeadersAsyncSkippedAfterClose(t *testing.T) {
 	)
 }
 
-// Regression for #2107: Close must drain in-flight replay goroutines
+// Regression: Close must drain in-flight replay goroutines
 // before returning, so callers (Node.shutdown phase 3) can safely close
 // the database without racing the replay's DB reads.
 func TestCloseWaitsForInFlightReplay(t *testing.T) {
@@ -6417,7 +6499,7 @@ func TestCloseWaitsForInFlightReplay(t *testing.T) {
 
 	// With closed=true and the worker blocked on chainsyncMutex, Close
 	// must not return: doing so would close the DB while the worker is
-	// still alive (the original #2107 panic).
+	// still alive.
 	testutil.RequireNoReceive(
 		t,
 		closeReturned,
@@ -6575,7 +6657,7 @@ func TestRequestChainsyncResyncDefersPublishUnderChainsyncBlockfetchMutex(
 // A crossable rollback the node actually applies must not leave its point in
 // the per-connection loop detector. Otherwise a later, legitimate rollback to
 // the same fork point counts the crossing we already made and is suppressed as
-// a false loop, which is the reconnect-churn wedge in issue #2790.
+// a false loop, which is the reconnect-churn wedge.
 func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	t *testing.T,
 ) {
@@ -6599,7 +6681,7 @@ func TestHandleEventChainsyncRollbackClearsLoopHistoryForCrossedPoint(
 	}
 }
 
-// The #2790 loop shape: after crossing a fork point the node advances forward
+// The loop shape: after crossing a fork point the node advances forward
 // on the peer's chain, then the peer rolls it back to the same fork point
 // again. Because the successful first cross reset the loop counter, the second
 // crossable rollback must be applied, not suppressed as a false loop.
@@ -6644,10 +6726,10 @@ func TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback(
 }
 
 // When the loop detector breaks a loop for a genuinely un-crossable rollback,
-// the skip path must surface the stuck condition through the point-keyed #2728
+// the skip path must surface the stuck condition through the point-keyed
 // unrecoverable-rollback tracker so the escalation and metric can fire,
 // instead of silently skipping and hiding a persistently un-recoverable
-// divergence (issue #2790 bullet 6).
+// divergence.
 func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 	t *testing.T,
 ) {
@@ -6694,8 +6776,7 @@ func TestHandleEventChainsyncRollbackSkipReportsUnrecoverableRollback(
 
 // A crossable rollback that reaches the per-connection loop threshold must
 // still be APPLIED, not suppressed as a false loop: the loop detector only
-// breaks loops for rollbacks the node cannot cross (issue #2790, requirement
-// 1). This exercises the appliability guard directly by pre-seeding history to
+// breaks loops for rollbacks the node cannot cross. This exercises the appliability guard directly by pre-seeding history to
 // the threshold, unlike the reset-on-success path which never reaches it.
 func TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold(
 	t *testing.T,
@@ -7034,7 +7115,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	// applied even when it repeats (see
 	// TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback and
 	// TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold),
-	// which is the issue #2790 fix.
+	// which is the fix.
 	uncrossablePoint := ocommon.Point{
 		Slot: fixture.currentTip.Point.Slot - 3,
 		Hash: testHashBytes("uncrossable-missing-fork-block"),
@@ -7065,7 +7146,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 }
 
 // TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTip
-// covers issue #3516's rollback-depth bound: the common ancestor between the
+// covers rollback-depth bound: the common ancestor between the
 // diverged primary chain and the stale ledger tip here sits 3 blocks behind
 // the primary chain's tip, beyond the fixture's K=2. Live reconciliation
 // must decline rather than force that rewind through, leaving chain and
@@ -7145,7 +7226,7 @@ func TestHandleEventChainsyncRollbackExceedsKDeclinesReconcilingDivergedLedgerTi
 }
 
 // TestHandleEventChainsyncRollbackReconcileFindsMithrilBoundaryAncestor
-// covers wolf31o2's review on PR #3611: when an over-K rollback triggers
+// covers wolf31o2's review on when an over-K rollback triggers
 // reconcileLivePrimaryChainLedgerDivergence and the common ancestor that
 // reconciliation itself finds sits at or below the Mithril boundary,
 // reconcilePrimaryChainTipWithLedgerTip's own pre-check (added earlier
@@ -7364,7 +7445,7 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 }
 
 // TestLedgerProcessBlocksRetriesInsteadOfHaltingOnOverKReconcile is the
-// pipeline-level regression a wolf31o2 review on PR #3611 required.
+// pipeline-level regression a wolf31o2 review on required.
 // TestLedgerReadChainRequestsResyncOnOverKReconcile above only proves
 // ledgerReadChain itself returns and publishes a resync event; it says
 // nothing about what happens to block processing afterward. Before this
@@ -7373,11 +7454,10 @@ func TestLedgerReadChainRequestsResyncOnMithrilBoundaryReconcile(
 // turned into a nil error -- ledgerProcessBlocksWithAttempt's err == nil
 // branch then exited its restart loop for good, permanently and silently
 // halting all ledger block processing with nothing to resume it short of a
-// full LedgerState restart. That the K-bounded rewind added by #3516 is
+// full LedgerState restart. That the K-bounded rewind is
 // what made this branch reachable at all (RewindPrimaryChainToPoint had no
-// bound before) is what makes this a merge blocker for this PR rather than
-// a candidate for the general, already-deferred pattern tracked in issue
-// #3776.
+// bound before) is why it must be fixed here rather than
+// folded into the general, already-deferred pattern.
 //
 // This wires the real ledgerReadChain/ledgerProcessBlocksFromSource pair
 // through ledgerProcessBlocksWithAttempt exactly as production
@@ -7553,7 +7633,7 @@ func TestHandleEventChainsyncForkRecordsAdmittedHeaderFrontier(t *testing.T) {
 	// so it cannot be exempted as Mithril-covered either (that would forbid
 	// the very rollback this fork resolution performs). An unverified fork
 	// header is still admitted onto the local header chain -- that's
-	// ordinary, safe chain-shape bookkeeping -- but issue #3528 requires
+	// ordinary, safe chain-shape bookkeeping -- but requires
 	// genuine trust (real verification or a Mithril certificate) before it
 	// may advance the shared "trusted sync progress" frontier
 	// (recordAdmittedHeaderFrontier), so syncUpstreamTipSlot must stay at
@@ -7828,7 +7908,7 @@ func TestHandleEventChainsyncBlockHeaderIgnoresObservedPredecessor(
 }
 
 // TestTryResolveForkExceedsKDeclinesReconcilingDivergedLedgerTip covers
-// issue #3516's rollback-depth bound from the fork-resolution call site: the
+// rollback-depth bound from the fork-resolution call site: the
 // common ancestor here sits 3 blocks behind the fixture's K=2, so live
 // reconciliation must decline the rewind rather than force it through, and
 // fork resolution must fall back to rejecting the fork and requesting a
@@ -10402,7 +10482,7 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 // and TestProcessEpochRollover_OrderingInvariant lock the rest of the sequence.
 //
 // currentBoundarySPOStakeState is a second read at the same point, resolving
-// mark[NewEpoch] for RATIFY's SPO tally (dingo#4441). Its position is load
+// mark[NewEpoch] for RATIFY's SPO tally. Its position is load
 // bearing for the same reason: when no SNAP-point distribution was stashed it
 // reconstructs the boundary itself, and the reconstruction counts reward
 // deltas up to and including the boundary slot. Moved below
@@ -10998,7 +11078,7 @@ func TestHandleEventBlockfetchBlockAllowsBlocksFromActiveBatch(t *testing.T) {
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
-		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// its slot Mithril-covered so the header crypto gate (:
 		// required by default, exempt only for a Mithril-certified slot)
 		// exempts it, letting this test isolate batch-ownership bookkeeping
 		// from crypto verification.
@@ -11099,7 +11179,7 @@ func TestHandleEventBlockfetchBlockAllowsEquivalentConnectionId(t *testing.T) {
 		activeBlockfetchConnId:       connId1,
 		chainsyncBlockfetchReadyChan: make(chan struct{}),
 		// mockBabbageBlock carries no real VRF/KES material to verify. Mark
-		// its slot Mithril-covered so the header crypto gate (issue #3528:
+		// its slot Mithril-covered so the header crypto gate (:
 		// required by default, exempt only for a Mithril-certified slot)
 		// exempts it, letting this test isolate connection-equivalence
 		// bookkeeping from crypto verification.
@@ -12003,7 +12083,7 @@ func TestHandleEventChainsyncRecordsOnlyAdmittedHeaderFrontier(t *testing.T) {
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate frontier-tracking from crypto verification.
 	ls.mithrilLedgerSlot = accepted.slot
@@ -12093,7 +12173,7 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 		},
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate connection-buffering from crypto verification.
 	ls.mithrilLedgerSlot = header1.slot
@@ -12404,7 +12484,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		},
 	}
 	// mockHeader carries no real VRF/KES material to verify. Mark its slot
-	// Mithril-covered so the header crypto gate (issue #3528: required by
+	// Mithril-covered so the header crypto gate (: required by
 	// default, exempt only for a Mithril-certified slot) exempts it, letting
 	// this test isolate buffered-header replay from crypto verification.
 	ls.mithrilLedgerSlot = 1
@@ -13711,56 +13791,6 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	}
 }
 
-// TestCalculateEpochNonce_NegativeSecurityParam tests handling of negative security parameter
-func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
-	t.Parallel()
-
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": -1,
-			"protocolMagic": 2
-		}
-	}`
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
-
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-	_ = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
-
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
-			EpochId:   1,
-			StartSlot: 86400,
-			Nonce:     []byte{0x01, 0x02, 0x03},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Test will depend on whether the genesis loads successfully
-	// If it loads, we expect an error about negative k
-	_, _, _, _, err := ls.calculateEpochNonce(
-		nil,
-		86400,
-		ls.currentEra,
-		ls.currentEpoch,
-		nil,
-	)
-	// Either genesis loading fails or calculateEpochNonce catches negative k
-	if err == nil {
-		t.Log("Note: negative k may be caught during genesis loading")
-	}
-}
-
 // TestCalculateEpochNonce_ShelleyEraDifferentParams tests Shelley era with various parameters
 func TestCalculateEpochNonce_ShelleyEraDifferentParams(t *testing.T) {
 	t.Parallel()
@@ -14251,4 +14281,3581 @@ func TestCalculateEpochNonce_MissingByronGenesisInByronEra(t *testing.T) {
 	if nonce != nil {
 		t.Errorf("expected nil nonce for Byron era, got: %v", nonce)
 	}
+}
+
+// mockForgedBlockChecker is a test implementation of ForgedBlockChecker.
+type mockForgedBlockChecker struct {
+	forgedSlots map[uint64][]byte
+}
+
+func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: localHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Subscribe to slot battle events
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	// Simulate an incoming block at slot 1000 with a different hash.
+	// Pass a non-nil error to indicate the remote block was rejected
+	// (local block stays on chain, so local won).
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: remoteHash,
+		},
+	}
+	ls.checkSlotBattle(e, errors.New("block rejected"))
+
+	// Verify the event was emitted
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		testutil.AsyncWait,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok, "event data should be SlotBattleEvent")
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, localHash, battle.LocalBlockHash)
+	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
+	assert.True(t, battle.Won,
+		"local should win when remote block is rejected")
+}
+
+func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: localHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	// Pass nil error to indicate the remote block was accepted
+	// (remote won, our block is replaced).
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: remoteHash,
+		},
+	}
+	ls.checkSlotBattle(e, nil)
+
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		testutil.AsyncWait,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.False(t, battle.Won,
+		"local should lose when remote block is accepted")
+}
+
+func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: {0x01, 0x02, 0x03, 0x04},
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	// Incoming block is at slot 2000, not a slot we forged
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 2000,
+			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
+		},
+	}
+	ls.checkSlotBattle(e, nil)
+
+	// Verify no event was emitted
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"unexpected SlotBattleEvent",
+	)
+}
+
+func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	blockHash := []byte{0x01, 0x02, 0x03, 0x04}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: blockHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	// Incoming block has the same hash (it's our own block echoed back)
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: blockHash,
+		},
+	}
+	ls.checkSlotBattle(e, nil)
+
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"same-hash block should not trigger slot battle",
+	)
+}
+
+func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: nil, // No checker configured
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: []byte{0x0A, 0x0B, 0x0C, 0x0D},
+		},
+	}
+	ls.checkSlotBattle(e, nil)
+
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"nil checker should not emit events",
+	)
+}
+
+func TestCheckSlotBattle_NilEventBus(t *testing.T) {
+	t.Parallel()
+
+	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: localHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           nil, // No event bus
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Should not panic with nil event bus
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: remoteHash,
+		},
+	}
+	ls.checkSlotBattle(e, errors.New("rejected"))
+}
+
+// TestCheckSlotBattle_UnderWriteLock is a regression test for the
+// deadlock where checkSlotBattle was called while holding ls.Lock()
+// (write lock) but internally attempted ls.RLock() on the same
+// non-reentrant sync.RWMutex.
+func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	localHash := []byte{0x01, 0x02, 0x03, 0x04}
+	remoteHash := []byte{0x0A, 0x0B, 0x0C, 0x0D}
+
+	checker := &mockForgedBlockChecker{
+		forgedSlots: map[uint64][]byte{
+			1000: localHash,
+		},
+	}
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			EventBus:           eventBus,
+			ForgedBlockChecker: checker,
+			Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	_, evtCh := eventBus.Subscribe(forging.SlotBattleEventType)
+
+	e := BlockfetchEvent{
+		Point: ocommon.Point{
+			Slot: 1000,
+			Hash: remoteHash,
+		},
+	}
+
+	// Call checkSlotBattle while holding the write lock, exactly
+	// as processBlockEvents does. Before the fix this deadlocked.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ls.Lock()
+		ls.checkSlotBattle(e, errors.New("block rejected"))
+		ls.Unlock()
+	}()
+
+	testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"checkSlotBattle deadlocked under write lock",
+	)
+
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		testutil.AsyncWait,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.True(t, battle.Won)
+}
+
+// newChainUpdateEvent builds a throwaway chain.update event for saturating the
+// bus in the deadlock regression below.
+func newChainUpdateEvent() event.Event {
+	return event.NewEvent(chain.ChainUpdateEventType, chain.ChainBlockEvent{})
+}
+
+// TestBlockfetchDrainDefersChainUpdatePastLedgerMutex is the regression guard
+// for the chainsync/blockfetch drain deadlock (blinklabs-io/dingo preview
+// freeze), rewritten to exercise the lane-saturation path the six-block test
+// could not reach.
+//
+// The ledger drains fetched blocks via flushPendingBlockfetchBlocks while
+// holding chainsyncBlockfetchMutex. If that drain publishes chain.update
+// inline, a terminal chain.update subscriber that stops draining stalls the
+// publish WITH the mutex held; handleEventChainsync then blocks acquiring the
+// same mutex, the ledger.chainsync buffer fills, and the node deadlocks.
+//
+// This test puts the bus into the exact state that traps BOTH previously
+// attempted inline publishers:
+//
+//   - a lossless chain.update subscriber whose one buffer slot is filled and
+//     never drained, so a synchronous Publish (the original code) blocks; and
+//   - the ordered chain.update lane filled to capacity, so a PublishOrdered
+//     (the rejected under-lock fix) also blocks -- this is the saturation the
+//     maintainer flagged, which a handful of blocks never reaches.
+//
+// With the bus in that state the drain must still return promptly, because the
+// fix hands each block's chain.update back to the ledger's pendingPublishes to
+// publish AFTER the mutex is released rather than publishing it inline. Both
+// older approaches would block here and fail the timeout.
+func TestBlockfetchDrainDefersChainUpdatePastLedgerMutex(t *testing.T) {
+	t.Parallel()
+
+	eventBus := event.NewEventBus(nil, nil)
+	// Stop releases the goroutines parked on the stalled subscriber / full
+	// lane at the end of the test. Run it under a bounded wait: if Stop's
+	// shutdown path ever regresses and fails to release those parked
+	// publishers, an unbounded t.Cleanup(eventBus.Stop) would hang the whole
+	// `go test` binary in Stop with no diagnostic. Fail the test instead so
+	// the regression is visible.
+	t.Cleanup(func() {
+		stopped := make(chan struct{})
+		go func() {
+			eventBus.Stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+		case <-time.After(testutil.AsyncWait):
+			t.Error(
+				"eventBus.Stop did not return: it failed to " +
+					"release the publishers parked on the stalled subscriber / " +
+					"full ordered lane (shutdown backpressure-release regressed)",
+			)
+		}
+	})
+
+	// Terminal chain.update subscriber, buffer 1, deliberately never drained.
+	// Lossless (SubscriberBackpressureBlock) means a full buffer blocks the
+	// publisher forever rather than dropping -- the stalled-subscriber
+	// condition behind the freeze.
+	subId, ch := eventBus.SubscribeWithBufferPolicy(
+		chain.ChainUpdateEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+	)
+	require.NotZero(t, subId)
+	require.NotNil(t, ch)
+
+	// Fill the subscriber's single buffer slot so any further synchronous
+	// Publish blocks. Confirm the stall is real: a second inline Publish must
+	// not complete.
+	eventBus.Publish(chain.ChainUpdateEventType, newChainUpdateEvent())
+	directBlocked := make(chan struct{})
+	go func() {
+		eventBus.Publish(chain.ChainUpdateEventType, newChainUpdateEvent())
+		close(directBlocked)
+	}()
+	select {
+	case <-directBlocked:
+		t.Fatal(
+			"inline Publish did not block on the stalled subscriber; " +
+				"the test cannot exercise the deadlock condition",
+		)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// Saturate the ordered chain.update lane to capacity. The lane worker
+	// parks on the stalled subscriber, so every enqueued event stays in the
+	// lane; once it is full a PublishOrdered blocks too.
+	go func() {
+		for range event.OrderedQueueSize + 8 {
+			eventBus.PublishOrdered(
+				chain.ChainUpdateEventType,
+				newChainUpdateEvent(),
+			)
+		}
+	}()
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			50*time.Millisecond,
+		)
+		defer cancel()
+		// A bounded publish that cannot enqueue reports false: the lane is
+		// full.
+		return !eventBus.PublishOrderedContext(
+			ctx,
+			chain.ChainUpdateEventType,
+			newChainUpdateEvent(),
+		)
+	}, testutil.AsyncWait, 20*time.Millisecond,
+		"ordered chain.update lane never reached capacity",
+	)
+
+	// Real primary chain wired to the saturated bus, plus a minimal ledger
+	// state -- enough for the blockfetch drain path.
+	cm, err := chain.NewManager(nil, eventBus)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	ls := &LedgerState{
+		chain: c,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: eventBus,
+		},
+	}
+
+	blocks, err := testfixtures.GenerateConwayChain(1)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	ls.pendingBlockfetchEvents = []BlockfetchEvent{
+		{
+			Block: blocks[0],
+			Point: ocommon.Point{
+				Slot: blocks[0].SlotNumber(),
+				Hash: blocks[0].Hash().Bytes(),
+			},
+		},
+	}
+
+	// THE FIX. flushPendingBlockfetchBlocksDeferred runs on the mutex-holding
+	// drain path. It must add the block and return promptly, queueing the
+	// chain.update on pubs instead of publishing it into the saturated bus.
+	// Under the original synchronous Publish, or the rejected under-lock
+	// PublishOrdered, this call would block forever on the stalled subscriber
+	// / full lane and the timeout below would fire.
+	var pubs pendingPublishes
+	drained := make(chan error, 1)
+	go func() { drained <- ls.flushPendingBlockfetchBlocksDeferred(&pubs) }()
+	select {
+	case drainErr := <-drained:
+		require.NoError(t, drainErr)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal(
+			"flushPendingBlockfetchBlocks blocked under a saturated " +
+				"chain.update lane: the block's chain.update must be deferred " +
+				"past chainsyncBlockfetchMutex, not published inline",
+		)
+	}
+
+	// The chain.update was deferred, not published: nothing reached the
+	// saturated bus under the lock. It is no longer requeued onto pubs.events;
+	// AddBlockWithPointDeferred enqueued it on the chain's shared sequencer
+	// under c.mutex, and the drain registered the chain on pubs.chainDrains so
+	// pubs.flush() publishes it (in chain-mutation order) after the mutex is
+	// released. That the chain is registered but not yet drained here is the
+	// deadlock-avoidance property: publication is deferred past the lock.
+	require.Empty(
+		t,
+		pubs.events,
+		"chain.update must not be requeued on the generic pending queue; it "+
+			"lives on the chain's shared sequencer",
+	)
+	require.Equal(
+		t,
+		[]*chain.Chain{c},
+		pubs.chainDrains,
+		"the drain must register the chain so its sequencer is flushed after "+
+			"the mutex is released",
+	)
+	// The block really was added to the chain (the drain did its job, it just
+	// did not publish).
+	require.Equal(t, blocks[0].SlotNumber(), c.Tip().Point.Slot)
+}
+
+// loadByronGenesisForTest fills fields that make a fixture valid as Byron
+// genesis while preserving fields the test is exercising.
+func loadByronGenesisForTest(
+	t testing.TB,
+	cfg *cardano.CardanoNodeConfig,
+	r io.Reader,
+) error {
+	t.Helper()
+
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	var genesis map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &genesis); err != nil {
+		return err
+	}
+	protocolMagic := uint32(164)
+	if protocolConsts, ok := genesis["protocolConsts"]; ok {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(protocolConsts, &fields); err != nil {
+			return err
+		}
+		if magic, ok := fields["protocolMagic"]; ok {
+			if err := json.Unmarshal(magic, &protocolMagic); err != nil {
+				return err
+			}
+		}
+	}
+	issuer := newByronPBFTTestKey(0x31)
+	delegate := newByronPBFTTestKey(0x32)
+	issuerHash, err := byronconsensus.PBFTVerificationKeyHash(
+		issuer.verificationKey,
+	)
+	if err != nil {
+		return err
+	}
+	certificate := newSignedByronPBFTDelegationCertificate(
+		t, protocolMagic, 0, issuer, delegate,
+	)
+	bootStakeholders, err := json.Marshal(map[string]uint64{
+		issuerHash.String(): 1,
+	})
+	if err != nil {
+		return err
+	}
+	heavyDelegation, err := json.Marshal(map[string]any{
+		issuerHash.String(): map[string]any{
+			"cert": hex.EncodeToString(certificate[3].([]byte)),
+			"delegatePk": base64.StdEncoding.EncodeToString(
+				delegate.verificationKey,
+			),
+			"issuerPk": base64.StdEncoding.EncodeToString(
+				issuer.verificationKey,
+			),
+			"omega": 0,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defaults := map[string]json.RawMessage{
+		"avvmDistr":        json.RawMessage(`{}`),
+		"bootStakeholders": bootStakeholders,
+		"heavyDelegation":  heavyDelegation,
+		"nonAvvmBalances":  json.RawMessage(`{}`),
+		"startTime":        json.RawMessage(`1788739200`),
+		"blockVersionData": json.RawMessage(`{
+			"heavyDelThd":"300000000000","maxBlockSize":"2000000",
+			"maxHeaderSize":"2000000","maxProposalSize":"700",
+			"maxTxSize":"4096","mpcThd":"20000000000000",
+			"scriptVersion":0,"slotDuration":"20000",
+			"softforkRule":{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"},
+			"txFeePolicy":{"multiplier":"43946000000","summand":"155381000000000"},
+			"unlockStakeEpoch":"18446744073709551615","updateImplicit":"10000",
+			"updateProposalThd":"100000000000000","updateVoteThd":"1000000000000"
+		}`),
+		"protocolConsts": json.RawMessage(`{"k":108,"protocolMagic":164}`),
+	}
+	for key, value := range defaults {
+		if _, ok := genesis[key]; !ok {
+			genesis[key] = value
+		}
+	}
+	for key, nestedDefaults := range map[string]map[string]json.RawMessage{
+		"blockVersionData": {
+			"heavyDelThd": json.RawMessage(`"300000000000"`), "maxBlockSize": json.RawMessage(`"2000000"`),
+			"maxHeaderSize": json.RawMessage(`"2000000"`), "maxProposalSize": json.RawMessage(`"700"`),
+			"maxTxSize": json.RawMessage(`"4096"`), "mpcThd": json.RawMessage(`"20000000000000"`),
+			"scriptVersion": json.RawMessage(`0`), "slotDuration": json.RawMessage(`"20000"`),
+			"softforkRule":     json.RawMessage(`{"initThd":"900000000000000","minThd":"600000000000000","thdDecrement":"50000000000000"}`),
+			"txFeePolicy":      json.RawMessage(`{"multiplier":"43946000000","summand":"155381000000000"}`),
+			"unlockStakeEpoch": json.RawMessage(`"18446744073709551615"`), "updateImplicit": json.RawMessage(`"10000"`),
+			"updateProposalThd": json.RawMessage(`"100000000000000"`), "updateVoteThd": json.RawMessage(`"1000000000000"`),
+		},
+		"protocolConsts": {"k": json.RawMessage(`108`), "protocolMagic": json.RawMessage(`164`)},
+	} {
+		var nested map[string]json.RawMessage
+		if err := json.Unmarshal(genesis[key], &nested); err != nil {
+			return err
+		}
+		if nested == nil {
+			continue
+		}
+		for nestedKey, value := range nestedDefaults {
+			if _, ok := nested[nestedKey]; !ok {
+				nested[nestedKey] = value
+			}
+		}
+		encoded, err := json.Marshal(nested)
+		if err != nil {
+			return err
+		}
+		genesis[key] = encoded
+	}
+	completed, err := json.Marshal(genesis)
+	if err != nil {
+		return err
+	}
+	return cfg.LoadByronGenesisFromReader(bytes.NewReader(completed))
+}
+
+// TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow proves
+// that the candidate-freeze cutoff at the Alonzo→Babbage epoch boundary is
+// driven by the source epoch's protocol family (TPraos, 3k/f) — not the
+// post-transition era (Babbage, Praos, 4k/f).
+//
+// State up to entering this rollover:
+//
+//   - currentEpoch = Alonzo (epoch 3, EraId=4, slots 225–299)
+//   - currentEra   = Babbage (5)              ← already advanced by
+//     applyHardForkTransition
+//   - k=6, f=0.4 → TPraos stability window = 3k/f = 45 slots,
+//     Praos stability window  = 4k/f = 60 slots
+//   - Alonzo cutoff (TPraos): 225 + 75 - 45 = 255
+//   - Alonzo cutoff (Praos):  225 + 75 - 60 = 240
+//
+// The test seeds two pre-stored block-nonce rows at slots 230 and 245:
+//
+//   - slot 230 is below both cutoffs (always contributes to candidate)
+//   - slot 245 sits between the Praos cutoff (240) and the TPraos cutoff
+//     (255). It should contribute to candidate iff the cutoff is taken
+//     from the SOURCE epoch's era (Alonzo, TPraos)
+//
+// The fast path freezes candidate at the latest pre-cutoff block's stored
+// nonce. So:
+//
+//   - Correct (source-era cutoff = 255): candidate = nonce(slot 245) =
+//     0xab*32. The block at slot 245 is the latest block strictly before
+//     255.
+//   - Buggy   (post-transition cutoff = 240): candidate = nonce(slot 230)
+//     = 0x99*32. The block at slot 245 is past the cutoff and does not
+//     contribute, so the latest pre-cutoff block is slot 230.
+//
+// The test asserts the correct value. Today, calculateEpochNonce passes
+// `currentEra.Id` (Babbage) into computeCandidateNonce — i.e. the
+// post-transition era — which selects the Praos window and produces the
+// buggy value. The fix is to pass `currentEpoch.EraId` (the source
+// epoch's era) instead, matching what verify_header.go already does and
+// what the function's own comment claims it does.
+//
+// This is the smaller of the two distinct VRF wedges: the bug
+// only fires at TPraos→Praos boundaries (Alonzo→Babbage) because that's
+// the only transition where the two stability-window formulas disagree.
+// All other era boundaries within TPraos (Shelley→Allegra, Allegra→Mary,
+// Mary→Alonzo) and within Praos (Babbage→Conway) use the same multiplier
+// either way and therefore mask the bug.
+func TestCalculateEpochNonce_TPraosToPraosUsesSourceEpochStabilityWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newAlonzoToBabbageStabilityCfg(t)
+
+	// Deterministic distinct nonces for slots 230 and 245 so the buggy
+	// vs correct candidate values are unambiguous.
+	nonceAt230 := bytes.Repeat([]byte{0x99}, 32)
+	nonceAt245 := bytes.Repeat([]byte{0xab}, 32)
+	hashAt230 := bytes.Repeat([]byte{0x01}, 32)
+	hashAt245 := bytes.Repeat([]byte{0x02}, 32)
+	prevHashAt230 := bytes.Repeat([]byte{0x10}, 32)
+	prevHashAt245 := bytes.Repeat([]byte{0x20}, 32)
+
+	// Insert two Alonzo blocks (slot 230 before any cutoff, slot 245
+	// between the Praos and TPraos cutoffs) into the blob store, plus
+	// pre-stored block-nonce rows so the fast path can compute the
+	// candidate without re-decoding CBOR.
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot: 230, Hash: hashAt230, PrevHash: prevHashAt230,
+			Cbor:   []byte{0x80}, // empty CBOR array, never decoded by fast path
+			Number: 1, Type: 4,   // Alonzo block type
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot: 245, Hash: hashAt245, PrevHash: prevHashAt245,
+			Cbor:   []byte{0x80},
+			Number: 2, Type: 4,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAt230, 230, nonceAt230, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAt245, 245, nonceAt245, false, txn,
+		)
+	}))
+
+	// currentTipBlockNonce is intentionally left empty so the
+	// resume-from-tip optimisation in computeEpochNonceForSlot
+	// /calculateEpochNonce does not short-circuit and the candidate
+	// is recomputed across the full epoch range from prevEvolvingNonce.
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.BabbageEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             3,
+			StartSlot:           225,
+			LengthInSlots:       75,
+			SlotLength:          1000,
+			EraId:               eras.AlonzoEraDesc.Id,
+			Nonce:               bytes.Repeat([]byte{0xee}, 32),
+			EvolvingNonce:       bytes.Repeat([]byte{0xee}, 32),
+			CandidateNonce:      bytes.Repeat([]byte{0xcc}, 32),
+			LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	// Drive the rollover that fires at the Alonzo→Babbage boundary.
+	// processEpochRollover is called with currentEra already advanced
+	// to Babbage (state.go:2457 passes eras.Eras[workingEraId] after
+	// applyHardForkTransition). What we want to assert is that the
+	// inner candidate-nonce computation still picks the cutoff slot
+	// from the era of the epoch being CLOSED, not the era being
+	// entered.
+	var candidate []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, _, c, _, err := ls.calculateEpochNonce(
+			txn,
+			ls.currentEpoch.StartSlot+uint64(ls.currentEpoch.LengthInSlots),
+			eras.BabbageEraDesc,
+			ls.currentEpoch,
+			nil,
+		)
+		candidate = c
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAt245),
+		hex.EncodeToString(candidate),
+		"candidate must freeze at the source epoch's TPraos cutoff "+
+			"(slot 255), so the block at slot 245 is the latest "+
+			"pre-cutoff contributor and its stored nonce becomes the "+
+			"candidate. Got %x — that's the nonce at slot 230, which "+
+			"means the freeze cutoff was computed against Babbage's "+
+			"Praos window (240) instead of Alonzo's TPraos window "+
+			"(255). #2125 Alonzo→Babbage VRF wedge.",
+		candidate,
+	)
+}
+
+// newAlonzoToBabbageStabilityCfg builds a CardanoNodeConfig with concrete
+// k and f values that put the Praos cutoff (4k/f = 60) and the TPraos
+// cutoff (3k/f = 45) on opposite sides of slot 245 inside an Alonzo epoch
+// of length 75 starting at slot 225. The Shelley genesis hash is set so
+// computeCandidateNonce's fall-back paths have something to decode.
+func newAlonzoToBabbageStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
+		"protocolConsts": {
+			"k": 6,
+			"protocolMagic": 42
+		}
+	}`)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"systemStart": "2026-01-01T00:00:00Z",
+		"securityParam": 6,
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 75,
+		"slotLength": 1
+	}`)))
+	return cfg
+}
+
+// TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff
+// reproduces the persisted-state shape that reports after a
+// Mithril bootstrap inside a Conway epoch:
+//
+//   - The bootstrap epoch row carries CandidateNonce == EvolvingNonce
+//     because the snapshot was taken before the candidate-freeze cutoff
+//     (psCandidateNonce in cardano-ledger tracks evolving until the
+//     stability window closes).
+//   - importTip wrote a block_nonce checkpoint at the snapshot tip slot
+//     so the resume logic can find the seam between the imported tip
+//     and post-import per-block accumulation.
+//   - Post-import sync produced block_nonce rows for blocks past the
+//     snapshot tip, including blocks straddling the freeze cutoff.
+//
+// The Conway→Conway rollover that closes the bootstrap epoch must:
+//
+//   - return candidateNonce frozen at the latest pre-cutoff block's
+//     stored nonce (NOT the imported tip-time value), and
+//   - return evolvingNonce equal to the last-block-of-epoch's stored
+//     nonce.
+//
+// If the rollover instead returns the imported tip-time value as the
+// candidate (i.e. it inherited prevEpoch.CandidateNonce without ever
+// iterating past the cutoff), the next epoch's nonce diverges from peers
+// and every header in that epoch fails VRF verification — the freeze
+// described by this test.
+func TestCalculateEpochNonce_PostMithrilBootstrapFreezesCandidateAtCutoff(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	// k=6, f=0.4 → 4k/f = 60 slots. Epoch length 75, start slot 1000,
+	// end slot 1075. cutoffSlot = 1075 - 60 = 1015.
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		cutoffSlot  uint64 = 1015
+		snapTipSlot uint64 = 1010 // snapshot taken before cutoff
+		preCutSlot  uint64 = 1014 // last block strictly before cutoff
+		postCutSlot uint64 = 1070 // last block of epoch (post-cutoff)
+	)
+
+	// Imported snapshot tip-time evolving == candidate (psCandidate
+	// tracks evolving until the stability window closes).
+	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
+	// Per-block evolving nonces stored by post-import processing.
+	// Distinct, deterministic values so a wrong return is unambiguous.
+	nonceAtPreCut := bytes.Repeat([]byte{0xbb}, 32)
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+
+	hashAtSnap := bytes.Repeat([]byte{0x10}, 32)
+	hashAtPreCut := bytes.Repeat([]byte{0x14}, 32)
+	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
+	prevHashAtSnap := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		// Mithril-imported tip block (no per-block VRF processing
+		// for it; importTip writes a single block_nonce checkpoint).
+		if err := db.BlockCreate(models.Block{
+			Slot:     snapTipSlot,
+			Hash:     hashAtSnap,
+			PrevHash: prevHashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// Post-import blocks. CBOR is a stub byte; the fast path
+		// computeCandidateNonceFast does not decode block bodies.
+		if err := db.BlockCreate(models.Block{
+			Slot:     preCutSlot,
+			Hash:     hashAtPreCut,
+			PrevHash: hashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     postCutSlot,
+			Hash:     hashAtPostCut,
+			PrevHash: hashAtPreCut,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// importTip checkpoint at the snapshot tip — Branch B in
+		// calculateEpochNonce relies on this row to find the seam
+		// between imported state and post-import accumulation.
+		if err := db.SetBlockNonce(
+			hashAtSnap, snapTipSlot, importedNonce, true, txn,
+		); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+		)
+	}))
+
+	// LedgerState shaped like the bootstrap epoch row written by
+	// generateAndSaveEpochs at import time: EvolvingNonce and
+	// CandidateNonce both seeded from the snapshot's mid-epoch value.
+	// currentTipBlockNonce intentionally left empty so the
+	// resume-from-tip optimisation in calculateEpochNonce takes the
+	// Branch B path (block_nonce row search).
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             100,
+			StartSlot:           epochStart,
+			LengthInSlots:       uint(epochLength),
+			SlotLength:          1000,
+			EraId:               eras.ConwayEraDesc.Id,
+			Nonce:               bytes.Repeat([]byte{0xee}, 32),
+			EvolvingNonce:       importedNonce,
+			CandidateNonce:      importedNonce,
+			LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var candidate, evolving []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, ev, c, _, err := ls.calculateEpochNonce(
+			txn,
+			epochEnd,
+			eras.ConwayEraDesc,
+			ls.currentEpoch,
+			nil,
+		)
+		candidate = c
+		evolving = ev
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(candidate),
+		"candidate must freeze at the last pre-cutoff block (slot %d). "+
+			"Got %x. If this equals importedNonce (0xaa...0xaa), the "+
+			"computation inherited the snapshot's mid-epoch candidate "+
+			"and never replaced it with the frozen-at-cutoff value — "+
+			"#2128 freeze. cutoff=%d, epoch=[%d,%d).",
+		preCutSlot, candidate, cutoffSlot, epochStart, epochEnd,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPostCut),
+		hex.EncodeToString(evolving),
+		"evolving must equal the last block's stored nonce (slot %d). "+
+			"Got %x.",
+		postCutSlot, evolving,
+	)
+	require.NotEqualf(
+		t,
+		hex.EncodeToString(candidate),
+		hex.EncodeToString(evolving),
+		"candidate and evolving must differ once the chain crosses "+
+			"the cutoff. Equal values mean the freeze was not applied.",
+	)
+}
+
+// TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff covers
+// the edge case where the chain produces NO blocks in the window between
+// the snapshot tip and the freeze cutoff (legal under low active-slots
+// coefficient or just unlucky leader assignment). The snapshot tip slot
+// is itself the last pre-cutoff slot, so the imported tip-time
+// EvolvingNonce IS the correct frozen-at-cutoff value: in cardano-ledger,
+// psCandidateNonce tracks evolving until the cutoff fires, so a snapshot
+// taken at the very last pre-cutoff block has psCandidateNonce ==
+// psEvolvingNonce == that block's accumulated evolving nonce.
+//
+// The rollover must therefore return candidate == importedNonce, NOT
+// some other value derived from a phantom pre-cutoff block.
+func TestCalculateEpochNonce_PostMithrilBootstrapNoBlocksBeforeCutoff(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		cutoffSlot  uint64 = 1015
+		snapTipSlot uint64 = 1014 // last block strictly before cutoff
+		postCutSlot uint64 = 1070 // last block of epoch (post-cutoff)
+	)
+
+	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+
+	hashAtSnap := bytes.Repeat([]byte{0x14}, 32)
+	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
+	prevHashAtSnap := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     snapTipSlot,
+			Hash:     hashAtSnap,
+			PrevHash: prevHashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     postCutSlot,
+			Hash:     hashAtPostCut,
+			PrevHash: hashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtSnap, snapTipSlot, importedNonce, true, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+		)
+	}))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             100,
+			StartSlot:           epochStart,
+			LengthInSlots:       uint(epochLength),
+			SlotLength:          1000,
+			EraId:               eras.ConwayEraDesc.Id,
+			Nonce:               bytes.Repeat([]byte{0xee}, 32),
+			EvolvingNonce:       importedNonce,
+			CandidateNonce:      importedNonce,
+			LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var candidate, evolving []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, ev, c, _, err := ls.calculateEpochNonce(
+			txn,
+			epochEnd,
+			eras.ConwayEraDesc,
+			ls.currentEpoch,
+			nil,
+		)
+		candidate = c
+		evolving = ev
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(importedNonce),
+		hex.EncodeToString(candidate),
+		"with no post-import blocks before the cutoff (slot %d), the "+
+			"snapshot tip slot %d itself IS the last pre-cutoff block "+
+			"and its stored block_nonce (= imported tip-time evolving) "+
+			"is the correct frozen candidate. Got %x.",
+		cutoffSlot, snapTipSlot, candidate,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPostCut),
+		hex.EncodeToString(evolving),
+		"evolving must equal the last block's stored nonce (slot %d). "+
+			"Got %x.",
+		postCutSlot, evolving,
+	)
+}
+
+// TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint covers
+// the operational hazard where a deployment was bootstrapped with an
+// importer that did not write the block_nonce checkpoint at the
+// snapshot tip slot. Branch B
+// in calculateEpochNonce searches for a block_nonce row matching
+// prevEpoch.EvolvingNonce; with no checkpoint that row does not
+// exist, and the resume seam is not found.
+//
+// The fast path should still produce correct results because it does
+// NOT depend on Branch B — it directly looks up the cutoff block and
+// the last block of the epoch by slot, and uses their stored
+// block_nonce rows. Those rows exist for every post-import block
+// (per-block accumulation correctly chains from the imported
+// EvolvingNonce, even though the seed itself is not in block_nonce).
+//
+// This test guards against any future change that makes the fast
+// path require a Branch B match.
+func TestCalculateEpochNonce_PostMithrilBootstrapWithoutCheckpoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		cutoffSlot  uint64 = 1015
+		snapTipSlot uint64 = 1010
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+	)
+
+	importedNonce := bytes.Repeat([]byte{0xaa}, 32)
+	nonceAtPreCut := bytes.Repeat([]byte{0xbb}, 32)
+	nonceAtPostCut := bytes.Repeat([]byte{0xcc}, 32)
+
+	hashAtSnap := bytes.Repeat([]byte{0x10}, 32)
+	hashAtPreCut := bytes.Repeat([]byte{0x14}, 32)
+	hashAtPostCut := bytes.Repeat([]byte{0x70}, 32)
+	prevHashAtSnap := bytes.Repeat([]byte{0x09}, 32)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot:     snapTipSlot,
+			Hash:     hashAtSnap,
+			PrevHash: prevHashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   1,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     preCutSlot,
+			Hash:     hashAtPreCut,
+			PrevHash: hashAtSnap,
+			Cbor:     []byte{0x80},
+			Number:   2,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot:     postCutSlot,
+			Hash:     hashAtPostCut,
+			PrevHash: hashAtPreCut,
+			Cbor:     []byte{0x80},
+			Number:   3,
+			Type:     conway.BlockTypeConway,
+		}, txn); err != nil {
+			return err
+		}
+		// NOTE: deliberately NO checkpoint row at snapTipSlot.
+		// Post-import block_nonce rows only.
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, nonceAtPreCut, false, txn,
+		); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn,
+		)
+	}))
+
+	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ConwayEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:             100,
+			StartSlot:           epochStart,
+			LengthInSlots:       uint(epochLength),
+			SlotLength:          1000,
+			EraId:               eras.ConwayEraDesc.Id,
+			Nonce:               bytes.Repeat([]byte{0xee}, 32),
+			EvolvingNonce:       importedNonce,
+			CandidateNonce:      importedNonce,
+			LastEpochBlockNonce: bytes.Repeat([]byte{0xfa}, 32),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	var candidate, evolving []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, ev, c, _, err := ls.calculateEpochNonce(
+			txn,
+			epochEnd,
+			eras.ConwayEraDesc,
+			ls.currentEpoch,
+			nil,
+		)
+		candidate = c
+		evolving = ev
+		return err
+	}))
+
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPreCut),
+		hex.EncodeToString(candidate),
+		"without the snap-tip checkpoint, the fast path must still "+
+			"freeze candidate at the last pre-cutoff block (slot %d) "+
+			"via direct slot lookup. Got %x.",
+		preCutSlot, candidate,
+	)
+	require.Equalf(
+		t,
+		hex.EncodeToString(nonceAtPostCut),
+		hex.EncodeToString(evolving),
+		"without the snap-tip checkpoint, evolving must still equal "+
+			"the last block's stored nonce (slot %d). Got %x.",
+		postCutSlot, evolving,
+	)
+}
+
+// newConwayBootstrapStabilityCfg builds a CardanoNodeConfig with k=6,
+// f=0.4 so 4k/f = 60 — the Conway nonce stability window. With epoch
+// length 75 starting at slot 1000, the candidate-freeze cutoff lands at
+// slot 1015, which lets the bootstrap test place blocks on each side of
+// the cutoff with single-digit slot gaps.
+func newConwayBootstrapStabilityCfg(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
+		"protocolConsts": {
+			"k": 6,
+			"protocolMagic": 42
+		}
+	}`)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"systemStart": "2026-01-01T00:00:00Z",
+		"securityParam": 6,
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 75,
+		"slotLength": 1
+	}`)))
+	return cfg
+}
+
+func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
+	remoteAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
+	remoteOnly := ouroboros.ConnectionId{RemoteAddr: remoteAddr}
+	remoteOnlySame := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+	remoteOnlyOther := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	localOnly := ouroboros.ConnectionId{LocalAddr: remoteAddr}
+	fullId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+
+	if !sameConnectionId(remoteOnly, remoteOnly) {
+		t.Fatal(
+			"sameConnectionId() = false, want true for identical remote-only ids",
+		)
+	}
+	if !sameConnectionId(remoteOnly, remoteOnlySame) {
+		t.Fatal(
+			"sameConnectionId() = false, want true for equal remote-only ids",
+		)
+	}
+	if sameConnectionId(remoteOnly, remoteOnlyOther) {
+		t.Fatal(
+			"sameConnectionId() = true, want false for differing remote-only ids",
+		)
+	}
+	if sameConnectionId(remoteOnly, localOnly) {
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs local-only",
+		)
+	}
+	if sameConnectionId(remoteOnly, ouroboros.ConnectionId{}) {
+		t.Fatal("sameConnectionId() = true, want false for remote-only vs zero")
+	}
+	if sameConnectionId(remoteOnly, fullId) {
+		t.Fatal(
+			"sameConnectionId() = true, want false for remote-only vs full id",
+		)
+	}
+}
+
+func TestConnIdKeyHandlesPartialNilAddrs(t *testing.T) {
+	t.Parallel()
+
+	remoteOnly := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+	localOnly := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+
+	if connIdKey(ouroboros.ConnectionId{}) != "" {
+		t.Fatal("connIdKey() != \"\" for zero value")
+	}
+	if connIdKey(remoteOnly) == "" {
+		t.Fatal("connIdKey() = \"\" for remote-only id, want non-empty")
+	}
+	if connIdKey(remoteOnly) == connIdKey(localOnly) {
+		t.Fatal(
+			"connIdKey() equal for remote-only vs local-only, want distinct",
+		)
+	}
+}
+
+// newHookTestLedger builds a minimal LedgerState with a discard logger, matching
+// the logger NewLedgerState installs when none is configured.
+func newHookTestLedger(t *testing.T) (*LedgerState, *database.Database) {
+	t.Helper()
+	db := newDonationTestDB(t)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	return ls, db
+}
+
+// TestCaptureEpochBoundarySnapshotHookNil verifies the rollover capture is a
+// no-op (and does not error) when no hook is installed — preserving the
+// event-driven fallback-only behavior.
+func TestCaptureEpochBoundarySnapshotHookNil(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newHookTestLedger(t)
+
+	result := &EpochRolloverResult{
+		NewCurrentEpoch: models.Epoch{EpochId: 1, StartSlot: 432000},
+	}
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.captureEpochBoundarySnapshot(
+			txn, models.Epoch{EpochId: 0}, result,
+		)
+	}))
+}
+
+// TestCaptureEpochBoundarySnapshotHookInvoked verifies the hook is called inside
+// the rollover transaction with an event derived from the new/previous epoch.
+func TestCaptureEpochBoundarySnapshotHookInvoked(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newHookTestLedger(t)
+
+	var called bool
+	var got event.EpochTransitionEvent
+	ls.SetEpochBoundarySnapshotHook(
+		func(_ *database.Txn, evt event.EpochTransitionEvent) error {
+			called = true
+			got = evt
+			return nil
+		},
+	)
+
+	result := &EpochRolloverResult{
+		NewCurrentEpoch: models.Epoch{
+			EpochId:   1,
+			StartSlot: 432000,
+			Nonce:     []byte{0xaa, 0xbb},
+		},
+	}
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.captureEpochBoundarySnapshot(
+			txn, models.Epoch{EpochId: 0}, result,
+		)
+	}))
+
+	require.True(t, called, "hook must be invoked during the rollover")
+	require.Equal(t, uint64(0), got.PreviousEpoch)
+	require.Equal(t, uint64(1), got.NewEpoch)
+	require.Equal(t, uint64(432000), got.BoundarySlot)
+	require.Equal(t, uint64(431999), got.SnapshotSlot)
+	require.Equal(t, []byte{0xaa, 0xbb}, got.EpochNonce)
+}
+
+// TestCaptureEpochBoundarySnapshotHookFailureDeferred verifies that a hook
+// failure is swallowed (the rollover is not aborted) and that the failed
+// capture's writes are rolled back to the savepoint rather than committed.
+func TestCaptureEpochBoundarySnapshotHookFailureDeferred(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newHookTestLedger(t)
+
+	ls.SetEpochBoundarySnapshotHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			// Write a row, then fail: the savepoint rollback must discard it.
+			if err := db.Metadata().SaveRewardSnapshot(&models.RewardSnapshot{
+				Epoch:           evt.NewEpoch,
+				SnapshotType:    "mark",
+				CapturedSlot:    1,
+				BoundarySlot:    1,
+				ProtocolVersion: 8,
+				Authoritative:   true,
+			}, txn.Metadata()); err != nil {
+				return err
+			}
+			return errors.New("capture boom")
+		},
+	)
+
+	result := &EpochRolloverResult{
+		NewCurrentEpoch: models.Epoch{EpochId: 1, StartSlot: 432000},
+	}
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		// Must NOT surface the hook error: capture failures defer to the
+		// event-driven fallback rather than wedging the rollover.
+		return ls.captureEpochBoundarySnapshot(
+			txn, models.Epoch{EpochId: 0}, result,
+		)
+	}))
+
+	snap, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, snap,
+		"a failed capture must be rolled back to the savepoint, not committed")
+}
+
+// maryPParamsWithExtraEntropy returns a minimally-populated Mary parameter set
+// carrying extraEntropy, plus its CBOR. A nil rational field encodes as CBOR
+// null and decodes back, so only ExtraEntropy needs a real value here.
+func maryPParamsWithExtraEntropy(
+	t *testing.T,
+	entropy []byte,
+) (*mary.MaryProtocolParameters, []byte) {
+	t.Helper()
+	pp := &mary.MaryProtocolParameters{
+		ProtocolMajor: 4,
+		// Block sizes the votedFuturePParams guard accepts.
+		MaxBlockBodySize:   65536,
+		MaxTxSize:          16384,
+		MaxBlockHeaderSize: 1100,
+	}
+	if len(entropy) == lcommon.Blake2b256Size {
+		pp.ExtraEntropy.Type = lcommon.NonceTypeNonce
+		copy(pp.ExtraEntropy.Value[:], entropy)
+	}
+	data, err := cbor.Encode(pp)
+	require.NoError(t, err)
+	// Guard the fixture: the production path reads this back through the era's
+	// own decoder, so a shape that does not round-trip would make the test
+	// pass for the wrong reason.
+	decoded, err := eras.DecodePParamsMary(data)
+	require.NoError(t, err)
+	decodedMary, ok := decoded.(*mary.MaryProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, pp.ExtraEntropy, decodedMary.ExtraEntropy)
+	return pp, data
+}
+
+// TestCalculateEpochNonceFoldsExtraEntropy covers the authoritative rollover
+// path, which writes the epoch record every later consumer reads. Unlike the
+// header-verification path it does not forecast: the boundary has already
+// enacted the new epoch's protocol parameters, and their extraEntropy is what
+// the nonce must mix.
+func TestCalculateEpochNonceFoldsExtraEntropy(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+		prevEpochID uint64 = 258
+	)
+
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	frozenCandidate := mustDecodeHex(t, mainnetEpoch259Candidate)
+	carriedLab := mustDecodeHex(t, mainnetEpoch259Lab)
+
+	importedNonce := mustDecodeHex(t, mainnetEpoch259Lab)
+	nonceAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	hashAtPreCut := mustDecodeHex(t, mainnetEpoch259Candidate)
+	hashAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	prevHashAtPreCut := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
+			Cbor: []byte{0x80}, Number: 1, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot: postCutSlot, Hash: hashAtPostCut, PrevHash: hashAtPreCut,
+			Cbor: []byte{0x80}, Number: 2, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, frozenCandidate, false, txn); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
+	}))
+
+	prevEpoch := models.Epoch{
+		EpochId:             prevEpochID,
+		StartSlot:           epochStart,
+		LengthInSlots:       uint(epochLength),
+		SlotLength:          1000,
+		EraId:               eras.MaryEraDesc.Id,
+		Nonce:               mustDecodeHex(t, mainnetEpoch259Lab),
+		EvolvingNonce:       importedNonce,
+		CandidateNonce:      importedNonce,
+		LastEpochBlockNonce: carriedLab,
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.MaryEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	enacted, _ := maryPParamsWithExtraEntropy(t, entropy)
+	neutral, _ := maryPParamsWithExtraEntropy(t, nil)
+
+	var withEntropy, withoutParam []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, _, candidate, _, err := ls.calculateEpochNonce(
+			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
+		)
+		if err != nil {
+			return err
+		}
+		require.Equal(
+			t,
+			frozenCandidate,
+			candidate,
+			"candidate nonce must freeze at the pre-cutoff block nonce",
+		)
+		withEntropy = n
+		n, _, _, _, err = ls.calculateEpochNonce(
+			txn, epochEnd, eras.MaryEraDesc, prevEpoch, neutral,
+		)
+		withoutParam = n
+		return err
+	}))
+
+	require.Equal(
+		t,
+		mainnetEpoch259Nonce,
+		hex.EncodeToString(withEntropy),
+		"epoch nonce must fold the enacted extraEntropy",
+	)
+
+	// Negative case: the same inputs with a neutral extraEntropy must produce
+	// the unmixed nonce, so the parameter is what moves the result rather than
+	// anything else in the fixture.
+	expectedNeutral, err := lcommon.CalculateEpochNonce(
+		frozenCandidate, carriedLab, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		expectedNeutral.Bytes(),
+		withoutParam,
+		"a neutral extraEntropy must leave the epoch nonce unmixed",
+	)
+}
+
+// TestCalculateEpochNonceNeutralLabMixesExtraEntropy covers the boundary where
+// the carried lastEpochBlockNonce is NeutralNonce and the extraEntropy is not.
+// NeutralNonce is the identity of the nonce operator, so the assembly collapses
+// to candidateNonce ⭒ extraEntropy -- not to candidateNonce alone, which is
+// what the NeutralNonce short-circuit returns when the entropy term is dropped.
+func TestCalculateEpochNonceNeutralLabMixesExtraEntropy(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+
+	const (
+		epochStart  uint64 = 1000
+		epochLength uint64 = 75
+		epochEnd    uint64 = epochStart + epochLength
+		preCutSlot  uint64 = 1014
+		postCutSlot uint64 = 1070
+		prevEpochID uint64 = 258
+	)
+
+	entropy := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+	frozenCandidate := mustDecodeHex(t, mainnetEpoch259Candidate)
+
+	importedNonce := mustDecodeHex(t, mainnetEpoch259Lab)
+	nonceAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	hashAtPreCut := mustDecodeHex(t, mainnetEpoch259Candidate)
+	hashAtPostCut := mustDecodeHex(t, mainnetEpoch259Nonce)
+	prevHashAtPreCut := mustDecodeHex(t, mainnetEpoch259ExtraEntropy)
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := db.BlockCreate(models.Block{
+			Slot: preCutSlot, Hash: hashAtPreCut, PrevHash: prevHashAtPreCut,
+			Cbor: []byte{0x80}, Number: 1, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.BlockCreate(models.Block{
+			Slot: postCutSlot, Hash: hashAtPostCut, PrevHash: hashAtPreCut,
+			Cbor: []byte{0x80}, Number: 2, Type: mary.BlockTypeMary,
+		}, txn); err != nil {
+			return err
+		}
+		if err := db.SetBlockNonce(
+			hashAtPreCut, preCutSlot, frozenCandidate, false, txn); err != nil {
+			return err
+		}
+		return db.SetBlockNonce(
+			hashAtPostCut, postCutSlot, nonceAtPostCut, false, txn)
+	}))
+
+	prevEpoch := models.Epoch{
+		EpochId:        prevEpochID,
+		StartSlot:      epochStart,
+		LengthInSlots:  uint(epochLength),
+		SlotLength:     1000,
+		EraId:          eras.MaryEraDesc.Id,
+		Nonce:          mustDecodeHex(t, mainnetEpoch259Lab),
+		EvolvingNonce:  importedNonce,
+		CandidateNonce: importedNonce,
+		// NeutralNonce: no carried last-block nonce.
+		LastEpochBlockNonce: nil,
+	}
+
+	ls := &LedgerState{
+		db:           db,
+		currentEra:   eras.MaryEraDesc,
+		currentEpoch: prevEpoch,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	enacted, _ := maryPParamsWithExtraEntropy(t, entropy)
+
+	var nonce []byte
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		n, _, _, _, err := ls.calculateEpochNonce(
+			txn, epochEnd, eras.MaryEraDesc, prevEpoch, enacted,
+		)
+		nonce = n
+		return err
+	}))
+
+	require.NotEqual(
+		t,
+		frozenCandidate,
+		nonce,
+		"a non-neutral extraEntropy must not leave the candidate nonce unmixed",
+	)
+	want, err := lcommon.CalculateRollingNonce(frozenCandidate, entropy)
+	require.NoError(t, err)
+	require.Equal(t, want.Bytes(), nonce)
+}
+
+func TestEraTransitionsRunAfterSourceEraPParamEnactment(t *testing.T) {
+	t.Parallel()
+
+	path := []uint{eras.BabbageEraDesc.Id}
+	before, after := splitEraTransitionsForRollover(path)
+
+	require.Empty(t, before,
+		"successor transitions must not replace the source era before rollover")
+	require.Equal(t, path, after,
+		"the successor transition must run after source-era pparam enactment")
+}
+
+// TestCreateGenesisBlockFileBackedNoFKError drives the real genesis sync path
+// (createGenesisBlock -> database.SetGenesisTransaction -> UtxoLedgerToModel ->
+// metadata SetGenesisTransaction) on a file-backed SQLite store, where
+// foreign_keys=ON is enforced.
+//
+// Genesis UTxOs are unspent/unreferenced, so the utxo columns spent_at_tx_id /
+// referenced_by_tx_id / collateral_by_tx_id (FKs to transaction(hash)) must be
+// stored as SQL NULL. If they are bound as an empty blob, the FK fails with
+// "FOREIGN KEY constraint failed (787)". This is the failure reported for
+// BURSA_SYNC=genesis on preview/devnet.
+//
+// It also re-runs createGenesisBlock to confirm idempotency.
+func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
+	t.Parallel()
+
+	networks := []struct {
+		name       string
+		configPath string
+	}{
+		{name: "preview", configPath: "preview/config.json"},
+		{name: "devnet", configPath: "devnet/config.json"},
+	}
+
+	for _, nw := range networks {
+		t.Run(nw.name, func(t *testing.T) {
+			// File-backed store: enables foreign_keys(1) + WAL, the
+			// production configuration that matches the reported failure.
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				DataDir: t.TempDir(),
+			})
+			require.NoError(t, err)
+
+			nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+				nw.configPath,
+				nw.name,
+				cardano.EmbeddedConfigFS,
+			)
+			require.NoError(t, err)
+
+			ls := &LedgerState{
+				db: db,
+				config: LedgerStateConfig{
+					Database:          db,
+					CardanoNodeConfig: nodeCfg,
+					Logger: slog.New(
+						slog.NewTextHandler(io.Discard, nil),
+					),
+				},
+			}
+
+			// First run: must not hit the FK 787 error.
+			require.NoError(
+				t,
+				ls.createGenesisBlock(),
+				"createGenesisBlock should not fail with FK constraint",
+			)
+
+			raw, err := dbtest.RawSQLiteMetadata(t, db)
+			require.NoError(t, err)
+
+			// At least one genesis UTxO should have been created so the
+			// assertions below are meaningful.
+			var utxoCount int64
+			require.NoError(t, raw.QueryRow(
+				"SELECT COUNT(*) FROM utxo",
+			).Scan(&utxoCount))
+			require.Greater(t, utxoCount, int64(0), "genesis UTxOs created")
+
+			// The hash FK columns must be stored as NULL, never empty blobs.
+			var nonNull int64
+			require.NoError(t, raw.QueryRow(`
+SELECT COUNT(*) FROM utxo
+WHERE spent_at_tx_id IS NOT NULL
+   OR referenced_by_tx_id IS NOT NULL
+   OR collateral_by_tx_id IS NOT NULL`,
+			).Scan(&nonNull))
+			require.Equal(
+				t,
+				int64(0),
+				nonNull,
+				"genesis UTxOs must store NULL hash FKs, not empty blobs",
+			)
+
+			// Second run: idempotent, still no error.
+			require.NoError(
+				t,
+				ls.createGenesisBlock(),
+				"re-running createGenesisBlock must remain idempotent",
+			)
+		})
+	}
+}
+
+// The Musashi Conway genesis declares three genesis committee members, all
+// key-hash cold credentials, each expiring at epoch 293.
+var musashiGenesisCommitteeColdKeys = []string{
+	"0fa32e5f69a89afa3f5e1074660b975dde8e5a89c1b8004d49501e33",
+	"518a0c96344656d332625e33aa680b6c25bbce6b5972a30adf1dce8d",
+	"8feda2412bec6f79bc5996a5055bcff28d230cb9c85fb9d5e8743a46",
+}
+
+// TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase covers the upgrade
+// path, which is the population that actually has the bug: a node already
+// synced from genesis on a build that never seeded the committee.
+//
+// Such a database has matching genesis CBOR and a nonzero tip, so
+// createGenesisBlock takes its early-return branch and never reaches the
+// genesis-creation transaction. Seeding only from that transaction would
+// therefore fix new nodes and leave every existing one broken.
+func TestCreateGenesisBlockSeedsCommitteeOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+
+	// Stand in for a database written by a build with no committee seed:
+	// genesis CBOR present and matching, a tip well past zero, and no
+	// committee_member rows at all.
+	genesisHash, err := GenesisBlockHash(ls.config.CardanoNodeConfig)
+	require.NoError(t, err)
+	require.NoError(t, db.SetGenesisCbor(0, genesisHash[:], []byte{0x80}, nil))
+	ls.currentTip.Point = ocommon.Point{Slot: 1_000_000}
+	require.Equal(t, 0, committeeMemberRowCount(t, db))
+
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	for _, coldKeyHex := range musashiGenesisCommitteeColdKeys {
+		coldKey, err := hex.DecodeString(coldKeyHex)
+		require.NoError(t, err)
+		member, err := lv.CommitteeCredentialMember(lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(coldKey),
+		})
+		require.NoError(t, err)
+		require.NotNil(
+			t,
+			member,
+			"genesis committee member %s must be backfilled on an existing database",
+			coldKeyHex,
+		)
+		require.Equal(
+			t,
+			uint64(musashiGenesisCommitteeExpiry),
+			member.ExpiryEpoch,
+		)
+	}
+}
+
+// TestCreateGenesisBlockCommitteeReplayIdempotent proves re-running genesis
+// initialization over a store that already holds the genesis committee
+// leaves a single row per member rather than a duplicate soft-delete/insert
+// pair.
+func TestCreateGenesisBlockCommitteeReplayIdempotent(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock())
+
+	require.Equal(
+		t,
+		len(musashiGenesisCommitteeColdKeys),
+		committeeMemberRowCount(t, db),
+	)
+}
+
+// TestParseGenesisCommitteeCredential exercises both credential prefixes and
+// the rejection paths for malformed genesis committee member keys.
+func TestParseGenesisCommitteeCredential(t *testing.T) {
+	t.Parallel()
+
+	keyHash := bytes.Repeat([]byte{0xab}, 28)
+	tag, hash, err := parseGenesisCommitteeCredential(
+		"keyHash-" + hex.EncodeToString(keyHash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint8(lcommon.CredentialTypeAddrKeyHash), tag)
+	require.Equal(t, keyHash, hash)
+
+	scriptHash := bytes.Repeat([]byte{0xcd}, 28)
+	tag, hash, err = parseGenesisCommitteeCredential(
+		"scriptHash-" + hex.EncodeToString(scriptHash),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint8(lcommon.CredentialTypeScriptHash), tag)
+	require.Equal(t, scriptHash, hash)
+
+	_, _, err = parseGenesisCommitteeCredential("bogus-deadbeef")
+	require.Error(t, err)
+
+	_, _, err = parseGenesisCommitteeCredential("keyHash-nothex")
+	require.Error(t, err)
+
+	_, _, err = parseGenesisCommitteeCredential("keyHash-abcd")
+	require.Error(t, err)
+}
+
+// TestEnsureGenesisCommitteeRejectsNegativeExpiry proves a malformed Conway
+// genesis fails initialization instead of seating a member with a wrapped
+// term.
+//
+// conway-genesis.json models the committee expiry as a bare JSON number, so it
+// decodes into a signed int. Converting a negative value straight to the
+// store's unsigned epoch would wrap it to a near-maximum uint64 -- a term no
+// epoch boundary would ever expire -- so the seed must refuse it outright.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiry(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+
+	// The embedded config is parsed fresh on every load, so mutating this
+	// state's genesis below cannot leak into the other tests in this file.
+	other, _ := genesisConstitutionTestState(t)
+	require.NotSame(
+		t,
+		ls.config.CardanoNodeConfig.ConwayGenesis(),
+		other.config.CardanoNodeConfig.ConwayGenesis(),
+		"each test state must own its genesis for the mutation below to be safe",
+	)
+
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -1
+
+	err := ls.ensureGenesisCommittee(nil)
+	require.ErrorContains(t, err, "negative expiry epoch -1")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(
+		t,
+		0,
+		committeeMemberRowCount(t, db),
+		"a malformed genesis committee must seat no members at all",
+	)
+}
+
+// TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded proves the
+// malformed-genesis check fails closed on the upgrade path too.
+//
+// Validating the expiry only after the already-seeded check would let the same
+// malformed genesis start a node whose database happens to hold rows already
+// while refusing a fresh one, even though the genesis file is equally
+// malformed in both cases.
+func TestEnsureGenesisCommitteeRejectsNegativeExpiryWhenAlreadySeeded(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+	seeded := committeeMemberRowCount(t, db)
+	require.Equal(t, len(musashiGenesisCommitteeColdKeys), seeded)
+
+	members := ls.config.CardanoNodeConfig.ConwayGenesis().Committee.Members
+	rawKey := "keyHash-" + musashiGenesisCommitteeColdKeys[0]
+	require.Contains(t, members, rawKey)
+	members[rawKey] = -7
+
+	err := ls.ensureGenesisCommittee(nil)
+	require.ErrorContains(t, err, "negative expiry epoch -7")
+	require.ErrorContains(t, err, musashiGenesisCommitteeColdKeys[0])
+	require.Equal(
+		t,
+		seeded,
+		committeeMemberRowCount(t, db),
+		"the failed check must not add or remove rows",
+	)
+}
+
+// TestGenesisCommitteeExpiryEpoch covers the signed-to-unsigned conversion
+// directly, including the most negative int, which is the value a straight
+// conversion wraps furthest.
+func TestGenesisCommitteeExpiryEpoch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		expiry  int
+		want    uint64
+		wantErr bool
+	}{
+		{"zero", 0, 0, false},
+		{
+			"musashi genesis expiry",
+			musashiGenesisCommitteeExpiry,
+			musashiGenesisCommitteeExpiry,
+			false,
+		},
+		{"negative one", -1, 0, true},
+		{"most negative int", math.MinInt, 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := genesisCommitteeExpiryEpoch(tc.expiry)
+			if tc.wantErr {
+				require.Error(t, err)
+				require.Zero(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// committeeMemberRowCount returns the number of stored committee_member rows.
+func committeeMemberRowCount(t *testing.T, db *database.Database) int {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, raw.Close()) }()
+	var count int
+	require.NoError(
+		t,
+		raw.QueryRow("SELECT COUNT(*) FROM committee_member").Scan(&count),
+	)
+	return count
+}
+
+// The constitution the Musashi Conway genesis declares. Genesis
+// initialization must record exactly these bytes, since guardrails
+// validation compares the script hash against every parameter-change and
+// treasury-withdrawal proposal's policy hash.
+const (
+	musashiConstitutionURL = "ipfs://" +
+		"bafkreiazhhawe7sjwuthcfgl3mmv2swec7sukvclu3oli7qdyz4uhhuvmy"
+	musashiConstitutionAnchorHash = "2a61e2f4b63442978140c77a70daab396" +
+		"1b22b12b63b13949a390c097214d1c5"
+	musashiConstitutionScriptHash = "fa24fb305126805cf2164c161d852a0e" +
+		"7330cf988f1fe558cf7d4a64"
+)
+
+// genesisConstitutionTestState builds a LedgerState over a file-backed test
+// database with the Musashi configuration, whose Conway genesis declares a
+// constitution with a guardrails script.
+func genesisConstitutionTestState(
+	t *testing.T,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	return ls, db
+}
+
+// requireGenesisConstitution asserts the view reports exactly the
+// constitution the Musashi Conway genesis declares.
+func requireGenesisConstitution(t *testing.T, lv *LedgerView) {
+	t.Helper()
+	got, err := lv.Constitution()
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, musashiConstitutionURL, got.Anchor.Url)
+	require.Equal(
+		t,
+		musashiConstitutionAnchorHash,
+		hex.EncodeToString(got.Anchor.DataHash[:]),
+	)
+	require.Equal(
+		t,
+		musashiConstitutionScriptHash,
+		hex.EncodeToString(got.ScriptHash),
+	)
+}
+
+// TestCreateGenesisBlockSeedsConstitution proves a node initialized from
+// Conway genesis reports the genesis constitution, so guardrails validation
+// accepts a treasury-withdrawal proposal carrying the genesis guardrails
+// script hash and rejects one carrying none. Without the seed the lookup
+// fails closed and every such proposal is rejected until a NewConstitution
+// action is enacted.
+func TestCreateGenesisBlockSeedsConstitution(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+
+	lv := &LedgerView{ls: ls}
+	requireGenesisConstitution(t, lv)
+
+	scriptHash, err := hex.DecodeString(musashiConstitutionScriptHash)
+	require.NoError(t, err)
+	require.NoError(t, constitutionTestGuardrails(t, lv, scriptHash))
+
+	err = constitutionTestGuardrails(t, lv, nil)
+	require.Error(t, err)
+	var mismatch conway.InvalidGuardrailsScriptHashError
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, scriptHash, mismatch.Expected)
+}
+
+// TestCreateGenesisBlockConstitutionReplayIdempotent proves re-running
+// genesis initialization over a store that already holds the genesis
+// constitution leaves a single slot-0 row rather than a duplicate.
+func TestCreateGenesisBlockConstitutionReplayIdempotent(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+	require.NoError(t, ls.createGenesisBlock())
+
+	requireGenesisConstitution(t, &LedgerView{ls: ls})
+	require.Equal(t, 1, constitutionRowCount(t, db))
+}
+
+// TestCreateGenesisBlockConstitutionSeededOnRestart proves the restart path
+// -- an existing database whose genesis CBOR already matches, which returns
+// before genesis storage is rewritten -- still records the genesis
+// constitution. A database created before the constitution was seeded
+// reaches genesis initialization only through that path.
+func TestCreateGenesisBlockConstitutionSeededOnRestart(t *testing.T) {
+	t.Parallel()
+
+	ls, db := genesisConstitutionTestState(t)
+	require.NoError(t, ls.createGenesisBlock())
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec("DELETE FROM constitution")
+	require.NoError(t, err)
+	require.NoError(t, raw.Close())
+	require.Equal(t, 0, constitutionRowCount(t, db))
+
+	// Advance past genesis so the second run takes the existing-database
+	// path instead of rewriting genesis storage.
+	ls.currentTip.Point = ocommon.Point{Slot: 100}
+	require.NoError(t, ls.createGenesisBlock())
+
+	requireGenesisConstitution(t, &LedgerView{ls: ls})
+}
+
+// constitutionRowCount returns the number of stored constitution rows.
+func constitutionRowCount(t *testing.T, db *database.Database) int {
+	t.Helper()
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, raw.Close()) }()
+	var count int
+	require.NoError(
+		t,
+		raw.QueryRow("SELECT COUNT(*) FROM constitution").Scan(&count),
+	)
+	return count
+}
+
+// TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap is the
+// same-bug-class regression test the PR review recommended: it
+// found that SetGenesisStaking (and SetGenesisGovernance, covered by
+// TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap below)
+// weren't gated by the same bootstrappedFromMithril guard as genesis UTxO
+// insertion. Both upsert current-state rows (ON CONFLICT ... DO UPDATE),
+// and a Mithril-bootstrapped node's imported ledger snapshot
+// (ledgerstate/import.go's importCertState) already reflects the correct
+// current pool/delegation state as of the bootstrap point -- reapplying
+// stale genesis-config values would silently resurrect a pool genuinely
+// retired (or a delegation genuinely changed) before the bootstrap point.
+//
+// Uses the embedded devnet config, the only bundled network that declares
+// a nonzero genesis pool + stake delegation (mainnet/preview/preprod/
+// musashi all declare zero, so the bug was unreachable there, but live on
+// devnet).
+func TestCreateGenesisBlockSkipsGenesisStakingAfterMithrilBootstrap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"devnet/config.json",
+		"devnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	genesisPools, _, err := nodeCfg.ShelleyGenesis().InitialPools()
+	require.NoError(t, err)
+	require.NotEmpty(
+		t, genesisPools,
+		"devnet must declare at least one genesis pool for this test to "+
+			"be meaningful",
+	)
+	var poolIdHex string
+	for k := range genesisPools {
+		poolIdHex = k
+		break
+	}
+	poolKeyHash, err := hex.DecodeString(poolIdHex)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	// Same bootstrap shape as
+	// TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap: a
+	// currentTip past slot 0 with no genesis CBOR yet stored.
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, ls.createGenesisBlock())
+
+	_, err = db.GetPool(lcommon.PoolKeyHash(poolKeyHash), true, nil)
+	require.ErrorIs(
+		t, err, models.ErrPoolNotFound,
+		"a genesis pool must not be (re-)inserted after a Mithril "+
+			"bootstrap -- the imported ledger snapshot is the only "+
+			"authority on whether it is still registered or was already "+
+			"retired before the bootstrap point",
+	)
+
+	// Re-running (as a real startup would on every restart) must remain
+	// idempotent and continue to skip insertion.
+	require.NoError(t, ls.createGenesisBlock())
+	_, err = db.GetPool(lcommon.PoolKeyHash(poolKeyHash), true, nil)
+	require.ErrorIs(t, err, models.ErrPoolNotFound)
+}
+
+// TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap covers
+// the same guard for SetGenesisGovernance. No bundled network config
+// declares a genesis DRep today (devnet's conway-genesis.json has an
+// empty initialDReps), so this synthesizes a minimal one via
+// LoadConwayGenesisFromReader, the same test-only escape hatch
+// config/cardano/node.go documents "mostly for tests".
+func TestCreateGenesisBlockSkipsGenesisGovernanceAfterMithrilBootstrap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"devnet/config.json",
+		"devnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	const drepKeyHashHex = "00112233445566778899aabbccddeeff001122334455667788990011"
+	require.Len(t, drepKeyHashHex, 56, "must decode to 28 bytes")
+	conwayGenesisJson := `{
+		"poolVotingThresholds": {},
+		"dRepVotingThresholds": {},
+		"committeeMinSize": 0,
+		"committeeMaxTermLength": 0,
+		"govActionLifetime": 0,
+		"govActionDeposit": 0,
+		"dRepDeposit": 0,
+		"dRepActivity": 0,
+		"minFeeRefScriptCostPerByte": null,
+		"plutusV3CostModel": [],
+		"constitution": {"anchor": {"dataHash": "", "url": ""}, "script": ""},
+		"committee": {"members": {}, "threshold": null},
+		"delegs": {},
+		"initialDReps": {
+			"keyHash-` + drepKeyHashHex + `": {
+				"expiry": 500,
+				"deposit": 500000000,
+				"anchor": null
+			}
+		}
+	}`
+	require.NoError(
+		t,
+		nodeCfg.LoadConwayGenesisFromReader(
+			strings.NewReader(conwayGenesisJson),
+		),
+	)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, ls.createGenesisBlock())
+
+	drepKeyHash, err := hex.DecodeString(drepKeyHashHex)
+	require.NoError(t, err)
+	_, err = db.GetDrep(drepKeyHash, true, nil)
+	require.ErrorIs(
+		t, err, models.ErrDrepNotFound,
+		"a genesis DRep must not be (re-)inserted after a Mithril "+
+			"bootstrap -- the imported ledger snapshot is the only "+
+			"authority on current DRep/delegation state",
+	)
+
+	require.NoError(t, ls.createGenesisBlock())
+	_, err = db.GetDrep(drepKeyHash, true, nil)
+	require.ErrorIs(t, err, models.ErrDrepNotFound)
+}
+
+func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
+	t.Parallel()
+
+	// Create temp directory for database
+	tmpDir, err := os.MkdirTemp("", "genesis_utxo_test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := slog.New(
+		slog.NewTextHandler(
+			os.Stdout,
+			&slog.HandlerOptions{Level: slog.LevelDebug},
+		),
+	)
+
+	// Create database
+	dbConfig := &database.Config{
+		DataDir: tmpDir,
+		Logger:  logger,
+	}
+	db, err := dbtest.NewDatabase(t, dbConfig)
+	require.NoError(t, err)
+	defer dbtest.CloseDatabase(db)
+
+	// Load cardano config from embedded preview network
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	// Get genesis UTxOs
+	byronGenesis := nodeCfg.ByronGenesis()
+	require.NotNil(t, byronGenesis)
+
+	byronGenesisUtxos, err := byronGenesis.GenesisUtxos()
+	require.NoError(t, err)
+	t.Logf("Found %d Byron genesis UTxOs", len(byronGenesisUtxos))
+
+	if len(byronGenesisUtxos) == 0 {
+		t.Skip("No Byron genesis UTxOs to test")
+	}
+
+	// First, encode the genesis outputs to CBOR (like createGenesisBlock does)
+	encodedUtxos := make([]lcommon.Utxo, len(byronGenesisUtxos))
+	for i, utxo := range byronGenesisUtxos {
+		// Encode the output to CBOR
+		cborData, err := cbor.Encode(utxo.Output)
+		require.NoError(t, err, "Failed to encode output %d", i)
+
+		// Create a new Utxo with CBOR-encoded output
+		switch output := utxo.Output.(type) {
+		case byron.ByronTransactionOutput:
+			newOutput := output
+			(&newOutput).SetCbor(cborData)
+			encodedUtxos[i] = lcommon.Utxo{
+				Id:     utxo.Id,
+				Output: newOutput,
+			}
+		default:
+			t.Fatalf("Unexpected output type: %T", utxo.Output)
+		}
+		utxoTxID := utxo.Id.Id()
+		t.Logf("Encoded UTxO %x#%d: %d bytes",
+			utxoTxID[:8], utxo.Id.Index(), len(cborData))
+	}
+
+	// Get the Byron genesis hash to use as the synthetic block hash
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+
+	// Create a transaction to store genesis UTxOs
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		// Build and store genesis block CBOR
+		utxoOffsets := make(map[database.UtxoRef]database.CborOffset)
+
+		// Build synthetic genesis block CBOR (simplified version)
+		// First, encode each UTxO to get its CBOR
+		var blockCbor []byte
+
+		// Track offsets as we build the block
+		for _, utxo := range encodedUtxos {
+			txId := utxo.Id.Id().Bytes()
+			outputIdx := utxo.Id.Index()
+
+			// Get the output CBOR
+			outputCbor := utxo.Output.Cbor()
+			if len(outputCbor) == 0 {
+				return fmt.Errorf(
+					"UTxO %x#%d still has no CBOR after encoding",
+					txId[:8], outputIdx,
+				)
+			}
+
+			var txHashArray [32]byte
+			copy(txHashArray[:], txId)
+
+			ref := database.UtxoRef{
+				TxId:      txHashArray,
+				OutputIdx: outputIdx,
+			}
+
+			// Track offset within block (simplified: just concatenate)
+			offset := uint32(len(blockCbor))
+			blockCbor = append(blockCbor, outputCbor...)
+
+			utxoOffsets[ref] = database.CborOffset{
+				BlockSlot:  0,
+				BlockHash:  genesisHash,
+				ByteOffset: offset,
+				ByteLength: uint32(len(outputCbor)),
+			}
+
+			t.Logf("UTxO %x#%d: offset=%d, length=%d",
+				txId[:8], outputIdx, offset, len(outputCbor))
+		}
+
+		// Store the genesis block CBOR
+		t.Logf("Storing genesis block CBOR: %d bytes", len(blockCbor))
+		if err := db.SetGenesisCbor(0, genesisHash[:], blockCbor, txn); err != nil {
+			return err
+		}
+
+		// Now store each genesis transaction
+		for _, utxo := range encodedUtxos {
+			txId := utxo.Id.Id().Bytes()
+			outputIdx := utxo.Id.Index()
+
+			var txHashArray [32]byte
+			copy(txHashArray[:], txId)
+
+			ref := database.UtxoRef{
+				TxId:      txHashArray,
+				OutputIdx: outputIdx,
+			}
+
+			offset, ok := utxoOffsets[ref]
+			if !ok {
+				return fmt.Errorf(
+					"no offset for UTxO %x#%d after building block",
+					txId[:8], outputIdx,
+				)
+			}
+
+			// Store the offset
+			offsetData := database.EncodeUtxoOffset(&offset)
+			t.Logf(
+				"Storing UTxO offset: %s",
+				hex.EncodeToString(offsetData[:20]),
+			)
+
+			blob := db.Blob()
+			if blob == nil {
+				return fmt.Errorf("blob store is nil")
+			}
+			blobTxn := txn.Blob()
+			if blobTxn == nil {
+				return fmt.Errorf("blob transaction is nil")
+			}
+
+			if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Now try to retrieve each genesis UTxO
+	t.Log("Retrieving genesis UTxOs...")
+	for _, utxo := range byronGenesisUtxos {
+		txIDHash := utxo.Id.Id()
+		txId := txIDHash[:]
+		txIDPrefix := txIDHash[:8]
+		outputIdx := utxo.Id.Index()
+
+		// Try to get the UTxO from blob store
+		readTxn := db.Transaction(false)
+		blob := db.Blob()
+		require.NotNil(t, blob)
+		blobTxn := readTxn.Blob()
+		require.NotNil(t, blobTxn)
+
+		data, err := blob.GetUtxo(blobTxn, txId, outputIdx)
+		if err != nil {
+			t.Errorf("Failed to get UTxO %s#%d from blob: %v",
+				hex.EncodeToString(txIDPrefix), outputIdx, err)
+			readTxn.Rollback() //nolint:errcheck
+			continue
+		}
+
+		t.Logf(
+			"Retrieved data for %x#%d: %d bytes, first bytes: %s",
+			txIDPrefix,
+			outputIdx,
+			len(data),
+			hex.EncodeToString(data[:min(20, len(data))]),
+		)
+
+		// Check if it's an offset
+		if database.IsUtxoOffsetStorage(data) {
+			t.Logf("Data is offset storage (has DOFF magic)")
+
+			// Decode the offset
+			offset, err := database.DecodeUtxoOffset(data)
+			require.NoError(
+				t,
+				err,
+				"Failed to decode offset for %x#%d",
+				txIDPrefix,
+				outputIdx,
+			)
+
+			t.Logf(
+				"Offset: slot=%d, hash=%x, offset=%d, length=%d",
+				offset.BlockSlot,
+				offset.BlockHash[:8],
+				offset.ByteOffset,
+				offset.ByteLength,
+			)
+
+			// Try to get the block
+			blockCbor, _, err := blob.GetBlock(
+				blobTxn,
+				offset.BlockSlot,
+				offset.BlockHash[:],
+			)
+			if err != nil {
+				t.Errorf(
+					"Failed to get block for offset: slot=%d, hash=%x, error=%v",
+					offset.BlockSlot,
+					offset.BlockHash[:8],
+					err,
+				)
+				readTxn.Rollback() //nolint:errcheck
+				continue
+			}
+
+			t.Logf("Got block: %d bytes", len(blockCbor))
+
+			// Extract the UTxO CBOR
+			end := uint64(offset.ByteOffset) + uint64(offset.ByteLength)
+			if end > uint64(len(blockCbor)) {
+				t.Errorf(
+					"Offset out of bounds: offset=%d, length=%d, block_size=%d",
+					offset.ByteOffset,
+					offset.ByteLength,
+					len(blockCbor),
+				)
+			} else {
+				utxoCbor := blockCbor[offset.ByteOffset:end]
+				t.Logf("Extracted UTxO CBOR: %d bytes, first bytes: %s",
+					len(utxoCbor), hex.EncodeToString(utxoCbor[:min(20, len(utxoCbor))]))
+			}
+		} else {
+			t.Logf("Data is raw CBOR (legacy format)")
+		}
+
+		readTxn.Rollback() //nolint:errcheck
+	}
+}
+
+// TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap is the
+// regression test: after a Mithril bootstrap,
+// createGenesisBlock unconditionally recreated every Byron/Shelley genesis
+// UTxO as a live row, without checking whether the imported ledger snapshot
+// already reflects that output as spent. Found via cmd/node-parity against
+// a real cardano-node: genesis-declared funds that the real chain spent long
+// ago reappeared as live in dingo's answer, byte-for-byte matching the raw
+// genesis declaration.
+//
+// Simulates the bootstrap shape the same way
+// TestCreateGenesisBlockBackfillsMissingNetworkState does: a currentTip past
+// slot 0 with no genesis CBOR yet stored, which is exactly the condition
+// createGenesisBlock's own comment attributes to "after Mithril bootstrap
+// which imports ledger state and ImmutableDB blocks but does not create the
+// synthetic genesis block." Proves createGenesisBlock no longer inserts a
+// live row for a real preview genesis UTxO on that path, while still
+// creating the synthetic genesis block CBOR structurally (other code, e.g.
+// this same function's own HasGenesisCbor short-circuit, depends on it
+// existing).
+func TestCreateGenesisBlockSkipsUtxoInsertionAfterMithrilBootstrap(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+
+	byronGenesisUtxos, err := nodeCfg.ByronGenesis().GenesisUtxos()
+	require.NoError(t, err)
+	require.NotEmpty(
+		t, byronGenesisUtxos,
+		"preview config must declare at least one Byron genesis UTxO "+
+			"for this test to be meaningful",
+	)
+	sample := byronGenesisUtxos[0]
+	sampleTxId := sample.Id.Id().Bytes()
+	sampleOutputIdx := sample.Id.Index()
+
+	genesisHash, err := GenesisBlockHash(nodeCfg)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: nodeCfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	// No genesis CBOR pre-seeded (unlike the normal from-genesis case),
+	// and currentTip already past slot 0: this is exactly the shape
+	// createGenesisBlock's own comment attributes to a fresh Mithril
+	// bootstrap, before it has ever run.
+	ls.currentTip.Point.Slot = 42
+	require.NoError(t, ls.createGenesisBlock())
+
+	require.True(
+		t, db.HasGenesisCbor(0, genesisHash[:]),
+		"the synthetic genesis block CBOR must still be created "+
+			"structurally, even though its UTxOs are not inserted as live",
+	)
+
+	exists, err := db.UtxoExists(sampleTxId, sampleOutputIdx, nil)
+	require.NoError(t, err)
+	require.False(
+		t, exists,
+		"a genesis UTxO must not be (re-)inserted as a live row after a "+
+			"Mithril bootstrap -- the imported ledger snapshot is the only "+
+			"authority on whether it is still live or was already spent "+
+			"before the bootstrap point",
+	)
+
+	// Re-running (as a real startup would on every restart) must remain
+	// idempotent and continue to skip insertion.
+	require.NoError(t, ls.createGenesisBlock())
+	exists, err = db.UtxoExists(sampleTxId, sampleOutputIdx, nil)
+	require.NoError(t, err)
+	require.False(t, exists)
+}
+
+func TestNodeLocalEnactmentWriteErrorAbortsBoundary(t *testing.T) {
+	t.Parallel()
+
+	f := newTreasuryRolloverFixture(t, 100)
+	withdrawAddress, returnAddress, stakeCredential := f.rewardAddress(t, 0xa1)
+	proposal := f.addProposal(
+		t,
+		0xa2,
+		501,
+		map[*lcommon.Address]uint64{withdrawAddress: 40},
+		returnAddress,
+		0,
+		true,
+	)
+	before := f.proposal(t, proposal)
+	require.NotNil(t, before.RatifiedSlot)
+	originalRatifiedSlot := *before.RatifiedSlot
+
+	raw, err := dbtest.RawSQLiteMetadata(t, f.db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`
+CREATE TRIGGER fail_governance_enact
+BEFORE UPDATE OF enacted_slot ON governance_proposal
+WHEN NEW.enacted_slot IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'injected enactment write failure');
+END`)
+	require.NoError(t, err)
+
+	txn := f.db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		_, rolloverErr := f.ls.processEpochRollover(
+			txn,
+			f.currentEpoch,
+			eras.ConwayEraDesc,
+			f.currentPParams,
+			false,
+		)
+		return rolloverErr
+	})
+	assert.Error(t, err, "a storage error must abort the boundary transaction")
+
+	after := f.proposal(t, proposal)
+	require.NotNil(t, after.RatifiedSlot)
+	assert.Equal(
+		t,
+		originalRatifiedSlot,
+		*after.RatifiedSlot,
+		"an aborted boundary must preserve the earlier ratification marker",
+	)
+	assert.Nil(t, after.EnactedSlot)
+	assert.Zero(t, f.accountReward(t, stakeCredential))
+	treasury, _, _ := networkState(t, f.db)
+	assert.Equal(t, uint64(100), treasury)
+	advancedEpoch, epochErr := f.db.Metadata().GetEpoch(
+		f.currentEpoch.EpochId+1,
+		nil,
+	)
+	require.NoError(t, epochErr)
+	assert.Nil(t, advancedEpoch)
+}
+
+func (f *treasuryRolloverFixture) rewardAddress(
+	t *testing.T,
+	marker byte,
+) (*lcommon.Address, []byte, []byte) {
+	t.Helper()
+	stakeCredential := repeatByte(28, marker)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCredential,
+	)
+	require.NoError(t, err)
+	addressBytes, err := address.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, f.db.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCredential,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}))
+	return &address, addressBytes, stakeCredential
+}
+
+func (f *treasuryRolloverFixture) addProposal(
+	t *testing.T,
+	marker byte,
+	addedSlot uint64,
+	withdrawals map[*lcommon.Address]uint64,
+	returnAddress []byte,
+	deposit uint64,
+	ratified bool,
+) *models.GovernanceProposal {
+	t.Helper()
+	actionCbor, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type:        2,
+		Withdrawals: withdrawals,
+	})
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        repeatByte(32, marker),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: f.currentEpoch.EpochId,
+		ExpiresEpoch:  f.currentEpoch.EpochId + 20,
+		AnchorURL:     "https://example.invalid/treasury-withdrawal",
+		AnchorHash:    repeatByte(32, marker+1),
+		Deposit:       deposit,
+		ReturnAddress: returnAddress,
+		GovActionCbor: actionCbor,
+		AddedSlot:     addedSlot,
+	}
+	if ratified {
+		ratifiedEpoch := f.currentEpoch.EpochId
+		ratifiedSlot := f.currentEpoch.StartSlot + 50
+		proposal.RatifiedEpoch = &ratifiedEpoch
+		proposal.RatifiedSlot = &ratifiedSlot
+	}
+	require.NoError(t, f.db.SetGovernanceProposal(proposal, nil))
+	require.NoError(t, f.db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      proposal.ID,
+		VoterType:       models.VoterTypeCC,
+		VoterCredential: f.hotCredential,
+		Vote:            models.VoteYes,
+		AddedSlot:       addedSlot + 1,
+	}, nil))
+	return proposal
+}
+
+func (f *treasuryRolloverFixture) accountReward(
+	t *testing.T,
+	stakeCredential []byte,
+) uint64 {
+	t.Helper()
+	account, err := f.db.GetAccountByCredential(
+		0,
+		stakeCredential,
+		false,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	return uint64(account.Reward)
+}
+
+func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newTreasuryRolloverFixture(t, 100)
+	withdrawAddress, _, stakeCredential := f.rewardAddress(t, 0x81)
+	proposal := f.addProposal(
+		t, 0x82, 501,
+		map[*lcommon.Address]uint64{withdrawAddress: 40},
+		[]byte{0xff}, 1, true,
+	)
+	enactedEpoch := f.currentEpoch.EpochId + 1
+	enactedSlot := f.currentEpoch.StartSlot +
+		uint64(f.currentEpoch.LengthInSlots)
+	proposal.EnactedEpoch = &enactedEpoch
+	proposal.EnactedSlot = &enactedSlot
+	require.NoError(t, f.db.SetGovernanceProposal(proposal, nil))
+
+	txn := f.db.Transaction(true)
+	err := txn.Do(func(txn *database.Txn) error {
+		_, rolloverErr := f.ls.processEpochRollover(
+			txn,
+			f.currentEpoch,
+			eras.ConwayEraDesc,
+			f.currentPParams,
+			false,
+		)
+		return rolloverErr
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "replay enacted proposal")
+	assert.Zero(t, f.accountReward(t, stakeCredential))
+	treasury, _, _ := networkState(t, f.db)
+	assert.Equal(t, uint64(100), treasury)
+	newEpoch, err := f.db.Metadata().GetEpoch(enactedEpoch, nil)
+	require.NoError(t, err)
+	assert.Nil(t, newEpoch)
+}
+
+// announcingMockHeader is a ranking-block header that carries a Leios
+// endorser-block announcement, as a Dijkstra-era header does.
+type announcingMockHeader struct {
+	mockHeader
+	ebHash lcommon.Blake2b256
+	ebSize uint64
+}
+
+// headerStreamFixture is a LedgerState whose chain publishes onto a real event
+// bus, so tests can observe the ordered chain.header stream the Leios vote
+// manager consumes.
+type headerStreamFixture struct {
+	ls     *LedgerState
+	bus    *event.EventBus
+	connId ouroboros.ConnectionId
+	ch     <-chan event.Event
+}
+
+func newHeaderStreamLedger(t *testing.T) *headerStreamFixture {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	cm, err := chain.NewManager(nil, bus)
+	require.NoError(t, err)
+	subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+	t.Cleanup(func() { bus.Unsubscribe(chain.ChainHeaderEventType, subId) })
+	ls := &LedgerState{
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	return &headerStreamFixture{
+		ls:  ls,
+		bus: bus,
+		connId: ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+		},
+		ch: ch,
+	}
+}
+
+func announcingHeader(
+	slot uint64,
+	name string,
+	prevHash lcommon.Blake2b256,
+	blockNumber uint64,
+	ebHash lcommon.Blake2b256,
+) announcingMockHeader {
+	return announcingMockHeader{
+		mockHeader: mockHeader{
+			hash:        lcommon.NewBlake2b256([]byte(name)),
+			prevHash:    prevHash,
+			blockNumber: blockNumber,
+			slot:        slot,
+		},
+		ebHash: ebHash,
+		ebSize: 4096,
+	}
+}
+
+// TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified pins the ledger
+// half of the crypto gate on the header stream.
+//
+// chainsyncHeaderCryptoPolicy admits a roll-forward header without verifying
+// its VRF/KES on two paths: a slot covered by an imported Mithril snapshot and
+// no cached epoch nonce for the slot (verification deferred to blockfetch).
+// Both reach
+// chain.AddBlockHeader, not AddVerifiedBlockHeader. Announcing such a header
+// would let a chainsync peer make this node sign and publish a BLS vote for a
+// ranking block it never authenticated, taking the (slot, voterId) pair the
+// honest block's own vote needs.
+func TestChainsyncHeaderAdmissionAnnouncesOnlyWhenCryptoVerified(
+	t *testing.T,
+) {
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	header := announcingHeader(
+		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
+	)
+	point := ocommon.NewPoint(header.slot, header.hash.Bytes())
+
+	// The fixture has no cached epoch nonce, so the policy defers verification
+	// and the handler takes the AddBlockHeader branch -- the real end-to-end
+	// unverified admission.
+	t.Run("unverified admission is queued, not announced", func(t *testing.T) {
+		fixture := newHeaderStreamLedger(t)
+		verifyNow, trusted := fixture.ls.chainsyncHeaderCryptoPolicy(
+			header.slot,
+		)
+		require.False(t, verifyNow, "fixture must exercise the unverified path")
+		require.False(t, trusted)
+
+		require.NoError(
+			t,
+			fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				BlockHeader:  header,
+				Point:        point,
+				Tip: ochainsync.Tip{
+					Point:       ocommon.NewPoint(60001, []byte("tip-1")),
+					BlockNumber: 60001,
+				},
+			}),
+		)
+		require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+		testutil.RequireNoReceive(
+			t,
+			fixture.ch,
+			500*time.Millisecond,
+			"an unverified header must not arm a vote",
+		)
+	})
+
+	// The verified branch of the same handler is one call:
+	// ls.chain.AddVerifiedBlockHeader(e.BlockHeader). It is driven directly
+	// here because a header that both announces a Leios endorser block and
+	// passes real VRF/KES cannot be synthesized in this suite: gouroboros
+	// VerifyBlock dispatches on the concrete era header type, so wrapping a
+	// valid Babbage header to add LeiosAnnouncement fails verification with
+	// "unsupported block type for VRF verification". The gate itself is
+	// covered from both sides in chain:
+	// TestHeaderAnnouncementRequiresCryptoVerifiedHeader.
+	t.Run("verified admission announces", func(t *testing.T) {
+		fixture := newHeaderStreamLedger(t)
+		require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
+		fixture.ls.chain.PublishPendingChainUpdates()
+
+		evt := testutil.RequireReceive(
+			t,
+			fixture.ch,
+			testutil.AsyncWait,
+			"announcement published from verified header admission",
+		)
+		data, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+		require.True(t, ok)
+		assert.Equal(t, uint64(577), data.Slot)
+		assert.Equal(t, header.hash, data.RbHash)
+		assert.Equal(t, ebHash, data.EbHash)
+		assert.NotZero(t, data.Seq)
+	})
+}
+
+// TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader covers the second
+// way an announcing header reaches the header queue. A header that does not
+// fit the current tip is queued by tryResolveFork rather than by the direct
+// admission path, and that branch returns before the caller's ordinary
+// bookkeeping runs. Emitting from the chain's own header-queue mutation is
+// what keeps this path covered.
+//
+// tryResolveFork re-queues a whole fork path: the header this event delivered,
+// plus earlier headers replayed from recorded peer history. Only the delivered
+// one carries a crypto verdict, so only it may be admitted verified, and only
+// a verified admission announces (see addForkPathHeader). Both halves are
+// asserted here at that composition site.
+func TestForkResolutionAnnouncesOnlyTheVerifiedIncomingHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		cryptoVerified bool
+		wantAnnounce   bool
+	}{
+		{
+			name:           "verified incoming header announces",
+			cryptoVerified: true,
+			wantAnnounce:   true,
+		},
+		{
+			name:           "unverified incoming header does not announce",
+			cryptoVerified: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bus := event.NewEventBus(nil, nil)
+			t.Cleanup(bus.Stop)
+			fixture := newChainsyncRollbackFixtureWithBus(t, bus)
+			subId, ch := bus.Subscribe(chain.ChainHeaderEventType)
+			defer bus.Unsubscribe(chain.ChainHeaderEventType, subId)
+			// Keep the test at header admission; no blockfetch worker is
+			// needed.
+			fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+
+			ebHash := lcommon.NewBlake2b256([]byte("fork-announced-eb"))
+			header := announcingHeader(
+				fixture.currentTip.Point.Slot+10,
+				"fork-announcing-header",
+				lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+				fixture.ancestorTip.BlockNumber+1,
+				ebHash,
+			)
+			// The header does not fit the current tip; that failure is the
+			// condition tryResolveFork exists to handle.
+			var notFitErr chain.BlockNotFitChainTipError
+			require.ErrorAs(
+				t,
+				fixture.ls.chain.AddBlockHeader(header),
+				&notFitErr,
+			)
+			advertisedSlot := ^uint64(0)
+
+			resolved, err := fixture.ls.tryResolveFork(
+				ChainsyncEvent{
+					ConnectionId: fixture.connId,
+					Point: ocommon.NewPoint(
+						header.slot,
+						header.hash.Bytes(),
+					),
+					BlockHeader: header,
+					Tip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							advertisedSlot,
+							[]byte("unbound-fork-tip"),
+						),
+						BlockNumber: advertisedSlot,
+					},
+				},
+				notFitErr,
+				nil,
+				tc.cryptoVerified,
+			)
+			require.NoError(t, err)
+			require.True(t, resolved)
+			// The header was queued through fork resolution, not direct
+			// admission.
+			require.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+			require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+			fixture.ls.chain.PublishPendingChainUpdates()
+
+			// The rollback's invalidation precedes anything the fork
+			// resolution queued after it.
+			invalidation := testutil.RequireReceive(
+				t, ch, testutil.AsyncWait, "rollback invalidation",
+			)
+			invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+			require.True(t, ok, "got %T", invalidation.Data)
+			assert.Equal(t, chain.HeaderInvalidationRollback, invalid.Reason)
+
+			if !tc.wantAnnounce {
+				testutil.RequireNoReceive(
+					t,
+					ch,
+					500*time.Millisecond,
+					"an unverified fork header must not arm a vote",
+				)
+				return
+			}
+
+			announcement := testutil.RequireReceive(
+				t, ch, testutil.AsyncWait, "announcement from fork resolution",
+			)
+			announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+			require.True(t, ok, "got %T", announcement.Data)
+			assert.Equal(t, header.hash, announced.RbHash)
+			assert.Equal(t, ebHash, announced.EbHash)
+			assert.Greater(
+				t,
+				announced.Seq,
+				invalid.Seq,
+				"the fork header is admitted after the rollback that made room for it",
+			)
+			testutil.RequireNoReceive(
+				t,
+				ch,
+				300*time.Millisecond,
+				"the incoming fork header must be announced exactly once",
+			)
+		})
+	}
+}
+
+// newChainsyncRollbackFixtureWithBus mirrors newChainsyncRollbackFixture but
+// gives the chain a real event bus so its deferred header/rollback events can
+// be observed.
+func newChainsyncRollbackFixtureWithBus(
+	t *testing.T,
+	bus *event.EventBus,
+) *chainsyncRollbackFixture {
+	t.Helper()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, bus)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
+
+	ancestorHash := testHashBytes("ancestor-block")
+	currentHash := testHashBytes("current-block")
+	ancestorBlock := chain.RawBlock{
+		Slot:        10,
+		Hash:        ancestorHash,
+		BlockNumber: 1,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}
+	currentBlock := chain.RawBlock{
+		Slot:        20,
+		Hash:        currentHash,
+		BlockNumber: 2,
+		Type:        1,
+		PrevHash:    ancestorHash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+			ancestorBlock,
+			currentBlock,
+		}),
+	)
+
+	ls, err := NewLedgerState(
+		LedgerStateConfig{
+			Database:          db,
+			ChainManager:      cm,
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	)
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	// Attached after construction so NewLedgerState does not register the
+	// node-level subscribers this focused test does not want.
+	ls.config.EventBus = bus
+
+	ancestorTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash),
+		BlockNumber: ancestorBlock.BlockNumber,
+	}
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
+		BlockNumber: currentBlock.BlockNumber,
+	}
+	ancestorNonce := []byte("nonce-ancestor")
+	currentNonce := []byte("nonce-current")
+	require.NoError(t, db.SetBlockNonce(
+		ancestorTip.Point.Hash,
+		ancestorTip.Point.Slot,
+		ancestorNonce,
+		true,
+		nil,
+	))
+	require.NoError(t, db.SetBlockNonce(
+		currentTip.Point.Hash, currentTip.Point.Slot, currentNonce, false, nil,
+	))
+	require.NoError(t, db.SetTip(currentTip, nil))
+
+	ls.currentTip = currentTip
+	ls.currentTipBlockNonce = append([]byte(nil), currentNonce...)
+	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
+
+	return &chainsyncRollbackFixture{
+		ls:          ls,
+		ancestorTip: ancestorTip,
+		currentTip:  currentTip,
+		connId: ouroboros.ConnectionId{
+			LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+			RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+		},
+		ancestorNonce: ancestorNonce,
+	}
+}
+
+// TestConnectionClosedPublishesHeaderInvalidation covers a header-queue
+// discard on a peer-stall path. When the connection that owned the header
+// pipeline closes, the queue is discarded and Chain.ClearHeaders enqueues the
+// invalidation on the chain-level sequencer -- but this handler previously
+// registered no drain, so it sat there until some unrelated handler ran. A
+// dead peer is exactly the case where no further event is guaranteed, so the
+// announcement would stay armed well past the ten-slot vote window.
+func TestConnectionClosedPublishesHeaderInvalidation(t *testing.T) {
+	fixture := newHeaderStreamLedger(t)
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	header := announcingHeader(
+		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
+	)
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
+	fixture.ls.headerPipelineConnId = fixture.connId
+	require.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	// The announcement is still undrained on the sequencer; the closed
+	// connection must publish it and the invalidation that voids it.
+	fixture.ls.handleConnectionClosedEvent(event.NewEvent(
+		ConnectionClosedEventType,
+		ConnectionClosedEvent{ConnectionId: fixture.connId},
+	))
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	announcement := testutil.RequireReceive(
+		t, fixture.ch, testutil.AsyncWait, "announcement",
+	)
+	announced, ok := announcement.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T", announcement.Data)
+	assert.Equal(t, header.hash, announced.RbHash)
+
+	invalidation := testutil.RequireReceive(
+		t,
+		fixture.ch,
+		testutil.AsyncWait,
+		"invalidation published without any later event",
+	)
+	invalid, ok := invalidation.Data.(chain.ChainHeaderInvalidationEvent)
+	require.True(t, ok, "got %T", invalidation.Data)
+	assert.Equal(t, chain.HeaderInvalidationQueueCleared, invalid.Reason)
+	assert.Contains(t, invalid.RbHashes, header.hash)
+	assert.Greater(t, invalid.Seq, announced.Seq)
+}
+
+// TestBlockfetchTimeoutDrainsHeaderSequencer covers the other peer-stall path.
+// The timeout handler tears the batch down and clears the header queue, and it
+// is the last thing that runs for a peer that stopped sending, so it has to
+// drain the sequencer rather than leave header events queued behind it.
+func TestBlockfetchTimeoutDrainsHeaderSequencer(t *testing.T) {
+	fixture := newHeaderStreamLedger(t)
+	ebHash := lcommon.NewBlake2b256([]byte("announced-eb"))
+	header := announcingHeader(
+		577, "hdr-1", lcommon.NewBlake2b256(nil), 1, ebHash,
+	)
+	require.NoError(t, fixture.ls.chain.AddVerifiedBlockHeader(header))
+
+	var pending pendingPublishes
+	func() {
+		defer pending.flush()
+		fixture.ls.chainsyncBlockfetchMutex.Lock()
+		defer fixture.ls.chainsyncBlockfetchMutex.Unlock()
+		fixture.ls.handleBlockfetchTimeoutLocked(fixture.connId, &pending)
+	}()
+
+	evt := testutil.RequireReceive(
+		t,
+		fixture.ch,
+		testutil.AsyncWait,
+		"header events published without any later event",
+	)
+	announced, ok := evt.Data.(chain.ChainHeaderAnnouncementEvent)
+	require.True(t, ok, "got %T", evt.Data)
+	assert.Equal(t, header.hash, announced.RbHash)
+}
+
+func newDonationTestDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	return db
+}
+
+func networkState(
+	t *testing.T,
+	db *database.Database,
+) (treasury, reserves, slot uint64) {
+	t.Helper()
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	return uint64(state.Treasury), uint64(state.Reserves), state.Slot
+}
+
+// TestApplyEpochDonations verifies that the ending epoch's donations are added
+// to the treasury at the boundary slot, leaving reserves untouched, and that
+// only the ended epoch's donations are moved.
+func TestApplyEpochDonations(t *testing.T) {
+	t.Parallel()
+
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+
+	// Post-withdrawal treasury/reserves baseline at an earlier slot.
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	// Donations for the ending epoch (7) and a later epoch (8) that must not move.
+	require.NoError(t, db.Metadata().AddNetworkDonation(60, 7, 100, nil))
+	require.NoError(t, db.Metadata().AddNetworkDonation(70, 7, 200, nil))
+	require.NoError(t, db.Metadata().AddNetworkDonation(600, 8, 999, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyEpochDonations(txn, 7, 80)
+	}))
+
+	treasury, reserves, slot := networkState(t, db)
+	assert.Equal(
+		t,
+		uint64(1_300),
+		treasury,
+		"treasury += epoch-7 donations (100+200)",
+	)
+	assert.Equal(t, uint64(5_000), reserves, "reserves untouched by donations")
+	assert.Equal(t, uint64(80), slot, "updated at the boundary slot")
+}
+
+// TestApplyEpochDonations_NoDonations is a no-op when the ended epoch had none.
+func TestApplyEpochDonations_NoDonations(t *testing.T) {
+	t.Parallel()
+
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyEpochDonations(txn, 7, 80)
+	}))
+
+	treasury, reserves, slot := networkState(t, db)
+	assert.Equal(t, uint64(1_000), treasury)
+	assert.Equal(t, uint64(5_000), reserves)
+	assert.Equal(
+		t,
+		uint64(50),
+		slot,
+		"no boundary row written when no donations",
+	)
+}
+
+// TestEpochDonationWithdrawalRollback exercises the acceptance scenario: a
+// treasury withdrawal (modelled as a debited treasury) followed by a donation
+// at the boundary, then a rollback past the boundary that restores the prior
+// treasury and drops the donation rows so re-application is deterministic.
+func TestEpochDonationWithdrawalRollback(t *testing.T) {
+	t.Parallel()
+
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+
+	// Epoch 7 starts with treasury 1_000 (slot 50).
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 5_000, 50, nil))
+	// A donation block lands mid-epoch.
+	require.NoError(t, db.Metadata().AddNetworkDonation(70, 7, 300, nil))
+	// At the 7->8 boundary (slot 80) a treasury withdrawal of 400 is enacted
+	// first (checked against the pre-donation treasury of 1_000), debiting the
+	// treasury to 600...
+	require.NoError(t, db.Metadata().SetNetworkState(600, 5_000, 80, nil))
+	// ...then the epoch's donations are added on top.
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyEpochDonations(txn, 7, 80)
+	}))
+	treasury, reserves, slot := networkState(t, db)
+	require.Equal(
+		t,
+		uint64(900),
+		treasury,
+		"1_000 - 400 withdrawal + 300 donation",
+	)
+	require.Equal(t, uint64(5_000), reserves)
+	require.Equal(t, uint64(80), slot)
+
+	// Roll back past the boundary (to slot 60): the boundary NetworkState row
+	// and the donation row are dropped, restoring epoch 7's starting treasury.
+	require.NoError(t, db.DeleteNetworkStateAfterSlot(60, nil))
+	require.NoError(t, db.DeleteNetworkDonationsAfterSlot(60, nil))
+
+	treasury, reserves, slot = networkState(t, db)
+	assert.Equal(
+		t,
+		uint64(1_000),
+		treasury,
+		"treasury restored to pre-boundary value",
+	)
+	assert.Equal(t, uint64(5_000), reserves)
+	assert.Equal(t, uint64(50), slot)
+	sum, err := db.Metadata().SumNetworkDonationsForEpoch(7, nil)
+	require.NoError(t, err)
+	assert.Zero(t, sum, "rolled-back donation rows are gone")
+}
+
+// TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor keeps the loop
+// detector's crossability predicate in step with the rollback it predicts.
+// Reporting a target below the prune floor as crossable would make the detector
+// insist on applying a rollback rollbackChainAndStateDeferred refuses.
+func TestRollbackIsAppliableRejectsBelowConsumedUtxoPruneFloor(t *testing.T) {
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.cleanupConsumedUtxos()
+
+	require.True(
+		t,
+		f.ls.rollbackIsAppliable(
+			ocommon.NewPoint(
+				pruneFixtureFloorSlot,
+				testHashBytes("3766-floor"),
+			),
+		),
+		"a target at the prune floor is still crossable",
+	)
+	require.False(
+		t,
+		f.ls.rollbackIsAppliable(
+			ocommon.NewPoint(
+				pruneFixtureDeepRewindSlot,
+				testHashBytes("3766-deep"),
+			),
+		),
+		"a target below the prune floor cannot be crossed",
+	)
+}
+
+// TestHandleEventChainsyncRollbackRejectsBelowPruneFloor pins that a peer
+// rollback the prune floor refuses is handled as peer divergence, not as a
+// local fault. handleEventChainsync routes any error returned by the rollback
+// handler to FatalErrorFunc, so returning one here would let a peer's choice of
+// rollback point terminate the node. The handler must instead reject the peer
+// chain and ask for a fresh intersection, exactly as the Mithril boundary does.
+func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	// A floor above the rollback target, as a sweep at a higher tip would
+	// have left behind.
+	require.NoError(t, fixture.ls.db.SetSyncState(
+		database.ConsumedUtxoPruneFloorSyncKey,
+		strconv.FormatUint(fixture.currentTip.Point.Slot, 10),
+		nil,
+	))
+
+	fatalCalls := 0
+	fixture.ls.config.FatalErrorFunc = func(error) { fatalCalls++ }
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+		nil,
+	)
+	require.NoError(
+		t,
+		err,
+		"a refused rollback must not surface as an error the fatal path acts on",
+	)
+	require.Zero(t, fatalCalls)
+
+	// Neither side moved: the chain was not truncated and the ledger tip
+	// stands.
+	require.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected prune-floor rollback resync event",
+	)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		e.Reason,
+	)
+	require.Equal(t, fixture.connId, e.ConnectionId)
 }

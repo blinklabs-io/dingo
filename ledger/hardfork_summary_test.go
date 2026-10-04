@@ -115,7 +115,7 @@ func newBenchLedgerState(tb testing.TB, n int) *LedgerState {
 }
 
 // BenchmarkHardForkSummary_SmallCache measures HardForkSummary's per-call
-// cost against a ~10-epoch cache -- the size implied by issue #2093's
+// cost against a ~10-epoch cache -- the size implied by
 // original (incorrect) "O(eras) ~= 7" cost assumption.
 func BenchmarkHardForkSummary_SmallCache(b *testing.B) {
 	ls := newBenchLedgerState(b, 10)
@@ -642,7 +642,7 @@ func TestHardForkSummaryCache_ConcurrentAccessIsRaceFree(t *testing.T) {
 // the ledger suite all pass unchanged when the cache lookup is removed
 // entirely, because they only prove a *stale* result is never served. Without
 // this test a refactor that made the key never match would stay green while
-// silently restoring the per-call O(known epochs) rebuild that issue #2093 was
+// silently restoring the per-call O(known epochs) rebuild that was
 // filed for.
 //
 // Pointer identity is the assertion rather than value equality precisely
@@ -1652,18 +1652,18 @@ func TestHardForkSummary_KnownTransitionRejectsPastSuccessorBound(
 }
 
 // TestHardForkSummary_KnownTransitionSuccessorTracksLiveTip is a regression
-// test for a node-side horizon-computation gap distinct from #3844: the
-// appended successor era used to measure its own safe zone only from the
-// announced boundary, never from how far the live tip has actually advanced
-// past it. A node that fails to apply the block crossing that boundary (for
-// any reason -- this is the exact class of bug this fixture reproduces, not
-// its cause) keeps reconstructing this same Summary on every retry with the
-// SAME transitionInfo and epoch cache, since neither changes without a
-// successful apply. Before this fix, the successor's horizon was pinned at
-// boundary+safeZone forever, so once the live tip passed that fixed point
-// every further block or transaction slot fell "past horizon" permanently --
-// a live, canonical chain rejected as though its own tip did not exist, even
-// though nothing about the transition or the chain's own history changed.
+// test for a node-side horizon-computation gap distinct from the horizon-anchor
+// gap: the appended successor era used to measure its own safe zone only from
+// the announced boundary, never from how far the live tip has actually advanced
+// past it. A node that fails to apply the block crossing that boundary (for any
+// reason -- this is the exact class of bug this fixture reproduces, not its
+// cause) keeps reconstructing this same Summary on every retry with the SAME
+// transitionInfo and epoch cache, since neither changes without a successful
+// apply. Before this fix, the successor's horizon was pinned at
+// boundary+safeZone forever, so once the live tip passed that fixed point every
+// further block or transaction slot fell "past horizon" permanently -- a live,
+// canonical chain rejected as though its own tip did not exist, even though
+// nothing about the transition or the chain's own history changed.
 //
 // This reproduces the reported live-incident signature directly: the current
 // published tip's own slot judged past horizon, looping "block processing
@@ -1974,7 +1974,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 }
 
 // TestHardForkSummary_HorizonAnchoredAtAppliedParent is the summary half of the
-// dingo #3844 fix. HardForkSummary measures the safe zone from the published
+// horizon-anchor fix. HardForkSummary measures the safe zone from the published
 // tip, which only advances when a whole block batch commits; the reference
 // implementation measures it from the applied block's immediate predecessor.
 // Because applySafeZone snaps up to an epoch boundary, that difference is not
@@ -2127,4 +2127,168 @@ func TestWallClockSlotFromConfirmedHistory_EmptyCache(t *testing.T) {
 	require.Error(t, err, "empty epoch cache must not masquerade as deferral")
 	assert.False(t, ok)
 	assert.Zero(t, slot)
+}
+
+// slotToTimeBehindHorizonState builds a ledger whose applied tip is near
+// genesis, with an injected wall clock far ahead of it, so the forecast horizon
+// is deterministically behind the current slot regardless of when the suite
+// runs.
+func slotToTimeBehindHorizonState(
+	t *testing.T,
+	slotLengthMs uint,
+	slotsAhead uint64,
+) (*LedgerState, uint64, time.Time) {
+	t.Helper()
+	cfg := newTestEraHistoryCfg(t)
+	systemStart := cfg.ShelleyGenesis().SystemStart
+	slotLength := time.Duration(slotLengthMs) * time.Millisecond
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			SlotLength:    slotLengthMs,
+			LengthInSlots: 432_000,
+			EraId:         eras.ConwayEraDesc.Id,
+		}},
+		currentEra: eras.ConwayEraDesc,
+		currentTip: ochainsync.Tip{Point: ocommon.NewPoint(10, []byte("tip"))},
+		config:     LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	// A fixed clock slotsAhead slots past genesis: hermetic, and far enough
+	// ahead that the era's safe zone cannot cover it.
+	now := systemStart.Add(time.Duration(slotsAhead) * slotLength)
+	ls.timeConv().nowFunc = func() time.Time { return now }
+	ls.publishSnapshotsLocked()
+	return ls, slotsAhead, now
+}
+
+// TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon is the regression test
+// for the slot clock spinning on "failed to get next slot time" for the whole
+// of a from-genesis sync or a `dingo load`.
+//
+// The clock's tick loop calls TimeToSlot(now) and then SlotToTime(slot+1). The
+// first has a near-now current-era extrapolation for exactly this case; the
+// second did not, so on a ledger whose applied tip is still near genesis while
+// the wall clock is far ahead, every tick logged an error and retried after
+// 100ms instead of sleeping to the next slot boundary.
+func TestSlotToTimeExtrapolatesNextSlotWhileBehindHorizon(t *testing.T) {
+	t.Parallel()
+
+	const slotLengthMs = 1000
+	ls, nowSlot, now := slotToTimeBehindHorizonState(
+		t, slotLengthMs, 5_000_000,
+	)
+	nextSlot := nowSlot + 1
+
+	// Confirm the premise: that slot really is past the bounded horizon, so
+	// this test cannot silently become vacuous.
+	sum, err := ls.HardForkSummary()
+	require.NoError(t, err)
+	_, horizonErr := sum.SlotToTime(nextSlot)
+	require.ErrorIs(t, horizonErr, hardfork.ErrPastHorizon,
+		"premise: the next wall-clock slot must be past the forecast horizon")
+
+	// SlotToTime must still resolve it, by extrapolating the current era.
+	when, err := ls.SlotToTime(nextSlot)
+	require.NoError(t, err,
+		"the slot clock must be able to resolve the next slot while behind")
+	assert.Equal(t, now.Add(time.Second), when,
+		"the next slot starts exactly one slot length after now")
+
+	// Consecutive slots stay one slot length apart.
+	next2, err := ls.SlotToTime(nextSlot + 1)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, next2.Sub(when))
+
+	// An arbitrary future slot stays bounded: the escape hatch is only for
+	// operational timing, not a general weakening of the horizon.
+	_, err = ls.SlotToTime(nextSlot + 1_000_000)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a far-future slot must still be past the horizon")
+
+	// Slot 0 keeps its genesis special case.
+	genesis, err := ls.SlotToTime(0)
+	require.NoError(t, err)
+	assert.Equal(t, ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart,
+		genesis)
+
+	// A slot inside the horizon is still answered by the bounded Summary.
+	inHorizon, err := ls.SlotToTime(100)
+	require.NoError(t, err)
+	assert.Equal(t,
+		ls.config.CardanoNodeConfig.ShelleyGenesis().SystemStart.
+			Add(100*time.Second),
+		inHorizon)
+}
+
+// previewWedgeLedgerState reproduces the ledger state the from-genesis Preview
+// replay was in when it wedged on epoch 40 of the Babbage era, a
+// published tip at block 168143 (slot 3516450), and the next two blocks not yet
+// reflected in that tip because their batch had not committed. Preview's
+// genesis gives the 25920-slot safe zone (see newTestEraHistoryCfg).
+func previewWedgeLedgerState(t testing.TB) *LedgerState {
+	t.Helper()
+	nodeConfig := newTestEraHistoryCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       previewEraStartEpoch,
+			StartSlot:     previewEraStartSlot,
+			SlotLength:    1_000,
+			LengthInSlots: previewEpochSize,
+			EraId:         eras.BabbageEraDesc.Id,
+		}},
+		currentEra: eras.BabbageEraDesc,
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				previewPublishedTipSlot,
+				[]byte("published-tip"),
+			),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            testLogger(),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	return ls
+}
+
+// TestLedgerViewSlotToTimeUsesHorizonAnchor pins the routing at the call site
+// the fix changes. LedgerView.SlotToTime is the converter every Plutus
+// script context translates its validity interval through, so the anchor has to
+// reach the summary from there and the horizon has to survive the trip.
+func TestLedgerViewSlotToTimeUsesHorizonAnchor(t *testing.T) {
+	t.Parallel()
+
+	ls := previewWedgeLedgerState(t)
+
+	// Unanchored, this is the wedge: the view falls back to the published tip
+	// and refuses the transaction's validity bound.
+	unanchored := &LedgerView{ls: ls}
+	_, err := unanchored.SlotToTime(previewTxUpperBound)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"the published tip must still leave this bound past the horizon; "+
+			"if it does not, the fixture no longer reproduces #3844")
+
+	// Anchored at the applied block's predecessor, the same bound converts.
+	anchored := &LedgerView{ls: ls, horizonAnchorSlot: previewParentSlot}
+	when, err := anchored.SlotToTime(previewTxUpperBound)
+	require.NoError(t, err,
+		"a Plutus validity bound inside the predecessor-anchored horizon "+
+			"must translate")
+	expected, err := ls.hardForkSummaryAnchoredAt(previewParentSlot)
+	require.NoError(t, err)
+	wantTime, err := expected.SlotToTime(previewTxUpperBound)
+	require.NoError(t, err)
+	assert.Equal(t, wantTime, when)
+
+	// The anchor moves the horizon; it does not remove it. cardano-ledger
+	// fails a Plutus transaction whose bound cannot be translated
+	// (TimeTranslationPastHorizon), so this must stay an error rather than
+	// become an in-era extrapolation.
+	_, err = anchored.SlotToTime(previewParentHorizon)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a bound past the anchored horizon must still be refused")
 }

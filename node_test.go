@@ -67,6 +67,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/blinklabs-io/dingo/plugin"
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -1411,8 +1412,8 @@ func newHandleConnManagerClosedOwnerConn(
 	return peer.conn
 }
 
-// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
-// issue #3508: NtC connections never received any close notification (the
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces a
+// leak: NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed
@@ -1484,7 +1485,7 @@ func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedOwnerFunc is
+// half of the wiring. The connection manager's ConnClosedOwnerFunc is
 // the only close notification an NtC connection gets, and it is what wakes a
 // chainsync server callback parked waiting for a certified endorser closure --
 // the protocol's own done channel cannot close while that callback is running.
@@ -1584,7 +1585,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
-// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// the NtC-close half of point-pinning: a client
 // that pins a point and then disconnects without a clean Release must not
 // leak its map entry, since NtC closes never reach
 // Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
@@ -2066,7 +2067,7 @@ func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
 // connection and then keeps its own "already asked" flag set -- the leios-fetch
 // backfill's markProtocolDead is the clearest case, where a dropped request
 // leaves a connection whose leios-fetch protocol can never answer again in the
-// pool for the rest of its life (dingo #3552). Detaching either subscriber
+// pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
@@ -2326,7 +2327,7 @@ func nodeFuncBodyForSnapshotWiring(
 // package defaults instead of the operator's configuration -- which is
 // exactly what happened to SetDelegatorInactivity (see
 // TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
-// and is the same gap dingo #4188's retention setter would leave.
+// and is the same gap retention setter would leave.
 func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	t.Parallel()
 
@@ -2364,7 +2365,7 @@ func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	}
 }
 
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins dingo #4188's
+// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
 // wiring itself: both node startup paths must widen reward_account_output
 // retention from the operator's koios-parity enablement. Without the call the
 // node keeps CORE mode's 4-epoch window, and the observer -- whose network
@@ -3298,11 +3299,11 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 }
 
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// dingo#4599 regression coverage: it proves that a Config built through the
+// pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --
 // carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
 // into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
-// NewLedgerState. internal/node/node_c81a0e1c_test.go's
+// NewLedgerState. internal/node/node_test.go's
 // TestBuildDingoConfigWiresBlockPipelineFlags covers the other half: the
 // internal/config.Config -> dingo.Config hop that was the actual defect.
 // Together the two tests span the full path a live serve run takes.
@@ -3330,6 +3331,89 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 			"pipeline's parallel VRF/KES validate stage never activates "+
 			"otherwise",
 	)
+}
+
+// The ledger is started, and replays any stored blocks it has not applied,
+// before the node creates Ouroboros networking. ledgerStateConfig therefore
+// hands the ledger callbacks that run while n.ouroboros() is still nil, and
+// each of them must report "unavailable" instead of dereferencing it. A
+// restart after a Musashi shutdown exposed this ordering when
+// EndorserBlockTxsByHash panicked before networking was initialized.
+func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
+	t.Parallel()
+
+	newConfig := func(t *testing.T) ledger.LedgerStateConfig {
+		t.Helper()
+		n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+		require.Nil(t, n.ouroboros())
+		return n.ledgerStateConfig()
+	}
+
+	t.Run("endorser block provider reports unavailable", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var (
+			txs []cbor.RawMessage
+			ok  bool
+		)
+		require.NotPanics(t, func() {
+			txs, ok = cfg.EndorserBlockProvider([]byte("eb-hash"), 660070)
+		})
+		assert.False(t, ok, "an endorser block must not be reported present")
+		assert.Empty(t, txs)
+	})
+
+	t.Run("endorser block fetcher returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			err = cfg.EndorserBlockFetcher(
+				t.Context(), 660070, []byte("eb-hash"),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("blockfetch range request returns an error", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		var err error
+		require.NotPanics(t, func() {
+			_, err = cfg.BlockfetchRequestRangeFunc(
+				newNodeTestConnId(3001),
+				ocommon.NewPoint(1, []byte("start")),
+				ocommon.NewPoint(2, []byte("end")),
+			)
+		})
+		assert.ErrorIs(t, err, errOuroborosNotStarted)
+	})
+
+	t.Run("block decode cache reject is a no-op", func(t *testing.T) {
+		t.Parallel()
+		cfg := newConfig(t)
+		require.NotPanics(t, func() {
+			cfg.RejectBlockDecodeCacheFunc(7, []byte("raw-block"))
+		})
+	})
+}
+
+// The "not started" answers above apply only while n.ouroboros() is nil. Once
+// networking exists the callbacks must reach it, or the ledger would treat
+// every endorser block as permanently unavailable.
+func TestLedgerStateConfigCallbacksDelegateOnceOuroborosExists(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: Config{cfg: &internalconfig.Config{}}}
+	n.ouroborosRef.Store(&ouroborosPkg.Ouroboros{})
+	cfg := n.ledgerStateConfig()
+
+	var err error
+	require.NotPanics(t, func() {
+		err = cfg.EndorserBlockFetcher(t.Context(), 660070, []byte("eb-hash"))
+	})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errOuroborosNotStarted)
 }
 
 func TestLedgerStateConfigUsesMusashiCertificateTrust(t *testing.T) {

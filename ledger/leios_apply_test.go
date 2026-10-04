@@ -219,7 +219,7 @@ WHERE tx_id = ? AND output_idx = ?`,
 // consume is Map.delete on a missing key -- a no-op -- and the transaction's
 // produced outputs are still added.
 //
-// This is the wedge reported as issue #3643 ("UTxO already spent" while
+// This is the wedge reported as ("UTxO already spent" while
 // applying the certified endorser block at ranking-block slot 1864040): the
 // failing apply is the endorser block's, and the conflict is between two
 // *different* certified transactions, so no transaction-hash dedup can address
@@ -827,6 +827,58 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
+// The Haskell-conformant path commits the endorser-block blob in its own blob
+// transaction, which the shared batch transaction's snapshot predates. Reading
+// an endorser-produced output back through that batch after the shared block
+// cache has evicted the blob must therefore use a fresh snapshot, which only
+// applyEndorserBlock's separate-commit mark enables.
+func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		CacheConfig: database.CborCacheConfig{BlockLRUEntries: 1},
+	})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
+	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x7a),
+			1,
+			430,
+			leiosApplyTestEbHash(0x6d),
+			[]cbor.RawMessage{rawTx},
+		)
+		if err != nil {
+			return err
+		}
+		// A later block commit evicts the endorser block from the one-entry
+		// shared cache, so the read below reaches the blob store.
+		require.NoError(t, db.SetGenesisCbor(
+			431,
+			leiosApplyTestEbHash(0x6e),
+			[]byte{0x01},
+			nil,
+		))
+		got, err := db.CborCache().ResolveUtxoCbor(tx.Hash().Bytes(), 0, txn)
+		require.NoError(t, err)
+		require.Equal(t, tx.Produced()[0].Output.Cbor(), got)
+		return nil
+	}))
+}
+
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -1099,12 +1151,12 @@ func TestEnsureReferencedEndorserBlocksRejectsUnresolvedCertifyingParent(
 
 // TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently is the concurrency
 // regression from review: the manifest is content-addressed, so the same
-// hash can legitimately be required at two different slots at once (issue
-// #3513). Deduping in-flight fetches by hash alone let a still-in-flight
-// fetch for one slot silently suppress spawn for a different slot of the
-// same hash; awaitFetch's "not in flight" skip-fast then fired the moment
-// the *first* slot's fetch cleared the shared key, leaving the second slot's
-// requirement never fetched at all.
+// hash can legitimately be required at two different slots at once. Deduping
+// in-flight fetches by hash alone let a still-in-flight fetch for one slot
+// silently suppress spawn for a different slot of the same hash; awaitFetch's
+// "not in flight" skip-fast then fired the moment the *first* slot's fetch
+// cleared the shared key, leaving the second slot's requirement never fetched
+// at all.
 func TestLeiosBackfillerSpawnDedupsByHashAndSlotIndependently(t *testing.T) {
 	t.Parallel()
 
@@ -1306,7 +1358,7 @@ func TestLeiosBackfillerAwaitFetchDoesNotSkipFastOnDifferentSlotCompletion(
 // companion regression to TestRequiredCertifiedEndorserBlocksKeepsDistinctSlots
 // for classifyEndorserBlockFetches: two historical blocks announcing the
 // same hash at different slots must both reach backfill, not collapse to
-// one via the hash-only seen-map dedup (issue #3513 review).
+// one via the hash-only seen-map dedup.
 func TestClassifyEndorserBlockFetchesKeepsDistinctSlotsOfSameHash(
 	t *testing.T,
 ) {
@@ -2290,7 +2342,7 @@ func TestEnsureReferencedEndorserBlocksAwaitsLateFetchOnCIPPath(t *testing.T) {
 // blocking set is non-empty and the guard is what decides. On this path a
 // missing closure is already retried by the bounded fetch that follows, so
 // paying a second diffusion window here would add head-of-line blocking on the
-// pipeline for nothing -- exactly what this PR removes.
+// pipeline for nothing.
 func TestEnsureReferencedEndorserBlocksSkipsGraceOnCertDrivenPath(
 	t *testing.T,
 ) {
