@@ -9,7 +9,17 @@ provider configuration, service, and dependency bundles.
 
 `Node.New` validates plugin selections and node configuration before registering
 metrics or starting EventBus workers. Configuration failure leaves the caller
-metrics registry unchanged, so corrected construction can reuse it.
+metrics registry unchanged, so corrected construction can reuse it. Node-lifetime
+collectors (build info, RTS gauges, chain-selection counters, EventBus) are
+registered through `internal/promutil`: a compatible collector already on the
+registry is reused, and a registration conflict unregisters what that
+construction added and returns an error rather than panicking.
+
+`Host.Stop` waits, bounded by its context, for `StopCapability` teardown
+already in flight. It then calls `Stop` on every remaining provider in reverse
+start order with that same context, even if the capability wait reached its
+deadline, so one timed-out capability does not discard the host's remaining
+provider ownership.
 
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
@@ -1609,6 +1619,15 @@ outgoing instance and silently lost.
 
 ### Shutdown Flow
 
+Bark serializes TLS/listener preflight and server publication with a lifecycle
+lock that shutdown can wait on with its context. A deadline during preflight
+returns without observing a partially published server. Plugin host shutdown
+waits for capability teardown already in flight before closing remaining
+providers, retains capability stop errors, and leaves dependencies open when
+that wait exceeds its deadline. Event buses sharing a metrics registry subtract
+only their own subscriber contributions when stopping.
+
+
 Graceful shutdown proceeds in phases:
 
 ```
@@ -1626,8 +1645,8 @@ Phase 1: Stop accepting new work
   CIP-26 token registry sync
 
 Phase 2: Drain and close connections
-  Mempool, terminal EventBus close (concurrent with ConnectionManager),
-  ConnectionManager
+  Mempool, terminal EventBus close bounded by the shutdown deadline
+  (concurrent with ConnectionManager), ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -1704,7 +1723,13 @@ releases; starting both operations together breaks that dependency cycle. The
 node context is already cancelled, and later component teardown treats the
 already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
 events after waiting for in-flight handlers; ordinary `Unsubscribe` and
-reusable `EventBus.Stop` preserve queued events.
+reusable `EventBus.Stop` preserve queued events. The wait is bounded by the
+shutdown deadline (`EventBus.CloseContext`), with a short bounded grace for
+close work already in flight when the deadline ends. A handler that remains
+active after that grace is abandoned, its event type is named in the returned
+error, and the unconfirmed drain makes phase 3 skip the `LedgerState.Close`,
+database close, and plugin host shutdown, since that handler may still be using
+them.
 
 If `LedgerState.Close` cannot confirm that its block-processing and database
 workers have drained, normal shutdown does not close the database or storage
@@ -1712,6 +1737,17 @@ providers afterward. The process may terminate with those resources still
 open, but closing them while an unconfirmed ledger worker can still access
 state risks a use-after-close and on-disk corruption. Live Restore/Truncate
 uses the same fail-closed rule and escalates to a supervised restart.
+
+The `ConnectionManager` is the only receiver of each connection's one-shot
+error channel. Its per-connection watcher closes a done channel
+(`GetConnectionWithDone`) once it has consumed the error, and protocol handlers
+(BlockFetch and ChainSync servers, TxSubmission server, mempool admission wait)
+wait on that channel instead of receiving from the error channel themselves, so
+a handler can never take the error that connection cleanup depends on.
+
+Bark `Start` holds its lock through TLS and listen preflight and publishes the
+server only after the listener is bound, so a concurrent `Stop` or `Start`
+observes either no server or a fully started one.
 
 ## Event-Driven Communication
 
