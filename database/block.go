@@ -683,8 +683,11 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		}
 		metadata, err := blockMetadataByKey(txn, highest.blockKey)
 		if err == nil && metadata.ID == highest.id {
-			return BlockNumberBound{HighestID: highest.id,
-				HighestNumber: metadata.Height, Resolved: true}, nil
+			return BlockNumberBound{
+				HighestID:     highest.id,
+				HighestNumber: metadata.Height,
+				Resolved:      true,
+			}, nil
 		}
 		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return BlockNumberBound{}, err
@@ -694,7 +697,6 @@ func ResolveBlockNumberBoundTxn(txn *Txn) (BlockNumberBound, error) {
 		}
 		upper = highest.id - 1
 	}
-
 }
 
 // BlockByNumber resolves the block carrying the given chain block number
