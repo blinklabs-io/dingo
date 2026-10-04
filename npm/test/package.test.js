@@ -38,11 +38,11 @@ test('packed package installs through local, global and npx entry points', { tim
   const fixtures = path.join(dir, 'fixture');
   await fs.mkdir(fixtures);
   await fs.writeFile(path.join(fixtures, 'dingo'), `#!/usr/bin/env node
-if (process.argv[2] === 'wait' || process.argv[2] === 'wait-default') {
-  if (process.argv[2] === 'wait') {
-    process.on('SIGTERM', () => { console.log('forwarded'); process.exit(23); });
-  }
-  console.log('ready'); setInterval(() => {}, 1000);
+const signalExitCodes = { SIGINT: 21, SIGTERM: 22, SIGHUP: 23 };
+if (process.argv[2] === 'wait') {
+  const signal = process.argv[3];
+  process.on(signal, () => process.exit(signalExitCodes[signal]));
+  console.log('ready ' + process.pid); setInterval(() => {}, 1000);
 } else if (process.argv[2] === 'stdio') {
   let input = '';
   process.stdin.setEncoding('utf8');
@@ -88,38 +88,45 @@ https.get = (url, callback) => {
   await assert.rejects(exec(executable, ['exit'], {
     env: { ...process.env, FIXTURE_EXIT: '17' },
   }), (error) => error.code === 17);
-  const running = spawn(executable, ['wait'], { stdio: ['ignore', 'pipe', 'pipe'] });
-  t.after(() => { if (running.exitCode === null) running.kill('SIGKILL'); });
-  const exited = once(running, 'exit');
-  await new Promise((resolve, reject) => {
-    let output = '';
-    running.stdout.on('data', (chunk) => { output += chunk; if (output.includes('ready\n')) resolve(); });
-    running.once('error', reject);
-    running.once('exit', () => {
-      if (!output.includes('ready\n')) reject(new Error('fixture exited before ready'));
-    });
-  });
-  running.kill('SIGTERM');
-  assert.deepEqual(await exited, [23, null]);
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-    const terminated = spawn(executable, ['wait-default'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const [signal, exitCode] of [['SIGINT', 21], ['SIGTERM', 22], ['SIGHUP', 23]]) {
+    const terminated = spawn(executable, ['wait', signal], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let fixturePid;
     t.after(() => {
       if (terminated.exitCode === null && terminated.signalCode === null) terminated.kill('SIGKILL');
+      if (fixturePid) {
+        try { process.kill(fixturePid, 'SIGKILL'); } catch (error) {
+          if (error.code !== 'ESRCH') throw error;
+        }
+      }
     });
     const terminatedExit = once(terminated, 'exit');
     await new Promise((resolve, reject) => {
       let output = '';
       terminated.stdout.on('data', (chunk) => {
         output += chunk;
-        if (output.includes('ready\n')) resolve();
+        const ready = output.match(/ready (\d+)\n/);
+        if (ready) {
+          fixturePid = Number(ready[1]);
+          resolve();
+        }
       });
       terminated.once('error', reject);
       terminated.once('exit', () => {
-        if (!output.includes('ready\n')) reject(new Error('fixture exited before ready'));
+        if (!fixturePid) reject(new Error('fixture exited before ready'));
       });
     });
     terminated.kill(signal);
-    assert.deepEqual(await terminatedExit, [null, signal]);
+    let timeout;
+    const timedOut = new Promise((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error(`wrapper did not forward ${signal}`)),
+        5_000,
+      );
+    });
+    const forwardedExit = await Promise.race([terminatedExit, timedOut]);
+    clearTimeout(timeout);
+    assert.deepEqual(forwardedExit, [exitCode, null]);
+    fixturePid = undefined;
   }
   const prefix = path.join(dir, 'global');
   await exec('npm', [

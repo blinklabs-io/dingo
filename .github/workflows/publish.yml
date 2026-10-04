@@ -533,7 +533,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: Build binaries
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: .github/scripts/build-targets.sh
       - name: Upload release assets
@@ -795,6 +795,7 @@ jobs:
     if: >-
       github.ref_type == 'tag'
       && !contains(github.ref_name, '-')
+      && !contains(github.ref_name, '+')
       && needs.finalize-release.result == 'success'
     permissions:
       contents: read
@@ -810,7 +811,9 @@ jobs:
       - name: Stamp package version
         env:
           PACKAGE_RELEASE_TAG: ${{ github.ref_name }}
-        run: npm version "${PACKAGE_RELEASE_TAG#v}" --no-git-tag-version --ignore-scripts
+        run: >-
+          npm version "${PACKAGE_RELEASE_TAG#v}" --no-git-tag-version
+          --ignore-scripts --allow-same-version
       - name: Validate package installation and invocation
         run: npm test
       - name: Validate finalized release asset

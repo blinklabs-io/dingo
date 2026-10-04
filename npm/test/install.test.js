@@ -27,16 +27,18 @@ const exec = promisify(execFile);
 test('release targets match the shipped archive names and reject absent targets', () => {
   for (const [platform, arch, goArch] of [
     ['linux', 'x64', 'amd64'], ['linux', 'arm64', 'arm64'],
-    ['freebsd', 'x64', 'amd64'], ['freebsd', 'arm64', 'arm64'], ['darwin', 'arm64', 'arm64'],
+    ['freebsd', 'x64', 'amd64'], ['freebsd', 'arm64', 'arm64'],
+    ['darwin', 'x64', 'amd64'], ['darwin', 'arm64', 'arm64'],
   ]) {
     assert.equal(releaseURL('1.2.3-rc.1', platform, arch),
       'https://github.com/blinklabs-io/dingo/releases/download/v1.2.3-rc.1/' +
       `dingo-v1.2.3-rc.1-${platform}-${goArch}.tar.gz`);
   }
-  for (const [platform, arch] of [['win32', 'x64'], ['darwin', 'x64'], ['linux', 'ia32']]) {
+  for (const [platform, arch] of [['win32', 'x64'], ['darwin', 'ia32'], ['linux', 'ia32']]) {
     assert.throws(() => releaseURL('1.2.3', platform, arch), /No Dingo release binary/);
   }
   assert.throws(() => releaseURL('../other', 'linux', 'x64'), /Invalid Dingo package version/);
+  assert.throws(() => releaseURL('1.2.3+build.7', 'linux', 'x64'), /Invalid Dingo package version/);
 });
 
 function requests(responses) {

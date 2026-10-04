@@ -24,7 +24,7 @@ function releaseURL(version, platform = process.platform, arch = process.arch) {
   const targets = {
     linux: { x64: 'amd64', arm64: 'arm64' },
     freebsd: { x64: 'amd64', arm64: 'arm64' },
-    darwin: { arm64: 'arm64' },
+    darwin: { x64: 'amd64', arm64: 'arm64' },
   };
   const goArch = targets[platform]?.[arch];
   if (!goArch) throw new Error(`No Dingo release binary for ${platform}/${arch}`);

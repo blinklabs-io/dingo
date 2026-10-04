@@ -529,7 +529,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
         run: .github/scripts/build-targets.sh
 
   # Stage 4. Folded in from the retired ci-docker.yml.
