@@ -180,6 +180,9 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
+	if opts.LedgerContextSlot != nil {
+		return errors.New("prototype closure context requires unbatched ingestion")
+	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
 	}

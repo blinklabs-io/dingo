@@ -1542,9 +1542,9 @@ startup if any are found, naming the affected epochs: such a snapshot cannot be
 safely reconstructed from a pruned database, since recomputing it correctly
 would require replaying that epoch's historical stake distribution.
 
-Migration `v15` (`reward-stake-calculation-version-restamp`) only upgrades
-version-1 snapshots to version 2 when their sigma-denominator inputs can be
-verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
+pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
+their sigma-denominator inputs can be verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
 governance enactment, and nonempty genesis staking changes the initial reward
 inputs. Older persisted snapshots require replay or a trusted ledger-state
 import rather than a version stamp.

@@ -1479,17 +1479,17 @@ LIMIT 1`,
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH reg_ranked AS (
-    SELECT pr.pool_id, pr.added_slot,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot,
            COALESCE(t.block_index, 0) AS blk_idx,
            COALESCE(c.cert_index, 0) AS cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC, COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) AS rn_latest,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot ASC, COALESCE(t.block_index, 0) ASC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) ASC, pr.added_slot ASC, COALESCE(t.block_index, 0) ASC,
                         COALESCE(c.cert_index, 0) ASC
            ) AS rn_first
     FROM pool_registration pr
@@ -1498,13 +1498,13 @@ WITH reg_ranked AS (
     WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) AS blk_idx,
            COALESCE(c.cert_index, 0) AS cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -1521,9 +1521,10 @@ JOIN reg_ranked fr ON fr.pool_id = p.id AND fr.rn_first = 1
 LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.pool_id IS NULL
    OR lrt.added_slot < lr.added_slot
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot < lr.ownership_slot)
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx < lr.blk_idx)
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
    OR lrt.epoch > ?
 ORDER BY fr.added_slot ASC, fr.blk_idx ASC, fr.cert_idx ASC,
@@ -1784,12 +1785,12 @@ LIMIT 1`,
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
-    SELECT pr.pool_id, pr.added_slot,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot,
            COALESCE(t.block_index, 0) blk_idx,
            COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
@@ -1799,13 +1800,13 @@ WITH latest_reg AS (
     WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) <= ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) blk_idx,
            COALESCE(c.cert_index, 0) cert_idx,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -1821,9 +1822,10 @@ JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
 LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 WHERE lrt.pool_id IS NULL
    OR lrt.added_slot < lr.added_slot
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot < lr.ownership_slot)
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx < lr.blk_idx)
-   OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0
+   OR (lrt.added_slot = lr.added_slot AND lrt.ownership_slot = lr.ownership_slot AND lrt.synthetic_ret = 0
        AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
    OR lrt.epoch > ?`,
 		slot,
@@ -2091,7 +2093,7 @@ WITH ranked AS (
     SELECT pr.id,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_key_hash
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC,
                         pr.id DESC
@@ -2588,14 +2590,14 @@ func (s *Store) GetPoolsRetiringAtEpoch(
 	}
 	rows, err := db.QueryContext(ctx, `
 WITH latest_reg AS (
-    SELECT pr.pool_id, pr.added_slot, pr.reward_account,
+    SELECT pr.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) AS added_slot, pr.added_slot AS ownership_slot, pr.reward_account,
            pr.reward_account_credential_tag,
            COALESCE(pr.deposit_held, pr.deposit_amount) deposit_held,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY pr.pool_id
-               ORDER BY pr.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), pr.added_slot) DESC, pr.added_slot DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
            ) rn
@@ -2605,13 +2607,13 @@ WITH latest_reg AS (
     WHERE COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs lc_cert ON lc_cert.transaction_id = lc.transaction_id WHERE lc_cert.id = pr.certificate_id), pr.added_slot) < ?
 ),
 latest_ret AS (
-    SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    SELECT rt.pool_id, COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) AS added_slot, rt.added_slot AS ownership_slot, rt.epoch,
            CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END synthetic_ret,
            COALESCE(t.block_index, 0) block_index,
            COALESCE(c.cert_index, 0) cert_index,
            ROW_NUMBER() OVER (
                PARTITION BY rt.pool_id
-               ORDER BY rt.added_slot DESC,
+               ORDER BY COALESCE((SELECT lc.slot FROM leios_transaction_context lc WHERE lc.transaction_id = t.id), rt.added_slot) DESC, rt.added_slot DESC,
                         CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC,
                         COALESCE(t.block_index, 0) DESC,
                         COALESCE(c.cert_index, 0) DESC
@@ -2629,9 +2631,10 @@ JOIN latest_ret ret ON ret.pool_id = p.id AND ret.rn = 1
 WHERE ret.epoch = ?
   AND NOT (
       ret.added_slot < reg.added_slot
-      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot < reg.ownership_slot)
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot = reg.ownership_slot AND ret.synthetic_ret = 0
           AND ret.block_index < reg.block_index)
-      OR (ret.added_slot = reg.added_slot AND ret.synthetic_ret = 0
+      OR (ret.added_slot = reg.added_slot AND ret.ownership_slot = reg.ownership_slot AND ret.synthetic_ret = 0
           AND ret.block_index = reg.block_index
           AND ret.cert_index < reg.cert_index)
   )`,

@@ -3909,6 +3909,19 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		return fmt.Errorf("read durable ledger tip: %w", err)
 	}
 	if point.Slot > durableTip.Point.Slot {
+		if hasUntickedClosure {
+			// The certifier's effects are persisted, but its parent remains
+			// the durable tip. Discard them without advancing that tip.
+			if err := ls.rollbackWithBlocksAndIntent(
+				durableTip.Point, nil, true, publishResync, true,
+			); err != nil {
+				return err
+			}
+			if retainIntent {
+				return nil
+			}
+			return ls.finishRollbackIntentForPoint(point)
+		}
 		ls.config.Logger.Debug(
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",

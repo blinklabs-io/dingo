@@ -27,7 +27,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gconway "github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
@@ -50,7 +52,31 @@ func boundarySnapshotAfterEnactment(
 	if err != nil {
 		return false, fmt.Errorf("resolve snapshot boundary era: %w", err)
 	}
-	return eraID >= gdijkstra.EraIdDijkstra, nil
+	if eraID >= gdijkstra.EraIdDijkstra {
+		return true, nil
+	}
+	// At the transition SNAP precedes era translation, so epoch still names
+	// Conway. Enacted parameters already carry the incoming major version.
+	var raw []byte
+	var parameterEra uint
+	err = db.QueryRowContext(ctx, `SELECT era_id, cbor FROM pparams WHERE added_slot <= ? ORDER BY added_slot DESC, id DESC LIMIT 1`, boundarySlot).Scan(&parameterEra, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve snapshot boundary parameters: %w", err)
+	}
+	if parameterEra >= gdijkstra.EraIdDijkstra {
+		return true, nil
+	}
+	if parameterEra != gconway.EraIdConway || len(raw) == 0 {
+		return false, nil
+	}
+	var params gconway.ConwayProtocolParameters
+	if _, err := gcbor.Decode(raw, &params); err != nil {
+		return false, fmt.Errorf("decode snapshot boundary parameters: %w", err)
+	}
+	return params.ProtocolVersion.Major >= lcommon.ProtocolVersionDijkstra, nil
 }
 
 type historicalStakeSource struct {
@@ -1201,19 +1227,22 @@ LIMIT 1`).Scan(&value)
 	parts := []string{}
 	for _, table := range accountWitnessTables {
 		parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN certs c ON c.transaction_id = lc.transaction_id WHERE c.id = witness.certificate_id), witness.added_slot) AS added_slot
 FROM `+table+` witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
  AND active.staking_key = witness.staking_key`)
 	}
 	parts = append(parts, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
 FROM account_withdrawal_witness witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag
  AND active.staking_key = witness.staking_key`, `
-SELECT witness.credential_tag, witness.staking_key, witness.added_slot
+SELECT witness.credential_tag, witness.staking_key,
+       COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = witness.tx_hash), witness.added_slot) AS added_slot
 FROM account_reward_delta witness
 JOIN active_delegation active
   ON active.credential_tag = witness.credential_tag

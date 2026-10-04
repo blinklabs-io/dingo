@@ -2962,3 +2962,25 @@ func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, stored, "a same-tip rollback must remove closure effects owned by the rejected next block")
 }
+
+func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentTip = fixture.ancestorTip
+	ls.publishSnapshotsLocked()
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
+	contextSlot := fixture.ancestorTip.Point.Slot
+	require.NoError(t, ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+		return err
+	}))
+	require.NotNil(t, ls.untickedClosure)
+	require.NoError(t, ls.rollbackWithBlocks(ocommon.Point{Slot: fixture.ancestorTip.Point.Slot + 1, Hash: fixture.ancestorTip.Point.Hash}, nil, false))
+	require.Nil(t, ls.untickedClosure)
+	stored, err := ls.db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored, "rollback before the certifier must remove pending closure effects")
+}

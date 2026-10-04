@@ -2014,9 +2014,9 @@ type MetadataStore interface {
 	// GetEpochBoundaryActivePoolKeyHashes excludes boundary retirements in
 	// Dijkstra, while retaining the pre-boundary transaction certificate cut.
 	GetEpochBoundaryActivePoolKeyHashes(
-		uint64,
-		uint64,
-		types.Txn,
+		slot uint64,
+		boundarySlot uint64,
+		txn types.Txn,
 	) ([][]byte, error)
 
 	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had

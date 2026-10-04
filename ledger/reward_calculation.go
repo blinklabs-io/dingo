@@ -754,6 +754,16 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		)
 	}
 
+	// Prototype test networks warm Set/Go from genesis staking. Standard
+	// cardano-node leaves Go empty until the snapshot pipeline advances.
+	genesisConfig := ls.config.CardanoNodeConfig
+	warmGenesis := ls.config.EnableDijkstra && genesisConfig != nil &&
+		genesisConfig.TestShelleyHardForkAtEpoch != nil &&
+		*genesisConfig.TestShelleyHardForkAtEpoch == 0
+	if epochs.bootstrap && !warmGenesis {
+		suppressBootstrapStakeRewards(result)
+	}
+
 	poolOutputs := rewardPoolOutputs(
 		rewardSnapshotEpoch,
 		capturedSlot,
@@ -5020,4 +5030,17 @@ func rewardRat(r *big.Rat) *types.Rat {
 		return nil
 	}
 	return &types.Rat{Rat: new(big.Rat).Set(r)}
+}
+
+func suppressBootstrapStakeRewards(result *rewards.Result) {
+	if result == nil {
+		return
+	}
+	result.PoolRewards = nil
+	result.AccountRewards = nil
+	result.NegativeLeaderRewards = nil
+	result.EffectiveRewards = 0
+	result.Unspendable = 0
+	result.UnspendableDeficit = 0
+	result.Undistributed = result.AvailableRewards
 }

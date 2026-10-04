@@ -361,3 +361,20 @@ func TestApplyStakeRewardsPersistsNegativeLeaderRewardDeficit(t *testing.T) {
 	require.Zero(t, uint64(outputs[0].TotalReward))
 	require.Zero(t, uint64(outputs[0].OptimalReward))
 }
+
+func TestSuppressBootstrapStakeRewardsClearsNegativeLeaderRewards(t *testing.T) {
+	t.Parallel()
+
+	result := &rewards.Result{
+		AvailableRewards: 1_000,
+		NegativeLeaderRewards: []rewards.NegativeLeaderReward{
+			{Amount: 10, Spendable: true},
+			{Amount: 20},
+		},
+		UnspendableDeficit: 20,
+	}
+	suppressBootstrapStakeRewards(result)
+	require.NoError(t, result.NegativeLeaderRewardError())
+	require.Zero(t, result.UnspendableDeficit)
+	require.Equal(t, uint64(1_000), result.Undistributed)
+}

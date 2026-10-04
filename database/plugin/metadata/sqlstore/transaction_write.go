@@ -1361,6 +1361,6 @@ func recordTransactionLedgerContext(ctx context.Context, db queryer, transaction
 	if err != nil {
 		return err
 	}
-	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?)`, transactionID, value)
+	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
 	return err
 }
