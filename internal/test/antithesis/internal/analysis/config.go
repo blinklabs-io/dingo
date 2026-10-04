@@ -17,7 +17,7 @@ package analysis
 import (
 	"errors"
 	"fmt"
-	"math"
+	"math/big"
 	"os"
 	"strconv"
 	"time"
@@ -162,8 +162,9 @@ func LoadConfig() (*Config, error) {
 			gcfg.SecurityParam > 0 {
 			// k counts blocks; MaxForkDepth is a slot distance, and k blocks
 			// span k/f slots.
-			cfg.MaxForkDepth = int( //nolint:gosec // k/f is far below MaxInt
-				math.Ceil(float64(gcfg.SecurityParam) / gcfg.ActiveSlotsCoeff),
+			cfg.MaxForkDepth = slotsForBlocks(
+				gcfg.SecurityParam,
+				gcfg.ActiveSlotsCoeff,
 			)
 		}
 		if gcfg.EpochLength == 0 {
@@ -200,4 +201,22 @@ func envStringA(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// slotsForBlocks returns ceil(k/f) for f > 0. f is divided as the decimal the
+// genesis file states rather than as a float64: float division lands just
+// above an exact quotient (21/0.7 gives 30.000000000000004), and the ceiling
+// would then overshoot by a slot.
+func slotsForBlocks(k uint64, f float64) int {
+	rf, ok := new(big.Rat).SetString(strconv.FormatFloat(f, 'g', -1, 64))
+	if !ok || rf.Sign() <= 0 {
+		// Genesis rejects f <= 0, so only a non-finite f reaches here.
+		return 0
+	}
+	q := new(big.Rat).Quo(new(big.Rat).SetUint64(k), rf)
+	n, rem := new(big.Int).QuoRem(q.Num(), q.Denom(), new(big.Int))
+	if rem.Sign() != 0 {
+		n.Add(n, big.NewInt(1))
+	}
+	return int(n.Int64()) //nolint:gosec // k/f is far below MaxInt
 }

@@ -15,6 +15,7 @@
 package analysis
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -59,6 +60,7 @@ func TestParseAnalysisDurationBounds(t *testing.T) {
 
 // Not t.Parallel: t.Setenv makes this test process-global.
 func TestLoadConfigAnalysisDurations(t *testing.T) {
+	clearAnalysisEnv(t)
 	t.Setenv("ANALYSIS_INITIAL_WAIT", "0")
 	t.Setenv("ANALYSIS_CHECK_INTERVAL", "1")
 
@@ -68,27 +70,57 @@ func TestLoadConfigAnalysisDurations(t *testing.T) {
 	require.Equal(t, time.Second, cfg.CheckInterval)
 }
 
+// clearAnalysisEnv isolates a LoadConfig test from ANALYSIS_* values in the
+// caller's environment; LoadConfig fails on any one it cannot parse.
+func clearAnalysisEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{
+		"ANALYSIS_LOG_DIR",
+		"ANALYSIS_GENESIS_FILE",
+		"ANALYSIS_INITIAL_WAIT",
+		"ANALYSIS_CHECK_INTERVAL",
+		"ANALYSIS_MAX_FORK_DEPTH",
+		"ANALYSIS_POOLS",
+		"ANALYSIS_MIN_BLOCKS_SAMPLE",
+	} {
+		t.Setenv(key, "")
+	}
+}
+
 // The genesis security parameter k counts blocks, while MaxForkDepth bounds a
-// slot distance; at active slot coefficient f a k-block window spans k/f slots.
+// slot distance; at active slot coefficient f a k-block window spans k/f slots,
+// rounded up. 21/0.7 is exactly 30, but float64 division gives
+// 30.000000000000004.
 // Not t.Parallel: t.Setenv makes this test process-global.
 func TestLoadConfigForkDepthIsGenesisKInSlots(t *testing.T) {
-	genesisFile := filepath.Join(t.TempDir(), "testnet.yaml")
-	require.NoError(t, os.WriteFile(genesisFile, []byte(`---
+	for _, tc := range []struct {
+		k    int
+		f    string
+		want int
+	}{
+		{k: 40, f: "0.4", want: 100},
+		{k: 21, f: "0.7", want: 30},
+		{k: 10, f: "0.3", want: 34},
+	} {
+		t.Run(fmt.Sprintf("k=%d,f=%s", tc.k, tc.f), func(t *testing.T) {
+			genesisFile := filepath.Join(t.TempDir(), "testnet.yaml")
+			require.NoError(t, os.WriteFile(genesisFile, fmt.Appendf(nil, `---
 poolCount: 5
 ---
 protocolConsts:
-  k: 40
+  k: %d
 ---
 epochLength: 500
 slotLength: 1
-activeSlotsCoeff: 0.4
-securityParam: 40
-`), 0o600))
-	t.Setenv("ANALYSIS_GENESIS_FILE", genesisFile)
-	t.Setenv("ANALYSIS_MAX_FORK_DEPTH", "")
-	t.Setenv("ANALYSIS_POOLS", "")
+activeSlotsCoeff: %s
+securityParam: %d
+`, tc.k, tc.f, tc.k), 0o600))
+			clearAnalysisEnv(t)
+			t.Setenv("ANALYSIS_GENESIS_FILE", genesisFile)
 
-	cfg, err := LoadConfig()
-	require.NoError(t, err)
-	require.Equal(t, 100, cfg.MaxForkDepth)
+			cfg, err := LoadConfig()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, cfg.MaxForkDepth)
+		})
+	}
 }
