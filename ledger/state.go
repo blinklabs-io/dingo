@@ -777,15 +777,11 @@ type LedgerStateConfig struct {
 	// effect only in Dijkstra and later. Enable a nonzero value only on a
 	// network where every node also enables the same value.
 	MinPoolMargin uint
-	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage reward cap. It
-	// is a consensus-affecting feature gate that defaults false; enable it only
-	// on a network where every node also enables it (mainnet and the public
-	// testnets keep it off). Unlike the Musashi-derived toggles above it is set
-	// from operator config in node.go, not derived from the network.
+	// PledgeLeverageEnabled enables the experimental pre-Dijkstra pledge
+	// leverage override. Dijkstra uses the enacted protocol parameter instead.
 	PledgeLeverageEnabled bool
-	// PledgeLeverage is L, the CIP-50 maximum ratio of total stake to pledge,
-	// in the range [1, 10000]. It is used only when PledgeLeverageEnabled is
-	// true.
+	// PledgeLeverage is the experimental pre-Dijkstra L value. It is used only
+	// when PledgeLeverageEnabled is true.
 	PledgeLeverage uint
 	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
 	// entire epoch reward pot is apportioned across pools that earned a base
@@ -1836,7 +1832,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
-	ls.epochCache = ls.epochCache[:len(ls.epochCache):len(ls.epochCache)]
+	ls.epochCache = slices.Clip(ls.epochCache)
 	ls.consensus.Store(&consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
@@ -2335,8 +2331,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 				"failed to rollback ledger: %w",
 				err,
 			)
-			var committedErr *rollbackCommittedError
-			if !errors.As(err, &committedErr) {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
 				return wrappedErr
 			}
 			// The metadata truncate committed even though an in-memory reload
@@ -2551,7 +2546,10 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if pool == nil {
 		return [32]byte{}, false, nil
 	}
-	registeredVrfHash, ok := registeredPoolVrfKeyHash(pool)
+	registeredVrfHash, ok, err := registeredPoolVrfKeyHash(pool)
+	if err != nil {
+		return [32]byte{}, false, err
+	}
 	if !ok {
 		return [32]byte{}, false, nil
 	}
@@ -3692,6 +3690,22 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 	}
 }
 
+// withDestructiveDatabaseTransition keeps coordinated API and lifecycle
+// snapshots from opening while a logical rollback deletes primary-chain blobs
+// in one transaction and truncates the metadata they back in a later one.
+// Ordinary writes keep using the commit barrier independently; this scope is
+// only for the cross-transaction destructive boundary.
+func (ls *LedgerState) withDestructiveDatabaseTransition(
+	op func() error,
+) error {
+	if ls.db == nil {
+		return op()
+	}
+	finish := ls.db.BeginDestructiveTransition()
+	defer finish()
+	return op()
+}
+
 // utxoPruningDeferredForCatchup reports whether cleanupConsumedUtxos would
 // defer a run at tipSlot/stabilityWindow right now, mirroring its own two
 // defer conditions above (unknown upstream target, or known but not yet
@@ -4639,6 +4653,12 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(
 			resolved.Slot,
 			pruneFloor,
 		)
+	}
+	// The prune-floor and Mithril refusals above are reads taken before the
+	// destructive boundary opens, so a refused rollback never blocks a
+	// coordinated snapshot.
+	if ls.db != nil {
+		defer ls.db.BeginDestructiveTransition()()
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
@@ -9746,13 +9766,24 @@ func (ls *LedgerState) loadPersistedProtocolParameters(
 	era eras.EraDesc,
 	txn *database.Txn,
 ) (lcommon.ProtocolParameters, error) {
-	if era.DecodePParamsFunc == nil {
+	return ls.loadPersistedProtocolParametersWith(
+		epoch, era, era.DecodePParamsFunc, txn,
+	)
+}
+
+func (ls *LedgerState) loadPersistedProtocolParametersWith(
+	epoch uint64,
+	era eras.EraDesc,
+	decode func([]byte) (lcommon.ProtocolParameters, error),
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if decode == nil {
 		return nil, nil
 	}
 	pparams, err := ls.db.GetPParams(
 		epoch,
 		era.Id,
-		era.DecodePParamsFunc,
+		decode,
 		txn,
 	)
 	if err != nil || pparams == nil || era.Id != eras.DijkstraEraDesc.Id {
@@ -10402,11 +10433,17 @@ func (ls *LedgerState) loadTip() error {
 }
 
 func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
+	return ls.withConsumedUtxoPruneBoundary(func() error {
+		return ls.withDestructiveDatabaseTransition(
+			ls.reconcilePrimaryChainTipWithLedgerTipLocked,
+		)
+	})
+}
+
+func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTipLocked() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
-	ls.consumedUtxoPruneMutex.Lock()
-	defer ls.consumedUtxoPruneMutex.Unlock()
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
