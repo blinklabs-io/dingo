@@ -81,7 +81,7 @@ type LedgerDelta struct {
 	// deltas so their behavior is unchanged.
 	skipConsumedInputRecovery bool
 	// strictConsumedInputs refuses to recover an absent consumed-input producer
-	// from the blob store and treats it as a hard error instead (issue #3005).
+	// from the blob store and treats it as a hard error instead.
 	// Set only when the block is applied in the steady-state, at-tip, validated
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
@@ -254,7 +254,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
 			}
 			if level.IsValid() {
-				if err := d.processGovernance(ls, level, txn); err != nil {
+				if err := d.processGovernance(
+					ls, level, uint32(storageIndex), txn, //nolint:gosec
+				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
 			}
@@ -434,6 +436,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
+	txIndex uint32,
 	txn *database.Txn,
 ) error {
 	proposals := tx.ProposalProcedures()
@@ -466,6 +469,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessProposals(
 			tx,
 			d.Point,
+			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
 			ls.db,

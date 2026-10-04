@@ -669,8 +669,8 @@ var restoreFuncNames = map[string]bool{
 // value log and memtable files back down when a store is cleanly stopped,
 // and every Restore call in this package stops its stores well before
 // Restore returns, so measuring reserved file sizes after the fact passes
-// whether or not a call site supplies a bounded config (see the
-// investigation on dingo#3746). Only a source-level check catches the
+// whether or not a call site supplies a bounded config. Only a source-level
+// check catches the
 // regression of a new or edited call site reintroducing the unbounded
 // default.
 func TestRestoreCallSitesUseBoundedBadgerConfig(t *testing.T) {

@@ -190,7 +190,7 @@ func TestValidateTxByron_OutputNetworkMagic(t *testing.T) {
 			// The three multi-output cases below pin the bad output at each
 			// position in turn. A validator that only inspected the last
 			// output (or only the first) would still pass a suite that put
-			// the mismatch in just one place; PR review on #4380 found this
+			// the mismatch in just one place; PR review on found this
 			// gap, since the original matrix only exercised "bad output
 			// last".
 			name:          "multi-output, bad output last",
@@ -854,7 +854,7 @@ func fundByronInput(
 	return input
 }
 
-// TestValidateTxByron_PositionalWitnesses covers #4394: witness i must
+// TestValidateTxByron_PositionalWitnesses covers: witness i must
 // authorize input i.
 func TestValidateTxByron_PositionalWitnesses(t *testing.T) {
 	t.Parallel()
@@ -907,7 +907,7 @@ func TestValidateTxByron_PositionalWitnesses(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_RepeatedInput covers #4401: a repeated input is valid,
+// TestValidateTxByron_RepeatedInput covers: a repeated input is valid,
 // and the input balance counts it once.
 func TestValidateTxByron_RepeatedInput(t *testing.T) {
 	t.Parallel()
@@ -929,7 +929,7 @@ func TestValidateTxByron_RepeatedInput(t *testing.T) {
 	assert.Equal(t, big.NewInt(1_000), notConserved.Consumed)
 }
 
-// TestValidateTxByron_LovelaceBounds covers #4405: balances are summed as
+// TestValidateTxByron_LovelaceBounds covers: balances are summed as
 // bounded Lovelace, so an aggregate above 45e15 fails.
 func TestValidateTxByron_LovelaceBounds(t *testing.T) {
 	t.Parallel()
@@ -963,7 +963,7 @@ func TestValidateTxByron_LovelaceBounds(t *testing.T) {
 	assert.Equal(t, "output balance", bound.Balance)
 }
 
-// TestByronMinFee covers #4403: summand div 10^9 plus the ceiling of the
+// TestByronMinFee covers: summand div 10^9 plus the ceiling of the
 // exact rational multiplier times the size.
 func TestByronMinFee(t *testing.T) {
 	t.Parallel()
@@ -1019,7 +1019,7 @@ func TestByronMinFee(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_MaxTxSize covers #4379: ppMaxTxSize bounds the
+// TestValidateTxByron_MaxTxSize covers: ppMaxTxSize bounds the
 // serialized TxAux, whatever fee it pays.
 func TestValidateTxByron_MaxTxSize(t *testing.T) {
 	t.Parallel()
@@ -1049,7 +1049,7 @@ func TestValidateTxByron_MaxTxSize(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_UnknownAttributes covers #4381 for transaction
+// TestValidateTxByron_UnknownAttributes covers for transaction
 // attributes: the unknown values must total fewer than 128 bytes.
 func TestValidateTxByron_UnknownAttributes(t *testing.T) {
 	t.Parallel()
@@ -1092,7 +1092,7 @@ func TestValidateTxByron_UnknownAttributes(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_UnknownAddressAttributes covers #4381 for output
+// TestValidateTxByron_UnknownAddressAttributes covers for output
 // addresses. A derivation path is a recognized attribute and never counts.
 func TestValidateTxByron_UnknownAddressAttributes(t *testing.T) {
 	t.Parallel()
@@ -1139,7 +1139,7 @@ func TestValidateTxByron_UnknownAddressAttributes(t *testing.T) {
 	}
 }
 
-// TestValidateTxByron_WitnessRootUsesCanonicalAttributes covers #4414: the
+// TestValidateTxByron_WitnessRootUsesCanonicalAttributes covers: the
 // root a witness is checked against is hashed over the canonical encoding of
 // the address's decoded attributes, not the bytes it carries on the wire.
 func TestValidateTxByron_WitnessRootUsesCanonicalAttributes(t *testing.T) {
@@ -1205,7 +1205,7 @@ func testByronGenesis(slotDuration string, k int) []byte {
 	}`, slotDuration, k))
 }
 
-// TestEpochLengthByronRejectsNegativeSlotDuration covers dingo#4427: the
+// TestEpochLengthByronRejectsNegativeSlotDuration covers: the
 // upstream gouroboros parser accepts a signed slotDuration, so a genesis
 // carrying slotDuration "-1" must not silently wrap to a huge unsigned
 // duration at the uint(...) conversion in EpochLengthByron. This uses
@@ -1371,6 +1371,22 @@ func (t *testByronTx) Outputs() []lcommon.TransactionOutput {
 	return t.outputs
 }
 
+// Produced overrides the method promoted from the embedded ByronTransaction,
+// which would read its empty body instead of t.outputs. It keeps the same
+// Word16 bound as ByronTransaction.Produced.
+func (t *testByronTx) Produced() []lcommon.Utxo {
+	outputs := t.outputs[:min(len(t.outputs), byronProducedLimit)]
+	ret := make([]lcommon.Utxo, 0, len(outputs))
+	for idx, output := range outputs {
+		ret = append(ret, lcommon.Utxo{
+			//nolint:gosec // G115: test transactions are small
+			Id:     newTestInput(0xee, uint32(idx)),
+			Output: output,
+		})
+	}
+	return ret
+}
+
 func (t *testByronTx) Cbor() []byte {
 	return t.cbor
 }
@@ -1477,7 +1493,7 @@ func TestValidateTxByron_MainnetBootstrapWitness(t *testing.T) {
 }
 
 // TestValidateTxByron_RejectsExtraMalformedWitness is the regression for
-// issue #4384: a transaction with a genuine, matching witness must not
+// this rule: a transaction with a genuine, matching witness must not
 // validate merely because that one witness resolves every input. A second,
 // unrecognized witness entry appended after it must reject the whole
 // transaction, mirroring the reference decoder's lack of a catch-all case.
@@ -1586,7 +1602,7 @@ func TestValidateTxByron_NilOutputs(t *testing.T) {
 	assert.ErrorAs(t, err, &OutputSetEmptyByronError{})
 }
 
-// TestValidateTxByron_DuplicateInputs covers #4401: the reference keeps
+// TestValidateTxByron_DuplicateInputs pins: the reference keeps
 // inputs as a list and has no duplicate-input rejection.
 func TestValidateTxByron_DuplicateInputs(t *testing.T) {
 	tx := &testByronTx{
@@ -1672,7 +1688,7 @@ type mockLedgerState struct {
 	slotToTimeCalls int
 	// syntheticV2CostModel backs SyntheticV2CostModelInEffect, so a test can
 	// exercise ValidateTxBabbage/EvaluateTxBabbage's ErrNoCostModelForPlutusV2
-	// check (blinklabs-io/dingo#3962) without a real *ledger.LedgerView.
+	// check without a real *ledger.LedgerView.
 	syntheticV2CostModel bool
 	// pendingMIR seeds the Pending map MIRDelegState reports, letting a test
 	// simulate InstantaneousRewards already accumulated earlier in the
@@ -2586,7 +2602,7 @@ func feePolicyUpdate(
 	}
 }
 
-// TestValidateTxByron_AdoptedFeePolicyChangesRequiredFee covers #4419: the
+// TestValidateTxByron_AdoptedFeePolicyChangesRequiredFee covers: the
 // minimum fee is the summand plus the per-byte multiplier of the policy the
 // caller passes, whichever of the two an adopted update changed. Genesis is
 // 155,381 + 43.946 * 200 = 164,171 for a 200-byte transaction.
@@ -2720,7 +2736,7 @@ func TestValidateTxByron_AdoptedFeePolicyChangesRequiredFee(t *testing.T) {
 	}
 }
 
-// TestByronFeePolicySuccessiveAdoptionsUseLatest covers #4419: each adopted
+// TestByronFeePolicySuccessiveAdoptionsUseLatest covers: each adopted
 // update replaces the whole policy, so the latest one alone sets the fee.
 func TestByronFeePolicySuccessiveAdoptionsUseLatest(t *testing.T) {
 	t.Parallel()
@@ -2753,7 +2769,7 @@ func TestByronFeePolicySuccessiveAdoptionsUseLatest(t *testing.T) {
 }
 
 // TestByronGenesisFeePolicyNormalizationUnlikeAdopted pins the two decodings
-// #4419 keeps apart: genesis truncates the summand to a whole lovelace, while
+// keeps apart: genesis truncates the summand to a whole lovelace, while
 // an adopted on-chain policy rounds it half to even.
 func TestByronGenesisFeePolicyNormalizationUnlikeAdopted(t *testing.T) {
 	t.Parallel()
@@ -2775,7 +2791,7 @@ func TestByronGenesisFeePolicyNormalizationUnlikeAdopted(t *testing.T) {
 	assert.Equal(t, uint64(155_382), adopted.TxFeeSummand)
 }
 
-// TestValidateTxByron_RedeemOnlyExemptionUnderAdoptedPolicy covers #4419: the
+// TestValidateTxByron_RedeemOnlyExemptionUnderAdoptedPolicy covers: the
 // redeem-only zero-fee exception holds however high the adopted policy sets
 // the minimum, and a transaction with any ordinary input owes that minimum.
 func TestValidateTxByron_RedeemOnlyExemptionUnderAdoptedPolicy(t *testing.T) {

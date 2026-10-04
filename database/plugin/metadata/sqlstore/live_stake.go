@@ -168,7 +168,7 @@ func applyUtxoStakeDelta(
 // refreshRewardLiveStakeAggregateDelta is refreshRewardLiveStakeAggregate's
 // incremental counterpart: instead of recomputing a credential's entire
 // live-UTxO total from scratch (sumCredentialUtxoStake's O(live UTxOs for
-// this credential) scan, dingo #4421), it reads the running total already
+// this credential) scan), it reads the running total already
 // stored in reward_live_stake and adjusts it by delta -- the exact signed
 // change this one write's UTxO mutations made to the credential's total, an
 // O(1) indexed point lookup plus an in-memory add.
@@ -421,6 +421,21 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 	return s.rebuildRewardLiveStake(slot, txn, true)
 }
 
+// RebuildRewardLiveStakeFromRunningTotalsInBatches finalizes imported stake
+// state in separate metadata transactions. The caller supplies the transaction
+// runner so each range participates in Database's commit barrier. Account,
+// UTxO, and delegation rows must remain stable until the finalizer returns; a
+// failed pass is safe to retry because the ranges only rewrite derived rows.
+func (s *Store) RebuildRewardLiveStakeFromRunningTotalsInBatches(
+	slot uint64,
+	runTxn func(func(types.Txn) error) error,
+) error {
+	if runTxn == nil {
+		return errors.New("reward live stake batch transaction runner is nil")
+	}
+	return s.rebuildRewardLiveStakeInBatches(slot, runTxn, nil)
+}
+
 // verifyRewardLiveStakeRunningTotals enforces the running-total path's
 // precondition: the ledger-state importer must have recorded a utxo_stake for
 // every credential that still holds a live UTxO, because that path never
@@ -431,7 +446,7 @@ func (s *Store) RebuildRewardLiveStakeFromRunningTotals(
 // finalizer's own SELECT. The per-credential form made the finalizer's cost
 // grow with the credential population twice over, and it is a large part of
 // why that SELECT could hold its write transaction -- and so the WAL snapshot
-// -- far longer than the work required (#4610).
+// -- far longer than the work required.
 func (s *Store) verifyRewardLiveStakeRunningTotals(
 	ctx context.Context,
 	db queryer,
@@ -475,7 +490,7 @@ LIMIT 1`)
 // until it finishes. Batching bounds both the Go-side rows and SQLite's
 // per-statement temp b-trees to one batch, and gives the rebuild a place to
 // report progress, while each batch reads only its own index ranges so the
-// total work stays linear in the key count (#4610).
+// total work stays linear in the key count.
 const rewardLiveStakeRebuildBatch = 20_000
 
 func (s *Store) rewardLiveStakeBatch() int {
@@ -487,6 +502,22 @@ func (s *Store) rewardLiveStakeBatch() int {
 
 // rewardLiveStakeProgressInterval throttles the rebuild's Info progress log.
 const rewardLiveStakeProgressInterval = 10 * time.Second
+
+const deleteOrphanRewardLiveStakeRowsQuery = `
+DELETE FROM reward_live_stake
+WHERE NOT EXISTS (
+    SELECT 1 FROM account
+    WHERE account.credential_tag = reward_live_stake.credential_tag
+      AND account.staking_key = reward_live_stake.staking_key
+)
+AND NOT EXISTS (
+    SELECT 1 FROM utxo
+    WHERE utxo.deleted_slot = 0
+      AND utxo.staking_key IS NOT NULL
+      AND LENGTH(utxo.staking_key) > 0
+      AND utxo.credential_tag = reward_live_stake.credential_tag
+      AND utxo.staking_key = reward_live_stake.staking_key
+)`
 
 type stakeKeyBound struct {
 	tag uint8
@@ -531,7 +562,9 @@ const liveUtxoStakeKeyFilter = `deleted_slot = 0
 func rewardLiveStakeKeySource(accountRange, utxoRange string) string {
 	return `
     SELECT credential_tag, staking_key FROM account
-    WHERE ` + accountRange + `
+    WHERE staking_key IS NOT NULL
+      AND LENGTH(staking_key) > 0
+      AND ` + accountRange + `
     UNION
     SELECT credential_tag, staking_key FROM utxo
     WHERE ` + liveUtxoStakeKeyFilter + `
@@ -730,21 +763,10 @@ func (s *Store) rebuildRewardLiveStake(
 				// A fresh Mithril import normally starts with an empty aggregate, but
 				// clearing orphan rows keeps the fast path correct if a prior run left
 				// aggregate state behind while its sync marker was lost.
-				if _, err := db.ExecContext(ctx, `
-DELETE FROM reward_live_stake
-WHERE NOT EXISTS (
-    SELECT 1 FROM account
-    WHERE account.credential_tag = reward_live_stake.credential_tag
-      AND account.staking_key = reward_live_stake.staking_key
-)
-AND NOT EXISTS (
-    SELECT 1 FROM utxo
-    WHERE utxo.deleted_slot = 0
-      AND utxo.staking_key IS NOT NULL
-      AND LENGTH(utxo.staking_key) > 0
-      AND utxo.credential_tag = reward_live_stake.credential_tag
-      AND utxo.staking_key = reward_live_stake.staking_key
-)`); err != nil {
+				if _, err := db.ExecContext(
+					ctx,
+					deleteOrphanRewardLiveStakeRowsQuery,
+				); err != nil {
 					return fmt.Errorf("clear orphan reward live stake: %w", err)
 				}
 				if err := s.verifyRewardLiveStakeRunningTotals(
@@ -821,6 +843,123 @@ AND NOT EXISTS (
 			return nil
 		},
 	)
+}
+
+func (s *Store) rebuildRewardLiveStakeInBatches(
+	slot uint64,
+	runTxn func(func(types.Txn) error) error,
+	afterBatch func(int64) error,
+) error {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	rebuildStart := time.Now()
+	runWriteTxn := func(fn func(queryer, context.Context) error) error {
+		return runTxn(func(txn types.Txn) error {
+			return s.withWriteTransaction(txn, fn)
+		})
+	}
+
+	if err := runWriteTxn(func(db queryer, ctx context.Context) error {
+		// The batch path runs after snapshot import and historical replay, before
+		// live block processing resumes. Keep validation and cleanup atomic.
+		if _, err := db.ExecContext(
+			ctx,
+			deleteOrphanRewardLiveStakeRowsQuery,
+		); err != nil {
+			return fmt.Errorf("clear orphan reward live stake: %w", err)
+		}
+		if err := s.verifyRewardLiveStakeRunningTotals(ctx, db); err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	readDB := s.instrumentedQueryer(s.readDB)
+	total, err := countRewardLiveStakeKeys(ctx, readDB)
+	if err != nil {
+		return err
+	}
+	s.logger.Info(
+		"reward live stake rebuild: started",
+		"stake_keys", total,
+		"from_running_totals", true,
+	)
+	lastProgress := time.Now()
+	var processed int64
+	var lo *stakeKeyBound
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		hi, err := nextRewardLiveStakeBatchEnd(
+			ctx,
+			readDB,
+			lo,
+			s.rewardLiveStakeBatch(),
+		)
+		if err != nil {
+			return err
+		}
+		var rows int
+		err = runWriteTxn(func(db queryer, ctx context.Context) error {
+			upserter := s.newRewardLiveStakeUpserter(db)
+			defer upserter.Close()
+			var err error
+			rows, err = s.rebuildRewardLiveStakeRange(
+				ctx,
+				db,
+				upserter,
+				stakeKeyRange{lo: lo, hi: hi},
+				true,
+				slotValue,
+			)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		processed += int64(rows)
+		if afterBatch != nil {
+			if err := afterBatch(processed); err != nil {
+				return err
+			}
+		}
+		if hi == nil {
+			break
+		}
+		lo = hi
+		if time.Since(lastProgress) >= rewardLiveStakeProgressInterval {
+			lastProgress = time.Now()
+			elapsed := time.Since(rebuildStart)
+			remaining := time.Duration(0)
+			if processed > 0 && total > processed {
+				remaining = time.Duration(
+					float64(elapsed) * float64(total-processed) / float64(processed),
+				)
+			}
+			s.logger.Info(
+				"reward live stake rebuild: progress",
+				"stake_keys_done", processed,
+				"stake_keys", total,
+				"elapsed", elapsed.Round(time.Second).String(),
+				"eta", remaining.Round(time.Second).String(),
+			)
+		}
+	}
+	s.logger.Info(
+		"reward live stake rebuild: complete",
+		"rows", processed,
+		"duration", time.Since(rebuildStart).String(),
+	)
+	return nil
 }
 
 type rewardLiveStakeCredential struct {
@@ -1305,8 +1444,7 @@ func (s *Store) StaleConsensusStakeSnapshotsExist(
 	// captureMarkSnapshot) is a real source for reward calculation whenever
 	// no authoritative row has been captured yet, so it must fail this gate
 	// on its own version rather than rely on authoritativeMarkRewardSnapshotExists
-	// separately rejecting a version mismatch when the fallback is consulted
-	// (dingo #4026).
+	// separately rejecting a version mismatch when the fallback is consulted.
 	err = db.QueryRowContext(ctx, `
 SELECT EXISTS (
     SELECT 1 FROM pool_stake_snapshot
@@ -1577,10 +1715,10 @@ func dedupeByteSlices(values [][]byte) [][]byte {
 // resolveInstantStake), so a snapshot whose stake is enumerated from the
 // active pool set alone silently drops the stake of any credential whose pool
 // is absent from it -- which raises sigma_a for every surviving pool and
-// under-credits every reward on the node by that stake's share (dingo #4660,
-// the same failure #3969 and #4025 fixed on the exclusion side). Unioning this
-// set into the one the distribution is fetched for restores the ledger's
-// credential-first denominator while leaving which pools earn rewards alone.
+// under-credits every reward on the node by that stake's share (the same
+// failure as on the exclusion side). Unioning this set into the one the
+// distribution is fetched for restores the ledger's credential-first
+// denominator while leaving which pools earn rewards alone.
 //
 // The result is deliberately a superset: it applies no registration or expiry
 // predicate, because those are applied by the stake fetch this feeds, and a

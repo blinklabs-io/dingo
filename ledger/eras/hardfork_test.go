@@ -216,7 +216,6 @@ func TestLegacyDecentralizationUpdateUsesSourceEraShape(t *testing.T) {
 // instead of pre-hashing produces a different result that does not match
 // what other nodes on the network compute, which manifests as VRF
 // verification failures on every header at the next epoch boundary
-// (issue #2125 Shelley→Allegra symptom).
 func expectedTPraosEtaV(prev, rawVrfOutput []byte) []byte {
 	contribution := lcommon.Blake2b256Hash(rawVrfOutput).Bytes()
 	concat := make([]byte, 0, len(prev)+len(contribution))
@@ -245,7 +244,7 @@ func tpraosTestVectors(
 // output before folding it into the rolling nonce. Without that pre-hash,
 // the resulting evolving and candidate nonces diverge from peers, the
 // derived epoch nonce no longer matches, and VRF verification of every
-// post-fork-boundary header fails — the symptom of issue #2125 at the
+// post-fork-boundary header fails — the symptom of at the
 // Shelley→Allegra boundary in the eras DevNet.
 func TestCalculateEtaV_TPraos_RawVrfMustBePreHashed(t *testing.T) {
 	cfg, prev, rawVrf := tpraosTestVectors(t)
@@ -359,7 +358,7 @@ func TestCalculateEtaV_TPraos_GenesisFallback(t *testing.T) {
 // the same seed-combination operator. The result is therefore distinct
 // from the TPraos pre-hash formula, which serves as a sanity check that
 // the two era families remain on separate code paths after the issue
-// #2125 fix.
+// fix.
 func TestCalculateEtaV_Praos_NotAffected(t *testing.T) {
 	cfg, prev, rawVrf := tpraosTestVectors(t)
 

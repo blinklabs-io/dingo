@@ -1152,22 +1152,22 @@ func TestGetSPOThreshold_ParameterChangeSecurityGroup(t *testing.T) {
 	))
 }
 
-func TestGetDRepThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
+func TestGetDRepThreshold_UpdateCommitteeUsesCommitteePresence(t *testing.T) {
 	t.Parallel()
 
 	pparams := conwayPParamsFixture(10)
 	// Fixture sets CommitteeNormal=67/100, CommitteeNoConfidence=60/100.
 	normal := getDRepThreshold(
-		lcommon.GovActionTypeUpdateCommittee, pparams, nil, false,
+		lcommon.GovActionTypeUpdateCommittee, pparams, nil, true,
 	)
 	assert.Equal(t, big.NewRat(67, 100), normal)
 	noConf := getDRepThreshold(
-		lcommon.GovActionTypeUpdateCommittee, pparams, nil, true,
+		lcommon.GovActionTypeUpdateCommittee, pparams, nil, false,
 	)
 	assert.Equal(t, big.NewRat(60, 100), noConf)
 }
 
-func TestGetSPOThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
+func TestGetSPOThreshold_UpdateCommitteeUsesCommitteePresence(t *testing.T) {
 	t.Parallel()
 
 	pparams := conwayPParamsFixture(10)
@@ -1175,13 +1175,47 @@ func TestGetSPOThreshold_UpdateCommitteeNoConfidenceState(t *testing.T) {
 	pparams.PoolVotingThresholds.CommitteeNormal = newRat(51, 100)
 	pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(65, 100)
 	normal := getSPOThreshold(
-		lcommon.GovActionTypeUpdateCommittee, pparams, nil, false,
+		lcommon.GovActionTypeUpdateCommittee, pparams, nil, true,
 	)
 	assert.Equal(t, big.NewRat(51, 100), normal)
 	noConf := getSPOThreshold(
-		lcommon.GovActionTypeUpdateCommittee, pparams, nil, true,
+		lcommon.GovActionTypeUpdateCommittee, pparams, nil, false,
 	)
 	assert.Equal(t, big.NewRat(65, 100), noConf)
+}
+
+func TestShouldRatify_UpdateCommitteeThresholdUsesElectedCommitteePresence(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	pparams := conwayPParamsFixture(10)
+	pparams.DRepVotingThresholds.CommitteeNormal = newRat(70, 100)
+	pparams.DRepVotingThresholds.CommitteeNoConfidence = newRat(50, 100)
+	pparams.PoolVotingThresholds.CommitteeNormal = newRat(70, 100)
+	pparams.PoolVotingThresholds.CommitteeNoConfidence = newRat(50, 100)
+	tally := &ProposalTally{
+		ActionType:     uint8(lcommon.GovActionTypeUpdateCommittee),
+		DRepYesStake:   60,
+		DRepTotalStake: 100,
+		SPOYesStake:    60,
+		SPOTotalStake:  100,
+	}
+
+	withoutCommittee := ratifyInputs(
+		tally, pparams, 10, 0, nil, 10, false,
+	)
+	withoutCommittee.CommitteeAbsent = true
+	withoutCommitteeDecision := ShouldRatify(withoutCommittee)
+	assert.True(t, withoutCommitteeDecision.DRepApproved)
+	assert.True(t, withoutCommitteeDecision.SPOApproved)
+	assert.True(t, withoutCommitteeDecision.Ratified)
+
+	withCommittee := ratifyInputs(tally, pparams, 10, 0, nil, 10, false)
+	withCommitteeDecision := ShouldRatify(withCommittee)
+	assert.False(t, withCommitteeDecision.DRepApproved)
+	assert.False(t, withCommitteeDecision.SPOApproved)
+	assert.False(t, withCommitteeDecision.Ratified)
 }
 
 func TestShouldRatify_CCQuorumMissingFailsSafe(t *testing.T) {

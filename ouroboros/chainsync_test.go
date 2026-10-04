@@ -736,7 +736,7 @@ func (h nonByronTestHeader) Era() gledger.Era {
 // proves that a header whose crypto verification returns a definite (not
 // deferred) error is excluded from chain-selection observation and triggers
 // a connection recycle, instead of being allowed to influence Genesis
-// density or corroboration (dingo #3517).
+// density or corroboration.
 func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	t *testing.T,
 ) {
@@ -1337,7 +1337,7 @@ func TestChainsyncNeverAsksPeerToReplayFromGenesisDuringRollback(t *testing.T) {
 
 // TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor is the regression
 // test for the review finding that the origin-only rescue re-introduced the
-// #2309 violation one layer up.
+// violation one layer up.
 //
 // When the point list is empty because the primary chain is AHEAD on a fork
 // that does not contain the applied ledger tip, the ledger deliberately reports
@@ -1369,12 +1369,12 @@ func TestFinalizeChainsyncIntersectPointsRefusesAheadForkAnchor(t *testing.T) {
 // the state a chain rewind leaves behind.
 //
 // This distinction is load-bearing: swapping this for the real block hash
-// converts the #2309 test below into the ordinary chain-ahead test beside it,
+// converts the test below into the ordinary chain-ahead test beside it,
 // which asserts the opposite outcome.
 var ledgerTipHashAbsentFromChain = bytes.Repeat([]byte{0xe8}, 32)
 
 // TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly is the
-// #2309 case: the primary chain is AHEAD of the ledger tip, and the ledger
+// case: the primary chain is AHEAD of the ledger tip, and the ledger
 // tip's own block row is missing (so the tip is not an ancestor on the primary
 // chain either). primaryChainTipAtOrAheadOfLedgerTip's ancestor check fails,
 // the authoritative path finds no tip row, and the ahead-gate refuses to anchor
@@ -1433,7 +1433,7 @@ func TestIntersectPointsChainAheadWithLedgerTipRowMissingStaysOriginOnly(
 
 // TestIntersectPointsChainAheadWithLedgerTipRowPresentAdvertisesChainPoints is
 // the complementary case, and the one that must NOT be conflated with the
-// #2309 test above: the primary chain is ahead of the ledger tip, but the
+// test above: the primary chain is ahead of the ledger tip, but the
 // ledger tip is a real block on that chain. The chain is then a valid forward
 // extension, primaryChainTipAtOrAheadOfLedgerTip's ancestor check passes, and
 // the chain's real points are advertised with origin appended as the usual
@@ -1575,7 +1575,7 @@ func TestBuildDefaultChainsyncIntersectPointsOffersRollbackPointInWindow(
 }
 
 // TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork drives the
-// #2309 shape through the real call site: the primary chain is ahead of the
+// shape through the real call site: the primary chain is ahead of the
 // ledger tip on a fork that does not contain it, and the ledger tip row is
 // missing. Nothing may be advertised, so the wire request is origin-only.
 func TestBuildDefaultChainsyncIntersectPointsStaysOriginOnlyOnAheadFork(
@@ -1999,8 +1999,8 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 }
 
 // The tests in this file drive Dingo's real ChainSync server callbacks over a
-// real protocol connection using the shared ouroboros-mock harness
-// (blinklabs-io/ouroboros-mock#226), and assert the exact protocol messages the
+// real protocol connection using the shared ouroboros-mock harness,
+// and assert the exact protocol messages the
 // server emits back.
 //
 // This is the difference that matters versus calling the callbacks directly:
@@ -2963,31 +2963,17 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 	)
 }
 
-// The post-AwaitReply waiter takes a chainsyncServerConnection, and the only
-// production caller hands it the *ouroboros.Connection the connection manager
-// resolved. Restating that here keeps the stand-in below from drifting away
-// from the type production actually passes.
-var _ chainsyncServerConnection = (*ouroboros.Connection)(nil)
-
-// stubChainsyncServerConnection is a single-consumer stand-in for the
-// connection the post-AwaitReply waiter watches, mirroring
-// stubBlockfetchConnection (blockfetch_test.go), which exists for the same
-// reason.
-//
-// The real conn.ErrorChan() is one buffered channel shared with the connection
-// manager's teardown watcher (and, in production, blockfetch and
-// tx-submission), and delivery goes to whichever consumer the runtime picks, so
-// a test cannot address this waiter on it. Publishing an extra error to cover
-// the other consumers is not an option either: the consumer that wins closes
-// the connection, and gouroboros' Connection.shutdown closes the error channel
-// it owns, so the extra send would race that closure.
+// stubChainsyncServerConnection stands in for the connection the
+// post-AwaitReply waiter watches: the test closes done to signal teardown,
+// exactly as the connection manager's watcher does for a real connection.
 //
 // closeFn delegates to the real connection, so closing the stand-in still drops
 // the actual transport and the harness can observe the parked peer being
 // released.
 type stubChainsyncServerConnection struct {
-	errChan chan error
-	closeFn func() error
+	done     chan struct{}
+	closeFn  func() error
+	closeErr error
 
 	mu         sync.Mutex
 	closeCalls int
@@ -2997,13 +2983,17 @@ func newStubChainsyncServerConnection(
 	closeFn func() error,
 ) *stubChainsyncServerConnection {
 	return &stubChainsyncServerConnection{
-		errChan: make(chan error, 1),
+		done:    make(chan struct{}),
 		closeFn: closeFn,
 	}
 }
 
-func (c *stubChainsyncServerConnection) ErrorChan() chan error {
-	return c.errChan
+func (c *stubChainsyncServerConnection) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *stubChainsyncServerConnection) CloseError() error {
+	return c.closeErr
 }
 
 func (c *stubChainsyncServerConnection) Close() error {
@@ -3023,7 +3013,7 @@ func (c *stubChainsyncServerConnection) closeCount() int {
 }
 
 // newChainsyncServerFixtureLogging is newChainsyncServerFixture with the
-// Ouroboros logger redirected into a buffer, for the two tests whose assertion
+// Ouroboros logger redirected into a buffer, for the teardown test whose assertion
 // includes the reason the waiter logged for a teardown.
 func newChainsyncServerFixtureLogging(
 	t *testing.T,
@@ -3041,52 +3031,45 @@ func newChainsyncServerFixtureLogging(
 	return f, logBuf
 }
 
-// TestChainsyncServerAwaitedWaiterClosesOnConnectionError covers the waiter's
-// error-channel exit: it consumes an error for the connection it is serving and
-// must close the transport rather than return silently. Closing is the whole
-// point of the exit -- once MsgAwaitReply is on the wire the server holds
-// agency in MustReply and nothing else releases the peer: an error-channel send
-// does not, a silent return does not, and ConnectionManager.RemoveConnection
-// only unregisters.
+// TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown covers the
+// waiter's teardown exit: once the connection manager signals teardown the
+// waiter must close the transport rather than return silently. Closing is the
+// whole point of the exit -- once MsgAwaitReply is on the wire the server holds
+// agency in MustReply and nothing else releases the peer: a silent return does
+// not, and ConnectionManager.RemoveConnection only unregisters.
 //
-// The waiter is driven directly here, over a single-consumer stand-in for the
-// connection whose Close is the real one; the test does not park a peer through
-// the protocol. Parking would arm the production waiter on the real error
-// channel, and since a test cannot address one consumer of that shared channel
-// the error would still have to be delivered to a second waiter -- a second
-// goroutine driving the same ChainIter. So the assertion here is the waiter's
-// own behavior on an error it has received, plus the transport actually going
-// away. A peer parked by the protocol is covered by
+// The waiter is driven directly, over a stand-in whose Close is the real one;
+// the test does not park a peer through the protocol. A peer parked by the
+// protocol is covered by
 // TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient and
 // TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient, which
 // park for real and drive the serve path on the real connection.
-func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
+func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 	t *testing.T,
 ) {
-	const connErrText = "simulated protocol error for the parked waiter"
 	f, logBuf := newChainsyncServerFixtureLogging(t)
 	clientState := f.registerClientAtOrigin(t)
 
 	conn := newStubChainsyncServerConnection(f.conn.Close)
+	conn.closeErr = errors.New("peer reset")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
 	}()
 
-	conn.ErrorChan() <- errors.New(connErrText)
+	close(conn.done)
 
 	testutil.RequireReceive(
 		t,
 		done,
 		10*time.Second,
-		"the waiter must return once it has consumed a connection error",
+		"the waiter must return once the connection is torn down",
 	)
 	f.requireClientUnparked(
 		t,
-		"a connection error consumed by the waiter must drop the transport, "+
-			"which is the only thing that releases a peer the server has "+
-			"parked in MustReply",
+		"connection teardown must drop the transport, which is the only "+
+			"thing that releases a peer the server has parked in MustReply",
 	)
 	require.Equal(
 		t,
@@ -3097,69 +3080,10 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 	require.Contains(
 		t,
 		logBuf.String(),
-		connErrText,
-		"the teardown must be logged with the error that caused it",
-	)
-}
-
-// TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure is the sibling of
-// the test above for the err == nil branch, which is the shape that fires most
-// often in production: gouroboros' Connection.shutdown closes the error channel
-// it owns, and every consumer then receives the zero value, whereas a live
-// error delivered to THIS consumer is the rarer race. Behavior is a Close()
-// either way, so what is distinct here is the reason -- the nil must not reach
-// the log as an empty or malformed error.
-//
-// Like its sibling it drives the waiter directly rather than through a peer
-// parked by the protocol, which here is also what makes the reason
-// attributable: a parked peer arms the production waiter on the real error
-// channel, and the delegated Close would wake that waiter with a closure of its
-// own whose teardown reason is textually identical to the one under test.
-func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
-	t *testing.T,
-) {
-	f, logBuf := newChainsyncServerFixtureLogging(t)
-	clientState := f.registerClientAtOrigin(t)
-
-	conn := newStubChainsyncServerConnection(f.conn.Close)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
-	}()
-
-	close(conn.ErrorChan())
-
-	testutil.RequireReceive(
-		t,
-		done,
-		10*time.Second,
-		"the waiter must return once its error channel is closed",
-	)
-	f.requireClientUnparked(
-		t,
-		"a closed error channel must drop the transport, which is the only "+
-			"thing that releases a peer the server has parked in MustReply",
-	)
-	require.Equal(
-		t,
-		1,
-		conn.closeCount(),
-		"the waiter itself must close the connection",
-	)
-	logged := logBuf.String()
-	require.Contains(
-		t,
-		logged,
 		errChainsyncAwaitConnectionClosed.Error(),
-		"a closed error channel must be reported as a closed connection",
+		"the teardown must be logged as a closed connection",
 	)
-	require.NotContains(
-		t,
-		logged,
-		"%!w(<nil>)",
-		"the nil a closed channel yields must never reach the log verbatim",
-	)
+	require.Contains(t, logBuf.String(), conn.closeErr.Error())
 }
 
 // TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection pins the one
@@ -3518,7 +3442,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				ouroboros_mock.ConversationEntryHandshakeNtCResponseInput,
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
@@ -3528,7 +3454,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				},
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
@@ -5279,7 +5207,7 @@ func TestChainsyncClientRollForward_InboundUpstreamPublishesWhenEligible(
 }
 
 // TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly
-// verifies the fix preserves the protection added in #1699: when peergov
+// verifies the fix preserves the protection against inbound peers: when peergov
 // reports the peer as ineligible (e.g. a random downstream client pulling
 // data from us), its headers must not feed the ledger even though chainsync
 // is running against it.
@@ -5347,8 +5275,7 @@ func TestChainsyncClientRollForward_InboundIneligiblePeerStaysObservabilityOnly(
 // verifies that when no ChainsyncIngressEligible policy is wired, an inbound
 // full-duplex chainsync client is not treated as ingress-eligible. Outbound
 // chainsync retains its legacy default of eligible so the fix does not
-// regress existing callers that don't pass a policy. Regression guard for
-// the review feedback on issue #1982.
+// regress existing callers that don't pass a policy. Regression guard.
 func TestShouldPublishChainsyncToLedger_InboundFailsClosedWithNilCallback(
 	t *testing.T,
 ) {

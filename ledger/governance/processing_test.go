@@ -126,6 +126,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 			err = ProcessProposals(
 				tx,
 				ocommon.Point{Slot: 100},
+				0,
 				100,
 				20,
 				db,

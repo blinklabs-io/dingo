@@ -31,9 +31,9 @@ const (
 	// EventQueueSize is the high-burst buffer used by subscribers that may
 	// receive bulk-sync bursts (e.g. chainsync/blockfetch ingest in the
 	// ledger). Subscribers opt in to this size via the *WithBuffer
-	// variants. Sized to absorb the worst case from #1556 / #1914. Buffer
+	// variants. Sized to absorb the worst case of bulk-sync bursts. Buffer
 	// size no longer decides whether events survive — a full buffer
-	// backpressures the publisher rather than dropping (#2932) — it decides
+	// backpressures the publisher rather than dropping — it decides
 	// how large a burst passes through without slowing ingestion.
 	EventQueueSize = 100000
 	// DefaultSubscriberBuffer is the per-subscriber channel buffer used by
@@ -42,7 +42,7 @@ const (
 	// receive sparse traffic and do not need 100k slots; sizing the
 	// default down keeps idle steady-state heap small while leaving the
 	// burst headroom available to opt-in callers via SubscribeWithBuffer
-	// / SubscribeFuncWithBuffer. See blinklabs-io/dingo#2106.
+	// / SubscribeFuncWithBuffer.
 	DefaultSubscriberBuffer = 1024
 	AsyncQueueSize          = 1000
 	AsyncWorkerPoolSize     = 4
@@ -184,11 +184,26 @@ type EventBus struct {
 	handlerProgressInterval time.Duration
 }
 
-// NewEventBus creates a new EventBus with async worker pool
+// NewEventBus creates a new EventBus with async worker pool. It panics if
+// the bus metrics cannot be registered on promRegistry; use TryNewEventBus to
+// receive that error instead.
 func NewEventBus(
 	promRegistry prometheus.Registerer,
 	logger *slog.Logger,
 ) *EventBus {
+	e, err := TryNewEventBus(promRegistry, logger)
+	if err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// TryNewEventBus is NewEventBus returning a metrics registration error. On
+// error nothing is left registered and no goroutine is started.
+func TryNewEventBus(
+	promRegistry prometheus.Registerer,
+	logger *slog.Logger,
+) (*EventBus, error) {
 	e := &EventBus{
 		subscribers: make(
 			map[EventType]map[EventSubscriberId]Subscriber,
@@ -202,7 +217,9 @@ func NewEventBus(
 		handlerProgressInterval: handlerProgressWarnInterval,
 	}
 	if promRegistry != nil {
-		e.initMetrics(promRegistry)
+		if err := e.initMetrics(promRegistry); err != nil {
+			return nil, fmt.Errorf("register event bus metrics: %w", err)
+		}
 	}
 	// Start async worker pool
 	for range AsyncWorkerPoolSize {
@@ -211,7 +228,7 @@ func NewEventBus(
 	}
 	e.asyncWg.Add(1)
 	go e.handlerProgressWatchdog(e.stopCh)
-	return e
+	return e, nil
 }
 
 // asyncWorker processes events from the async queue
@@ -261,7 +278,7 @@ type Subscriber interface {
 // channelSubscriber is the in-memory subscriber adapter that preserves the
 // existing channel-based API. Delivery waits for buffer capacity rather than
 // dropping: a subscriber that falls behind backpressures its publishers
-// instead of silently losing events (blinklabs-io/dingo#2932). Terminal event
+// instead of silently losing events. Terminal event
 // bus shutdown may discard queued events before closing the channel so
 // SubscribeFunc goroutines exit without replaying a potentially large backlog
 // into components that are closing; ordinary unsubscribe preserves them.
@@ -1139,7 +1156,7 @@ func (e *EventBus) unsubscribe(
 // goroutine can be outstanding per timed-out subscriber.
 //
 // True cancellation would require adding context support to the
-// Subscriber interface, which is out of scope for this change.
+// Subscriber interface, which is out of scope here.
 func (e *EventBus) deliverWithTimeout(
 	sub Subscriber,
 	evt Event,
@@ -1427,6 +1444,55 @@ func (e *EventBus) Close() {
 	e.shutdown(false)
 }
 
+// CloseContext waits for Close until ctx ends, then grants the in-flight close
+// a short bounded grace to finish. If handlers are still running after that
+// grace, it returns an error wrapping ctx.Err() that names their event types.
+// The abandoned Close keeps running in its own goroutine and finishes once
+// those handlers return.
+func (e *EventBus) CloseContext(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		e.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+	}
+	// A ctx that was already done on entry gives Close no time at all. Allow
+	// the in-flight close a short bounded grace, including when a handler was
+	// still running at the deadline, before declaring the drain abandoned.
+	grace := time.NewTimer(closeContextGrace)
+	defer grace.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-grace.C:
+	}
+	running := e.runningHandlerTypes()
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	if len(running) == 0 {
+		return fmt.Errorf(
+			"event bus close bookkeeping did not finish: %w",
+			ctx.Err(),
+		)
+	}
+	return fmt.Errorf(
+		"event bus close abandoned with handlers still running for %v: %w",
+		running,
+		ctx.Err(),
+	)
+}
+
+// closeContextGrace bounds how long CloseContext waits past its deadline for
+// in-flight close work to finish.
+const closeContextGrace = time.Second
+
 func (e *EventBus) shutdown(restart bool) {
 	if e == nil {
 		return
@@ -1478,8 +1544,16 @@ func (e *EventBus) shutdown(restart bool) {
 
 	// Close subscribers outside of lock
 	discardQueued := !restart
-	for _, evtTypeSubs := range subsCopy {
+	for eventType, evtTypeSubs := range subsCopy {
 		for _, sub := range evtTypeSubs {
+			if e.metrics != nil {
+				kind := "remote"
+				if _, ok := sub.(*channelSubscriber); ok {
+					kind = "in-memory"
+				}
+				e.metrics.subscribers.WithLabelValues(string(eventType), kind).
+					Dec()
+			}
 			if chSub, ok := sub.(*channelSubscriber); ok {
 				chSub.close(discardQueued)
 			} else {
@@ -1511,11 +1585,6 @@ func (e *EventBus) shutdown(restart bool) {
 		}
 	}
 	e.mu.Unlock()
-
-	// Reset subscriber metrics if they exist
-	if e.metrics != nil {
-		e.metrics.subscribers.Reset()
-	}
 
 	// Every ordered-lane worker watched the stop channel closed above and
 	// has exited (asyncWg.Wait covered them alongside the shared pool), so

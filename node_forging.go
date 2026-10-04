@@ -687,15 +687,15 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
-// applyForgeTuning copies the operator-tunable forging knobs from the node
-// configuration onto the forger config. It is the one place that mapping
-// happens on the runtime path, so a test can assert it without standing up
-// a node: a knob dropped here reaches the forger as its zero value, which
-// silently reverts it to the built-in default and leaves yaml, env and CLI
-// with no effect at all.
+// applyForgeTuning is the runtime mapping for operator-configured forge knobs.
+// Keeping the mapping together lets its test catch any setting that would
+// otherwise stop affecting the forger when configuration wiring changes.
 func applyForgeTuning(fc *forging.ForgerConfig, cfg *Config) {
 	fc.ForgeSyncToleranceSlots = cfg.forgeSyncToleranceSlots
 	fc.ForgeStaleGapThresholdSlots = cfg.forgeStaleGapThresholdSlots
+	fc.ForgeUpstreamStalenessSlots = cfg.forgeUpstreamStalenessSlots
+	fc.ForgeAppliedTipStalenessSlots = cfg.forgeAppliedTipStalenessSlots
+	fc.ForgeEndorserBlockStalenessSlots = cfg.forgeEndorserBlockStalenessSlots
 	fc.ForgeEBSelectionReserve = cfg.forgeEBSelectionReserve
 	fc.ForgeEBMaxTxRefs = cfg.forgeEBMaxTxRefs
 	fc.ForgeEBMaxBytes = cfg.forgeEBMaxBytes
@@ -900,8 +900,8 @@ func (n *Node) initBlockForger(
 
 	// Always enforce aggregate reference-script limits before AddBlock.
 	// Full self-validation (header crypto, body-hash, per-tx ledger checks)
-	// runs too unless the operator explicitly opts out (issue #3528: fail
-	// closed by default).
+	// runs too unless the operator explicitly opts out (fail closed by
+	// default).
 	blockValidator := newForgedBlockValidator(
 		n.ledgerState,
 		n.config.validateForgedBlock,
@@ -925,12 +925,8 @@ func (n *Node) initBlockForger(
 		// mkCurrentBlockContext's EQ case. The primary chain supplies the
 		// fork context; LedgerState arbitrates with the same Praos
 		// comparison a peer's competing block goes through.
-		ChainContext:                       n.chainManager.PrimaryChain(),
-		SiblingAdopter:                     n.ledgerState,
-		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        n.config.forgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      n.config.forgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   n.config.forgeEndorserBlockStalenessSlots,
+		ChainContext:   n.chainManager.PrimaryChain(),
+		SiblingAdopter: n.ledgerState,
 		// Closure, not a method value: n.ouroboros is rebuilt live, so this
 		// resolves the current instance when the forge loop asks.
 		LeiosVerifiedEbSlot: func() uint64 {
@@ -1132,7 +1128,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 //
 // Two defects are fixed here, and both are load-bearing for consensus:
 //
-// dingo #3814 -- the denominator comes from LedgerView.GetTotalActiveStake,
+// Denominator -- the denominator comes from LedgerView.GetTotalActiveStake,
 // a txn-scoped wrapper over Metadata().GetTotalActiveStake, which is the
 // same store accessor ledger/verify_header.go resolves the denominator
 // through when it checks an incoming header's leader eligibility.
@@ -1151,7 +1147,7 @@ func (a *stakeDistributionAdapter) getStakeDistribution(
 // decline a slot it is genuinely eligible for. Resolving both through one
 // accessor removes the second derivation entirely.
 //
-// dingo #3815 -- both values are read through one db.MetadataTxn and one
+// Atomicity -- both values are read through one db.MetadataTxn and one
 // LedgerView. Opening a transaction per value let a snapshot re-capture land
 // between them, yielding a sigma whose halves come from different writes.
 func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
@@ -1210,7 +1206,7 @@ func (a *stakeDistributionAdapter) GetPoolAndTotalActiveStake(
 
 // The forging adapter must resolve sigma through the atomic pair accessor.
 // A drift back to two independent reads, or to summing the mark rows for the
-// denominator, is the pair of defects dingo #3814 and #3815 describe; make it
+// denominator, is the pair of defects described above; make it
 // a compile error rather than a silent consensus divergence.
 var _ leader.StakeDistributionProvider = (*stakeDistributionAdapter)(nil)
 
@@ -1221,8 +1217,8 @@ type epochInfoAdapter struct {
 
 // computeSchedule discovers the exact-rational coefficient with a runtime type
 // assertion and silently falls back to the float64 accessor when it fails,
-// which yields a strictly larger leadership threshold than the reference node's
-// (dingo #2798). Make that drift a compile error;
+// which yields a strictly larger leadership threshold than the reference
+// node's. Make that drift a compile error;
 // TestEpochInfoAdapterProvidesExactActiveSlotCoeff covers the same pairing.
 var _ leader.ActiveSlotCoeffRatProvider = (*epochInfoAdapter)(nil)
 
@@ -1329,6 +1325,14 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 	return a.ledgerState.Tip().Point
 }
 
+func (a *slotClockAdapter) ChainTipSnapshot() ochainsync.Tip {
+	return a.ledgerState.Tip()
+}
+
+func (a *slotClockAdapter) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return a.ledgerState.ForgeTipSnapshot()
+}
+
 // ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
 // forger no longer calls it: it takes the tip hash from ChainTip above,
 // which returns slot and hash from one snapshot. Kept so the adapter still
@@ -1349,6 +1353,12 @@ func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
 	return a.ledgerState.PrimaryChainTip().Point
 }
 
+func (a *slotClockAdapter) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	return a.ledgerState.PrimaryChainTipRelation(point)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1359,6 +1369,14 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 
 func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
 	return a.ledgerState.UpstreamSyncStatus()
+}
+
+func (a *slotClockAdapter) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return a.ledgerState.UpstreamSyncTip()
+}
+
+func (a *slotClockAdapter) SecurityParam() int {
+	return a.ledgerState.SecurityParam()
 }
 
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
@@ -1445,7 +1463,13 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 		)
 	}
 	hash, _, ok := leiosheader.ReferencedEndorserBlock(decoded.Header())
-	rbHash := lcommon.NewBlake2b256(tip.Point.Hash)
+	rbHash, err := lcommon.NewBlake2b256Checked(tip.Point.Hash)
+	if err != nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
+			"parent block hash: %w",
+			err,
+		)
+	}
 	return rbHash, hash, ok, nil
 }
 
