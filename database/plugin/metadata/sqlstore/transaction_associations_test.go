@@ -216,7 +216,8 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 func TestCollateralRollbackOrderAcrossRestart(t *testing.T) {
 	t.Parallel()
 
-	dsn := "file:" + filepath.Join(t.TempDir(), "collateral.db")
+	dsn := "file:" + filepath.Join(t.TempDir(), "collateral.db") +
+		"?_pragma=synchronous(OFF)&_pragma=journal_mode(MEMORY)"
 	open := func() (*Store, *sql.DB) {
 		db, err := sql.Open("sqlite", dsn)
 		require.NoError(t, err)
