@@ -3811,9 +3811,10 @@ There is therefore no reference-node case in which cardano-node *accepts* a
 non-genesis-delegate block at a `d=1` overlay slot, and the defer never makes
 dingo accept one either: `verifyGenesisDelegateHeader` defers only while
 `allowStateDefer && ledgerTipBehindSlot(slot)`, and at ledger apply
-`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderStateWithEpochAdvance(
-block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — with the defer
-switch off, so the stateful genesis-delegate check runs to an authoritative
+`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderCryptoWithEpochAdvance(
+block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — the VRF, KES and
+operational-certificate signature checks followed by the stateful ones, with the
+defer switch off, so the stateful genesis-delegate check runs to an authoritative
 accept/reject verdict before the block can be adopted. The deferral moves *when*
 the verdict is computed, not *whether* it is enforced; the marker
 (`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
@@ -3825,7 +3826,7 @@ The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A
 `GenesisKeyDelegationCertificate` rewrites a genesis key's active delegate/VRF
 hash; `Store.GetGenesisDelegationForSlot` returns the latest
-`genesis_delegation` row with `added_slot < blockSlot`, and that row is written
+`genesis_delegation` row with `added_slot + stabilityWindow <= blockSlot`, and that row is written
 only when the block carrying the certificate is *applied*
 (`transaction_certificates.go`). During catch-up the header chain runs ahead of
 the applied tip, so at header-verification time the reassignment row can be
@@ -5337,6 +5338,17 @@ active or while corroboration is incomplete.
 #### Header Verification Handoff
 
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
+
+#### Deferred Header Validation Bounds and Attribution
+
+Four rules shape the deferred-header path beyond the marker itself.
+
+- **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `sync_state` markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
+- **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
+- **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
+- **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
+
+Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 
 #### Leios CertRB Serving (NtC)
 
@@ -8890,8 +8902,8 @@ correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
-one query per pool: `CountPoolBlocksInSlotRange` returns every active pool's
-`blocks_minted` keyed by pool, and `GetOffchainMetadataBatch` returns every
+one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's
+`blocks_minted` keyed by pool (observed blocks plus a Mithril snapshot's imported counts), and `GetOffchainMetadataBatch` returns every
 pool's cached off-chain document keyed by URL, supplying the nullable
 `metadata` object. See the Off-chain Metadata Worker section above for the
 metadata half and DATABASE.md for both queries' index usage.
@@ -13678,7 +13690,12 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    caught up as of the currently validating slot. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
-   with withdrawals drained first. It also rejects delegation from a
+   with withdrawals drained first. For genesis key delegation certificates it
+   enforces `GenesisKeyNotInMappingDELEG`, `DuplicateGenesisDelegateDELEG` and
+   `DuplicateGenesisVRFDELEG` against the delegations in force and the pending
+   ones from `*LedgerView.GenesisDelegState`, and a certified delegation takes
+   effect only at its slot plus the stability window. It also rejects
+   delegation from a
    credential deregistered earlier in the transaction. Upstream value
    conservation counts a deposit for every registration and a refund for
    every deregistration, and those amounts match real accounts only because

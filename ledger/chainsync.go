@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 	"math"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,6 +147,11 @@ const (
 
 	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
 	deferredHeaderValidationSyncStateValue  = "true"
+	// deferredHeaderValidationFloorSyncStateKey must not start with
+	// deferredHeaderValidationSyncStatePrefix, which marker scans match.
+	deferredHeaderValidationFloorSyncStateKey = "deferred_header_validation_floor"
+	defaultMaxDeferredHeaderMarkers           = 100_000
+	defaultMaxAdmissionVerified               = 100_000
 
 	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
 	// used to gate shadow blockfetch dispatch when no peer-population
@@ -509,13 +516,162 @@ func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
 	)
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
+	ls.markDeferredHeaderValidationFrom(point, ouroboros.ConnectionId{})
+}
+
+// boundDeferredHeaderValidation keeps the deferred-header set, and its
+// persisted markers, within maxDeferredHeaderMarkers. The applied-tip eviction
+// cannot do this: when the header chain runs far ahead of a stalled applied
+// tip, every new entry sits above that cutoff.
+//
+// Once over the cap it evicts the lowest-slot entries down to three quarters of
+// it, so the work is amortised across admissions. A marker is the only thing
+// that makes apply run header verification for a block whose admission was
+// deferred, so eviction first raises deferredHeaderValidationFloor past every
+// evicted slot and persists it: a block below the floor is verified in full at
+// apply whether or not it has a marker. The floor is stored before any marker
+// is deleted, so a failure leaves the set unbounded rather than unverified.
+//
+// The caller must not hold deferredHeaderValidationMu, and must not hold the
+// blockfetch mutex across the database writes (see deletePersistedDeferredMarkers).
+func (ls *LedgerState) boundDeferredHeaderValidation() error {
+	// Serialize the snapshot, durable floor write, and marker deletion. The
+	// in-memory mutex must be released for the database write to avoid lock
+	// inversion with block apply, so it cannot also serialize concurrent bounds.
+	ls.deferredHeaderValidationBoundMu.Lock()
+	defer ls.deferredHeaderValidationBoundMu.Unlock()
+
+	limit := ls.maxDeferredHeaderMarkers
+	if limit <= 0 {
+		limit = defaultMaxDeferredHeaderMarkers
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	if len(ls.deferredHeaderValidation) <= limit {
+		ls.deferredHeaderValidationMu.Unlock()
+		return nil
+	}
+	type markedPoint struct {
+		key  string
+		slot uint64
+	}
+	marked := make([]markedPoint, 0, len(ls.deferredHeaderValidation))
+	for key := range ls.deferredHeaderValidation {
+		// An unparseable key can never be verified; evicting it at slot 0
+		// raises nothing.
+		slot, _ := slotFromHeaderValidationKey(key)
+		marked = append(marked, markedPoint{key: key, slot: slot})
+	}
+	floor := ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+
+	slices.SortFunc(marked, func(a, b markedPoint) int {
+		return cmp.Compare(a.slot, b.slot)
+	})
+	evictCount := len(marked) - limit*3/4
+	evictedKeys := make([]string, 0, evictCount)
+	for _, m := range marked[:evictCount] {
+		evictedKeys = append(evictedKeys, m.key)
+		floor = max(floor, m.slot+1)
+	}
+	if ls.db != nil && ls.db.Metadata() != nil {
+		if err := ls.db.SetSyncState(
+			deferredHeaderValidationFloorSyncStateKey,
+			strconv.FormatUint(floor, 10),
+			nil,
+		); err != nil {
+			return fmt.Errorf("persist deferred header floor: %w", err)
+		}
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	ls.deferredHeaderValidationFloor = max(
+		ls.deferredHeaderValidationFloor,
+		floor,
+	)
+	for _, key := range evictedKeys {
+		delete(ls.deferredHeaderValidation, key)
+	}
+	ls.deferredHeaderValidationMu.Unlock()
+	return ls.deletePersistedDeferredMarkers(evictedKeys)
+}
+
+// markAdmissionVerified records that point's header passed full verification
+// at blockfetch admission, so block-pipeline replay need not verify it again.
+// The record is only an optimisation: a block without one is verified in full,
+// so when the set is at its cap, after dropping records at or below the
+// applied tip (replayed or abandoned), a new record is simply not kept.
+func (ls *LedgerState) markAdmissionVerified(point ocommon.Point) {
+	limit := ls.maxAdmissionVerified
+	if limit <= 0 {
+		limit = defaultMaxAdmissionVerified
+	}
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	if len(ls.admissionVerified) >= limit {
+		for slot := range ls.admissionVerified {
+			if slot <= tipSlot {
+				delete(ls.admissionVerified, slot)
+			}
+		}
+		if len(ls.admissionVerified) >= limit {
+			return
+		}
+	}
+	if ls.admissionVerified == nil {
+		ls.admissionVerified = make(map[uint64]string)
+	}
+	ls.admissionVerified[point.Slot] = headerValidationPointKey(point)
+}
+
+// admissionVerifiedSlot reports whether a block at slot has an admission
+// record. It does not consume it.
+func (ls *LedgerState) admissionVerifiedSlot(slot uint64) bool {
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	_, ok := ls.admissionVerified[slot]
+	return ok
+}
+
+// consumeAdmissionVerified removes any record for point's slot and reports
+// whether it was for exactly this point. A record for another hash at the same
+// slot is dropped without vouching for point.
+func (ls *LedgerState) consumeAdmissionVerified(point ocommon.Point) bool {
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	key, ok := ls.admissionVerified[point.Slot]
+	if !ok {
+		return false
+	}
+	delete(ls.admissionVerified, point.Slot)
+	return key == headerValidationPointKey(point)
+}
+
+// markDeferredHeaderValidationFrom records point as awaiting apply-time header
+// validation, attributed to the connection that supplied its block.
+func (ls *LedgerState) markDeferredHeaderValidationFrom(
+	point ocommon.Point,
+	source ouroboros.ConnectionId,
+) {
 	ls.deferredHeaderValidationMu.Lock()
 	defer ls.deferredHeaderValidationMu.Unlock()
 	if ls.deferredHeaderValidation == nil {
-		ls.deferredHeaderValidation = make(map[string]struct{})
+		ls.deferredHeaderValidation = make(
+			map[string]ouroboros.ConnectionId,
+		)
 	}
-	ls.deferredHeaderValidation[headerValidationPointKey(point)] = struct{}{}
+	ls.deferredHeaderValidation[headerValidationPointKey(point)] = source
+}
+
+// deferredHeaderSource returns the connection that supplied the deferred
+// block at point, or the zero value if it is unknown or not deferred.
+func (ls *LedgerState) deferredHeaderSource(
+	point ocommon.Point,
+) ouroboros.ConnectionId {
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
+	return ls.deferredHeaderValidation[headerValidationPointKey(point)]
 }
 
 func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
@@ -524,17 +680,28 @@ func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) consumeDeferredHeaderValidation(
 	point ocommon.Point,
 ) bool {
+	_, ok := ls.takeDeferredHeaderValidation(point)
+	return ok
+}
+
+// takeDeferredHeaderValidation removes point's deferred marker and returns the
+// connection that supplied its block.
+func (ls *LedgerState) takeDeferredHeaderValidation(
+	point ocommon.Point,
+) (ouroboros.ConnectionId, bool) {
 	ls.deferredHeaderValidationMu.Lock()
 	defer ls.deferredHeaderValidationMu.Unlock()
 	key := headerValidationPointKey(point)
-	if _, ok := ls.deferredHeaderValidation[key]; !ok {
-		return false
+	source, ok := ls.deferredHeaderValidation[key]
+	if !ok {
+		return ouroboros.ConnectionId{}, false
 	}
 	delete(ls.deferredHeaderValidation, key)
-	return true
+	return source, true
 }
 
 // evictStaleDeferredHeadersLocked drops deferred-header entries that are
@@ -779,12 +946,30 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			err,
 		)
 	}
-	if len(keys) == 0 {
-		return nil
+	floorValue, err := ls.db.GetSyncState(
+		deferredHeaderValidationFloorSyncStateKey,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("read deferred header floor: %w", err)
+	}
+	if floorValue != "" {
+		floor, err := strconv.ParseUint(floorValue, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse deferred header floor: %w", err)
+		}
+		ls.deferredHeaderValidationMu.Lock()
+		ls.deferredHeaderValidationFloor = max(
+			ls.deferredHeaderValidationFloor,
+			floor,
+		)
+		ls.deferredHeaderValidationMu.Unlock()
 	}
 	ls.deferredHeaderValidationMu.Lock()
-	if ls.deferredHeaderValidation == nil {
-		ls.deferredHeaderValidation = make(map[string]struct{}, len(keys))
+	if len(keys) > 0 && ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(
+			map[string]ouroboros.ConnectionId, len(keys),
+		)
 	}
 	restored := 0
 	for _, syncKey := range keys {
@@ -795,7 +980,9 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		if mapKey == "" || mapKey == syncKey {
 			continue
 		}
-		ls.deferredHeaderValidation[mapKey] = struct{}{}
+		// A restored marker has no known source: connection identifiers do
+		// not survive a restart.
+		ls.deferredHeaderValidation[mapKey] = ouroboros.ConnectionId{}
 		restored++
 	}
 	ls.deferredHeaderValidationMu.Unlock()
@@ -806,7 +993,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			"component", "ledger",
 		)
 	}
-	return nil
+	return ls.boundDeferredHeaderValidation()
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(
@@ -845,22 +1032,30 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 func (ls *LedgerState) deferredHeaderValidationRequired(
 	point ocommon.Point,
 	txn *database.Txn,
-) (bool, error) {
-	required := ls.consumeDeferredHeaderValidation(point)
+) (bool, ouroboros.ConnectionId, error) {
+	source, required := ls.takeDeferredHeaderValidation(point)
+	ls.deferredHeaderValidationMu.Lock()
+	belowFloor := point.Slot < ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+	// Below the floor the marker may have been evicted. Mithril-covered slots
+	// were never verified at admission and have no nonce to verify against.
+	required = required || (belowFloor && !ls.slotCoveredByMithril(point.Slot))
 	if ls.db == nil || ls.db.Metadata() == nil {
-		return required, nil
+		return required, source, nil
 	}
 	value, err := ls.db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
 		txn,
 	)
 	if err != nil {
-		return false, fmt.Errorf(
+		return false, source, fmt.Errorf(
 			"read deferred header validation marker: %w",
 			err,
 		)
 	}
-	return required || value == deferredHeaderValidationSyncStateValue, nil
+	return required || value == deferredHeaderValidationSyncStateValue,
+		source,
+		nil
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
@@ -868,14 +1063,17 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	point ocommon.Point,
 	block gledger.Block,
 ) error {
-	required, err := ls.deferredHeaderValidationRequired(point, txn)
+	required, source, err := ls.deferredHeaderValidationRequired(point, txn)
 	if err != nil {
 		return err
 	}
 	if !required {
 		return nil
 	}
-	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
+	// Admission deferred this header, so its VRF, KES and operational
+	// certificate signatures were never checked; run the full path before
+	// any block mutation. A nonce that is still unavailable fails closed.
+	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false); err != nil {
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -887,6 +1085,7 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 				point.Slot,
 				err,
 			),
+			Source: source,
 		}
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
@@ -4558,11 +4757,28 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
 		)
+		if verifyErr == nil && ls.config.BlockPipelineValidateEnabled {
+			ls.markAdmissionVerified(e.Point)
+		}
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
-				ls.markDeferredHeaderValidation(e.Point)
+				ls.markDeferredHeaderValidationFrom(e.Point, e.ConnectionId)
 				persist := func() error {
-					return ls.persistDeferredHeaderValidation(e.Point, nil)
+					if err := ls.persistDeferredHeaderValidation(
+						e.Point, nil,
+					); err != nil {
+						return err
+					}
+					// Bounding is housekeeping: a failure leaves the set
+					// larger than the cap, never a block unverified.
+					if err := ls.boundDeferredHeaderValidation(); err != nil {
+						ls.config.Logger.Warn(
+							"failed to bound deferred header markers",
+							"component", "ledger",
+							"error", err,
+						)
+					}
+					return nil
 				}
 				var persistErr error
 				if blockfetchMutexHeld {
