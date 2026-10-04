@@ -245,6 +245,19 @@ func TestValidateTxDijkstraScopesSemanticRulesToDeclaredValidity(t *testing.T) {
 			},
 		},
 		{
+			// The reference checks the declared treasury value inside the
+			// phase-2-valid branch of LEDGER. Upstream lists the rule as
+			// always-run and gates it internally, so only behaviour pins it.
+			name: "current treasury value mismatch",
+			mutate: func(t *testing.T, b *gdijkstra.DijkstraTransactionBody) {
+				b.TxCurrentTreasuryValue = 5
+			},
+			check: func(t *testing.T, err error) {
+				var e lcommon.CurrentTreasuryValueMismatchError
+				require.ErrorAs(t, err, &e)
+			},
+		},
+		{
 			name: "pool registration below the margin floor",
 			mutate: func(t *testing.T, b *gdijkstra.DijkstraTransactionBody) {
 				b.TxCertificates = []lcommon.CertificateWrapper{{
