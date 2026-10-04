@@ -1243,8 +1243,21 @@ func newTestLedgerStateWithChain(
 	blockCount uint64,
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
+	return newTestLedgerStateWithChainAt(t, blockCount, "")
+}
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+// newTestLedgerStateWithChainAt is newTestLedgerStateWithChain over a database
+// in dataDir. An empty dataDir is in-memory SQLite, whose shared cache blocks
+// a writer while any read transaction is open; a test that holds a snapshot
+// across a write needs an on-disk database instead.
+func newTestLedgerStateWithChainAt(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+) (*ledger.LedgerState, *database.Database) {
+	t.Helper()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 

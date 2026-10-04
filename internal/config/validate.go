@@ -700,6 +700,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"shutdownTimeout", c.ShutdownTimeout, true},
 		{"ledgerCatchupTimeout", c.LedgerCatchupTimeout, true},
+		{"localStateQueryViewMaxLifetime", c.LocalStateQueryViewMaxLifetime, true},
 		{"chainsync.stallTimeout", c.Chainsync.StallTimeout, true},
 		// Negative disables Mithril download idle detection
 		{"mithril.downloadIdleTimeout", c.Mithril.DownloadIdleTimeout, false},

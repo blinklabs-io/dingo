@@ -158,12 +158,14 @@ func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
 // schedule, so leaving it unhandled does not merely fail one query: an
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
-func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
+func (ls *LedgerState) queryShelleyDebugChainDepState(
+	txn *database.Txn,
+) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
 	// snapshots.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	txn, release := ls.readTxn(txn)
+	defer release()
 
 	tip, current, err := ls.epochAtTip(txn)
 	if err != nil {

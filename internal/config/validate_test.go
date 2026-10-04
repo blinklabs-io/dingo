@@ -636,6 +636,20 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid ledgerCatchupTimeout",
 		},
 		{
+			name: "unparseable local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "a while"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime",
+		},
+		{
+			name: "non-positive local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "0s"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime \"0s\": must be positive",
+		},
+		{
 			name:    "unparseable chainsync stall timeout",
 			modify:  func(c *Config) { c.Chainsync.StallTimeout = "soon" },
 			wantErr: "invalid chainsync.stallTimeout",

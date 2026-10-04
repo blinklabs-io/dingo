@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -64,6 +65,22 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 ) (any, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	if !at.pinned() {
+		// A QueryView whose epoch ended after it was acquired still has to
+		// answer for the epoch it froze, not the one that replaced it. When
+		// that epoch has no persisted row the live value is the best answer
+		// left, so the historical rejection is not surfaced here.
+		row, err := ls.snapshotEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		if row != nil && row.EpochId != snapshot.currentEpoch.EpochId {
+			result, err := ls.historicalProtocolParameters(
+				snapshot, row.EpochId, at, txn,
+			)
+			if !errors.Is(err, ErrHistoricalStateUnavailable) {
+				return result, err
+			}
+		}
 		return []any{withoutSyntheticV2CostModel(
 			snapshot.currentPParams,
 			snapshot.syntheticV2CostModelInEffect,
@@ -81,14 +98,25 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	if !found {
 		return nil, errEpochNotResolved(at)
 	}
-	liveEpoch := snapshot.currentEpoch.EpochId
-	if targetEpoch == liveEpoch {
+	if targetEpoch == snapshot.currentEpoch.EpochId {
 		return []any{withoutSyntheticV2CostModel(
 			snapshot.currentPParams,
 			snapshot.syntheticV2CostModelInEffect,
 			ls.config.Logger,
 		)}, nil
 	}
+	return ls.historicalProtocolParameters(snapshot, targetEpoch, at, txn)
+}
+
+// historicalProtocolParameters answers from targetEpoch's persisted pparams
+// row, for a targetEpoch other than the live snapshot's epoch.
+func (ls *LedgerState) historicalProtocolParameters(
+	snapshot *consensusSnapshot,
+	targetEpoch uint64,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	liveEpoch := snapshot.currentEpoch.EpochId
 	epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
 	if err != nil {
 		return nil, err
