@@ -1086,7 +1086,11 @@ type LedgerState struct {
 	// with rollback flows that may truncate the primary chain before restoring
 	// ledger metadata. It must never be held while acquiring chainsyncMutex;
 	// ChainSync handlers already hold chainsyncMutex when they enter rollback.
-	consumedUtxoPruneMutex        sync.Mutex
+	consumedUtxoPruneMutex sync.Mutex
+	// acquiredPins tracks LocalStateQuery points currently acquired, so the
+	// consumed-UTxO and pool-snapshot pruning paths retain what they need.
+	// See acquiredPointPins.
+	acquiredPins                  acquiredPointPins
 	chainsyncBlockfetchMutex      sync.Mutex
 	chainsyncBlockfetchReadyMutex sync.Mutex
 	// bufferedHeaderMutex guards bufferedHeaderEvents alone. That map is
@@ -3624,7 +3628,10 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		return
 	}
 	if tipSlot > stabilityWindow {
-		floor := tipSlot - stabilityWindow
+		// Capped at the oldest acquired LocalStateQuery point, and announced,
+		// before anything below is persisted or deleted -- see
+		// acquiredPointPins for why that order matters.
+		floor := ls.capUtxoPruneFloor(tipSlot-stabilityWindow, stabilityWindow)
 		// Persisted before the delete below, and this run must not proceed
 		// to delete anything if the persist itself fails: this durably
 		// records that rows at-or-behind floor are now ELIGIBLE for
@@ -3650,7 +3657,7 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 		// No lock needed here - the database handles its own consistency
 		// and we're not accessing any in-memory LedgerState fields.
 		// The tipSlot was captured above with a read lock.
-		pruneSlot := tipSlot - stabilityWindow
+		pruneSlot := floor
 		pruned, err := ls.db.UtxosDeleteConsumed(
 			pruneSlot,
 			cleanupConsumedUtxoBatchSize,

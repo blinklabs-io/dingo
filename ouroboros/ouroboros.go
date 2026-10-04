@@ -172,8 +172,13 @@ type Ouroboros struct {
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
-	localstatequeryAcquireMutex   sync.Mutex
-	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// localstatequeryPinReleases holds, per connection, the release func for
+	// the ledger pin that keeps pruning off the acquired point's state
+	// (ledger.LedgerState.PinAcquiredPoint). Every path that clears an
+	// acquired point must call it, or the pin outlives the session.
+	localstatequeryPinReleases  map[ouroboros.ConnectionId]func()
+	localstatequeryAcquireMutex sync.Mutex
+	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.

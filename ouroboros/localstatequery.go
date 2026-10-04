@@ -182,7 +182,13 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 		// VerifyPointQueryable's own doc comment covers verifyPointOnChain
 		// too, so this subsumes VerifyPointOnChain rather than needing
 		// both checks run separately.
+		// Pin before verifying, never after: the pin is what stops a
+		// concurrent prune from deleting state between this check approving
+		// the point and the point being recorded below. Released on
+		// rejection, so a refused point holds nothing.
+		release := o.ledgerState.PinAcquiredPoint(point.Slot)
 		if err := o.ledgerState.VerifyPointQueryable(nil, point); err != nil {
+			release()
 			if errors.Is(err, ledger.ErrPointNotOnChain) {
 				return fmt.Errorf(
 					"%w: %w",
@@ -222,6 +228,10 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 			)
 		}
 		o.localstatequeryAcquireMutex.Lock()
+		// A re-Acquire replaces the previous pin only now that the new point
+		// has verified: on a failed re-Acquire the client keeps its previous
+		// point (see above), so that point's pin must survive with it.
+		previous := o.localstatequeryPinReleases[ctx.ConnectionId]
 		o.localstatequeryAcquiredPoints[ctx.ConnectionId] = point
 		if o.localstatequeryOwners == nil {
 			o.localstatequeryOwners = make(
@@ -229,14 +239,35 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 			)
 		}
 		o.localstatequeryOwners[ctx.ConnectionId] = ctx.Server
+		if o.localstatequeryPinReleases == nil {
+			o.localstatequeryPinReleases = make(
+				map[ouroboros.ConnectionId]func(),
+			)
+		}
+		o.localstatequeryPinReleases[ctx.ConnectionId] = release
 		o.localstatequeryAcquireMutex.Unlock()
+		if previous != nil {
+			previous()
+		}
 		return nil
 	}
 	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, ctx.ConnectionId)
-	delete(o.localstatequeryOwners, ctx.ConnectionId)
+	o.clearAcquiredPointLocked(ctx.ConnectionId)
 	o.localstatequeryAcquireMutex.Unlock()
 	return nil
+}
+
+// clearAcquiredPointLocked forgets connId's acquired point and releases the
+// ledger pin holding pruning off it. Every path that clears an acquired point
+// goes through here, so none can leave a pin behind.
+// localstatequeryAcquireMutex must be held.
+func (o *Ouroboros) clearAcquiredPointLocked(connId ouroboros.ConnectionId) {
+	if release := o.localstatequeryPinReleases[connId]; release != nil {
+		release()
+	}
+	delete(o.localstatequeryPinReleases, connId)
+	delete(o.localstatequeryAcquiredPoints, connId)
+	delete(o.localstatequeryOwners, connId)
 }
 
 func (o *Ouroboros) localstatequeryServerQuery(
@@ -277,8 +308,7 @@ func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
 	if !ok || (currentOwner != nil && currentOwner != owner) {
 		return
 	}
-	delete(o.localstatequeryAcquiredPoints, connId)
-	delete(o.localstatequeryOwners, connId)
+	o.clearAcquiredPointLocked(connId)
 }
 
 // ReleaseLocalStateQueryAcquiredPointOwner clears connId's pinned point only
@@ -298,8 +328,7 @@ func (o *Ouroboros) ReleaseLocalStateQueryAcquiredPoint(
 	connId ouroboros.ConnectionId,
 ) {
 	o.localstatequeryAcquireMutex.Lock()
-	delete(o.localstatequeryAcquiredPoints, connId)
-	delete(o.localstatequeryOwners, connId)
+	o.clearAcquiredPointLocked(connId)
 	o.localstatequeryAcquireMutex.Unlock()
 }
 
@@ -312,8 +341,8 @@ func (o *Ouroboros) SetLocalStateQueryAcquiredPointForTesting(
 	point ledger.QueryPoint,
 ) {
 	o.localstatequeryAcquireMutex.Lock()
+	o.clearAcquiredPointLocked(connId)
 	o.localstatequeryAcquiredPoints[connId] = point
-	delete(o.localstatequeryOwners, connId)
 	o.localstatequeryAcquireMutex.Unlock()
 }
 

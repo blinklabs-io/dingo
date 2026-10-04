@@ -442,3 +442,105 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 	)
 	require.NoError(t, client.Release())
 }
+
+// newPinTestOuroboros returns an Ouroboros whose ledger accepts a specific
+// point at slot 2, the same fixture as
+// TestLocalstatequeryServerAcquire_PointOnChain_Succeeds.
+func newPinTestOuroboros(t *testing.T) (*Ouroboros, ocommon.Point) {
+	t.Helper()
+	o := &Ouroboros{
+		localstatequeryAcquiredPoints: make(
+			map[ouroboros.ConnectionId]ledger.QueryPoint,
+		),
+	}
+	ls, db := newTestLedgerStateWithChain(t, 2)
+	o.ledgerState = ls
+	tipHash := bytes.Repeat([]byte{2}, 32)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(2, tipHash),
+	}, nil))
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	return o, ocommon.NewPoint(2, tipHash)
+}
+
+func acquireSpecific(
+	t *testing.T, o *Ouroboros, connID ouroboros.ConnectionId,
+	point ocommon.Point, reAcquire bool,
+) error {
+	t.Helper()
+	return o.localstatequeryServerAcquire(
+		olocalstatequery.CallbackContext{ConnectionId: connID},
+		olocalstatequery.AcquireSpecificPoint{Point: point},
+		reAcquire,
+	)
+}
+
+// TestLocalstatequeryAcquire_PinLifecycle is the pin leak check. Acquire now
+// pins the point in the ledger so pruning keeps its state, and every path
+// that clears the point must release that pin: a leaked one silently holds
+// spent-UTxO and pool-snapshot pruning back until the backstop. Each exit is
+// checked separately, because each is a separate code path.
+func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
+	connID := ouroboros.ConnectionId{}
+
+	t.Run("successful acquire holds exactly one pin", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting())
+	})
+
+	t.Run("Release drops the pin", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		require.NoError(t, o.localstatequeryServerRelease(
+			olocalstatequery.CallbackContext{ConnectionId: connID},
+		))
+		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+	})
+
+	t.Run("connection close drops the pin", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		o.ReleaseLocalStateQueryAcquiredPointOwner(connID, nil)
+		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+	})
+
+	t.Run("acquiring the volatile tip drops the pin", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		require.NoError(t, o.localstatequeryServerAcquire(
+			olocalstatequery.CallbackContext{ConnectionId: connID},
+			olocalstatequery.AcquireVolatileTip{},
+			true,
+		))
+		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting())
+	})
+
+	t.Run("re-acquire replaces rather than accumulates", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		require.NoError(t, acquireSpecific(t, o, connID, point, true))
+		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting(),
+			"a re-acquire must release the previous pin, not stack a second")
+	})
+
+	t.Run("a rejected acquire leaves no pin", func(t *testing.T) {
+		o, _ := newPinTestOuroboros(t)
+		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
+		require.Error(t, acquireSpecific(t, o, connID, ahead, false))
+		require.Equal(t, 0, o.ledgerState.AcquiredPointPinCountForTesting(),
+			"a point that failed verification must hold nothing")
+	})
+
+	t.Run("a rejected re-acquire keeps the previous pin", func(t *testing.T) {
+		o, point := newPinTestOuroboros(t)
+		require.NoError(t, acquireSpecific(t, o, connID, point, false))
+		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
+		require.Error(t, acquireSpecific(t, o, connID, ahead, true))
+		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting(),
+			"the client keeps its previous point, so its pin must survive")
+		require.True(t, o.HasLocalStateQueryAcquiredPointForTesting(connID))
+	})
+}

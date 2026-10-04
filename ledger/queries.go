@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -355,21 +356,16 @@ func (ls *LedgerState) queryShelleyEpochNo(
 // Unpinned (at.pinned() false) always succeeds: the live tip trivially
 // satisfies every retention window.
 //
-// KNOWN GAP: this check runs in its own transaction, which closes before
-// the caller (localstatequeryServerAcquire) records at as this
-// connection's acquired point. cleanupConsumedUtxos runs
-// as an unsynchronized background goroutine (ledger/state.go, `go
-// ls.cleanupConsumedUtxos()`), not serialized against Acquire in any way, so
-// it -- or an equivalent cleanup pass in ledger/snapshot's rotation.go, or
-// pparams retention -- could in principle advance a retention floor past at
-// in the gap between this function returning and the point being recorded,
-// leaving a query against an already-acquired point exposed to the exact
-// mid-query failure this whole mechanism exists to prevent. Acquire-time
-// validation alone cannot close this: doing so needs every relevant pruning
-// path to know about and defer to currently-acquired points until Release,
-// ReAcquire, or disconnect -- a cross-cutting feature spanning three
-// independent pruning subsystems, not a fix scoped to this function.
-// Deferred rather than rushed; tracked as a follow-up issue.
+// Race with background pruning: this check runs in its own transaction, which
+// closes before the caller records at as the connection's acquired point, and
+// the consumed-UTxO and pool-snapshot pruning paths run concurrently. That gap
+// is closed by acquiredPointPins, not by this function alone: the caller must
+// call PinAcquiredPoint BEFORE this, and checkAnnouncedPruneFloors below then
+// refuses any point a concurrent prune has already committed to removing. A
+// prune that announces after the pin lands sees the pin and retains the point.
+// Protocol-parameter rows are not age-pruned at all -- only
+// DeletePParamsAfterSlot removes them, on rollback, which verifyPointOnChain
+// already covers.
 func (ls *LedgerState) VerifyPointQueryable(
 	txn *database.Txn,
 	at QueryPoint,
@@ -404,6 +400,53 @@ func (ls *LedgerState) VerifyPointQueryable(
 		at, txn,
 	); err != nil {
 		return err
+	}
+	return ls.checkAnnouncedPruneFloors(txn, at)
+}
+
+// checkAnnouncedPruneFloors rejects at when a pruning path has already
+// announced a floor above it. The persisted and epoch-relative checks above
+// cover pruning that has finished; this covers a prune that announced its
+// floor but whose delete has not committed, which those checks cannot yet see.
+//
+// It is only race-free when the caller registered its pin (PinAcquiredPoint)
+// before calling VerifyPointQueryable: see acquiredPointPins.
+func (ls *LedgerState) checkAnnouncedPruneFloors(
+	txn *database.Txn,
+	at QueryPoint,
+) error {
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return nil
+	}
+	utxoFloor, poolFloor := ls.announcedPruneFloors()
+	if utxoFloor > 0 && at.Slot < utxoFloor {
+		return fmt.Errorf(
+			"%w: pinned slot %d is below the consumed-UTxO prune floor "+
+				"(slot %d) a concurrent cleanup has already announced",
+			ErrHistoricalStateUnavailable,
+			at.Slot,
+			utxoFloor,
+		)
+	}
+	if poolFloor > 0 {
+		targetEpoch, found, err := ls.resolveAsOfEpoch(txn, at)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errEpochNotResolved(at)
+		}
+		if snap := praos.StakeSnapshotEpoch(targetEpoch); snap < poolFloor {
+			return fmt.Errorf(
+				"%w: pinned slot %d needs the mark snapshot from epoch %d, "+
+					"below the pool-snapshot prune floor (epoch %d) a "+
+					"concurrent cleanup has already announced",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+				snap,
+				poolFloor,
+			)
+		}
 	}
 	return nil
 }

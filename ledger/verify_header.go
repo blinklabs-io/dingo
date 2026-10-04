@@ -2713,6 +2713,25 @@ func (ls *LedgerState) PrunePoolSnapshotsWithRetentionFloor(
 			before = minBefore
 		}
 	}()
+	// Acquired LocalStateQuery points pin snapshots too, and unlike a deferred
+	// header they cannot recover from a lost snapshot on a later pass: a query
+	// against a point whose snapshot is gone simply fails. So their floor is
+	// announced before the prune, under the pin registry's own lock, which is
+	// what lets a concurrent Acquire either be retained or be refused cleanly
+	// (see acquiredPointPins). Taken after deferredHeaderValidationMu is
+	// released; the epoch cache is an atomic snapshot and takes no lock. One
+	// cache generation for every pin keeps the floor coherent, as above.
+	cache := ls.loadConsensusSnapshot().epochCache
+	before = ls.capPoolSnapshotPruneBefore(
+		before, minBefore,
+		func(slot uint64) (uint64, bool) {
+			epoch, err := epochForSlotInCache(cache, slot)
+			if err != nil {
+				return 0, false
+			}
+			return epoch.EpochId, true
+		},
+	)
 	// Prune runs with the mutex RELEASED: it opens the single sqlite write
 	// connection, which block apply holds before taking this mutex, so running
 	// it under the lock deadlocks. See the doc comment.

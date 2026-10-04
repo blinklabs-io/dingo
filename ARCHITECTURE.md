@@ -4379,13 +4379,38 @@ This is why `localstatequeryServerAcquire` validates an `AcquireSpecificPoint`
 target synchronously, at Acquire time, rather than leaving it to the first
 `Query`: an Acquire-time rejection has a graceful wire-level
 `AcquireFailure` reply, so a point ahead of the tip or naming the wrong fork
-is now rejected without this failure mode applying at all. A point that
-passes Acquire (on-chain at that instant) but whose historical data a later
-Query can no longer serve — e.g. a rollback or retention-floor pruning
-between Acquire and Query — still hits this same connection-teardown
-behavior; closing that residual gap needs either a gouroboros protocol
-change or cross-cutting historical-state retention, neither of which exists
-yet.
+is now rejected without this failure mode applying at all.
+
+An acquired point is also pinned against pruning (`ledger/acquired_point_pins.go`).
+Acquire calls `LedgerState.PinAcquiredPoint` *before* `VerifyPointQueryable`,
+and the consumed-UTxO cleanup and the pool-snapshot retention guard each cap
+their prune floor at the oldest pinned slot. Without this, a prune could run in
+the gap between the verify approving a point and the point being recorded, and
+delete state it needed (#4322). Each pruning path reads the pins, caps its
+floor, and announces that floor in memory under the registry's lock, then
+releases the lock and only afterwards deletes; a verify that runs after its own
+pin landed also refuses any point below an announced floor. So either the pin
+lands first and the prune retains the point, or the prune announces first and
+the point is refused at Acquire, where the protocol has a clean reply. No I/O
+runs under that lock: holding a lock across the delete is what deadlocked an
+earlier design of the pool-snapshot guard on SQLite's single write connection.
+
+Every path that clears an acquired point — Release, an Acquire of a tip, a
+re-Acquire, connection close — releases its pin through one helper
+(`clearAcquiredPointLocked`). A re-Acquire releases the previous pin only once
+the new point has verified, since a rejected re-Acquire leaves the client on
+its previous point. A pin cannot hold pruning back without limit: the UTxO
+floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
+windows, and pool snapshots by the existing `poolSnapshotRetentionMaxDepth`,
+so a client that acquires and never releases eventually stops being protected.
+Protocol-parameter rows need no pin; they are only ever deleted on rollback.
+
+Two cases still end in the connection teardown above. A rollback that removes
+the acquired point's block cannot be retained against, so its next Query fails.
+And a Query long after Acquire is still checked against the *live* retention
+window, so a point held past that window is refused even though its pin kept
+the underlying rows: the pin protects the data, but the query-time check does
+not yet consult it. Both are tracked in #4234.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
