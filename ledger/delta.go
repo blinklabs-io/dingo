@@ -164,6 +164,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
+		var proposalsValidated bool
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
 			return fmt.Errorf("transaction index out of range: %d", tr.Index)
 		}
@@ -255,7 +256,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			}
 			if level.IsValid() {
 				if err := d.processGovernance(
-					ls, level, uint32(storageIndex), txn, //nolint:gosec
+					ls, level, uint32(storageIndex), txn, &proposalsValidated, //nolint:gosec
 				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
@@ -438,6 +439,7 @@ func (d *LedgerDelta) processGovernance(
 	tx lcommon.Transaction,
 	txIndex uint32,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	proposals := tx.ProposalProcedures()
 	votes := tx.VotingProcedures()
@@ -475,6 +477,7 @@ func (d *LedgerDelta) processGovernance(
 			pparams,
 			ls.db,
 			txn,
+			validated,
 		); err != nil {
 			return fmt.Errorf("process governance proposals: %w", err)
 		}

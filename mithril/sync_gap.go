@@ -652,6 +652,7 @@ func processGapBlockTransactions(
 	defer txn.Release()
 	var storageIndexOffset uint64
 	for i, tx := range txs {
+		var proposalsValidated bool
 		// Gap blocks are already reflected in the Mithril snapshot's
 		// UTxO set, so input UTxOs are already consumed. Store the TX
 		// record and blob offsets without re-consuming inputs.
@@ -705,6 +706,7 @@ func processGapBlockTransactions(
 					pparams,
 					db,
 					txn,
+					&proposalsValidated,
 				); err != nil {
 					return fmt.Errorf(
 						"processing body %d governance proposals: %w",

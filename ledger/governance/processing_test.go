@@ -132,6 +132,7 @@ func TestProcessProposalsRejectsExpiredCommitteeAdditions(t *testing.T) {
 				testConwayProtocolParameters(),
 				db,
 				nil,
+				nil,
 			)
 			stored, getErr := db.GetGovernanceProposal(txHash, 0, nil)
 			if test.wantError {

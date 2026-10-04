@@ -646,8 +646,9 @@ func (b *Backfill) processBlockGovernanceLevel(
 	point ocommon.Point,
 	txIndex uint32,
 	epochId uint64,
-	conwayPP *conway.ConwayProtocolParameters,
+	pp lcommon.ProtocolParameters,
 	txn *database.Txn,
+	validated *bool,
 ) error {
 	if !tx.IsValid() {
 		return nil
@@ -658,6 +659,7 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if len(proposals) == 0 && len(votes) == 0 && !hasDRepActivityCerts {
 		return nil
 	}
+	conwayPP := backfillConwayProtocolParameters(pp)
 	if conwayPP == nil {
 		return errors.New(
 			"missing Conway protocol parameters for governance backfill",
@@ -667,7 +669,7 @@ func (b *Backfill) processBlockGovernanceLevel(
 		if err := governance.ProcessProposals(
 			tx, point, txIndex, epochId,
 			conwayPP.GovActionValidityPeriod,
-			conwayPP, b.db, txn,
+			pp, b.db, txn, validated,
 		); err != nil {
 			return fmt.Errorf(
 				"governance proposals: %w", err,
@@ -1203,6 +1205,7 @@ func (b *Backfill) processBlockTxsBatched(
 	}
 	var storageIndexOffset uint64
 	for txIndex, tx := range txs {
+		var proposalsValidated bool
 		levels := dledger.TransactionLevelsForApply(tx)
 		childCount := uint64(len(levels)) - 1
 		storageBaseIndex := uint64(txIndex) + storageIndexOffset
@@ -1249,8 +1252,9 @@ func (b *Backfill) processBlockTxsBatched(
 				point,
 				uint32(storageIndex), //nolint:gosec
 				epochId,
-				backfillConwayProtocolParameters(pp),
+				pp,
 				txn,
+				&proposalsValidated,
 			); err != nil {
 				return fmt.Errorf(
 					"governance at slot %d tx %d body %d: %w",

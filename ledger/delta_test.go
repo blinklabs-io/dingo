@@ -361,7 +361,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.processGovernance(ls, tx, 0, txn)
+		return delta.processGovernance(ls, tx, 0, txn, nil)
 	}))
 
 	got, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
@@ -527,7 +527,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return (&LedgerDelta{}).processGovernance(ls, tx, 0, txn)
+		return (&LedgerDelta{}).processGovernance(ls, tx, 0, txn, nil)
 	}))
 
 	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
@@ -598,7 +598,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 
 			var err error
 			require.NotPanics(t, func() {
-				err = (&LedgerDelta{}).processGovernance(ls, tx, 0, nil)
+				err = (&LedgerDelta{}).processGovernance(ls, tx, 0, nil, nil)
 			})
 			require.Error(t, err)
 			require.Contains(

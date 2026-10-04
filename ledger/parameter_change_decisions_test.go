@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
@@ -165,6 +166,8 @@ func newParameterChangeFixture(
 	originHash := bytes.Repeat([]byte{0xf3}, lcommon.Blake2b256Size)
 	originTip := ochainsync.Tip{Point: ocommon.Point{Slot: 1, Hash: originHash}}
 	require.NoError(t, db.SetTip(originTip, nil))
+	chainManager, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
 	config := newTestShelleyGenesisCfg(t)
 	config.ShelleyGenesis().NetworkId = "Testnet"
 	epoch := models.Epoch{
@@ -182,6 +185,7 @@ func newParameterChangeFixture(
 		epochCache:           []models.Epoch{epoch},
 		currentPParams:       pparams,
 		currentTip:           originTip,
+		chain:                chainManager.PrimaryChain(),
 		currentTipBlockNonce: bytes.Repeat([]byte{0xf2}, lcommon.Blake2b256Size),
 		validationEnabled:    true,
 		config: LedgerStateConfig{

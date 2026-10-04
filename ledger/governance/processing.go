@@ -123,6 +123,8 @@ func ProcessDRepActivityCertificates(
 // that the era's proposal rule refuses (zero-valued fields, out-of-domain
 // widths) is rejected here, before anything is stored, so replay and backfill
 // reach the same decision as mempool admission and live block validation.
+// validated is shared only by levels of one enclosing transaction; the era
+// rule checks all its levels in one call.
 func ProcessProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -132,9 +134,16 @@ func ProcessProposals(
 	pp lcommon.ProtocolParameters,
 	db *database.Database,
 	txn *database.Txn,
+	validated *bool,
 ) error {
-	if err := validateParameterChanges(tx, point.Slot, currentEpoch, pp); err != nil {
-		return fmt.Errorf("proposal well-formedness: %w", err)
+	if validated == nil || !*validated {
+		didValidate, err := validateParameterChanges(tx, point.Slot, currentEpoch, pp)
+		if err != nil {
+			return fmt.Errorf("proposal well-formedness: %w", err)
+		}
+		if validated != nil && didValidate {
+			*validated = true
+		}
 	}
 	return persistGovernanceProposals(
 		tx,
@@ -174,7 +183,7 @@ func validateParameterChanges(
 	slot uint64,
 	currentEpoch uint64,
 	pp lcommon.ProtocolParameters,
-) error {
+) (bool, error) {
 	hasParameterChange := false
 	for _, proposal := range tx.ProposalProcedures() {
 		switch proposal.GovAction().(type) {
@@ -184,20 +193,21 @@ func validateParameterChanges(
 		}
 	}
 	if !hasParameterChange || !tx.IsValid() {
-		return nil
+		return false, nil
 	}
 	if pp == nil {
-		return errors.New("protocol parameters unavailable")
+		return false, errors.New("protocol parameters unavailable")
 	}
 	if level, ok := tx.(enclosingTransaction); ok {
 		tx = level.EnclosingTransaction()
 	}
-	return gdijkstra.UtxoValidateProposalProcedures(
+	err := gdijkstra.UtxoValidateProposalProcedures(
 		tx,
 		slot,
 		epochOnlyLedgerState{epoch: currentEpoch},
 		pp,
 	)
+	return err == nil, err
 }
 
 func persistGovernanceProposals(

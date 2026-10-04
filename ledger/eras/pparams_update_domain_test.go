@@ -16,6 +16,7 @@ package eras
 
 import (
 	"math"
+	"strconv"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -44,6 +45,7 @@ func TestPParamsUpdateRejectsOutOfDomainUpdate(t *testing.T) {
 		t.Run("Conway/"+name, func(t *testing.T) {
 			t.Parallel()
 			current := &conway.ConwayProtocolParameters{MaxTxSize: 16384}
+			before := *current
 			var update conway.ConwayProtocolParameterUpdate
 			set(&update)
 			var (
@@ -59,15 +61,17 @@ func TestPParamsUpdateRejectsOutOfDomainUpdate(t *testing.T) {
 				return
 			}
 			require.ErrorContains(t, err, wantErr)
-			require.Equal(t, uint(16384), current.MaxTxSize)
+			require.Equal(t, before, *current)
 		})
 	}
 	conwayCase("Word32 maximum", func(u *conway.ConwayProtocolParameterUpdate) {
 		u.MaxTxSize = &maxWord32
 	}, "")
-	conwayCase("Word32 above maximum", func(u *conway.ConwayProtocolParameterUpdate) {
-		u.MaxTxSize = &overWord32
-	}, "maxTxSize")
+	if strconv.IntSize > 32 {
+		conwayCase("Word32 above maximum", func(u *conway.ConwayProtocolParameterUpdate) {
+			u.MaxTxSize = &overWord32
+		}, "maxTxSize")
+	}
 	conwayCase("Word16 maximum", func(u *conway.ConwayProtocolParameterUpdate) {
 		u.CollateralPercentage = &maxWord16
 	}, "")
@@ -81,17 +85,20 @@ func TestPParamsUpdateRejectsOutOfDomainUpdate(t *testing.T) {
 		u.CostModels = map[uint][]int64{255: {1}}
 	}, "")
 
-	t.Run("Dijkstra/Word32 above maximum", func(t *testing.T) {
-		t.Parallel()
-		current := &gdijkstra.DijkstraProtocolParameters{
-			ConwayProtocolParameters: conway.ConwayProtocolParameters{MaxTxSize: 16384},
-		}
-		update := gdijkstra.DijkstraProtocolParameterUpdate{MaxTxSize: &overWord32}
-		var err error
-		require.NotPanics(t, func() {
-			_, err = PParamsUpdateDijkstra(current, update)
+	if strconv.IntSize > 32 {
+		t.Run("Dijkstra/Word32 above maximum", func(t *testing.T) {
+			t.Parallel()
+			current := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{MaxTxSize: 16384},
+			}
+			before := *current
+			update := gdijkstra.DijkstraProtocolParameterUpdate{MaxTxSize: &overWord32}
+			var err error
+			require.NotPanics(t, func() {
+				_, err = PParamsUpdateDijkstra(current, update)
+			})
+			require.ErrorContains(t, err, "maxTxSize")
+			require.Equal(t, before, *current)
 		})
-		require.ErrorContains(t, err, "maxTxSize")
-		require.Equal(t, uint(16384), current.MaxTxSize)
-	})
+	}
 }

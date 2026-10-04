@@ -115,8 +115,9 @@ func TestBackfillRejectsMalformedParameterChange(t *testing.T) {
 					ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 					0,
 					100,
-					backfillConwayProtocolParameters(pparams),
+					pparams,
 					txn,
+					nil,
 				)
 			})
 			stored, getErr := db.GetGovernanceProposal(tx.Id().Bytes(), 0, nil)

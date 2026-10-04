@@ -167,6 +167,7 @@ func TestProcessProposalsEnforcesParameterChangeWellFormedness(
 				parameterChangeTestPParams(test.dijkstra, test.major),
 				db,
 				nil,
+				nil,
 			)
 			stored, getErr := db.GetGovernanceProposal(
 				tx.Id().Bytes(), 0, nil,
@@ -256,6 +257,7 @@ func TestProcessProposalsRejectsProgrammaticParameterUpdateWidths(
 					20,
 					parameterChangeTestPParams(false, 10),
 					db,
+					nil,
 					nil,
 				)
 				stored, getErr := db.GetGovernanceProposal(

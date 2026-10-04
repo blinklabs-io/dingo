@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lconway "github.com/blinklabs-io/gouroboros/ledger/conway"
+	ldijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -130,4 +131,16 @@ func TestValidatePParamsDataEnforcesCddlDomains(t *testing.T) {
 			require.ErrorContains(t, err, test.wantErr)
 		})
 	}
+}
+
+func TestValidateDijkstraPParamsDataRejectsZeroMultiplier(t *testing.T) {
+	t.Parallel()
+	params := &ldijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: *testConwayPParams(),
+		RefScriptCostStride:      25_600,
+		RefScriptCostMultiplier:  &cbor.Rat{Rat: big.NewRat(0, 1)},
+	}
+	data, err := cbor.Encode(params)
+	require.NoError(t, err)
+	require.ErrorContains(t, validatePParamsData(int(ldijkstra.EraIdDijkstra), data), "refScriptCostMultiplier")
 }

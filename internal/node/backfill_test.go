@@ -135,8 +135,9 @@ func TestBackfillProcessBlockGovernanceRenewsDRepFromCertificateOnly(
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
 			100,
-			backfillConwayProtocolParameters(&pparams),
+			&pparams,
 			txn,
+			nil,
 		)
 	}))
 
@@ -187,8 +188,9 @@ func TestBackfillProcessBlockGovernanceRenewsDRepInDijkstra(t *testing.T) {
 			ocommon.NewPoint(1000, bytes.Repeat([]byte{0xCD}, 32)),
 			0,
 			100,
-			backfillConwayProtocolParameters(pparams),
+			pparams,
 			txn,
+			nil,
 		)
 	}))
 
