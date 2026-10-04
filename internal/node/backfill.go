@@ -644,6 +644,7 @@ func backfillConwayProtocolParameters(
 func (b *Backfill) processBlockGovernanceLevel(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	epochId uint64,
 	conwayPP *conway.ConwayProtocolParameters,
 	txn *database.Txn,
@@ -668,6 +669,7 @@ func (b *Backfill) processBlockGovernanceLevel(
 	if err := governance.ProcessTransactionEffects(
 		tx,
 		point,
+		txIndex,
 		epochId,
 		inactivityPeriod,
 		proposalLifetime,
@@ -1252,6 +1254,7 @@ func (b *Backfill) processBlockTxsBatched(
 			if err := b.processBlockGovernanceLevel(
 				level,
 				point,
+				uint32(storageIndex), //nolint:gosec
 				epochId,
 				conwayPP,
 				txn,

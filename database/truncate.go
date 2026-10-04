@@ -119,6 +119,27 @@ func (d *Database) TruncateAfterSlot(
 	mithrilFloor uint64,
 	txn *Txn,
 ) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
+	return d.rollbackAfterSlot(point, mithrilFloor, txn, true)
+}
+
+// RollbackMetadataAfterSlot reverts slot-scoped metadata after point while
+// leaving the stored blocks and database tip intact. mithrilFloor preserves
+// UTxO and transaction rows needed to replay the gap after a Mithril snapshot.
+func (d *Database) RollbackMetadataAfterSlot(
+	point ocommon.Point,
+	mithrilFloor uint64,
+	txn *Txn,
+) error {
+	_, _, err := d.rollbackAfterSlot(point, mithrilFloor, txn, false)
+	return err
+}
+
+func (d *Database) rollbackAfterSlot(
+	point ocommon.Point,
+	mithrilFloor uint64,
+	txn *Txn,
+	updateTip bool,
+) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
 	started := time.Now()
 	// Set only when this call opened and committed its own transaction.
 	// Distinct from `owned`, which is also false when the caller supplied
@@ -392,6 +413,20 @@ func (d *Database) TruncateAfterSlot(
 			"restore spent UTxOs after rollback: %w",
 			err,
 		)
+	}
+
+	if !updateTip {
+		if owned {
+			if err := txn.Commit(); err != nil {
+				return ochainsync.Tip{}, nil, fmt.Errorf(
+					"commit transaction: %w",
+					err,
+				)
+			}
+			owned = false
+			committedInternally = true
+		}
+		return ochainsync.Tip{}, nil, nil
 	}
 
 	// Build new tip value

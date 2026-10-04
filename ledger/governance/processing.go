@@ -187,10 +187,12 @@ func ProcessDRepActivityCertificates(
 // action type, parent action, anchor, and deposit information.
 //
 // The govActionLifetime parameter determines how many epochs a proposal remains
-// active before expiring.
+// active before expiring. txIndex is the transaction's position in its block;
+// Conway RATIFY orders equal-priority actions by it within a slot.
 func ProcessProposals(
 	tx lcommon.Transaction,
 	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	db *database.Database,
@@ -204,6 +206,7 @@ func ProcessProposals(
 	return persistGovernanceProposals(
 		tx,
 		point,
+		txIndex,
 		currentEpoch,
 		govActionLifetime,
 		db,
@@ -323,6 +326,7 @@ func BumpDormantDRepExpiryAtEpochBoundary(
 func persistGovernanceProposals(
 	tx proposalSource,
 	point ocommon.Point,
+	txIndex uint32,
 	currentEpoch uint64,
 	govActionLifetime uint64,
 	db *database.Database,
@@ -400,6 +404,7 @@ func persistGovernanceProposals(
 			Deposit:       proposal.Deposit(),
 			ReturnAddress: rewardAddrBytes,
 			GovActionCbor: actionCbor,
+			TxIndex:       &txIndex,
 			AddedSlot:     point.Slot,
 		}
 
@@ -812,6 +817,7 @@ func repairMissingGovernanceProposal(
 			Slot: txRecord.Slot,
 			Hash: txRecord.BlockHash,
 		},
+		txRecord.BlockIndex,
 		epoch.EpochId,
 		govActionValidityPeriod,
 		db,

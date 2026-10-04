@@ -71,6 +71,7 @@ const (
 	drepExpiryHistorySchemaRelease                      = "drep-expiry-history"
 	drepDormancyStateSchemaRelease                      = "drep-dormancy-state"
 	drepDelegatorStateSchemaRelease                     = "drep-delegator-state"
+	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -199,9 +200,14 @@ var schemaVersions = []struct {
 		Name:    rewardLeaderDeficitSchemaRelease,
 		Dir:     "v32",
 	},
-	{Version: 33, Name: drepExpiryHistorySchemaRelease, Dir: "v33"},
-	{Version: 34, Name: drepDormancyStateSchemaRelease, Dir: "v34"},
-	{Version: 35, Name: drepDelegatorStateSchemaRelease, Dir: "v35"},
+	{
+		Version: 33,
+		Name:    governanceProposalOrderSchemaRelease,
+		Dir:     "v33",
+	},
+	{Version: 34, Name: drepExpiryHistorySchemaRelease, Dir: "v34"},
+	{Version: 35, Name: drepDormancyStateSchemaRelease, Dir: "v35"},
+	{Version: 36, Name: drepDelegatorStateSchemaRelease, Dir: "v36"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
@@ -354,6 +360,9 @@ func rewardCreditRoundBackfill(
 	var rounds []models.RewardCreditRound
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+	}
+	if rounds == nil {
+		rounds = make([]models.RewardCreditRound, 0)
 	}
 	start := 0
 	if batch.Cursor != "" {
