@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"context"
 	"database/sql"
 	"path/filepath"
 	"testing"
@@ -24,22 +25,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A scheduled VACUUM that has to wait for SQLite's database-wide write lock
-// waits on its own connection. Issued on the single-connection write pool it
-// would hold that pool's only connection for the whole wait, and every ledger
-// write would queue behind it.
-func TestSQLiteVacuumWaitsOutsideWritePool(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
+// newVacuumFixture opens a file-backed store whose database holds free pages
+// left behind by a dropped table, plus a small table for concurrent writes.
+func newVacuumFixture(
+	t *testing.T,
+) (dataDir string, writeDB, readDB *sql.DB) {
+	t.Helper()
+	dataDir = t.TempDir()
 	store, writeDB, readDB, err := openSQLStore(
-		Config{DataDir: dataDir, VacuumIntervalSeconds: 1},
+		Config{DataDir: dataDir},
 		metadata.ProviderDependencies{},
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
-
 	for _, statement := range []string{
 		"CREATE TABLE vacuum_probe (payload BLOB)",
+		"CREATE TABLE vacuum_writes (id INTEGER)",
 		`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200)
 INSERT INTO vacuum_probe SELECT zeroblob(8192) FROM n`,
 		"DROP TABLE vacuum_probe",
@@ -47,50 +48,117 @@ INSERT INTO vacuum_probe SELECT zeroblob(8192) FROM n`,
 		_, err = writeDB.ExecContext(t.Context(), statement)
 		require.NoError(t, err)
 	}
-	freelist := func() int {
-		var pages int
-		if err := readDB.QueryRowContext(
-			t.Context(),
-			"PRAGMA freelist_count",
-		).Scan(&pages); err != nil {
-			return -1
-		}
-		return pages
-	}
-	require.Positive(t, freelist(), "dropping the table must free pages")
+	require.Positive(
+		t,
+		pragmaInt(t, readDB, "freelist_count"),
+		"dropping the table must free pages",
+	)
+	return dataDir, writeDB, readDB
+}
 
-	require.NoError(t, store.Start(t.Context()))
-	// Hold the write lock from outside the pools so VACUUM has to wait.
-	lockDB, err := sql.Open(
+func pragmaInt(t *testing.T, db *sql.DB, pragma string) int {
+	t.Helper()
+	var value int
+	require.NoError(
+		t,
+		db.QueryRowContext(t.Context(), "PRAGMA "+pragma).Scan(&value),
+	)
+	return value
+}
+
+// A ledger write that arrives while VACUUM is due waits for the write pool.
+// A VACUUM on any other connection takes SQLite's database-wide lock while
+// the pool believes it is idle, and a writer then fails with SQLITE_BUSY
+// after its busy_timeout instead of queueing.
+func TestSQLiteVacuumRunsThroughWritePool(t *testing.T) {
+	t.Parallel()
+	dataDir, writeDB, readDB := newVacuumFixture(t)
+	vacuum, _, err := sqliteVacuum(writeDB, 1)
+	require.NoError(t, err)
+
+	// A probe with no busy timeout reports any database-wide write lock
+	// held by someone else the moment it is taken.
+	probeDB, err := sql.Open(
 		"sqlite",
 		sqliteFileURI(filepath.Join(dataDir, "metadata.sqlite"))+
-			"?_pragma=busy_timeout(30000)&_pragma=synchronous(OFF)",
+			"?_pragma=busy_timeout(0)&_pragma=synchronous(OFF)",
 	)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = lockDB.Close() })
-	lock, err := lockDB.Conn(t.Context())
+	t.Cleanup(func() { _ = probeDB.Close() })
+	probe, err := probeDB.Conn(t.Context())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = lock.Close() })
-	_, err = lock.ExecContext(t.Context(), "BEGIN IMMEDIATE")
-	require.NoError(t, err)
+	t.Cleanup(func() { _ = probe.Close() })
+	writeLockHeld := func() bool {
+		if _, err := probe.ExecContext(
+			t.Context(),
+			"BEGIN IMMEDIATE",
+		); err != nil {
+			return true
+		}
+		_, err := probe.ExecContext(t.Context(), "ROLLBACK")
+		require.NoError(t, err)
+		return false
+	}
 
-	// The first VACUUM is due 1 to 1.1 seconds after Start and then blocks on
-	// the lock above; the window outlasts it.
+	held, err := writeDB.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.Close() })
+	done := make(chan error, 1)
+	go func() { done <- vacuum(context.Background()) }()
+
 	require.Never(
 		t,
-		func() bool { return writeDB.Stats().InUse > 0 },
-		3*time.Second,
-		10*time.Millisecond,
-		"VACUUM held a write-pool connection while waiting for the lock",
+		writeLockHeld,
+		time.Second,
+		2*time.Millisecond,
+		"VACUUM took the database write lock while the write pool's only connection was in use",
 	)
+	require.Positive(t, pragmaInt(t, readDB, "freelist_count"))
+	require.NoError(t, held.Close())
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("VACUUM did not finish once the write pool was free")
+	}
+	require.Zero(t, pragmaInt(t, readDB, "freelist_count"))
+	require.Equal(t, 2, pragmaInt(t, readDB, "auto_vacuum"))
+}
 
-	_, err = lock.ExecContext(t.Context(), "ROLLBACK")
-	require.NoError(t, err)
-	require.Eventually(
-		t,
-		func() bool { return freelist() == 0 },
-		30*time.Second,
-		50*time.Millisecond,
-		"VACUUM did not run once the lock was released",
+// Between incremental steps the write connection is back in the pool, so a
+// queued ledger write completes before the reclaim does.
+func TestSQLiteVacuumYieldsWritePoolBetweenChunks(t *testing.T) {
+	t.Parallel()
+	_, writeDB, readDB := newVacuumFixture(t)
+	// Convert first so the loop under test is the incremental one.
+	require.NoError(t, vacuumWith(t.Context(), writeDB, 1<<20, nil))
+	_, err := writeDB.ExecContext(
+		t.Context(),
+		`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+INSERT INTO vacuum_writes SELECT zeroblob(8192) FROM n`,
 	)
+	require.NoError(t, err)
+	_, err = writeDB.ExecContext(t.Context(), "DELETE FROM vacuum_writes")
+	require.NoError(t, err)
+	free := pragmaInt(t, readDB, "freelist_count")
+
+	var chunks int
+	err = vacuumWith(t.Context(), writeDB, 16, func() {
+		chunks++
+		if chunks > 3 {
+			return
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		_, err := writeDB.ExecContext(
+			ctx,
+			"INSERT INTO vacuum_writes VALUES (?)",
+			chunks,
+		)
+		require.NoError(t, err, "write between chunks must not wait")
+	})
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, free, 1)
+	require.Greater(t, chunks, 3, "reclaim must proceed in several steps")
+	require.Zero(t, pragmaInt(t, readDB, "freelist_count"))
 }

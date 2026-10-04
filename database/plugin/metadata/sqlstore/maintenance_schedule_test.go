@@ -18,6 +18,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,6 +66,17 @@ func newScheduledStore(
 	calls *atomic.Uint32,
 ) *Store {
 	t.Helper()
+	return newScheduledStoreWithLogger(t, job, every, calls, nil)
+}
+
+func newScheduledStoreWithLogger(
+	t *testing.T,
+	job scheduledJob,
+	every time.Duration,
+	calls *atomic.Uint32,
+	logger *slog.Logger,
+) *Store {
+	t.Helper()
 	db, err := sql.Open(
 		"sqlite",
 		fmt.Sprintf(
@@ -71,7 +85,7 @@ func newScheduledStore(
 		),
 	)
 	require.NoError(t, err)
-	cfg := Config{WriteDB: db, Dialect: SQLiteDialect()}
+	cfg := Config{WriteDB: db, Dialect: SQLiteDialect(), Logger: logger}
 	job.wire(&cfg, every, calls)
 	store, err := New(cfg)
 	require.NoError(t, err)
@@ -192,4 +206,60 @@ func TestJitteredIntervalStaysWithinBoundsAndVaries(t *testing.T) {
 		seen[delay] = struct{}{}
 	}
 	require.Greater(t, len(seen), 1, "interval must vary between runs")
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A job that keeps coming due while the write pool is busy would otherwise
+// never run and never say so.
+func TestStoreWarnsWhenJobKeepsBeingPostponed(t *testing.T) {
+	t.Parallel()
+	for _, job := range scheduledJobs {
+		t.Run(job.name, func(t *testing.T) {
+			t.Parallel()
+			var out lockedBuffer
+			var calls atomic.Uint32
+			store := newScheduledStoreWithLogger(
+				t, job, 24*time.Hour, &calls,
+				slog.New(slog.NewTextHandler(&out, nil)),
+			)
+			store.tickDelay = func(time.Duration) time.Duration {
+				return time.Millisecond
+			}
+			writer, err := store.writeDB.Conn(t.Context())
+			require.NoError(t, err)
+			defer writer.Close()
+			require.NoError(t, store.Start(t.Context()))
+
+			require.Eventually(
+				t,
+				func() bool {
+					return strings.Contains(
+						out.String(),
+						"postponed while the write pool is busy",
+					)
+				},
+				10*time.Second,
+				10*time.Millisecond,
+				"%s postponement went unreported",
+				job.name,
+			)
+			require.Zero(t, calls.Load())
+		})
+	}
 }

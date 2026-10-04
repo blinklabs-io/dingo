@@ -191,19 +191,26 @@ storage providers. `plugins.storage.blob.config.dataDir` and
 when either is unset, that provider inherits `databasePath`.
 
 File-backed SQLite supports an optional `plugins.storage.metadata.config.vacuumIntervalSeconds`
-setting. It defaults to `0`, which disables full `VACUUM`: SQLite's full
-database rebuild holds a database-wide writer lock and can stop ledger writes
-for the duration. Setting a positive interval explicitly opts into that pause.
-VACUUM runs on its own ticker and does not change the separate daily committee
-authorization cleanup schedule. It runs on a dedicated short-lived connection
-(30 second busy timeout), not on the single-connection write pool, so waiting
-for or running a VACUUM never occupies the pool's only connection; ledger
-writes still wait on SQLite's database-wide lock while the file is rewritten.
+setting. It defaults to `0`, which disables space reclaim. A full `VACUUM`
+rewrites the file under SQLite's database-wide write lock, and no connection
+choice avoids that lock: a writer on any other connection fails with
+`SQLITE_BUSY` once its busy timeout elapses, and ledger code does not retry it.
+The reclaim job therefore runs on the single-connection write pool, where
+ledger writes queue in Go rather than fail, and it keeps each hold short. The
+first run on a database whose `auto_vacuum` mode is not `INCREMENTAL` sets that
+mode and performs one full `VACUUM`, which holds the pool for the whole rewrite
+(minutes on a large database). Every later run releases free pages with
+`PRAGMA incremental_vacuum` in steps of 1000 pages and returns the connection
+to the pool between steps, so queued writes run between steps. Incremental
+vacuum returns free pages to the filesystem; it does not defragment the file.
+The job runs on its own ticker and does not change the separate daily committee
+authorization cleanup schedule.
 
 The maintenance and VACUUM tickers wait their interval plus up to 10% random
 jitter between runs, so they do not recur at the same offset every day. A run
 that comes due while a write-pool connection is in use is postponed and
-rechecked after the shorter of the interval and one minute.
+rechecked after the shorter of the interval and one minute. A job postponed
+ten consecutive times logs a warning naming the job.
 
 Dingo stores chain state in two sibling stores:
 

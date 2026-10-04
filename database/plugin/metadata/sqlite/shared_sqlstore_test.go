@@ -3050,16 +3050,24 @@ func newSharedSQLStore(
 
 func TestSQLiteVacuumMaintenanceIsOptInAndConfigurable(t *testing.T) {
 	t.Parallel()
-	databaseURI := sqliteFileURI(
-		filepath.Join(t.TempDir(), "metadata.sqlite"),
+	db, err := sqlstore.OpenDB(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlite_vacuum_config_%d?mode=memory&cache=shared",
+			sharedMemoryDBSequence.Add(1),
+		),
+		"sqlite",
+		false,
 	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
 
-	maintenance, interval, err := sqliteVacuum(databaseURI, 0)
+	maintenance, interval, err := sqliteVacuum(db, 0)
 	require.NoError(t, err)
 	require.Nil(t, maintenance)
 	require.Zero(t, interval)
 
-	maintenance, interval, err = sqliteVacuum(databaseURI, 30)
+	maintenance, interval, err = sqliteVacuum(db, 30)
 	require.NoError(t, err)
 	require.NotNil(t, maintenance)
 	require.Equal(t, 30*time.Second, interval)

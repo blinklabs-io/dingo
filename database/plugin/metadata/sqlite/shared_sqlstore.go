@@ -41,11 +41,6 @@ const maxVacuumIntervalSeconds uint64 = uint64(
 	(1<<63 - 1) / int64(time.Second),
 )
 
-// vacuumBusyTimeout bounds how long VACUUM waits for the write lock another
-// connection holds, matching the budget the pools' own busy_timeout gives
-// ordinary writers.
-const vacuumBusyTimeout = 30 * time.Second
-
 // openMaintenanceDB opens a single-connection pool that is neither writeDB nor
 // readDB, for work that must not occupy writeDB's sole connection. SQLite
 // tracks locks per database file rather than per database/sql connection, so
@@ -71,12 +66,20 @@ func openMaintenanceDB(
 	return db, nil
 }
 
-// sqliteVacuum returns the optional periodic VACUUM callback. VACUUM rewrites
-// the whole database through the WAL, so it runs on its own short-lived
-// connection: issued on writeDB it would hold that pool's only connection for
-// the whole rewrite and queue every ledger write behind it.
+// vacuumChunkPages bounds how many free pages one incremental vacuum step
+// releases, and therefore how long that step holds SQLite's write lock.
+const vacuumChunkPages = 1000
+
+// sqliteVacuum returns the optional periodic space-reclaim callback.
+//
+// A full VACUUM rewrites the whole file under SQLite's database-wide write
+// lock, and no connection choice avoids that lock. Issued on any connection
+// outside writeDB, a ledger write waits in SQLite's busy handler and fails
+// with SQLITE_BUSY once its busy_timeout elapses, which ledger code does not
+// retry. The callback therefore runs on writeDB, where writers queue in Go
+// until it finishes or yields, and keeps each hold short: see vacuumWith.
 func sqliteVacuum(
-	databaseURI string,
+	writeDB *sql.DB,
 	intervalSeconds uint64,
 ) (func(context.Context) error, time.Duration, error) {
 	if intervalSeconds == 0 {
@@ -89,16 +92,70 @@ func sqliteVacuum(
 		)
 	}
 	return func(ctx context.Context) error {
-		db, err := openMaintenanceDB(databaseURI, vacuumBusyTimeout)
-		if err != nil {
-			return fmt.Errorf("open VACUUM connection: %w", err)
-		}
-		defer func() {
-			_ = db.Close()
-		}()
-		_, err = db.ExecContext(ctx, "VACUUM")
-		return err
+		return vacuumWith(ctx, writeDB, vacuumChunkPages, nil)
 	}, time.Duration(intervalSeconds) * time.Second, nil // #nosec G115 -- bounded above by maxVacuumIntervalSeconds
+}
+
+// vacuumWith reclaims free pages in bounded steps. A database whose
+// auto_vacuum mode is not INCREMENTAL is converted first, which needs one
+// full VACUUM; after that each step releases at most chunkPages pages and
+// returns the write connection to the pool, so queued ledger writes run
+// between steps instead of waiting for the whole file to be rewritten.
+// afterChunk, when set, runs after each step with the connection released.
+func vacuumWith(
+	ctx context.Context,
+	writeDB *sql.DB,
+	chunkPages int,
+	afterChunk func(),
+) error {
+	const autoVacuumIncremental = 2
+	var mode int
+	if err := writeDB.QueryRowContext(
+		ctx,
+		"PRAGMA auto_vacuum",
+	).Scan(&mode); err != nil {
+		return fmt.Errorf("read auto_vacuum mode: %w", err)
+	}
+	if mode != autoVacuumIncremental {
+		conn, err := writeDB.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire write connection: %w", err)
+		}
+		// The new mode only takes effect through the VACUUM that follows
+		// it, on the same connection.
+		_, err = conn.ExecContext(ctx, "PRAGMA auto_vacuum = INCREMENTAL")
+		if err == nil {
+			_, err = conn.ExecContext(ctx, "VACUUM")
+		}
+		closeErr := conn.Close()
+		if err != nil {
+			return fmt.Errorf("convert to incremental auto_vacuum: %w", err)
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	for {
+		var free int
+		if err := writeDB.QueryRowContext(
+			ctx,
+			"PRAGMA freelist_count",
+		).Scan(&free); err != nil {
+			return fmt.Errorf("read freelist_count: %w", err)
+		}
+		if free == 0 {
+			return nil
+		}
+		if _, err := writeDB.ExecContext(
+			ctx,
+			fmt.Sprintf("PRAGMA incremental_vacuum(%d)", chunkPages),
+		); err != nil {
+			return fmt.Errorf("incremental vacuum: %w", err)
+		}
+		if afterChunk != nil {
+			afterChunk()
+		}
+	}
 }
 
 // sqliteCommonPragmas is the DSN fragment applied to both the write and read
@@ -505,7 +562,7 @@ func openSQLStore(
 		locker = migrations.NewFileLocker(databasePath + ".migrate.lock")
 		diskSizeFunc = sqliteDiskSize(databaseURI, databasePath)
 		vacuum, vacuumInterval, err = sqliteVacuum(
-			databaseURI,
+			writeDB,
 			config.VacuumIntervalSeconds,
 		)
 		if err != nil {

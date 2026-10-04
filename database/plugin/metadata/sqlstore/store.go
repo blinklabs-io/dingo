@@ -632,7 +632,7 @@ func (s *Store) startMaintenance() {
 	s.maintenanceDone = make(chan struct{})
 	go func() {
 		defer close(s.maintenanceDone)
-		for s.waitForTick(ctx, s.maintenanceEvery) {
+		for s.waitForTick(ctx, "maintenance", s.maintenanceEvery) {
 			// Admission is an atomic state transition. Close moves the
 			// state to closed before cancelling the callback context, so a
 			// racing tick cannot start maintenance against closing pools.
@@ -674,14 +674,22 @@ func jitteredInterval(every time.Duration) time.Duration {
 	return every + rand.N(every/10+1) //nolint:gosec // schedule jitter, not a secret
 }
 
+// postponeWarnEvery is how many consecutive postponements pass between
+// warnings; at the one-minute retry delay it is one warning per ten minutes.
+const postponeWarnEvery = 10
+
 // waitForTick blocks until a periodic job is due and the write pool is
 // quiet, and returns false once ctx ends. A job that comes due while a
 // ledger write holds a write-pool connection is retried after a short
 // delay instead of running on top of that write path or waiting out a full
 // interval.
-func (s *Store) waitForTick(ctx context.Context, every time.Duration) bool {
+func (s *Store) waitForTick(
+	ctx context.Context,
+	job string,
+	every time.Duration,
+) bool {
 	delay := s.tickDelay(every)
-	for {
+	for postponed := 1; ; postponed++ {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -691,6 +699,13 @@ func (s *Store) waitForTick(ctx context.Context, every time.Duration) bool {
 		}
 		if s.writeDB.Stats().InUse == 0 {
 			return true
+		}
+		if postponed%postponeWarnEvery == 0 {
+			s.logger.Warn(
+				"metadata database job postponed while the write pool is busy",
+				"job", job,
+				"postponements", postponed,
+			)
 		}
 		delay = s.tickDelay(min(every, time.Minute))
 	}
@@ -727,7 +742,7 @@ func (s *Store) startVacuumTicker() {
 	s.vacuumDone = make(chan struct{})
 	go func() {
 		defer close(s.vacuumDone)
-		for s.waitForTick(ctx, s.vacuumEvery) {
+		for s.waitForTick(ctx, "vacuum", s.vacuumEvery) {
 			if !s.vacuumState.CompareAndSwap(0, 1) {
 				return
 			}
