@@ -9,7 +9,17 @@ provider configuration, service, and dependency bundles.
 
 `Node.New` validates plugin selections and node configuration before registering
 metrics or starting EventBus workers. Configuration failure leaves the caller
-metrics registry unchanged, so corrected construction can reuse it.
+metrics registry unchanged, so corrected construction can reuse it. Node-lifetime
+collectors (build info, RTS gauges, chain-selection counters, EventBus) are
+registered through `internal/promutil`: a compatible collector already on the
+registry is reused, and a registration conflict unregisters what that
+construction added and returns an error rather than panicking.
+
+`Host.Stop` waits, bounded by its context, for `StopCapability` teardown
+already in flight. It then calls `Stop` on every remaining provider in reverse
+start order with that same context, even if the capability wait reached its
+deadline, so one timed-out capability does not discard the host's remaining
+provider ownership.
 
 Startup resolves storage, constructs database and ledger, resolves mempool,
 then resolves the enabled API capabilities. Each API provider (Blockfrost,
@@ -1609,6 +1619,15 @@ outgoing instance and silently lost.
 
 ### Shutdown Flow
 
+Bark serializes TLS/listener preflight and server publication with a lifecycle
+lock that shutdown can wait on with its context. A deadline during preflight
+returns without observing a partially published server. Plugin host shutdown
+waits for capability teardown already in flight before closing remaining
+providers, retains capability stop errors, and leaves dependencies open when
+that wait exceeds its deadline. Event buses sharing a metrics registry subtract
+only their own subscriber contributions when stopping.
+
+
 Graceful shutdown proceeds in phases:
 
 ```
@@ -1626,8 +1645,8 @@ Phase 1: Stop accepting new work
   CIP-26 token registry sync
 
 Phase 2: Drain and close connections
-  Mempool, terminal EventBus close (concurrent with ConnectionManager),
-  ConnectionManager
+  Mempool, terminal EventBus close bounded by the shutdown deadline
+  (concurrent with ConnectionManager), ConnectionManager
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -1704,7 +1723,13 @@ releases; starting both operations together breaks that dependency cycle. The
 node context is already cancelled, and later component teardown treats the
 already-closed bus as idempotent. `EventBus.Close` discards queued in-memory
 events after waiting for in-flight handlers; ordinary `Unsubscribe` and
-reusable `EventBus.Stop` preserve queued events.
+reusable `EventBus.Stop` preserve queued events. The wait is bounded by the
+shutdown deadline (`EventBus.CloseContext`), with a short bounded grace for
+close work already in flight when the deadline ends. A handler that remains
+active after that grace is abandoned, its event type is named in the returned
+error, and the unconfirmed drain makes phase 3 skip the `LedgerState.Close`,
+database close, and plugin host shutdown, since that handler may still be using
+them.
 
 If `LedgerState.Close` cannot confirm that its block-processing and database
 workers have drained, normal shutdown does not close the database or storage
@@ -1712,6 +1737,17 @@ providers afterward. The process may terminate with those resources still
 open, but closing them while an unconfirmed ledger worker can still access
 state risks a use-after-close and on-disk corruption. Live Restore/Truncate
 uses the same fail-closed rule and escalates to a supervised restart.
+
+The `ConnectionManager` is the only receiver of each connection's one-shot
+error channel. Its per-connection watcher closes a done channel
+(`GetConnectionWithDone`) once it has consumed the error, and protocol handlers
+(BlockFetch and ChainSync servers, TxSubmission server, mempool admission wait)
+wait on that channel instead of receiving from the error channel themselves, so
+a handler can never take the error that connection cleanup depends on.
+
+Bark `Start` holds its lock through TLS and listen preflight and publishes the
+server only after the listener is bound, so a concurrent `Stop` or `Start`
+observes either no server or a fully started one.
 
 ## Event-Driven Communication
 
@@ -4277,8 +4313,8 @@ multi-index OR optimization, but only once `sqlite_stat1` exists. With the
 `idx_account_active_pool_staking_key (active=?)` and evaluates the whole OR
 chain per row, so each chunk costs `O(active rows × refs)` and the
 "batched" read becomes slower than the per-item loop it replaced as the
-account table grows. `ANALYZE` only runs via `RunPlannerStats` at Mithril
-sync and before backfill, never as the table grows during a genesis sync,
+account table grows. `ANALYZE` runs at Mithril sync and around metadata backfill,
+never as the table grows during a genesis sync,
 so that no-statistics state is what a long-running genesis-synced node is
 actually in — and even with statistics present, the grouped-IN form is
 still measurably cheaper. `GetStakeSnapshots`' pool-side primitive
@@ -8378,7 +8414,8 @@ are not the only writer of that row. `ClearSyncState`
 (`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
 that clear through `updateMithrilReadyState` immediately after the critical
 rebuild. It therefore re-writes every row a completed sync still needs —
-`mithril_ledger_slot`, `mithril_ledger_hash`, and the deferred-index marker —
+`mithril_ledger_slot`, `mithril_ledger_hash`, the post-backfill statistics marker,
+and the deferred-index marker —
 back after the clear; without the last of those, every Mithril-bootstrapped
 database loses the marker moments after `BuildCritical` set it and never builds
 the lazy manifest entries at all. Core-mode startup still
@@ -8392,6 +8429,20 @@ schema migration that created those indexes is recorded complete and never
 re-runs. On MySQL, InnoDB
 requires indexes supporting foreign-key child columns, so the dialect leaves
 those indexes in place while deferring the remaining manifest entries.
+
+After a completed metadata backfill, `internal/node.FinalizeBackfillPlannerStats`
+refreshes planner statistics after critical index repair and before either
+Mithril sync or `serve` clears import readiness state. It records a checkpoint
+identity in `metadata_planner_stats_backfill` only after successful analysis;
+startup repairs older completed imports without that marker, and interruption or
+failure leaves the refresh retryable. Built-in SQL providers accept the startup
+context through `ContextPlannerStatsUpdater`. Subsequent starts skip analysis
+when the checkpoint identity matches. This prevents pre-backfill row-count
+estimates from driving expensive query plans on the completed database.
+
+MCP node status inspects SQLite's index catalog and sync state to distinguish
+critical index readiness from pending background maintenance. Neither a complete
+index catalog nor a recorded statistics refresh establishes ledger readiness.
 
 ## External Interfaces
 
@@ -8469,9 +8520,67 @@ it lands on. The gap is reported as
 its database but has not begun following the chain reports not-ready rather
 than reading as perfectly caught up.
 
+### MCP API (`api/mcp/`)
+
+The instance-owned plugin host registers MCP explicitly from composition.
+`node.go` and live lifecycle reconstruction inject the active database, ledger
+state and mempool. MCP serves Streamable HTTP and legacy SSE through
+`internal/apilistener`. It opens and owns a separate read-only pool at the active
+SQLite metadata provider's resolved location; storage selection is never inferred
+from the global data directory. Exact-address queries delegate to the database's
+context-aware CBOR address page API, including when no SQLite pool exists. Request deadlines reach the coordinated
+read transaction; candidate processing checks cancellation between blob loads
+and decodes. Pages carry a cursor after the last completed candidate, including
+empty pages that have more candidates. Each page reads live state independently.
+The table-catalog resource introspects
+the same read-only SQLite pool at request time; without that pool it reports
+schema unavailability.
+
+MCP is opt-in: `plugins.api.mcp.config.port: 0` prevents node composition
+from constructing or starting the server. It does not request an ephemeral
+port. Set a positive port, such as `8088`, to enable it in either core or API
+storage mode. This keeps the SQL and node-inspection endpoint from starting
+automatically on existing nodes. Authentication is optional and unset by
+default; the listener defaults to `127.0.0.1`. Storage mode and retained
+metadata determine which queries have data available.
+Any non-loopback MCP bind additionally requires both a non-empty auth token and
+server TLS; unprotected network binds fail during provider construction and
+direct server construction, checked against the actual listen address.
+The canonical plugin auth-token environment setting overrides the compatibility
+`DINGO_MCP_AUTH_TOKEN` alias, which overrides YAML. Browser origins must be
+same-origin on loopback or explicitly listed in `corsAllowedOrigins`; the root wildcard
+does not grant access to MCP. Rejected origins receive HTTP 403 before any
+transport or preflight handling. Native clients can omit Origin. Streaming
+responses have no absolute write timeout. The rate limiter reclaims stale entries
+on requests and starts no background worker. It runs before authentication, so
+failed credentials consume capacity; preflight and both health aliases bypass
+it. Negative or non-finite rate limits fail construction. Stopping MCP prevents
+new starts and closes its owned pool after listener shutdown; a timed-out start
+is awaited by deferred cleanup before closing that pool.
+
+SQLite-backed tools and resources enforce the configured query timeout.
+Tip responses report synchronization as unknown without a measured current
+slot, and database lookup failures remain errors rather than missing records.
+
+Transaction evaluation and minimum-UTxO sizing reject trailing bytes after the
+single supplied CBOR value. Credential presence follows address payload types,
+including all-zero hashes; raw Bech32 credentials require the expected prefix
+and an exact 28-byte payload.
+
+`evaluate_tx` admits at most one ledger evaluation per MCP server. Cancellation
+or the configured query timeout releases the request, but the non-interruptible
+ledger call retains that admission slot until it finishes. Further evaluations
+receive a busy error, preventing canceled requests from accumulating workers.
+Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
+SQLite size limits before execution. The original settings are restored before
+the connection returns to an injected pool.
+
+See [MCP architecture](docs/mcp/architecture.md) for tool semantics and upstream
+protocol references.
+
 ### API security (TLS)
 
-Blockfrost, Kupo, Mesh, and UTxO RPC share one optional TLS contract. TLS is
+Blockfrost, Kupo, Mesh, UTxO RPC, and MCP share one optional TLS contract. TLS is
 validated before listeners bind: an invalid mode is rejected at construction,
 and `mode: server` requires both certificate and key paths. TLS may be configured
 through the shared `api.tls` policy or a provider's
@@ -8484,23 +8593,29 @@ provider `mode: disabled` keeps that listener plaintext. Shared TLS values
 follow the normal CLI > environment > YAML > default precedence before this
 scope merge. Certificate files are loaded when the listener starts.
 
-API routes require no credentials, including health and reflection routes.
+Blockfrost, Kupo, Mesh, and UTxO RPC routes require no credentials, including
+health and reflection routes. MCP supports an optional shared token through Bearer
+authentication or `X-API-Key`. Its `/healthz` route bypasses authentication and
+rate limiting; `/health` does not. Origin validation precedes both routes and
+preflight handling.
 
 The legacy root `tlsCertFilePath`/`tlsKeyFilePath` fields remain a UTxO
-RPC-only TLS compatibility input among these three providers; Midnight also
-uses the pair directly. They are not promoted to Blockfrost or Mesh.
-The four API listeners use the root `bindAddr`, whose default is
-`0.0.0.0`. `debugBindAddr` remains the separate pprof
-listener setting. `corsAllowedOrigins` remains a root-level, operator-chosen
-CORS setting shared by the API providers.
+RPC-only TLS compatibility input among these providers; Midnight also
+uses the pair directly. They are not promoted to Blockfrost, Kupo, Mesh, or MCP.
+Blockfrost, Kupo, Mesh, and UTxO RPC use the root `bindAddr`, whose default is
+`0.0.0.0`. MCP overrides it with `plugins.api.mcp.config.host`, defaulting to
+`127.0.0.1`; an explicitly empty MCP host falls back to `bindAddr`.
+`debugBindAddr` remains the separate pprof listener setting.
+`corsAllowedOrigins` is shared configuration, but MCP rejects its wildcard
+and applies the origin checks described above.
 
 ### API listener lifecycle (`internal/apilistener`)
 
-All four API servers (`api/blockfrost`, `api/kupo`, `api/mesh`,
-`api/utxorpc`) share one
+The API servers (`api/blockfrost`, `api/kupo`, `api/mesh`, `api/utxorpc`,
+`api/mcp`) share one
 start/stop protocol rather than each implementing its own, because the way they
 bind makes a correct `Stop` genuinely subtle and the subtlety is identical in
-all three.
+all five.
 
 The problem is that `http.Server.Shutdown` closes only the listeners `Serve`
 has already registered, and each server opens its socket synchronously — so a

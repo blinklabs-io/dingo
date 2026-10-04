@@ -2941,7 +2941,17 @@ type BulkLoadOptimizer interface {
 }
 
 // PlannerStatsUpdater is an optional interface for metadata stores that can
-// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+// collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
+// refreshes statistics through deferred-index maintenance instead.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
 }
+
+// ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
+type ContextPlannerStatsUpdater interface {
+	UpdatePlannerStatsContext(context.Context) error
+}
+
+// PlannerStatsBackfillSyncKey records the completed backfill whose planner
+// statistics were refreshed after rebuilding critical indexes.
+const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

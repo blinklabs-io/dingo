@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -82,7 +83,7 @@ func newTestEquivocationDetector(
 	t.Helper()
 	registry := prometheus.NewRegistry()
 	return newEquivocationDetector(
-		registry,
+		promutil.NewRegistration(registry),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	), registry
 }
@@ -330,8 +331,11 @@ func TestNodeSubscribesEquivocationDetectorToChainUpdates(t *testing.T) {
 	bus := event.NewEventBus(nil, logger)
 	t.Cleanup(bus.Close)
 	n := &Node{
-		eventBus:     bus,
-		equivocation: newEquivocationDetector(registry, logger),
+		eventBus: bus,
+		equivocation: newEquivocationDetector(
+			promutil.NewRegistration(registry),
+			logger,
+		),
 	}
 	n.subscribeEquivocationDetector()
 	pool := newPoolFixture(1)

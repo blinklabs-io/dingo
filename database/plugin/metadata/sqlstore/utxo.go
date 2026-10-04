@@ -1490,7 +1490,10 @@ func (s *Store) utxoRefsByTxID(
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		placeholders := strings.TrimSuffix(
+			strings.Repeat("?,", len(batch)),
+			",",
+		)
 		args := make([]any, len(batch))
 		for i, txID := range batch {
 			args[i] = txID
@@ -1868,8 +1871,12 @@ func (s *Store) GetUtxosByAddress(
 // GetUtxosByAddressWithOrdering applies.
 func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
+	disqualifyLivenessIndex bool,
 ) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
+	if disqualifyLivenessIndex {
+		predicate = "+utxo.deleted_slot = 0"
+	}
 	args := []any{}
 	switch {
 	case query.MatchAllAddresses:
@@ -1943,7 +1950,18 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	// Disqualify the low-selectivity liveness index only for exact payment
+	// lookups, where stale statistics can otherwise cause a full live-row scan.
+	hint := s.dialect.Name() == "sqlite" && len(query.AddressPatterns) == 1 &&
+		len(query.AddressPatterns[0].ExactAddress) > 0
+	if hint {
+		addr, decodeErr := lcommon.NewAddressFromBytes(
+			query.AddressPatterns[0].ExactAddress,
+		)
+		hint = decodeErr == nil &&
+			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+	}
+	predicate, args, err := utxoOrderingPredicate(query, hint)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
@@ -2246,7 +2264,7 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	if err != nil {
 		return 0, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	predicate, args, err := utxoOrderingPredicate(query, false)
 	if err != nil {
 		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
 	}

@@ -24,8 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // maxEquivocationRolledBack bounds the rolled-back blocks retained for
@@ -68,21 +68,21 @@ type equivocationDetector struct {
 }
 
 // newEquivocationDetector creates a detector reporting through a
-// dingo_equivocation_total counter registered on registry (nil disables the
+// dingo_equivocation_total counter registered on registration (nil disables the
 // counter but keeps the warning log).
 func newEquivocationDetector(
-	registry prometheus.Registerer,
+	registration *promutil.Registration,
 	logger *slog.Logger,
 ) *equivocationDetector {
 	d := &equivocationDetector{logger: logger}
-	if registry != nil {
-		d.counter = promauto.With(registry).NewCounterVec(
+	if registration != nil {
+		d.counter = promutil.Register(registration, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_equivocation_total",
 				Help: "pairs of competing blocks from one pool at the same slot or block number, by pool and whether the pool is this node's own",
 			},
 			[]string{"pool_id", "self_key"},
-		)
+		))
 	}
 	return d
 }

@@ -935,6 +935,7 @@ type APIPluginsConfig struct {
 	Kupo       hostplugin.Selection `yaml:"kupo"`
 	Mesh       hostplugin.Selection `yaml:"mesh"`
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
+	Mcp        hostplugin.Selection `yaml:"mcp"`
 }
 
 // APIConfig holds the shared TLS policy defaults
@@ -991,6 +992,10 @@ func defaultPluginsConfig() PluginsConfig {
 			Utxorpc: hostplugin.Selection{
 				Provider: "builtin",
 				Config:   map[string]any{"port": 9090},
+			},
+			Mcp: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 0},
 			},
 		},
 	}
@@ -1440,6 +1445,7 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.API.Kupo = clonePluginSelection(cfg.Plugins.API.Kupo)
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	clone.Plugins.API.Mcp = clonePluginSelection(cfg.Plugins.API.Mcp)
 	if cfg.provenance != nil {
 		clone.provenance = make(Provenance, len(cfg.provenance))
 		maps.Copy(clone.provenance, cfg.provenance)
@@ -1533,6 +1539,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
 	pluginEnviron := os.Environ()
+	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
 	if err := applyAPIPortCompatibilityEnvironment(
 		cfg,
 		pluginEnviron,
@@ -1553,6 +1560,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		{hostplugin.CapabilityAPIKupo, &cfg.Plugins.API.Kupo},
 		{hostplugin.CapabilityAPIMesh, &cfg.Plugins.API.Mesh},
 		{hostplugin.CapabilityAPIUtxorpc, &cfg.Plugins.API.Utxorpc},
+		{hostplugin.CapabilityAPIMcp, &cfg.Plugins.API.Mcp},
 	}
 	for _, item := range pluginSelections {
 		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
@@ -1611,6 +1619,11 @@ func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
 			legacyName:    "DINGO_UTXORPC_PORT",
 			canonicalName: "DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT",
 			selection:     &cfg.Plugins.API.Utxorpc,
+		},
+		{
+			legacyName:    "DINGO_MCP_PORT",
+			canonicalName: "DINGO_PLUGINS_API_MCP_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Mcp,
 		},
 	}
 	values := make(map[string]string, len(environ))
@@ -1898,4 +1911,27 @@ func embeddedTopologyFileMissing(file string) bool {
 
 func GetTopologyConfig() *topology.TopologyConfig {
 	return globalTopologyConfig
+}
+
+func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
+	var token string
+	var found bool
+	for _, entry := range environ {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if name == "DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN" {
+			return
+		}
+		if name == "DINGO_MCP_AUTH_TOKEN" {
+			token, found = value, true
+		}
+	}
+	if found {
+		if cfg.Plugins.API.Mcp.Config == nil {
+			cfg.Plugins.API.Mcp.Config = make(map[string]any)
+		}
+		cfg.Plugins.API.Mcp.Config["authToken"] = token
+	}
 }
