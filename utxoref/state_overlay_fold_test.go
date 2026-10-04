@@ -17,6 +17,7 @@ package utxoref_test
 import (
 	"bytes"
 	"errors"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -99,13 +100,13 @@ func TestStateOverlayViewFoldsEachTransactionOnce(t *testing.T) {
 			foldWithdrawalCbor(t, seed),
 		)
 	}
-	_, err := overlay.View(base, nil)
+	_, err := overlay.View(base, nil, ocommon.Point{})
 	require.NoError(t, err)
 	require.Equal(t, 3, base.balanceReads)
 
 	overlay.ApplyEncoded(uint(conway.EraIdConway), foldWithdrawalCbor(t, 0x04))
 	base.balanceReads = 0
-	_, err = overlay.View(base, nil)
+	_, err = overlay.View(base, nil, ocommon.Point{})
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -115,7 +116,7 @@ func TestStateOverlayViewFoldsEachTransactionOnce(t *testing.T) {
 	)
 
 	base.balanceReads = 0
-	_, err = overlay.View(base, nil)
+	_, err = overlay.View(base, nil, ocommon.Point{})
 	require.NoError(t, err)
 	require.Zero(t, base.balanceReads, "nothing new to apply")
 	require.Equal(t, 4, overlay.Len())
@@ -126,13 +127,13 @@ func TestStateOverlayViewReadsThroughTheLatestBase(t *testing.T) {
 	first := newCountingBase()
 	overlay := utxoref.NewStateOverlay()
 	overlay.ApplyEncoded(uint(conway.EraIdConway), foldWithdrawalCbor(t, 0x01))
-	view, err := overlay.View(first, nil)
+	view, err := overlay.View(first, nil, ocommon.Point{})
 	require.NoError(t, err)
 	require.False(t, view.IsStakeCredentialRegistered(overlayCredential))
 
 	second := newCountingBase()
 	second.registered = true
-	view, err = overlay.View(second, nil)
+	view, err = overlay.View(second, nil, ocommon.Point{})
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -157,7 +158,7 @@ func TestStateOverlayViewLeavesUtxoLookupsToTheBase(t *testing.T) {
 	overlay.Apply(stored)
 	require.Equal(t, 1, overlay.Len())
 
-	view, err := overlay.View(base, nil)
+	view, err := overlay.View(base, nil, ocommon.Point{})
 	require.NoError(t, err)
 	created := stored.Produced()[0]
 	_, err = view.UtxoById(created.Id)
@@ -174,7 +175,7 @@ func TestStateOverlayViewFailsOnUndecodableTransaction(t *testing.T) {
 	overlay := utxoref.NewStateOverlay()
 	overlay.ApplyEncoded(uint(conway.EraIdConway), []byte{0xff})
 	for range 2 {
-		_, err := overlay.View(newCountingBase(), nil)
+		_, err := overlay.View(newCountingBase(), nil, ocommon.Point{})
 		require.ErrorContains(t, err, "decode pending transaction")
 	}
 }
@@ -186,4 +187,56 @@ func mustRewardAddress(t *testing.T) *lcommon.Address {
 	)
 	require.NoError(t, err)
 	return &addr
+}
+
+func TestStateOverlayViewRefoldsWhenTipChanges(t *testing.T) {
+	t.Parallel()
+	var stake lcommon.Blake2b224
+	copy(stake[:], foldStakeKey)
+	cred := lcommon.Credential{CredType: lcommon.CredentialTypeAddrKeyHash}
+	cred.Credential = stake
+	balanceOf := func(t *testing.T, view lcommon.LedgerState) uint64 {
+		t.Helper()
+		balance, err := view.RewardAccountBalance(cred)
+		require.NoError(t, err)
+		require.NotNil(t, balance)
+		return *balance
+	}
+	// A zero withdrawal leaves the balance as the base reports it, so the
+	// folded state caches whatever base it was folded over.
+	overlay := utxoref.NewStateOverlay()
+	overlay.ApplyEncoded(uint(conway.EraIdConway), foldWithdrawalCbor(t, 0x01))
+	tipA := ocommon.Point{Slot: 10, Hash: []byte{0x0a}}
+	tipB := ocommon.Point{Slot: 11, Hash: []byte{0x0b}}
+
+	view, err := overlay.View(newCountingBase(), nil, tipA)
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), balanceOf(t, view))
+
+	drained := &countingBase{
+		LedgerState: mockledger.NewLedgerStateBuilder().
+			WithRewardAccountBalance(stake, 0).
+			Build(),
+	}
+	view, err = overlay.View(drained, nil, tipB)
+	require.NoError(t, err)
+	require.Zero(
+		t,
+		balanceOf(t, view),
+		"a View over a new tip must not return state folded over the old one",
+	)
+
+	drained.balanceReads = 0
+	_, err = overlay.View(drained, nil, tipB)
+	require.NoError(t, err)
+	require.Zero(t, drained.balanceReads, "an unchanged tip keeps the fold")
+
+	view, err = overlay.View(newCountingBase(), nil, tipA)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		uint64(100),
+		balanceOf(t, view),
+		"returning to an earlier tip refolds as well",
+	)
 }

@@ -15,6 +15,7 @@
 package utxoref
 
 import (
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -28,7 +29,7 @@ func TestStateOverlayEncodedEntryKeepsOnlyCallerBytes(t *testing.T) {
 	require.Same(t, &encoded[0], &overlay.entries[0].cbor[0])
 	require.Nil(t, overlay.entries[0].tx)
 
-	_, err := overlay.View(nil, nil)
+	_, err := overlay.View(nil, nil, ocommon.Point{})
 	require.Error(t, err)
 	require.Nil(t, overlay.entries[0].tx, "folding must not cache the decoded form")
 }

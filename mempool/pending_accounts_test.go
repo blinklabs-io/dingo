@@ -17,6 +17,7 @@ package mempool
 import (
 	"bytes"
 	"context"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"sync/atomic"
 	"testing"
 
@@ -70,6 +71,8 @@ type balanceValidator struct {
 	balance atomic.Uint64
 	// reads counts reward balance reads against the stored state.
 	reads atomic.Int64
+	// tip is the slot of the ledger tip the stored balance belongs to.
+	tip atomic.Uint64
 }
 
 type countingLedger struct {
@@ -102,7 +105,7 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 			Build(),
 		reads: &v.reads,
 	}
-	state, err := pending.View(base, nil)
+	state, err := pending.View(base, nil, ocommon.Point{Slot: v.tip.Load()})
 	if err != nil {
 		return err
 	}
@@ -288,4 +291,34 @@ func TestRemovalKeepsStateOverlayUnlessStatefulTxDropped(t *testing.T) {
 	pool.RemoveTransaction(statefulTx.Hash().String())
 	require.NotSame(t, before, pool.overlay.accounts)
 	require.Zero(t, pool.overlay.accounts.Len())
+}
+
+func TestAdmissionFollowsLedgerTipWithoutRebuild(t *testing.T) {
+	t.Parallel()
+	pool, validator := newWithdrawalPool(t, ImplementationFIFO, 0)
+	// Zero withdrawals keep the pool's folded state populated with the balance
+	// the base reported. The fold is lazy, so the second admission is the
+	// validation that folds the first.
+	for _, seed := range []byte{0x01, 0x03} {
+		require.NoError(
+			t,
+			pool.AddTransaction(
+				uint(conway.EraIdConway),
+				withdrawalTxCbor(t, seed, withdrawalStakeKey, 0),
+			),
+		)
+	}
+
+	// A new block funds the account; the pool has not rebuilt yet.
+	validator.balance.Store(100)
+	validator.tip.Store(1)
+
+	require.NoError(
+		t,
+		pool.AddTransaction(
+			uint(conway.EraIdConway),
+			withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
+		),
+		"admission read a balance from before the tip changed",
+	)
 }

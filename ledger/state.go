@@ -13021,7 +13021,7 @@ func (ls *LedgerState) withTxValidationSession(
 				epochStartSlot:  snapshot.currentEpochStartSlot,
 			}).pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			state, err := lv.validationState(pp)
+			state, err := lv.validationState(pp, snapshot.tipPoint)
 			if err == nil {
 				err = validationEra.ValidateTxFunc(
 					tx,
@@ -13239,7 +13239,7 @@ func (ls *LedgerState) validateTxCore(
 			lv.epochStartSlot = snapshot.currentEpochStartSlot
 			lv = lv.pinCommitteeState(snapshot.currentEpoch, pp).
 				pinSyntheticV2CostModel(synthetic)
-			state, err := lv.validationState(pp)
+			state, err := lv.validationState(pp, snapshot.tipPoint)
 			if err != nil {
 				return err
 			}

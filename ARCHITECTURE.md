@@ -1565,8 +1565,10 @@ them over the ledger view with gouroboros `BlockLedgerState`, so a transaction
 is checked against the balances, registrations and deposits those leave rather
 than the stored ones. The overlay folds each recorded transaction once, on the
 next validation, so a pool of k such transactions costs k applications in total
-and a pool rebuild costs k, not k per validation. The folded state tracks no
-UTxOs: spent and created outputs come from the UTxO overlay, which covers every
+and a pool rebuild costs k, not k per validation. The folded state caches
+what it read from the ledger, so it is keyed to the ledger tip it was folded at
+and a validation at another tip folds again from the first transaction. It
+tracks no UTxOs: spent and created outputs come from the UTxO overlay, which covers every
 pending transaction. The pool records a state-changing transaction as its own
 retained CBOR slice, shared with the pool entry and counted once by the pool's
 byte counter; the transaction is decoded only while it is folded. The overlay

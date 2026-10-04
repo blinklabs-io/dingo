@@ -37,6 +37,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // ErrNilDecodedOutput is returned when a decoded UTxO output is nil.
@@ -545,8 +546,9 @@ func (lv *LedgerView) StakeRegistrationByCredential(
 // deposits and proposals applied.
 func (lv *LedgerView) validationState(
 	pp lcommon.ProtocolParameters,
+	tip ocommon.Point,
 ) (lcommon.LedgerState, error) {
-	return lv.pendingState.View(lv, pp)
+	return lv.pendingState.View(lv, pp, tip)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered

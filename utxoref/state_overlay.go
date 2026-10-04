@@ -15,11 +15,13 @@
 package utxoref
 
 import (
+	"bytes"
 	"fmt"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // StateOverlay holds, in order, the transactions that are pending or already
@@ -30,12 +32,12 @@ import (
 //
 // The fold is incremental: View applies only the transactions recorded since
 // the previous View, so a pool of k transactions costs k applications in
-// total rather than k per validation. The folded state reads from whichever
-// base the latest View received, which is sound because a base change (a new
-// block) rebuilds the overlay from scratch. A transaction recorded with
-// ApplyEncoded is held only as the caller's CBOR slice and is decoded when
-// folded, so the overlay retains no decoded transaction and adds no bytes the
-// caller does not already count.
+// total rather than k per validation. The folded state caches what it read
+// from the base, so it is keyed to the ledger tip it was folded at, and a View
+// at a different tip discards it and folds again from the first transaction.
+// A transaction recorded with ApplyEncoded is held only as the caller's CBOR
+// slice and is decoded when folded, so the overlay retains no decoded
+// transaction and adds no bytes the caller does not already count.
 //
 // The folded state does not model UTxOs: the mempool's consumed and created
 // maps already cover every pending transaction, and a second copy that
@@ -55,6 +57,8 @@ type StateOverlay struct {
 	folded int
 	state  *lcommon.BlockLedgerState
 	base   *swappableState
+	// tip is the ledger tip state was folded at.
+	tip ocommon.Point
 }
 
 type stateEntry struct {
@@ -135,13 +139,15 @@ func (o *StateOverlay) Len() int {
 
 // View returns base with the recorded transactions applied. With nothing
 // recorded it returns base unchanged. pp supplies the key deposit that a
-// pre-Conway stake registration certificate records.
+// pre-Conway stake registration certificate records. tip identifies the
+// ledger state base reads, and must change whenever that state does.
 //
 // A failure to decode or apply a recorded transaction fails the View, and
 // the next View refolds from the first transaction.
 func (o *StateOverlay) View(
 	base lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
+	tip ocommon.Point,
 ) (lcommon.LedgerState, error) {
 	if o == nil {
 		return base, nil
@@ -151,7 +157,12 @@ func (o *StateOverlay) View(
 	if len(o.entries) == 0 {
 		return base, nil
 	}
+	if o.state != nil &&
+		(o.tip.Slot != tip.Slot || !bytes.Equal(o.tip.Hash, tip.Hash)) {
+		o.state = nil
+	}
 	if o.state == nil {
+		o.tip = tip
 		o.base = &swappableState{}
 		o.state = lcommon.NewBlockLedgerState(o.base)
 		o.folded = 0
