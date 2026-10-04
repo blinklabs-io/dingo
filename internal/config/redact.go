@@ -85,6 +85,7 @@ var logURIConfigFields = []string{
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
 	"Plugins.API.Kupo.Config",
+	"Plugins.API.Mcp.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -228,6 +229,7 @@ var logPlainConfigFields = []string{
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
 	"Plugins.API.Kupo.Provider",
+	"Plugins.API.Mcp.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",

@@ -43,6 +43,7 @@ const (
 	CapabilityAPIKupo         Capability = "api.kupo"
 	CapabilityAPIMesh         Capability = "api.mesh"
 	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
+	CapabilityAPIMcp          Capability = "api.mcp"
 )
 
 // allCapabilities is the single enumeration of the capabilities this platform
@@ -57,6 +58,7 @@ var allCapabilities = []Capability{
 	CapabilityAPIKupo,
 	CapabilityAPIMesh,
 	CapabilityAPIUtxorpc,
+	CapabilityAPIMcp,
 }
 
 // AllCapabilities returns every capability supported by this platform, in a

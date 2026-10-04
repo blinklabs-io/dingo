@@ -346,8 +346,7 @@ func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	// hold.
 	pinBlobStoreForTxn(t, db)
 	if ms := db.Metadata(); ms != nil {
-		// See NewTxn's matching comment: context.Background() here is the
-		// current propagation boundary, not a metadata-store-internal gap.
+		// Legacy metadata-only callers do not supply a request context.
 		if readWrite {
 			t.metadataTxn = ms.Transaction(context.Background())
 		} else {
