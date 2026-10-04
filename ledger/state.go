@@ -1825,7 +1825,7 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 	// Prevent a later append to the writer-owned slice from reusing storage
 	// visible to an already-published snapshot. Element updates still require
 	// replacing the cache and its slice-backed Epoch fields.
-	ls.epochCache = ls.epochCache[:len(ls.epochCache):len(ls.epochCache)]
+	ls.epochCache = slices.Clip(ls.epochCache)
 	ls.consensus.Store(&consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
@@ -2324,8 +2324,7 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 				"failed to rollback ledger: %w",
 				err,
 			)
-			var committedErr *rollbackCommittedError
-			if !errors.As(err, &committedErr) {
+			if _, ok := errors.AsType[*rollbackCommittedError](err); !ok {
 				return wrappedErr
 			}
 			// The metadata truncate committed even though an in-memory reload
