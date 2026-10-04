@@ -47,6 +47,13 @@ GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' 
 BUILD_TAGS ?= dingo_extra_plugins
 CGO_ENABLED ?= 0
 GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
+# nilaway and modernize accept -tags but ignore it ("no effect"); their package
+# loader reads build tags from GOFLAGS only, so pass them there or every
+# BUILD_TAGS-gated file goes unanalyzed.
+comma := ,
+empty :=
+space := $(empty) $(empty)
+ANALYZER_GOFLAGS=$(strip $(GOFLAGS) $(if $(strip $(BUILD_TAGS)),-tags=$(subst $(space),$(comma),$(strip $(BUILD_TAGS))),))
 # Cover all blinklabs-io modules dingo depends on (gouroboros, plutigo, bursa,
 # bark, ouroboros-mock, ...) without descending into third-party/stdlib deps.
 NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
@@ -99,15 +106,14 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 	done
 	$(MAKE) nilaway modernize
 
-# nilaway and modernize are gates, not advisories. CI runs these same targets
-# in the lint job after installing pinned binaries.
+# CI runs these same targets in the lint job.
 nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
-	nilaway $(GO_TAG_FLAGS) $(NILAWAY_FLAGS) -exclude-test-files ./...
+	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
 
 modernize: ## Fail on modernize findings in hand-written packages
-	modernize $(GO_TAG_FLAGS) $(MODERNIZE_PACKAGES)
+	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture

@@ -91,13 +91,13 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
         with:
           working-directory: internal/test/antithesis
-      # Pinned so a new analyzer release cannot fail an unrelated pull request;
-      # bump the versions deliberately. Both run through the Makefile so this
-      # job and `make lint` use the same tags, flags, and package set.
+      # Unpinned like golangci-lint above, so a new analyzer release's findings
+      # are fixed when it lands. Both run through the Makefile so this job and
+      # `make lint` use the same build tags, flags, and package set.
       - name: install nilaway and modernize
         run: |
-          go install go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260318203545-ad240b12fb4c
-          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@v0.45.0
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest
       - name: nilaway
         run: make nilaway
       - name: modernize

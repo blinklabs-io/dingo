@@ -3678,14 +3678,26 @@ func TestPullRequestPipelineRunsBlockPipelineDevnet(t *testing.T) {
 	}
 }
 
+// analyzerGoflagsRe matches the Makefile variable that carries BUILD_TAGS to
+// nilaway and modernize. Both accept -tags but document it as "no effect";
+// the package loader reads build tags only from GOFLAGS.
+var analyzerGoflagsRe = regexp.MustCompile(
+	`(?m)^ANALYZER_GOFLAGS\s*=.*-tags=.*\$\(BUILD_TAGS\)`,
+)
+
 // TestLintGatesNilawayAndModernize checks that nilaway and modernize fail
-// `make lint` on any finding, and that the lint job of both pipelines runs
-// them from pinned installs. A findings exit tolerated in the Makefile, or a
-// pipeline that never runs the tools, lets the baseline grow again.
+// `make lint` on any finding, analyze the BUILD_TAGS-gated files, and that the
+// lint job of both pipelines runs them from floating installs. A findings exit
+// tolerated in the Makefile, tags passed where the tools ignore them, or a
+// pipeline that never runs the tools lets the baseline grow again.
 func TestLintGatesNilawayAndModernize(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
 	makefile := readRepoFile(t, root, "Makefile")
+	if !analyzerGoflagsRe.MatchString(makefile) {
+		t.Error("Makefile does not set ANALYZER_GOFLAGS to -tags=$(BUILD_TAGS)")
+	}
+	const analyzerEnv = `GOFLAGS="$(ANALYZER_GOFLAGS)" `
 
 	recipes := map[string][]string{}
 	current := ""
@@ -3707,10 +3719,19 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 	for _, tool := range []string{"nilaway", "modernize"} {
 		found := false
 		for _, line := range recipes[tool] {
-			if !strings.HasPrefix(line, tool+" ") {
+			cmd, hasEnv := strings.CutPrefix(line, analyzerEnv)
+			if !strings.HasPrefix(cmd, tool+" ") {
 				continue
 			}
 			found = true
+			if !hasEnv {
+				t.Errorf(
+					"make %s does not set GOFLAGS; %s ignores -tags and skips tag-gated files: %q",
+					tool,
+					tool,
+					line,
+				)
+			}
 			if strings.Contains(line, "||") || strings.Contains(line, "-eq") {
 				t.Errorf("make %s tolerates a failing exit: %q", tool, line)
 			}
@@ -3756,8 +3777,15 @@ func TestLintGatesNilawayAndModernize(t *testing.T) {
 				continue
 			}
 			version, _, _ = strings.Cut(version, "\n")
-			if version == "" || version == "latest" {
-				t.Errorf("%s installs %s at %q; pin a version", workflow, tool, version)
+			// Scanners float like golangci-lint, so a new release's findings
+			// are fixed when it lands rather than parked behind a stale pin.
+			if version != "latest" {
+				t.Errorf(
+					"%s installs %s at %q, want latest",
+					workflow,
+					tool,
+					version,
+				)
 			}
 		}
 	}
