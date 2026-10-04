@@ -91,8 +91,9 @@ type blockfetchCandidate struct {
 // so near-equal peers neither flap nor attract every node alike. A peer with
 // no latency sample is tried for one range in blockfetchExploreEvery, chosen
 // by the salted range hash, so asking about the same range again gives the
-// same answer while the measurements stand. When nothing has been measured,
-// or no other peer holds point, origin is used.
+// same answer while the measurements stand. When every candidate is unsampled,
+// origin is used outside those exploration ranges. With no other holder, origin
+// is always used.
 func (s *State) SelectBlockfetchPeer(
 	origin ouroboros.ConnectionId,
 	point ocommon.Point,
