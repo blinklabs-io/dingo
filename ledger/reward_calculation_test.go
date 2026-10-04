@@ -9014,7 +9014,7 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 // TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
 // The round into epoch 1 reads genesis pots and empty previous block counts;
 // the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
-// empty Go distributions. Byron-prefix networks are suppressed by
+// genesis Go distributions. Byron-prefix networks are suppressed by
 // applyStakeRewards' Byron performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	t.Parallel()
@@ -9047,46 +9047,6 @@ func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 		performance: 1,
 		pots:        2,
 	}, epochs)
-}
-
-func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	result := &rewards.Result{
-		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
-		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
-		TotalRewardPot:   1_000,
-		AvailableRewards: 800,
-		EffectiveRewards: 600,
-		Unspendable:      50,
-		Undistributed:    150,
-	}
-	suppressBootstrapStakeRewards(result)
-
-	require.Empty(t, result.PoolRewards)
-	require.Empty(t, result.AccountRewards)
-	require.Zero(t, result.EffectiveRewards)
-	require.Zero(t, result.Unspendable)
-	require.Equal(t, uint64(800), result.Undistributed)
-
-	app := &stakeRewardApplication{
-		params: rewards.Parameters{
-			TreasuryExpansion: big.NewRat(1, 5),
-		},
-		pots: &models.RewardAdaPots{
-			Reserves: types.Uint64(10_000),
-			Treasury: types.Uint64(10),
-		},
-		totalRewardPot:   result.TotalRewardPot,
-		availableRewards: result.AvailableRewards,
-		undistributed:    result.Undistributed,
-	}
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
-	require.NoError(t, err)
-	require.Equal(t, uint64(9_800), reserves)
-	require.Equal(t, uint64(210), treasury)
 }
 
 func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
@@ -9194,8 +9154,27 @@ INSERT INTO "transaction" (
 		fraction *big.Rat
 	}{
 		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
-		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+		{2, 1_080_080_000, 1_998_876_009_026, big.NewRat(1_000_022_155_487, 4_001_123_990_974)},
 	} {
+		if tc.epoch == 2 {
+			readTxn := db.Transaction(false)
+			app, ok, err := ls.calculateStakeRewardApplication(
+				readTxn,
+				2,
+				1000,
+				1000,
+				true,
+			)
+			require.NoError(t, readTxn.Rollback())
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.NotEmpty(
+				t,
+				app.accountOutputs,
+				"genesis staking must receive rewards from epoch 0's blocks",
+			)
+		}
+
 		boundary := tc.epoch * 500
 		ended, err := meta.GetEpoch(tc.epoch-1, nil)
 		require.NoError(t, err)

@@ -1542,21 +1542,12 @@ startup if any are found, naming the affected epochs: such a snapshot cannot be
 safely reconstructed from a pruned database, since recomputing it correctly
 would require replaying that epoch's historical stake distribution.
 
-A version bump does not necessarily mean every existing database is affected,
-though. Migration `v15` (`reward-stake-calculation-version-restamp`,
-`database/plugin/metadata/sqlstore/migrations/registry.go`) runs a two-phase
-backfill on upgrade: every stale `pool_stake_snapshot` row is re-stamped to the
-current version unconditionally, because its stored totals have never depended
-on calculation version (see `TotalActiveStake`'s comment in
-`ledger/snapshot/rotation.go`). A stale Mark `reward_snapshot` row is re-stamped
-only when its `total_active_stake` already agrees with the same epoch's
-`epoch_summary.total_active_stake` -- a value that also never depended on
-calculation version -- which is exactly the condition identifying an epoch the
-version bump did not actually change. A row that disagrees names an epoch the
-bump did change and is deliberately left at its old version for the startup
-gate above to keep failing closed on; only that database, and only from that
-epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
-snapshot.
+Migration `v15` (`reward-stake-calculation-version-restamp`) only upgrades
+version-1 snapshots to version 2 when their sigma-denominator inputs can be
+verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+governance enactment, and nonempty genesis staking changes the initial reward
+inputs. Older persisted snapshots require replay or a trusted ledger-state
+import rather than a version stamp.
 
 #### Incremental live-UTxO stake maintenance
 
@@ -3489,6 +3480,13 @@ only later local witnesses exist, `account.created_slot` supplies the historical
 floor instead, so a later renewal cannot revive stake in an older snapshot.
 Credentials without an account row remain active. The final predicate keeps
 only `expiration_epoch = 0 OR expiration_epoch >= expiryEpoch`.
+
+Dijkstra evaluates SNAP after POOLREAP, enacted treasury withdrawals, proposal
+refunds and HARDFORK. Boundary reward reconstruction therefore includes credits
+marked `post_snapshot` by those shared writers, and resolves pool retirements at
+the incoming epoch. Transaction, delegation-certificate and UTxO cutoffs still
+exclude the incoming ranking block. Conway and earlier boundaries retain their
+pre-enactment snapshot rules.
 
 `GetLiveStakeInputsForPools` reads every registered credential for the requested
 pools from `reward_live_stake`, retaining zero-stake rows so an exact delegator

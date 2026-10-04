@@ -422,8 +422,8 @@ RETURNING id`,
 				decimalUint64(registration.DepositAmount),
 				// An import's recorded deposit is the amount the source says
 				// the pool is holding: `ledgerstate` reads it out of the
-				// snapshot's PState deposit map, and the genesis and
-				// reconcile-tombstone paths record none. Charged and held are
+				// snapshot's PState deposit map, genesis uses poolDeposit,
+				// and reconcile tombstones record none. Charged and held are
 				// therefore the same figure here -- there is no earlier
 				// registration in this database to carry a held amount forward
 				// from, because an import writes no certificate history.
@@ -1718,6 +1718,32 @@ func (s *Store) GetActivePoolKeyHashesAtSlot(
 	slot uint64,
 	txn types.Txn,
 ) ([][]byte, error) {
+	return s.getActivePoolKeyHashesAtSlots(slot, slot, txn)
+}
+
+func (s *Store) GetEpochBoundaryActivePoolKeyHashes(
+	slot, boundarySlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	afterEnactment, err := boundarySnapshotAfterEnactment(ctx, db, boundarySlot)
+	if err != nil {
+		return nil, err
+	}
+	epochSlot := slot
+	if afterEnactment {
+		epochSlot = boundarySlot
+	}
+	return s.getActivePoolKeyHashesAtSlots(slot, epochSlot, txn)
+}
+
+func (s *Store) getActivePoolKeyHashesAtSlots(
+	slot, epochSlot uint64,
+	txn types.Txn,
+) ([][]byte, error) {
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1734,7 +1760,7 @@ FROM epoch
 WHERE start_slot <= ?
 ORDER BY start_slot DESC
 LIMIT 1`,
-		slot,
+		epochSlot,
 	).Scan(&epochID, &startSlot, &length)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf(
@@ -1745,8 +1771,12 @@ LIMIT 1`,
 	if err != nil {
 		return nil, err
 	}
-	if !epochID.Valid || !startSlot.Valid || !length.Valid ||
-		slot >= uint64(startSlot.Int64+length.Int64) {
+	if epochID.Valid && startSlot.Valid && length.Valid && epochSlot != slot &&
+		epochSlot == uint64(startSlot.Int64+length.Int64) {
+		// The new epoch row is written after EPOCH's SNAP read.
+		epochID.Int64++
+	} else if !epochID.Valid || !startSlot.Valid || !length.Valid ||
+		epochSlot >= uint64(startSlot.Int64+length.Int64) {
 		return nil, fmt.Errorf(
 			"GetActivePoolKeyHashesAtSlot: %w",
 			types.ErrNoEpochData,

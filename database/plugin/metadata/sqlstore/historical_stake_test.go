@@ -15,6 +15,7 @@
 package sqlstore
 
 import (
+	"fmt"
 	"testing"
 
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -122,4 +123,32 @@ func TestGetStakeByPoolsAtSlotCountsDelegationAfterExplicitRedelegation(
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), delegators[string(pool.Bytes())])
 	_ = stakes
+}
+
+func TestEpochBoundaryActivePoolsUseEraSpecificReap(t *testing.T) {
+	t.Parallel()
+	for _, era := range []uint{6, 7} {
+		t.Run(fmt.Sprintf("era_%d", era), func(t *testing.T) {
+			store := newDepositHeldStore(t)
+			depositHeldEpochs(t, store, 2)
+			require.NoError(t, store.SetEpoch(1_000, 1, nil, nil, nil, nil,
+				era, 1, depositHeldEpochLength, nil))
+			pool := depositHeldPoolKey(0xd1)
+			writeDepositHeldCert(t, store, 100, 0,
+				depositHeldRegistration(pool), 0)
+			writeDepositHeldCert(t, store, 200, 0,
+				depositHeldRetirement(pool, 1), 0)
+			ordinary, err := store.GetActivePoolKeyHashesAtSlot(999, nil)
+			require.NoError(t, err)
+			require.Equal(t, [][]byte{pool.Bytes()}, ordinary)
+			boundary, err := store.GetEpochBoundaryActivePoolKeyHashes(
+				999, 1_000, nil)
+			require.NoError(t, err)
+			if era == 7 {
+				require.Empty(t, boundary)
+			} else {
+				require.Equal(t, ordinary, boundary)
+			}
+		})
+	}
 }

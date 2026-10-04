@@ -283,25 +283,6 @@ func TestPrecomputeStakeRewardsSkipsNegativeLeaderReward(t *testing.T) {
 	require.Empty(t, outputs)
 }
 
-// A bootstrap round pays nothing, so a negative leader reward computed for it
-// must not stop the boundary or reach the treasury.
-func TestSuppressBootstrapStakeRewardsClearsNegativeLeaderRewards(t *testing.T) {
-	t.Parallel()
-
-	result := &rewards.Result{
-		AvailableRewards: 1_000,
-		NegativeLeaderRewards: []rewards.NegativeLeaderReward{
-			{Amount: 10, Spendable: true},
-			{Amount: 20},
-		},
-		UnspendableDeficit: 20,
-	}
-	suppressBootstrapStakeRewards(result)
-	require.NoError(t, result.NegativeLeaderRewardError())
-	require.Zero(t, result.UnspendableDeficit)
-	require.Equal(t, uint64(1_000), result.Undistributed)
-}
-
 // The per-pool precompute has no row that can carry a negative leader reward,
 // so it declines the round and leaves it to the single-pass calculation.
 func TestChunkedRewardPrecomputeDeclinesNegativeLeaderReward(t *testing.T) {

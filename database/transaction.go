@@ -1256,11 +1256,32 @@ func (d *Database) SetGenesisStaking(
 	blockHash []byte,
 	txn *Txn,
 ) error {
+	return d.SetGenesisStakingWithDeposits(
+		pools,
+		stakeDelegations,
+		keyDeposit,
+		0,
+		blockHash,
+		txn,
+	)
+}
+
+// SetGenesisStakingWithDeposits stores genesis staking with the key and pool
+// deposits that the reference ledger retains for later refunds.
+func (d *Database) SetGenesisStakingWithDeposits(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	keyDeposit uint64,
+	poolDeposit uint64,
+	blockHash []byte,
+	txn *Txn,
+) error {
 	if txn == nil {
-		if err := d.metadata.SetGenesisStaking(
+		if err := d.metadata.SetGenesisStakingWithDeposits(
 			pools,
 			stakeDelegations,
 			keyDeposit,
+			poolDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1268,10 +1289,11 @@ func (d *Database) SetGenesisStaking(
 		}
 		return nil
 	}
-	if err := d.metadata.SetGenesisStaking(
+	if err := d.metadata.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
 		keyDeposit,
+		poolDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {

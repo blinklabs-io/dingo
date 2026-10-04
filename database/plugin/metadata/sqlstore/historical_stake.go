@@ -28,7 +28,30 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
+
+// boundarySnapshotAfterEnactment follows Dijkstra EPOCH, whose SNAP runs after
+// POOLREAP, governance credits and HARDFORK. Earlier eras run SNAP first.
+func boundarySnapshotAfterEnactment(
+	ctx context.Context,
+	db queryer,
+	boundarySlot uint64,
+) (bool, error) {
+	if boundarySlot == 0 {
+		return false, nil
+	}
+	var eraID uint
+	err := db.QueryRowContext(ctx, `SELECT era_id FROM epoch WHERE start_slot <= ? ORDER BY start_slot DESC LIMIT 1`, boundarySlot).
+		Scan(&eraID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("resolve snapshot boundary era: %w", err)
+	}
+	return eraID >= gdijkstra.EraIdDijkstra, nil
+}
 
 type historicalStakeSource struct {
 	table      string
@@ -245,7 +268,20 @@ WHERE withdrawal = TRUE AND COALESCE((SELECT lc.slot FROM leios_transaction_cont
 			return nil, boundaryErr
 		}
 		futureRewardPredicate = `(COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) > ? OR (COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) = ? AND post_snapshot = TRUE))`
-		creditArgs = []any{boundaryValue, boundaryValue}
+		afterEnactment, err := boundarySnapshotAfterEnactment(
+			ctx,
+			db,
+			boundarySlot,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if afterEnactment {
+			futureRewardPredicate = `COALESCE((SELECT lc.slot FROM leios_transaction_context lc JOIN "transaction" tx ON tx.id = lc.transaction_id WHERE tx.hash = account_reward_delta.tx_hash), added_slot) > ?`
+			creditArgs = []any{boundaryValue}
+		} else {
+			creditArgs = []any{boundaryValue, boundaryValue}
+		}
 	}
 	creditArgs = append(creditArgs, predicateArgs...)
 	rows, err = db.QueryContext(ctx, `
@@ -808,7 +844,15 @@ func (s *Store) historicalStakeCTE(
 	predicate string,
 	predicateArgs []any,
 ) (string, []any, error) {
-	query, args := activeDelegationSQL(slot)
+	reapSlot := slot
+	afterEnactment, err := boundarySnapshotAfterEnactment(ctx, db, boundarySlot)
+	if err != nil {
+		return "", nil, err
+	}
+	if afterEnactment {
+		reapSlot = boundarySlot
+	}
+	query, args := activeDelegationSQL(slot, reapSlot)
 	// Stake held at a pointer address reaches its credential only in the eras
 	// that count it, and only through the position recorded in utxo_pointer.
 	// When it is not counted the query is exactly what it was before pointer
@@ -933,7 +977,7 @@ func byteSliceArgs(values [][]byte) []any {
 // re-delegated had their stake wrongly resurrected onto the pool by this
 // query, producing a stake-distribution mismatch against Koios of exactly
 // the reaped credentials' stake (dingo node-parity issue, epoch 647).
-func activeDelegationSQL(slot uint64) (string, []any) {
+func activeDelegationSQL(slot uint64, reapSlot uint64) (string, []any) {
 	args := make(
 		[]any,
 		0,
@@ -1095,7 +1139,7 @@ WITH delegation_events AS (` + strings.Join(delegationParts, " UNION ALL ") + `
                )
          )
    )
-)`, append(args, slot, slot)
+)`, append(args, slot, reapSlot)
 }
 
 // historicalExpirationSQL reconstructs each active-delegation credential's
