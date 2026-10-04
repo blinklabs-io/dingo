@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"sort"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -412,11 +413,10 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 }
 
 // confirmsRecentChain reports whether witness confirms this peer's (candidate's)
-// chain across the window range they overlap. It is true when, for every block
-// the witness observed within the candidate's frontier slot range, the candidate
-// observed the identical (slot, hash) block, AND they share at least one such
-// block. In other words the witness's chain, as far as it reaches into the
-// candidate's window, is a prefix/subset of the candidate's chain.
+// recent chain. It considers the candidate tip and the up to k preceding blocks
+// retained in its delivered-tip history. Within that range, every
+// witness-observed point must match the candidate, and the witness must share
+// at least one such point.
 //
 // This is deliberately stronger than "share any common point": a fast source
 // that shares only an old ancestor and then diverges for every later block is
@@ -424,7 +424,8 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // not (or a conflicting hash at the same slot). A witness whose frontier does
 // not overlap the candidate's window at all cannot confirm it (returns false),
 // so corroboration fails closed — the candidate then stalls rather than being
-// followed uncorroborated.
+// followed uncorroborated. A match only in older candidate history does not
+// confirm the current suffix.
 //
 // Both frontiers are kept in strictly-ascending slot order; this is a
 // two-pointer scan. It relies on the observed frontier being populated per
@@ -432,10 +433,19 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // block in their overlap.
 func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 	if p == nil || witness == nil ||
-		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
+		len(p.observedPoints) == 0 || len(p.observedTipHistory) == 0 ||
+		len(witness.observedPoints) == 0 {
 		return false
 	}
 	candidate := p.observedPoints
+	recentStartSlot := p.observedTipHistory[0].Point.Slot
+	recentStart := sort.Search(len(candidate), func(i int) bool {
+		return candidate[i].Slot >= recentStartSlot
+	})
+	candidate = candidate[recentStart:]
+	if len(candidate) == 0 {
+		return false
+	}
 	lo := candidate[0].Slot
 	hi := candidate[len(candidate)-1].Slot
 	i := 0

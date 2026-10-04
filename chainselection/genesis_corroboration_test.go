@@ -78,6 +78,22 @@ func feedPoints(pt *PeerChainTip, window uint64, points ...ocommon.Point) {
 	}
 }
 
+// feedPointsWithTipHistory also seeds the delivered-tip window used for recent checks.
+func feedPointsWithTipHistory(
+	pt *PeerChainTip,
+	window uint64,
+	historyLimit uint64,
+	points ...ocommon.Point,
+) {
+	feedPoints(pt, window, points...)
+	for i, point := range points {
+		pt.recordObservedTipHistory(ochainsync.Tip{
+			Point:       point,
+			BlockNumber: uint64(i + 1),
+		}, historyLimit)
+	}
+}
+
 // recordObservedPoint keeps the slot frontier and the point (slot+hash)
 // frontier in lockstep, storing the current hash at each slot.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
@@ -240,7 +256,7 @@ func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 	honestA := &PeerChainTip{}
 	honestB := &PeerChainTip{}
 	divergent := &PeerChainTip{}
-	feedPoints(honestA, window,
+	feedPointsWithTipHistory(honestA, window, 3,
 		ocommon.Point{Slot: 10, Hash: []byte("h10")},
 		ocommon.Point{Slot: 20, Hash: []byte("h20")},
 	)
@@ -268,7 +284,7 @@ func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
 	honest := &PeerChainTip{}
 	// Both agree on slot 100, then the fast source forks (x...) while the
 	// honest witness continues on the real chain (h...).
-	feedPoints(fast, window,
+	feedPointsWithTipHistory(fast, window, 4,
 		ocommon.Point{Slot: 100, Hash: []byte("shared-100")},
 		ocommon.Point{Slot: 105, Hash: []byte("x105")},
 		ocommon.Point{Slot: 110, Hash: []byte("x110")},
@@ -289,7 +305,7 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 	window := uint64(20)
 	ahead := &PeerChainTip{}
 	behind := &PeerChainTip{}
-	feedPoints(ahead, window,
+	feedPointsWithTipHistory(ahead, window, 3,
 		ocommon.Point{Slot: 200, Hash: []byte("h200")},
 		ocommon.Point{Slot: 210, Hash: []byte("h210")},
 	)
@@ -298,6 +314,47 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 		ocommon.Point{Slot: 105, Hash: []byte("h105")},
 	)
 	assert.False(t, ahead.confirmsRecentChain(behind))
+}
+
+func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      1,
+		GenesisWindowSlots: 100,
+	})
+	candidateConn := corrConn(1)
+	witnessConn := corrConn(2)
+	candidateTip := NewPeerChainTip(candidateConn, genesisTip(40, "candidate-40", 4), nil)
+	witnessTip := NewPeerChainTip(witnessConn, genesisTip(80, "witness-80", 5), nil)
+	feedPointsWithTipHistory(candidateTip, 100, 2,
+		ocommon.Point{Slot: 10, Hash: []byte("shared-10")},
+		ocommon.Point{Slot: 20, Hash: []byte("candidate-20")},
+		ocommon.Point{Slot: 30, Hash: []byte("candidate-30")},
+		ocommon.Point{Slot: 40, Hash: []byte("candidate-40")},
+	)
+	feedPoints(witnessTip, 100,
+		ocommon.Point{Slot: 10, Hash: []byte("shared-10")},
+		ocommon.Point{Slot: 50, Hash: []byte("witness-50")},
+		ocommon.Point{Slot: 80, Hash: []byte("witness-80")},
+	)
+	cs.peerTips[candidateConn] = candidateTip
+	cs.peerTips[witnessConn] = witnessTip
+
+	cs.mutex.RLock()
+	suffixSupported := cs.witnessSupportsSuffixLocked(candidateTip, witnessTip)
+	corroboratingPeers := cs.corroboratingPeersLocked(
+		candidateConn,
+		candidateTip,
+	)
+	cs.mutex.RUnlock()
+	require.True(t, suffixSupported,
+		"the ahead witness is within the block-number suffix bound")
+	if corroboratingPeers != 0 {
+		t.Fatalf(
+			"an old shared ancestor counted as recent corroboration: got %d peers",
+			corroboratingPeers,
+		)
+	}
 }
 
 // Removing the selected best peer with no replacement also publishes a

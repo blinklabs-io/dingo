@@ -1811,9 +1811,10 @@ share a cold key, so that key is forging in two places. Each such pair
 increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
 three competing blocks are three pairs. `self_key="true"` when the pool is this
 node's own, taken from the block producer credentials validated at startup. A
-distinct pair is counted once, even if the chain switches between its blocks
-again; repeated rolled-back hashes are retained only once. Both the rollback
-history and recently reported pair set are bounded to 2160 entries. On
+distinct pair is counted once while it remains in the bounded recently
+reported pair set; after eviction, the same pair may be counted again.
+Repeated rolled-back hashes are retained only once. Both the rollback history
+and recently reported pair set are bounded to 2160 entries. On
 rollback, every rolled-back block is decoded to read its issuer. For later
 added blocks, the detector first scans stored slot and block-number fields and
 decodes only when a possible match exists, so a normal sync pays one scan of
@@ -4808,10 +4809,10 @@ it. Dingo implements this as a **corroboration gate**
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
 - A witness must also **reach the candidate's suffix**: its delivered frontier
-  must be within `securityParam` blocks of the candidate's
-  (`witnessSupportsSuffixLocked`). A witness that only shares a point the
-  candidate passed long ago, however recently it answered a keepalive, does not
-  count.
+  block number may be at most `securityParam` blocks behind the candidate's
+  delivered tip, and may be ahead of it (`witnessSupportsSuffixLocked`). A
+  witness that only shares a point the candidate passed long ago, however
+  recently it answered a keepalive, does not count.
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. The identity is peer governance's

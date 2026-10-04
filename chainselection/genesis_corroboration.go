@@ -110,11 +110,10 @@ func (cs *ChainSelector) corroboratorIdentity(
 	return addr
 }
 
-// witnessSupportsSuffixLocked reports whether a witness has delivered far
-// enough along the candidate's chain to vouch for its current suffix. A witness
-// that only reaches a point the candidate passed more than k blocks ago shares
-// the past with it and says nothing about the blocks being relied on, however
-// recently it answered a keepalive.
+// witnessSupportsSuffixLocked reports whether the witness's delivered tip is
+// no more than k blocks behind the candidate's delivered tip; the distance is
+// measured from the candidate tip. A witness may be ahead. Keepalive activity
+// does not advance this delivered frontier.
 func (cs *ChainSelector) witnessSupportsSuffixLocked(
 	candidateTip *PeerChainTip,
 	witnessTip *PeerChainTip,
