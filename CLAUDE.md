@@ -30,7 +30,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 
 ```shell
 make lint         # import-boundaries, all modules, windows, nilaway, modernize
-GOFLAGS=-tags=dingo_extra_plugins modernize --fix ./...   # optional: auto-apply modernize's findings
+make modernize MODERNIZE_FLAGS=-fix   # optional: auto-apply modernize's findings
 make docs-parity
 make config-parity  # embedded configs vs the pinned cardano-configs image; needs network + docker
 make golines

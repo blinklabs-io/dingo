@@ -59,6 +59,7 @@ ANALYZER_GOFLAGS=$(strip $(GOFLAGS) $(if $(strip $(BUILD_TAGS)),-tags=$(subst $(
 NILAWAY_FLAGS ?= -include-pkgs=github.com/blinklabs-io
 # Generated sqlc and protobuf packages are validated by their generators;
 # run modernize only against hand-written packages to avoid generator drift.
+MODERNIZE_FLAGS ?=
 MODERNIZE_PACKAGES=$(shell go list $(GO_TAG_FLAGS) -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... | grep -Ev '/database/plugin/(blob/(aws|gcs)|metadata/(mysql|postgres)|metadata/sqlstore/internal/query/(mysql|postgres|sqlite))$$|/midnight$$')
 
 .PHONY: all build help install uninstall mod-tidy clean format golines lint nilaway modernize import-boundaries docs-parity config-parity proto sql sql-check govulncheck test test-live-lifecycle bench bench-ci bench-leios-db bench-mempool bench-mempool-normal bench-mempool-degenerate bench-mempool-revalidation test-load test-load-log test-load-profile test-devnet
@@ -107,13 +108,18 @@ lint: import-boundaries ## Run import-boundaries, golangci-lint, nilaway, and mo
 	$(MAKE) nilaway modernize
 
 # CI runs these same targets in the lint job.
+#
+# nilaway's live heap on this tree is about 12 GB, and without a limit its peak
+# passes the 16 GB of a hosted runner and the runner is killed. GOMEMLIMIT
+# makes the collector hold it near the floor at the cost of run time.
+nilaway: export GOMEMLIMIT ?= 10GiB
 nilaway: ## Fail on NilAway findings in production code
 	# Test fixtures establish preconditions with testify assertions that nilaway
 	# cannot track across calls; analyze production code here.
 	GOFLAGS="$(ANALYZER_GOFLAGS)" nilaway $(NILAWAY_FLAGS) -exclude-test-files ./...
 
 modernize: ## Fail on modernize findings in hand-written packages
-	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_PACKAGES)
+	GOFLAGS="$(ANALYZER_GOFLAGS)" modernize $(MODERNIZE_FLAGS) $(MODERNIZE_PACKAGES)
 
 import-boundaries: ## Check reviewed package import boundaries
 	go test ./internal/architecture
