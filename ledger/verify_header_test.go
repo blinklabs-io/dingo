@@ -2372,7 +2372,10 @@ func TestOldestRequiredSnapshotEpoch(t *testing.T) {
 	assert.Equal(t, uint64(13), floor)
 }
 
-func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
+// A genesis key delegation certificate takes effect only once its slot plus the
+// stability window has been reached, so a block from the new delegate inside
+// the window is rejected and the replaced delegate stays authoritative.
+func TestVerifyBlockHeaderState_GenesisDelegateWaitsForStabilityWindow(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -2384,39 +2387,66 @@ func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 	require.NoError(t, err)
 	require.True(t, ok)
 	vrfHash := lcommon.Blake2b256Hash(vrfKey)
+	initialDelegate := bytes.Repeat([]byte{0xaa}, lcommon.Blake2b224Size)
 	ls.config.CardanoNodeConfig = newGenesisDelegateShelleyGenesisCfg(
 		t,
-		strings.Repeat("aa", lcommon.Blake2b224Size),
+		hex.EncodeToString(initialDelegate),
 		strings.Repeat("bb", lcommon.Blake2b256Size),
 	)
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
 	ls.publishSnapshotsLocked()
+	const certSlot = uint64(0)
+	require.Less(t, tb.block.SlotNumber(), uint64(1_000),
+		"the test block must fall inside the stability window")
 	seedGenesisDelegation(t, db, models.GenesisDelegation{
 		GenesisHash:         bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
 		GenesisDelegateHash: delegateHash.Bytes(),
 		VrfKeyHash:          vrfHash.Bytes(),
-		AddedSlot:           0,
+		AddedSlot:           certSlot,
 		BlockIndex:          0,
 		CertIndex:           0,
 	})
+	window, err := eras.StabilityWindowForEra(
+		ls.config.CardanoNodeConfig,
+		eras.ShelleyEraDesc.Id,
+	)
+	require.NoError(t, err)
 	genesisKeyHash := lcommon.Blake2b224{}
 	copy(genesisKeyHash[:], bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size))
 	view := &LedgerView{ls: ls}
-	delegates, err := view.GenesisDelegateKeyHashes(5)
-	require.NoError(t, err)
-	require.Equal(t, []lcommon.Blake2b224{delegateHash}, delegates)
-	activeDelegate, found, err := view.GenesisDelegateForGenesisKey(
-		genesisKeyHash,
-		5,
-	)
-	require.NoError(t, err)
-	require.True(t, found)
-	require.Equal(t, delegateHash, activeDelegate)
+
+	for _, tc := range []struct {
+		name string
+		slot uint64
+		want []byte
+	}{
+		{"certificate slot", certSlot, initialDelegate},
+		{"last slot of the window", certSlot + window - 1, initialDelegate},
+		{
+			"first slot after the window",
+			certSlot + window,
+			delegateHash.Bytes(),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			delegates, err := view.GenesisDelegateKeyHashes(tc.slot)
+			require.NoError(t, err)
+			require.Len(t, delegates, 1)
+			require.Equal(t, tc.want, delegates[0].Bytes())
+			active, found, err := view.GenesisDelegateForGenesisKey(
+				genesisKeyHash,
+				tc.slot,
+			)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, tc.want, active.Bytes())
+		})
+	}
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "genesis overlay slot assigned to delegate")
 }
 
 func TestProtocolParameterUpdateWindowUsesShelleyStabilityWindow(t *testing.T) {
