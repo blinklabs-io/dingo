@@ -2455,7 +2455,15 @@ func requireGoroutineGone(t *testing.T, marker string) {
 // needs: a real database, chain manager, ledger state and event bus, plus the
 // devnet credential fixtures.
 func newStartupCleanupProducerNode(t *testing.T) *Node {
-	t.Helper()
+ t.Helper()
+ return newStartupCleanupProducerNodeWithGenesisStart(t, nil)
+}
+
+func newStartupCleanupProducerNodeWithGenesisStart(
+ t *testing.T,
+ start *time.Time,
+) *Node {
+ t.Helper()
 	vrf, kes, opcert := devnetCredPaths(t)
 	// The full devnet config, for the Byron genesis and the genesis hashes
 	// LedgerState.Start needs to build the genesis block. Its own Shelley
@@ -2471,7 +2479,11 @@ func newStartupCleanupProducerNode(t *testing.T) *Node {
 	// and the initial funds and protocol params the genesis block needs stay
 	// exactly as shipped.
 	cardanoCfg.ShelleyGenesis().SystemStart = time.Now().Add(-time.Hour)
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+ if start != nil {
+  cardanoCfg.ShelleyGenesis().SystemStart = *start
+  cardanoCfg.ByronGenesis().StartTime = int(start.Unix())
+ }
+ db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))

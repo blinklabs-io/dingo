@@ -163,6 +163,17 @@ func TestReloadBlockProducerCredentialsRefusesClockOutsideConfirmedHistory(
 	}
 }
 
+func TestReloadBlockProducerCredentialsExportedEntryRotates(t *testing.T) {
+ t.Parallel()
+ start := time.Now().Add(-time.Minute)
+ started := newStartupCleanupProducerNodeWithGenesisStart(t, &start)
+ r := newReloadTestNode(t, 1)
+ r.ledgerState = started.ledgerState
+ r.rotateTo(t, 2, nil)
+ require.NoError(t, r.ReloadBlockProducerCredentials())
+ r.requireLiveCounter(t, 2)
+}
+
 func TestReloadBlockProducerCredentialsExportedEntryRefusesUnconfirmedClock(t *testing.T) {
 	t.Parallel()
 	started := newStartupCleanupProducerNode(t)
