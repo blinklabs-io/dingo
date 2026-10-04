@@ -496,6 +496,7 @@ func openSQLStore(
 	}
 
 	store, err := sqlstore.New(sqlstore.Config{
+		SQLitePath:          databasePath,
 		WriteDB:             writeDB,
 		ReadDB:              readDB,
 		Dialect:             sqlstore.SQLiteDialect(),
