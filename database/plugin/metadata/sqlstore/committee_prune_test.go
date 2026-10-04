@@ -875,3 +875,46 @@ func TestAuthCommitteeHotPruningIsPerTaggedCredential(t *testing.T) {
 	require.Equal(t, 2, authRowCountFor(t, store, keyTag, shared))
 	require.Equal(t, 2, authRowCountFor(t, store, scriptTag, shared))
 }
+
+// GetCommitteeAuthorizedCount counts seated members that hold a hot key. A
+// member that never authorized one is seated but not counted, a resigned
+// member is not counted, and an expired term is not filtered.
+func TestGetCommitteeAuthorizedCountCountsOnlyAuthorizedMembers(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const keyTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	authorized := credentialHash(0xd1)
+	unauthorized := credentialHash(0xd2)
+	resigned := credentialHash(0xd3)
+	expired := credentialHash(0xd4)
+
+	seatMember(t, store, keyTag, authorized, 1)
+	seatMember(t, store, keyTag, unauthorized, 1)
+	seatMember(t, store, keyTag, resigned, 1)
+	require.NoError(t, store.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: keyTag,
+		ColdCredHash:      expired,
+		ExpiresEpoch:      1,
+		TermStartSlot:     1,
+		TermStartSlotSet:  true,
+		AddedSlot:         1,
+	}}, nil))
+	for i, cold := range [][]byte{authorized, resigned, expired} {
+		seedAuthorization(
+			t, store, keyTag, cold, keyTag, hotHash(0x60, i),
+			uint64(i+1), 10, // #nosec G115
+		)
+	}
+	seedResignation(t, store, keyTag, resigned, 100, 20)
+
+	count, err := store.GetCommitteeAuthorizedCount(nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, count, "authorized and expired members are counted")
+
+	seated, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(
+		t, seated, 4,
+		"the unauthorized and resigned members stay seated",
+	)
+}
