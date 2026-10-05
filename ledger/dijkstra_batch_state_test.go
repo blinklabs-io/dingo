@@ -44,6 +44,7 @@ type batchLevel struct {
 	collateral    []batchRef
 	collateralRet uint64
 	fee           uint64
+	certs         []any
 }
 
 type batchRef struct {
@@ -84,6 +85,9 @@ func (l batchLevel) encode(t *testing.T, top bool) map[uint]any {
 	}
 	if l.donation > 0 {
 		body[22] = l.donation
+	}
+	if len(l.certs) > 0 {
+		body[4] = l.certs
 	}
 	if len(l.collateral) > 0 {
 		collateral := make([]any, 0, len(l.collateral))
