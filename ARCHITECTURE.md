@@ -8463,9 +8463,13 @@ the newest ledger state and an Ed25519-signed manifest
 that ledger state. The archives are re-hashed as they are written, so a file
 rewritten after its digest was taken fails the run. `artifact.json` is written
 last and is the completion marker: a snapshot without it is not listed and not
-pruned. Output is a function of the directory alone (sorted entries, zero
-timestamps and owners, single-threaded zstd), so a second run reproduces the
-same bytes and hash. `certificate_hash` is empty until the aggregator certifies the snapshot.
+pruned, so a run that fails or is interrupted before writing it deletes the
+objects it uploaded. Archives are a function of the directory and the
+ancillary key (sorted entries, zero timestamps and owners, single-threaded
+zstd), and the artifact hash covers only the epoch and digest merkle root, so a
+second run reproduces the same archives and hash; `artifact.json` also records
+a `created_at` time of the run. `certificate_hash` is empty until the
+aggregator certifies the snapshot.
 A run whose hash is already complete in the store writes nothing and returns
 the stored snapshot, so a certificate attached to it is kept.
 
@@ -8474,8 +8478,10 @@ the stored snapshot, so a certificate attached to it is kept.
 `s3://` / `gcs://` URI in builds with `dingo_extra_plugins`. Remote stores read
 credentials from the SDK default chain (`AWS_ENDPOINT` selects an
 S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
-`mithril.server.keepSnapshots` makes `snapshot create` prune all but the newest
-N complete snapshots, removing each one's metadata object first.
+When `mithril.server.keepSnapshots` is a positive N, `snapshot create` prunes
+all but the newest N complete snapshots, removing each one's metadata object
+first; 0 keeps every snapshot. A run that reproduces a stored snapshot older
+than the newest N fails, since retention has removed it.
 
 **Serving** (`mithril.NewServerHandler`) answers `GET /artifact/cardano-database`,
 `/artifact/cardano-database/{hash}`, `/download/{hash}/{name}` and

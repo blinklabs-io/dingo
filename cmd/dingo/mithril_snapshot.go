@@ -22,8 +22,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -60,8 +63,14 @@ When mithril.server.keepSnapshots is set, older snapshots are then removed.`,
 			if err != nil {
 				return err
 			}
+			// A signal cancels the uploads, and the run then removes the
+			// objects it wrote instead of leaving them unlisted.
+			ctx, stop := signal.NotifyContext(
+				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+			)
+			defer stop()
 			artifact, err := runMithrilSnapshotCreate(
-				cmd.Context(), cfg, dbDir, logger,
+				ctx, cfg, dbDir, logger,
 			)
 			if err != nil {
 				return err
@@ -129,6 +138,15 @@ func runMithrilSnapshotCreate(
 			"hash", hash,
 		)
 	}
+	// A run reproducing a stored snapshot older than the retained ones
+	// returns that snapshot, and retention has just removed it.
+	if slices.Contains(removed, artifact.Hash) {
+		return nil, fmt.Errorf(
+			"snapshot %s is older than the newest %d and was removed by "+
+				"mithril.server.keepSnapshots",
+			artifact.Hash, server.KeepSnapshots,
+		)
+	}
 	return artifact, nil
 }
 
@@ -165,7 +183,12 @@ stored snapshots.`,
 			if err != nil {
 				return err
 			}
-			srv, err := newMithrilServer(cmd.Context(), cfg, logger)
+			// A signal shuts the server down gracefully.
+			ctx, stop := signal.NotifyContext(
+				cmd.Context(), syscall.SIGINT, syscall.SIGTERM,
+			)
+			defer stop()
+			srv, err := newMithrilServer(ctx, cfg, logger)
 			if err != nil {
 				return err
 			}
@@ -178,7 +201,7 @@ stored snapshots.`,
 				"component", "mithril",
 			)
 			return serveMithril(
-				cmd.Context(), srv, ln, cfg.Mithril.Server.TLSEnabled,
+				ctx, srv, ln, cfg.Mithril.Server.TLSEnabled,
 				cfg.TlsCertFilePath, cfg.TlsKeyFilePath,
 			)
 		},

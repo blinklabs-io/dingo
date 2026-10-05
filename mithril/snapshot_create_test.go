@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -333,6 +334,47 @@ func TestCreateSnapshotDetectsFileChangedAfterDigest(t *testing.T) {
 		context.Background(), newSnapshotConfig(t, db, store, key),
 	)
 	require.ErrorContains(t, err, "changed while archiving")
+}
+
+// failAfterPutsStore fails every Put after the first n, the way an upload
+// interrupted part way through a snapshot would.
+type failAfterPutsStore struct {
+	ArtifactStore
+	n    int
+	puts int
+}
+
+func (s *failAfterPutsStore) Put(
+	ctx context.Context,
+	key string,
+	r io.Reader,
+) error {
+	s.puts++
+	if s.puts > s.n {
+		return errors.New("upload failed")
+	}
+	return s.ArtifactStore.Put(ctx, key, r)
+}
+
+// TestCreateSnapshotRemovesPartialUploadOnFailure guards against orphaned
+// archives: a snapshot without metadata is neither listed nor pruned, so a run
+// that fails after uploading archives must remove them itself.
+func TestCreateSnapshotRemovesPartialUploadOnFailure(t *testing.T) {
+	t.Parallel()
+
+	db := newCardanoDB(t, 3)
+	_, key := newSigningKey(t)
+	inner, dir := newLocalStore(t)
+	store := &failAfterPutsStore{ArtifactStore: inner, n: 2}
+	_, err := CreateSnapshot(
+		context.Background(), newSnapshotConfig(t, db, store, key),
+	)
+	require.ErrorContains(t, err, "upload failed")
+
+	subdirs, err := inner.Subdirs(context.Background(), "")
+	require.NoError(t, err)
+	assert.Empty(t, subdirs)
+	assert.Empty(t, readTree(t, dir))
 }
 
 func TestReadAncillaryKeepsSelectedStateBytes(t *testing.T) {

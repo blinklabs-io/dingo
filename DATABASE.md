@@ -779,8 +779,10 @@ Two further optional `CloudDestination` capabilities, meaningful on a destinatio
 
 `dingo mithril snapshot create` and `dingo mithril serve` keep artifacts in an
 object store selected by `mithril.server.artifactStore` (a directory, or an
-`s3://` or `gcs://` URI), not in the metadata or blob stores. Objects are keyed
-by snapshot hash, the 64-hex-digit artifact hash:
+`s3://` or `gcs://` URI in builds with `dingo_extra_plugins`), not in the
+metadata or blob stores. A snapshot's objects are keyed under its 64-hex-digit
+artifact hash; certificates are keyed by certificate hash under
+`certificates/`, and the aggregator state is a single root object:
 
 | Key | Content |
 |---|---|
@@ -791,10 +793,13 @@ by snapshot hash, the 64-hex-digit artifact hash:
 | `certificates/<hash>.json` | Mithril certificate JSON served by `/certificate/<hash>` |
 | `aggregator.json` | aggregator epoch, protocol parameters, closed signer set (BLS key, proof of possession, stake) and the genesis and latest certificate hashes |
 
-Local stores write each object under a `.partial` name and rename it, so a
-reader never sees a partial object. Retention (`mithril.server.keepSnapshots`)
-deletes `artifact.json` first, so an interrupted removal leaves an unlisted
-remainder rather than a listed snapshot with missing archives.
+Local stores write each object to a uniquely named `.partial-*` file and
+rename it, so a reader never sees a partial object and concurrent writers of
+one key do not share a file. A run that fails before writing `artifact.json`
+deletes the objects it wrote under the hash. Retention
+(`mithril.server.keepSnapshots`) deletes `artifact.json` first, so an
+interrupted removal leaves an unlisted remainder rather than a listed snapshot
+with missing archives.
 
 ## Store Topology
 

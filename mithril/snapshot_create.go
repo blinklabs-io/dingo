@@ -66,8 +66,8 @@ type CreateSnapshotConfig struct {
 	AncillarySigningKey ed25519.PrivateKey
 	// CardanoNodeVersion is recorded verbatim in the artifact.
 	CardanoNodeVersion string
-	// CreatedAt is recorded in the artifact; the zero value means now.
-	// Everything else in the output is a function of DBDir alone.
+	// CreatedAt is recorded in the artifact metadata; the zero value means
+	// now. The archives are a function of DBDir and AncillarySigningKey.
 	CreatedAt time.Time
 	// Store receives the produced objects.
 	Store ArtifactStore
@@ -81,9 +81,10 @@ type CreateSnapshotConfig struct {
 // Ed25519-signed manifest, and the artifact metadata. The metadata object is
 // written last, so a snapshot is listed only once it is complete.
 //
-// Output is deterministic: archive entries are sorted, carry no timestamps or
+// Archives are deterministic: entries are sorted, carry no timestamps or
 // owners, and compression is single-threaded, so two runs over the same
-// directory produce identical bytes and the same artifact hash. When a
+// directory produce identical archives and the same artifact hash; only the
+// metadata's CreatedAt differs unless it is set. When a
 // complete snapshot with that hash is already in the store, nothing is
 // written and the stored snapshot, with any certificate it carries, is
 // returned.
@@ -190,6 +191,12 @@ func CreateSnapshot(
 		return nil, fmt.Errorf("reading existing snapshot: %w", err)
 	}
 
+	complete := false
+	defer func() {
+		if !complete {
+			removeIncompleteSnapshot(ctx, cfg.Store, artifact.Hash, logger)
+		}
+	}()
 	for num := range lastNum + 1 {
 		if err := putImmutableArchive(
 			ctx, cfg.Store, root, artifact.Hash, num, digestByName,
@@ -231,6 +238,7 @@ func CreateSnapshot(
 	); err != nil {
 		return nil, fmt.Errorf("writing artifact metadata: %w", err)
 	}
+	complete = true
 	logger.Info(
 		"snapshot created",
 		"component", "mithril",
@@ -239,6 +247,34 @@ func CreateSnapshot(
 		"immutable_file_number", lastNum,
 	)
 	return artifact, nil
+}
+
+// removeIncompleteSnapshot deletes the objects of a run that failed before
+// writing the snapshot metadata. Such objects are neither listed nor pruned, so
+// nothing else would ever remove them. It ignores cancellation of ctx so an
+// interrupted run still cleans up, and leaves the snapshot alone if a concurrent
+// run over the same database has completed it.
+func removeIncompleteSnapshot(
+	ctx context.Context,
+	store ArtifactStore,
+	hash string,
+	logger *slog.Logger,
+) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	if _, err := readSnapshot(ctx, store, hash); !errors.Is(
+		err, ErrArtifactNotFound,
+	) {
+		return
+	}
+	if err := store.DeletePrefix(ctx, hash); err != nil {
+		logger.Warn(
+			"failed to remove incomplete snapshot",
+			"component", "mithril",
+			"hash", hash,
+			"error", err,
+		)
+	}
 }
 
 // digestImmutables returns the SHA-256 digest of every immutable file, in the
@@ -524,7 +560,9 @@ func readAncillary(root *os.Root) (*ancillaryState, uint64, error) {
 		entry, err := openFileEntry(item.name, item.file)
 		if err != nil {
 			files.Close()
-			return nil, 0, fmt.Errorf("reading ledger file %s: %w", item.name, err)
+			return nil, 0, fmt.Errorf(
+				"reading ledger file %s: %w", item.name, err,
+			)
 		}
 		if _, ok := out.digests[item.name]; !ok {
 			r, err := entry.open()

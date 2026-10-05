@@ -102,6 +102,7 @@ func TestRunMithrilSnapshotCreateAppliesRetention(t *testing.T) {
 		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
 	)
 	require.NoError(t, err)
+	require.NotEqual(t, first.Hash, second.Hash)
 
 	store, err := mithril.OpenArtifactStore(
 		t.Context(), cfg.Mithril.Server.ArtifactStore,
@@ -111,6 +112,37 @@ func TestRunMithrilSnapshotCreateAppliesRetention(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, snapshots, 1)
 	assert.Equal(t, second.Hash, snapshots[0].Hash)
+}
+
+// TestRunMithrilSnapshotCreateFailsWhenRetentionRemovesResult covers a run
+// that reproduces a stored snapshot older than the retained ones: retention
+// removes it, so reporting its hash would name a snapshot that is gone.
+func TestRunMithrilSnapshotCreateFailsWhenRetentionRemovesResult(t *testing.T) {
+	t.Parallel()
+
+	cfg, _ := snapshotTestConfig(t)
+	olderDB := cardanoDB(t, 1)
+	older, err := runMithrilSnapshotCreate(
+		t.Context(), cfg, olderDB, discardLogger,
+	)
+	require.NoError(t, err)
+	newer, err := runMithrilSnapshotCreate(
+		t.Context(), cfg, cardanoDB(t, 2), discardLogger,
+	)
+	require.NoError(t, err)
+
+	cfg.Mithril.Server.KeepSnapshots = 1
+	_, err = runMithrilSnapshotCreate(t.Context(), cfg, olderDB, discardLogger)
+	require.ErrorContains(t, err, older.Hash)
+
+	store, err := mithril.OpenArtifactStore(
+		t.Context(), cfg.Mithril.Server.ArtifactStore,
+	)
+	require.NoError(t, err)
+	snapshots, err := mithril.ListSnapshots(t.Context(), store)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	assert.Equal(t, newer.Hash, snapshots[0].Hash)
 }
 
 func TestRunMithrilSnapshotCreateRequiresSettings(t *testing.T) {
