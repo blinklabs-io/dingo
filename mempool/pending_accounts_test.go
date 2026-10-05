@@ -495,6 +495,9 @@ type overlappingRebuildValidator struct {
 	admissions atomic.Int64
 	overlapped chan struct{}
 	rebuilds   atomic.Int64
+	// missedOverlap records that the first rebuild gave up waiting, so the
+	// test did not exercise the race it is about.
+	missedOverlap atomic.Bool
 }
 
 func (v *overlappingRebuildValidator) ValidateTx(tx gledger.Transaction) error {
@@ -530,6 +533,7 @@ func (v *overlappingRebuildValidator) WithTxValidationSession(
 		select {
 		case <-v.overlapped:
 		case <-time.After(5 * time.Second):
+			v.missedOverlap.Store(true)
 		}
 	}
 	return fn(v.balanceValidator.ValidateTxWithOverlay, func() bool { return true })
@@ -570,6 +574,11 @@ func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {
 		})
 	}
 	wg.Wait()
+	require.False(
+		t,
+		validator.missedOverlap.Load(),
+		"the second admission never validated while the first rebuild ran",
+	)
 	require.NoError(t, errs[0])
 	require.NoError(t, errs[1])
 	require.Len(t, pool.Transactions(), 3)
