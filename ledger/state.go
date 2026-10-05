@@ -662,6 +662,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	RejectBlockDecodeCacheFunc  func(uint, []byte)
 	PeersWithBlockFunc          PeersWithBlockFunc
+	SelectBlockfetchPeerFunc    SelectBlockfetchPeerFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
 	BlockfetchLatencyFunc       BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
@@ -678,6 +679,10 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
+	// RecordBlockfetchThroughputFunc receives each completed batch's
+	// delivery rate: the bytes that followed the first block and the time
+	// they took to arrive.
+	RecordBlockfetchThroughputFunc RecordBlockfetchThroughputFunc
 	// EndorserBlockFetcher actively fetches a referenced endorser block (its
 	// manifest and all transaction bodies) by point and caches it, so the
 	// EndorserBlockProvider can then supply it. Unlike the tip path, which waits
@@ -903,6 +908,22 @@ type PeersWithBlockFunc func(
 	point ocommon.Point,
 ) []ouroboros.ConnectionId
 
+// SelectBlockfetchPeerFunc returns the connection to fetch the range that
+// ends at the given point from. origin is the connection that delivered the
+// header and is the answer when nothing better is known.
+type SelectBlockfetchPeerFunc func(
+	origin ouroboros.ConnectionId,
+	rangeEnd ocommon.Point,
+) ouroboros.ConnectionId
+
+// RecordBlockfetchThroughputFunc records how many bytes a batch delivered
+// after its first block and how long that took.
+type RecordBlockfetchThroughputFunc func(
+	connId ouroboros.ConnectionId,
+	bytes uint64,
+	elapsed time.Duration,
+)
+
 // RecordBlockfetchLatencyFunc records a first-block latency sample
 // for the given connection after a successful RequestRange response.
 type RecordBlockfetchLatencyFunc func(ouroboros.ConnectionId, time.Duration)
@@ -932,10 +953,29 @@ type MempoolProvider interface {
 	// chained descendants, which remain valid against the updated ledger.
 	RemoveTxsByHash(hashes []string)
 }
+
+// resyncCoalesceRecord tracks when a connection's resync request was last
+// published and how many repeats were dropped since.
+type resyncCoalesceRecord struct {
+	at         time.Time
+	suppressed int
+}
+
 type rollbackRecord struct {
 	point     ocommon.Point
 	connKey   string
 	timestamp time.Time
+}
+
+type rollbackCountKey struct {
+	connKey string
+	slot    uint64
+	hash    string
+}
+
+type rollbackCountRecord struct {
+	first  time.Time
+	second time.Time
 }
 
 type forgedBlockCheckerHolder struct {
@@ -1182,6 +1222,17 @@ type LedgerState struct {
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+
+	// batchFirstBlockAt and batchLastBlockAt bracket the arrival of the
+	// current batch's blocks, and batchStreamBytes counts the bytes of every
+	// block after the first. Together they give the batch's delivery rate
+	// without charging it the first block's latency.
+	batchFirstBlockAt   time.Time
+	batchLastBlockAt    time.Time
+	batchStreamBytes    uint64
+	batchDeliveryConnId ouroboros.ConnectionId
+	batchDeliveryMixed  bool
+
 	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
 	// held when the current batch was requested. A batch is fetched for the
 	// header queue that existed at request time; a rollback replaces both that
@@ -1247,18 +1298,37 @@ type LedgerState struct {
 	// consumeDeferredHeaderValidation, so holding it across that write inverts the
 	// lock order and deadlocks the node. The eviction+floor read is
 	// atomic; a header admitted after the lock is released is handled by the next
-	// cleanup pass (the floor is a lower-watermark recomputed each pass).
-	deferredHeaderValidation    map[string]struct{}
-	deferredHeaderValidationMu  sync.Mutex
-	checkpointWrittenForEpoch   bool
-	closed                      atomic.Bool
-	closeMu                     sync.Mutex
-	closeDone                   chan struct{}
-	closeErr                    error
-	inRecovery                  bool // guards against recursive recovery in SubmitAsyncDBTxn
-	lastAtTipRecovery           *atTipRecoveryAttempt
-	lastHeaderValidationFailure *headerValidationError
-	lastHeaderValidationTip     ocommon.Point
+	// cleanup pass (the floor is a lower-watermark recomputed each pass). Each
+	// value is the connection that supplied the block, or the zero value when
+	// unknown (markers restored after a restart carry none).
+	deferredHeaderValidation map[string]ouroboros.ConnectionId
+	// deferredHeaderValidationFloor is the highest slot below which a block
+	// needs full header verification at apply even without a marker, because
+	// its marker may have been evicted to bound the set. Guarded by
+	// deferredHeaderValidationMu.
+	deferredHeaderValidationFloor uint64
+	// maxDeferredHeaderMarkers overrides defaultMaxDeferredHeaderMarkers
+	// when non-zero.
+	maxDeferredHeaderMarkers int
+	// admissionVerified maps the slot of each block whose header passed full
+	// admission verification to its hash key, until block-pipeline replay
+	// consumes it. Guarded by admissionVerifiedMu.
+	admissionVerified   map[uint64]string
+	admissionVerifiedMu sync.Mutex
+	// maxAdmissionVerified overrides defaultMaxAdmissionVerified when
+	// non-zero.
+	maxAdmissionVerified            int
+	deferredHeaderValidationMu      sync.Mutex
+	deferredHeaderValidationBoundMu sync.Mutex
+	checkpointWrittenForEpoch       bool
+	closed                          atomic.Bool
+	closeMu                         sync.Mutex
+	closeDone                       chan struct{}
+	closeErr                        error
+	inRecovery                      bool // guards against recursive recovery in SubmitAsyncDBTxn
+	lastAtTipRecovery               *atTipRecoveryAttempt
+	lastHeaderValidationFailure     *headerValidationError
+	lastHeaderValidationTip         ocommon.Point
 	// At-tip recovery non-convergence tracking. A descending
 	// series of *distinct* (block, tx) validation failures each resets the
 	// same-block escalation to attempt 1, so the escalate-and-cap logic in
@@ -1567,7 +1637,15 @@ type LedgerState struct {
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
-	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+	rollbackHistory []rollbackRecord // bounded recent rollback records
+	// rollbackCounts preserves exact per-connection/point loop counts across
+	// rollbackHistory's event cap. Each entry keeps only the two timestamps
+	// needed by the loop threshold and is pruned by rollbackLoopWindow.
+	rollbackCounts map[rollbackCountKey]rollbackCountRecord
+	// resyncCoalesce records the last resync request published per
+	// connection, so one divergence episode publishes a single request.
+	resyncCoalesce      map[string]*resyncCoalesceRecord
+	resyncCoalesceMutex sync.Mutex
 
 	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
 	// us to cross to but that we cannot apply locally (block missing below
@@ -6453,6 +6531,12 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 			"error",
 			err,
 		)
+	case errors.Is(err, errBlockPipelineAdmissionVerified):
+		ls.config.Logger.Debug(
+			"block-processing pipeline: validate stage skipped for a header verified at admission",
+			"error",
+			err,
+		)
 	case errors.Is(err, errHeaderVerificationDeferred):
 		ls.metrics.incBlockPipelineDeferredEpochCacheError()
 		ls.config.Logger.Debug(
@@ -6600,6 +6684,9 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			continue
 		}
 		block := item.Block()
+		point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
+		admissionVerified := ls.config.BlockPipelineValidateEnabled &&
+			ls.consumeAdmissionVerified(point)
 		// Byron-era blocks have no VRF/KES fields and no Praos epoch nonce
 		// to validate against (blockPipelineEta0Provider always fails the
 		// nonce lookup for them), matching the serial path's
@@ -6609,7 +6696,23 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		if ls.config.BlockPipelineValidateEnabled &&
 			block.Era().Id != byron.EraIdByron &&
 			ls.shouldEnforceBlockPipelineCrypto(block.SlotNumber()) {
-			if valErr := item.ValidationError(); valErr != nil {
+			// Admission already verified this exact header; the nonce
+			// provider told the validate stage to skip it.
+			if admissionVerified {
+				decoded = append(decoded, block)
+				continue
+			}
+			valErr := item.ValidationError()
+			if errors.Is(valErr, errBlockPipelineAdmissionVerified) {
+				// The slot's admission record was for a different hash, so
+				// the validate stage did not check this block.
+				_, valErr = ls.verifyBlockHeaderStatelessCrypto(block, false)
+				if valErr == nil {
+					decoded = append(decoded, block)
+					continue
+				}
+			}
+			if valErr != nil {
 				// The validation-state snapshot can change between the gate
 				// above and the provider's lookup. A missing/deferred nonce is
 				// not evidence that the block is invalid; admission or the
@@ -6625,14 +6728,12 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: fmt.Errorf(
 						"block pipeline header crypto validation: %w",
 						valErr,
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
@@ -6642,13 +6743,11 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: errors.New(
 						"block failed pipeline header crypto validation",
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
@@ -6664,14 +6763,12 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 					"slot", block.SlotNumber(),
 				)
 				retErr = &headerValidationError{
-					BlockPoint: ocommon.NewPoint(
-						block.SlotNumber(),
-						block.Hash().Bytes(),
-					),
+					BlockPoint: point,
 					Cause: fmt.Errorf(
 						"block pipeline operational certificate validation: %w",
 						opCertErr,
 					),
+					Source: ls.deferredHeaderSource(point),
 				}
 				continue
 			}
