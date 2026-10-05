@@ -214,6 +214,7 @@ var logPlainConfigFields = []string{
 	"Mithril.CleanupAfterLoad",
 	"Mithril.DownloadDir",
 	"Mithril.DownloadIdleTimeout",
+	"Mithril.DownloadMaxBytes",
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
 	"Mithril.PinnedDigest",
