@@ -7489,12 +7489,14 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit of 1 TiB by default, matching
-the existing extracted-archive total limit. Library callers can set
-`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
-`DownloadConfig.MaxBytes`; zero selects the default and negatives fail
-validation. The setting reaches both v1 archives and all v2 digest,
-immutable, and ancillary archives. `ExpectedSize`, when positive, remains
+Compressed downloads have a per-object limit: 512 GiB for a v1 archive, and
+for v2 objects 1 GiB per immutable archive, 256 MiB for the digest list and
+64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
+(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
+callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
+or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
+fail validation. A positive value replaces the limit of every v1 and v2
+object. `ExpectedSize`, when positive, remains
 an exact-size requirement and cannot exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
@@ -7514,6 +7516,23 @@ download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`.
+
+Extraction also bounds the archive's shape while it is read: an entry-count
+cap (directories and empty files count), per-member and aggregate expanded-byte
+caps, and an expansion bound of 256 times the compressed bytes read plus a
+64 MiB floor. Each archive type except the v1 full snapshot admits only the
+members its consumer reads, and a refused member is never created. An
+immutable archive admits its own certified trio (plus a `ledger/` tree, where
+v1-layout archives keep the ledger state). Its expanded-byte limits allow
+8 GiB per member and 1 TiB in total so ledger tables retain the same limits
+as full snapshots; each trio file is
+SHA-256-checked against the certified digest list as it is written, so a
+mismatching file is removed before the pool moves on. The digest list archive
+admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
+archives admit the signed manifest, the `ledger/` tree and the next immutable
+trio. The immutable pool charges each in-flight download at its size limit
+against a 16 GiB budget. Raising the limit lowers concurrency; an override
+above 16 GiB allows only one download, with capacity equal to that override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so

@@ -321,6 +321,10 @@ type v2Fixture struct {
 	ancillaryVKey        string
 	genesisVKey          string
 	immutableHits        atomic.Int32
+	// immutableGate, when set, runs on each immutable archive request before
+	// the response is written. Set it before the first request.
+	immutableGate func()
+
 	// ancillaryServed, when set, replaces ancillaryArchive on the wire.
 	ancillaryServed atomic.Pointer[[]byte]
 }
@@ -697,6 +701,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					return
 				}
 				fixture.immutableHits.Add(1)
+				if fixture.immutableGate != nil {
+					fixture.immutableGate()
+				}
 				_, _ = w.Write(archive)
 			case strings.HasPrefix(p, "/certificate/"):
 				hash := strings.TrimPrefix(p, "/certificate/")
