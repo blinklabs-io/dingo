@@ -692,6 +692,45 @@ WHERE tx_id = ? AND output_idx = ?
 			)
 		}
 	}
+	// A certified snapshot's live UTxO set declares this specific output live
+	// (DeletedSlot == 0) as of its anchor. If the conflicting local row still
+	// carries a spend, that spend can only have been recorded after the
+	// anchor: a row genuinely spent at or before the anchor would not appear
+	// in the snapshot's live set at all, so this branch never observes a
+	// settled pre-anchor spend. Clear it, scoped to this exact (tx_id,
+	// output_idx) reference only -- never a table-wide unspend -- so a later
+	// replay of the real post-anchor spending block finds the output live
+	// instead of failing with "utxo not found". Mirrors the columns
+	// SetUtxosNotDeletedAfterSlot's rollback path clears.
+	//
+	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
+	// conflict path) are also reached by database/transaction.go's
+	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
+	// recover a missing input's producer row from the blob store rather than
+	// hydrate a certified snapshot. Neither can trigger this clause in
+	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
+	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
+	// reaching this ON CONFLICT branch for it would require a concurrent
+	// writer to the same row within one block's write transaction -- which
+	// the single-writer block-apply pipeline does not have today. If that
+	// invariant ever changes, this clause would need a way to tell "a
+	// certified snapshot's own declaration" apart from "a locally
+	// reconstructed row that merely happens to declare DeletedSlot == 0".
+	if utxo.DeletedSlot == 0 {
+		if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET deleted_slot = 0, spent_at_tx_id = NULL
+WHERE tx_id = ? AND output_idx = ? AND deleted_slot > 0`,
+			utxo.TxId,
+			utxo.OutputIdx,
+		); err != nil {
+			return fmt.Errorf(
+				"clear stale spend on re-imported live UTxO: %w",
+				err,
+			)
+		}
+	}
 	return nil
 }
 
@@ -1451,7 +1490,10 @@ func (s *Store) utxoRefsByTxID(
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		placeholders := strings.TrimSuffix(
+			strings.Repeat("?,", len(batch)),
+			",",
+		)
 		args := make([]any, len(batch))
 		for i, txID := range batch {
 			args[i] = txID
@@ -1829,8 +1871,12 @@ func (s *Store) GetUtxosByAddress(
 // GetUtxosByAddressWithOrdering applies.
 func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
+	disqualifyLivenessIndex bool,
 ) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
+	if disqualifyLivenessIndex {
+		predicate = "+utxo.deleted_slot = 0"
+	}
 	args := []any{}
 	switch {
 	case query.MatchAllAddresses:
@@ -1904,7 +1950,18 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	// Disqualify the low-selectivity liveness index only for exact payment
+	// lookups, where stale statistics can otherwise cause a full live-row scan.
+	hint := s.dialect.Name() == "sqlite" && len(query.AddressPatterns) == 1 &&
+		len(query.AddressPatterns[0].ExactAddress) > 0
+	if hint {
+		addr, decodeErr := lcommon.NewAddressFromBytes(
+			query.AddressPatterns[0].ExactAddress,
+		)
+		hint = decodeErr == nil &&
+			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+	}
+	predicate, args, err := utxoOrderingPredicate(query, hint)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
@@ -2207,7 +2264,7 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	if err != nil {
 		return 0, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	predicate, args, err := utxoOrderingPredicate(query, false)
 	if err != nil {
 		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
 	}

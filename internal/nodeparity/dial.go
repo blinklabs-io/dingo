@@ -161,8 +161,7 @@ func Dial(
 }
 
 // protoFromAddr returns "unix" for paths starting with "/" and "tcp"
-// otherwise, matching internal/test/antithesis/internal/txpump's
-// convention for the same choice.
+// otherwise, matching cardano-txpump's convention for the same choice.
 func protoFromAddr(addr string) string {
 	if strings.HasPrefix(addr, "/") {
 		return "unix"

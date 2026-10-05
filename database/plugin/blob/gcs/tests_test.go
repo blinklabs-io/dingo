@@ -161,6 +161,10 @@ func TestBlobStoreResourceCleanup(t *testing.T) {
 // pointing GOOGLE_APPLICATION_CREDENTIALS at a nonexistent file makes Start
 // itself fail immediately. t.Setenv scopes the override to this test only.
 func TestBlobStoreBadCredentialsFailsCleanly(t *testing.T) {
+	// Not t.Parallel: changes process-wide credential and emulator settings.
+	// Emulator clients bypass authentication, so this test must disable them.
+	t.Setenv("STORAGE_EMULATOR_HOST_GRPC", "")
+	t.Setenv("STORAGE_EMULATOR_HOST", "")
 	t.Setenv(
 		"GOOGLE_APPLICATION_CREDENTIALS",
 		filepath.Join(t.TempDir(), "nonexistent-credentials.json"),

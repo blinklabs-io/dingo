@@ -317,6 +317,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	mcpHost := "127.0.0.1"
+	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
+		mcpHost = host
+		if host == "" {
+			mcpHost = c.BindAddr
+		}
+	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
@@ -334,6 +341,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
+		{
+			"plugins.api.mcp.config.port",
+			mcpHost,
+			APIPluginPort(c.Plugins.API.Mcp),
+			serving,
+			false,
+		},
 		{
 			"plugins.api.utxorpc.config.port",
 			c.BindAddr,
