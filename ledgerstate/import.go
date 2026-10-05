@@ -805,8 +805,20 @@ func validateImportState(cfg ImportConfig) error {
 		}
 	}
 	if state.SnapShotsData != nil {
-		if _, err := ParseSnapShots(state.SnapShotsData); err != nil {
+		snapshots, err := ParseSnapShots(state.SnapShotsData)
+		if err != nil {
 			return fmt.Errorf("parsing stake snapshots: %w", err)
+		}
+		// seedImportedRewardBasis refuses the same inconsistency, but only
+		// in the snapshots phase, after the UTxO phase has persisted.
+		if state.Fees < snapshots.Fee {
+			return fmt.Errorf(
+				"imported UTxO state fees %d are less than the snapshot "+
+					"fee pot %d for epoch %d",
+				state.Fees,
+				snapshots.Fee,
+				state.Epoch,
+			)
 		}
 		if state.PoolDistrData != nil {
 			if _, err := ParseActivePoolDistribution(

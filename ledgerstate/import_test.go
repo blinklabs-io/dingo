@@ -2891,6 +2891,15 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 	require.NoError(t, err)
 	garbage := cbor.RawMessage{0xff}
 	partialCertState := partialCertStateData(t, fixture)
+	snapshotParts, err := decodeRawArray(fixture.SnapShotsData)
+	require.NoError(t, err)
+	snapshotsWithFee, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshotParts[0]),
+		cbor.RawMessage(snapshotParts[1]),
+		cbor.RawMessage(snapshotParts[2]),
+		uint64(1),
+	})
+	require.NoError(t, err)
 
 	tests := []struct {
 		name    string
@@ -2939,6 +2948,14 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			name:    "previous protocol parameters",
 			mutate:  func(s *RawLedgerState) { s.PrevPParamsData = garbage },
 			wantErr: "validating previous protocol parameters",
+		},
+		{
+			name: "fees below snapshot fee pot",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = snapshotsWithFee
+				s.Fees = 0
+			},
+			wantErr: "less than the snapshot fee pot",
 		},
 		{
 			name: "opcert counter key",
