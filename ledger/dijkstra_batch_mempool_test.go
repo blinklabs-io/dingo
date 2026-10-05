@@ -44,7 +44,13 @@ func TestDijkstraBatchPendingBalanceAgreesWithAppliedBalance(t *testing.T) {
 	t.Parallel()
 	stakeKey := bytes.Repeat([]byte{0xe1}, 28)
 	addr := stateRewardAddress(stakeKey)
-	childIn, childIn2, topIn := batchRef{seed: 0xe2}, batchRef{seed: 0xe3}, batchRef{seed: 0xe4}
+	childIn, childIn2, topIn := batchRef{
+		seed: 0xe2,
+	}, batchRef{
+		seed: 0xe3,
+	}, batchRef{
+		seed: 0xe4,
+	}
 	batch := buildStateBatch(t,
 		[]batchLevel{
 			{

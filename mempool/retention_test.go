@@ -291,7 +291,12 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 		isBytes := kind == reflect.String ||
 			(kind == reflect.Slice && field.Type.Elem().Kind() == reflect.Uint8)
 		if field.Name != "hash" && field.Name != "stateCbor" {
-			require.Falsef(t, isBytes, "appliedTx.%s retains raw bytes", field.Name)
+			require.Falsef(
+				t,
+				isBytes,
+				"appliedTx.%s retains raw bytes",
+				field.Name,
+			)
 		}
 	}
 	pool.RLock()

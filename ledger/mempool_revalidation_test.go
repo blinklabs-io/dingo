@@ -159,9 +159,11 @@ func TestMempoolRevalidationKeepsDescendantOfConfirmedParent(t *testing.T) {
 				bus := event.NewEventBus(nil, nil)
 				t.Cleanup(bus.Close)
 				pool, err := construct(dingomempool.MempoolConfig{
-					Validator:       f.ls,
-					EventBus:        bus,
-					Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+					Validator: f.ls,
+					EventBus:  bus,
+					Logger: slog.New(
+						slog.NewTextHandler(io.Discard, nil),
+					),
 					PromRegistry:    prometheus.NewRegistry(),
 					MempoolCapacity: 1 << 20,
 				})

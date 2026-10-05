@@ -732,8 +732,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 								// pool waits for the whole budget and is then
 								// dropped by the retry bound; asking for more
 								// would end intake for this peer.
+								limit := headroom.MaxAdmissionHeadroomBytes()
 								return headroom.WaitForAdmissionHeadroom(
-									min(need, headroom.MaxAdmissionHeadroomBytes()),
+									min(need, limit),
 									connDone,
 								)
 							},

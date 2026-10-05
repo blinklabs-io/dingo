@@ -110,7 +110,11 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState(
 	state, err := lv.validationState(pp, 1)
 	require.NoError(t, err)
 	_, layered := state.(*LedgerView)
-	require.False(t, layered, "the pending transaction must be layered over the view")
+	require.False(
+		t,
+		layered,
+		"the pending transaction must be layered over the view",
+	)
 
 	err = eras.ValidateTxDijkstra(dijkstraPoolCertTx(1, 1000), 0, state, pp)
 	require.Error(t, err)
