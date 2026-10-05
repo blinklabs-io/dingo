@@ -647,7 +647,11 @@ func LoadWithDB(
 	immutableDir string,
 	db *database.Database,
 ) error {
-	if isRemoteImmutableSource(immutableDir) && cfg.DatabasePath == "" {
+	remoteImmutable, err := classifyRemoteImmutableSource(immutableDir)
+	if err != nil {
+		return err
+	}
+	if remoteImmutable && cfg.DatabasePath == "" {
 		return errors.New(
 			"loading from a remote ImmutableDB requires databasePath " +
 				"for its download cache",
@@ -864,7 +868,7 @@ func LoadWithDB(
 		blocksCopied     int
 		immutableTipSlot uint64
 	)
-	if isRemoteImmutableSource(immutableDir) {
+	if remoteImmutable {
 		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
 			replayCtx, logger, immutableDir,
 			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),

@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -37,7 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsRemoteImmutableSource(t *testing.T) {
+func TestClassifyRemoteImmutableSource(t *testing.T) {
 	t.Parallel()
 	for source, want := range map[string]bool{
 		"https://cdn.example/immutable/":  true,
@@ -48,8 +49,75 @@ func TestIsRemoteImmutableSource(t *testing.T) {
 		"ftp://cdn.example/immutable":     false,
 		"https:///immutable":              false,
 	} {
-		require.Equal(t, want, isRemoteImmutableSource(source), source)
+		got, err := classifyRemoteImmutableSource(source)
+		if source == "https:///immutable" {
+			require.Error(t, err)
+			continue
+		}
+		require.NoError(t, err, source)
+		require.Equal(t, want, got, source)
 	}
+}
+
+func TestClassifyRemoteImmutableSourceRejectsInvalidOrPlaintextRemoteHost(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, source := range []string{
+		"http://cdn.example/immutable",
+		"http://cdn.example/%zz",
+		"http:cdn.example/immutable",
+	} {
+		_, err := classifyRemoteImmutableSource(source)
+		require.Error(t, err, source)
+	}
+	for _, source := range []string{
+		"https://cdn.example/immutable",
+		"http://localhost:8080/immutable",
+		"http://127.0.0.1:8080/immutable",
+		"/var/lib/cardano/immutable",
+	} {
+		_, err := classifyRemoteImmutableSource(source)
+		require.NoError(t, err, source)
+	}
+}
+
+func TestRemoteImmutableRedirectRejectsHTTPSDowngrade(t *testing.T) {
+	t.Parallel()
+	req, err := http.NewRequest(
+		http.MethodGet,
+		"http://127.0.0.1:8081/immutable/00000.chunk",
+		nil,
+	)
+	require.NoError(t, err)
+	require.ErrorContains(
+		t,
+		checkRemoteImmutableRedirect(req, []*http.Request{
+			{URL: &url.URL{Scheme: "http", Host: "localhost:8080"}},
+			{URL: &url.URL{Scheme: "https", Host: "cdn.example"}},
+		}),
+		"requires HTTPS",
+	)
+	req.URL.Scheme = "https"
+	require.NoError(t, checkRemoteImmutableRedirect(req, nil))
+}
+
+func TestRemoteImmutableRedirectPreservesLimitAndLoopbackHTTP(t *testing.T) {
+	t.Parallel()
+	req := &http.Request{URL: &url.URL{
+		Scheme: "http",
+		Host:   "127.0.0.1:8080",
+	}}
+	via := []*http.Request{{URL: &url.URL{
+		Scheme: "http",
+		Host:   "localhost:8080",
+	}}}
+	require.NoError(t, checkRemoteImmutableRedirect(req, via))
+
+	for len(via) < 10 {
+		via = append(via, via[0])
+	}
+	require.ErrorContains(t, checkRemoteImmutableRedirect(req, via), "10 redirects")
 }
 
 // remoteRoot serves chunk triads copied from the immutable testdata, plus a

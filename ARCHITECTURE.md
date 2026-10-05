@@ -8130,10 +8130,13 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
-`dingo load` also reads an ImmutableDB served over HTTP(S). A source that
-parses as an `http://` or `https://` URL with a host, whether from the
+`dingo load` also reads an ImmutableDB served over HTTPS. Loopback HTTP is
+accepted for local development. A source that parses as an `http://` or
+`https://` URL with a host, whether from the
 positional argument, `immutableDbPath`, or `DINGO_IMMUTABLE_DB_PATH`, selects
-the remote root; anything else is a local directory and loads as before. The
+the remote root; non-loopback HTTP is rejected, including after a redirect,
+malformed HTTP(S) URLs are rejected, and inputs without an HTTP(S) scheme are
+local directories that load as before. The
 root serves `tip.json` (`slot`, `block_no`, and `hash` in hex) and `NNNNN.chunk`,
 `NNNNN.primary` and `NNNNN.secondary` per chunk, the layout a Genesis Sync
 Accelerator CDN publishes. `copyBlocksRemote` in `internal/node` downloads up
@@ -8146,8 +8149,9 @@ root does not publish; a chunk whose `.chunk` exists without its indexes is an
 error. The downloader lives in `internal/node` rather than reusing the
 `mithril` one because `mithril` imports `internal/node`.
 
-Trust: remote chunk files carry no signature or digest, and a remote root is
-trusted exactly as a local ImmutableDB is. `dingo load` decodes every block and
+Trust: remote chunk files carry no signature or digest, so authenticated
+transport establishes the remote root as the source. `dingo load` decodes
+every block and
 `Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
 or reordered chunk fails the load. The replay is a trusted replay that skips
 body-hash checks, so it does not detect a root serving a self-consistent

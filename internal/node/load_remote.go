@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,19 +55,63 @@ const (
 // file for a chunk number, which ends the contiguous published history.
 var errRemoteChunkNotPublished = errors.New("remote chunk not published")
 
-var remoteImmutableClient = &http.Client{Timeout: remoteImmutableFileTimeout}
+var remoteImmutableClient = &http.Client{
+	Timeout:       remoteImmutableFileTimeout,
+	CheckRedirect: checkRemoteImmutableRedirect,
+}
 
 // remoteImmutableRetryDelay is a variable so tests do not wait it out.
 var remoteImmutableRetryDelay = time.Second
 
-// isRemoteImmutableSource reports whether a load source names an HTTP(S)
-// ImmutableDB root rather than a local directory.
-func isRemoteImmutableSource(source string) bool {
+// classifyRemoteImmutableSource distinguishes a local directory from an
+// authenticated remote root.
+func classifyRemoteImmutableSource(source string) (bool, error) {
 	u, err := url.Parse(source)
 	if err != nil {
-		return false
+		if colon := strings.IndexByte(source, ':'); colon > 0 &&
+			(strings.EqualFold(source[:colon], "http") ||
+				strings.EqualFold(source[:colon], "https")) {
+			return false, fmt.Errorf("invalid remote ImmutableDB source: %w", err)
+		}
+		return false, nil
 	}
-	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	if !strings.EqualFold(u.Scheme, "http") &&
+		!strings.EqualFold(u.Scheme, "https") {
+		return false, nil
+	}
+	if u.Host == "" {
+		return false, errors.New("remote ImmutableDB source requires a host")
+	}
+	if strings.EqualFold(u.Scheme, "http") && !isLoopbackRemoteURL(u) {
+		return false, errors.New("remote ImmutableDB source requires HTTPS")
+	}
+	return true, nil
+}
+
+func isLoopbackRemoteURL(u *url.URL) bool {
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	return strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback()
+}
+
+func checkRemoteImmutableRedirect(
+	req *http.Request,
+	via []*http.Request,
+) error {
+	if len(via) >= 10 {
+		return errors.New("remote ImmutableDB stopped after 10 redirects")
+	}
+	if strings.EqualFold(req.URL.Scheme, "https") {
+		return nil
+	}
+	if strings.EqualFold(req.URL.Scheme, "http") && len(via) > 0 {
+		previous := via[len(via)-1]
+		if strings.EqualFold(previous.URL.Scheme, "http") &&
+			isLoopbackRemoteURL(previous.URL) && isLoopbackRemoteURL(req.URL) {
+			return nil
+		}
+	}
+	return errors.New("remote ImmutableDB redirect requires HTTPS")
 }
 
 // remoteImmutableTip is the tip.json document a Genesis Sync Accelerator
@@ -76,11 +121,12 @@ type remoteImmutableTip struct {
 	Hash string `json:"hash"`
 }
 
-// copyBlocksRemote loads blocks from an HTTP(S) ImmutableDB root. Chunk
-// triads download into staging up to remoteImmutablePrefetch ahead, in any
-// order, and move into the ready directory strictly in chunk order, so
-// copyBlocksDirect only ever reads a contiguous prefix. Copying stops when
-// the chain reaches the remote tip or the root publishes no next chunk.
+// copyBlocksRemote loads blocks from an HTTPS or loopback HTTP ImmutableDB
+// root. Chunk triads download into staging up to remoteImmutablePrefetch
+// ahead, in any order, and move into the ready directory strictly in chunk
+// order, so copyBlocksDirect only ever reads a contiguous prefix. Copying
+// stops when the chain reaches the remote tip or the root publishes no next
+// chunk.
 // Copied chunks below the one holding the chain tip are evicted, and that
 // chunk stays, so a later run resumes from it.
 func copyBlocksRemote(
@@ -91,6 +137,13 @@ func copyBlocksRemote(
 	c *chain.Chain,
 	replayBatches chan<- []gledger.Block,
 ) (int, uint64, error) {
+	remote, err := classifyRemoteImmutableSource(rootURL)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !remote {
+		return 0, 0, errors.New("remote ImmutableDB source requires HTTP or HTTPS")
+	}
 	rootURL = strings.TrimRight(rootURL, "/")
 	tip, err := fetchRemoteImmutableTip(ctx, rootURL)
 	if err != nil {
