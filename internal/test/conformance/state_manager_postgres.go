@@ -211,10 +211,10 @@ func newPostgresResetter(dsn, schema string) (*backendResetter, error) {
 // deliberately unread: a WITH branch that modifies data runs whether or not
 // the primary query references it.
 //
-// TRUNCATE ... CASCADE could reach a table outside the managed list, through
-// a foreign key into one that is in it. Nothing in this schema is outside
-// that list but schema_migrations, which references nothing, so dropping
-// CASCADE removes no reachable table.
+// The former TRUNCATE ... CASCADE reset could reach a table outside the
+// managed list through a foreign key into one that is in it. The only tables
+// outside the list are schema_migrations and node_settings_gate; neither
+// references a managed table.
 func deletePostgresTables(
 	ctx context.Context,
 	db *sql.DB,

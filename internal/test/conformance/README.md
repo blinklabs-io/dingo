@@ -233,13 +233,13 @@ does not fall when the table holds the handful of rows one vector wrote.
 `deleteMysqlTables` batches a `DELETE` per dirty table into one transaction
 instead — measured on a `mysql:8` container with the CI service's settings,
 1,687ms of `TRUNCATE` per reset against 23ms of batched `DELETE`. `DELETE`
-does not restart `AUTO_INCREMENT` and `TRUNCATE` does; nothing here needs it
-restarted, because the Postgres backend's `TRUNCATE` carries no `RESTART
-IDENTITY` and so has never restarted its sequences between vectors either,
-while `TestRulesConformanceVectorsPostgres` asserts that backend reproduces
-the SQLite baseline vector for vector. `TestMain` drops the process database and removes this directory
-once, after every test in the process has finished -- see
-`process_cleanup_test.go`.
+does not restart `AUTO_INCREMENT`, unlike MySQL's former `TRUNCATE`. Resetting
+IDs is unnecessary here: PostgreSQL's former `TRUNCATE` omitted `RESTART
+IDENTITY`, so its sequences already advanced between vectors. The PostgreSQL
+backend still reproduces the SQLite baseline vector for vector, as
+`TestRulesConformanceVectorsPostgres` asserts. `TestMain` drops the process
+database and removes this directory once, after every test in the process has
+finished; see `process_cleanup_test.go`.
 
 `TestRulesConformanceVectorsMysql` follows the same count-comparison approach
 as the Postgres variant, for the same reason, and likewise reuses the memoized

@@ -168,9 +168,8 @@ func newDingoMysqlStateManagerAtDatabase(
 // DSN naming a database that does not exist yet, though it always does here
 // once the store has been constructed once.
 //
-// MySQL has no multi-table TRUNCATE, so the batching PostgreSQL gets from one
-// TRUNCATE statement is unavailable; deleteMysqlTables batches into one
-// transaction instead. See reset_cost.go for the measurements.
+// MySQL deletes each table in one transaction; PostgreSQL batches its deletes
+// in one statement. See reset_cost.go for the measurements.
 func newMysqlResetter(rootDSN, database string) (*backendResetter, error) {
 	cfg, err := mysqldriver.ParseDSN(rootDSN)
 	if err != nil {

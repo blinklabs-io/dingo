@@ -474,12 +474,12 @@ func TestDeleteMysqlTablesClearsDespiteForeignKeys(t *testing.T) {
 			mysqlQuoteIdentifier(name)
 	}
 	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("parent")+
-		" (id INT AUTO_INCREMENT PRIMARY KEY)")
+		" (id INT AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB")
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, "CREATE TABLE "+qualify("child")+
 		" (id INT AUTO_INCREMENT PRIMARY KEY, parent_id INT, "+
 		"CONSTRAINT fk_parent FOREIGN KEY (parent_id) REFERENCES "+
-		qualify("parent")+" (id))")
+		qualify("parent")+" (id)) ENGINE=InnoDB")
 	require.NoError(t, err)
 	_, err = db.ExecContext(ctx, "INSERT INTO "+qualify("parent")+
 		" (id) VALUES (1)")
