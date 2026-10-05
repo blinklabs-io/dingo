@@ -51,8 +51,7 @@ func newSQLOperationsCounter(
 			"reason prepared_stmt.go's cache hits do.",
 	}, []string{"op"})
 	if err := reg.Register(counter); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if errors.As(err, &already) {
+		if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
 			if existing, ok := already.ExistingCollector.(*prometheus.CounterVec); ok {
 				return existing
 			}
@@ -215,8 +214,7 @@ func newSQLQueryDurationHistogram(
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 15),
 	}, []string{"op", "query"})
 	if err := reg.Register(histogram); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if errors.As(err, &already) {
+		if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
 			if existing, ok := already.ExistingCollector.(*prometheus.HistogramVec); ok {
 				return existing
 			}
@@ -250,8 +248,7 @@ func safeRegisterGaugeFunc(
 		fn,
 	)
 	if err := reg.Register(gauge); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if !errors.As(err, &already) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}
@@ -276,8 +273,7 @@ func safeRegisterCounterFunc(
 		fn,
 	)
 	if err := reg.Register(counter); err != nil {
-		var already prometheus.AlreadyRegisteredError
-		if !errors.As(err, &already) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}
@@ -313,18 +309,18 @@ func classifySQLStatement(query string) (op, name string) {
 		if !ok {
 			break
 		}
-		idx := strings.IndexByte(rest, '\n')
-		if idx < 0 {
+		before, after, ok := strings.Cut(rest, "\n")
+		if !ok {
 			// A comment with no trailing newline is the entire remaining
 			// text: there is no statement left to classify.
 			return "other", name
 		}
 		if name == "unknown" {
-			if parsed, ok := parseSQLCQueryName(rest[:idx]); ok {
+			if parsed, ok := parseSQLCQueryName(before); ok {
 				name = parsed
 			}
 		}
-		q = rest[idx+1:]
+		q = after
 	}
 	for _, op := range [...]string{"INSERT", "UPDATE", "DELETE", "SELECT"} {
 		if len(q) >= len(op) && strings.EqualFold(q[:len(op)], op) {

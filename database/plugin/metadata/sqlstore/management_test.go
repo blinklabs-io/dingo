@@ -17,17 +17,278 @@ package sqlstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
+
+func initialNodeSettingsGates() nodesettings.Values {
+	return nodesettings.Values{
+		nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitWordV1,
+	}
+}
+
+func TestNodeSettingsGatesRoundTrip(t *testing.T) {
+	store := newManagementTestStore(t)
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, initialNodeSettingsGates(), gates)
+
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{
+			"network_magic": "1",
+			"start_era":     "dijkstra",
+		},
+		42, 1000,
+	))
+
+	gates, err = store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "1", gates["network_magic"])
+	require.Equal(t, "dijkstra", gates["start_era"])
+}
+
+func TestNodeSettingsGatesUpsertOverwrites(t *testing.T) {
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{"storage_mode": "api"}, 1, 10,
+	))
+	require.NoError(t, store.SetNodeSettingsGates(
+		nodesettings.Values{"storage_mode": "core"}, 2, 20,
+	))
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "core", gates["storage_mode"])
+}
+
+func TestNodeSettingsGatesEmptyWriteIsNoOp(t *testing.T) {
+	store := newManagementTestStore(t)
+	require.NoError(t, store.SetNodeSettingsGates(nil, 0, 0))
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, initialNodeSettingsGates(), gates)
+}
+
+// TestInsertNodeSettingsGateIfAbsentFirstCallWins pins the ordinary case:
+// the first call for a name inserts and reports it, unlike
+// SetNodeSettingsGates's unconditional upsert.
+func TestInsertNodeSettingsGateIfAbsentFirstCallWins(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(t, "1", gates["network_magic"])
+}
+
+// TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite is
+// InsertNodeSettingsGateIfAbsent's whole point: a second call for a name
+// that already has a row must report that it did not insert and must never
+// touch the existing value -- the opposite of SetNodeSettingsGates's
+// upsert, which always overwrites regardless of what is already there.
+func TestInsertNodeSettingsGateIfAbsentLoserDoesNotOverwrite(t *testing.T) {
+	store := newManagementTestStore(t)
+	inserted, err := store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "1", 0, 0,
+	)
+	require.NoError(t, err)
+	require.True(t, inserted)
+
+	inserted, err = store.InsertNodeSettingsGateIfAbsent(
+		"network_magic", "2", 10, 100,
+	)
+	require.NoError(t, err)
+	require.False(t, inserted)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		"1",
+		gates["network_magic"],
+		"a losing call must never overwrite the winner's value",
+	)
+}
+
+// TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins runs many
+// concurrent conditional inserts for the same name against a real
+// connection pool and asserts exactly one reports having inserted -- the
+// property commit_timestamp.go's evaluateAndPersistGates depends on to
+// detect a concurrent first-ever opener instead of racing an unconditional
+// upsert.
+func TestInsertNodeSettingsGateIfAbsentConcurrentCallsExactlyOneWins(
+	t *testing.T,
+) {
+	store := newManagementTestStore(t)
+	const attempts = 8
+	results := make([]bool, attempts)
+	errorsByAttempt := make([]error, attempts)
+	var wg sync.WaitGroup
+	wg.Add(attempts)
+	for i := range attempts {
+		go func(i int) {
+			defer wg.Done()
+			inserted, err := store.InsertNodeSettingsGateIfAbsent(
+				"storage_mode", "core", 0, 0,
+			)
+			errorsByAttempt[i] = err
+			results[i] = inserted
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
+
+	winners := 0
+	for _, inserted := range results {
+		if inserted {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners, "exactly one concurrent insert must win")
+}
+
+func TestInsertNodeSettingsGatesIfAbsentConcurrentSetsAreAtomic(t *testing.T) {
+	store := newManagementTestStore(t)
+	sets := []nodesettings.Values{
+		{"network_magic": "1", "start_era": "byron"},
+		{"network_magic": "2", "start_era": "shelley"},
+	}
+	inserted := make([]bool, len(sets))
+	errorsByAttempt := make([]error, len(sets))
+	var wg sync.WaitGroup
+	wg.Add(len(sets))
+	for i := range sets {
+		go func(i int) {
+			defer wg.Done()
+			inserted[i], errorsByAttempt[i] =
+				store.InsertNodeSettingsGatesIfAbsent(sets[i], 0, 0)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errorsByAttempt {
+		require.NoError(t, err, "attempt %d", i)
+	}
+	winners := 0
+	for _, value := range inserted {
+		if value {
+			winners++
+		}
+	}
+	require.Equal(t, 1, winners)
+
+	gates, err := store.GetNodeSettingsGates()
+	require.NoError(t, err)
+	winningSet := sets[0]
+	if !inserted[0] {
+		winningSet = sets[1]
+	}
+	require.Equal(t, initialNodeSettingsGates()[nodesettings.AlonzoPParamsUnitGateName],
+		gates[nodesettings.AlonzoPParamsUnitGateName])
+	delete(gates, nodesettings.AlonzoPParamsUnitGateName)
+	require.Equal(t, winningSet, gates)
+}
+
+func TestInsertNodeSettingsGatesIfAbsentPreservesRollbackFailure(t *testing.T) {
+	rollbackErr := errors.New("rollback failed")
+	err := errors.Join(errNodeSettingsGateInitializationLost, rollbackErr)
+	require.False(t, isOnlyNodeSettingsGateInitializationRace(err))
+}
+
+// TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot proves every write path
+// that stamps recordedEpoch/recordedSlot onto a gate row rejects a uint64
+// value outside SQLite's signed INTEGER domain instead of silently wrapping
+// it into a negative column value, matching the checkedInt64 guard already
+// used elsewhere in this package for the same write boundary.
+func TestNodeSettingsGatesRejectOutOfDomainEpochAndSlot(t *testing.T) {
+	const outOfDomain = uint64(math.MaxInt64) + 1
+
+	// requireOnlyInitialGates proves rejection actually left no new row behind:
+	// a regression that writes the row and still returns an error would
+	// otherwise slip past a test that only checks the error return.
+	requireOnlyInitialGates := func(t *testing.T, store *Store) {
+		t.Helper()
+		gates, err := store.GetNodeSettingsGates()
+		require.NoError(t, err)
+		require.Equal(t, initialNodeSettingsGates(), gates)
+	}
+
+	t.Run("SetNodeSettingsGates bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			outOfDomain,
+			0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("SetNodeSettingsGates bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		err := store.SetNodeSettingsGates(
+			nodesettings.Values{"start_era": "byron"},
+			0,
+			outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", outOfDomain, 0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGateIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGateIfAbsent(
+			"start_era", "byron", 0, outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad epoch", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, outOfDomain, 0,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+
+	t.Run("InsertNodeSettingsGatesIfAbsent bad slot", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		_, err := store.InsertNodeSettingsGatesIfAbsent(
+			nodesettings.Values{"start_era": "byron"}, 0, outOfDomain,
+		)
+		require.Error(t, err)
+		requireOnlyInitialGates(t, store)
+	})
+}
 
 func newManagementTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -84,8 +345,8 @@ func TestGetPoolByVrfKeyHashExcludesRetiredPool(t *testing.T) {
 
 }
 
-// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner is the
-// regression test for a CodeRabbit finding on this PR: a retired pool's own
+// TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner verifies that a
+// retired pool's own
 // historical registration of a key must not shadow a different, currently
 // active pool that legitimately re-registered the same, by-then-free key.
 // Both pools have a pool_registration row naming the key, so both are
@@ -145,7 +406,7 @@ func TestGetPoolByVrfKeyHashSkipsRetiredCandidateForActiveOwner(
 }
 
 // TestGetPoolByVrfKeyHashPreservesActiveKeyDuringDeferredReRegistration is
-// the regression test for issue #4352: a pool re-registering with a new VRF
+// the regression test for this case: a pool re-registering with a new VRF
 // key mid-epoch must not free its old key before the epoch boundary, because
 // cardano-ledger defers a re-registration through psFutureStakePoolParams
 // until then.
@@ -326,7 +587,7 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 }
 
 // TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey is the
-// regression test for the PV11+ follow-up to #4352: after pool P cycles
+// regression test for the PV11+ follow-up case: after pool P cycles
 // A -> B -> C within one epoch, a later reuse of B (the superseded, no
 // longer pending value) must still be rejected, because psVRFKeyHashes
 // retains every key placed in psFutureStakePoolParams during the epoch, not
@@ -335,7 +596,10 @@ func TestGetPoolByVrfKeyHashActivatesAndReleasesAtEpochBoundary(
 // this same pool as the claimant and PoolCurrentState disagrees with the
 // requested key, so this method must report P as claiming B even though B
 // is neither P's effective (pre-boundary) key nor its current pending one.
-func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
+// TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey pins that only a
+// pool's latest same-epoch registration reserves its key, not every key the
+// pool cycled through during the epoch.
+func TestGetPoolByVrfKeyHashFreesSupersededSameEpochKey(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -370,9 +634,9 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 		},
 		nil,
 	))
-	// P: B -> C, same epoch. B is now superseded -- it is neither P's
-	// effective key (still A) nor its current pending key (now C) -- but
-	// it must still be claimed by P for the rest of the epoch.
+	// P: B -> C, same epoch. B is now superseded: it was never P's
+	// effective key (still A) and is no longer P's pending key (now C), so
+	// it must be free for a different pool to claim.
 	require.NoError(t, store.ImportPool(
 		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
 		&models.PoolRegistration{
@@ -385,25 +649,11 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 
 	const epochStartSlot = 30
 
-	// B must be reported as claimed by P, not free, even though it is not
-	// P's effective key (A) or current pending key (C). This is the
-	// signal gouroboros's caller needs: it will compare against
-	// PoolCurrentState (C) and reject a P -> B reuse because C != B.
-	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
-	require.NoError(t, err)
-	require.NotNil(
-		t,
-		got,
-		"a superseded same-epoch future key must still be claimed, "+
-			"not reported free",
-	)
-	require.Equal(t, poolKey, got.PoolKeyHash)
-
 	// Sanity check on the mechanism the caller relies on: P's current
 	// (latest) registration is genuinely C, not B, which is exactly what
-	// makes the reuse of B distinguishable from a legitimate revert to an
-	// unchanged key. This mirrors how ledger.LedgerView.PoolCurrentState
-	// picks the latest registration by AddedSlot.
+	// makes B a superseded, not merely an older, same-epoch key. This
+	// mirrors how ledger.LedgerView.PoolCurrentState picks the latest
+	// registration by AddedSlot.
 	fullPool, err := store.GetPool(
 		lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolKey)),
 		true,
@@ -419,6 +669,17 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 	}
 	require.Equal(t, keyC, latest.VrfKeyHash)
 
+	// B must be reported free: it is neither P's effective key (A) nor its
+	// latest pending key (C).
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		got,
+		"a superseded same-epoch key must be freed once a later "+
+			"same-epoch registration replaces it",
+	)
+
 	// A and C themselves are unaffected: A remains P's active key, and C
 	// is P's own pending key, so reverting to either must not be treated
 	// as a conflict against a different owner.
@@ -433,8 +694,221 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 	require.Equal(t, poolKey, got.PoolKeyHash)
 }
 
+// TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback covers the
+// rollback-preservation criterion: the fix ranks whatever
+// pool_registration rows currently exist, so rolling back the superseding
+// registration (C) must make the previously-superseded key (B) the pool's
+// latest pending key again, not leave it incorrectly free.
+func TestGetPoolByVrfKeyHashRestoresPendingKeyAfterRollback(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 3
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+	keyC := make([]byte, 32)
+	keyC[0] = 0xC
+
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyC,
+			AddedSlot:   70,
+		},
+		nil,
+	))
+
+	const epochStartSlot = 30
+
+	// Before rollback: C supersedes B, so B is free (the main fix behavior).
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(t, got, "B must start out free, superseded by C")
+
+	// Roll back everything after slot 60, removing C's registration (slot
+	// 70) but keeping B's (slot 50).
+	require.NoError(t, store.DeleteCertificatesAfterSlot(60, nil))
+
+	// After rollback: B is once again P's latest same-epoch registration,
+	// so it must be reserved again.
+	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		got,
+		"B must be reserved again once the rollback removes the "+
+			"registration that superseded it",
+	)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	// A remains P's effective key throughout.
+	got, err = store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
+// TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction covers
+// the one-transaction case (as against separate same-epoch transactions).
+// Every other test in this file writes each of P's re-
+// registrations through its own auto-committed call (mirroring cert-by-cert
+// application as blocks arrive on the live chain). This variant writes all
+// three -- A, then A -> B, then B -> C -- through one shared, explicitly
+// committed transaction instead, mirroring a bulk write such as a Mithril or
+// genesis import batch. The fix must rank by added_slot/block_index/
+// cert_index regardless of how many separate database transactions the rows
+// arrived in.
+func TestGetPoolByVrfKeyHashFreesSupersededKeyWrittenInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 4
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+	keyC := make([]byte, 32)
+	keyC[0] = 0xC
+
+	txn := store.Transaction(t.Context())
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		txn,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		txn,
+	))
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyC},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyC,
+			AddedSlot:   70,
+		},
+		txn,
+	))
+	require.NoError(t, txn.Commit())
+
+	const epochStartSlot = 30
+
+	// B must be free: superseded by C, even though all three registrations
+	// were written and committed as a single database transaction rather
+	// than three separate ones.
+	got, err := store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.Nil(
+		t,
+		got,
+		"a superseded same-epoch key must be freed whether its "+
+			"supersession was written in one transaction or many",
+	)
+
+	got, err = store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	got, err = store.GetPoolByVrfKeyHash(keyC, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
+// TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey covers
+// the two-step case: with only one same-epoch re-registration (A ->
+// B, no superseding C yet), B is still the pool's latest pending key and
+// must remain reserved alongside the still-effective A.
+func TestGetPoolByVrfKeyHashReservesActiveAndSoleSameEpochPendingKey(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	poolKey := make([]byte, 28)
+	poolKey[0] = 2
+	keyA := make([]byte, 32)
+	keyA[0] = 0xA
+	keyB := make([]byte, 32)
+	keyB[0] = 0xB
+
+	// P registers with A before the current epoch begins.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyA},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyA,
+			AddedSlot:   10,
+		},
+		nil,
+	))
+	// P: A -> B, mid-epoch, in a separate transaction from A's registration.
+	require.NoError(t, store.ImportPool(
+		&models.Pool{PoolKeyHash: poolKey, VrfKeyHash: keyB},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKey,
+			VrfKeyHash:  keyB,
+			AddedSlot:   50,
+		},
+		nil,
+	))
+
+	const epochStartSlot = 30
+
+	// A remains claimed: it is still P's effective key until the epoch
+	// boundary promotes B.
+	got, err := store.GetPoolByVrfKeyHash(keyA, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+
+	// B remains claimed: it is P's latest (and only) same-epoch pending
+	// key, not yet superseded by anything.
+	got, err = store.GetPoolByVrfKeyHash(keyB, epochStartSlot, nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+}
+
 // TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration
-// is the regression test for a human reviewer finding on this PR:
+// is the regression test for this case:
 // activePoolOrNil checked retirement against the live database tip, not
 // against epochStartSlot. A pool that retires and later submits a fresh
 // registration for a DIFFERENT key un-retires via that new registration
@@ -442,8 +916,7 @@ func TestGetPoolByVrfKeyHashClaimsSupersededSameEpochFutureKey(
 // re-registration, since the pool had left psStakePools). Checking
 // retirement against "now" let that pool's stale, pre-retirement
 // registration for its OLD key still resolve as active, reporting the old
-// key in use when the pool no longer holds it -- this PR's own bug class,
-// reintroduced.
+// key in use when the pool no longer holds it.
 func TestGetPoolByVrfKeyHashFreesKeyAfterRetirementThenDifferentKeyReRegistration(
 	t *testing.T,
 ) {
@@ -548,4 +1021,66 @@ func TestNodeSettingsAreImmutableWithNetworkBackfill(t *testing.T) {
 		StorageMode: types.StorageModeCore,
 		Network:     "preview",
 	}, settings)
+}
+
+// TestTransactionContextCancellationRollsBackWrites guards "preserve
+// transaction rollback on cancellation": a write issued through a
+// Transaction(ctx) must not survive once ctx is canceled mid-transaction,
+// and the connection it held must be released back to the pool rather than
+// leaked.
+//
+// This intentionally does not pin writeDB to a single connection: doing so
+// with SQLite's mode=memory&cache=shared DSN interacts badly with
+// database/sql discarding (rather than idling) a connection whose in-flight
+// statement failed from ctx cancellation -- a brief window with zero live
+// connections destroys the shared in-memory database out from under the
+// test, which is a SQLite test-fixture artifact, not the behavior under
+// test. Connection release is instead asserted directly against pool
+// stats.
+func TestTransactionContextCancellationRollsBackWrites(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	// database/sql discards (rather than idles) a pooled connection whose
+	// in-flight statement failed from ctx cancellation, and reopens a fresh
+	// one lazily on next use. For SQLite's mode=memory&cache=shared DSN, a
+	// window with zero live connections destroys the shared in-memory
+	// database along with it. Hold one extra, otherwise-unused connection
+	// open for the test's duration so the schema survives that window.
+	keepAlive, err := store.writeDB.Conn(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = keepAlive.Close() })
+
+	ctx, cancel := context.WithCancel(t.Context())
+	txn := store.Transaction(ctx)
+	require.NoError(t, store.SetCommitTimestamp(42, txn))
+
+	cancel()
+
+	// database/sql rolls back a Tx once the ctx supplied to BeginTx is
+	// canceled, per BeginTx's documented contract -- but that happens on an
+	// internal watcher goroutine, not synchronously with cancel(), so poll
+	// rather than assert immediately. (In practice this also fails on the
+	// first attempt regardless of that goroutine's timing: dbFromTxn hands
+	// this statement the transaction's own now-canceled ctx directly.)
+	require.Eventually(t, func() bool {
+		return store.SetCommitTimestamp(43, txn) != nil
+	}, 2*time.Second, 5*time.Millisecond,
+		"transaction must stop accepting writes once its ctx is canceled")
+
+	require.Error(t, txn.Commit())
+
+	// The connection the aborted transaction held must come back to the
+	// pool rather than being leaked: only the keepAlive connection above
+	// should remain checked out.
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().InUse <= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"canceled transaction's connection must be released back to the pool")
+
+	// Neither the successful first write nor anything else from the
+	// canceled transaction may be durably visible.
+	persisted, err := store.GetCommitTimestamp()
+	require.NoError(t, err)
+	require.Zero(t, persisted)
 }

@@ -16,6 +16,7 @@
 package sqlstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -31,24 +32,37 @@ id, tx_hash, action_index, action_type, proposed_epoch, expires_epoch,
 parent_tx_hash, parent_action_idx, enacted_epoch, enacted_slot,
 ratified_epoch, ratified_slot, policy_hash, anchor_url, anchor_hash, deposit,
 return_address, gov_action_cbor, expired_epoch, expired_slot, added_slot,
-deleted_slot, dropped_epoch, dropped_slot`
+deleted_slot, dropped_epoch, dropped_slot, tx_index`
 
-// governanceProposalFromSQL joins in the drop-state companion table (see its
-// migration comment for why dropped_epoch/dropped_slot are not columns on
-// governance_proposal itself). Every column name across the two tables is
-// unique, so callers can keep referencing dropped_epoch/dropped_slot and
-// every other governance_proposal column unqualified.
+// governanceProposalFromSQL joins in the drop-state and submission-order
+// companion tables (see their migration comments for why dropped_epoch,
+// dropped_slot and tx_index are not columns on governance_proposal itself).
+// Apart from the two proposal_id join keys, every column name across the
+// three tables is unique, so callers can keep referencing those columns and
+// every governance_proposal column unqualified.
 const governanceProposalFromSQL = `
 FROM governance_proposal
 LEFT JOIN governance_proposal_drop
-  ON governance_proposal_drop.proposal_id = governance_proposal.id`
+  ON governance_proposal_drop.proposal_id = governance_proposal.id
+LEFT JOIN governance_proposal_order
+  ON governance_proposal_order.proposal_id = governance_proposal.id`
+
+// governanceProposalSubmissionOrderSQL orders proposals within one slot the
+// way Conway RATIFY walks them: block transaction position, then action
+// position within the transaction. tx_hash separates two transactions only
+// for rows stored without a position, which keep the hash order they had
+// before positions were recorded; the CASE keeps any such rows first on
+// every backend, whatever its NULL ordering.
+const governanceProposalSubmissionOrderSQL = `
+CASE WHEN governance_proposal_order.tx_index IS NULL THEN 0 ELSE 1 END ASC,
+governance_proposal_order.tx_index ASC, tx_hash ASC, action_index ASC`
 
 const governanceProposalOrderSQL = `
-proposed_epoch ASC, added_slot ASC, tx_hash ASC, action_index ASC`
+proposed_epoch ASC, added_slot ASC,` + governanceProposalSubmissionOrderSQL
 
 const ratifiedGovernanceProposalOrderSQL = `
-ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,
-tx_hash ASC, action_index ASC`
+ratified_epoch ASC, ratified_slot ASC, proposed_epoch ASC, added_slot ASC,` +
+	governanceProposalSubmissionOrderSQL
 
 func (s *Store) GetGovernanceProposal(
 	txHash []byte,
@@ -86,13 +100,24 @@ func (s *Store) GetActiveGovernanceProposals(
 	)
 }
 
+func (s *Store) GetGovernanceProposalSet(
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	return s.queryGovernanceProposals(
+		txn,
+		"enacted_epoch IS NULL AND dropped_epoch IS NULL "+
+			"AND deleted_slot IS NULL",
+		governanceProposalOrderSQL,
+	)
+}
+
 func (s *Store) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.GovernanceProposal, error) {
 	return s.queryGovernanceProposals(
 		txn,
-		"expires_epoch < ? AND enacted_epoch IS NULL "+
+		"expires_epoch < ? AND ratified_epoch IS NULL AND enacted_epoch IS NULL "+
 			"AND expired_epoch IS NULL AND deleted_slot IS NULL",
 		governanceProposalOrderSQL,
 		epoch,
@@ -122,7 +147,7 @@ func (s *Store) GetExpiredAwaitingDropGovernanceProposals(
 	// guard on the caller's step ordering: a boundary that is reprocessed
 	// after a commit crash reruns this query against rows the first pass
 	// already marked expired at that same epoch, and an unbounded predicate
-	// would refund them in the epoch they expired (dingo#4411).
+	// would refund them in the epoch they expired.
 	return s.queryGovernanceProposals(
 		txn,
 		"expired_epoch < ? AND dropped_epoch IS NULL "+
@@ -199,15 +224,26 @@ func (s *Store) GetLastEnactedGovernanceProposal(
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, len(actionTypes))
+	args := make([]any, len(actionTypes)*2)
 	for i, actionType := range actionTypes {
 		args[i] = actionType
+		args[len(actionTypes)+i] = actionType
 	}
+	placeholders := bindPlaceholders(len(actionTypes))
 	proposal, err := scanGovernanceProposal(db.QueryRowContext(
 		ctx,
 		"SELECT "+governanceProposalColumns+governanceProposalFromSQL+`
- WHERE action_type IN (`+bindPlaceholders(len(args))+`)
+ WHERE action_type IN (`+placeholders+`)
    AND enacted_epoch IS NOT NULL AND deleted_slot IS NULL
+   AND NOT EXISTS (
+       SELECT 1 FROM governance_proposal AS child
+        WHERE child.parent_tx_hash = governance_proposal.tx_hash
+          AND child.parent_action_idx = governance_proposal.action_index
+          AND child.action_type IN (`+placeholders+`)
+          AND child.enacted_epoch = governance_proposal.enacted_epoch
+          AND child.enacted_slot = governance_proposal.enacted_slot
+          AND child.deleted_slot IS NULL
+   )
  ORDER BY enacted_epoch DESC, enacted_slot DESC, id DESC
  LIMIT 1`,
 		args...,
@@ -329,6 +365,21 @@ ON CONFLICT (proposal_id) DO UPDATE SET
 					id,
 					proposal.DroppedEpoch,
 					proposal.DroppedSlot,
+				); err != nil {
+					return err
+				}
+			}
+
+			// A nil TxIndex means the caller did not supply the position, so
+			// an existing row is left in place rather than cleared.
+			if proposal.TxIndex != nil {
+				if _, err := db.ExecContext(ctx, `
+INSERT INTO governance_proposal_order (proposal_id, tx_index)
+VALUES (?, ?)
+ON CONFLICT (proposal_id) DO UPDATE SET
+    tx_index = excluded.tx_index`,
+					id,
+					*proposal.TxIndex,
 				); err != nil {
 					return err
 				}
@@ -462,6 +513,23 @@ func (s *Store) SetGovernanceVote(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
+			var previousVote sql.NullByte
+			var previousAnchorURL sql.NullString
+			var previousAnchorHash []byte
+			previousErr := db.QueryRowContext(ctx, `
+SELECT vote, anchor_url, anchor_hash
+FROM governance_vote
+WHERE proposal_id = ? AND voter_type = ? AND voter_credential_tag = ?
+    AND voter_credential = ?`,
+				vote.ProposalID,
+				vote.VoterType,
+				vote.VoterCredentialTag,
+				vote.VoterCredential,
+			).Scan(&previousVote, &previousAnchorURL, &previousAnchorHash)
+			if previousErr != nil && !errors.Is(previousErr, sql.ErrNoRows) {
+				return previousErr
+			}
+
 			var id uint
 			err := db.QueryRowContext(ctx, `
 INSERT INTO governance_vote (
@@ -488,9 +556,38 @@ RETURNING id`,
 				vote.VoteUpdatedSlot,
 				vote.DeletedSlot,
 			).Scan(&id)
-			if err == nil {
-				vote.ID = id
+			if err != nil {
+				return err
 			}
+			vote.ID = id
+
+			// Record a history entry whenever this call changes the
+			// effective vote (including the first cast, where no previous
+			// row exists), so a later rollback that lands between two
+			// replacements can restore the value that was actually current
+			// at the target slot instead of losing it.
+			unchanged := previousErr == nil &&
+				previousVote.Valid &&
+				previousVote.Byte == vote.Vote &&
+				previousAnchorURL.String == vote.AnchorURL &&
+				bytes.Equal(previousAnchorHash, vote.AnchorHash)
+			if unchanged {
+				return nil
+			}
+			transitionSlot := vote.AddedSlot
+			if vote.VoteUpdatedSlot != nil {
+				transitionSlot = *vote.VoteUpdatedSlot
+			}
+			_, err = db.ExecContext(ctx, `
+INSERT INTO governance_vote_history (
+    vote_id, transition_slot, vote, anchor_url, anchor_hash
+) VALUES (?, ?, ?, ?, ?)`,
+				id,
+				transitionSlot,
+				vote.Vote,
+				vote.AnchorURL,
+				vote.AnchorHash,
+			)
 			return err
 		},
 	)
@@ -507,6 +604,15 @@ func (s *Store) DeleteGovernanceProposalsAfterSlot(
 				query string
 				args  []any
 			}{
+				{
+					// Deleted explicitly rather than through the foreign-key
+					// cascade, which SQLite applies only with foreign_keys on.
+					query: `DELETE FROM governance_proposal_order
+				 WHERE proposal_id IN (
+				     SELECT id FROM governance_proposal WHERE added_slot > ?
+				 )`,
+					args: []any{slot},
+				},
 				{
 					query: "DELETE FROM governance_proposal WHERE added_slot > ?",
 					args:  []any{slot},
@@ -576,20 +682,94 @@ func (s *Store) DeleteGovernanceVotesAfterSlot(
 	return s.withWriteTransaction(
 		txn,
 		func(db queryer, ctx context.Context) error {
-			if _, err := db.ExecContext(ctx, `
-DELETE FROM governance_vote
-WHERE added_slot > ? OR vote_updated_slot > ?`,
-				slot,
-				slot,
-			); err != nil {
-				return err
+			// Drop history entries for transitions past the rollback point
+			// before restoring from what remains, and drop votes that did
+			// not exist at all before the rollback point (their history
+			// goes with them via ON DELETE CASCADE).
+			queries := []struct {
+				query string
+				args  []any
+			}{
+				{
+					query: `DELETE FROM governance_vote_history
+				 WHERE transition_slot > ?`,
+					args: []any{slot},
+				},
+				{
+					// A vote with no surviving history cannot be restored.
+					// This is the pre-v22 fallback: a vote replaced before
+					// the v22 backfill ran only got one history row for its
+					// current-at-migration value (DATABASE.md's
+					// governance_vote_history entry documents this data-loss
+					// limit), so a rollback landing between that vote's
+					// added_slot and its pre-migration replacement deletes
+					// that one history row and leaves nothing to restore
+					// from. Falling back to deletion here matches the
+					// pre-fix behavior instead of writing NULL into the
+					// NOT NULL vote column below.
+					query: `DELETE FROM governance_vote
+				 WHERE added_slot > ?
+				    OR NOT EXISTS (
+				        SELECT 1 FROM governance_vote_history AS history
+				        WHERE history.vote_id = governance_vote.id
+				    )`,
+					args: []any{slot},
+				},
+				{
+					// Restore the vote value that was current at the
+					// rollback point from the latest surviving history
+					// entry. This is a no-op for a vote whose
+					// vote_updated_slot was already at or before slot, since
+					// that entry is still the latest remaining one. Scoped to
+					// rows with surviving history: every other row was just
+					// deleted above.
+					query: `UPDATE governance_vote
+				 SET vote = (
+				     SELECT history.vote
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), anchor_url = (
+				     SELECT history.anchor_url
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), anchor_hash = (
+				     SELECT history.anchor_hash
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 ), vote_updated_slot = (
+				     SELECT history.transition_slot
+				     FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				     ORDER BY history.transition_slot DESC, history.id DESC
+				     LIMIT 1
+				 )
+				 WHERE EXISTS (
+				     SELECT 1 FROM governance_vote_history AS history
+				     WHERE history.vote_id = governance_vote.id
+				 )`,
+				},
+				{
+					query: `UPDATE governance_vote SET deleted_slot = NULL
+				 WHERE deleted_slot > ?`,
+					args: []any{slot},
+				},
 			}
-			_, err := db.ExecContext(ctx, `
-UPDATE governance_vote SET deleted_slot = NULL
-WHERE deleted_slot > ?`,
-				slot,
-			)
-			return err
+			for _, query := range queries {
+				if _, err := db.ExecContext(
+					ctx,
+					query.query,
+					query.args...,
+				); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	)
 }
@@ -655,6 +835,7 @@ func scanGovernanceProposal(
 		&proposal.DeletedSlot,
 		&proposal.DroppedEpoch,
 		&proposal.DroppedSlot,
+		&proposal.TxIndex,
 	)
 	if err != nil {
 		return nil, err
@@ -718,6 +899,55 @@ LIMIT 1`,
 		return nil, nil
 	}
 	return &member, err
+}
+
+// GetCommitteeHotAuthorizationsSince filters before ranking: a cold
+// credential's latest authorization is at or after minSlot exactly when its
+// latest authorization among rows at or after minSlot is, so the added_slot
+// index bounds the scan to the window without changing the answer.
+func (s *Store) GetCommitteeHotAuthorizationsSince(
+	minSlot uint64,
+	txn types.Txn,
+) ([]*models.AuthCommitteeHot, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+       host_credential, id, certificate_id, added_slot
+FROM (
+    SELECT cold_credential_tag, cold_credential, hot_credential_tag,
+           host_credential, id, certificate_id, added_slot,
+           ROW_NUMBER() OVER (
+               PARTITION BY cold_credential_tag, cold_credential
+               ORDER BY added_slot DESC, certificate_id DESC
+           ) rn
+    FROM auth_committee_hot
+    WHERE added_slot >= ?
+) auth
+WHERE auth.rn = 1`, minSlot)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.AuthCommitteeHot{}
+	for rows.Next() {
+		var member models.AuthCommitteeHot
+		if err := rows.Scan(
+			&member.ColdCredentialTag,
+			&member.ColdCredential,
+			&member.HotCredentialTag,
+			&member.HotCredential,
+			&member.ID,
+			&member.CertificateID,
+			&member.AddedSlot,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, &member)
+	}
+	return ret, rows.Err()
 }
 
 func (s *Store) GetActiveCommitteeMembers(
@@ -869,7 +1099,7 @@ GROUP BY cold_credential_tag, cold_credential`
 	return ret, nil
 }
 
-func (s *Store) GetCommitteeActiveCount(
+func (s *Store) GetCommitteeAuthorizedCount(
 	txn types.Txn,
 ) (int, error) {
 	members, err := s.GetActiveCommitteeMembers(txn)

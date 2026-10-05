@@ -17,17 +17,26 @@ package bark
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 	databasev1alpha1 "github.com/blinklabs-io/bark/proto/v1alpha1/database"
+	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
@@ -37,6 +46,1083 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+// barkFakeCloudDestination is a minimal stand-in for a real cloud
+// destination (S3/GCS), backed by an ordinary local directory — the same
+// pattern database/lifecycle/destination_test.go uses, redeclared here
+// because Go test binaries are per-package: that file's "faketest" scheme
+// registration only exists inside database/lifecycle's own test binary,
+// not bark's.
+type barkFakeCloudDestination struct {
+	dir string
+}
+
+func (d *barkFakeCloudDestination) UploadDir(
+	_ context.Context,
+	localDir string,
+) error {
+	if err := os.MkdirAll(d.dir, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(localDir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(d.dir, entry.Name()), data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *barkFakeCloudDestination) DownloadDir(
+	_ context.Context,
+	localDir string,
+) error {
+	entries, err := os.ReadDir(d.dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(d.dir, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(localDir, entry.Name()), data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *barkFakeCloudDestination) ListSnapshots(
+	_ context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
+	return lifecycle.ListSnapshots(d.dir)
+}
+
+// FetchManifest mirrors the real S3/GCS destinations' contract: a missing
+// manifest is wrapped in lifecycle.ErrCloudSnapshotNotFound (confirmed
+// absent), distinct from any other error (a real fake-backing-dir I/O
+// problem, which this fake has no way to simulate distinctly but is
+// preserved unwrapped regardless).
+func (d *barkFakeCloudDestination) FetchManifest(
+	_ context.Context,
+) (lifecycle.Manifest, error) {
+	m, err := lifecycle.ReadManifest(d.dir)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"%w: %w", lifecycle.ErrCloudSnapshotNotFound, err,
+		)
+	}
+	return m, err
+}
+
+func (d *barkFakeCloudDestination) Delete(_ context.Context) error {
+	return os.RemoveAll(d.dir)
+}
+
+var (
+	_ lifecycle.SnapshotLister       = &barkFakeCloudDestination{}
+	_ lifecycle.CloudManifestFetcher = &barkFakeCloudDestination{}
+	_ lifecycle.CloudDeleter         = &barkFakeCloudDestination{}
+)
+
+// barkFakeCloudDir is process-global and only momentarily locked, so the
+// scheme registered below resolves against whichever test wrote it last.
+// Every test in this file therefore runs sequentially -- none of them
+// calls t.Parallel. Giving the fixture a per-test identity (or the
+// serializing gate database/lifecycle's equivalent uses) is what would
+// let them run in parallel.
+var (
+	barkFakeCloudMu  sync.Mutex
+	barkFakeCloudDir string
+)
+
+// testDestinationRegistry is this test package's own instance-owned
+// registry (mirroring what composition code builds at startup — see
+// lifecycle.DestinationRegistry's doc comment), shared by every fake cloud
+// scheme this file registers below and threaded into
+// newTestDatabaseServiceHandler's Service/BarkConfig, instead of the
+// removed package-global process registry.
+var testDestinationRegistry = lifecycle.NewDestinationRegistry()
+
+// fakeCloudBackingDir reads a fake scheme's backing directory under mu and
+// refuses to resolve when none is set.
+//
+// A resolution with no backing directory would filepath.Join against "" and
+// write the URI path relative to the package directory. The only way to get
+// there is a resolution that outlived the test that set the fixture -- bark
+// runs snapshot and restore work on background goroutines -- and that should
+// error rather than leave files in the checkout.
+//
+// Shared by both fake schemes so the two registrations cannot drift.
+func fakeCloudBackingDir(
+	mu *sync.Mutex,
+	dir *string,
+	scheme string,
+) (string, error) {
+	mu.Lock()
+	base := *dir
+	mu.Unlock()
+	if base == "" {
+		return "", fmt.Errorf(
+			"%s: no backing directory set for this test",
+			scheme,
+		)
+	}
+	return base, nil
+}
+
+func init() {
+	testDestinationRegistry.Register(
+		"barkfaketest",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			base, err := fakeCloudBackingDir(
+				&barkFakeCloudMu, &barkFakeCloudDir, "barkfaketest",
+			)
+			if err != nil {
+				return nil, err
+			}
+			return &barkFakeCloudDestination{
+				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+			}, nil
+		},
+	)
+}
+
+func setBarkFakeCloudBackingDir(t *testing.T, dir string) {
+	t.Helper()
+	barkFakeCloudMu.Lock()
+	barkFakeCloudDir = dir
+	barkFakeCloudMu.Unlock()
+	t.Cleanup(func() {
+		barkFakeCloudMu.Lock()
+		barkFakeCloudDir = ""
+		barkFakeCloudMu.Unlock()
+	})
+}
+
+// barkFakeCloudDestinationNoDelete is identical to barkFakeCloudDestination
+// (backed by the same kind of local directory) except it deliberately
+// does not implement lifecycle.CloudDeleter — used to test
+// DeleteSnapshot's CodeUnimplemented path for a cloud copy that exists
+// but whose destination type doesn't support deletion, distinct from
+// "doesn't exist at all" (CodeNotFound) or "delete failed" (CodeInternal).
+type barkFakeCloudDestinationNoDelete struct {
+	dir string
+}
+
+func (d *barkFakeCloudDestinationNoDelete) UploadDir(
+	ctx context.Context,
+	localDir string,
+) error {
+	return (&barkFakeCloudDestination{dir: d.dir}).UploadDir(ctx, localDir)
+}
+
+func (d *barkFakeCloudDestinationNoDelete) DownloadDir(
+	ctx context.Context,
+	localDir string,
+) error {
+	return (&barkFakeCloudDestination{dir: d.dir}).DownloadDir(ctx, localDir)
+}
+
+func (d *barkFakeCloudDestinationNoDelete) FetchManifest(
+	ctx context.Context,
+) (lifecycle.Manifest, error) {
+	return (&barkFakeCloudDestination{dir: d.dir}).FetchManifest(ctx)
+}
+
+var _ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationNoDelete{}
+
+var (
+	barkFakeCloudNoDeleteMu  sync.Mutex
+	barkFakeCloudNoDeleteDir string
+)
+
+func init() {
+	testDestinationRegistry.Register(
+		"barkfaketest-nodelete",
+		func(uri *url.URL) (lifecycle.CloudDestination, error) {
+			base, err := fakeCloudBackingDir(
+				&barkFakeCloudNoDeleteMu,
+				&barkFakeCloudNoDeleteDir,
+				"barkfaketest-nodelete",
+			)
+			if err != nil {
+				return nil, err
+			}
+			return &barkFakeCloudDestinationNoDelete{
+				dir: filepath.Join(base, strings.TrimPrefix(uri.Path, "/")),
+			}, nil
+		},
+	)
+}
+
+func setBarkFakeCloudNoDeleteBackingDir(t *testing.T, dir string) {
+	t.Helper()
+	barkFakeCloudNoDeleteMu.Lock()
+	barkFakeCloudNoDeleteDir = dir
+	barkFakeCloudNoDeleteMu.Unlock()
+	t.Cleanup(func() {
+		barkFakeCloudNoDeleteMu.Lock()
+		barkFakeCloudNoDeleteDir = ""
+		barkFakeCloudNoDeleteMu.Unlock()
+	})
+}
+
+// barkFakeCloudDestinationCommError simulates a real cloud communication
+// failure (auth, network, timeout) rather than a confirmed-absent
+// manifest: FetchManifest always returns a plain error, never wrapped in
+// lifecycle.ErrCloudSnapshotNotFound. Used to prove that a probe failure
+// distinct from "confirmed not there" is surfaced to the caller rather
+// than silently folded into "not found".
+type barkFakeCloudDestinationCommError struct{}
+
+func (d *barkFakeCloudDestinationCommError) UploadDir(
+	context.Context,
+	string,
+) error {
+	return errors.New("simulated cloud communication failure")
+}
+
+func (d *barkFakeCloudDestinationCommError) DownloadDir(
+	context.Context,
+	string,
+) error {
+	return errors.New("simulated cloud communication failure")
+}
+
+func (d *barkFakeCloudDestinationCommError) FetchManifest(
+	context.Context,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, errors.New(
+		"simulated cloud communication failure",
+	)
+}
+
+func (d *barkFakeCloudDestinationCommError) ListSnapshots(
+	context.Context,
+) ([]lifecycle.SnapshotEntry, error) {
+	return nil, errors.New("simulated cloud communication failure")
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
+	_ lifecycle.SnapshotLister       = &barkFakeCloudDestinationCommError{}
+)
+
+func init() {
+	testDestinationRegistry.Register(
+		"barkfaketest-commerror",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &barkFakeCloudDestinationCommError{}, nil
+		},
+	)
+}
+
+// TestBarkFakeCloudBackingDirsResetBetweenTests guards against a leaked
+// global: setBarkFakeCloudBackingDir/
+// setBarkFakeCloudNoDeleteBackingDir used to set their package-level
+// backing-dir globals with no corresponding reset, so whichever test
+// happened to set one last left that directory in place for every
+// subsequent test in this package — a test that forgot to call the
+// setter (or was reordered/shuffled ahead of the one that used to set it
+// up) could silently resolve "barkfaketest://"/"barkfaketest-nodelete://"
+// against a leftover directory from an unrelated test instead of failing
+// loudly. Each subtest's t.Cleanup (registered by the respective setter)
+// runs synchronously before t.Run returns, so both globals must already
+// be reset by the time this checks them.
+// TestBarkFakeCloudSchemeRequiresBackingDir proves the fake schemes refuse to
+// resolve once no test owns the fixture. bark performs snapshot and restore
+// work on background goroutines (database.go), so a resolution can outlive the
+// t.Cleanup that reset the backing directory; joining the URI path onto an
+// empty base then wrote "prefix/cloud-a/..." into the package directory, which
+// a full `go test ./...` run reproduced.
+func TestBarkFakeCloudSchemeRequiresBackingDir(t *testing.T) {
+	for _, scheme := range []string{"barkfaketest", "barkfaketest-nodelete"} {
+		_, err := lifecycle.ParseCloudDestination(
+			testDestinationRegistry,
+			scheme+"://bucket/prefix",
+		)
+		require.Error(
+			t, err,
+			"%s must not resolve with no backing directory set", scheme,
+		)
+	}
+}
+
+func TestBarkFakeCloudBackingDirsResetBetweenTests(t *testing.T) {
+	t.Run("sets them", func(t *testing.T) {
+		setBarkFakeCloudBackingDir(t, t.TempDir())
+		setBarkFakeCloudNoDeleteBackingDir(t, t.TempDir())
+	})
+
+	barkFakeCloudMu.Lock()
+	gotCloud := barkFakeCloudDir
+	barkFakeCloudMu.Unlock()
+	require.Empty(
+		t,
+		gotCloud,
+		"barkFakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
+	)
+
+	barkFakeCloudNoDeleteMu.Lock()
+	gotNoDelete := barkFakeCloudNoDeleteDir
+	barkFakeCloudNoDeleteMu.Unlock()
+	require.Empty(
+		t,
+		gotNoDelete,
+		"barkFakeCloudNoDeleteDir must be reset via t.Cleanup once the test that set it finishes",
+	)
+}
+
+// TestListAvailableSnapshotsMergesLocalAndCloud seeds three snapshots
+// directly via database/lifecycle (bypassing bark's CreateSnapshot RPC,
+// whose test harness Service doesn't thread a cloud destination through)
+// to exercise mergedSnapshotCatalogPage's actual merge/dedup logic:
+//   - one present both locally and in the cloud (dedup must keep the
+//     local Location, not the cloud one)
+//   - one present ONLY in the cloud (local directory removed after
+//     upload, simulating DeleteSnapshot or manual pruning) — this is the
+//     entry ListSnapshots could never surface but ListAvailableSnapshots
+//     must
+//   - one present ONLY locally (never uploaded)
+func TestListAvailableSnapshotsMergesLocalAndCloud(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	localAndCloudDir := filepath.Join(snapshotDir, "local-and-cloud")
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(), testDestinationRegistry, db, localAndCloudDir,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
+		"", "",
+	)
+	require.NoError(t, err)
+
+	cloudOnlyDir := filepath.Join(snapshotDir, "cloud-only")
+	_, err = lifecycle.SnapshotToCloud(
+		context.Background(), testDestinationRegistry, db, cloudOnlyDir,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
+		"", "",
+	)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(cloudOnlyDir))
+
+	localOnlyDir := filepath.Join(snapshotDir, "local-only")
+	_, err = lifecycle.Snapshot(
+		context.Background(),
+		db,
+		localOnlyDir,
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	resp, err := h.ListAvailableSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+
+	byID := make(
+		map[string]*databasev1alpha1.SnapshotInfo,
+		len(resp.Msg.GetSnapshots()),
+	)
+	for _, s := range resp.Msg.GetSnapshots() {
+		byID[s.GetSnapshotId()] = s
+	}
+	require.Len(t, byID, 3)
+	require.Contains(t, byID, "local-and-cloud")
+	require.Contains(t, byID, "cloud-only")
+	require.Contains(t, byID, "local-only")
+
+	// Deduped entry must report its real local path, not a reconstructed
+	// cloud URI.
+	require.Equal(
+		t,
+		filepath.Join(snapshotDir, "local-and-cloud"),
+		byID["local-and-cloud"].GetLocation(),
+	)
+	// The cloud-only entry has no local directory anymore, so its
+	// Location must be the cloud URI.
+	require.Equal(t, cloudDest+"/cloud-only", byID["cloud-only"].GetLocation())
+	require.Equal(
+		t,
+		filepath.Join(snapshotDir, "local-only"),
+		byID["local-only"].GetLocation(),
+	)
+}
+
+// TestListAvailableSnapshotsSurvivesCloudListingFailure guards a real bug:
+// a cloud listing communication failure used to discard the local entries
+// mergedSnapshotCatalogPage had already built and fail the whole call with
+// CodeInternal, hiding known-good local snapshots from an operator over
+// what is often just a transient cloud outage -- exactly the class of
+// failure cloudSnapshotExists/resolveSnapshotSource/DeleteSnapshot
+// elsewhere in this file already report as CodeUnavailable rather than
+// CodeInternal. This proves the fix: a local-only snapshot still comes
+// back successfully even when the configured cloud destination's listing
+// call errors out.
+func TestListAvailableSnapshotsSurvivesCloudListingFailure(t *testing.T) {
+	snapshotDir := t.TempDir()
+
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		filepath.Join(snapshotDir, "local-only"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	resp, err := h.ListAvailableSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(t, "local-only", resp.Msg.GetSnapshots()[0].GetSnapshotId())
+}
+
+func TestListAvailableSnapshotsWithoutCloudDestIsLocalOnly(t *testing.T) {
+	snapshotDir := t.TempDir()
+
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	_, err := lifecycle.Snapshot(
+		context.Background(),
+		db,
+		filepath.Join(snapshotDir, "only-snapshot"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+	)
+	require.NoError(t, err)
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	// SnapshotCloudDestination left empty.
+
+	resp, err := h.ListAvailableSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, resp.Msg.GetSnapshots(), 1)
+	require.Equal(
+		t,
+		"only-snapshot",
+		resp.Msg.GetSnapshots()[0].GetSnapshotId(),
+	)
+}
+
+// ── Restore/VerifySnapshot/DeleteSnapshot cloud-fallback ──────────────────
+//
+// None of these three RPCs previously had a direct in-process test at
+// all (only exercised indirectly, if ever, via the real-network wire
+// test) — restoring requires a target data directory distinct from the
+// one used to create the source snapshot, which newTestDatabaseServiceHandler's
+// shared dbDataDir doesn't provide by default. These tests fix that gap
+// while also covering the new cloud-fallback behavior.
+
+func TestRestoreFromLocalSnapshot(t *testing.T) {
+	sourceDataDir := t.TempDir()
+	sourceDB := newDiskTestDB(t, sourceDataDir)
+	block1 := testBlock(1, 0x01)
+	require.NoError(t, sourceDB.BlockCreate(block1, nil))
+	require.NoError(t, sourceDB.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
+		BlockNumber: block1.Number,
+	}, nil))
+
+	snapshotDir := t.TempDir()
+	_, err := lifecycle.Snapshot(
+		context.Background(), sourceDB, filepath.Join(snapshotDir, "snap1"),
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+	)
+	require.NoError(t, err)
+	dbtest.CloseDatabase(sourceDB) //nolint:errcheck
+
+	targetDataDir := filepath.Join(t.TempDir(), "target")
+	h := newTestDatabaseServiceHandler(t, nil, targetDataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+
+	restoreResp, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "snap1"},
+		),
+	)
+	require.NoError(t, err)
+
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetRestoreStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
+					OperationId: restoreResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
+		progress.GetStatus(),
+		"restore message: %s", progress.GetMessage(),
+	)
+}
+
+func TestRestoreFromCloudOnlySnapshot(t *testing.T) {
+	sourceDataDir := t.TempDir()
+	sourceDB := newDiskTestDB(t, sourceDataDir)
+	block1 := testBlock(1, 0x01)
+	require.NoError(t, sourceDB.BlockCreate(block1, nil))
+	require.NoError(t, sourceDB.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
+		BlockNumber: block1.Number,
+	}, nil))
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		sourceDB,
+		filepath.Join(snapshotDir, "cloud-snap"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
+	)
+	require.NoError(t, err)
+	dbtest.CloseDatabase(sourceDB) //nolint:errcheck
+
+	// Remove the local copy so only the cloud mirror remains — simulating
+	// a snapshot ListAvailableSnapshots would surface as cloud-only.
+	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-snap")))
+
+	targetDataDir := filepath.Join(t.TempDir(), "target")
+	h := newTestDatabaseServiceHandler(t, nil, targetDataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	restoreResp, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "cloud-snap"},
+		),
+	)
+	require.NoError(t, err)
+
+	progress := waitForOperationStatus(
+		t,
+		func() *databasev1alpha1.OperationProgress {
+			statusResp, err := h.GetRestoreStatus(
+				context.Background(),
+				connect.NewRequest(&databasev1alpha1.GetRestoreStatusRequest{
+					OperationId: restoreResp.Msg.GetOperationId(),
+				}),
+			)
+			require.NoError(t, err)
+			return statusResp.Msg.GetProgress()
+		},
+	)
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
+		progress.GetStatus(),
+		"restore message: %s", progress.GetMessage(),
+	)
+}
+
+func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
+	h := newTestDatabaseServiceHandler(
+		t,
+		nil,
+		filepath.Join(t.TempDir(), "target"),
+	)
+	_, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "does-not-exist"},
+		),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+// TestRestoreReturnsUnavailableOnCloudCommunicationFailure guards against
+// a real bug: a real cloud communication failure (auth,
+// network, timeout — anything other than a confirmed-absent manifest)
+// while probing the configured cloud destination used to be silently
+// folded into "doesn't exist," so an operator restoring a snapshot whose
+// local copy had already been pruned (the exact case cloud fallback
+// exists for) could be told "not found" for a snapshot that may well
+// still be sitting in the cloud, indistinguishable from actual data loss.
+// It must instead be reported as CodeUnavailable, distinct from a
+// genuine CodeNotFound.
+func TestRestoreReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
+	h := newTestDatabaseServiceHandler(
+		t,
+		nil,
+		filepath.Join(t.TempDir(), "target"),
+	)
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	_, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.RestoreRequest{SnapshotId: "some-snapshot"},
+		),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+}
+
+func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "cloud-verify"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
+	)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-verify")))
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	verifyResp, err := h.VerifySnapshot(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.VerifySnapshotRequest{SnapshotId: "cloud-verify"},
+		),
+	)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		histResp, err := h.GetOperationHistory(
+			context.Background(),
+			connect.NewRequest(&databasev1alpha1.GetOperationHistoryRequest{}),
+		)
+		require.NoError(t, err)
+		for _, rec := range histResp.Msg.GetRecords() {
+			if rec.GetOperationId() == verifyResp.Msg.GetOperationId() {
+				return rec.GetStatus() == databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
+			}
+		}
+		return false
+	}, databaseOperationTimeout, 10*time.Millisecond,
+		"verify of a cloud-only snapshot must succeed",
+	)
+}
+
+func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "cloud-delete"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
+	)
+	require.NoError(t, err)
+	require.NoError(t, os.RemoveAll(filepath.Join(snapshotDir, "cloud-delete")))
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	_, err = h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "cloud-delete"},
+		),
+	)
+	require.NoError(t, err)
+
+	_, ok, err := lifecycle.FetchCloudManifest(
+		context.Background(),
+		testDestinationRegistry,
+		lifecycle.JoinCloudURI(cloudDest, "cloud-delete"),
+	)
+	require.True(t, ok)
+	require.Error(t, err, "cloud copy must actually be gone after delete")
+}
+
+func TestDeleteSnapshotRemovesBothLocalAndCloudCopies(t *testing.T) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		db,
+		filepath.Join(snapshotDir, "both"),
+		lifecycle.TriggerManual,
+		"test-version",
+		"badger",
+		"sqlite",
+		cloudDest,
+		"",
+		"",
+	)
+	require.NoError(t, err)
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	_, err = h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "both"},
+		),
+	)
+	require.NoError(t, err)
+
+	require.NoDirExists(t, filepath.Join(snapshotDir, "both"))
+	_, ok, err := lifecycle.FetchCloudManifest(
+		context.Background(),
+		testDestinationRegistry,
+		lifecycle.JoinCloudURI(cloudDest, "both"),
+	)
+	require.True(t, ok)
+	require.Error(t, err, "cloud copy must actually be gone after delete")
+}
+
+func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
+	setBarkFakeCloudBackingDir(t, t.TempDir())
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotCloudDestination = "barkfaketest://bucket/prefix"
+
+	_, err := h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{
+				SnapshotId: "does-not-exist",
+			},
+		),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+// TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure is
+// DeleteSnapshot's half of the same regression guard above: a snapshot
+// with no local copy must not be reported (or treated) as "not found"
+// when the cloud probe itself failed to communicate — that could delete
+// nothing while telling the operator there was nothing to delete, when
+// the cloud copy may still be there.
+func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(
+	t *testing.T,
+) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	_, err := h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(
+			&databasev1alpha1.DeleteSnapshotRequest{
+				SnapshotId: "some-snapshot",
+			},
+		),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+}
+
+// TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented
+// covers the third DeleteSnapshot outcome distinct from "not found
+// anywhere" (CodeNotFound) and "delete itself failed" (CodeInternal): a
+// cloud copy genuinely exists, but its destination type doesn't implement
+// CloudDeleter — S3/GCS always do, but a future destination type might
+// not, and this must be reported clearly rather than silently no-op'ing
+// and reporting success.
+func TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented(
+	t *testing.T,
+) {
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudNoDeleteBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest-nodelete://bucket/prefix"
+
+	localDir := filepath.Join(snapshotDir, "no-delete-support")
+	_, err := lifecycle.SnapshotToCloud(
+		context.Background(), testDestinationRegistry, db, localDir,
+		lifecycle.TriggerManual, "test-version", "badger", "sqlite", cloudDest,
+		"", "",
+	)
+	require.NoError(t, err)
+	// Remove the local copy so DeleteSnapshot must act on the cloud-only
+	// entry rather than succeeding via the local delete alone.
+	require.NoError(t, os.RemoveAll(localDir))
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	_, err = h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{
+			SnapshotId: "no-delete-support",
+		}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err))
+}
+
+// TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud seeds two
+// local-only and two cloud-only snapshots and pages through
+// ListAvailableSnapshots with a page size smaller than the total count,
+// proving pagination is correct over the actual merged (not just
+// same-source) catalog: every ID appears exactly once across all pages,
+// and the last page's next_page_token is empty.
+func TestListAvailableSnapshotsPaginatesAcrossMixedLocalAndCloud(t *testing.T) {
+	snapshotDir := t.TempDir()
+	cloudBackingDir := t.TempDir()
+	setBarkFakeCloudBackingDir(t, cloudBackingDir)
+	const cloudDest = "barkfaketest://bucket/prefix"
+
+	dataDir := t.TempDir()
+	db := newDiskTestDB(t, dataDir)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	for _, name := range []string{"local-a", "local-b"} {
+		_, err := lifecycle.Snapshot(
+			context.Background(), db, filepath.Join(snapshotDir, name),
+			lifecycle.TriggerManual, "test-version", "badger", "sqlite",
+		)
+		require.NoError(t, err)
+	}
+	for _, name := range []string{"cloud-a", "cloud-b"} {
+		dir := filepath.Join(snapshotDir, name)
+		_, err := lifecycle.SnapshotToCloud(
+			context.Background(),
+			testDestinationRegistry,
+			db,
+			dir,
+			lifecycle.TriggerManual,
+			"test-version",
+			"badger",
+			"sqlite",
+			cloudDest,
+			"",
+			"",
+		)
+		require.NoError(t, err)
+		require.NoError(t, os.RemoveAll(dir))
+	}
+
+	h := newTestDatabaseServiceHandler(t, nil, dataDir)
+	h.bark.config.SnapshotDir = snapshotDir
+	h.bark.config.SnapshotCloudDestination = cloudDest
+
+	seen := make(map[string]bool)
+	pageToken := ""
+	pages := 0
+	for {
+		pages++
+		require.LessOrEqual(t, pages, 10, "pagination did not terminate")
+
+		resp, err := h.ListAvailableSnapshots(
+			context.Background(),
+			connect.NewRequest(&databasev1alpha1.ListAvailableSnapshotsRequest{
+				PageSize:  2,
+				PageToken: pageToken,
+			}),
+		)
+		require.NoError(t, err)
+		for _, s := range resp.Msg.GetSnapshots() {
+			require.False(
+				t, seen[s.GetSnapshotId()],
+				"snapshot %q returned on more than one page", s.GetSnapshotId(),
+			)
+			seen[s.GetSnapshotId()] = true
+		}
+
+		pageToken = resp.Msg.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+	require.Equal(
+		t,
+		2,
+		pages,
+		"4 snapshots at page size 2 must take exactly 2 pages",
+	)
+
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	require.ElementsMatch(
+		t,
+		[]string{"local-a", "local-b", "cloud-a", "cloud-b"},
+		ids,
+	)
+}
+
+func TestSnapshotRPCManifestByteLimit(t *testing.T) {
+	for _, source := range []string{"local", "cloud"} {
+		for _, operation := range []string{"verify", "restore"} {
+			t.Run(source+"/"+operation, func(t *testing.T) {
+				dataDir := t.TempDir()
+				db := newDiskTestDB(t, dataDir)
+				require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+				dbtest.CloseDatabase(db) //nolint:errcheck
+				creator := newTestDatabaseServiceHandler(t, nil, dataDir)
+				created := createAndAwaitSnapshot(t, creator, &databasev1alpha1.CreateSnapshotRequest{})
+				id := created.GetSnapshotId()
+				manifestPath := filepath.Join(creator.bark.config.SnapshotDir, id, lifecycle.ManifestFileName)
+				original, err := os.ReadFile(manifestPath)
+				require.NoError(t, err)
+				targetDir := filepath.Join(t.TempDir(), "restore")
+				h := newTestDatabaseServiceHandler(t, nil, targetDir)
+				if source == "local" {
+					h.bark.config.SnapshotDir = creator.bark.config.SnapshotDir
+				} else {
+					registry := lifecycle.NewDestinationRegistry()
+					registry.Register("limits", func(uri *url.URL) (lifecycle.CloudDestination, error) {
+						return &barkFakeCloudDestination{dir: filepath.Join(creator.bark.config.SnapshotDir, filepath.Base(uri.Path))}, nil
+					})
+					h.bark.config.DestinationRegistry = registry
+					h.bark.config.SnapshotCloudDestination = "limits://bucket"
+					// Restore's lifecycle service must use the same registry.
+					h.bark.config.Lifecycle = dblifecycle.NewService(&config.Config{
+						DatabasePath: targetDir,
+						Plugins: config.PluginsConfig{Storage: config.StoragePluginsConfig{
+							Blob:     plugin.Selection{Provider: "badger"},
+							Metadata: plugin.Selection{Provider: "sqlite"},
+						}},
+					}, registry, nil)
+				}
+				invoke := func(snapshotID string) (string, error) {
+					if operation == "verify" {
+						resp, err := h.VerifySnapshot(context.Background(), connect.NewRequest(&databasev1alpha1.VerifySnapshotRequest{SnapshotId: snapshotID}))
+						if err != nil {
+							return "", err
+						}
+						return resp.Msg.GetOperationId(), nil
+					}
+					resp, err := h.Restore(context.Background(), connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: snapshotID}))
+					if err != nil {
+						return "", err
+					}
+					return resp.Msg.GetOperationId(), nil
+				}
+				require.NoError(t, os.WriteFile(manifestPath, bytes.Repeat([]byte{'x'}, lifecycle.MaxManifestBytes+1), 0o600))
+				_, err = invoke(id)
+				require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+				require.ErrorIs(t, err, lifecycle.ErrManifestTooLarge)
+				h.mu.Lock()
+				busy := h.busy
+				h.mu.Unlock()
+				require.False(t, busy, "resource rejection must release operation ownership")
+				_, err = invoke("missing-snapshot")
+				require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+				require.NoError(t, os.WriteFile(manifestPath, original, 0o600))
+				opID, err := invoke(id)
+				require.NoError(t, err, "a valid manifest must pass the same RPC boundary")
+				progress := waitForOperationStatus(t, func() *databasev1alpha1.OperationProgress {
+					op, err := h.lookupOperation(opID)
+					require.NoError(t, err)
+					return op.progress()
+				})
+				require.Equal(t, databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED, progress.GetStatus(), progress.GetMessage())
+			})
+		}
+	}
+}
 
 // databaseOperationTimeout allows for real Badger and SQLite file operations
 // running under the race detector alongside every other package in CI. Linux
@@ -281,7 +1367,7 @@ func TestDeleteSnapshotRejectsConcurrentOperation(t *testing.T) {
 }
 
 // TestRestoreClaimsBusyBeforeResolvingSource guards the reordering fix
-// for dingo#1651's finding that Restore used to resolve its snapshot
+// for the finding that Restore used to resolve its snapshot
 // source before claiming the busy flag DeleteSnapshot also uses, leaving
 // a window where a concurrent DeleteSnapshot could remove the very
 // snapshot Restore was about to read. If Restore still resolved the
@@ -386,7 +1472,7 @@ func TestVerifySnapshotReleasesBusyWhenSourceResolutionFails(t *testing.T) {
 // the "more than one field set" cases this test used to also cover as a
 // synchronous RPC rejection, before blockRefToTarget started accepting any
 // combination of fields at the RPC level and deferring agreement-checking
-// to dblifecycle.ResolveTarget (dingo#1651 follow-up).
+// to dblifecycle.ResolveTarget.
 func TestTruncateRejectsInvalidTarget(t *testing.T) {
 	t.Parallel()
 
@@ -620,6 +1706,9 @@ func TestGetDatabaseInfoReturnsTipSizeBytesAndBlockCount(t *testing.T) {
 	// land at slots 10/20/30 — block_count=3, oldest_slot=10.
 	require.Equal(t, uint64(3), resp.Msg.GetBlockCount())
 	require.Equal(t, uint64(10), resp.Msg.GetOldestSlot())
+	// Tier reports the database's configured storage mode, not a placeholder.
+	require.NotEmpty(t, db.StorageMode())
+	require.Equal(t, db.StorageMode(), resp.Msg.GetTier())
 }
 
 // TestListSnapshotsReturnsCreatedSnapshotWithLabel verifies that
@@ -708,7 +1797,7 @@ func TestListSnapshotsPaginates(t *testing.T) {
 
 // TestListSnapshotsSkipsCorruptedEntryButReturnsOthers verifies that one
 // snapshot's corrupted manifest.json doesn't hide every other, otherwise-
-// valid snapshot from ListSnapshots (dingo#1651 follow-up): this RPC used
+// valid snapshot from ListSnapshots: this RPC used
 // to fail the whole call whenever lifecycle.ListSnapshots reported ANY
 // per-entry problem, discarding the valid entries it had already
 // collected instead of using them.
@@ -803,7 +1892,7 @@ func TestListAvailableSnapshotsSkipsCorruptedEntryButReturnsOthers(
 }
 
 // TestListAvailableSnapshotsMirrorsListSnapshots covers the no-cloud-
-// destination-configured case: see database_cloud_test.go for the actual
+// destination-configured case: see database_test.go for the actual
 // local+cloud merge behavior this RPC exists for.
 func TestListAvailableSnapshotsMirrorsListSnapshots(t *testing.T) {
 	t.Parallel()
@@ -1036,7 +2125,7 @@ func tamperManifestChecksum(t *testing.T, manifestPath string) {
 }
 
 // TestVerifySnapshotOfTamperedManifestReturnsDataLoss guards against a
-// misleading-error finding (dingo#1651 follow-up): a snapshot whose
+// misleading-error finding: a snapshot whose
 // manifest.json was corrupted/hand-edited (so it fails checksum
 // validation) used to be indistinguishable from a snapshot ID that never
 // existed at all — both surfaced as CodeNotFound. resolveSnapshotSource
@@ -1166,7 +2255,7 @@ func TestGetOperationHistoryReturnsPastOperations(t *testing.T) {
 }
 
 // TestOperationsArePrunedOnceOverCap verifies that h.operations doesn't
-// grow without bound (dingo#1651 follow-up): once more than
+// grow without bound: once more than
 // maxRetainedOperations terminal operations have been registered, the
 // oldest ones are pruned so both the map's memory footprint and
 // GetOperationHistory's per-call sort over it stay bounded, rather than
@@ -1391,5 +2480,223 @@ func TestCancelOperationOnAlreadyCompletedOperationIsANoOp(t *testing.T) {
 		t,
 		databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED,
 		cancelResp.Msg.GetStatus(),
+	)
+}
+
+// mtlsHTTPClient builds an HTTP/2-over-TLS client suitable for talking to a
+// bark.Bark server started with TlsCertFilePath/TlsKeyFilePath: it skips
+// verifying the server's certificate (these tests always use
+// writeTestTLSCertKey's throwaway self-signed one, which no client would
+// otherwise trust) and, when certPath/keyPath are non-empty, presents that
+// keypair as its own client certificate for mTLS. Passing "", "" builds an
+// anonymous client — no certificate presented at all.
+func mtlsHTTPClient(t *testing.T, certPath, keyPath string) *http.Client {
+	t.Helper()
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // test-only, throwaway self-signed server cert
+	}
+	if certPath != "" || keyPath != "" {
+		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+		require.NoError(t, err)
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig:   tlsCfg,
+			ForceAttemptHTTP2: true,
+		},
+	}
+}
+
+// TestDatabaseServiceOverRealHTTP is the wire-level companion to
+// database_test.go's in-process handler tests: those call
+// databaseServiceHandler's methods directly, proving the job-tracking and
+// Service-wiring logic but not that a real Connect client, talking to a
+// really-listening bark.Bark server over real HTTP, gets back something
+// the generated client can decode. This starts a real server and drives
+// it with the generated databaseconnect.DatabaseServiceClient.
+func TestDatabaseServiceOverRealHTTP(t *testing.T) {
+	t.Parallel()
+
+	// bark's own DB (kept open for GetDatabaseInfo) and the Service's
+	// target (opened and closed per call by Service.Snapshot/Truncate)
+	// must be separate directories: Badger's exclusive file lock refuses
+	// a second concurrent open of the same one, so a single shared
+	// directory would fail CreateSnapshot/Truncate with "another process
+	// is using this Badger database" the instant they ran.
+	block1 := testBlock(1, 0x01)
+
+	barkDataDir := t.TempDir()
+	db := newDiskTestDB(t, barkDataDir)
+	require.NoError(t, db.BlockCreate(block1, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
+		BlockNumber: block1.Number,
+	}, nil))
+
+	svcDataDir := t.TempDir()
+	svcDB := newDiskTestDB(t, svcDataDir)
+	require.NoError(t, svcDB.BlockCreate(block1, nil))
+	require.NoError(t, svcDB.SetTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: block1.Slot, Hash: block1.Hash},
+		BlockNumber: block1.Number,
+	}, nil))
+	dbtest.CloseDatabase(svcDB) //nolint:errcheck
+
+	svc := dblifecycle.NewService(&config.Config{
+		DatabasePath: svcDataDir,
+		Plugins: config.PluginsConfig{
+			Storage: config.StoragePluginsConfig{
+				Blob:     plugin.Selection{Provider: "badger"},
+				Metadata: plugin.Selection{Provider: "sqlite"},
+			},
+		},
+	}, nil, nil)
+
+	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
+	caCert, caKey, caCertPath := writeTestCA(t)
+	clientCertPath, clientKeyPath := writeTestClientCert(
+		t,
+		caCert,
+		caKey,
+		"wire-test-operator",
+	)
+
+	b, err := NewBark(BarkConfig{
+		DB:                  db,
+		Lifecycle:           svc,
+		SnapshotDir:         t.TempDir(),
+		Host:                "127.0.0.1",
+		TlsCertFilePath:     serverCertPath,
+		TlsKeyFilePath:      serverKeyPath,
+		TlsClientCAFilePath: caCertPath,
+		OperatorCertificateFingerprints: []string{
+			testCertificateFingerprint(t, clientCertPath),
+		},
+	})
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	require.NoError(t, b.Start(ctx))
+	defer func() { _ = b.Stop(context.Background()) }()
+	require.NotEmpty(t, b.Addr())
+
+	client := databaseconnect.NewDatabaseServiceClient(
+		mtlsHTTPClient(t, clientCertPath, clientKeyPath),
+		"https://"+b.Addr(),
+	)
+
+	infoResp, err := client.GetDatabaseInfo(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.GetDatabaseInfoRequest{}),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(10), infoResp.Msg.GetTip().GetSlot())
+	require.Equal(t, uint64(1), infoResp.Msg.GetTip().GetBlockNumber())
+	require.False(t, infoResp.Msg.GetOperationInProgress())
+	require.NotZero(t, infoResp.Msg.GetSizeBytes())
+
+	createResp, err := client.CreateSnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.CreateSnapshotRequest{
+			Name: "wire-test",
+		}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, createResp.Msg.GetOperationId())
+	require.NotEmpty(t, createResp.Msg.GetSnapshotId())
+
+	var finalProgress *databasev1alpha1.OperationProgress
+	require.Eventually(t, func() bool {
+		statusResp, err := client.GetSnapshotStatus(
+			context.Background(),
+			connect.NewRequest(&databasev1alpha1.GetSnapshotStatusRequest{
+				OperationId: createResp.Msg.GetOperationId(),
+			}),
+		)
+		require.NoError(t, err)
+		finalProgress = statusResp.Msg.GetProgress()
+		return finalProgress.GetStatus() ==
+			databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
+	}, databaseOperationTimeout, 20*time.Millisecond,
+		"snapshot must complete over the wire",
+	)
+	require.Equal(t, "completed", finalProgress.GetMessage())
+	require.Equal(
+		t,
+		createResp.Msg.GetOperationId(),
+		finalProgress.GetOperationId(),
+	)
+
+	// Truncate over the same real connection, sequenced after the
+	// snapshot completes so the handler's single-operation gate doesn't
+	// reject it.
+	blockNumber := uint64(1)
+	truncResp, err := client.Truncate(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.TruncateRequest{
+			Target: &databasev1alpha1.BlockRef{BlockNumber: &blockNumber},
+		}),
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, truncResp.Msg.GetOperationId())
+
+	require.Eventually(t, func() bool {
+		statusResp, err := client.GetTruncateStatus(
+			context.Background(),
+			connect.NewRequest(&databasev1alpha1.GetTruncateStatusRequest{
+				OperationId: truncResp.Msg.GetOperationId(),
+			}),
+		)
+		require.NoError(t, err)
+		return statusResp.Msg.GetProgress().GetStatus() ==
+			databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
+	}, databaseOperationTimeout, 20*time.Millisecond,
+		"truncate must complete over the wire",
+	)
+
+	histResp, err := client.GetOperationHistory(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.GetOperationHistoryRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, histResp.Msg.GetRecords(), 2)
+
+	// StreamOperationProgress is the one server-streaming RPC, which needs
+	// a real transport to exercise (a unit test can't easily construct a
+	// *connect.ServerStream by hand) — the truncate above already reached
+	// COMPLETED, so the very first message the stream sends should report
+	// that and the stream should then close.
+	stream, err := client.StreamOperationProgress(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.StreamOperationProgressRequest{
+			OperationId: truncResp.Msg.GetOperationId(),
+		}),
+	)
+	require.NoError(t, err)
+	var sawCompleted bool
+	for stream.Receive() {
+		if stream.Msg().GetProgress().GetStatus() ==
+			databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED {
+			sawCompleted = true
+		}
+	}
+	require.NoError(t, stream.Err())
+	require.True(
+		t,
+		sawCompleted,
+		"stream must report the truncate's completed status before closing",
+	)
+
+	listResp, err := client.ListSnapshots(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.ListSnapshotsRequest{}),
+	)
+	require.NoError(t, err)
+	require.Len(t, listResp.Msg.GetSnapshots(), 1)
+	require.Equal(
+		t,
+		createResp.Msg.GetSnapshotId(),
+		listResp.Msg.GetSnapshots()[0].GetSnapshotId(),
 	)
 }

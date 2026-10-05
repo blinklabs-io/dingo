@@ -33,51 +33,53 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		Plugins:                            defaultPluginsConfig(),
-		BindAddr:                           "0.0.0.0",
-		CardanoConfig:                      "", // Will be set dynamically based on network
-		DatabasePath:                       ".dingo",
-		SocketPath:                         "dingo.socket",
-		IntersectTip:                       false,
-		ValidateHistorical:                 true,
-		StrictUtxoValidation:               true,
-		Network:                            "preview",
-		MetricsPort:                        12798,
-		HealthPort:                         DefaultHealthPort,
-		HealthReadyGapSlots:                DefaultHealthReadyGapSlots,
-		DebugBindAddr:                      DefaultDebugBindAddr,
-		PrivateBindAddr:                    "127.0.0.1",
-		PrivatePort:                        3002,
-		RelayPort:                          3001,
-		CORSAllowedOrigins:                 []string{"*"},
-		Topology:                           "",
-		TlsCertFilePath:                    "",
-		TlsKeyFilePath:                     "",
-		RunMode:                            RunModeServe,
-		StartEra:                           StartEraDefault,
-		ImmutableDbPath:                    "",
-		ShutdownTimeout:                    DefaultShutdownTimeout,
-		LedgerCatchupTimeout:               DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:                    5,
-		DatabaseQueueSize:                  50,
-		BackfillBatchSize:                  100,
-		GenesisBootstrap:                   DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:                      DefaultHistoryExpiryConfig(),
-		KoiosParity:                        DefaultKoiosParityConfig(),
-		Midnight:                           DefaultMidnightConfig(),
-		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
-		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
+		Plugins:                          defaultPluginsConfig(),
+		BindAddr:                         "0.0.0.0",
+		CardanoConfig:                    "", // Will be set dynamically based on network
+		DatabasePath:                     ".dingo",
+		SocketPath:                       "dingo.socket",
+		IntersectTip:                     false,
+		ValidateHistorical:               true,
+		StrictUtxoValidation:             true,
+		Network:                          "preview",
+		MetricsPort:                      12798,
+		HealthPort:                       DefaultHealthPort,
+		HealthReadyGapSlots:              DefaultHealthReadyGapSlots,
+		DebugBindAddr:                    DefaultDebugBindAddr,
+		PrivateBindAddr:                  "127.0.0.1",
+		PrivatePort:                      3002,
+		RelayPort:                        3001,
+		CORSAllowedOrigins:               []string{"*"},
+		Topology:                         "",
+		TlsCertFilePath:                  "",
+		TlsKeyFilePath:                   "",
+		RunMode:                          RunModeServe,
+		StartEra:                         StartEraDefault,
+		ImmutableDbPath:                  "",
+		ShutdownTimeout:                  DefaultShutdownTimeout,
+		LedgerCatchupTimeout:             DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:                  5,
+		DatabaseQueueSize:                50,
+		BackfillBatchSize:                100,
+		GenesisBootstrap:                 DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:                    DefaultHistoryExpiryConfig(),
+		KoiosParity:                      DefaultKoiosParityConfig(),
+		Midnight:                         DefaultMidnightConfig(),
+		ForgeSyncToleranceSlots:          DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:      DefaultForgeStaleGapThresholdSlots,
+		ForgeUpstreamStalenessSlots:      DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
+		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
 			VerifyCertificates: true,
 		},
 		// Fail closed: mirrors newDefaultConfig's own ValidateForgedBlock
-		// default (issue #3528) so this test-only reset does not silently
+		// default so this test-only reset does not silently
 		// diverge from what an operator actually gets. Unlike the several
 		// fields above left at their zero value on purpose (StorageMode,
 		// Cache, Chainsync, SlotsPerKESPeriod, ...), so tests can observe
@@ -199,6 +201,9 @@ mithril:
 
 	t.Setenv("DINGO_FORGE_SYNC_TOLERANCE_SLOTS", "321")
 	t.Setenv("DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS", "654")
+	t.Setenv("DINGO_FORGE_EB_MAX_TX_REFS", "777")
+	t.Setenv("DINGO_FORGE_EB_MAX_BYTES", "888888")
+	t.Setenv("DINGO_FORGE_EB_SELECTION_RESERVE", "750ms")
 
 	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
 	if err != nil {
@@ -244,6 +249,8 @@ mithril:
 			Enabled:                     false,
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
+			// Unset in the file, so the default survives.
+			LimitOnPatienceEnabled: true,
 		},
 		HistoryExpiry: DefaultHistoryExpiryConfig(),
 		KoiosParity:   DefaultKoiosParityConfig(),
@@ -267,11 +274,13 @@ mithril:
 		// not from ApplyDefaults: this test never calls it, and LoadConfig
 		// only parses and merges. Both staleness bounds are 0 there because
 		// 0 means "disabled" for them rather than "unset".
-		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
-		ValidateForgedBlock:                true,
+		ForgeUpstreamStalenessSlots:      DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:              true,
+		ForgeEBMaxTxRefs:                 forgeEBCapDefault(777),
+		ForgeEBMaxBytes:                  forgeEBCapDefault(888888),
+		ForgeEBSelectionReserve:          750 * time.Millisecond,
 		Mithril: MithrilConfig{
 			Enabled:                false,
 			AggregatorURL:          "https://mithril.example.net",
@@ -379,13 +388,15 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 			m.Host = DefaultMidnightConfig().Host
 			return m
 		}(),
-		ForgeSyncToleranceSlots:            DefaultForgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots:        DefaultForgeStaleGapThresholdSlots,
-		ForgePrimaryChainTipToleranceSlots: DefaultForgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        DefaultForgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      DefaultForgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   DefaultForgeEndorserBlockStalenessSlots,
-		ValidateForgedBlock:                true,
+		ForgeSyncToleranceSlots:          DefaultForgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:      DefaultForgeStaleGapThresholdSlots,
+		ForgeUpstreamStalenessSlots:      DefaultForgeUpstreamStalenessSlots,
+		ForgeAppliedTipStalenessSlots:    DefaultForgeAppliedTipStalenessSlots,
+		ForgeEndorserBlockStalenessSlots: DefaultForgeEndorserBlockStalenessSlots,
+		ValidateForgedBlock:              true,
+		ForgeEBMaxTxRefs:                 forgeEBCapDefault(DefaultForgeEBMaxTxRefs),
+		ForgeEBMaxBytes:                  forgeEBCapDefault(DefaultForgeEBMaxBytes),
+		ForgeEBSelectionReserve:          DefaultForgeEBSelectionReserve,
 		Mithril: MithrilConfig{
 			Enabled:            true,
 			CleanupAfterLoad:   true,
@@ -1249,6 +1260,10 @@ plugins:
       provider: builtin
       config:
         port: 8080
+    kupo:
+      provider: builtin
+      config:
+        port: 1443
     utxorpc:
       provider: builtin
       config:
@@ -1278,6 +1293,9 @@ network: "preview"
 			"expected Blockfrost port to be 8080, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 1443 {
+		t.Errorf("expected Kupo port to be 1443, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
@@ -1368,6 +1386,9 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 			"expected BlockfrostPort default to be 3000, got %d",
 			port,
 		)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Kupo); port != 0 {
+		t.Errorf("expected KupoPort default to be disabled, got %d", port)
 	}
 	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
@@ -2012,7 +2033,7 @@ func exampleConfigPath() string {
 	)
 }
 
-// TestLoad_ExampleConfigParses guards against regressions like #3169, where
+// TestLoad_ExampleConfigParses guards against regressions where
 // a single mis-indented line in dingo.yaml.example (the default config
 // shipped to operators) produced a YAML syntax error on startup with no
 // indication of which field was affected. Any change to dingo.yaml.example
@@ -2097,4 +2118,21 @@ config:
 		)
 		assert.Equal(t, expected, err.Error())
 	})
+}
+
+func TestCloneConfigIsolatesMCP(t *testing.T) {
+	t.Parallel()
+	cfg := &Config{Plugins: defaultPluginsConfig()}
+	cfg.Plugins.API.Mcp.Config["tls"] = map[string]any{"enabled": true}
+	clone := cloneConfig(cfg)
+	clone.Plugins.API.Mcp.Config["port"] = 8088
+	clone.Plugins.API.Mcp.Config["authToken"] = "override"
+	clone.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"] = false
+	require.Equal(t, 0, cfg.Plugins.API.Mcp.Config["port"])
+	require.NotContains(t, cfg.Plugins.API.Mcp.Config, "authToken")
+	require.Equal(
+		t,
+		true,
+		cfg.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"],
+	)
 }

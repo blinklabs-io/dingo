@@ -32,12 +32,17 @@ import (
 
 var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Config contains backend-neutral dependencies for a Store.
+// Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
-	WriteDB *sql.DB
-	ReadDB  *sql.DB
-	Dialect Dialect
-	Logger  *slog.Logger
+	// SQLitePath identifies the file opened by the provider, including its
+	// dataDir override. Reconstructing it from the node's global directory
+	// could point introspection clients at a different database. It is empty
+	// for in-memory SQLite and other backends, and immutable after construction.
+	SQLitePath string
+	WriteDB    *sql.DB
+	ReadDB     *sql.DB
+	Dialect    Dialect
+	Logger     *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -51,9 +56,15 @@ type Config struct {
 	MigrationLocker migrations.Locker
 	DiskSize        func() (int64, error)
 	// Maintenance is optional backend maintenance started only after the
-	// migration readiness gate succeeds. SQLite uses it for periodic VACUUM.
+	// migration readiness gate succeeds. It runs alongside the periodic
+	// committee authorization sweep.
 	Maintenance         func(context.Context) error
 	MaintenanceInterval time.Duration
+	// Vacuum runs optional database vacuum work on a dedicated ticker. It is
+	// separate from Maintenance because vacuum may take much longer and has a
+	// different safe cadence.
+	Vacuum         func(context.Context) error
+	VacuumInterval time.Duration
 	// Checkpoint is an optional provider-owned hook run on its own ticker,
 	// independent of Maintenance/MaintenanceInterval: SQLite uses it to
 	// attempt a periodic WAL TRUNCATE checkpoint (see sqlite.checkpointWAL)
@@ -118,6 +129,7 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	sqlitePath  string
 	writeDB     *sql.DB
 	readDB      *sql.DB
 	dialect     Dialect
@@ -128,6 +140,11 @@ type Store struct {
 	// auth_committee_hot pruning. Read it through committeeAuthRetention(),
 	// which applies the default, rather than directly.
 	committeeAuthRetentionSlots uint64
+
+	// rewardLiveStakeBatchSize overrides rewardLiveStakeRebuildBatch when
+	// non-zero. Only tests set it, to drive the rebuild across many batch
+	// boundaries without a production-sized fixture.
+	rewardLiveStakeBatchSize int
 
 	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
 	// the live rollback-safe immutable slot (tip depth securityParam blocks
@@ -154,6 +171,8 @@ type Store struct {
 	diskSize          func() (int64, error)
 	maintenance       func(context.Context) error
 	maintenanceEvery  time.Duration
+	vacuum            func(context.Context) error
+	vacuumEvery       time.Duration
 	backupTo          func(context.Context, string) error
 	restoreFrom       func(context.Context, string) error
 	prepare           func(context.Context) error
@@ -162,6 +181,9 @@ type Store struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	maintenanceState  atomic.Uint32
+	vacuumCancel      context.CancelFunc
+	vacuumDone        chan struct{}
+	vacuumState       atomic.Uint32
 
 	// checkpoint/checkpointEvery back an independent ticker from
 	// maintenance/maintenanceEvery -- see Config.Checkpoint's doc comment for
@@ -179,6 +201,7 @@ type Store struct {
 	bulkConn         *sql.Conn
 
 	closeOnce sync.Once
+	closeDone chan struct{}
 	closeErr  error
 
 	// stmtMu and stmts back the prepared-statement cache; see
@@ -252,6 +275,7 @@ func New(config Config) (*Store, error) {
 	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
+		sqlitePath:                  config.SQLitePath,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
@@ -261,6 +285,8 @@ func New(config Config) (*Store, error) {
 		diskSize:                    config.DiskSize,
 		maintenance:                 config.Maintenance,
 		maintenanceEvery:            config.MaintenanceInterval,
+		vacuum:                      config.Vacuum,
+		vacuumEvery:                 config.VacuumInterval,
 		checkpoint:                  config.Checkpoint,
 		checkpointEvery:             config.CheckpointInterval,
 		backupTo:                    config.BackupTo,
@@ -268,6 +294,7 @@ func New(config Config) (*Store, error) {
 		prepare:                     config.Prepare,
 		reset:                       config.Reset,
 		validateBackup:              config.ValidateBackup,
+		closeDone:                   make(chan struct{}),
 		sqlOperations: newSQLOperationsCounter(
 			config.PromRegistry,
 		),
@@ -428,10 +455,11 @@ func (s *Store) Start(ctx context.Context) error {
 	// failure here does not abort Start.
 	s.prepareHotStatements(ctx)
 	s.ready.Store(true)
-	// Maintenance and the checkpoint ticker both own their own lifetime and
-	// must not inherit the startup context, which callers commonly cancel as
-	// soon as Start returns.
+	// The maintenance, vacuum, and checkpoint tickers own their own
+	// lifetimes and must not inherit the startup context, which callers
+	// commonly cancel as soon as Start returns.
 	s.startMaintenance()      //nolint:contextcheck
+	s.startVacuumTicker()     //nolint:contextcheck
 	s.startCheckpointTicker() //nolint:contextcheck
 	return nil
 }
@@ -482,6 +510,7 @@ func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
 		return &sqlTxn{
 			owner:    s,
 			ctx:      ctx,
+			readOnly: readOnly,
 			beginErr: errors.New("sqlstore: store is not ready"),
 		}
 	}
@@ -495,7 +524,14 @@ func (s *Store) transaction(ctx context.Context, readOnly bool) types.Txn {
 	} else {
 		tx, release, err = s.beginWriteTx(ctx)
 	}
-	return &sqlTxn{owner: s, tx: tx, ctx: ctx, release: release, beginErr: err}
+	return &sqlTxn{
+		owner:    s,
+		tx:       tx,
+		ctx:      ctx,
+		readOnly: readOnly,
+		release:  release,
+		beginErr: err,
+	}
 }
 
 // Close closes each owned pool exactly once.
@@ -503,18 +539,21 @@ func (s *Store) Close() error {
 	return s.CloseContext(context.Background())
 }
 
-// CloseContext cancels maintenance and the checkpoint ticker and closes each
-// owned pool. The lifecycle context is also passed to those waits so
-// cancellation can interrupt a long-running VACUUM or in-flight checkpoint
-// before the provider shutdown deadline expires.
+// CloseContext cancels maintenance, vacuum, and checkpoint tickers and closes
+// each owned pool after their callbacks drain. The lifecycle context bounds
+// how long this call waits. A timed-out call leaves shutdown running so a
+// later call can still wait for completion.
 func (s *Store) CloseContext(ctx context.Context) error {
 	if ctx == nil {
 		return errors.New("sqlstore: close context is nil")
 	}
 	s.startMu.Lock()
-	defer s.startMu.Unlock()
+	if s.closeDone == nil {
+		s.closeDone = make(chan struct{})
+	}
 	s.closeOnce.Do(func() {
 		s.closeMaintenanceAdmission()
+		s.closeVacuumAdmission()
 		s.closeCheckpointAdmission()
 		s.closed.Store(true)
 		s.ready.Store(false)
@@ -532,46 +571,43 @@ func (s *Store) CloseContext(ctx context.Context) error {
 			// sessions where session_replication_role is connection-scoped.
 			_ = s.restoreNormalPragmas(ctx)
 		}
-		// Cancel both tickers up front, before waiting on either. Cancelling
+		// Cancel every ticker up front, before waiting on any. Cancelling
 		// stops each ticker's select loop from admitting a new tick, but it
-		// does not interrupt a tick already in flight: neither Maintenance's
-		// VACUUM nor SQLite's checkpointWAL observes context cancellation
-		// once its underlying driver call has started, so a tick that began
-		// just before Close is called still runs to completion regardless of
-		// ctx. checkpointWAL bounds that wait to checkpointBusyTimeout (see
-		// its doc comment) rather than the 30-second busy_timeout an
-		// in-flight checkpoint against writeDB used to allow, so in practice
-		// neither ticker's goroutine outlives this call by more than that
-		// bound. Requesting both cancellations here -- rather than only
-		// reaching the second one after the first successfully waited --
-		// still matters: it lets the two waits below run against tickers
-		// that are both already trying to stop, instead of serializing one
-		// ticker's shutdown behind the other's.
+		// does not interrupt a tick already in flight when its callback is
+		// inside a database driver call. A caller's context bounds the wait;
+		// all callbacks receive cancellation before shutdown waits on any one
+		// of them.
 		if s.maintenanceCancel != nil {
 			s.maintenanceCancel()
+		}
+		if s.vacuumCancel != nil {
+			s.vacuumCancel()
 		}
 		if s.checkpointCancel != nil {
 			s.checkpointCancel()
 		}
-		if s.maintenanceCancel != nil {
-			select {
-			case <-s.maintenanceDone:
-			case <-ctx.Done():
-				s.closeErr = errors.Join(ctx.Err(), s.closePools())
-				return
+		go func() {
+			if s.maintenanceDone != nil {
+				<-s.maintenanceDone
 			}
-		}
-		if s.checkpointCancel != nil {
-			select {
-			case <-s.checkpointDone:
-			case <-ctx.Done():
-				s.closeErr = errors.Join(ctx.Err(), s.closePools())
-				return
+			if s.vacuumDone != nil {
+				<-s.vacuumDone
 			}
-		}
-		s.closeErr = s.closePools()
+			if s.checkpointDone != nil {
+				<-s.checkpointDone
+			}
+			s.closeErr = s.closePools()
+			close(s.closeDone)
+		}()
 	})
-	return s.closeErr
+	done := s.closeDone
+	s.startMu.Unlock()
+	select {
+	case <-done:
+		return s.closeErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Store) closePools() error {
@@ -655,9 +691,67 @@ func (s *Store) closeMaintenanceAdmission() {
 	}
 }
 
+func (s *Store) startVacuumTicker() {
+	if s.vacuum == nil || s.vacuumEvery <= 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.vacuumCancel = cancel
+	s.vacuumDone = make(chan struct{})
+	go func() {
+		defer close(s.vacuumDone)
+		ticker := time.NewTicker(s.vacuumEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !s.vacuumState.CompareAndSwap(0, 1) {
+					return
+				}
+				if ctx.Err() != nil || s.closed.Load() {
+					s.vacuumState.CompareAndSwap(1, 0)
+					return
+				}
+				started := time.Now()
+				err := s.vacuum(ctx)
+				s.vacuumState.CompareAndSwap(1, 0)
+				if err != nil {
+					if ctx.Err() == nil {
+						s.logger.Error(
+							"metadata database vacuum failed",
+							"dialect", s.dialect.Name(),
+							"duration", time.Since(started),
+							"error", err,
+						)
+					} else {
+						return
+					}
+					continue
+				}
+				s.logger.Debug(
+					"metadata database vacuum complete",
+					"dialect", s.dialect.Name(),
+					"duration", time.Since(started),
+				)
+			}
+		}
+	}()
+}
+
+func (s *Store) closeVacuumAdmission() {
+	for {
+		state := s.vacuumState.Load()
+		if state == 2 || s.vacuumState.CompareAndSwap(state, 2) {
+			return
+		}
+	}
+}
+
 // startCheckpointTicker runs s.checkpoint on its own ticker, independent of
-// startMaintenance's 24-hour-scale cadence: WAL checkpointing needs to run
-// every 1-5 minutes to bound WAL growth, not once a day. Mirrors
+// maintenance and vacuum cadences. WAL checkpointing needs to run every 1-5
+// minutes to bound WAL growth, not once a day. Mirrors
 // startMaintenance's admission/cancellation shape (checkpointState,
 // checkpointCancel, checkpointDone) exactly, as a distinct instance rather
 // than a shared one, so a slow VACUUM can never delay or skip a checkpoint
@@ -789,17 +883,29 @@ func (s *Store) withWriteTransaction(
 	txn types.Txn,
 	fn func(queryer, context.Context) error,
 ) error {
+	return s.withWriteTransactionContext(context.Background(), txn, fn)
+}
+
+// withWriteTransactionContext is withWriteTransaction with an explicit ctx
+// for the implicit-transaction case, so a caller that owns a cancellable
+// context (a restore, say) can interrupt a long DDL statement instead of
+// waiting it out. A caller-supplied txn still carries its own ctx, per
+// dbFromTxn, and ctx is ignored in that case.
+func (s *Store) withWriteTransactionContext(
+	ctx context.Context,
+	txn types.Txn,
+	fn func(queryer, context.Context) error,
+) error {
 	if err := s.ensureReady(); err != nil {
 		return err
 	}
 	if txn != nil {
-		db, ctx, err := s.dbFromTxn(txn)
+		db, txnCtx, err := s.dbFromTxn(txn)
 		if err != nil {
 			return err
 		}
-		return fn(db, ctx)
+		return fn(db, txnCtx)
 	}
-	ctx := context.Background()
 	sqlTransaction, release, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return err
@@ -838,6 +944,90 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 	return tx, nil, err
 }
 
+// ReserveRead takes one read-pool connection without beginning a
+// transaction on it, implementing types.ReadReserver.
+//
+// database.NewReadSnapshotContext uses it to keep the read-pool wait out of
+// the commit barrier it holds while fixing its two read views. Its lifetime
+// admission cap also leaves one connection outside coordinated snapshots for
+// operational reads during rollback.
+func (s *Store) ReserveRead(
+	ctx context.Context,
+) (types.ReadReservation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.ready.Load() {
+		return nil, errors.New("sqlstore: store is not ready")
+	}
+	conn, err := s.readDB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &readReservation{owner: s, conn: conn, ctx: ctx}, nil
+}
+
+// ReadSnapshotLimit leaves one read-pool connection available for operational
+// reads performed inside destructive transitions while coordinated snapshots
+// remain open for client-paced responses.
+func (s *Store) ReadSnapshotLimit() int {
+	return max(1, s.readDB.Stats().MaxOpenConnections-1)
+}
+
+// readReservation holds a reserved read-pool connection. releaseOnce makes
+// Release idempotent so the reserving caller can defer it unconditionally
+// alongside a Begin that may already have handed ownership to a sqlTxn.
+type readReservation struct {
+	owner       *Store
+	conn        *sql.Conn
+	ctx         context.Context
+	releaseOnce sync.Once
+	begun       bool
+}
+
+func (r *readReservation) Begin() types.Txn {
+	if r.begun {
+		return &sqlTxn{
+			owner:    r.owner,
+			ctx:      r.ctx,
+			beginErr: errors.New("sqlstore: read reservation already begun"),
+		}
+	}
+	r.begun = true
+	tx, err := r.conn.BeginTx(r.ctx, r.owner.dialect.BeginOptions(true))
+	if err != nil {
+		// Nothing owns the connection now, so the reservation returns it
+		// here rather than leaving it to a Rollback that reports beginErr
+		// without reaching releaseConnection.
+		r.releaseConn()
+		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
+	}
+	return &sqlTxn{
+		owner:   r.owner,
+		tx:      tx,
+		ctx:     r.ctx,
+		release: r.releaseConn,
+	}
+}
+
+func (r *readReservation) Release() {
+	if r.begun {
+		return
+	}
+	r.releaseConn()
+}
+
+func (r *readReservation) releaseConn() {
+	r.releaseOnce.Do(func() {
+		if err := r.conn.Close(); err != nil {
+			r.owner.logger.Debug(
+				"sqlstore: release reserved read connection",
+				"error", err,
+			)
+		}
+	})
+}
+
 type queryer interface {
 	Execer
 	PrepareContext(context.Context, string) (*sql.Stmt, error)
@@ -868,8 +1058,9 @@ func (s *Store) instrumentedQueryer(db queryer) queryer {
 }
 
 type sqlTxn struct {
-	owner *Store
-	tx    *sql.Tx
+	owner    *Store
+	tx       *sql.Tx
+	readOnly bool
 	// ctx is the context.Context this transaction was begun with (via
 	// Transaction/ReadTransaction). dbFromTxn hands it back alongside the
 	// queryer so every statement issued against this txn -- through
@@ -1017,12 +1208,22 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
+	return s.UpdatePlannerStatsContext(context.Background())
+}
+
+// UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
+func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkMu.RLock()
 	defer s.bulkMu.RUnlock()
 	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 	}
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
 }
+
+// SQLitePath returns the active provider's on-disk SQLite location, if any.
+// This optional capability lets clients own separate read-only pools without
+// exposing the provider's pools or requiring it on every MetadataStore.
+func (s *Store) SQLitePath() string { return s.sqlitePath }

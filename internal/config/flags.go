@@ -210,10 +210,22 @@ var flagSpecs = []flagSpec{
 		"Blockfrost API provider",
 	),
 	stringFlag(
+		"Plugins.API.Kupo.Provider",
+		"kupo-provider",
+		"",
+		"Kupo API provider",
+	),
+	stringFlag(
 		"Plugins.API.Mesh.Provider",
 		"mesh-provider",
 		"",
 		"Mesh API provider",
+	),
+	stringFlag(
+		"Plugins.API.Mcp.Provider",
+		"mcp-provider",
+		"",
+		"MCP API provider",
 	),
 	stringSliceFlag(
 		"CORSAllowedOrigins",
@@ -311,9 +323,29 @@ var flagSpecs = []flagSpec{
 		"CIP-26 token registry max compressed download bytes (0 = default)",
 	),
 	int64Flag(
+		"TokenRegistry.MaxDecompressedBytes",
+		"token-registry-max-decompressed-bytes",
+		"CIP-26 token registry max expanded archive bytes (0 = default)",
+	),
+	int64Flag(
 		"TokenRegistry.MaxEntryBytes",
 		"token-registry-max-entry-bytes",
 		"CIP-26 token registry max bytes per mapping (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxArchiveEntries",
+		"token-registry-max-archive-entries",
+		"CIP-26 token registry max archive entries (0 = default)",
+	),
+	intFlag(
+		"TokenRegistry.MaxAcceptedEntries",
+		"token-registry-max-accepted-entries",
+		"CIP-26 token registry max accepted mappings (0 = default)",
+	),
+	int64Flag(
+		"TokenRegistry.MaxBatchBytes",
+		"token-registry-max-batch-bytes",
+		"CIP-26 token registry max retained batch bytes (0 = default)",
 	),
 	boolFlag(
 		"TokenRegistry.StoreLogos",
@@ -390,7 +422,7 @@ var flagSpecs = []flagSpec{
 		"history expiry scan frequency",
 	),
 
-	// Koios reward-parity observer (dingo #3098; one-off validation aid, not a
+	// Koios reward-parity observer (one-off validation aid, not a
 	// permanent subsystem)
 	boolFlag(
 		"KoiosParity.Enabled",
@@ -427,9 +459,15 @@ var flagSpecs = []flagSpec{
 		"allow a plain-HTTP --koios-parity-base-url (local dev/test only; the API key is sent as a Bearer token)",
 	),
 	boolFlag(
+		"KoiosParity.AllowPrivateAddresses",
+		"koios-parity-allow-private-addresses",
+		"allow a private, loopback, or special-use "+
+			"--koios-parity-base-url (intentional private deployments only)",
+	),
+	boolFlag(
 		"KoiosParity.Strict",
 		"koios-parity-strict",
-		"stop/cancel the node on the first Koios/tool error or exact parity mismatch",
+		"stop/cancel the node on the first Koios/tool error or non-pass parity result (a reference_lag-only result never stops the node)",
 	),
 	intFlag(
 		"KoiosParity.GraceHours",
@@ -537,6 +575,7 @@ var flagSpecs = []flagSpec{
 	),
 	intFlag("MaxInboundConns", "max-inbound-conns", "max inbound connections"),
 	intFlag("MaxNtCConns", "max-ntc-conns", "max node-to-client connections"),
+	intFlag("MaxTrustedLocalNtCConns", "max-trusted-local-ntc-conns", "max trusted local node-to-client connections"),
 	intFlag(
 		"MaxNtCConnectionsPerIP",
 		"max-ntc-connections-per-ip",
@@ -615,6 +654,21 @@ var flagSpecs = []flagSpec{
 		"genesis-bootstrap-corroboration-peers",
 		"independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)",
 	),
+	boolFlag(
+		"GenesisBootstrap.LimitOnPatienceEnabled",
+		"genesis-bootstrap-limit-on-patience-enabled",
+		"disconnect ChainSync peers that deliver advertised progress too slowly during Genesis sync",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceCapacity",
+		"genesis-bootstrap-limit-on-patience-capacity",
+		"Genesis Limit on Patience bucket capacity in tokens (0 uses the default of 1000)",
+	),
+	uint64Flag(
+		"GenesisBootstrap.LimitOnPatienceRate",
+		"genesis-bootstrap-limit-on-patience-rate",
+		"Genesis Limit on Patience leak rate in tokens per second (0 uses the default of 5)",
+	),
 
 	// Logging
 	transformStringFlag(
@@ -677,6 +731,23 @@ var flagSpecs = []flagSpec{
 		"",
 		"path to Shelley operational certificate",
 	),
+	stringFlag(
+		"ShelleyKESAgentSocket",
+		"shelley-kes-agent-socket",
+		"",
+		"path to a bursa KES agent service socket; sources the KES signing key from the agent instead of --shelley-kes-key (VRF key and opcert flags still apply)",
+	),
+	stringFlag(
+		"ShelleyKESAgentMode",
+		"shelley-kes-agent-mode",
+		"",
+		"KES agent service mode: serve-key (default) or sign",
+	),
+	durationFlag(
+		"ShelleyKESAgentSignTimeout",
+		"shelley-kes-agent-sign-timeout",
+		"timeout for one sign-mode KES agent round trip; must stay below a slot (0 uses the 500ms default)",
+	),
 	uint64Flag(
 		"SlotsPerKESPeriod",
 		"slots-per-kes-period",
@@ -698,11 +769,6 @@ var flagSpecs = []flagSpec{
 		"slot gap threshold for stale slot clock alerts",
 	),
 	uint64Flag(
-		"ForgePrimaryChainTipToleranceSlots",
-		"forge-primary-chain-tip-tolerance-slots",
-		"max slots the ledger-applied tip may trail this node's own primary chain tip (chain.Tip()) before skipping block forging",
-	),
-	uint64Flag(
 		"ForgeUpstreamStalenessSlots",
 		"forge-upstream-staleness-slots",
 		"max slots the newest block this node holds may trail the corroborated upstream target before skipping block forging",
@@ -710,12 +776,27 @@ var flagSpecs = []flagSpec{
 	uint64Flag(
 		"ForgeAppliedTipStalenessSlots",
 		"forge-applied-tip-staleness-slots",
-		"max slots the newest block this node holds may be older than the current slot before skipping block forging (0 disables)",
+		"maximum slot lag for the applied tip when a corroborated upstream target exists (0 disables)",
 	),
 	uint64Flag(
 		"ForgeEndorserBlockStalenessSlots",
 		"forge-endorser-block-staleness-slots",
 		"max slots a corroborated Leios endorser block may lead the ledger-applied tip before skipping block forging (0 disables)",
+	),
+	durationFlag(
+		"ForgeEBSelectionReserve",
+		"forge-eb-selection-reserve",
+		"slot time reserved for ranking-block assembly after Leios endorser-block selection",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxTxRefs",
+		"forge-eb-max-tx-refs",
+		"maximum transaction references in a forged Leios endorser block (0 = unlimited)",
+	),
+	uint64PtrFlag(
+		"ForgeEBMaxBytes",
+		"forge-eb-max-bytes",
+		"maximum total referenced transaction bytes in a forged Leios endorser block (0 = unlimited)",
 	),
 	boolFlag(
 		"ValidateForgedBlock",
@@ -752,16 +833,16 @@ var flagSpecs = []flagSpec{
 		"CIP-0163 inactivity window in epochs, in [1,10000] (used when delegator-inactivity-enabled)",
 	),
 
-	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	// Experimental pre-Dijkstra CIP-50 override (consensus-affecting; default off)
 	boolFlag(
 		"PledgeLeverageEnabled",
 		"pledge-leverage-enabled",
-		"enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)",
+		"enable the experimental pre-Dijkstra pledge-leverage cap (match across local-network nodes)",
 	),
 	uintFlag(
 		"PledgeLeverage",
 		"pledge-leverage",
-		"CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)",
+		"experimental pre-Dijkstra max pledge leverage L in [1,10000]",
 	),
 
 	// Leios voting (experimental)
@@ -1181,6 +1262,39 @@ func uint32Flag(field, name, help string) flagSpec {
 				)
 			}
 			targetValue(cfg, field).SetUint(uint64(v))
+			return nil
+		},
+	}
+}
+
+// uint64PtrFlag binds a CLI flag to a *uint64 field. The pointer keeps an
+// explicit 0 -- which disables the cap it controls -- distinct from never
+// passing the flag at all, which takes the default. Only an explicitly
+// passed flag writes to the field, matching boolPtrFlag's contract.
+func uint64PtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet, defaults *Config) {
+			// Report the value that omitting the flag actually
+			// produces, not the zero value of the pointer. The
+			// Changed check below still lets an explicit 0 through
+			// to disable the cap.
+			var def uint64
+			if v := defaultValue(defaults, field); !v.IsNil() {
+				def = v.Elem().Uint()
+			}
+			f.Uint64(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetUint64(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}

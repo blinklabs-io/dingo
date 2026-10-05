@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gconnection "github.com/blinklabs-io/gouroboros/connection"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	gcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/muxer"
@@ -46,24 +47,20 @@ import (
 const musashiNetworkMagic = 164
 
 // Fixtures captured from leios-node.play.dev.cardano.org:3001 (magic 164) on
-// 2026-09-02. Musashi changes both its chain-sync header wire type and its
-// block-fetch block wire type from 7 to 8 at block 4329 (slot 86407), and the
-// CBOR layout changes with the tag:
+// 2026-09-02. The type-8 block has the current three-component Dijkstra body
+// layout. The type-7 block
+// uses a five-component Conway envelope with a Leios-extended header:
 //
 //	blocks 0..4328    wire type 7  block: 5 components (Conway layout)
 //	                               header: 2 elements, 12-field header body
-//	blocks 4329..tip  wire type 8  block: 2 components (Dijkstra layout)
+//	blocks 4329..tip  wire type 8  block: 2 components, 3-field body
 //	                               header: 2 elements, 12-field header body
 //
-// Both header forms are Dijkstra headers; only the block layout differs. The
-// type-7 block is the one gouroboros' strict Conway decoder rejects, which is
-// what stops a from-genesis sync at origin (#3798, #3761).
-//
-// The type-8 pair is the transition block itself (4329), captured with its own
-// header so the header and block dispatch paths can be asserted against the
-// same block. database/models/testdata/musashi_dijkstra_block.hex is the same
-// block *layout* but a different block (28091) and has no paired header, so it
-// cannot serve this test.
+// The type-7 block is the one whose strict Conway decode used to stop
+// from-genesis sync at origin. The type-8 pair exercises the
+// captured block through the production block-fetch path. The corresponding
+// `database/models/testdata/musashi_dijkstra_block.hex` file is also used by
+// model decoding tests.
 const (
 	musashiType7BlockFixture  = "testdata/musashi_type7_leios_conway_block.hex"
 	musashiType7HeaderFixture = "testdata/musashi_type7_leios_header.hex"
@@ -111,12 +108,6 @@ func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 			blockPath:  musashiType7BlockFixture,
 			headerPath: musashiType7HeaderFixture,
 		},
-		{
-			name:       "type8_dijkstra_layout",
-			blockType:  gledger.BlockTypeDijkstra,
-			blockPath:  musashiType8BlockFixture,
-			headerPath: musashiType8HeaderFixture,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			blockRaw := readHexFixture(t, tc.blockPath)
@@ -127,7 +118,7 @@ func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 			require.NotNil(t, block)
 
 			// The chain-sync header path must reach the same block identity
-			// for the same wire type. #3761 was exactly the two paths
+			// for the same wire type. A past bug was exactly the two paths
 			// disagreeing; assert agreement rather than assuming it.
 			header, err := o.decodeChainsyncHeader(tc.blockType, headerRaw)
 			require.NoError(t, err)
@@ -316,7 +307,7 @@ func (p *musashiBlockfetchPeer) readRequestRangeErr() error {
 
 // rawDeliveryOfUnrepresentableBlockSupported reports whether the linked
 // gouroboros delivers a block its typed decoder cannot represent to
-// BlockRawFunc rather than failing the request (gouroboros #2186).
+// BlockRawFunc rather than failing the request.
 //
 // This is a behavioral probe, not a version comparison: it drives the real
 // block-fetch client with a bare recording raw callback -- not Dingo's
@@ -432,14 +423,14 @@ func requireRawDeliverySupport(t *testing.T) {
 }
 
 // runMusashiBlockfetchClientDelivery drives Dingo's real block-fetch client
-// config over a real muxer with one Musashi block, and returns the block the
-// production dispatch published on the event bus.
+// config over a real muxer with one Musashi block, returning the published
+// block or the client's decode error.
 func runMusashiBlockfetchClientDelivery(
 	t *testing.T,
 	blockType uint,
 	blockPath string,
 	headerPath string,
-) (gledger.Block, gledger.BlockHeader, []byte) {
+) (gledger.Block, gledger.BlockHeader, []byte, error) {
 	t.Helper()
 	blockRaw := readHexFixture(t, blockPath)
 	headerRaw := readHexFixture(t, headerPath)
@@ -502,7 +493,16 @@ func runMusashiBlockfetchClientDelivery(
 		}
 	}()
 
-	require.NoError(t, peer.client.GetBlockRange(point, point))
+	if err := peer.client.GetBlockRange(point, point); err != nil {
+		select {
+		case <-blockCh:
+			return nil, header, blockRaw, errors.New(
+				"block-fetch published a rejected block",
+			)
+		default:
+		}
+		return nil, header, blockRaw, err
+	}
 
 	select {
 	case evt := <-blockCh:
@@ -513,17 +513,18 @@ func runMusashiBlockfetchClientDelivery(
 			bfEvt.Block,
 			"block-fetch delivered a batch-done before the block",
 		)
-		return bfEvt.Block, header, blockRaw
+		return bfEvt.Block, header, blockRaw, nil
 	case err := <-peer.errChan:
-		t.Fatalf("block-fetch client failed the request: %v", err)
+		return nil, header, blockRaw, err
 	case <-time.After(10 * time.Second):
-		t.Fatal("timeout waiting for the block-fetch block event")
+		return nil, header, blockRaw, errors.New(
+			"timeout waiting for the block-fetch block event",
+		)
 	}
-	return nil, nil, nil
 }
 
 // TestBlockfetchClientDeliversMusashiType7Block is the regression for the
-// symptom reported in #3798.
+// type-8 decoder-fallback bypass.
 //
 // A Musashi block below the type-8 transition arrives tagged as block type 7
 // in a five-component Conway layout with a twelve-field Leios header body.
@@ -532,7 +533,7 @@ func runMusashiBlockfetchClientDelivery(
 // rejected these bytes and failed the request -- tearing down the connection
 // before Dingo's WithBlockRawFunc callback, and therefore
 // decodeBlockfetchBlock's Musashi fallback, ever ran. Every from-genesis sync
-// stalled at origin with no selectable peer, with the error #3798 quotes.
+// stalled at origin with no selectable peer, with a decode error.
 //
 // Direct decoder tests could not catch this: models.DecodeConwayBlock decodes
 // these bytes correctly and always did. The failure was in the dispatch that
@@ -541,36 +542,30 @@ func TestBlockfetchClientDeliversMusashiType7Block(t *testing.T) {
 	t.Parallel()
 
 	requireRawDeliverySupport(t)
-	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
+	block, header, blockRaw, err := runMusashiBlockfetchClientDelivery(
 		t,
 		gledger.BlockTypeConway,
 		musashiType7BlockFixture,
 		musashiType7HeaderFixture,
 	)
+	require.NoError(t, err)
 	require.Equal(t, header.Hash().String(), block.Hash().String())
 	require.Equal(t, header.SlotNumber(), block.SlotNumber())
 	require.Equal(t, blockRaw, block.Cbor())
 }
 
-// TestBlockfetchClientDeliversMusashiType8Block covers the type-8 input #3798
-// names, through the same production dispatch.
-//
-// It needs no raw-delivery support and is not skipped, which is the point:
-// gouroboros dispatches block type 8 to its Dijkstra decoder, that decoder
-// accepts the Musashi twelve-field Leios header body, so the typed decode
-// succeeds and BlockRawFunc is reached even on a gouroboros without #2186.
-// Type 8 was never gated out of the Musashi fallback in a way that mattered --
-// the strict decoder for type 8 is the Dijkstra decoder. The error #3798
-// quotes names conway.tmpConwayBlock, which only the type-7 route can produce.
+// TestBlockfetchClientDeliversMusashiType8Block sends the captured Dijkstra
+// body through the real block-fetch client.
 func TestBlockfetchClientDeliversMusashiType8Block(t *testing.T) {
 	t.Parallel()
 
-	block, header, blockRaw := runMusashiBlockfetchClientDelivery(
+	block, header, blockRaw, err := runMusashiBlockfetchClientDelivery(
 		t,
 		gledger.BlockTypeDijkstra,
 		musashiType8BlockFixture,
 		musashiType8HeaderFixture,
 	)
+	require.NoError(t, err)
 	require.Equal(t, header.Hash().String(), block.Hash().String())
 	require.Equal(t, header.SlotNumber(), block.SlotNumber())
 	require.Equal(t, blockRaw, block.Cbor())
@@ -610,17 +605,30 @@ func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
 	}
 }
 
-// TestDecodeBlockfetchBlockType8NeedsNoMusashiScope pins the fact #3798 got
-// wrong: block type 8 decodes through gouroboros' own dispatch, so it needs no
-// network-scoped fallback and behaves identically on Musashi and on a network
-// that has never seen a Musashi block. Widening the Musashi gate to type 8, or
-// widening models.hasDijkstraLeiosShape, would change nothing here except to
-// loosen a decoder for no observed input.
-func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
+// TestDecodeBlockfetchBlockRejectsLegacyDijkstraBodyWithMatchingHash verifies
+// the fixture's header commits to its four-field body, then confirms current
+// block-fetch decoding rejects that layout on every network.
+func TestDecodeBlockfetchBlockKeepsThreeComponentDijkstraBody(t *testing.T) {
 	t.Parallel()
 
 	blockRaw := readHexFixture(t, musashiType8BlockFixture)
-	var hashes []string
+	var blockItems []cbor.RawMessage
+	_, err := cbor.Decode(blockRaw, &blockItems)
+	require.NoError(t, err)
+	require.Len(t, blockItems, 2)
+	var bodyItems []cbor.RawMessage
+	_, err = cbor.Decode(blockItems[1], &bodyItems)
+	require.NoError(t, err)
+	require.Len(t, bodyItems, 3)
+	header, err := dijkstra.NewDijkstraBlockHeaderFromCbor(
+		readHexFixture(t, musashiType8HeaderFixture),
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		header.BlockBodyHash(),
+		gcommon.Blake2b256Hash(blockItems[1]),
+	)
 	for _, magic := range []uint32{musashiNetworkMagic, 764824073} {
 		o := newOuroboros(OuroborosConfig{
 			Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -632,17 +640,11 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NotNil(t, block)
-		require.EqualValues(t, dijkstra.EraIdDijkstra, block.Era().Id)
-		hashes = append(hashes, block.Hash().String())
 	}
-	// The loop above ranges a two-element literal and appends once per
-	// iteration, so both indexes exist; nilaway does not track that.
-	//nolint:nilaway // the loop above appends exactly two entries
-	require.Equal(t, hashes[0], hashes[1])
 }
 
 // TestMusashiDispatchEraAgreement records the era each production dispatch
-// path assigns to the same Musashi block, for both wire types. #3761 was the
+// path assigns to the same valid type-7 Musashi block. A past bug was the
 // header and block paths disagreeing, so the mapping is asserted rather than
 // assumed.
 //
@@ -654,8 +656,8 @@ func TestDecodeBlockfetchBlockType8NeedsNoMusashiScope(t *testing.T) {
 // gouroboros representability limit, not a dispatch choice Dingo can make
 // differently, and it is pinned here so a change to either path is visible.
 //
-// The disagreement is latent rather than a live defect, and is tracked in
-// #3828: the ledger does not gate on a block-derived era. ls.currentEra comes
+// The disagreement is latent rather than a live defect, and is a known gap:
+// the ledger does not gate on a block-derived era. ls.currentEra comes
 // from protocol-version pparams and is passed into ledgerProcessBlock, so on
 // Musashi at protocol version 12 those gates see Dijkstra whatever the block
 // decodes as, and Leios endorser-block application and the Dijkstra
@@ -679,13 +681,6 @@ func TestMusashiDispatchEraAgreement(t *testing.T) {
 			headerPath:   musashiType7HeaderFixture,
 			wantBlockEra: conway.EraIdConway,
 		},
-		{
-			name:         "type8_dijkstra_layout",
-			blockType:    gledger.BlockTypeDijkstra,
-			blockPath:    musashiType8BlockFixture,
-			headerPath:   musashiType8HeaderFixture,
-			wantBlockEra: dijkstra.EraIdDijkstra,
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			block, err := o.decodeBlockfetchBlock(
@@ -698,8 +693,7 @@ func TestMusashiDispatchEraAgreement(t *testing.T) {
 				readHexFixture(t, tc.headerPath),
 			)
 			require.NoError(t, err)
-			// Both Musashi wire types carry the same twelve-field Leios
-			// header body, so the header path reports Dijkstra for both.
+			// The type-7 Leios header uses the Dijkstra header decoder.
 			require.EqualValues(t, dijkstra.EraIdDijkstra, header.Era().Id)
 			require.EqualValues(t, tc.wantBlockEra, block.Era().Id)
 			require.Equal(t, header.Hash().String(), block.Hash().String())

@@ -16,8 +16,11 @@ package bark
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +45,43 @@ func TestBarkListenAddrSupportsIPv6(t *testing.T) {
 	require.Equal(t, "127.0.0.1:9091", barkListenAddr("127.0.0.1", 9091))
 }
 
+func TestLifecycleMutexUnlockWithoutLockPanics(t *testing.T) {
+	t.Parallel()
+
+	var mutex lifecycleMutex
+	panicValue := make(chan any, 1)
+	go func() {
+		defer func() { panicValue <- recover() }()
+		mutex.Unlock()
+	}()
+	select {
+	case got := <-panicValue:
+		require.Equal(t, "unlock of unlocked lifecycleMutex", got)
+	case <-time.After(time.Second):
+		t.Fatal("Unlock blocked instead of panicking")
+	}
+}
+
+// TestStartOnPortZeroBindsAFreePort asserts Port 0 asks the OS for a free port,
+// which Addr then reports. Two servers started that way must not contend for
+// one fixed port.
+func TestStartOnPortZeroBindsAFreePort(t *testing.T) {
+	t.Parallel()
+
+	addrs := make(map[string]bool)
+	for range 2 {
+		b, err := NewBark(BarkConfig{DB: newTestDB(t), Host: "127.0.0.1"})
+		require.NoError(t, err)
+		require.NoError(t, b.Start(t.Context()))
+		t.Cleanup(func() { _ = b.Stop(context.Background()) })
+		_, port, err := net.SplitHostPort(b.Addr())
+		require.NoError(t, err)
+		require.NotEqual(t, "0", port)
+		addrs[b.Addr()] = true
+	}
+	require.Len(t, addrs, 2)
+}
+
 func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 	t.Parallel()
 
@@ -59,7 +99,6 @@ func TestBarkServerTimeoutsSupportStreaming(t *testing.T) {
 			cfg := BarkConfig{
 				DB:   newTestDB(t),
 				Host: "127.0.0.1",
-				Port: freeTCPPort(t),
 			}
 			if testCase.useTLS {
 				cfg.TlsCertFilePath, cfg.TlsKeyFilePath = writeTestTLSCertKey(t)
@@ -136,6 +175,16 @@ func TestAcquireFailsFastWhilePaused(t *testing.T) {
 // TestPauseDBWaitsForInFlightAcquire verifies PauseDB doesn't return — and
 // therefore a caller closing the database it guards doesn't proceed — until
 // every Acquire holder in flight when it was called has released.
+//
+// The wait is asserted through the gate's own state rather than through
+// elapsed time. sync.RWMutex turns new readers away as soon as a writer is
+// queued, so a PauseDB that is genuinely blocked behind the in-flight holder
+// is observable: Acquire starts failing with ErrDBUnavailable, and cannot
+// start failing for any other reason here. Asserting only that PauseDB had
+// not returned after some interval would equally accept a PauseDB that never
+// touched the gate at all and merely took a while — which is precisely the
+// implementation that would let a live Restore/Truncate close the database
+// under an in-flight Acquire holder.
 func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
 	t.Parallel()
 
@@ -151,9 +200,25 @@ func TestPauseDBWaitsForInFlightAcquire(t *testing.T) {
 		close(pauseDone)
 	}()
 
-	testutil.RequireNoReceive(t, pauseDone, 150*time.Millisecond,
-		"PauseDB must wait for the in-flight Acquire to release before "+
-			"closing the pause gate")
+	require.Eventually(t, func() bool {
+		db, release, err := b.Acquire()
+		if err == nil {
+			require.NotNil(t, db)
+			release()
+			return false
+		}
+		return errors.Is(err, ErrDBUnavailable)
+	}, 5*time.Second, time.Millisecond,
+		"PauseDB must take the gate and turn new Acquire calls away while it "+
+			"waits for the in-flight holder to release")
+
+	// Holding a reader makes this deterministic rather than a race with a
+	// timer: PauseDB cannot have completed while release is still unheld.
+	select {
+	case <-pauseDone:
+		t.Fatal("PauseDB returned while an Acquire holder was still in flight")
+	default:
+	}
 
 	release()
 	testutil.RequireReceive(t, pauseDone, time.Second, "PauseDB should "+
@@ -196,7 +261,7 @@ func TestAddrClearsAfterStop(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 	require.Empty(t, b.Addr(), "Addr must be empty before Start is ever called")
@@ -246,7 +311,7 @@ func TestAddrClearsAfterStopTimesOut(t *testing.T) {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		db := newTestDB(t)
 		b, err := NewBark(
-			BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+			BarkConfig{DB: db, Host: "127.0.0.1"},
 		)
 		require.NoError(t, err)
 		require.NoError(t, b.Start(context.Background()))
@@ -305,7 +370,7 @@ func TestAddrClearsWhenStartContextIsCancelled(t *testing.T) {
 
 	db := newTestDB(t)
 	b, err := NewBark(
-		BarkConfig{DB: db, Host: "127.0.0.1", Port: freeTCPPort(t)},
+		BarkConfig{DB: db, Host: "127.0.0.1"},
 	)
 	require.NoError(t, err)
 
@@ -446,4 +511,145 @@ func TestStopDoesNotDeadlockWithInFlightAcquire(t *testing.T) {
 		2*time.Second,
 		"Serve should return once Shutdown completes",
 	)
+}
+
+// holdFirstPreflight installs a beforePreflight hook that parks the first
+// Start in startServer until release is called.
+func holdFirstPreflight(b *Bark) (entered <-chan struct{}, release func()) {
+	enteredCh := make(chan struct{})
+	releaseCh := make(chan struct{})
+	var first, once sync.Once
+	b.beforePreflight = func() {
+		first.Do(func() {
+			close(enteredCh)
+			<-releaseCh
+		})
+	}
+	return enteredCh, func() { once.Do(func() { close(releaseCh) }) }
+}
+
+// goCall runs fn in a goroutine and returns its result channel plus a
+// channel closed once it has finished.
+func goCall(fn func() error) (result <-chan error, done <-chan struct{}) {
+	res := make(chan error, 1)
+	fin := make(chan struct{})
+	go func() {
+		res <- fn()
+		close(fin)
+	}()
+	return res, fin
+}
+
+// settle waits for done, giving up after a short bound: a call correctly
+// blocked behind Start never finishes, so the bound only has to be long
+// enough for an unsynchronised implementation to get through.
+func settle(done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestStopDuringStartPreflightLeavesNoListener(t *testing.T) {
+	t.Parallel()
+
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Host: "127.0.0.1",
+	})
+	require.NoError(t, err)
+	entered, release := holdFirstPreflight(b)
+	defer release()
+
+	startRes, _ := goCall(func() error { return b.Start(context.Background()) })
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"Start never reached preflight",
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	timedStop, _ := goCall(func() error { return b.Stop(ctx) })
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(
+			t,
+			timedStop,
+			time.Second,
+			"Stop ignored its deadline during preflight",
+		),
+		context.Canceled,
+	)
+
+	stopRes, stopDone := goCall(
+		func() error { return b.Stop(context.Background()) },
+	)
+	settle(stopDone)
+	release()
+
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			startRes,
+			5*time.Second,
+			"Start did not return",
+		),
+	)
+	require.NoError(
+		t,
+		testutil.RequireReceive(
+			t,
+			stopRes,
+			5*time.Second,
+			"Stop did not return",
+		),
+	)
+	// Stop is linearized after Start, so it must have closed the listener
+	// Start bound.
+	require.Empty(
+		t,
+		b.Addr(),
+		"Stop must not leave a listener Start bound after it",
+	)
+}
+
+func TestStartPreflightFailureDoesNotPublishServer(t *testing.T) {
+	t.Parallel()
+
+	certPath, _ := writeTestTLSCertKey(t)
+	b, err := NewBark(BarkConfig{
+		DB: newTestDB(t), Host: "127.0.0.1",
+		TlsCertFilePath: certPath,
+		TlsKeyFilePath:  filepath.Join(t.TempDir(), "missing.key"),
+	})
+	require.NoError(t, err)
+	entered, release := holdFirstPreflight(b)
+	defer release()
+
+	firstRes, _ := goCall(func() error { return b.Start(context.Background()) })
+	testutil.RequireReceive(
+		t,
+		entered,
+		5*time.Second,
+		"Start never reached preflight",
+	)
+	secondRes, secondDone := goCall(
+		func() error { return b.Start(context.Background()) },
+	)
+	settle(secondDone)
+	release()
+
+	for _, ch := range []<-chan error{firstRes, secondRes} {
+		err := testutil.RequireReceive(
+			t,
+			ch,
+			5*time.Second,
+			"Start did not return",
+		)
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "already started",
+			"a Start whose preflight fails must never have published a server")
+		require.Contains(t, err.Error(), "TLS keypair")
+	}
 }

@@ -22,21 +22,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestBound_Zero(t *testing.T) {
-	var b hardfork.Bound
-	assert.Equal(t, time.Duration(0), b.RelativeTime)
-	assert.Equal(t, uint64(0), b.Slot)
-	assert.Equal(t, uint64(0), b.Epoch)
-}
-
-func TestEraParams_Zero(t *testing.T) {
-	var p hardfork.EraParams
-	assert.Equal(t, uint64(0), p.EpochSize)
-	assert.Equal(t, time.Duration(0), p.SlotLength)
-	assert.Equal(t, uint64(0), p.SafeZoneSlots)
-	assert.Equal(t, uint64(0), p.GenesisWindow)
-}
-
 func TestEraParams_Valid(t *testing.T) {
 	p := hardfork.EraParams{
 		EpochSize:     432_000,

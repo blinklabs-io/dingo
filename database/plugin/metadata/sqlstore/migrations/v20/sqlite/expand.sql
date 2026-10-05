@@ -1,0 +1,2 @@
+-- No schema change. The backfill records whether persisted Alonzo protocol
+-- parameters predate the word-unit encoding required by gouroboros v0.205.7.

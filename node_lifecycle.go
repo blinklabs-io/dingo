@@ -69,11 +69,14 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/kupo"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -132,6 +135,12 @@ func (n *Node) quiesceComponentStops() []namedStop {
 		stops = append(stops, namedStop{
 			name: "block forger",
 			stop: func() error { n.blockForger.Stop(); return nil },
+		})
+	}
+	if n.kesAgentClient != nil {
+		stops = append(stops, namedStop{
+			name: "kes agent client",
+			stop: func() error { n.closeKESAgentClient(); return nil },
 		})
 	}
 	if n.leaderElection != nil {
@@ -266,7 +275,7 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		n.poolRelayProvider.Close()
 		n.poolRelayProvider = nil
 	}
-	// The Koios parity observer (dingo #3098) reads Dingo's committed reward
+	// The Koios parity observer reads Dingo's committed reward
 	// state through a RewardParitySource backed directly by n.db, the same
 	// way snapshotMgr above does -- it must be fully stopped (Observer.Stop
 	// blocks until its background goroutine has actually exited) and its
@@ -299,10 +308,8 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 		)
 		n.koiosParitySubId = 0
 	}
-	// utxorpc/blockfrost/mesh are API-capability plugin providers with no
-	// service kept on Node (see node.go's Run()) -- StopCapability is a
-	// no-op if the capability was never resolved (e.g. non-API storage
-	// mode or a zero configured port).
+	// API services, including MCP in either storage mode, are owned by the
+	// plugin host. Unresolved capabilities need no shutdown.
 	if n.pluginHost != nil {
 		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityAPIUtxorpc,
@@ -353,11 +360,27 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 			)
 		}
 		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIKupo,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("kupo API shutdown: %w", stopErr),
+			)
+		}
+		if stopErr := n.pluginHost.StopCapability(
 			ctx, plugin.CapabilityAPIMesh,
 		); stopErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("mesh API shutdown: %w", stopErr),
+			)
+		}
+		if stopErr := n.pluginHost.StopCapability(
+			ctx, plugin.CapabilityAPIMcp,
+		); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("mcp API shutdown: %w", stopErr),
 			)
 		}
 	}
@@ -694,6 +717,9 @@ func (n *Node) reinitializeCoreStorage(ctx context.Context) error {
 		if err := n.ledgerState.RecoverCommitTimestampConflict(); err != nil {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
+		if err := n.enforceRecoveredNodeSettings(); err != nil {
+			return err
+		}
 	}
 
 	if n.config.historyExpiry.Enabled {
@@ -762,7 +788,7 @@ func (n *Node) reinitializeMidnightIndexer() error {
 
 // reinitializeBackgroundManagers rebuilds the stake-snapshot manager and
 // wires both its epoch-boundary hooks (the stake hook and the capture
-// hook), (re)starts the optional Koios parity observer (dingo #3098) if
+// hook), (re)starts the optional Koios parity observer if
 // configured, then starts n.ledgerState -- in that order, matching Run()'s
 // own "hooks configured → observer subscribed → ledger started" sequencing
 // (node.go), so an epoch boundary reached immediately after restart can
@@ -786,7 +812,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	}
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Mirror the Koios parity observer's enablement into the rebuilt snapshot
-	// manager too (see Run()'s identical call in node.go, dingo #4188), or a
+	// manager too (see Run()'s identical call in node.go), or a
 	// live restore/truncate would silently drop back to CORE mode's 4-epoch
 	// reward_account_output retention even though the observer is enabled.
 	n.snapshotMgr.SetRewardAccountOutputRetentionUnbounded(
@@ -795,7 +821,7 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	// Prune pool snapshots through the deferred-header retention guard, so a
 	// snapshot a queued/deferred header still needs for leader validation is
 	// never pruned out from under it and misread as pool absence, and the
-	// floor selection is atomic with deferred-header admission (issue #3727).
+	// floor selection is atomic with deferred-header admission.
 	// Set before Start; the pin is released automatically as headers resolve.
 	n.snapshotMgr.SetPoolSnapshotRetentionGuard(
 		n.ledgerState.PrunePoolSnapshotsWithRetentionFloor,
@@ -819,6 +845,18 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 	n.ledgerState.SetEpochBoundarySnapshotHook(
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
 			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
+	wireDeferredRewardStakeInputs(n.ledgerState, n.snapshotMgr)
+	// Reinstall governance's same-boundary SPO stake hook too --
+	// see node.go's Run() for why a production node must always have this
+	// wired alongside the other two.
+	n.ledgerState.SetCurrentBoundarySPOStakeHook(
+		func(
+			txn *database.Txn,
+			evt event.EpochTransitionEvent,
+		) ([]*models.PoolStakeSnapshot, error) {
+			return n.snapshotMgr.CurrentBoundarySPOStakeRows(n.ctx, txn, evt)
 		},
 	)
 
@@ -887,6 +925,14 @@ func (n *Node) reinitializeBackgroundManagers(ctx context.Context) error {
 // peerGov. Must run after reinitializeBackgroundManagers (mempool/
 // chainsyncState come after the background managers in Run()'s order,
 // though nothing here actually depends on them).
+//
+// Callers must hold n.liveLifecycleMu. Every field reassigned here is read
+// by live background goroutines that take that lock to see a stable set --
+// withLiveChainsyncState for n.chainsyncState, WithLiveComponents for the
+// wider group -- and the ledger's read-chain loop reaches n.chainsyncState
+// that way once per gather pass, through GetActiveConnectionFunc. Restore
+// and Truncate hold it across the whole quiesce-through-reinitialize
+// sequence; a caller that reaches this directly has to take it too.
 func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	mempoolSelection := n.config.pluginSelections[plugin.CapabilityMempool]
 	var err error
@@ -909,24 +955,12 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 	}
 	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 
-	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
-	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
-	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
-	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
-		chainsyncCfg,
+		n.chainsyncConfig(),
 	)
-	n.chainsyncClientRemoveSubId = n.eventBus.SubscribeFunc(
-		chainsync.ClientRemoveRequestedEventType,
-		n.chainsyncState.HandleClientRemoveRequestedEvent,
-	)
+	n.chainsyncClientRemoveSubId = n.subscribeChainsyncClientRemoveRequests()
 
 	// Providers, not eagerly-computed values, matching Run. Resolving these
 	// here would capture the outgoing ouroboros instance that is replaced
@@ -944,12 +978,13 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 			OutboundConnOptsProvider: func() []ouroboros.ConnectionOptionFunc {
 				return n.ouroboros().OutboundConnOpts()
 			},
-			PromRegistry:           n.config.promRegistry,
-			MaxConnectionsPerIP:    n.config.maxConnectionsPerIP,
-			MaxInboundConns:        n.config.maxInboundConns,
-			MaxNtCConns:            n.config.maxNtCConns,
-			MaxNtCConnectionsPerIP: n.config.maxNtCConnectionsPerIP,
-			ConnClosedOwnerFunc:    n.handleConnManagerClosedOwner,
+			PromRegistry:            n.config.promRegistry,
+			MaxConnectionsPerIP:     n.config.maxConnectionsPerIP,
+			MaxInboundConns:         n.config.maxInboundConns,
+			MaxNtCConns:             n.config.maxNtCConns,
+			MaxNtCConnectionsPerIP:  n.config.maxNtCConnectionsPerIP,
+			MaxTrustedLocalNtCConns: n.config.maxTrustedLocalNtCConns,
+			ConnClosedOwnerFunc:     n.handleConnManagerClosedOwner,
 		},
 	)
 	n.connManagerRecycleSubId = n.subscribeConnectionRecycleRequests(
@@ -1085,7 +1120,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 }
 
 // reinitializeAPIServers rebuilds the optional, storage-mode/config-gated API
-// servers (utxorpc, midnightServer, blockfrostAPI, meshAPI,
+// servers (utxorpc, midnightServer, blockfrostAPI, kupoAPI, meshAPI,
 // offchainMetadataFetcher), matching Run()'s gating exactly. The Bark blob-
 // store client (n.config.barkBaseUrl) is handled in reinitializeCoreStorage
 // since it wires directly onto n.db, not a separate server object.
@@ -1190,6 +1225,30 @@ func (n *Node) reinitializeAPIServers() error {
 		}
 	}
 
+	kupoSelection, kupoPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIKupo,
+	)
+	if err != nil {
+		return err
+	}
+	if n.config.storageMode.IsAPI() && kupoPort > 0 {
+		adapter, err := kupo.NewNodeAdapter(n.ledgerState)
+		if err != nil {
+			return fmt.Errorf("recreating kupo node adapter: %w", err)
+		}
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIKupo,
+			kupoSelection.Provider, kupoSelection.Config,
+			kupo.ProviderDependencies{
+				Node: adapter, Logger: n.config.logger, Host: n.config.bindAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("restarting kupo API: %w", err)
+		}
+	}
+
 	meshSelection, meshPort, err := n.apiPluginSelection(
 		plugin.CapabilityAPIMesh,
 	)
@@ -1230,6 +1289,31 @@ func (n *Node) reinitializeAPIServers() error {
 		)
 		if err != nil {
 			return fmt.Errorf("recreate mesh API server: %w", err)
+		}
+	}
+
+	mcpSelection, mcpPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMcp,
+	)
+	if err != nil {
+		return err
+	}
+	if mcpPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
+			mcpSelection.Provider, mcpSelection.Config,
+			mcp.ProviderDependencies{
+				Logger:             n.config.logger,
+				Database:           n.db,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("recreate mcp API server: %w", err)
 		}
 	}
 
@@ -1281,7 +1365,7 @@ func (n *Node) reinitializeAPIServers() error {
 // election, block forger, Leios vote wiring) if block production is
 // enabled, reusing the same helper methods Run() calls
 // (node_forging.go) rather than duplicating their bodies.
-func (n *Node) reinitializeBlockProducer() error {
+func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if !n.config.blockProducer {
 		return nil
 	}
@@ -1289,6 +1373,16 @@ func (n *Node) reinitializeBlockProducer() error {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	// validateBlockProducerStartup may have dialled a KES agent and started
+	// its serve-key loop. Unlike Run's failure path this one leaves the node
+	// running, so a failure below would otherwise leave that loop installing
+	// key pushes into credentials no forger holds, against an agent
+	// connection nothing reaches until the node shuts down.
+	defer func() {
+		if retErr != nil {
+			n.closeKESAgentClient()
+		}
+	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {
 		return fmt.Errorf(
 			"block producer credentials failed ledger check: %w",
@@ -1334,6 +1428,9 @@ func (n *Node) databaseConfig() *database.Config {
 			HotTxEntries:    n.config.cacheHotTxEntries,
 			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
 		},
+		AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+			n.config.cardanoNodeConfig, "", n.config.network,
+		),
 	}
 }
 
@@ -1637,6 +1734,9 @@ func (n *Node) Restore(
 		lifecycle.RestoreStorageConfig{
 			Blob:     n.config.pluginSelections[plugin.CapabilityStorageBlob].Config,
 			Metadata: n.config.pluginSelections[plugin.CapabilityStorageMetadata].Config,
+			AlonzoLovelacePerUtxoWord: cardano.AlonzoLovelacePerUtxoWord(
+				n.config.cardanoNodeConfig, "", n.config.network,
+			),
 		},
 	)
 	if err != nil {

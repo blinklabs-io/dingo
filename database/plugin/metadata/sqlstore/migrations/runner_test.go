@@ -39,7 +39,7 @@ var addColumnPattern = regexp.MustCompile(
 // testDBPragmas relaxes durability for throwaway per-test SQLite databases:
 // each one is created, migrated, asserted against, and deleted inside a
 // single test, so an fsync'd rollback journal buys nothing and is expensive
-// on a contended CI runner (dingo#4171). No test in this package kills a
+// on a contended CI runner. No test in this package kills a
 // connection mid-transaction, simulates crash recovery, or inspects a
 // journal/WAL file -- "interruption" tests resume from a schema_migrations
 // row an in-process UPDATE or a returned error puts into the dirty state, not
@@ -188,6 +188,57 @@ func TestRunnerFreshDatabaseAndIdempotentRerun(t *testing.T) {
 	require.Equal(t, string(PhaseComplete), phase)
 	require.False(t, dirty)
 	require.True(t, completed.Valid)
+}
+
+func TestImportedLeiosKeyMigrationKeepsAgeUnknown(t *testing.T) {
+	t.Parallel()
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE pool_registration (
+		id INTEGER PRIMARY KEY,
+		certificate_id INTEGER,
+		added_slot INTEGER,
+		leios_key_public BLOB,
+		leios_key_possession_proof BLOB
+	)`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO pool_registration (
+		id, certificate_id, added_slot, leios_key_public,
+		leios_key_possession_proof
+	) VALUES
+		(1, NULL, 100, X'01', X'02'),
+		(2, 7, 100, X'03', X'04'),
+		(3, NULL, 0, X'05', X'06'),
+		(4, NULL, 100, NULL, NULL),
+		(5, 0, 100, X'07', X'08')`)
+	require.NoError(t, err)
+	registry, err := SQLiteRegistry()
+	require.NoError(t, err)
+	for _, statement := range registry[26].SQL["sqlite"].Expand {
+		_, err := db.Exec(statement)
+		require.NoError(t, err)
+	}
+	rows, err := db.Query(`
+SELECT id, leios_key_registration_age_unknown
+FROM pool_registration ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var got []struct {
+		id      int
+		unknown bool
+	}
+	for rows.Next() {
+		var row struct {
+			id      int
+			unknown bool
+		}
+		require.NoError(t, rows.Scan(&row.id, &row.unknown))
+		got = append(got, row)
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, []struct {
+		id      int
+		unknown bool
+	}{{1, true}, {2, false}, {3, false}, {4, false}, {5, true}}, got)
 }
 
 func TestRatificationHistoryMigrationBackfillsExistingMarker(t *testing.T) {
@@ -453,8 +504,8 @@ func TestRunnerReportsAddColumnTypeMismatch(t *testing.T) {
 // dialect, so this pins the guard against that translation drifting.
 func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 	t.Parallel()
-	// v2 adds four columns, v5 two, v7/v8 one each, and v17 one more.
-	const shippedAddColumns = 15
+	// v2 adds four columns, v5 adds two, and later migrations add fifteen.
+	const shippedAddColumns = 21
 	// The replay guard compares the type the statement declares with the type
 	// the live schema reports, so every shipped ADD COLUMN has to declare a
 	// type whose two spellings are already known to agree after
@@ -468,6 +519,9 @@ func TestAddColumnPatternMatchesShippedMigrations(t *testing.T) {
 		"bigint":  {},
 		"integer": {},
 		"text":    {},
+		// MySQL's translation of TEXT NOT NULL DEFAULT '0'; information_schema
+		// reports it as varchar.
+		"varchar": {},
 	}
 	for _, dialect := range []struct {
 		name string
@@ -705,7 +759,7 @@ func TestRunnerRestoresSQLiteForeignKeysAfterCancellation(t *testing.T) {
 // DDL/state writes (13 migrations, each a separate transaction); sharing it
 // avoids redoing that work in every one of the ~13 parallel subtests, and
 // testDBPragmas removes the per-write fsync from both the shared baseline and
-// each subtest's own per-version replay (dingo#4171). The per-migration
+// each subtest's own per-version replay. The per-migration
 // replay under test -- resetting one version to PhaseExpand and calling
 // Run() again -- still runs against each subtest's own independent copy, so
 // the coverage this test exists for is unchanged.
@@ -720,7 +774,7 @@ func TestRunnerReplaysEveryShippedVersionFromExpand(t *testing.T) {
 	// later one has run. A single shared "migrated to latest" baseline worked
 	// for every version before v19 only because versions 1-18 are all purely
 	// additive (ADD COLUMN/CREATE TABLE/CREATE INDEX): replaying an old
-	// version's DDL against the newest schema was harmless. v19 (dingo#4464)
+	// version's DDL against the newest schema was harmless. v19
 	// drops a column and index a later replay can no longer see, so
 	// replaying v1's CREATE INDEX on `asset`(`name_hex`) against a database
 	// that already ran v19 fails with "no such column" -- a state v1 can

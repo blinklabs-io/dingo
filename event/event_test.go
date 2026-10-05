@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -654,7 +655,7 @@ func TestSubscribeFuncStrictOnPanicHookPanicIsContained(t *testing.T) {
 // subscriber's buffer can hold does not leak goroutines. This is a regression
 // test for MEM-06 where publishWithTimeout spawned goroutines that could never
 // complete when a subscriber's channel buffer was full. Publish now
-// backpressures instead of dropping (#2932), so the subscriber is drained
+// backpressures instead of dropping, so the subscriber is drained
 // concurrently and the assertion is that repeatedly hitting the full-buffer
 // path spawns no per-event goroutines.
 // Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
@@ -718,7 +719,7 @@ func TestPublishNoGoroutineLeak(t *testing.T) {
 
 // TestPublishAsyncNoGoroutineLeak verifies that PublishAsync with a slow
 // subscriber does not leak goroutines. The async workers call Publish
-// internally, which previously used publishWithTimeout. Since #2932 the async
+// internally, which previously used publishWithTimeout. The async
 // queue backpressures instead of dropping, so the subscriber is drained
 // concurrently.
 // Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
@@ -786,14 +787,15 @@ func TestPublishAsyncNoGoroutineLeak(t *testing.T) {
 
 // TestPublishBlocksOnFullBufferAndLosesNothing verifies that when a
 // subscriber's channel buffer is full, Publish backpressures the producer and
-// every event is eventually delivered. Regression test for
-// blinklabs-io/dingo#2932, which replaced the drop-on-full behavior this test
+// every event is eventually delivered. Regression test for the
+// change that replaced the drop-on-full behavior this test
 // previously asserted.
 func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 	t.Parallel()
 
 	const testEvtType event.EventType = "test.backpressure"
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 	defer eb.Stop()
 
 	const buffer = 16
@@ -813,6 +815,24 @@ func TestPublishBlocksOnFullBufferAndLosesNothing(t *testing.T) {
 		}
 	}()
 
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill loop above,
+	// so a one-time length check cannot prove the overflow publisher
+	// actually reached its blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"a backpressured delivery should be counted",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		done,
@@ -920,9 +940,10 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 	t.Parallel()
 
 	const testEvtType event.EventType = "test.blocking.stop"
-	eb := event.NewEventBus(nil, nil)
+	reg := prometheus.NewRegistry()
+	eb := event.NewEventBus(reg, nil)
 
-	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
 	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
 
 	done := make(chan error, 1)
@@ -933,6 +954,24 @@ func TestPublishBlockingUnblocksOnStop(t *testing.T) {
 		)
 	}()
 
+	// Wait for the blocked-delivery metric rather than merely checking the
+	// buffer is full: the buffer was already full from the fill above, so a
+	// one-time length check cannot prove PublishBlocking actually reached its
+	// blocking path.
+	require.Eventually(t, func() bool {
+		return counterValue(
+			t,
+			reg,
+			"event_delivery_blocked_total",
+			map[string]string{
+				"type": string(testEvtType),
+				"kind": "in-memory",
+			},
+		) >= 1
+	}, 2*time.Second, 5*time.Millisecond,
+		"the blocked PublishBlocking should be counted before Stop is exercised",
+	)
+	require.Len(t, subCh, cap(subCh), "the subscriber buffer must be full")
 	testutil.RequireNoReceive(
 		t,
 		done,
@@ -1016,11 +1055,11 @@ func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
 	require.ErrorIs(t, err, event.ErrEventBusStopped)
 }
 
-// TestSubscribeUsesSmallDefaultBuffer is the regression test for #2106.
-// Subscribe / SubscribeFunc must allocate the small default buffer; only
-// callers that explicitly opt in via the *WithBuffer variants should pay
-// the EventQueueSize allocation. Verified by capacity, since cap on a
-// receive-only channel reports the underlying buffer size.
+// TestSubscribeUsesSmallDefaultBuffer is the regression test for the default
+// buffer size. Subscribe / SubscribeFunc must allocate the small default
+// buffer; only callers that explicitly opt in via the *WithBuffer variants
+// should pay the EventQueueSize allocation. Verified by capacity, since cap on
+// a receive-only channel reports the underlying buffer size.
 func TestSubscribeUsesSmallDefaultBuffer(t *testing.T) {
 	t.Parallel()
 

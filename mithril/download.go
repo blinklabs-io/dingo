@@ -832,7 +832,10 @@ func downloadSnapshotOnce(
 		) {
 			return "", fmt.Errorf("downloading snapshot: %w", cause)
 		}
-		return "", fmt.Errorf("downloading snapshot: %w", err)
+		return "", fmt.Errorf(
+			"downloading snapshot: %w",
+			redactLocationError(err, cfg.URL),
+		)
 	}
 	if resp == nil || resp.Body == nil {
 		return "", errors.New("nil response from download server")
@@ -935,7 +938,7 @@ func downloadSnapshotOnce(
 				}
 				return "", fmt.Errorf(
 					"restarting download: %w",
-					err,
+					redactLocationError(err, cfg.URL),
 				)
 			}
 			if resp2 == nil || resp2.Body == nil {
@@ -950,12 +953,12 @@ func downloadSnapshotOnce(
 				)
 				resp2.Body.Close()
 				file.Close()
-				return "", fmt.Errorf(
+				return "", redactLocationError(fmt.Errorf(
 					"restart download failed with "+
 						"status %d: %s",
 					resp2.StatusCode,
 					string(bodyBytes),
-				)
+				), cfg.URL)
 			}
 			// Replace the original response body with the
 			// fresh full-download stream.
@@ -1042,18 +1045,18 @@ func downloadSnapshotOnce(
 		)
 		if resp.StatusCode == http.StatusTooManyRequests ||
 			resp.StatusCode >= http.StatusInternalServerError {
-			return "", fmt.Errorf(
+			return "", redactLocationError(fmt.Errorf(
 				"%w: download failed with status %d: %s",
 				errDownloadTransient,
 				resp.StatusCode,
 				string(bodyBytes),
-			)
+			), cfg.URL)
 		}
-		return "", fmt.Errorf(
+		return "", redactLocationError(fmt.Errorf(
 			"download failed with status %d: %s",
 			resp.StatusCode,
 			string(bodyBytes),
-		)
+		), cfg.URL)
 	}
 	defer func() {
 		if file != nil {
@@ -1064,7 +1067,7 @@ func downloadSnapshotOnce(
 	cfg.Logger.Debug(
 		"downloading snapshot",
 		"component", "mithril",
-		"url", cfg.URL,
+		"url", redactLocationURI(cfg.URL),
 		"total_bytes", totalSize,
 		"destination", destPath,
 	)

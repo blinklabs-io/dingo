@@ -1,3 +1,5 @@
+//go:build !antithesis
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build !antithesis
 
 // Package analysis provides assertion helpers that wrap Antithesis SDK calls
 // (or fall back to structured logging when the antithesis build tag is absent).

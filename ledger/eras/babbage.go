@@ -227,9 +227,7 @@ func ValidateTxBabbage(
 			)
 		}
 	}
-	if err := validateMIRAccumulatedRewards(
-		tx, slot, ls, tmpPparams.ProtocolMajorVersion(),
-	); err != nil {
+	if err := validateShelleyDelegCerts(tx, slot, ls, pp); err != nil {
 		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
@@ -292,6 +290,7 @@ func ValidateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
@@ -332,13 +331,15 @@ func ValidateTxBabbage(
 			if err != nil {
 				return err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -383,7 +384,8 @@ func ValidateTxBabbage(
 			// Real cardano-ledger rejects this transaction outright at the
 			// UTXOW level, before any script runs, when PlutusV2 has no real
 			// cost model yet -- see ErrNoCostModelForPlutusV2.
-			if syntheticV2CostModelInEffect(ls) {
+			syntheticV2 := syntheticV2CostModelInEffect(ls)
+			if syntheticV2 {
 				return fmt.Errorf(
 					"script %s: %w",
 					tmpScript.Hash(),
@@ -402,13 +404,15 @@ func ValidateTxBabbage(
 			if err != nil {
 				return err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				syntheticV2,
 			)
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
@@ -529,6 +533,7 @@ func EvaluateTxBabbage(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
+		tmpPparams.ProtocolMajor,
 	)
 	if txHasRedeemers(tx) {
 		txInfoV2, err = txInfos.v2()
@@ -569,13 +574,15 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV1,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				false,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)
@@ -602,7 +609,8 @@ func EvaluateTxBabbage(
 			// Mirrors ValidateTxBabbage's identical check: a transaction
 			// that would be rejected outright at validation time must not
 			// be quoted a fee/ex-units estimate implying it's valid.
-			if syntheticV2CostModelInEffect(ls) {
+			syntheticV2 := syntheticV2CostModelInEffect(ls)
+			if syntheticV2 {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
 					"script %s: %w",
 					tmpScript.Hash(),
@@ -621,13 +629,15 @@ func EvaluateTxBabbage(
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
-			evalContext, err := cek.NewEvalContext(
+			evalContext, err := plutusEvalContext(
+				ls,
 				lang.LanguageVersionV2,
 				cek.ProtoVersion{
 					Major: tmpPparams.ProtocolMajor,
 					Minor: tmpPparams.ProtocolMinor,
 				},
 				costModel,
+				syntheticV2,
 			)
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, fmt.Errorf("build evaluation context: %w", err)

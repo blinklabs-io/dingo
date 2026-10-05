@@ -57,9 +57,10 @@ var errExactAddressCandidateScanLimit = errors.New(
 
 // deleteUtxoBlobs deletes blob data for the given [models.Utxo] entries.
 // Metadata remains the authoritative source of truth; blob deletions are
-// supplementary. The caller [*Txn] is ignored — this function always creates
-// and commits its own blob-only batches via the [Database], so callers should
-// not expect blob deletes to participate in any outer transaction.
+// supplementary. A caller [*Txn] holding a blob handle stages the deletes in
+// that transaction, so they commit or roll back with the metadata delete they
+// accompany; without one, this function creates and commits its own blob-only
+// batches via the [Database].
 //
 // Failures do not stop the remaining deletes, but they are counted and
 // reported as [ErrBlobDeleteIncomplete]: the caller goes on to remove the
@@ -117,7 +118,34 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, txn *Txn) error {
 		if blob == nil {
 			return types.ErrBlobStoreUnavailable
 		}
-		deleteBatch(blob, txn.Blob(), utxos)
+		// Stage only what that transaction can still hold. Past its budget
+		// the store rejects every further staged write, including the
+		// commit timestamp Txn.Commit puts into this same transaction, so
+		// an unbounded stage costs the caller its whole commit rather than
+		// just the tail of this set. What is left
+		// unstaged is counted with the deletes that failed and reported
+		// through ErrBlobDeleteIncomplete below: the metadata naming these
+		// objects goes away either way, so both are orphans rather than
+		// silently dropped work.
+		staged := len(utxos)
+		if staged > 0 {
+			staged = stagedBlobDeleteLimit(
+				blob,
+				txn.Blob(),
+				len(types.UtxoBlobKey(utxos[0].TxId, utxos[0].OutputIdx)),
+				staged,
+			)
+		}
+		deleteBatch(blob, txn.Blob(), utxos[:staged])
+		if skipped := len(utxos) - staged; skipped > 0 {
+			deleteErrors += skipped
+			d.logger.Warn(
+				"UTxO blob deletes left unstaged to keep the transaction committable",
+				"skipped", skipped,
+				"staged", staged,
+				"total", len(utxos),
+			)
+		}
 	} else {
 		for start := 0; start < len(utxos); start += batchSize {
 			end := min(start+batchSize, len(utxos))
@@ -293,7 +321,7 @@ func loadCbor(u *models.Utxo, txn *Txn) error {
 // branch below. Only recoverUtxoCbor's metadata-based fallback
 // (utxoRecoveryBlockForTx, once the blob-based lookup misses) actually
 // needs one, so a metadata-capable transaction is opened here, on demand,
-// just for that branch (blinklabs-io/dingo#1900 review). This is an
+// just for that branch. This is an
 // explicit, self-contained guarantee: sqlstore.Store.GetTransactionByHash
 // (what that fallback ultimately calls) separately tolerates a nil
 // types.Txn by borrowing its own ad-hoc pooled connection for just that one
@@ -326,7 +354,7 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob
 				// handle to fetch the producing block's raw CBOR, which
 				// txn doesn't have. Mirrors the metadata-missing case
-				// above for the opposite gap (cubic review).
+				// above for the opposite gap.
 				recoveryTxn, cleanup = txn.withBlobForRecovery()
 			}
 			if cleanup != nil {
@@ -345,6 +373,10 @@ func recoverUtxoCbor(
 	txId []byte,
 	outputIdx uint32,
 ) ([]byte, error) {
+	txHash, err := lcommon.NewBlake2b256Checked(txId)
+	if err != nil {
+		return nil, fmt.Errorf("utxo recovery transaction id: %w", err)
+	}
 	block, err := utxoRecoveryBlockForTx(db, txn, txId)
 	if err != nil {
 		return nil, err
@@ -379,9 +411,7 @@ func recoverUtxoCbor(
 	indexer := NewBlockIndexer(block.Slot, block.Hash)
 	offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 	if indexErr == nil {
-		var txHashArray [32]byte
-		copy(txHashArray[:], txId)
-		ref := UtxoRef{TxId: txHashArray, OutputIdx: outputIdx}
+		ref := UtxoRef{TxId: txHash, OutputIdx: outputIdx}
 		if offset, ok := offsets.UtxoOffsets[ref]; ok {
 			if repairErr := repairUtxoBlob(
 				db, txn, txId, outputIdx, &offset,
@@ -582,8 +612,8 @@ func repairUtxoBlob(
 	// above located this block through the caller's pinned store, and
 	// re-pinning here would let a concurrent SetBlobStore swap repair a
 	// different store than the one just read from, splitting the read
-	// and the write-back non-atomically across two stores
-	// (blinklabs-io/dingo#1900 review). The caller's own pin, still held
+	// and the write-back non-atomically across two stores.
+	// The caller's own pin, still held
 	// for txn's lifetime (which spans this whole call), keeps that store
 	// from being drained out from under this write.
 	var store blob.BlobStore
@@ -704,7 +734,7 @@ func (d *Database) UtxosByRefs(
 // at atSlot" or "was live at atSlot but its spend record has since been
 // hard-deleted by the periodic stability-window cleanup"
 // (UtxosDeleteConsumed). Callers pinning a historical point (ledger.Query,
-// blinklabs-io/dingo#382/#1900) must reject that case themselves before
+// node-parity) must reject that case themselves before
 // calling this -- see ledger's checkUtxoRetentionWindow.
 func (d *Database) UtxosByRefsAsOf(
 	refs []models.UtxoId,
@@ -805,6 +835,124 @@ func (d *Database) UtxosByAddress(
 		}
 	}
 	return filterUtxosByAddressPatterns(utxos, patterns)
+}
+
+// UtxosWithHistory returns retained live and spent outputs with their
+// producing and spending chain positions. The metadata store performs the
+// indexed coarse query; this coordinated layer resolves output CBOR and
+// completes exact-address matching, which cannot be done from credential
+// columns alone. For a bounded exact-address query, Limit applies to exact
+// matches rather than coarse SQL candidates.
+func (d *Database) UtxosWithHistory(
+	q *models.UtxoHistoryQuery,
+	txn *Txn,
+) ([]models.UtxoWithHistory, error) {
+	if q == nil {
+		return nil, models.ErrNilUtxoHistoryQuery
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	requiresExact := !q.MatchAllAddresses &&
+		models.RequiresExactAddressFilter(q.AddressPatterns)
+	if !requiresExact || q.Limit <= 0 {
+		utxos, err := d.utxoStore().GetUtxosWithHistory(
+			q,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		patterns := q.AddressPatterns
+		if !requiresExact {
+			patterns = nil
+		}
+		return d.loadAndFilterHistoricalUtxos(utxos, patterns, txn)
+	}
+
+	// Exact address identity is only available in output CBOR. Scan coarse SQL
+	// candidates in keyset order until Limit exact matches are collected, so a
+	// page full of other address forms sharing the requested credential cannot
+	// truncate the result. GetUtxosWithHistory uses the cursor's comparison
+	// direction for both ascending and descending queries.
+	scanQuery := *q
+	// Keep each SQL query and decoded candidate set bounded without imposing a
+	// total scan cap. The number of credential-sharing address forms before an
+	// exact match is not a correctness boundary.
+	scanQuery.Limit = min(max(q.Limit, 128), 1024)
+	ret := make([]models.UtxoWithHistory, 0, q.Limit)
+	for len(ret) < q.Limit {
+		batch, err := d.utxoStore().GetUtxosWithHistory(
+			&scanQuery,
+			txn.Metadata(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		filtered, err := d.loadAndFilterHistoricalUtxos(
+			batch,
+			q.AddressPatterns,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		remaining := q.Limit - len(ret)
+		if len(filtered) > remaining {
+			filtered = filtered[:remaining]
+		}
+		ret = append(ret, filtered...)
+		if len(batch) < scanQuery.Limit || len(batch) == 0 {
+			break
+		}
+		last := batch[len(batch)-1]
+		scanQuery.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
+	}
+	return ret, nil
+}
+
+func (d *Database) loadAndFilterHistoricalUtxos(
+	utxos []models.UtxoWithHistory,
+	patterns []models.UtxoAddressPattern,
+	txn *Txn,
+) ([]models.UtxoWithHistory, error) {
+	for i := range utxos {
+		if err := loadCbor(&utxos[i].Utxo, txn); err != nil {
+			return nil, err
+		}
+	}
+	if !models.RequiresExactAddressFilter(patterns) {
+		return utxos, nil
+	}
+	ret := make([]models.UtxoWithHistory, 0, len(utxos))
+	for i := range utxos {
+		output, err := utxos[i].Decode()
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode historical UTxO %x#%d for exact address match: %w",
+				utxos[i].TxId,
+				utxos[i].OutputIdx,
+				err,
+			)
+		}
+		match, err := models.MatchesUtxoAddressPatterns(
+			output.Address(),
+			patterns,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if match {
+			ret = append(ret, utxos[i])
+		}
+	}
+	return ret, nil
 }
 
 // GetControlledAmountByCredential returns the sum of live UTxO amounts
@@ -1282,7 +1430,7 @@ func (d *Database) UtxosDeleteConsumed(
 	// that removes them. TruncateAfterSlot restores spent UTxOs with an
 	// UPDATE, which cannot reach a row that no longer exists, so a rollback
 	// below this slot silently leaves the live set short of every output
-	// consumed above it (issue #3766). The floor only ever moves up: a sweep
+	// consumed above it. The floor only ever moves up: a sweep
 	// at a lower slot does not make rows an earlier, higher sweep removed
 	// restorable again.
 	if utxoCount > 0 && slot > pruneFloor {

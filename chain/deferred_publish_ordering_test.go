@@ -53,7 +53,7 @@ const (
 	updateRollback observedUpdate = "rollback"
 )
 
-// runDeferredOrderingScenario drives the exact concurrency wolf31o2 flagged: a
+// runDeferredOrderingScenario drives the exact concurrency at risk: a
 // blockfetch-style deferred add and a chainsync-style deferred rollback, each
 // mutating the primary chain under its OWN mutex (the real handlers hold two
 // different mutexes -- chainsyncBlockfetchMutex and chainsyncMutex -- so they do
@@ -212,19 +212,20 @@ func runDeferredOrderingScenario(
 			)
 		}
 	}
-	// No third chain.update may follow (exactly-once, no duplicate drain).
+	// Both publishing goroutines have completed, so no third update can still
+	// be in flight. Check the subscriber without using a timing window.
 	select {
 	case evt := <-ch:
 		if kind, ok := classify(evt); ok {
 			t.Fatalf("unexpected extra chain.update published: %s", kind)
 		}
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 	return got
 }
 
 // TestDeferredChainUpdatesPublishInChainMutationOrder is the regression guard
-// for wolf31o2's blocking review (ledger/chainsync.go:531): deferred chain.update
+// that deferred chain.update
 // publication must follow chain-mutation order across the blockfetch-add and
 // chainsync-rollback handlers, which hold different mutexes and previously
 // flushed independent pendingPublishes queues.

@@ -48,7 +48,7 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 		ledgerPeerCount := 0
 		for _, peer := range p.peers {
 			if peer != nil && peer.Source == PeerSourceP2PLedger &&
-				peer.hasClientConnection() &&
+				p.usableClientLocked(peer) &&
 				(peer.State == PeerStateHot || peer.State == PeerStateWarm) {
 				ledgerPeerCount++
 			}
@@ -124,24 +124,11 @@ func (p *PeerGovernor) bootstrapExitSuccessorCountLocked() int {
 			(peer.State != PeerStateHot && peer.State != PeerStateWarm) {
 			continue
 		}
-		if chainSelectionEligible(peer.Source, peer.Connection) {
+		if chainSelectionEligible(peer.Source, p.selectionConnLocked(peer)) {
 			successorCount++
 		}
 	}
 	return successorCount
-}
-
-// exitBootstrap marks bootstrap as exited while preserving bootstrap-source
-// classification so recovery remains reachable.
-// Acquires p.mu internally and publishes events after releasing it to avoid deadlock.
-//
-//nolint:unused // Used by tests
-func (p *PeerGovernor) exitBootstrap(reason string) {
-	p.mu.Lock()
-	events := p.exitBootstrapLocked(reason)
-	p.mu.Unlock()
-
-	p.publishPendingEvents(events)
 }
 
 // exitBootstrapLocked exits bootstrap mode and returns pending events.
@@ -201,22 +188,6 @@ func (p *PeerGovernor) exitBootstrapLocked(reason string) []pendingEvent {
 	return events
 }
 
-// checkBootstrapRecovery checks if bootstrap peers should be re-enabled.
-// This happens when:
-// - AutoBootstrapRecovery is enabled
-// - Hot peer count < MinHotPeers
-// - No gossip or ledger peers are available as warm candidates
-// Acquires p.mu internally and publishes events after releasing it to avoid deadlock.
-//
-//nolint:unused // Used by tests
-func (p *PeerGovernor) checkBootstrapRecovery() {
-	p.mu.Lock()
-	events := p.checkBootstrapRecoveryLocked()
-	p.mu.Unlock()
-
-	p.publishPendingEvents(events)
-}
-
 // checkBootstrapRecoveryLocked checks if bootstrap peers should be re-enabled
 // and returns pending events. Must be called with p.mu held.
 func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
@@ -263,7 +234,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 	hotCount := 0
 	for _, peer := range p.peers {
 		if peer != nil && peer.State == PeerStateHot &&
-			peer.hasClientConnection() {
+			p.usableClientLocked(peer) {
 			hotCount++
 		}
 	}
@@ -284,7 +255,7 @@ func (p *PeerGovernor) checkBootstrapRecoveryLocked() []pendingEvent {
 		if peer == nil {
 			continue
 		}
-		if peer.State == PeerStateWarm && peer.hasClientConnection() {
+		if peer.State == PeerStateWarm && p.usableClientLocked(peer) {
 			if peer.Source == PeerSourceP2PGossip ||
 				peer.Source == PeerSourceP2PLedger {
 				hasWarmCandidates = true

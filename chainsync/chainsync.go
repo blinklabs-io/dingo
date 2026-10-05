@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"slices"
 	"sync"
@@ -159,6 +160,13 @@ type TrackedClient struct {
 	// response. Zero means no samples recorded yet.
 	BlockfetchLatencyEWMA time.Duration
 	blockfetchSampleCount uint64
+	// blockfetchSecondsPerByte is an exponential moving average (alpha=0.2)
+	// of the delivery time per byte over completed batches; zero until
+	// blockfetchThroughputSamples is non-zero.
+	blockfetchSecondsPerByte    float64
+	blockfetchThroughputSamples uint64
+	// Patience is the client's Genesis Limit on Patience bucket.
+	Patience PatienceState
 }
 
 // Config holds configuration for the chainsync State.
@@ -182,6 +190,20 @@ type Config struct {
 	// PromRegistry, when non-nil, is used to register chainsync metrics
 	// such as the current header deduplication cache size.
 	PromRegistry prometheus.Registerer
+	// Patience configures the Genesis Limit on Patience.
+	Patience PatienceConfig
+	// PatienceActiveFunc reports whether Genesis selection is syncing, the
+	// only state in which the Limit on Patience applies. When nil the Limit
+	// on Patience never applies.
+	PatienceActiveFunc func() bool
+	// Now is the clock for activity, stall, and patience tracking. When nil
+	// it is time.Now.
+	Now func() time.Time
+	// IsRoot reports whether a connection belongs to a configured root peer.
+	// Roots take eligible-client slots ahead of other peers: a root can
+	// displace a non-root client when every slot is taken, and a freed slot
+	// goes to a connected root first. When nil no connection is a root.
+	IsRoot func(ouroboros.ConnectionId) bool
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -189,6 +211,7 @@ func DefaultConfig() Config {
 	return Config{
 		MaxClients:   DefaultMaxClients,
 		StallTimeout: DefaultStallTimeout,
+		Patience:     DefaultPatienceConfig(),
 	}
 }
 
@@ -258,6 +281,20 @@ type State struct {
 	// deleted on disconnect in RemoveClientConnId so cardinality stays
 	// bounded by live connections.
 	blockfetchLatencyGauge *prometheus.GaugeVec
+	// patienceExhaustedCounter counts clients that exhausted their Genesis
+	// Limit on Patience. Never nil; unregistered when PromRegistry is nil.
+	patienceExhaustedCounter prometheus.Counter
+	// blockfetchSelectionsCounter counts SelectBlockfetchPeer decisions by
+	// kind and blockfetchHandoffsCounter counts selections that moved to a
+	// different peer than the previous one. Never nil; unregistered when
+	// PromRegistry is nil.
+	blockfetchSelectionsCounter *prometheus.CounterVec
+	blockfetchHandoffsCounter   prometheus.Counter
+	// blockfetchSalt breaks ties between near-equal peers differently on
+	// each node, so independent nodes do not converge on the same relay.
+	blockfetchSalt uint64
+	// blockfetchSelection guards the last peer chosen.
+	blockfetchSelection blockfetchSelectionState
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
@@ -306,6 +343,10 @@ func NewStateWithConfig(
 	if cfg.StallTimeout <= 0 {
 		cfg.StallTimeout = DefaultStallTimeout
 	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	cfg.Patience = cfg.Patience.withDefaults()
 	s := &State{
 		eventBus:       eventBus,
 		chainProvider:  chainProvider,
@@ -333,7 +374,39 @@ func NewStateWithConfig(
 		},
 		[]string{"peer", "connection_id"},
 	)
+	s.patienceExhaustedCounter = promauto.With(cfg.PromRegistry).NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_patience_exhausted_total",
+			Help: "chainsync clients disconnected for exhausting the Genesis Limit on Patience",
+		},
+	)
+	s.blockfetchSelectionsCounter = promauto.With(cfg.PromRegistry).NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_peer_selections_total",
+			Help: "blockfetch peer selections, by decision",
+		},
+		[]string{"decision"},
+	)
+	for _, decision := range []string{
+		"only_holder",
+		"explore",
+		"model",
+		"unmeasured",
+	} {
+		s.blockfetchSelectionsCounter.WithLabelValues(decision)
+	}
+	s.blockfetchHandoffsCounter = promauto.With(cfg.PromRegistry).NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_peer_handoffs_total",
+			Help: "blockfetch peer selections that moved to a different peer than the previous selection",
+		},
+	)
+	s.blockfetchSalt = rand.Uint64() //nolint:gosec // tie-break salt, not a secret
 	return s
+}
+
+func (s *State) now() time.Time {
+	return s.config.Now()
 }
 
 // AddClient registers a server-side (N2C) chainsync client.
@@ -495,6 +568,56 @@ func (s *State) ClearClientConnId(connId ouroboros.ConnectionId) {
 func (s *State) RemoveClientConnId(
 	connId ouroboros.ConnectionId,
 ) {
+	removedEvent, wasEligible := s.removeClientConnId(connId)
+	if wasEligible {
+		s.promoteObservedRoot(connId)
+	}
+	if removedEvent == nil {
+		return
+	}
+	// Removal can run inside an EventBus callback. PublishAsync waits for queue
+	// capacity, so waiting here can occupy that callback while all async workers
+	// are parked trying to deliver into its full subscriber channel. Keep the
+	// state mutation independent from bus backpressure; shutdown releases a
+	// deferred publish through the bus stop channel.
+	s.publishAsyncDetached(
+		ClientRemovedEventType,
+		event.NewEvent(ClientRemovedEventType, *removedEvent),
+	)
+}
+
+func (s *State) publishAsyncDetached(eventType event.EventType, evt event.Event) {
+	if s.eventBus == nil {
+		return
+	}
+	go s.eventBus.PublishAsync(eventType, evt)
+}
+
+// promoteObservedRoot hands a free eligible slot to a connected root other
+// than freed that is only observing, so a root does not wait for its own next
+// message to be admitted after a slot frees. freed is the connection whose
+// removal or demotion freed the slot; promoting it would undo the demotion.
+func (s *State) promoteObservedRoot(freed ouroboros.ConnectionId) {
+	if s.config.IsRoot == nil {
+		return
+	}
+	s.clientConnIdMutex.RLock()
+	var root *ouroboros.ConnectionId
+	for id, tc := range s.trackedClients {
+		if id != freed && tc.ObservabilityOnly && s.config.IsRoot(id) {
+			root = &id
+			break
+		}
+	}
+	s.clientConnIdMutex.RUnlock()
+	if root != nil {
+		s.SetClientObservabilityOnly(*root, false)
+	}
+}
+
+func (s *State) removeClientConnId(
+	connId ouroboros.ConnectionId,
+) (*ClientRemovedEvent, bool) {
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	tc, exists := s.trackedClients[connId]
@@ -508,20 +631,15 @@ func (s *State) RemoveClientConnId(
 	if wasPrimary {
 		s.activeClientConnId = nil
 	}
-	// Emit client removed event
+	var removedEvent *ClientRemovedEvent
 	if wasEligible && s.eventBus != nil {
-		s.eventBus.PublishAsync(
-			ClientRemovedEventType,
-			event.NewEvent(
-				ClientRemovedEventType,
-				ClientRemovedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-					WasPrimary:   wasPrimary,
-				},
-			),
-		)
+		removedEvent = &ClientRemovedEvent{
+			ConnId:       connId,
+			TotalClients: s.eligibleClientCountLocked(),
+			WasPrimary:   wasPrimary,
+		}
 	}
+	return removedEvent, wasEligible
 }
 
 func pointAheadOf(a, b ocommon.Point) bool {
@@ -541,35 +659,33 @@ func (s *State) HandleClientRemoveRequestedEvent(evt event.Event) {
 	s.RemoveClientConnId(e.ConnId)
 }
 
-// addTrackedClientLocked registers a new tracked client and emits a
-// ClientAddedEvent. Registration alone does not make the client active: it has
+// addTrackedClientLocked registers a new tracked client and returns its
+// notification. Registration alone does not make the client active: it has
 // not delivered a tip for ChainSelector to validate yet.
 // Caller must hold clientConnIdMutex.
 func (s *State) addTrackedClientLocked(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
 	startedAsOutbound bool,
-) {
+) *ClientAddedEvent {
 	s.trackedClients[connId] = &TrackedClient{
 		ConnId:            connId,
 		Status:            ClientStatusSyncing,
 		ObservabilityOnly: observabilityOnly,
 		StartedAsOutbound: startedAsOutbound,
-		LastActivity:      time.Now(),
+		LastActivity:      s.now(),
+		Patience: newPatienceState(
+			s.config.Patience.Capacity,
+			s.now(),
+		),
 	}
-	// Emit client added event
 	if !observabilityOnly && s.eventBus != nil {
-		s.eventBus.PublishAsync(
-			ClientAddedEventType,
-			event.NewEvent(
-				ClientAddedEventType,
-				ClientAddedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-				},
-			),
-		)
+		return &ClientAddedEvent{
+			ConnId:       connId,
+			TotalClients: s.eligibleClientCountLocked(),
+		}
 	}
+	return nil
 }
 
 // AddClientConnId adds a connection ID to the set of tracked
@@ -604,13 +720,26 @@ func (s *State) TryAddObservedClientConnIdWithDirection(
 	connId ouroboros.ConnectionId,
 	startedAsOutbound bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
+	added, ok := func() (*ClientAddedEvent, bool) {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
+		if _, exists := s.trackedClients[connId]; exists {
+			return nil, false
+		}
+		return s.addTrackedClientLocked(connId, true, startedAsOutbound), true
+	}()
+	s.publishClientAdded(added)
+	return ok
+}
+
+func (s *State) publishClientAdded(added *ClientAddedEvent) {
+	if added == nil {
+		return
 	}
-	s.addTrackedClientLocked(connId, true, startedAsOutbound)
-	return true
+	s.publishAsyncDetached(
+		ClientAddedEventType,
+		event.NewEvent(ClientAddedEventType, *added),
+	)
 }
 
 // HasClientConnId returns true if the connection ID is being
@@ -656,18 +785,32 @@ func (s *State) TryAddClientConnId(
 	connId ouroboros.ConnectionId,
 	maxClients int,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	// Check if already tracked
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
-	}
-	// Check client limit
-	if s.eligibleClientCountLocked() >= maxClients {
-		return false
-	}
-	s.addTrackedClientLocked(connId, false, false)
-	return true
+	return s.tryAddClientConnIdWithDirection(connId, maxClients, false)
+}
+
+func (s *State) tryAddClientConnIdWithDirection(
+	connId ouroboros.ConnectionId,
+	maxClients int,
+	startedAsOutbound bool,
+) bool {
+	var removed *ClientRemovedEvent
+	added, ok := func() (*ClientAddedEvent, bool) {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
+		if _, exists := s.trackedClients[connId]; exists {
+			return nil, false
+		}
+		if s.eligibleClientCountLocked() >= maxClients {
+			var preempted bool
+			if removed, preempted = s.preemptForRootLocked(connId); !preempted {
+				return nil, false
+			}
+		}
+		return s.addTrackedClientLocked(connId, false, startedAsOutbound), true
+	}()
+	s.publishClientRemoved(removed)
+	s.publishClientAdded(added)
+	return ok
 }
 
 // TryAddClientConnIdWithDirection is like TryAddClientConnId but
@@ -680,18 +823,7 @@ func (s *State) TryAddClientConnIdWithDirection(
 	maxClients int,
 	startedAsOutbound bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-	// Check if already tracked
-	if _, exists := s.trackedClients[connId]; exists {
-		return false
-	}
-	// Check client limit
-	if s.eligibleClientCountLocked() >= maxClients {
-		return false
-	}
-	s.addTrackedClientLocked(connId, false, startedAsOutbound)
-	return true
+	return s.tryAddClientConnIdWithDirection(connId, maxClients, startedAsOutbound)
 }
 
 // ClientObservabilityOnly reports whether a tracked client is currently
@@ -743,65 +875,119 @@ func (s *State) SetClientStartedAsOutbound(
 
 // SetClientObservabilityOnly toggles whether a tracked client participates in
 // the eligible chainsync pool. Promoting an observability-only client back into
-// the eligible pool respects MaxClients; when the pool is full, the client
-// remains observability-only and this method returns false.
+// the eligible pool respects MaxClients: when the pool is full a configured
+// root displaces a non-root client, and any other client remains
+// observability-only and this method returns false. Demoting an eligible
+// client hands the freed slot to another connected root that is observing.
 func (s *State) SetClientObservabilityOnly(
 	connId ouroboros.ConnectionId,
 	observabilityOnly bool,
 ) bool {
-	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
+	var notifyType event.EventType
+	var notify *event.Event
+	var preempted *ClientRemovedEvent
+	var freedSlot bool
+	ok := func() bool {
+		s.clientConnIdMutex.Lock()
+		defer s.clientConnIdMutex.Unlock()
 
-	tc, exists := s.trackedClients[connId]
-	if !exists {
-		return false
-	}
-	if tc.ObservabilityOnly == observabilityOnly {
+		tc, exists := s.trackedClients[connId]
+		if !exists {
+			return false
+		}
+		if tc.ObservabilityOnly == observabilityOnly {
+			return true
+		}
+		if !observabilityOnly &&
+			s.config.MaxClients > 0 &&
+			s.eligibleClientCountLocked() >= s.config.MaxClients {
+			var ok bool
+			if preempted, ok = s.preemptForRootLocked(connId); !ok {
+				return false
+			}
+		}
+
+		wasPrimary := s.activeClientConnId != nil &&
+			*s.activeClientConnId == connId
+		wasEligible := !tc.ObservabilityOnly
+		tc.ObservabilityOnly = observabilityOnly
+		freedSlot = wasEligible && observabilityOnly
+		if wasPrimary && observabilityOnly {
+			s.activeClientConnId = nil
+		}
+
+		if s.eventBus != nil && wasEligible && observabilityOnly {
+			notifyType = ClientRemovedEventType
+			evt := event.NewEvent(ClientRemovedEventType, ClientRemovedEvent{
+				ConnId:       connId,
+				TotalClients: s.eligibleClientCountLocked(),
+				WasPrimary:   wasPrimary,
+			})
+			notify = &evt
+		}
+		if s.eventBus != nil && !wasEligible && !observabilityOnly {
+			notifyType = ClientAddedEventType
+			evt := event.NewEvent(ClientAddedEventType, ClientAddedEvent{
+				ConnId:       connId,
+				TotalClients: s.eligibleClientCountLocked(),
+			})
+			notify = &evt
+		}
 		return true
+	}()
+	s.publishClientRemoved(preempted)
+	if notify != nil {
+		s.publishAsyncDetached(notifyType, *notify)
 	}
-	if !observabilityOnly &&
-		s.config.MaxClients > 0 &&
-		s.eligibleClientCountLocked() >= s.config.MaxClients {
-		return false
+	if freedSlot {
+		s.promoteObservedRoot(connId)
 	}
+	return ok
+}
 
-	wasPrimary := s.activeClientConnId != nil &&
-		*s.activeClientConnId == connId
-	wasEligible := !tc.ObservabilityOnly
-	tc.ObservabilityOnly = observabilityOnly
-	if wasPrimary && observabilityOnly {
-		s.activeClientConnId = nil
+// preemptForRootLocked frees one eligible slot for connId when it is a
+// configured root: the longest-idle non-root client that is not the active
+// one becomes observability-only and stays connected. It reports false when
+// connId is not a root or every eligible client is a root or the active one.
+// Caller must hold clientConnIdMutex.
+func (s *State) preemptForRootLocked(
+	connId ouroboros.ConnectionId,
+) (*ClientRemovedEvent, bool) {
+	if s.config.IsRoot == nil || !s.config.IsRoot(connId) {
+		return nil, false
 	}
-
+	var victim *TrackedClient
+	for id, tc := range s.trackedClients {
+		if tc.ObservabilityOnly ||
+			(s.activeClientConnId != nil && *s.activeClientConnId == id) ||
+			s.config.IsRoot(id) {
+			continue
+		}
+		if victim == nil || tc.LastActivity.Before(victim.LastActivity) {
+			victim = tc
+		}
+	}
+	if victim == nil {
+		return nil, false
+	}
+	victim.ObservabilityOnly = true
 	if s.eventBus == nil {
-		return true
+		return nil, true
 	}
-	if wasEligible && observabilityOnly {
-		s.eventBus.PublishAsync(
-			ClientRemovedEventType,
-			event.NewEvent(
-				ClientRemovedEventType,
-				ClientRemovedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-					WasPrimary:   wasPrimary,
-				},
-			),
-		)
+	return &ClientRemovedEvent{
+		ConnId:       victim.ConnId,
+		TotalClients: s.eligibleClientCountLocked(),
+	}, true
+}
+
+func (s *State) publishClientRemoved(removed *ClientRemovedEvent) {
+	if removed == nil {
+		return
 	}
-	if !wasEligible && !observabilityOnly {
-		s.eventBus.PublishAsync(
-			ClientAddedEventType,
-			event.NewEvent(
-				ClientAddedEventType,
-				ClientAddedEvent{
-					ConnId:       connId,
-					TotalClients: s.eligibleClientCountLocked(),
-				},
-			),
-		)
-	}
-	return true
+	s.publishAsyncDetached(
+		ClientRemovedEventType,
+		event.NewEvent(ClientRemovedEventType, *removed),
+	)
 }
 
 // UpdateClientTip updates the cursor, tip, and activity
@@ -842,18 +1028,27 @@ func (s *State) UpdateClientRollback(
 	point ocommon.Point,
 	tip ochainsync.Tip,
 ) bool {
+	active := s.patienceActive()
 	s.clientConnIdMutex.Lock()
 	defer s.clientConnIdMutex.Unlock()
 	tc, exists := s.trackedClients[connId]
 	if !exists {
 		return false
 	}
+	// A rollback to the cursor the peer already sits at moves nothing, so it
+	// must not refresh the stall clock or clear a stalled status; otherwise a
+	// peer can repeat it indefinitely and look alive.
+	noOp := tc.Cursor.Slot == point.Slot &&
+		bytes.Equal(tc.Cursor.Hash, point.Hash)
 	point.Hash = cloneBytes(point.Hash)
 	tip.Point.Hash = cloneBytes(tip.Point.Hash)
 	tc.Cursor = point
 	tc.Tip = tip
-	tc.LastActivity = time.Now()
-	tc.Status = ClientStatusSyncing
+	if !noOp {
+		tc.LastActivity = s.now()
+		tc.Status = ClientStatusSyncing
+	}
+	s.resumePatienceAfterRollbackLocked(tc, point, tip, active)
 	return true
 }
 
@@ -902,7 +1097,7 @@ func (s *State) RewindTrackedClientsTo(
 			Hash: cloneBytes(point.Hash),
 		}
 		tc.Status = ClientStatusSyncing
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		ret = append(ret, connId)
 	}
 	return ret
@@ -1023,7 +1218,7 @@ func (s *State) updateTrackedClientTip(
 	}
 	tc.Cursor = point
 	tc.Tip = tip
-	tc.LastActivity = time.Now()
+	tc.LastActivity = s.now()
 	tc.HeadersRecv++
 	if tc.Status == ClientStatusStalled {
 		tc.Status = ClientStatusSyncing
@@ -1043,12 +1238,12 @@ func (s *State) processHeader(
 	point ocommon.Point,
 ) bool {
 	s.seenHeadersMutex.Lock()
-	defer s.seenHeadersMutex.Unlock()
 	records := s.seenHeaders[point.Slot]
 	// Check if any existing record matches this hash
 	for _, rec := range records {
 		if bytes.Equal(rec.hash, point.Hash) {
 			// Duplicate header, same hash
+			s.seenHeadersMutex.Unlock()
 			return false
 		}
 	}
@@ -1064,6 +1259,7 @@ func (s *State) processHeader(
 		// deliveries of an overflow header too. An unseen header must remain
 		// eligible for ledger validation: cache saturation is not invalidity.
 		records[len(records)-1] = newRec
+		s.seenHeadersMutex.Unlock()
 		return true
 	}
 	s.seenHeaders[point.Slot] = append(records, newRec)
@@ -1075,27 +1271,24 @@ func (s *State) processHeader(
 	// emit a fork detection event against the first record.
 	// Clone the Point.Hash to avoid aliasing the caller's
 	// buffer in the event payload.
-	if len(records) > 0 {
-		if s.eventBus != nil {
-			clonedPoint := ocommon.NewPoint(
-				point.Slot,
-				cloneBytes(point.Hash),
-			)
-			s.eventBus.PublishAsync(
-				ForkDetectedEventType,
-				event.NewEvent(
-					ForkDetectedEventType,
-					ForkDetectedEvent{
-						Slot:    point.Slot,
-						HashA:   records[0].hash,
-						HashB:   hashClone,
-						ConnIdA: records[0].connId,
-						ConnIdB: connId,
-						Point:   clonedPoint,
-					},
-				),
-			)
+	var forkEvent *ForkDetectedEvent
+	if len(records) > 0 && s.eventBus != nil {
+		clonedPoint := ocommon.NewPoint(point.Slot, cloneBytes(point.Hash))
+		forkEvent = &ForkDetectedEvent{
+			Slot:    point.Slot,
+			HashA:   records[0].hash,
+			HashB:   hashClone,
+			ConnIdA: records[0].connId,
+			ConnIdB: connId,
+			Point:   clonedPoint,
 		}
+	}
+	s.seenHeadersMutex.Unlock()
+	if forkEvent != nil {
+		s.publishAsyncDetached(
+			ForkDetectedEventType,
+			event.NewEvent(ForkDetectedEventType, *forkEvent),
+		)
 	}
 	return true
 }
@@ -1149,7 +1342,7 @@ func (s *State) MarkClientSynced(
 	var changed bool
 	if exists && tc.Status != ClientStatusSynced {
 		tc.Status = ClientStatusSynced
-		tc.LastActivity = time.Now()
+		tc.LastActivity = s.now()
 		changed = true
 	}
 	var slot uint64
@@ -1158,7 +1351,7 @@ func (s *State) MarkClientSynced(
 	}
 	s.clientConnIdMutex.Unlock()
 	if changed && s.eventBus != nil {
-		s.eventBus.PublishAsync(
+		s.publishAsyncDetached(
 			ClientSyncedEventType,
 			event.NewEvent(
 				ClientSyncedEventType,
@@ -1178,10 +1371,9 @@ func (s *State) MarkClientSynced(
 // Returns the list of connection IDs that were newly marked as stalled.
 func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 	s.clientConnIdMutex.Lock()
-	defer s.clientConnIdMutex.Unlock()
-
-	now := time.Now()
+	now := s.now()
 	var stalled []ouroboros.ConnectionId
+	var notifications []ClientStalledEvent
 	for id, tc := range s.trackedClients {
 		if tc.ObservabilityOnly ||
 			tc.Status == ClientStatusStalled ||
@@ -1192,18 +1384,19 @@ func (s *State) CheckStalledClients() []ouroboros.ConnectionId {
 			tc.Status = ClientStatusStalled
 			stalled = append(stalled, id)
 			if s.eventBus != nil {
-				s.eventBus.PublishAsync(
-					ClientStalledEventType,
-					event.NewEvent(
-						ClientStalledEventType,
-						ClientStalledEvent{
-							ConnId: id,
-							Slot:   tc.Tip.Point.Slot,
-						},
-					),
-				)
+				notifications = append(notifications, ClientStalledEvent{
+					ConnId: id,
+					Slot:   tc.Tip.Point.Slot,
+				})
 			}
 		}
+	}
+	s.clientConnIdMutex.Unlock()
+	for _, notification := range notifications {
+		s.publishAsyncDetached(
+			ClientStalledEventType,
+			event.NewEvent(ClientStalledEventType, notification),
+		)
 	}
 
 	return stalled

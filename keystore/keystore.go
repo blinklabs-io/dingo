@@ -26,6 +26,7 @@ import (
 	"sync"
 
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
@@ -381,7 +382,13 @@ func (ks *KeyStore) isLoadedUnsafe() bool {
 	return ks.vrfSKey != nil && ks.kesSKey != nil && ks.opCert != nil
 }
 
-// ValidateOpCert validates that the operational certificate matches the KES key.
+// ValidateOpCert validates the loaded operational certificate: that it names
+// the loaded KES key as its hot key, and that the pool's cold key signed it.
+//
+// The cold signature is the half that establishes identity. KeyStore derives
+// its pool id from OpCert.ColdVKey, so without this check a certificate
+// carrying an unrelated or corrupt cold vkey/signature pair yields a pool id
+// whose cold key never authorized this hot key.
 func (ks *KeyStore) ValidateOpCert() error {
 	ks.mu.RLock()
 	defer ks.mu.RUnlock()
@@ -398,6 +405,21 @@ func (ks *KeyStore) ValidateOpCert() error {
 		return errors.New(
 			"KES verification key mismatch: loaded key does not match OpCert.KESVKey",
 		)
+	}
+
+	// Verify the cold-key signature over the cardano-ledger OCertSignable
+	// representation (hot vkey || counter BE64 || KES period BE64). Delegated
+	// to gouroboros rather than re-derived here: that is the same function
+	// dingo's inbound block-header path uses (ledger/verify_opcert.go), so a
+	// certificate this node forges under is checked against exactly the rule
+	// its peers will apply to the resulting blocks.
+	if err := ledger.VerifyOpCertSignature(&ledger.OpCert{
+		KesVkey:       ks.opCert.KESVKey,
+		IssueNumber:   ks.opCert.IssueNumber,
+		KesPeriod:     ks.opCert.KESPeriod,
+		ColdSignature: ks.opCert.Signature,
+	}, ks.opCert.ColdVKey); err != nil {
+		return fmt.Errorf("OpCert cold-key signature invalid: %w", err)
 	}
 
 	return nil

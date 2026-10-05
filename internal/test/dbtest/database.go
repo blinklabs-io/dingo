@@ -70,7 +70,8 @@ func RawSQLiteMetadata(
 	raw, err := sql.Open(
 		"sqlite",
 		fmt.Sprintf(
-			"file:%s?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)",
+			"file:%s?_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)"+
+				"&_pragma=synchronous(OFF)",
 			path,
 		),
 	)

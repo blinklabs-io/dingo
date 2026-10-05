@@ -196,12 +196,6 @@ func (v *mockValidator) ValidateTxWithOverlay(
 	return v.ValidateTx(tx)
 }
 
-func (v *mockValidator) setFailHash(hash string, fail bool) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.failHashes[hash] = fail
-}
-
 func (v *mockValidator) setFailAll(fail bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -506,7 +500,9 @@ func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
 	second := m.AddConsumer(connId)
 
 	require.Same(t, first, second)
+	m.consumersMutex.Lock()
 	assert.Len(t, m.consumers, 1)
+	m.consumersMutex.Unlock()
 }
 
 func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
@@ -648,40 +644,46 @@ func TestMempool_ConsumerCreatedDuringTxAddition(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
 
-	// Start goroutine adding transactions continuously
-	stopAdding := make(chan struct{})
-	go func() {
-		for i := 0; ; i++ {
+	// Add a fixed stream of transactions and notify the consumer creator after
+	// each append so the test does not depend on wall-clock scheduling.
+	const numAdded = 100
+	added := make(chan struct{})
+	// Releases the producer if a require below fails before it is drained.
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	var addWG sync.WaitGroup
+	addWG.Go(func() {
+		defer close(added)
+		for i := range numAdded {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
+			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 			select {
-			case <-stopAdding:
+			case added <- struct{}{}:
+			case <-stop:
 				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
 			}
 		}
-	}()
+	})
 
-	// Create consumers at various points during addition
+	// Create consumers at distinct points in the concurrent append stream.
 	consumers := make([]*MempoolConsumer, 10)
 	for i := range 10 {
-		time.Sleep(5 * time.Millisecond) // Stagger consumer creation
+		for range 10 {
+			_, ok := <-added
+			require.True(t, ok, "transaction producer ended before consumer %d", i)
+		}
 		connId := newTestConnectionId(i)
 		consumers[i] = mustAddConsumer(t, m, connId)
 		require.NotNil(t, consumers[i], "consumer %d should not be nil", i)
 	}
-
-	// Let more transactions be added
-	time.Sleep(50 * time.Millisecond)
-	close(stopAdding)
+	addWG.Wait()
 
 	// Verify each consumer can read transactions without panic
 	for i, consumer := range consumers {
@@ -1019,63 +1021,47 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	addMockTransactions(t, m, 50)
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
 
 	// Goroutine adding transactions
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-add-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
+		<-start
+		for i := range 500 {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-add-%d", i),
+				Cbor:     fmt.Appendf(nil, "cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
 			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 		}
 	})
 
 	// Goroutine removing transactions
 	wg.Go(func() {
+		<-start
 		removeIdx := 0
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", removeIdx))
-				removeIdx++
-				if removeIdx >= 50 {
-					removeIdx = 0
-				}
-				time.Sleep(2 * time.Millisecond)
+		for range 500 {
+			m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", removeIdx))
+			removeIdx++
+			if removeIdx >= 50 {
+				removeIdx = 0
 			}
 		}
 	})
 
 	// Goroutine creating consumers
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				connId := newTestConnectionId(1000 + i)
-				consumer := m.AddConsumer(connId)
-				if consumer != nil {
-					// Read a few transactions
-					for range 3 {
-						consumer.NextTx(false)
-					}
+		<-start
+		for i := range 100 {
+			connId := newTestConnectionId(1000 + i)
+			consumer := m.AddConsumer(connId)
+			if consumer != nil {
+				for range 3 {
+					consumer.NextTx(false)
 				}
-				time.Sleep(5 * time.Millisecond)
 			}
 		}
 	})
@@ -1084,20 +1070,13 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
 	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				consumer.NextTx(false)
-				time.Sleep(time.Millisecond)
-			}
+		<-start
+		for range 500 {
+			consumer.NextTx(false)
 		}
 	})
 
-	// Run for a short duration
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	// Wait with timeout
 	waitCh := make(chan struct{})
@@ -1111,6 +1090,10 @@ func TestMempool_ConcurrentConsumerOperations(t *testing.T) {
 		// Success - no deadlock
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected - test timed out")
+	}
+	for i := range 50 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
 	}
 }
 
@@ -1129,24 +1112,19 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
 	txsRead := make([]int32, numConsumers)
+	start := make(chan struct{})
 
 	// Each consumer reads in its own goroutine
 	for i := range numConsumers {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			for {
-				select {
-				case <-done:
-					return
-				default:
-					tx := consumers[idx].NextTx(false)
-					if tx != nil {
-						atomic.AddInt32(&txsRead[idx], 1)
-					}
-					time.Sleep(time.Microsecond * 100)
+			<-start
+			for range 500 {
+				tx := consumers[idx].NextTx(false)
+				if tx != nil {
+					atomic.AddInt32(&txsRead[idx], 1)
 				}
 			}
 		}(i)
@@ -1154,41 +1132,29 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 
 	// Adder goroutine
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("new-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.Unlock()
-				time.Sleep(time.Millisecond)
+		<-start
+		for i := range 500 {
+			m.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("new-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "new-cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: time.Now(),
 			}
+			m.transactions = append(m.transactions, tx)
+			m.Unlock()
 		}
 	})
 
 	// Remover goroutine
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", i%100))
-				time.Sleep(time.Millisecond * 2)
-			}
+		<-start
+		for i := range 500 {
+			m.RemoveTransaction(fmt.Sprintf("tx-hash-%d", i%100))
 		}
 	})
 
-	// Run for short duration
-	time.Sleep(300 * time.Millisecond)
-	close(done)
+	close(start)
 
 	// Wait with timeout
 	waitCh := make(chan struct{})
@@ -1208,6 +1174,10 @@ func TestMempool_ConcurrentNextTx_MultipleConsumers(t *testing.T) {
 		t.Logf("Total transactions read: %d", total)
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock detected")
+	}
+	for i := range 100 {
+		_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+		assert.False(t, exists, "original transaction %d should be removed", i)
 	}
 }
 
@@ -1971,8 +1941,11 @@ func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {
 	require.True(t, exists)
 	firstLastSeen := tx1.LastSeen
 
-	// Wait a bit
-	time.Sleep(10 * time.Millisecond)
+	// Move the stored timestamp back deterministically so refreshing it is
+	// observable even on a coarse or unusually fast clock.
+	m.Lock()
+	m.txByHash[txHash].LastSeen = firstLastSeen.Add(-time.Hour)
+	m.Unlock()
 
 	// Add same transaction again
 	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
@@ -2870,8 +2843,9 @@ func TestMempool_TTL_NonExpiredTransactionsRetained(t *testing.T) {
 	m.consumersMutex.Unlock()
 	m.Unlock()
 
-	// Wait for a few cleanup cycles to run
-	time.Sleep(100 * time.Millisecond)
+	// Exercise the production cleanup path directly; the fresh timestamps
+	// must survive regardless of the background cleanup schedule.
+	m.removeExpiredTransactions()
 
 	// Verify transactions are still present
 	m.RLock()
@@ -3175,107 +3149,106 @@ func TestMempool_TTL_RemoveExpiredTransactions_EmptyMempool(
 }
 
 func TestMempool_TTL_LastSeenUpdatePreventsExpiry(t *testing.T) {
-	// Use a generous TTL (500ms) relative to the total refresh
-	// window (6 × 30ms = 180ms) so the test is not flaky under
-	// CI load.
-	m := newTestMempoolWithTTL(t, 500*time.Millisecond, 20*time.Millisecond)
+	// The background cleanup interval is far longer than the test, so removal
+	// only happens through the explicit removeExpiredTransactions calls.
+	m := newTestMempoolWithTTL(t, time.Hour, time.Hour)
 	defer m.Stop(context.Background())
 
-	// Add a transaction that will expire soon
-	m.Lock()
-	m.consumersMutex.Lock()
-	tx := &MempoolTransaction{
-		Hash:     "refresh-tx",
-		Cbor:     []byte("refresh-cbor"),
-		Type:     uint(conway.EraIdConway),
-		LastSeen: time.Now(),
+	// Both transactions start well past the TTL; only one is refreshed.
+	add := func(hash string) {
+		m.Lock()
+		m.consumersMutex.Lock()
+		tx := &MempoolTransaction{
+			Hash:     hash,
+			Cbor:     []byte(hash + "-cbor"),
+			Type:     uint(conway.EraIdConway),
+			LastSeen: time.Now().Add(-2 * time.Hour),
+		}
+		m.transactions = append(m.transactions, tx)
+		m.txByHash[tx.Hash] = tx
+		m.currentSizeBytes += int64(len(tx.Cbor))
+		m.metrics.txsInMempool.Inc()
+		m.consumersMutex.Unlock()
+		m.Unlock()
 	}
-	m.transactions = append(m.transactions, tx)
-	m.txByHash[tx.Hash] = tx
-	m.currentSizeBytes += int64(len(tx.Cbor))
-	m.metrics.txsInMempool.Inc()
-	m.consumersMutex.Unlock()
+	add("refresh-tx")
+	add("stale-tx")
+
+	m.Lock()
+	m.txByHash["refresh-tx"].LastSeen = time.Now()
 	m.Unlock()
 
-	// Keep refreshing LastSeen so the transaction never expires
-	refreshDone := make(chan struct{})
-	go func() {
-		defer close(refreshDone)
-		for range 6 {
-			time.Sleep(30 * time.Millisecond)
-			m.Lock()
-			if existingTx := m.txByHash["refresh-tx"]; existingTx != nil {
-				existingTx.LastSeen = time.Now()
-			}
-			m.Unlock()
-		}
-	}()
+	m.removeExpiredTransactions()
 
-	<-refreshDone
-
-	// The transaction should still be in the mempool because
-	// we kept refreshing it
 	m.RLock()
-	assert.Equal(
-		t, 1, len(m.transactions),
-		"refreshed transaction should still be present",
-	)
-	_, exists := m.txByHash["refresh-tx"]
-	assert.True(t, exists, "refreshed transaction should be in hash map")
-	m.RUnlock()
+	defer m.RUnlock()
+	require.Len(t, m.transactions, 1)
+	assert.Equal(t, "refresh-tx", m.transactions[0].Hash,
+		"refreshed transaction should still be present")
+	assert.Contains(t, m.txByHash, "refresh-tx")
+	assert.NotContains(t, m.txByHash, "stale-tx",
+		"an unrefreshed transaction past the TTL should be removed")
 }
 
 func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
-	m := newTestMempoolWithTTL(t, 30*time.Millisecond, 10*time.Millisecond)
+	m := newTestMempoolWithTTL(t, time.Minute, 10*time.Millisecond)
 	defer m.Stop(context.Background())
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
+	expiredInserted := make(chan struct{})
+	addDone := make(chan struct{})
 
-	// Goroutine continuously adding transactions
+	// Add a deterministic mix of expired and live transactions while cleanup
+	// and consumer reads run concurrently.
 	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				m.consumersMutex.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("concurrent-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "concurrent-cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.txByHash[tx.Hash] = tx
-				m.currentSizeBytes += int64(len(tx.Cbor))
-				m.metrics.txsInMempool.Inc()
-				m.consumersMutex.Unlock()
-				m.Unlock()
-				time.Sleep(5 * time.Millisecond)
+		<-start
+		for i := range 200 {
+			lastSeen := time.Now()
+			if i%2 == 0 {
+				lastSeen = lastSeen.Add(-time.Hour)
+			}
+			m.Lock()
+			m.consumersMutex.Lock()
+			tx := &MempoolTransaction{
+				Hash:     fmt.Sprintf("concurrent-tx-%d", i),
+				Cbor:     fmt.Appendf(nil, "concurrent-cbor-%d", i),
+				Type:     uint(conway.EraIdConway),
+				LastSeen: lastSeen,
+			}
+			m.transactions = append(m.transactions, tx)
+			m.txByHash[tx.Hash] = tx
+			m.currentSizeBytes += int64(len(tx.Cbor))
+			m.metrics.txsInMempool.Inc()
+			m.consumersMutex.Unlock()
+			m.Unlock()
+			if i == 0 {
+				close(expiredInserted)
 			}
 		}
+		close(addDone)
+	})
+	wg.Go(func() {
+		<-start
+		<-expiredInserted
+		for range 200 {
+			m.removeExpiredTransactions()
+		}
+		<-addDone
+		m.removeExpiredTransactions()
 	})
 
 	// Goroutine reading transactions via consumer
 	connId := newTestConnectionId(0)
 	consumer := m.AddConsumer(connId)
 	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				consumer.NextTx(false)
-				time.Sleep(2 * time.Millisecond)
-			}
+		<-start
+		for range 200 {
+			consumer.NextTx(false)
 		}
 	})
 
-	// Let it run with concurrent adds, reads, and expiry
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	waitCh := make(chan struct{})
 	go func() {
@@ -3285,14 +3258,18 @@ func TestMempool_TTL_ConcurrentExpiryAndAddition(t *testing.T) {
 
 	select {
 	case <-waitCh:
-		// Success - no deadlock or race
 		m.RLock()
-		t.Logf(
-			"Final mempool state: %d transactions, %d bytes",
-			len(m.transactions),
-			m.currentSizeBytes,
-		)
+		transactionCount := len(m.transactions)
+		present := make(map[int]bool, 200)
+		for i := range 200 {
+			_, exists := m.txByHash[fmt.Sprintf("concurrent-tx-%d", i)]
+			present[i] = exists
+		}
 		m.RUnlock()
+		require.Equal(t, 100, transactionCount)
+		for i := range 200 {
+			require.Equal(t, i%2 != 0, present[i])
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("potential deadlock with concurrent expiry and addition")
 	}
@@ -3884,61 +3861,70 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 	var addEvents atomic.Int32
 	var removeEvents atomic.Int32
 
-	m.eventBus.SubscribeFunc(
+	addSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		AddTransactionEventType,
+		600,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_, _ = m.GetTransaction("any")
 			addEvents.Add(1)
 		},
 	)
-	m.eventBus.SubscribeFunc(
+	removeSubscriptionID := m.eventBus.SubscribeFuncWithBufferPolicy(
 		RemoveTransactionEventType,
+		400,
+		event.SubscriberBackpressureBlock,
 		func(evt event.Event) {
 			// Access mempool during event handling
 			_ = m.Transactions()
 			removeEvents.Add(1)
 		},
 	)
+	t.Cleanup(func() {
+		m.eventBus.UnsubscribeAndWait(
+			AddTransactionEventType,
+			addSubscriptionID,
+		)
+		m.eventBus.UnsubscribeAndWait(
+			RemoveTransactionEventType,
+			removeSubscriptionID,
+		)
+	})
+	addMockTransactions(t, m, 400)
 
 	var wg sync.WaitGroup
-	done := make(chan struct{})
+	start := make(chan struct{})
 
 	// Goroutines adding transactions via direct mock injection
 	for i := range 3 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; ; j++ {
-				select {
-				case <-done:
-					return
-				default:
-					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
-					m.Lock()
-					m.consumersMutex.Lock()
-					tx := &MempoolTransaction{
-						Hash:     hash,
-						Cbor:     []byte(hash),
-						Type:     uint(conway.EraIdConway),
-						LastSeen: time.Now(),
-					}
-					m.transactions = append(m.transactions, tx)
-					m.txByHash[tx.Hash] = tx
-					m.currentSizeBytes += int64(len(tx.Cbor))
-					m.metrics.txsInMempool.Inc()
-					m.consumersMutex.Unlock()
-					m.Unlock()
-					// Publish add event outside locks
-					m.eventBus.Publish(
-						AddTransactionEventType,
-						event.NewEvent(
-							AddTransactionEventType,
-							AddTransactionEvent{Hash: hash},
-						),
-					)
-					time.Sleep(time.Millisecond)
+			<-start
+			for j := range 200 {
+				hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
+				m.Lock()
+				m.consumersMutex.Lock()
+				tx := &MempoolTransaction{
+					Hash:     hash,
+					Cbor:     []byte(hash),
+					Type:     uint(conway.EraIdConway),
+					LastSeen: time.Now(),
 				}
+				m.transactions = append(m.transactions, tx)
+				m.txByHash[tx.Hash] = tx
+				m.currentSizeBytes += int64(len(tx.Cbor))
+				m.metrics.txsInMempool.Inc()
+				m.consumersMutex.Unlock()
+				m.Unlock()
+				m.eventBus.Publish(
+					AddTransactionEventType,
+					event.NewEvent(
+						AddTransactionEventType,
+						AddTransactionEvent{Hash: hash},
+					),
+				)
 			}
 		}(i)
 	}
@@ -3948,22 +3934,15 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; ; j++ {
-				select {
-				case <-done:
-					return
-				default:
-					hash := fmt.Sprintf("pub-tx-%d-%d", id, j)
-					m.RemoveTransaction(hash)
-					time.Sleep(2 * time.Millisecond)
-				}
+			<-start
+			for j := range 200 {
+				hash := fmt.Sprintf("tx-hash-%d", id*200+j)
+				m.RemoveTransaction(hash)
 			}
 		}(i)
 	}
 
-	// Run for 200ms
-	time.Sleep(200 * time.Millisecond)
-	close(done)
+	close(start)
 
 	waitCh := make(chan struct{})
 	go func() {
@@ -3973,11 +3952,18 @@ func TestMempool_MEM03_NoDeadlockOnConcurrentPublish(
 
 	select {
 	case <-waitCh:
-		t.Logf(
-			"Add events: %d, Remove events: %d",
-			addEvents.Load(),
-			removeEvents.Load(),
+		require.Eventually(t, func() bool {
+			return addEvents.Load() == 600 && removeEvents.Load() == 400
+		}, 5*time.Second, 10*time.Millisecond,
+			"all published events should be handled",
 		)
+		require.Equal(t, int32(600), addEvents.Load())
+		require.Equal(t, int32(400), removeEvents.Load())
+		require.Len(t, m.Transactions(), 600)
+		for i := range 400 {
+			_, exists := m.GetTransaction(fmt.Sprintf("tx-hash-%d", i))
+			require.False(t, exists)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal(
 			"deadlock detected during concurrent publish operations",
@@ -4044,16 +4030,6 @@ func (v *overlayValidator) removeBaseUtxo(key utxoref.Key) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.baseUtxos, key)
-}
-
-// hexToBlake2b256 converts a hex string to a Blake2b256 hash.
-func hexToBlake2b256(t *testing.T, h string) lcommon.Blake2b256 {
-	t.Helper()
-	var hash lcommon.Blake2b256
-	b, err := hex.DecodeString(h)
-	require.NoError(t, err)
-	copy(hash[:], b)
-	return hash
 }
 
 // buildMockTx builds a mock transaction with the given inputs and outputs.

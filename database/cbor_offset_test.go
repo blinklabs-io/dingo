@@ -24,196 +24,138 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCborOffsetEncodeDecode(t *testing.T) {
-	t.Parallel()
+func FuzzCborOffsetRoundTrip(f *testing.F) {
+	f.Add(uint64(0), make([]byte, 32), uint32(0), uint32(0))
+	f.Add(
+		uint64(12345678),
+		bytes.Repeat([]byte{0xab}, 32),
+		uint32(1024),
+		uint32(256),
+	)
+	f.Add(
+		uint64(math.MaxUint64),
+		bytes.Repeat([]byte{0xff}, 32),
+		uint32(math.MaxUint32),
+		uint32(math.MaxUint32),
+	)
 
-	testCases := []struct {
-		name       string
-		blockSlot  uint64
-		blockHash  [32]byte
-		byteOffset uint32
-		byteLength uint32
-	}{
-		{
-			name:       "zero values",
-			blockSlot:  0,
-			blockHash:  [32]byte{},
-			byteOffset: 0,
-			byteLength: 0,
-		},
-		{
-			name:      "typical values",
-			blockSlot: 12345678,
-			blockHash: [32]byte{
-				0x01,
-				0x02,
-				0x03,
-				0x04,
-				0x05,
-				0x06,
-				0x07,
-				0x08,
-				0x09,
-				0x0a,
-				0x0b,
-				0x0c,
-				0x0d,
-				0x0e,
-				0x0f,
-				0x10,
-				0x11,
-				0x12,
-				0x13,
-				0x14,
-				0x15,
-				0x16,
-				0x17,
-				0x18,
-				0x19,
-				0x1a,
-				0x1b,
-				0x1c,
-				0x1d,
-				0x1e,
-				0x1f,
-				0x20,
-			},
-			byteOffset: 1024,
-			byteLength: 256,
-		},
-		{
-			name:      "max uint64 slot",
-			blockSlot: math.MaxUint64,
-			blockHash: [32]byte{
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-				0xff,
-			},
-			byteOffset: math.MaxUint32,
-			byteLength: math.MaxUint32,
-		},
-		{
-			name:      "large slot number",
-			blockSlot: 1000000000000,
-			blockHash: [32]byte{
-				0xab,
-				0xcd,
-				0xef,
-				0x12,
-				0x34,
-				0x56,
-				0x78,
-				0x9a,
-				0xbc,
-				0xde,
-				0xf0,
-				0x11,
-				0x22,
-				0x33,
-				0x44,
-				0x55,
-				0x66,
-				0x77,
-				0x88,
-				0x99,
-				0xaa,
-				0xbb,
-				0xcc,
-				0xdd,
-				0xee,
-				0xff,
-				0x00,
-				0x11,
-				0x22,
-				0x33,
-				0x44,
-				0x55,
-			},
-			byteOffset: 500000,
-			byteLength: 100000,
-		},
-	}
+	f.Fuzz(func(
+		t *testing.T,
+		blockSlot uint64,
+		blockHashBytes []byte,
+		byteOffset uint32,
+		byteLength uint32,
+	) {
+		var blockHash [32]byte
+		copy(blockHash[:], blockHashBytes)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			original := CborOffset{
-				BlockSlot:  tc.blockSlot,
-				BlockHash:  tc.blockHash,
-				ByteOffset: tc.byteOffset,
-				ByteLength: tc.byteLength,
+		original := CborOffset{
+			BlockSlot:  blockSlot,
+			BlockHash:  blockHash,
+			ByteOffset: byteOffset,
+			ByteLength: byteLength,
+		}
+		decoded, err := DecodeCborOffset(original.Encode())
+		if err != nil {
+			t.Fatalf("DecodeCborOffset(encoded): %v", err)
+		}
+		if *decoded != original {
+			t.Fatalf("decoded offset = %#v, want %#v", *decoded, original)
+		}
+	})
+}
+
+func FuzzDecodeCborOffset(f *testing.F) {
+	f.Add([]byte(nil))
+	f.Add([]byte("DOFF"))
+	f.Add((&CborOffset{
+		BlockSlot:  42,
+		BlockHash:  [32]byte{0x01, 0x02, 0x03},
+		ByteOffset: 12,
+		ByteLength: 34,
+	}).Encode())
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		decoded, err := DecodeCborOffset(data)
+		if err != nil {
+			if IsUtxoOffsetStorage(data) || IsTxOffsetStorage(data) {
+				t.Fatalf(
+					"storage detector accepted data DecodeCborOffset rejected: %v",
+					err,
+				)
 			}
+			return
+		}
 
-			// Test encode
-			encoded := original.Encode()
-			require.Len(
-				t,
-				encoded,
-				CborOffsetSize,
-				"encoded size should be %d bytes",
-				CborOffsetSize,
+		if !IsUtxoOffsetStorage(data) {
+			t.Fatalf("IsUtxoOffsetStorage returned false for decoded offset")
+		}
+		if !IsTxOffsetStorage(data) {
+			t.Fatalf("IsTxOffsetStorage returned false for decoded offset")
+		}
+		if !bytes.Equal(decoded.Encode(), data) {
+			t.Fatalf(
+				"DecodeCborOffset re-encoded to %x, want %x",
+				decoded.Encode(),
+				data,
 			)
+		}
+	})
+}
 
-			// Test decode
-			decoded, err := DecodeCborOffset(encoded)
-			require.NoError(t, err, "decode should not error")
-			require.NotNil(t, decoded, "decoded should not be nil")
+func FuzzDecodeTxCborParts(f *testing.F) {
+	f.Add([]byte(nil))
+	f.Add([]byte("DTXP"))
+	f.Add((&TxCborParts{
+		BlockSlot:      42,
+		BlockHash:      [32]byte{0x01, 0x02, 0x03},
+		BodyOffset:     1,
+		BodyLength:     2,
+		WitnessOffset:  3,
+		WitnessLength:  4,
+		MetadataOffset: 5,
+		MetadataLength: 6,
+		IsValid:        true,
+	}).Encode())
 
-			// Verify round-trip
-			assert.Equal(
-				t,
-				original.BlockSlot,
-				decoded.BlockSlot,
-				"BlockSlot mismatch",
+	f.Fuzz(func(t *testing.T, data []byte) {
+		decoded, err := DecodeTxCborParts(data)
+		if err != nil {
+			// IsTxCborPartsStorage is format recognition only (magic +
+			// size), deliberately independent of DecodeTxCborParts's
+			// additional IsValid-byte canonical-value check -- see
+			// IsTxCborPartsStorage's doc comment. So the only way these
+			// two can disagree is a recognizable-but-noncanonical
+			// IsValid byte; any other disagreement is a real bug.
+			if IsTxCborPartsStorage(data) &&
+				data[68] != 0 && data[68] != 1 {
+				return
+			}
+			if IsTxCborPartsStorage(data) {
+				t.Fatalf(
+					"storage detector accepted data DecodeTxCborParts rejected: %v",
+					err,
+				)
+			}
+			return
+		}
+
+		if !IsTxCborPartsStorage(data) {
+			t.Fatalf("IsTxCborPartsStorage returned false for decoded tx parts")
+		}
+
+		roundTrip, err := DecodeTxCborParts(decoded.Encode())
+		if err != nil {
+			t.Fatalf("DecodeTxCborParts(decoded.Encode()): %v", err)
+		}
+		if *roundTrip != *decoded {
+			t.Fatalf(
+				"round-trip tx parts = %#v, want %#v",
+				*roundTrip,
+				*decoded,
 			)
-			assert.Equal(
-				t,
-				original.BlockHash,
-				decoded.BlockHash,
-				"BlockHash mismatch",
-			)
-			assert.Equal(
-				t,
-				original.ByteOffset,
-				decoded.ByteOffset,
-				"ByteOffset mismatch",
-			)
-			assert.Equal(
-				t,
-				original.ByteLength,
-				decoded.ByteLength,
-				"ByteLength mismatch",
-			)
-		})
-	}
+		}
+	})
 }
 
 func TestCborOffsetEncodeFormat(t *testing.T) {
@@ -416,387 +358,6 @@ func TestCborOffsetSizeConstant(t *testing.T) {
 		CborOffsetSize,
 		"encoded size should match CborOffsetSize constant",
 	)
-}
-
-func TestEncodeUtxoOffset(t *testing.T) {
-	t.Parallel()
-
-	offset := &CborOffset{
-		BlockSlot:  12345,
-		BlockHash:  [32]byte{0x01, 0x02, 0x03},
-		ByteOffset: 100,
-		ByteLength: 200,
-	}
-
-	encoded := EncodeUtxoOffset(offset)
-	assert.Len(t, encoded, CborOffsetSize, "encoded should be 52 bytes")
-
-	// Verify magic prefix
-	assert.True(
-		t,
-		bytes.Equal(encoded[0:4], offsetMagic[:]),
-		"should have DOFF magic prefix",
-	)
-
-	// Verify it decodes correctly
-	decoded, err := DecodeUtxoOffset(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, offset.BlockSlot, decoded.BlockSlot)
-	assert.Equal(t, offset.BlockHash, decoded.BlockHash)
-	assert.Equal(t, offset.ByteOffset, decoded.ByteOffset)
-	assert.Equal(t, offset.ByteLength, decoded.ByteLength)
-}
-
-func TestIsUtxoOffsetStorage(t *testing.T) {
-	t.Parallel()
-
-	// Create a valid offset-encoded data
-	validOffset := make([]byte, CborOffsetSize)
-	copy(validOffset[0:4], offsetMagic[:])
-
-	tests := []struct {
-		name     string
-		data     []byte
-		expected bool
-	}{
-		{
-			name:     "valid 52 bytes with magic",
-			data:     validOffset,
-			expected: true,
-		},
-		{
-			name:     "52 bytes but wrong magic",
-			data:     make([]byte, 52), // zeros, no DOFF magic
-			expected: false,
-		},
-		{
-			name:     "too short - 51 bytes",
-			data:     make([]byte, 51),
-			expected: false,
-		},
-		{
-			name:     "too long - 53 bytes",
-			data:     make([]byte, 53),
-			expected: false,
-		},
-		{
-			name:     "empty",
-			data:     []byte{},
-			expected: false,
-		},
-		{
-			name:     "typical CBOR size",
-			data:     make([]byte, 100),
-			expected: false,
-		},
-		{
-			name:     "48 bytes (legacy size) should not match",
-			data:     make([]byte, 48),
-			expected: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := IsUtxoOffsetStorage(tc.data)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
-}
-
-func TestDecodeUtxoOffsetError(t *testing.T) {
-	t.Parallel()
-
-	// Invalid sizes should error
-	_, err := DecodeUtxoOffset(make([]byte, 51))
-	assert.Error(t, err)
-
-	_, err = DecodeUtxoOffset(make([]byte, 53))
-	assert.Error(t, err)
-
-	// Valid size but wrong magic should error
-	wrongMagic := make([]byte, 52)
-	_, err = DecodeUtxoOffset(wrongMagic)
-	assert.Error(t, err)
-
-	// Valid size with correct magic should succeed
-	validData := make([]byte, 52)
-	copy(validData[0:4], offsetMagic[:])
-	_, err = DecodeUtxoOffset(validData)
-	assert.NoError(t, err)
-}
-
-func TestEncodeTxOffset(t *testing.T) {
-	t.Parallel()
-
-	offset := &CborOffset{
-		BlockSlot:  12345,
-		BlockHash:  [32]byte{0x01, 0x02, 0x03},
-		ByteOffset: 100,
-		ByteLength: 200,
-	}
-
-	encoded := EncodeTxOffset(offset)
-	assert.Len(t, encoded, CborOffsetSize, "encoded should be 52 bytes")
-
-	// Verify magic prefix
-	assert.True(
-		t,
-		bytes.Equal(encoded[0:4], offsetMagic[:]),
-		"should have DOFF magic prefix",
-	)
-
-	// Verify it decodes correctly
-	decoded, err := DecodeTxOffset(encoded)
-	require.NoError(t, err)
-	assert.Equal(t, offset.BlockSlot, decoded.BlockSlot)
-	assert.Equal(t, offset.BlockHash, decoded.BlockHash)
-	assert.Equal(t, offset.ByteOffset, decoded.ByteOffset)
-	assert.Equal(t, offset.ByteLength, decoded.ByteLength)
-}
-
-func TestIsTxOffsetStorage(t *testing.T) {
-	t.Parallel()
-
-	// Create a valid offset-encoded data
-	validOffset := make([]byte, CborOffsetSize)
-	copy(validOffset[0:4], offsetMagic[:])
-
-	tests := []struct {
-		name     string
-		data     []byte
-		expected bool
-	}{
-		{
-			name:     "valid 52 bytes with magic",
-			data:     validOffset,
-			expected: true,
-		},
-		{
-			name:     "52 bytes but wrong magic",
-			data:     make([]byte, 52), // zeros, no DOFF magic
-			expected: false,
-		},
-		{
-			name:     "too short - 51 bytes",
-			data:     make([]byte, 51),
-			expected: false,
-		},
-		{
-			name:     "too long - 53 bytes",
-			data:     make([]byte, 53),
-			expected: false,
-		},
-		{
-			name:     "empty",
-			data:     []byte{},
-			expected: false,
-		},
-		{
-			name:     "typical CBOR size",
-			data:     make([]byte, 100),
-			expected: false,
-		},
-		{
-			name:     "48 bytes (legacy size) should not match",
-			data:     make([]byte, 48),
-			expected: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := IsTxOffsetStorage(tc.data)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
-}
-
-func TestDecodeTxOffsetError(t *testing.T) {
-	t.Parallel()
-
-	// Invalid sizes should error
-	_, err := DecodeTxOffset(make([]byte, 51))
-	assert.Error(t, err)
-
-	_, err = DecodeTxOffset(make([]byte, 53))
-	assert.Error(t, err)
-
-	// Valid size but wrong magic should error
-	wrongMagic := make([]byte, 52)
-	_, err = DecodeTxOffset(wrongMagic)
-	assert.Error(t, err)
-
-	// Valid size with correct magic should succeed
-	validData := make([]byte, 52)
-	copy(validData[0:4], offsetMagic[:])
-	_, err = DecodeTxOffset(validData)
-	assert.NoError(t, err)
-}
-
-func TestTxCborPartsEncodeDecode(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name           string
-		blockSlot      uint64
-		blockHash      [32]byte
-		bodyOffset     uint32
-		bodyLength     uint32
-		witnessOffset  uint32
-		witnessLength  uint32
-		metadataOffset uint32
-		metadataLength uint32
-		isValid        bool
-	}{
-		{
-			name:           "zero values",
-			blockSlot:      0,
-			blockHash:      [32]byte{},
-			bodyOffset:     0,
-			bodyLength:     0,
-			witnessOffset:  0,
-			witnessLength:  0,
-			metadataOffset: 0,
-			metadataLength: 0,
-			isValid:        false,
-		},
-		{
-			name:           "typical valid transaction",
-			blockSlot:      12345678,
-			blockHash:      [32]byte{0x01, 0x02, 0x03, 0x04},
-			bodyOffset:     100,
-			bodyLength:     500,
-			witnessOffset:  1000,
-			witnessLength:  200,
-			metadataOffset: 2000,
-			metadataLength: 50,
-			isValid:        true,
-		},
-		{
-			name:           "invalid transaction no metadata",
-			blockSlot:      99999,
-			blockHash:      [32]byte{0xff, 0xee, 0xdd},
-			bodyOffset:     200,
-			bodyLength:     300,
-			witnessOffset:  800,
-			witnessLength:  150,
-			metadataOffset: 0,
-			metadataLength: 0,
-			isValid:        false,
-		},
-		{
-			name:      "max values",
-			blockSlot: math.MaxUint64,
-			blockHash: [32]byte{
-				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-				0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-			},
-			bodyOffset:     math.MaxUint32,
-			bodyLength:     math.MaxUint32,
-			witnessOffset:  math.MaxUint32,
-			witnessLength:  math.MaxUint32,
-			metadataOffset: math.MaxUint32,
-			metadataLength: math.MaxUint32,
-			isValid:        true,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			original := TxCborParts{
-				BlockSlot:      tc.blockSlot,
-				BlockHash:      tc.blockHash,
-				BodyOffset:     tc.bodyOffset,
-				BodyLength:     tc.bodyLength,
-				WitnessOffset:  tc.witnessOffset,
-				WitnessLength:  tc.witnessLength,
-				MetadataOffset: tc.metadataOffset,
-				MetadataLength: tc.metadataLength,
-				IsValid:        tc.isValid,
-			}
-
-			// Test encode
-			encoded := original.Encode()
-			require.Len(
-				t,
-				encoded,
-				TxCborPartsSize,
-				"encoded size should be %d bytes",
-				TxCborPartsSize,
-			)
-
-			// Verify magic prefix
-			assert.True(
-				t,
-				bytes.Equal(encoded[0:4], txPartsMagic[:]),
-				"should have DTXP magic prefix",
-			)
-
-			// Test decode
-			decoded, err := DecodeTxCborParts(encoded)
-			require.NoError(t, err, "decode should not error")
-			require.NotNil(t, decoded, "decoded should not be nil")
-
-			// Verify round-trip
-			assert.Equal(
-				t,
-				original.BlockSlot,
-				decoded.BlockSlot,
-				"BlockSlot mismatch",
-			)
-			assert.Equal(
-				t,
-				original.BlockHash,
-				decoded.BlockHash,
-				"BlockHash mismatch",
-			)
-			assert.Equal(
-				t,
-				original.BodyOffset,
-				decoded.BodyOffset,
-				"BodyOffset mismatch",
-			)
-			assert.Equal(
-				t,
-				original.BodyLength,
-				decoded.BodyLength,
-				"BodyLength mismatch",
-			)
-			assert.Equal(
-				t,
-				original.WitnessOffset,
-				decoded.WitnessOffset,
-				"WitnessOffset mismatch",
-			)
-			assert.Equal(
-				t,
-				original.WitnessLength,
-				decoded.WitnessLength,
-				"WitnessLength mismatch",
-			)
-			assert.Equal(
-				t,
-				original.MetadataOffset,
-				decoded.MetadataOffset,
-				"MetadataOffset mismatch",
-			)
-			assert.Equal(
-				t,
-				original.MetadataLength,
-				decoded.MetadataLength,
-				"MetadataLength mismatch",
-			)
-			assert.Equal(
-				t,
-				original.IsValid,
-				decoded.IsValid,
-				"IsValid mismatch",
-			)
-		})
-	}
 }
 
 func TestTxCborPartsSizeConstant(t *testing.T) {

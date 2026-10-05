@@ -179,32 +179,24 @@ func (d *Database) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn *Txn,
 ) (int, error) {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	n, err := d.metadata.ClearDanglingDRepDelegations(
-		atSlot,
-		txn.Metadata(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf(
-			"clear dangling drep delegations at slot %d: %w",
+	var n int
+	err := d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		updated, err := d.metadata.ClearDanglingDRepDelegations(
 			atSlot,
-			err,
+			txn.Metadata(),
 		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return 0, fmt.Errorf("commit transaction: %w", err)
+		if err != nil {
+			return fmt.Errorf(
+				"clear dangling drep delegations at slot %d: %w",
+				atSlot,
+				err,
+			)
 		}
-		owned = false
+		n = updated
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
 	return n, nil
 }
@@ -217,33 +209,19 @@ func (d *Database) RestoreAccountStateAtSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.RestoreAccountStateAtSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to restore account state at slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.RestoreAccountStateAtSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to restore account state at slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetAccountByCredential returns an account by staking credential tag and key.
@@ -310,6 +288,26 @@ func (d *Database) AddAccountRewardByCredential(
 	)
 }
 
+// AddAccountRewardsByCredential applies a batch of reward credits with the
+// effect of one AddAccountRewardByCredential call per credit; see
+// metadata.MetadataStore.AddAccountRewardsByCredential.
+func (d *Database) AddAccountRewardsByCredential(
+	credits []models.AccountRewardCredit,
+	txn *Txn,
+) error {
+	if len(credits) == 0 {
+		return nil
+	}
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.AddAccountRewardsByCredential(
+			credits, txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to add account rewards: %w", err)
+		}
+		return nil
+	})
+}
+
 // AddPostSnapshotAccountRewardByCredential credits a reward account with an
 // epoch-boundary credit that cardano-ledger applies AFTER the boundary stake
 // snapshot (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and
@@ -343,37 +341,23 @@ func (d *Database) addAccountRewardByCredential(
 	if amount == 0 {
 		return nil
 	}
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
 	credit := d.metadata.AddAccountRewardByCredential
 	if postSnapshot {
 		credit = d.metadata.AddPostSnapshotAccountRewardByCredential
 	}
-	if err := credit(
-		credentialTag,
-		stakeKey,
-		amount,
-		slot,
-		sourceHash,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf("failed to add account reward: %w", err)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := credit(
+			credentialTag,
+			stakeKey,
+			amount,
+			slot,
+			sourceHash,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("failed to add account reward: %w", err)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }
 
 // DeleteAccountRewardsAfterSlot reverts reward-account balance changes recorded
@@ -383,31 +367,17 @@ func (d *Database) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn *Txn,
 ) error {
-	owned := false
-	if txn == nil {
-		txn = d.MetadataTxn(true)
-		owned = true
-		defer func() {
-			if owned {
-				txn.Rollback() //nolint:errcheck
-			}
-		}()
-	}
-	if err := d.metadata.DeleteAccountRewardsAfterSlot(
-		slot,
-		txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete account reward deltas after slot %d: %w",
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.metadata.DeleteAccountRewardsAfterSlot(
 			slot,
-			err,
-		)
-	}
-	if owned {
-		if err := txn.Commit(); err != nil {
-			return fmt.Errorf("commit transaction: %w", err)
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to delete account reward deltas after slot %d: %w",
+				slot,
+				err,
+			)
 		}
-		owned = false
-	}
-	return nil
+		return nil
+	})
 }

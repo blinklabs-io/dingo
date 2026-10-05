@@ -89,6 +89,13 @@ are non-empty and tx-submission / mempool paths are continuously hit. The image
 is built from
 `internal/test/antithesis/` (`Dockerfile.txpump`, `cmd/txpump/`).
 
+The dedicated `--leios` runner uses the all-Dingo topology with
+`testnet-dingo-leios.yaml`: Dijkstra is active from genesis, test-only Leios
+keys are registered on the three pools, and a producer-to-peer scenario
+checks EB notification, relay fetch, ranking-header reference, and ledger
+application. It selects that feature scenario only; it does not change the
+canonical Conway specs or the `--accelerated` timeline.
+
 ## Network parameters
 
 Dingo mode reads `testnet-dingo.yaml`, conformance mode reads `testnet.yaml`.
@@ -139,7 +146,7 @@ The canonical specs are deliberately *not* accelerated: they are what soak
 and canary runs use, and `TestCanonicalSpecsKeepCanonicalTiming` fails if
 someone quietly speeds them up.
 
-## Prerequisites
+## Docker runtime prerequisites
 
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.26+ on the host (matching `go.mod`) to run the integration tests.
@@ -153,6 +160,50 @@ someone quietly speeds them up.
   by Compose.
 
 ## Building Dingo
+
+### Apple Container on macOS
+
+`run-tests.sh` optionally uses [Apple Container](https://github.com/apple/container)
+on an Apple silicon Mac with the Apple Container CLI installed and its system running. A host Go installation and host Docker are not required. Docker remains the default runtime:
+
+```bash
+container system start
+./internal/test/devnet/run-tests.sh --runtime container --accelerated
+./internal/test/devnet/run-tests.sh --runtime container --accelerated --conformance
+# Equivalent environment selection; an explicit --runtime flag takes precedence:
+DEVNET_RUNTIME=container ./internal/test/devnet/run-tests.sh --accelerated
+```
+
+This runs Docker Engine and Compose **inside an Apple Container Linux VM**.
+Docker Desktop and a host Docker daemon are not required. The existing Linux
+harness, bridge networking, health checks, named volumes, and disruption tests
+run unchanged inside that VM. Apple Container 1.4.1 is the tested CLI version;
+the runner needs its capability and path-mask options for the nested engine.
+The Docker API listens only on a Unix socket inside the VM.
+
+The VM receives 6 CPUs and 12 GiB of RAM by default. Set
+`DEVNET_CONTAINER_CPUS` and `DEVNET_CONTAINER_MEMORY` before the first run to
+change those allocations. A stopped VM retains its filesystem, including
+images, build caches, and the Go toolchain selected by this repository. It is
+reused for the same checkout and stopped after tests finish. Delete the stopped
+runner with `container delete <runner-name>` to reclaim its disk or change its
+resource allocation. The runner name is printed at startup. Concurrent runs
+against the same checkout are rejected by a lock directory.
+
+The checkout is mounted at the same absolute path inside Linux. Failure
+artifacts default to `.devnet/apple-container/run.XXXXXX` on the Mac and survive
+VM shutdown. `DEVNET_ARTIFACT_DIR` must be inside the checkout. Other file-path
+overrides must also refer to files available inside the VM; arbitrary host
+directories are not mounted. Test configuration environment variables
+(`DEVNET_*`, `COMPOSE_PROJECT_NAME`, `COMPOSE_PROFILES`, and `MODE`) are forwarded.
+
+`--keep-up` leaves both the network and VM running after success. Use
+`container exec -e COMPOSE_PROJECT_NAME=<project-name> -w <checkout-path> <runner-name> bash internal/test/devnet/stop.sh`
+(using the project name selected for the run and adding `--conformance` if selected) to tear the network down, then
+`container stop <runner-name>` to stop the VM. Run manual queries inside the
+VM with `container exec`; its DevNet ports are not published to macOS.
+
+### Docker
 
 You do not need to `make build` Dingo locally — Compose builds the Dingo
 node images (`dingo-1`/`dingo-2`/`dingo-3`/`dingo-relay` in dingo mode,
@@ -259,6 +310,39 @@ the `cardano-node` sockets live on each node's `*-ipc` volume at
 bind mounts — see LocalStateQuery access below for how the host reaches a
 node's NtC endpoint.
 
+## Preview observability and Koios parity
+
+The `koios-parity` Compose profile runs a separate Dingo node syncing Preview
+with Prometheus and Grafana. It shares this DevNet Compose file and project
+layout, while keeping its database and monitoring data in separate volumes.
+The profile can run alongside either generated DevNet profile. It uses the
+node's embedded Preview configuration and does not use the local DevNet
+genesis network.
+
+From this directory, select only the Preview profile to start or stop it:
+
+```bash
+COMPOSE_PROFILES=koios-parity docker compose up -d
+COMPOSE_PROFILES=koios-parity docker compose down -v
+```
+
+Set `DEVNET_KOIOS_PARITY_ENABLED=true` before startup to enable reward parity
+checks against Preview Koios. It defaults to `false`. Grafana is available on
+`127.0.0.1:13930`, Prometheus on `127.0.0.1:13900`, and the node's metrics
+endpoint on `127.0.0.1:13798`. Override these ports with
+`DEVNET_KOIOS_PARITY_GRAFANA_PORT`,
+`DEVNET_KOIOS_PARITY_PROMETHEUS_PORT`,
+`DEVNET_KOIOS_PARITY_METRICS_PORT`, and
+`DEVNET_KOIOS_PARITY_RELAY_PORT` when they are already in use. The Grafana
+dashboards show Preview sync progress and Koios parity results. Grafana's
+default login is `admin` / `admin`; set `DEVNET_GRAFANA_ADMIN_USER` and
+`DEVNET_GRAFANA_ADMIN_PASSWORD` before startup, and change them before exposing
+Grafana beyond localhost.
+
+Reward parity is checked only at closed-epoch boundaries. Preview epochs last
+about five days, so a short sync can show the observer enabled without reaching
+its first parity check.
+
 ## Running the integration tests
 
 `run-tests.sh` is the entry point for a complete native-Linux DevNet run:
@@ -266,8 +350,9 @@ node's NtC endpoint.
 ```bash
 ./run-tests.sh                              # dingo mode (default): bring up, run devnet tests, tear down
 ./run-tests.sh --conformance                 # conformance mode: dingo + cardano-node
-./run-tests.sh --accelerated                # fast event-driven scenario timeline (see below)
+./run-tests.sh --accelerated                # fast timeline, including Conway governance scenarios
 ./run-tests.sh --accelerated --conformance  # the same timeline against the reference topology
+./run-tests.sh --leios                      # Dijkstra/Leios producer-to-peer path
 ./run-tests.sh -run TestBasicBlockForging   # forward -run (and other flags) to `go test`
 ./run-tests.sh --keep-up                    # leave the network running on success (for poking around)
 DEVNET_MEMPOOL_PROVIDER=dag ./run-tests.sh  # exercise the DAG mempool on every Dingo node
@@ -305,8 +390,9 @@ than falling back to `testnet.yaml`.
 
 `--accelerated` is the fast path used for scheduled and release
 integration evidence. It brings the network up on the accelerated spec and
-runs one test — `TestAcceleratedScenarioTimeline` — instead of the full
-suite.
+runs `TestAcceleratedScenarioTimeline` and, in all-Dingo mode,
+`TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` instead of the
+full suite.
 
 What makes it fast is not just the shorter slots. The canonical suite
 queries each node's tip by opening a fresh Node-to-Node connection every
@@ -382,6 +468,37 @@ would connect to the wrong ports. Then:
 `TestAcceleratedScenarioTimeline` skips unless `DEVNET_ACCELERATED=1` is
 set, so it never runs against the canonical-timing network, where its
 budget could not be met.
+
+## Dijkstra/Leios producer-to-peer scenario
+
+`--leios` selects `testnet-dingo-leios.yaml`, runs the all-Dingo profile,
+registers a valid test-only Leios key in each generated pool registration,
+starts each Dingo node in explicit `leios` run mode and Dijkstra start era,
+and activates Dijkstra at epoch 0. Its transaction pump submits signed Dijkstra
+payments so the endorser block contains ledger-valid transactions. The pump
+keeps their outputs unavailable for 1000 slots so it cannot spend them before
+the scenario queries the relay ledger; this wallet delay is not confirmation
+evidence. The test
+observes an endorser-block offer over LeiosNotify, fetches its manifest and
+every referenced body from the non-forging relay over LeiosFetch, matches the
+ranking header's announcement to that EB, and queries the relay's ledger for
+an output from the fetched transactions. This exercises the producer,
+network, and ledger path through Dingo's interfaces and protocol outputs.
+
+Run the complete scenario with:
+
+```bash
+./run-tests.sh --leios
+```
+
+The `devnet-leios` workflow runs this scenario daily and on manual dispatch,
+and uploads the failure artifacts described below when it fails.
+
+For a manually started network, `./start.sh --leios` prints the environment
+and Go command for the matching producer-to-peer test. The test-only signing
+key and proof are paired fixtures under `testdata/`; a focused unit test
+checks that the registered proof and signing key agree. The configurator
+places the secret only in the generated local pool-key volume.
 
 ## Failure artifacts
 
@@ -588,6 +705,7 @@ conformance mode:
 | `TestSustainedConsensus` | All nodes stay in agreement across multiple sampling intervals |
 | `TestEpochBoundaryConsensus` | All nodes remain in consensus across at least one epoch boundary (exercises candidate-nonce freeze, lab nonce roll, and new-epoch VRF verification) |
 | `TestAcceleratedScenarioTimeline` | The accelerated scenario timeline: readiness, block and transaction propagation, chain agreement, an epoch transition, a peer interruption with recovery, and a relay restart — all on one shared clock, driven by streamed ChainSync events. Skipped unless `DEVNET_ACCELERATED=1`; see Accelerated scenario timeline above. |
+| `TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch` | Moves delegated stake across pools, ratifies and enacts an above-threshold no-confidence action, then checks that its below-threshold committee-update child remains active. Requires the accelerated all-Dingo run and its exposed test keys. |
 
 Reference-conformance scenario
 (`//go:build linux && devnet && devnet_conformance`) runs only with
@@ -605,6 +723,7 @@ dingo mode — no `cardano-node` reference exists for this feature:
 | Test | What it verifies |
 |------|-------------------|
 | `TestCIP50PledgeLeverageRewardEffect` | With `poolPledge: 0`, compares a leverage-off baseline (member rewards greater than zero by epoch 4) against a leveraged pass (member rewards exactly zero for every delegated stake credential). Skipped unless `DEVNET_CIP50_TEST=1` is set; requires two separately launched networks to run both passes (see above). |
+| `TestLeiosEndorserBlockProducerToPeer` | On the dedicated Dijkstra network, follows a producer EB offer through LeiosNotify, relay LeiosFetch, a Dijkstra ranking-header reference, and presence of a fetched transaction output in the relay ledger. Runs only via `run-tests.sh --leios`. |
 
 ## Port and address overrides
 
@@ -654,13 +773,14 @@ harness and the compose port mappings always agree.
 
 | File                         | Purpose |
 |------------------------------|---------|
-| `docker-compose.yml`         | Service, volume, and network definitions for both the `dingo` and `conformance` profiles |
+| `docker-compose.yml`         | Service, volume, and network definitions for the `dingo`, `conformance`, and `koios-parity` profiles |
 | `Dockerfile.configurator`    | Builds the genesis/key generator image (cardano-foundation/testnet-generation-tool v0.1.0) |
 | `configurator.sh`            | Runs inside the configurator: drives `genesis-cli.py`, builds ring topology (mode-aware pool count via `DINGO_POOL_IDS`), sets `systemStart`, relaxes key permissions for non-root node containers and chowns each Dingo pool's keys to `DINGO_UID`/`DINGO_GID` (passed in by compose, defaulting to the `1000:1000` pinned in the repo root `Dockerfile`) |
 | `testnet-dingo.yaml`         | Canonical network spec for dingo mode: 3 pools, `poolPledge: 0` |
 | `testnet.yaml`               | Canonical network spec for conformance mode: 2 pools |
 | `testnet-dingo-accelerated.yaml` | Accelerated dingo-mode spec: 60s epochs, `k: 10`, 0.5s slots |
 | `testnet-accelerated.yaml`   | Accelerated conformance-mode spec: same timing, 2 pools |
+| `testnet-dingo-leios.yaml`   | Dijkstra/Leios all-Dingo integration spec: Dijkstra at genesis, 120-slot epochs, 0.5s slots |
 | `topology/dingo-1.json`, `dingo-2.json`, `dingo-3.json`, `dingo-relay.json` | Static peer lists for dingo mode |
 | `topology/dingo-producer.json`, `cardano-producer.json`, `relay.json` | Static peer lists for conformance mode |
 | `.env`                       | Sets the default `COMPOSE_PROFILES=dingo` |

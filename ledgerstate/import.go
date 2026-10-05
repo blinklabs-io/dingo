@@ -61,9 +61,12 @@ type RawLedgerState struct {
 	Treasury uint64
 	// Reserves is the reserves balance in lovelace.
 	Reserves uint64
-	// Fees is the fee pot accumulated so far in the snapshot's epoch, taken
-	// from UTxOState. It is an addend of the reward pot, so it is carried
-	// here to let the import seed a complete RewardAdaPots row.
+	// Fees is UTxOState.utxosFees, taken verbatim from the snapshot. Per
+	// cardano-ledger's NEWEPOCH/SNAP rules this equals the SnapShots' own
+	// ssFee (see ParsedSnapShots.Fee) plus the fees this epoch has collected
+	// up to and including the snapshot's anchor block -- not a running total
+	// for "the current epoch so far" in isolation. Fees minus ssFee is the
+	// epoch's pre-anchor fee pot; see seedImportedRewardBasis.
 	Fees uint64
 	// UTxOData is the deferred CBOR for the UTxO map.
 	UTxOData cbor.RawMessage
@@ -178,6 +181,7 @@ type EraBound struct {
 type ParsedUTxO struct {
 	TxHash        []byte // 32 bytes
 	OutputIndex   uint32
+	Cbor          []byte // serialized TxOut used by ledger replay
 	Address       []byte // raw address bytes
 	PaymentKey    []byte // 28 bytes, extracted from address
 	StakingKey    []byte // 28 bytes, extracted from address
@@ -310,8 +314,9 @@ type ParsedPool struct {
 	// verification does not happen here (ledgerstate must not depend on
 	// ledger/leios's BLS primitives); it happens where these keys are read
 	// back out for committee construction.
-	LeiosKeyPublic          []byte // 96 bytes
-	LeiosKeyPossessionProof []byte // 48 bytes
+	LeiosKeyPublic            []byte // 96 bytes
+	LeiosKeyPossessionProof   []byte // 48 bytes
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ParsedRelay represents a pool relay from the stake pool
@@ -369,12 +374,13 @@ type ParsedSnapShot struct {
 // StakeNumerator/StakeDenominator are the exact sigma fraction used by
 // Praos leader eligibility.
 type ParsedActivePoolStake struct {
-	PoolKeyHash             []byte
-	StakeNumerator          uint64
-	StakeDenominator        uint64
-	VrfKeyHash              []byte
-	LeiosKeyPublic          []byte
-	LeiosKeyPossessionProof []byte
+	PoolKeyHash               []byte
+	StakeNumerator            uint64
+	StakeDenominator          uint64
+	VrfKeyHash                []byte
+	LeiosKeyPublic            []byte
+	LeiosKeyPossessionProof   []byte
+	LeiosKeyRegistrationEpoch *uint64
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -419,6 +425,10 @@ type ImportConfig struct {
 	// when Reconcile is set. It is populated by the import phases and consumed
 	// by reconcileStaleLedgerState. Not caller-settable.
 	reconcileKeys *reconcileKeys
+}
+
+type deferredRewardLiveStakeImporter interface {
+	ImportUtxosDeferredRewardLiveStakeRefresh([]models.Utxo, types.Txn) error
 }
 
 // ImportLedgerState orchestrates the full import of parsed ledger
@@ -518,6 +528,40 @@ func ImportLedgerState(
 		cfg.Logger.Info(
 			"skipping UTxO import (already completed)",
 			"component", "ledgerstate",
+		)
+	}
+
+	// A UTxO created strictly after this snapshot's anchor by local block
+	// replay never appears in the snapshot's live set at all -- the anchor
+	// predates it -- so it never reaches hydrateImportedUtxo's ON CONFLICT
+	// clear above, which only ever sees a row the snapshot's live set
+	// conflicts with. A reconcile pass (below) cannot repair it either: it is
+	// equally absent from the reconcile key set, so reconcile tombstones a
+	// still-live one and leaves an already-spent one untouched either way.
+	// Either shape leaves the row permanently wrong, and the next real
+	// replay of the block that spends it halts with "utxo not found".
+	//
+	// Roll the row back entirely instead of patching its deleted_slot:
+	// UtxosDeleteRolledback (the same primitive deleteBlobBlocksAboveSlot
+	// uses to discard a rejected gap-block range) deletes every UTxO with
+	// added_slot > slot outright, so the ordinary replay that follows this
+	// import re-creates it at its real slot with insertUtxoModelChecked's
+	// inserted=true, contributing its live-stake delta exactly when replay
+	// reaches it. Patching deleted_slot in place at import time instead would
+	// be wrong: ComputeEpochBoundarySnapshot's mark-snapshot read
+	// (GetLiveStakeInputsForPools) has no tip gate and no slot argument, so a
+	// row made live at import time would count toward every mark snapshot
+	// crossed between the anchor and the slot replay actually re-creates it
+	// at -- corrupting reward/leader-stake inputs instead of only failing the
+	// halt this exists to fix. Run before reconcile, so reconcile's live-row
+	// scan never has to reason about a post-anchor row it cannot correctly
+	// judge either way. The rollback is unconditional because it is
+	// idempotent and a no-op on a fresh database, which has no post-anchor
+	// rows.
+	if err := cfg.Database.UtxosDeleteRolledback(slot, nil); err != nil {
+		return fmt.Errorf(
+			"rolling back post-anchor-created UTxOs: %w",
+			err,
 		)
 	}
 
@@ -805,6 +849,11 @@ func importUTxOs(
 	)
 
 	store := cfg.Database.Metadata()
+	// The concrete store cannot change mid-import, so resolve the deferred
+	// importer once rather than per batch. Skipping the per-batch aggregate
+	// refresh is only sound because ImportLedgerState rebuilds
+	// reward_live_stake in full once every phase has been imported.
+	importer, supportsDeferredRefresh := store.(deferredRewardLiveStakeImporter)
 	totalImported := 0
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -838,16 +887,47 @@ func importUTxOs(
 			)
 		}
 
-		txn := cfg.Database.MetadataTxn(true)
+		txn := cfg.Database.Transaction(true)
 		defer txn.Release()
 
-		if err := store.ImportUtxos(
-			utxos, txn.Metadata(),
-		); err != nil {
+		var err error
+		if supportsDeferredRefresh {
+			err = importer.ImportUtxosDeferredRewardLiveStakeRefresh(
+				utxos,
+				txn.Metadata(),
+			)
+		} else {
+			err = store.ImportUtxos(utxos, txn.Metadata())
+		}
+		if err != nil {
 			return fmt.Errorf(
 				"inserting UTxO batch: %w",
 				err,
 			)
+		}
+		blob := txn.BlobStore()
+		if blob == nil {
+			return errors.New("blob store not available during UTxO import")
+		}
+		for i := range batch {
+			if len(batch[i].Cbor) == 0 {
+				return fmt.Errorf(
+					"UTxO %x#%d has no serialized output",
+					batch[i].TxHash,
+					batch[i].OutputIndex,
+				)
+			}
+			if err := blob.SetUtxo(
+				txn.Blob(), batch[i].TxHash,
+				batch[i].OutputIndex, batch[i].Cbor,
+			); err != nil {
+				return fmt.Errorf(
+					"storing imported UTxO CBOR %x#%d: %w",
+					batch[i].TxHash,
+					batch[i].OutputIndex,
+					err,
+				)
+			}
 		}
 
 		if err := txn.Commit(); err != nil {
@@ -972,10 +1052,13 @@ func importCertState(
 					"sync` again)", err,
 			)
 		}
-		cfg.Logger.Warn(
-			"cert state parse warnings",
-			"component", "ledgerstate",
-			"warning", err.Error(),
+		// A skipped or partially decoded entry would import an account,
+		// pool or DRep set that differs from the ledger state, and every
+		// stake distribution and reward derived from it would be wrong.
+		return 0, fmt.Errorf(
+			"parsing cert state: %w; the ledger state cannot be "+
+				"imported with skipped or partially decoded entries",
+			err,
 		)
 	}
 
@@ -1296,12 +1379,16 @@ func importPools(
 			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 			LeiosKeyPublic:             pool.LeiosKeyPublic,
 			LeiosKeyPossessionProof:    pool.LeiosKeyPossessionProof,
-			AddedSlot:                  slot,
-			DepositAmount:              types.Uint64(pool.Deposit),
-			Owners:                     owners,
-			Relays:                     relays,
-			MetadataUrl:                pool.MetadataUrl,
-			MetadataHash:               pool.MetadataHash,
+			LeiosKeyRegistrationAgeUnknown: (len(pool.LeiosKeyPublic) > 0 ||
+				len(pool.LeiosKeyPossessionProof) > 0) &&
+				pool.LeiosKeyRegistrationEpoch == nil,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			AddedSlot:                 slot,
+			DepositAmount:             types.Uint64(pool.Deposit),
+			Owners:                    owners,
+			Relays:                    relays,
+			MetadataUrl:               pool.MetadataUrl,
+			MetadataHash:              pool.MetadataHash,
 		}
 
 		if err := store.ImportPool(
@@ -1595,11 +1682,13 @@ func importSnapShots(
 				err,
 			)
 		}
-		// Non-fatal: some entries skipped during parsing
-		cfg.Logger.Warn(
-			"stake snapshot parse warnings",
-			"component", "ledgerstate",
-			"warning", err.Error(),
+		// A skipped entry drops stake, a delegation or a pool from the
+		// snapshot, which changes the leader schedule and rewards derived
+		// from it.
+		return fmt.Errorf(
+			"parsing stake snapshots: %w; the ledger state cannot be "+
+				"imported with skipped entries",
+			err,
 		)
 	}
 
@@ -1821,17 +1910,20 @@ func seedImportedRewardBasis(
 	for _, snap := range []*ParsedSnapShot{
 		&snapshots.Mark, &snapshots.Set, &snapshots.Go,
 	} {
-		for _, poolKey := range snap.Delegations {
-			if len(poolKey) != credentialHashSize {
-				continue
+		for credHex, poolKey := range snap.Delegations {
+			key, err := lcommon.NewBlake2b224Checked(poolKey)
+			if err != nil {
+				return fmt.Errorf(
+					"seeding imported reward basis: delegation of %s: %w",
+					credHex,
+					err,
+				)
 			}
 			if _, dup := seen[string(poolKey)]; dup {
 				continue
 			}
 			seen[string(poolKey)] = struct{}{}
-			var key lcommon.PoolKeyHash
-			copy(key[:], poolKey)
-			keys = append(keys, key)
+			keys = append(keys, lcommon.PoolKeyHash(key))
 		}
 	}
 	// Seed the ADA pots for the imported epoch alongside the reward
@@ -1841,20 +1933,43 @@ func seedImportedRewardBasis(
 	// up.
 	//
 	// The fee pot comes from SnapShots' own ssFee, not from UTxOState.
-	// UTxOState carries the fees accumulated so far in the current
-	// epoch, which is a partial figure unless the snapshot happens to
-	// sit exactly on a boundary; ssFee is the value captured at the
+	// UTxOState's utxosFees is ssFee plus the fees collected so far in
+	// the current epoch, so it equals ssFee only when the snapshot sits
+	// exactly on a boundary; ssFee is the value captured at the
 	// boundary, which is what the reward pot's fee addend means. Seeding
 	// the live figure would compute the round at the wrong amount rather
 	// than visibly not running it.
+	pots := &models.RewardAdaPots{
+		Epoch:        epoch,
+		Treasury:     types.Uint64(cfg.State.Treasury),
+		Reserves:     types.Uint64(cfg.State.Reserves),
+		Fees:         types.Uint64(snapshots.Fee),
+		CapturedSlot: slot,
+	}
+	// ImportedEpochFees carries the fees this epoch collected up to and
+	// including the anchor block (UTxOState.utxosFees minus SnapShots'
+	// ssFee), so a later local boundary calculation can add the fees it
+	// observes after the anchor instead of silently omitting everything
+	// before it. cardano-ledger's NEWEPOCH rule leaves
+	// utxosFees equal to the new ssFee after every boundary and only
+	// transactions add to it within an epoch, so State.Fees below
+	// snapshots.Fee means the snapshot was not decoded as a consistent
+	// ledger state. Refusing it is the only fail-closed choice: an unset
+	// field is indistinguishable from a live-computed row, so the next
+	// boundary would credit its round short without any record of why.
+	if cfg.State.Fees < snapshots.Fee {
+		return fmt.Errorf(
+			"imported UTxO state fees %d are less than the snapshot fee "+
+				"pot %d for epoch %d",
+			cfg.State.Fees,
+			snapshots.Fee,
+			epoch,
+		)
+	}
+	preAnchorFees := types.Uint64(cfg.State.Fees - snapshots.Fee)
+	pots.ImportedEpochFees = &preAnchorFees
 	if err := cfg.Database.Metadata().SaveRewardAdaPots(
-		&models.RewardAdaPots{
-			Epoch:        epoch,
-			Treasury:     types.Uint64(cfg.State.Treasury),
-			Reserves:     types.Uint64(cfg.State.Reserves),
-			Fees:         types.Uint64(snapshots.Fee),
-			CapturedSlot: slot,
-		},
+		pots,
 		txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("seeding imported epoch ADA pots: %w", err)
@@ -1955,14 +2070,14 @@ func persistImportedSnapshot(
 		// epochs): faithful resolution needs the reward account's DRep
 		// delegation AS OF the historical boundary. That state is not
 		// available after a Mithril restore — cert history tables are
-		// empty for pre-snapshot epochs and #1902's persisted reward
+		// empty for pre-snapshot epochs and the persisted reward
 		// state does not capture reward-account DRep delegation. Resolving
 		// against live DRep delegation and marking the row authoritative
 		// would freeze a possibly-changed value onto a historical boundary.
 		// We therefore leave these rows RewardAccountAutoVoteResolved=false
 		// so the tally treats them as PoolRewardAccountAutoVoteNone
 		// (implicit no), matching pre-CIP-1694 behaviour, until per-boundary
-		// DRep-delegation state is persisted (follow-up to #1902).
+		// DRep-delegation state is persisted.
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
 				poolSnapshots, txn,
@@ -2101,23 +2216,32 @@ func synthesizeRetiredScheduledPools(
 		return nil
 	}
 
-	poolKeyHashSize := len(lcommon.PoolKeyHash{})
-	vrfKeyHashSize := len(lcommon.VrfKeyHash{})
+	// A malformed entry fails the import: skipping it would leave a pool
+	// the leader schedule elects with no registered VRF key to check its
+	// blocks against.
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(activePoolDistr))
 	for i := range activePoolDistr {
-		if len(activePoolDistr[i].PoolKeyHash) != poolKeyHashSize {
-			cfg.Logger.Warn(
-				"skipping malformed active pool distribution entry",
-				"index", i,
-				"field", "pool_key_hash",
-				"actual_length", len(activePoolDistr[i].PoolKeyHash),
-				"expected_length", poolKeyHashSize,
+		pkh, err := lcommon.NewBlake2b224Checked(
+			activePoolDistr[i].PoolKeyHash,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"active pool distribution entry %d pool key hash: %w",
+				i,
+				err,
 			)
-			continue
 		}
-		var pkh lcommon.PoolKeyHash
-		copy(pkh[:], activePoolDistr[i].PoolKeyHash)
-		keyHashes = append(keyHashes, pkh)
+		if _, err := lcommon.NewBlake2b256Checked(
+			activePoolDistr[i].VrfKeyHash,
+		); err != nil {
+			return fmt.Errorf(
+				"active pool distribution entry %d (pool %x) VRF key hash: %w",
+				i,
+				activePoolDistr[i].PoolKeyHash,
+				err,
+			)
+		}
+		keyHashes = append(keyHashes, lcommon.PoolKeyHash(pkh))
 	}
 	if len(keyHashes) == 0 {
 		return nil
@@ -2147,19 +2271,6 @@ func synthesizeRetiredScheduledPools(
 		default:
 		}
 		pool := activePoolDistr[i]
-		if len(pool.PoolKeyHash) != poolKeyHashSize {
-			continue
-		}
-		if len(pool.VrfKeyHash) != vrfKeyHashSize {
-			cfg.Logger.Warn(
-				"skipping malformed active pool distribution entry",
-				"index", i,
-				"field", "vrf_key_hash",
-				"actual_length", len(pool.VrfKeyHash),
-				"expected_length", vrfKeyHashSize,
-			)
-			continue
-		}
 		if _, ok := present[string(pool.PoolKeyHash)]; ok {
 			continue
 		}
@@ -2300,7 +2411,8 @@ func ActivePoolDistributionSnapshots(
 			LeiosKeyPossessionProof: append(
 				[]byte(nil), pool.LeiosKeyPossessionProof...,
 			),
-			CalculationVersion: models.RewardStakeCalculationVersion,
+			LeiosKeyRegistrationEpoch: pool.LeiosKeyRegistrationEpoch,
+			CalculationVersion:        models.RewardStakeCalculationVersion,
 		})
 	}
 	return snapshots
@@ -3069,12 +3181,17 @@ func validateImportedRewardPParams(
 			previousEpoch,
 		)
 	}
+	previousPayload, payloadErr := previousPParamsForEra(
+		cfg.State.EraIndex,
+		[]byte(cfg.State.PrevPParamsData),
+		previousEra,
+	)
 	previousAvailable, err := importedPParamsAvailable(
 		store,
 		txn,
 		previousEpoch,
 		previousEra,
-		[]byte(cfg.State.PrevPParamsData),
+		previousPayload,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -3083,6 +3200,15 @@ func validateImportedRewardPParams(
 		)
 	}
 	if !previousAvailable {
+		if payloadErr != nil {
+			return fmt.Errorf(
+				"%w: historical protocol parameters for epoch %d are unavailable in era %s: %w",
+				errRewardPParamsUnavailable,
+				previousEpoch,
+				EraName(previousEra),
+				payloadErr,
+			)
+		}
 		return fmt.Errorf(
 			"%w: historical protocol parameters for epoch %d are unavailable in era %s",
 			errRewardPParamsUnavailable,
@@ -3203,15 +3329,25 @@ func importPParams(
 	var (
 		previousEpoch uint64
 		previousEra   int
-		previousCbor  = []byte(cfg.State.PrevPParamsData)
+		previousCbor  []byte
 		writePrevious bool
 	)
-	if cfg.State.Epoch > 0 && len(previousCbor) > 0 {
+	if cfg.State.Epoch > 0 && len(cfg.State.PrevPParamsData) > 0 {
 		previousEpoch = cfg.State.Epoch - 1
-		var previousEraKnown bool
+		var (
+			previousEraKnown bool
+			conversionErr    error
+		)
 		previousEra, previousEraKnown = importedEraForEpoch(
 			cfg.State, previousEpoch,
 		)
+		if previousEraKnown {
+			previousCbor, conversionErr = previousPParamsForEra(
+				cfg.State.EraIndex,
+				[]byte(cfg.State.PrevPParamsData),
+				previousEra,
+			)
+		}
 		if !previousEraKnown {
 			cfg.Logger.Warn(
 				"not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
@@ -3220,15 +3356,13 @@ func importPParams(
 				"epoch",
 				previousEpoch,
 			)
-		} else if validationErr := validatePParamsData(
-			previousEra, previousCbor,
-		); validationErr != nil {
+		} else if conversionErr != nil {
 			cfg.Logger.Warn(
-				"not importing historical protocol parameters from snapshot because the payload is incompatible with the epoch's era",
+				"not importing historical protocol parameters from snapshot because they cannot be expressed in the epoch's era",
 				"component", "ledgerstate",
 				"epoch", previousEpoch,
 				"era", EraName(previousEra),
-				"error", validationErr.Error(),
+				"error", conversionErr.Error(),
 			)
 		} else {
 			previousStored, err := storedValidPParams(
@@ -3351,8 +3485,16 @@ func importGovState(
 			govState.PulsingStateParseError,
 		)
 	}
+	if govState.ImportParseError != nil {
+		// A skipped proposal or an undecodable constitution policy hash
+		// would import governance state that differs from the ledger's.
+		return fmt.Errorf(
+			"parsing governance state: %w; the ledger state cannot be "+
+				"imported with skipped entries",
+			govState.ImportParseError,
+		)
+	}
 	if err != nil {
-		// Non-fatal warnings from committee/proposals parsing
 		cfg.Logger.Warn(
 			"governance state parsed with warnings",
 			"component", "ledgerstate",
@@ -3543,7 +3685,7 @@ func importGovState(
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
 			metaTxn := txn.Metadata()
-			for _, prop := range govState.Proposals {
+			for position, prop := range govState.Proposals {
 				select {
 				case <-ctx.Done():
 					return fmt.Errorf(
@@ -3556,6 +3698,7 @@ func importGovState(
 					cfg,
 					prop.ProposedIn,
 				)
+				orderIndex := uint32(position) //nolint:gosec // bounded by the decoded proposal array
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
 				_, ratified := ratifiedIds[govActionIdKey(
@@ -3589,7 +3732,12 @@ func importGovState(
 						GovActionCbor:   prop.GovActionCbor,
 						RatifiedEpoch:   ratifiedEpoch,
 						RatifiedSlot:    ratifiedSlot,
-						AddedSlot:       proposedSlot,
+						// The snapshot lists proposals in submission order,
+						// and every proposal of one epoch shares its anchor
+						// slot, so this position stands in for the block
+						// order RATIFY needs.
+						TxIndex:   &orderIndex,
+						AddedSlot: proposedSlot,
 					},
 					metaTxn,
 				); err != nil {
@@ -3622,7 +3770,7 @@ func importGovState(
 	// these synthetic enacted rows, the next chained proposal that
 	// references a parent enacted before the snapshot would be
 	// rejected by validateParentChain (currentRoot is nil) and
-	// silently expire — see issue #2195. Genesis-synced nodes get
+	// silently expire. Genesis-synced nodes get
 	// these rows from the normal enactment path; Mithril snapshots
 	// don't surface them otherwise.
 	if govState.PrevGovActionIds != nil {

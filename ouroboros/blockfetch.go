@@ -16,8 +16,10 @@ package ouroboros
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -35,11 +37,65 @@ import (
 // on late blocks) is sufficient for dashboard accuracy.
 const blockfetchMetricsCdfUpdateInterval = 32
 
-// MaxBlockFetchRange is the maximum slot range allowed for a single block
-// fetch request. This prevents peers from requesting unbounded ranges that
-// would cause the server to iterate the entire chain. The value of 129600
-// corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
-const MaxBlockFetchRange = 129600
+// blockfetchMaxBlocksFloor is the minimum cap on blocks served for a single
+// BlockFetch range request, applied regardless of the network's security
+// parameter K. This prevents a peer from using a single request to make the
+// server stream the entire chain, while never capping below
+// ledger.BlockfetchBatchSize (500), the largest range this implementation's
+// own chainsync client ever requests in one call: without this floor, a
+// custom or test network configured with a small K would reject Dingo's own
+// chainsync batches.
+const blockfetchMaxBlocksFloor = 10 * ledger.BlockfetchBatchSize
+
+// blockfetchMaxInFlightBytes is the per-connection bound on the total
+// expected size of outstanding pipelined block-fetch ranges.
+const blockfetchMaxInFlightBytes = 3 * ledger.BlockfetchMaxRangeBytes
+
+// maxBlockFetchBlocksForSecurityParam returns the maximum number of blocks
+// served for a single BlockFetch range request. The bound is on the actual
+// resource cost (blocks iterated and sent) rather than on slot distance: on
+// a sparse or low-active-slot-coefficient custom network, a run of
+// consecutive real blocks can span far more slots than mainnet's 3k/f
+// stability window, so rejecting purely on slot distance discards valid
+// requests.
+//
+// It is not sized to Dingo's own chainsync client; it governs every peer,
+// and an honest peer's candidate fragment -- and so a legitimate BlockFetch
+// range -- scales with the network's own security parameter K, not with any
+// one implementation's batch size. 3*K reuses the same numerator the
+// removed slot-distance check (3k/f) used, reinterpreted as a block count
+// once the active-slot-coefficient factor no longer applies; it is a chosen
+// safety margin, not a protocol guarantee. blockfetchMaxBlocksFloor keeps a
+// small-K network from capping below Dingo's own batch size.
+func maxBlockFetchBlocksForSecurityParam(k int) int {
+	if k < 0 {
+		k = 0
+	}
+	if dynamic := 3 * k; dynamic > blockfetchMaxBlocksFloor {
+		return dynamic
+	}
+	return blockfetchMaxBlocksFloor
+}
+
+// errBlockfetchRangeExceededMaxBlocks is returned by blockfetchServerSendBatch
+// when a range would serve more blocks than maxBlockFetchBlocksForSecurityParam
+// allows. blockfetchServerRequestRange's async goroutine reports every
+// non-nil error through reportBlockfetchServerAsyncError, which logs at
+// Error and closes the connection again; this sentinel lets that reporter
+// recognize the case already fully handled (WARN logged, connection closed)
+// at the point the cap was hit, and skip the redundant Error log and second
+// Close() call.
+//
+// In practice this should be rare: blockfetchServerRequestRange rejects an
+// oversized range with NoBlocks before StartBatch for any range whose block
+// count is knowable up front, so an honest peer gets a recoverable signal
+// instead of reaching this backstop. It stays as defense in depth for cases
+// the up-front check cannot cover, such as a concurrent rollback changing
+// the chain after validation or a Byron-EBB block-number tie undercounting
+// the range.
+var errBlockfetchRangeExceededMaxBlocks = errors.New(
+	"blockfetch range exceeded maximum block count",
+)
 
 // blockfetchMaxConsecutiveNoBlocks is the number of consecutive NoBlocks
 // responses for the same (connId, start) tuple before closing the connection.
@@ -86,10 +142,63 @@ type blockfetchSendDrainWaiter interface {
 	WaitSendQueueDrained(time.Duration) bool
 }
 
-type blockfetchConnection interface {
-	ErrorChan() chan error
+// managedConnection is what a protocol handler may do with a connection the
+// connection manager owns: wait for its teardown and drop the transport. It
+// deliberately has no ErrorChan: the manager is the only receiver of that
+// one-shot channel, so a handler that received from it could take the error
+// the manager's cleanup is waiting for.
+type managedConnection interface {
+	Done() <-chan struct{}
 	Close() error
 }
+
+// connWithDone adapts a manager-owned *ouroboros.Connection and the teardown
+// signal from GetConnectionWithDone to managedConnection.
+type connWithDone struct {
+	conn     *ouroboros.Connection
+	done     <-chan struct{}
+	closeErr func() error
+}
+
+func (c connWithDone) Done() <-chan struct{} { return c.done }
+
+func (c connWithDone) Close() error { return c.conn.Close() }
+
+func (c connWithDone) CloseError() error {
+	if c.closeErr == nil {
+		return nil
+	}
+	return c.closeErr()
+}
+
+// blockFetchKey identifies one outstanding RequestRange call. gouroboros'
+// nextRequestId is scoped per connection, so requestId alone is not globally
+// unique; connId alone is exactly the clobber this key exists to avoid, since
+// pipelining lets more than one request be outstanding on the same
+// connection at once.
+type blockFetchKey struct {
+	connId    ouroboros.ConnectionId
+	requestId uint64
+}
+
+// blockfetchRangeRequester is the subset of *blockfetch.Client
+// BlockfetchClientRequestRange calls. Extracted so its dispatch and
+// blockFetchStarts bookkeeping can be tested without a live connection
+// registered in connManager.
+type blockfetchRangeRequester interface {
+	RequestRange(
+		ctx context.Context,
+		req blockfetch.RangeRequest,
+	) (uint64, error)
+}
+
+// blockfetchConnClientFunc resolves the live request-range client for a
+// connection. The production value (blockfetchConnClientLive) looks it up
+// through connManager; tests override the Ouroboros field this is stored in
+// to exercise BlockfetchClientRequestRange without a live connection.
+type blockfetchConnClientFunc func(
+	ouroboros.ConnectionId,
+) (blockfetchRangeRequester, error)
 
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
@@ -108,9 +217,20 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 		blockfetch.WithBlockRawFunc(
 			o.instrumentBlockfetchBlockRaw(o.blockfetchClientBlockRaw),
 		),
-		blockfetch.WithBatchDoneFunc(
-			o.instrumentBlockfetchBatchDone(o.blockfetchClientBatchDone),
+		// RangeDoneFunc replaces BatchDoneFunc: with RequestPipelining
+		// enabled, every request's terminal outcome (success, NoBlocks, or
+		// any transport/protocol failure) is reported here instead, exactly
+		// once per request, whether or not it ever started streaming.
+		// BatchDoneFunc is never invoked for a pipelined request.
+		blockfetch.WithRangeDoneFunc(
+			o.instrumentBlockfetchRangeDone(o.blockfetchClientRangeDone),
 		),
+		blockfetch.WithRequestPipelining(true),
+		// Ranges carry real size estimates, so the default budget (100 x
+		// 88 KiB) would admit one heavy range at a time and end pipelining.
+		// Sized for the active range, its prefetched successor, and one more
+		// range of slack for estimate error.
+		blockfetch.WithMaxInFlightBytes(blockfetchMaxInFlightBytes),
 		blockfetch.WithBatchStartTimeout(60 * time.Second),
 		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
@@ -135,7 +255,10 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 	}()
 	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
 		blockType == gledger.BlockTypeConway {
-		return models.DecodeConwayBlock(raw)
+		return models.DecodeConwayPeerBlock(raw)
+	}
+	if blockType == gledger.BlockTypeDijkstra {
+		return models.DecodeDijkstraPeerBlock(raw)
 	}
 	return gledger.NewBlockFromCbor(blockType, raw)
 }
@@ -149,16 +272,22 @@ func (o *Ouroboros) decodeBlockfetchBlock(
 // the decode is keyed by content hash and shared across connections: the
 // first connection to submit a given block's bytes decodes it, and every
 // other connection submitting the identical bytes -- concurrently or
-// afterward -- reuses that result instead of redoing the parse. See #489.
+// afterward -- reuses that result instead of redoing the parse.
 func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
 ) error {
 	key := hashDecodeInput(blockType, blockData)
-	block, err := decodeWithPanicSafeMetrics(
+	cacheBytes := decodeCacheChargeForRaw(len(blockData))
+	if !hasCborArrayEnvelope(blockData) {
+		cacheBytes = int(^uint(0) >> 1)
+	}
+	block, err := decodeWithPanicSafeMetricsSized(
 		o.blockDecodeCache,
 		key,
+		cacheBytes,
+		true,
 		func() (gledger.Block, error) {
 			decodeStart := time.Now()
 			block, err := o.decodeBlockfetchBlock(blockType, blockData)
@@ -179,6 +308,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 		)
 	}
 	if block == nil {
+		o.blockDecodeCache.remove(key)
 		// decodeCache's contract is (nil value, non-nil err) on failure, but
 		// that is a convention on decodeFn, not something the generic cache
 		// itself enforces -- guard explicitly rather than trust it silently.
@@ -190,12 +320,18 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
+// InvalidateBlockDecodeCache removes a decoded block when the ledger rejects it
+// after asynchronous blockfetch event delivery.
+func (o *Ouroboros) InvalidateBlockDecodeCache(blockType uint, raw []byte) {
+	o.blockDecodeCache.remove(hashDecodeInput(blockType, raw))
+}
+
 func (o *Ouroboros) blockfetchServerRequestRange(
 	ctx blockfetch.CallbackContext,
 	start ocommon.Point,
 	end ocommon.Point,
 ) error {
-	// Validate that start is not after end (#397)
+	// Validate that start is not after end
 	if start.Slot > end.Slot {
 		o.config.Logger.Warn(
 			"blockfetch: requested range has start after end, sending NoBlocks",
@@ -217,32 +353,13 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
-	// Validate that the requested slot range is not too large
-	slotRange := end.Slot - start.Slot
-	if slotRange > MaxBlockFetchRange {
-		o.config.Logger.Debug(
-			"blockfetch: requested range exceeds maximum, sending NoBlocks",
-			"connection_id", ctx.ConnectionId.String(),
-			"start_slot", start.Slot,
-			"end_slot", end.Slot,
-			"slot_range", slotRange,
-			"max_range", MaxBlockFetchRange,
-		)
-		if err := ctx.Server.NoBlocks(); err != nil {
-			return fmt.Errorf(
-				"blockfetch NoBlocks after oversized range: %w",
-				err,
-			)
-		}
-		o.blockfetchRecordNoBlocksAndMaybeClose(
-			ctx.ConnectionId,
-			start,
-			"blockfetch: closing stuck peer after repeated oversized range requests",
-			"blockfetch: peer stuck on oversized range",
-		)
-		return nil
-	}
-	// Validate that the start point exists in our chain (#397)
+	// The requested slot span is not validated here: on a sparse or
+	// low-active-slot-coefficient network, a valid run of consecutive
+	// blocks can span far more slots than mainnet's stability window.
+	// Resource usage is instead bounded by actual block count,
+	// below, scaled to the network's own security parameter.
+	//
+	// Validate that the start point exists in our chain
 	chainIter, err := o.ledgerState.GetChainFromPoint(start, true)
 	if err != nil {
 		o.config.Logger.Debug(
@@ -292,14 +409,65 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		return nil
 	}
 	endIter.Cancel()
+	maxBlocks := maxBlockFetchBlocksForSecurityParam(
+		o.ledgerState.SecurityParam(),
+	)
+	// maxBlockFetchBlocksForSecurityParam never returns negative.
+	maxBlocksU64 := uint64(maxBlocks) // #nosec G115
+	// Validate that the range does not exceed the block-count bound.
+	// This mirrors the other invalid-range rejections above instead of
+	// silently dropping the connection mid-batch: an honest peer whose range
+	// is genuinely larger than the network supports gets a clean, accounted
+	// NoBlocks it can act on, rather than a transport reset it would only
+	// repeat by retrying the identical range. Best-effort: if either
+	// endpoint's block cannot be resolved here -- for example, a race with a
+	// concurrent rollback after the checks above -- skip this early check
+	// and let blockfetchServerSendBatch's own resource bound enforce it
+	// during streaming instead.
+	if startBlock, startErr := o.ledgerState.GetBlock(start); startErr == nil {
+		if endBlock, endErr := o.ledgerState.GetBlock(end); endErr == nil &&
+			endBlock.Number >= startBlock.Number {
+			blockCount := endBlock.Number - startBlock.Number + 1
+			if blockCount > maxBlocksU64 {
+				o.config.Logger.Debug(
+					"blockfetch: range exceeds maximum block count, sending NoBlocks",
+					"connection_id",
+					ctx.ConnectionId.String(),
+					"start_slot",
+					start.Slot,
+					"end_slot",
+					end.Slot,
+					"block_count",
+					blockCount,
+					"max_blocks",
+					maxBlocks,
+				)
+				chainIter.Cancel()
+				if err := ctx.Server.NoBlocks(); err != nil {
+					return fmt.Errorf(
+						"blockfetch NoBlocks after oversized range: %w",
+						err,
+					)
+				}
+				o.blockfetchRecordNoBlocksAndMaybeClose(
+					ctx.ConnectionId,
+					start,
+					"blockfetch: closing stuck peer after repeated oversized range requests",
+					"blockfetch: peer stuck on oversized range",
+				)
+				return nil
+			}
+		}
+	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
-		if conn == nil {
+		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+		if rawConn == nil {
 			chainIter.Cancel()
 			return
 		}
+		conn := connWithDone{conn: rawConn, done: connDone}
 		err := o.blockfetchServerSendBatch(
 			ctx.ConnectionId.String(),
 			start,
@@ -307,6 +475,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			chainIter,
 			ctx.Server,
 			conn,
+			maxBlocks,
 		)
 		if err != nil {
 			o.reportBlockfetchServerAsyncError(
@@ -327,7 +496,8 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 	end ocommon.Point,
 	chainIter blockfetchRangeIterator,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
+	maxBlocks int,
 ) error {
 	defer chainIter.Cancel()
 	if err := server.StartBatch(); err != nil {
@@ -349,10 +519,11 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 		return err
 	}
 	reachedEnd := false
+	blocksServed := 0
 Loop:
 	for {
 		select {
-		case <-conn.ErrorChan():
+		case <-conn.Done():
 			return nil
 		default:
 			next, iterErr := chainIter.Next(false)
@@ -398,6 +569,31 @@ Loop:
 			if next.Block.Slot == end.Slot &&
 				bytes.Equal(next.Point.Hash, end.Hash) {
 				reachedEnd = true
+			}
+			blocksServed++
+			if blocksServed > maxBlocks {
+				// blockfetchServerRequestRange already rejects an oversized
+				// range with NoBlocks before StartBatch when both
+				// endpoints' block numbers are resolvable, so reaching this
+				// backstop means that check could not run or undercounted
+				// (a concurrent rollback, or a Byron-EBB block-number tie).
+				// StartBatch() has already committed the protocol to this
+				// batch, so the only safe recovery left is to drop the
+				// transport (mirrors the other post-StartBatch error paths
+				// below).
+				o.config.Logger.Warn(
+					"blockfetch: range exceeded maximum block count, closing connection",
+					"connection_id", connectionID,
+					"start_slot", start.Slot,
+					"end_slot", end.Slot,
+					"max_blocks", maxBlocks,
+				)
+				o.closeBlockfetchConnection(
+					conn,
+					connectionID,
+					"range exceeded maximum block count after StartBatch",
+				)
+				return errBlockfetchRangeExceededMaxBlocks
 			}
 			blockBytes := next.Block.Cbor
 			err := server.Block(
@@ -465,7 +661,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 	start ocommon.Point,
 	end ocommon.Point,
 	server blockfetchBatchServer,
-	conn blockfetchConnection,
+	conn managedConnection,
 	phase string,
 ) error {
 	drainWaiter, ok := server.(blockfetchSendDrainWaiter)
@@ -476,7 +672,7 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 		return nil
 	}
 	select {
-	case <-conn.ErrorChan():
+	case <-conn.Done():
 		return nil
 	default:
 	}
@@ -501,12 +697,18 @@ func (o *Ouroboros) blockfetchServerWaitForSendDrain(
 }
 
 func (o *Ouroboros) reportBlockfetchServerAsyncError(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	start ocommon.Point,
 	end ocommon.Point,
 	err error,
 ) {
+	if errors.Is(err, errBlockfetchRangeExceededMaxBlocks) {
+		// blockfetchServerSendBatch already logged a WARN and closed the
+		// connection for this expected, peer-triggered condition; an Error
+		// log and a second Close() attempt here would be pure noise.
+		return
+	}
 	o.config.Logger.Error(
 		"blockfetch: async range server failed",
 		"connection_id", connectionID,
@@ -524,7 +726,7 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 }
 
 func (o *Ouroboros) closeBlockfetchConnection(
-	conn blockfetchConnection,
+	conn io.Closer,
 	connectionID string,
 	reason string,
 ) {
@@ -590,40 +792,88 @@ func (o *Ouroboros) blockfetchResetNoBlocks(connId ouroboros.ConnectionId) {
 	o.blockFetchMutex.Unlock()
 }
 
-// BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
+// blockfetchConnClientLive resolves the live blockfetch client for a
+// connection through connManager. This is the production value of the
+// Ouroboros.blockfetchConnClient seam; see blockfetchConnClientFunc.
+func (o *Ouroboros) blockfetchConnClientLive(
+	connId ouroboros.ConnectionId,
+) (blockfetchRangeRequester, error) {
+	if o.connManager == nil {
+		return nil, errors.New("ConnManager not initialized")
+	}
+	conn := o.connManager.GetConnectionById(connId)
+	if conn == nil {
+		return nil, fmt.Errorf(
+			"failed to lookup connection ID: %s",
+			connId.String(),
+		)
+	}
+	return conn.BlockFetch().Client, nil
+}
+
+// BlockfetchClientRequestRange is called by the ledger when it needs to
+// request a range of block bodies. It returns the request ID gouroboros
+// assigned the range, which the caller can use to distinguish this request's
+// events from another one outstanding on the same connection.
+//
+// RequestRange (unlike the GetBlockRange this replaced) returns as soon as
+// the request is sent, not once the range has been delivered: the terminal
+// outcome always arrives later through blockfetchClientRangeDone via
+// RangeDoneFunc, including for a request that fails synchronously here for a
+// reason other than never having been sent. Peer-governance failure scoring
+// on a synchronous error is therefore this function's own responsibility --
+// blockfetchClientRangeDone only ever sees a request that was actually
+// queued.
 func (o *Ouroboros) BlockfetchClientRequestRange(
 	connId ouroboros.ConnectionId,
 	start ocommon.Point,
 	end ocommon.Point,
-) error {
-	if o.connManager == nil {
-		return errors.New("ConnManager not initialized")
+) (uint64, error) {
+	client, err := o.blockfetchConnClient(connId)
+	if err != nil {
+		return 0, err
 	}
-	conn := o.connManager.GetConnectionById(connId)
-	if conn == nil {
-		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
-	}
-	// Record start time for metrics and scoring
-	o.blockFetchMutex.Lock()
-	o.blockFetchStarts[connId] = time.Now()
-	o.blockFetchMutex.Unlock()
-	if err := conn.BlockFetch().Client.GetBlockRange(start, end); err != nil {
-		// Clean up start time and record failed observation
-		o.blockFetchMutex.Lock()
-		startTime, exists := o.blockFetchStarts[connId]
-		delete(o.blockFetchStarts, connId)
-		o.blockFetchMutex.Unlock()
-		if exists && o.peerGov != nil {
-			latencyMs := time.Since(startTime).Milliseconds()
+	dispatchStart := time.Now()
+	// context.Background() is deliberate: sendRequestRange's internal waits
+	// (admission against the in-flight byte budget, and the queue-append send
+	// token) already select on the connection's own protocol shutdown channel
+	// in addition to ctx.Done(), so a request unblocks on connection teardown
+	// even though this caller's context is never canceled directly.
+	requestId, err := client.RequestRange(
+		context.Background(),
+		blockfetch.RangeRequest{
+			Start: start,
+			End:   end,
+			// Zero (no estimate) makes the client charge one default block
+			// for the range; see LedgerState.BlockfetchRangeExpectedBytes.
+			ExpectedBytes: o.blockfetchRangeBytes(start, end),
+		},
+	)
+	if err != nil {
+		if o.peerGov != nil {
+			latencyMs := time.Since(dispatchStart).Milliseconds()
 			o.peerGov.UpdatePeerBlockFetchObservation(
 				connId,
 				float64(latencyMs),
 				false,
 			)
 		}
-		return err
+		return 0, err
 	}
-	return nil
+	// RequestRange returns once the request is on the wire, so a peer that
+	// replies immediately can drive blockfetchClientRangeDone to completion
+	// on the protocol's receive goroutine before this insert runs. Recording
+	// the start time anyway would leave an entry whose only deleter has
+	// already fired, so consume the marker it left instead.
+	key := blockFetchKey{connId: connId, requestId: requestId}
+	o.blockFetchMutex.Lock()
+	if _, doneEarly := o.blockFetchDoneEarly[key]; doneEarly {
+		delete(o.blockFetchDoneEarly, key)
+	} else {
+		o.blockFetchStarts[key] = dispatchStart
+	}
+	o.blockFetchMutex.Unlock()
+	return requestId, nil
 }
 
 func (o *Ouroboros) blockfetchClientBlock(
@@ -632,8 +882,9 @@ func (o *Ouroboros) blockfetchClientBlock(
 	block gledger.Block,
 ) error {
 	// Update metrics and peer scoring
+	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	startTime, exists := o.blockFetchStarts[ctx.ConnectionId]
+	startTime, exists := o.blockFetchStarts[key]
 	o.blockFetchMutex.Unlock()
 	if exists {
 		fetchDuration := time.Since(startTime)
@@ -652,6 +903,12 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 
 			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
+			o.blockfetchMetrics.recentDelays.record(
+				block.BlockNumber(),
+				block.Hash(),
+				delaySeconds,
+				fetchDuration.Seconds(),
+			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.
@@ -695,12 +952,16 @@ func (o *Ouroboros) blockfetchClientBlock(
 	}
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// This runs on the blockfetch receive goroutine, which must not wait
+		// on the ledger; see enqueueBlockfetchEvent.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
 					ConnectionId: ctx.ConnectionId,
+					RequestId:    ctx.RequestId,
+					RawBlock:     block.Cbor(),
 					Point: ocommon.NewPoint(
 						block.SlotNumber(),
 						block.Hash().Bytes(),
@@ -709,29 +970,50 @@ func (o *Ouroboros) blockfetchClientBlock(
 					Block: block,
 				},
 			),
+			len(block.Cbor()),
 		)
 	}
 	return nil
 }
 
-func (o *Ouroboros) blockfetchClientBatchDone(
+// blockfetchClientRangeDone is the RangeDoneFunc for a pipelined request. It
+// replaces blockfetchClientBatchDone: with RequestPipelining enabled, every
+// request's terminal outcome -- success, NoBlocks, or any other
+// transport/protocol failure -- is reported here exactly once, whether or not
+// the request ever reached MsgStartBatch. rangeErr is nil for a request that
+// completed successfully.
+func (o *Ouroboros) blockfetchClientRangeDone(
 	ctx blockfetch.CallbackContext,
+	rangeErr error,
 ) error {
-	// Clean up start time
+	// Clean up start time. An absent entry means this callback beat the
+	// dispatching BlockfetchClientRequestRange to the map, so leave a marker
+	// for it to consume rather than letting it insert an entry that no
+	// further callback will ever remove.
+	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
-	delete(o.blockFetchStarts, ctx.ConnectionId)
+	if _, started := o.blockFetchStarts[key]; started {
+		delete(o.blockFetchStarts, key)
+	} else {
+		o.blockFetchDoneEarly[key] = struct{}{}
+	}
 	o.blockFetchMutex.Unlock()
 	if o.eventBus != nil &&
 		o.eventBus.HasSubscribers(ledger.BlockfetchEventType) {
-		o.eventBus.Publish(
-			ledger.BlockfetchEventType,
+		// Same per-connection queue as the blocks, so this BatchDone reaches
+		// the ledger after every block the connection delivered before it.
+		o.enqueueBlockfetchEvent(
+			ctx.ConnectionId,
 			event.NewEvent(
 				ledger.BlockfetchEventType,
 				ledger.BlockfetchEvent{
 					ConnectionId: ctx.ConnectionId,
+					RequestId:    ctx.RequestId,
 					BatchDone:    true,
+					RangeErr:     rangeErr,
 				},
 			),
+			0,
 		)
 	}
 	return nil
@@ -773,12 +1055,12 @@ func (o *Ouroboros) instrumentBlockfetchBlockRaw(
 	}
 }
 
-func (o *Ouroboros) instrumentBlockfetchBatchDone(
-	fn func(blockfetch.CallbackContext) error,
-) func(blockfetch.CallbackContext) error {
-	return func(ctx blockfetch.CallbackContext) error {
+func (o *Ouroboros) instrumentBlockfetchRangeDone(
+	fn func(blockfetch.CallbackContext, error) error,
+) func(blockfetch.CallbackContext, error) error {
+	return func(ctx blockfetch.CallbackContext, rangeErr error) error {
 		start := time.Now()
-		err := fn(ctx)
+		err := fn(ctx, rangeErr)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
 		return err
 	}

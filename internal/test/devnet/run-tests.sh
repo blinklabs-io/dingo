@@ -23,23 +23,48 @@
 #   4. Tears down the DevNet and reports results
 #
 # Usage:
+#   ./run-tests.sh --runtime container --accelerated
 #   ./run-tests.sh                    # Run all devnet tests (default: all-dingo network)
 #   ./run-tests.sh --conformance      # Run against the dingo + cardano-node reference network
-#   ./run-tests.sh --accelerated      # Run the fast event-driven scenario timeline
+#   ./run-tests.sh --accelerated      # Run accelerated timeline and governance scenarios
 #   ./run-tests.sh -run TestBasic     # Run specific test pattern
 #   ./run-tests.sh --keep-up          # Don't tear down on success (for debugging)
 #
 # --accelerated brings the network up on the accelerated spec (shorter
-# slots, epochs and security parameter) and runs the single scenario
-# timeline in scenarios/accelerated_timeline_test.go, which is bounded by
-# a hard timeout. It composes with --conformance to run the same timeline
-# against the dingo + cardano-node topology. Without it the canonical
+# slots, epochs and security parameter) and runs the event-driven scenario
+# timeline plus the Conway SPO governance ratification scenario in dingo
+# mode. It composes with --conformance to run the timeline against the
+# dingo + cardano-node topology. Without it the canonical
 # timing network and the full suite run as before, which is what soak and
 # canary runs use.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Dispatch before probing Docker or allocating Linux-only topology paths.
+RUNTIME="${DEVNET_RUNTIME:-docker}"
+RUNTIME_ARGS=()
+while (( $# > 0 )); do
+  case "$1" in
+    --runtime)
+      if (( $# < 2 )); then
+        echo "--runtime requires docker or container" >&2
+        exit 2
+      fi
+      RUNTIME="$2"
+      shift 2
+      ;;
+    --runtime=*) RUNTIME="${1#*=}"; shift ;;
+    *) RUNTIME_ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${RUNTIME_ARGS[@]+"${RUNTIME_ARGS[@]}"}"
+case "${RUNTIME}" in
+  docker) ;;
+  container) exec bash "${SCRIPT_DIR}/run-tests-container.sh" "$@" ;;
+  *) echo "Unsupported runtime: ${RUNTIME} (use docker or container)" >&2; exit 2 ;;
+esac
+
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.yml"
 # shellcheck source=compose-project.sh
@@ -51,6 +76,7 @@ devnet_ports
 # Parse arguments
 KEEP_UP=false
 ACCELERATED=false
+LEIOS=false
 # Mode selection: default dingo (all-dingo network), --conformance for the
 # dingo + cardano-node reference network.
 MODE="${MODE:-dingo}"
@@ -61,11 +87,31 @@ for arg in "$@"; do
     --keep-up)     KEEP_UP=true ;;
     --conformance) MODE="conformance" ;;
     --accelerated) ACCELERATED=true ;;
+    --leios)       LEIOS=true ;;
     -run|-run=*|-test.run|-test.run=*)
                    USER_RUN_FILTER=true; TEST_ARGS+=("${arg}") ;;
     *)             TEST_ARGS+=("${arg}") ;;
   esac
 done
+
+if [[ "${LEIOS}" == "true" && "${MODE}" != "dingo" ]]; then
+  echo "[run-tests] ERROR: --leios requires the all-Dingo profile" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${ACCELERATED}" == "true" ]]; then
+  echo "[run-tests] ERROR: --leios selects its own accelerated Dijkstra spec; do not combine it with --accelerated" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" == "true" && "${USER_RUN_FILTER}" == "true" ]]; then
+  echo "[run-tests] ERROR: --leios runs TestLeiosEndorserBlockProducerToPeer; do not combine it with -run" >&2
+  exit 1
+fi
+if [[ "${LEIOS}" != "true" ]]; then
+  unset DEVNET_LEIOS_ENABLED DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE
+  unset DEVNET_DINGO_RUN_MODE
+  unset DEVNET_DINGO_START_ERA
+  unset DEVNET_TXPUMP_TRANSACTION_ERA
+fi
 
 # Derive mode-specific variables. COMPOSE_PROFILES is exported unconditionally
 # (not defaulted) so the --conformance flag always wins over any pre-existing
@@ -91,7 +137,19 @@ fi
 # Select the network spec the configurator generates genesis from, and
 # point the Go harness at the same file so its derived timings match the
 # network that is actually running.
-if [[ "${ACCELERATED}" == "true" ]]; then
+if [[ "${LEIOS}" == "true" ]]; then
+  ACTIVE_SPEC="./testnet-dingo-leios.yaml"
+  export DEVNET_LEIOS_ENABLED=1
+  export DEVNET_LEIOS_VOTE_SIGNING_KEY_FILE="/configs/keys/leios-vote.skey"
+  export DEVNET_DINGO_RUN_MODE=leios
+  export DEVNET_DINGO_START_ERA=dijkstra
+  export DEVNET_TXPUMP_TRANSACTION_ERA=dijkstra
+  # Keep EB outputs in the tx pump's wallet quarantine until the scenario
+  # queries the relay ledger; this delay is not proof of on-chain confirmation.
+  export DEVNET_TXPUMP_CONFIRMATION_SLOTS=1000
+  export DEVNET_DINGO_SPEC="${ACTIVE_SPEC}"
+  unset DEVNET_ACCELERATED
+elif [[ "${ACCELERATED}" == "true" ]]; then
   ACTIVE_SPEC="${ACCELERATED_SPEC}"
   export DEVNET_ACCELERATED=1
   # 100 slots is 50s on the accelerated specs, leaving time for another round.
@@ -304,13 +362,20 @@ if [[ "${MODE}" == "dingo" ]]; then
   else
     # Never let a copy failure abort the run. Missing stake keys are handled
     # below by disabling the opt-in CIP-50 scenario for this invocation.
-    # Match the host user so the runner can remove its own temporary tree.
-    # The source volume is world-readable by configurator.sh.
+    # Copy root-only pool cold keys into the host user's private temporary
+    # directory, then return ownership and restrict all copied signing keys.
     docker run --rm \
-      --user "$(id -u):$(id -g)" \
+      --user 0:0 \
+      -e HOST_UID="$(id -u)" \
+      -e HOST_GID="$(id -g)" \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
-      alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
+      alpine sh -c 'cp -r /k/stake /out/stake; \
+        cp -r /k/pool-keys /out/pool-keys; \
+        cp /k/genesis.*.skey /k/genesis.*.vkey /k/genesis.*.addr.info /out/; \
+        chown -R "${HOST_UID}:${HOST_GID}" /out; \
+        find /out -type f -name "*.skey" -exec chmod 0600 {} +' \
+      2>/dev/null || true
   fi
   if [[ -d "${STAKE_KEYS_HOST_DIR}/stake" ]]; then
     export DEVNET_STAKE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}/stake"
@@ -321,6 +386,14 @@ if [[ "${MODE}" == "dingo" ]]; then
       warn "Genesis stake keys were not copied; skipping the CIP-50 scenario"
       unset DEVNET_CIP50_TEST
     fi
+  fi
+  if [[ "${ACCELERATED}" == "true" ]] &&
+    [[ -d "${STAKE_KEYS_HOST_DIR}/pool-keys" ]] &&
+    compgen -G "${STAKE_KEYS_HOST_DIR}/genesis.*.skey" >/dev/null; then
+    export DEVNET_GOVERNANCE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}"
+    log "DEVNET_GOVERNANCE_KEYS_DIR=${DEVNET_GOVERNANCE_KEYS_DIR}"
+  else
+    unset DEVNET_GOVERNANCE_KEYS_DIR
   fi
 fi
 
@@ -359,16 +432,24 @@ fi
 # Run tests with the mode's build tags.
 # The -count=1 flag disables test caching.
 #
-# The accelerated run is a single scenario timeline, so it selects that
-# test and takes a much tighter timeout: the scenario enforces its own
-# hard timeout internally, and this is the outer backstop.
+# The accelerated governance scenario crosses four epoch boundaries after
+# the timeline, so the outer timeout covers both tests.
 if [[ "${ACCELERATED}" == "true" ]]; then
-  TEST_TIMEOUT="${TEST_TIMEOUT:-8m}"
+  TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
   if [[ "${USER_RUN_FILTER}" == "false" ]]; then
-    TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+    if [[ "${MODE}" == "dingo" ]]; then
+      TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline|TestConwaySPORatificationUsesBoundaryMarkAndEnactsNextEpoch')
+    else
+      TEST_ARGS+=(-run 'TestAcceleratedScenarioTimeline')
+    fi
   fi
 else
-  TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+  if [[ "${LEIOS}" == "true" ]]; then
+    TEST_TIMEOUT="${TEST_TIMEOUT:-12m}"
+    TEST_ARGS+=(-run '^TestLeiosEndorserBlockProducerToPeer$')
+  else
+    TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
+  fi
 fi
 set +e
 go test \

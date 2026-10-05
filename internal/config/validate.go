@@ -37,7 +37,36 @@ import (
 const (
 	minUnprivilegedPort = 1024
 	maxPort             = 65535
+	// maxKESAgentSignTimeout is exclusive. A sign-mode request blocks the
+	// slot-aligned forging loop, so it must finish before the next mainnet
+	// slot.
+	maxKESAgentSignTimeout = time.Second
 )
+
+// ValidateKESKeySources rejects a block producer that names both a local KES
+// signing key file and a KES agent socket: an operator's explicit choice of
+// key source should never be silently discarded in favor of the other.
+func ValidateKESKeySources(kesKeyPath, kesAgentSocket string) error {
+	if kesKeyPath != "" && kesAgentSocket != "" {
+		return errors.New(
+			"blockProducer cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		)
+	}
+	return nil
+}
+
+// ValidateKESAgentSignTimeout accepts zero as the documented default
+// selector, or an explicit positive timeout shorter than one mainnet slot.
+func ValidateKESAgentSignTimeout(timeout time.Duration) error {
+	if timeout < 0 || timeout >= maxKESAgentSignTimeout {
+		return fmt.Errorf(
+			"shelleyKesAgentSignTimeout (%s) must be zero (use default) or positive and less than %s",
+			timeout,
+			maxKESAgentSignTimeout,
+		)
+	}
+	return nil
+}
 
 // AcceptedChainsyncStrategies mirrors
 // chainsync.AcceptedHeaderSyncStrategyNames (the accepted-name list
@@ -271,7 +300,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     that port for the hours the bootstrap takes and a refused probe
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
-	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
+	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. Dev mode forces API storage on at startup, and node.Run
 	//     keys that off the *configured* runMode — `dingo serve` with
 	//     runMode "dev" still runs dev — so the configured mode is
@@ -286,7 +315,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
+	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	mcpHost := "127.0.0.1"
+	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
+		mcpHost = host
+		if host == "" {
+			mcpHost = c.BindAddr
+		}
+	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
@@ -305,6 +342,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
+			"plugins.api.mcp.config.port",
+			mcpHost,
+			APIPluginPort(c.Plugins.API.Mcp),
+			serving,
+			false,
+		},
+		{
 			"plugins.api.utxorpc.config.port",
 			c.BindAddr,
 			utxorpcPort,
@@ -315,6 +359,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"plugins.api.blockfrost.config.port",
 			c.BindAddr,
 			blockfrostPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.kupo.config.port",
+			c.BindAddr,
+			kupoPort,
 			apiListeners,
 			false,
 		},
@@ -387,7 +438,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 
 	// The shared api.tls mode enum is checked here so a typo is
 	// caught once, with a single clear message, rather than surfacing
-	// identically from every one of the three API providers that inherit
+	// identically from every one of the four API providers that inherit
 	// it. Certificate/key presence is deliberately NOT
 	// checked here: a provider legitimately may supply only its own
 	// certFilePath/keyFilePath while inheriting just `mode: server` from
@@ -499,14 +550,58 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	if c.TokenRegistry.MaxDecompressedBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxDecompressedBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxDecompressedBytes,
+		))
+	}
+	if c.TokenRegistry.MaxArchiveEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxArchiveEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxArchiveEntries,
+		))
+	}
+	if c.TokenRegistry.MaxAcceptedEntries < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxAcceptedEntries: %d (must not be negative)",
+			c.TokenRegistry.MaxAcceptedEntries,
+		))
+	}
+	if c.TokenRegistry.MaxBatchBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must not be negative)",
+			c.TokenRegistry.MaxBatchBytes,
+		))
+	}
+	if c.TokenRegistry.MaxEntryBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes > 0 &&
+		c.TokenRegistry.MaxBatchBytes < c.TokenRegistry.MaxEntryBytes {
+		errs = append(errs, fmt.Errorf(
+			"invalid tokenRegistry.maxBatchBytes: %d (must be at least maxEntryBytes %d)",
+			c.TokenRegistry.MaxBatchBytes,
+			c.TokenRegistry.MaxEntryBytes,
+		))
+	}
+
 	// Block production needs all three credential paths
 	if c.BlockProducer {
 		var missing []string
 		if c.ShelleyVRFKey == "" {
 			missing = append(missing, "shelleyVrfKey")
 		}
-		if c.ShelleyKESKey == "" {
+		// The KES signing key is only required when it is local. With a KES
+		// agent socket configured, the key lives with the agent instead --
+		// that is the whole point of the flag -- so requiring both made an
+		// agent-only configuration impossible to start.
+		if c.ShelleyKESKey == "" && c.ShelleyKESAgentSocket == "" {
 			missing = append(missing, "shelleyKesKey")
+		}
+		if err := ValidateKESKeySources(
+			c.ShelleyKESKey,
+			c.ShelleyKESAgentSocket,
+		); err != nil {
+			errs = append(errs, err)
 		}
 		if c.ShelleyOperationalCertificate == "" {
 			missing = append(missing, "shelleyOperationalCertificate")
@@ -517,6 +612,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				missing,
 			))
 		}
+	}
+	if c.ShelleyKESAgentMode != "" &&
+		c.ShelleyKESAgentMode != "serve-key" &&
+		c.ShelleyKESAgentMode != "sign" {
+		errs = append(errs, fmt.Errorf(
+			"invalid shelleyKesAgentMode %q: must be \"serve-key\" or \"sign\"",
+			c.ShelleyKESAgentMode,
+		))
+	}
+	if err := ValidateKESAgentSignTimeout(
+		c.ShelleyKESAgentSignTimeout,
+	); err != nil {
+		errs = append(errs, err)
 	}
 
 	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
@@ -763,7 +871,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
-	// Koios parity observer (dingo #3098): network mirrors the same
+	// Koios parity observer: network mirrors the same
 	// preview/preprod restriction internal/koiosparity.NewObserver enforces
 	// at construction time, checked here too so a bad value fails fast at
 	// config-validation time instead of only once the node reaches

@@ -34,12 +34,18 @@ import (
 // transaction, the epoch and slot at which enactment takes effect,
 // and the protocol-parameter update function for the current era.
 type EnactmentContext struct {
-	DB       *database.Database
-	Txn      *database.Txn
-	Epoch    uint64
-	Slot     uint64
-	PParams  lcommon.ProtocolParameters
-	UpdateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
+	DB    *database.Database
+	Txn   *database.Txn
+	Epoch uint64
+	Slot  uint64
+	// PrevEpochStartSlot is the first slot of the epoch this boundary
+	// closes. cardano-ledger drops the committee state of every cold
+	// credential outside the enacted committee at each epoch boundary
+	// (Conway EPOCH, updateCommitteeState), so a credential newly seated here
+	// keeps only the certificates recorded since the previous boundary.
+	PrevEpochStartSlot uint64
+	PParams            lcommon.ProtocolParameters
+	UpdateFn           func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
 
 	// TreasuryWithdrawalRemaining tracks the ENACT rule's cumulative
 	// withdrawal limit across all treasury-withdrawal actions enacted in
@@ -64,7 +70,6 @@ type EnactmentResult struct {
 	// model, so a real governance enactment writing that exact value is the
 	// common case on any real network, not a rare coincidence a
 	// value-comparison could dismiss as "unchanged, therefore not written."
-	// See blinklabs-io/dingo#3825's PR review.
 	PlutusV2CostModelWritten bool
 }
 
@@ -92,6 +97,7 @@ func EnactProposal(
 		return nil, fmt.Errorf("decode gov action: %w", err)
 	}
 
+	refundSource := proposalRewardSourceHash(proposal)
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
 		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
@@ -130,6 +136,17 @@ func EnactProposal(
 	case *lcommon.TreasuryWithdrawalGovAction:
 		if err := applyTreasuryWithdrawal(ctx, a, proposal); err != nil {
 			return nil, fmt.Errorf("treasury withdrawal: %w", err)
+		}
+		// The withdrawal credits above are journaled under the proposal's
+		// source hash. A refund to one of those destinations under the same
+		// hash would hit the journal's replay key and be dropped, losing the
+		// deposit, so that refund gets its own discriminator.
+		collides, err := returnAccountReceivesWithdrawal(proposal, a)
+		if err != nil {
+			return nil, fmt.Errorf("treasury withdrawal: %w", err)
+		}
+		if collides {
+			refundSource = proposalDepositRefundSourceHash(proposal)
 		}
 
 	case *lcommon.NoConfidenceGovAction:
@@ -179,8 +196,8 @@ func EnactProposal(
 	// Per CIP-1694, the deposit is returned to the proposer's reward
 	// account when the proposal is finalized (enactment here, or
 	// expiry in the EpochInput expiry path).
-	if err := refundProposalDeposit(
-		ctx.DB, ctx.Txn, proposal, ctx.Slot,
+	if err := refundProposalDepositFromSource(
+		ctx.DB, ctx.Txn, proposal, ctx.Slot, refundSource,
 	); err != nil {
 		return nil, fmt.Errorf("refund proposal deposit: %w", err)
 	}
@@ -319,6 +336,47 @@ func applyTreasuryWithdrawal(
 		ctx.Slot,
 		metaTxn,
 	)
+}
+
+// returnAccountReceivesWithdrawal reports whether the proposal's deposit
+// return account is also credited a non-zero amount by the withdrawal, which
+// is when the two credits would share a journal key.
+func returnAccountReceivesWithdrawal(
+	proposal *models.GovernanceProposal,
+	a *lcommon.TreasuryWithdrawalGovAction,
+) (bool, error) {
+	if proposal == nil || a == nil || proposal.Deposit == 0 {
+		return false, nil
+	}
+	returnTag, returnCredential, err := rewardAccountStakeCredential(
+		proposal.ReturnAddress,
+	)
+	if err != nil {
+		return false, fmt.Errorf("proposal deposit return account: %w", err)
+	}
+	for rewardAddr, amount := range a.Withdrawals {
+		if amount == 0 || rewardAddr == nil {
+			continue
+		}
+		rewardAddrBytes, err := rewardAddr.Bytes()
+		if err != nil {
+			return false, fmt.Errorf(
+				"encode treasury withdrawal reward address: %w",
+				err,
+			)
+		}
+		tag, credential, err := rewardAccountStakeCredential(rewardAddrBytes)
+		if err != nil {
+			return false, fmt.Errorf(
+				"treasury withdrawal reward account: %w",
+				err,
+			)
+		}
+		if tag == returnTag && bytes.Equal(credential, returnCredential) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // treasuryWithdrawalTotal returns the amount an ENACT transition would remove
@@ -478,11 +536,42 @@ func AddUnclaimedToTreasury(
 // applyUpdateCommittee removes the requested cold credentials and
 // adds or updates new members with their expiry epochs from the
 // action's credential-to-epoch map, then records the enacted quorum.
+//
+// A cold credential already an active (non-deleted) committee member
+// immediately before this enactment keeps its existing TermStartSlot: it is
+// continuing, not rejoining, and the hot-key authorization/resignation
+// queries gate on term_start_slot to decide whether a stale, pre-removal
+// certificate should still resolve. Stamping a fresh TermStartSlot on every
+// credential in the action's map -- including a continuing member whose term is
+// simply being renewed -- silently invalidated that member's still-valid
+// hot-key authorization the moment the term renewed, despite no resignation or
+// re-authorization ever occurring. Only a credential genuinely new to the
+// committee, or rejoining after having been removed at some point since its
+// last authorization, gets a fresh TermStartSlot; that is what correctly
+// excludes its stale pre-removal authorization once it rejoins. The fresh start
+// is the later of the proposal's slot and ctx.PrevEpochStartSlot: certificates
+// the credential recorded while pending before the closing epoch were dropped
+// at that epoch's own boundary, when it was not yet a member.
 func applyUpdateCommittee(
 	ctx *EnactmentContext,
 	a *lcommon.UpdateCommitteeGovAction,
 	termStartSlot uint64,
 ) error {
+	var continuingTermStart map[string]uint64
+	if len(a.CredEpochs) > 0 {
+		existing, err := ctx.DB.GetCommitteeMembers(ctx.Txn)
+		if err != nil {
+			return fmt.Errorf("get existing committee members: %w", err)
+		}
+		continuingTermStart = make(map[string]uint64, len(existing))
+		for _, member := range existing {
+			key := models.CommitteeCredential{
+				CredentialTag: member.ColdCredentialTag,
+				Credential:    member.ColdCredHash,
+			}.Key()
+			continuingTermStart[key] = member.TermStartSlot
+		}
+	}
 	removeCredentials := make(
 		[]models.CommitteeCredential,
 		0,
@@ -525,11 +614,19 @@ func applyUpdateCommittee(
 		if err != nil {
 			return fmt.Errorf("add member credential: %w", err)
 		}
+		memberTermStart := max(termStartSlot, ctx.PrevEpochStartSlot)
+		key := models.CommitteeCredential{
+			CredentialTag: credentialTag,
+			Credential:    hash[:],
+		}.Key()
+		if priorTermStart, ok := continuingTermStart[key]; ok {
+			memberTermStart = priorTermStart
+		}
 		members = append(members, &models.CommitteeMember{
 			ColdCredentialTag: credentialTag,
 			ColdCredHash:      hash[:],
 			ExpiresEpoch:      uint64(expiry),
-			TermStartSlot:     termStartSlot,
+			TermStartSlot:     memberTermStart,
 			TermStartSlotSet:  true,
 			AddedSlot:         ctx.Slot,
 		})

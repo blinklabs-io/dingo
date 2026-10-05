@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
-	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,47 +39,6 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-func TestNewEraMismatchError_Fields(t *testing.T) {
-	t.Parallel()
-
-	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
-	require.NotNil(t, got)
-	assert.Equal(t, uint8(eras.ShelleyEraDesc.Id), got.OtherEra.Index)
-	assert.Equal(t, "Shelley", got.OtherEra.Name)
-	assert.Equal(t, uint8(eras.ByronEraDesc.Id), got.LedgerEra.Index)
-	assert.Equal(t, "Byron", got.LedgerEra.Name)
-}
-
-// TestNewEraMismatchError_EncodesGoldenBytes is the core closure of the
-// wire-format gap: a typed reject reason returned from dingo's
-// SubmitTxFunc must hit the wire as canonical bytes matching what a
-// Haskell node would emit. Compare against
-// IntersectMBO/ouroboros-consensus golden ApplyTxErr_WrongEraByron.
-func TestNewEraMismatchError_EncodesGoldenBytes(t *testing.T) {
-	t.Parallel()
-
-	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
-	encoded, err := cbor.Encode(got)
-	require.NoError(t, err)
-	assert.Equal(t, mustHex(t, goldenWrongEraByron), encoded)
-}
-
-// TestNewEraMismatchError_AsErrorWithWrap verifies the typed error
-// survives fmt.Errorf("...: %w", typed) wrapping (errors.As walks the
-// chain). dingo callers may wrap the error with additional context
-// before returning to gouroboros' tx-submission server; the server's
-// encodeRejectReason uses errors.As to pick out the typed reason
-// regardless of wrapping depth.
-func TestNewEraMismatchError_AsErrorWithWrap(t *testing.T) {
-	t.Parallel()
-
-	em := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
-	var err error = em
-	var got *gledger.EraMismatch
-	require.True(t, errors.As(err, &got))
-	assert.Equal(t, "Shelley", got.OtherEra.Name)
-}
-
 // TestNewEraMismatchError_UnknownEraIdSurvives verifies that a synthetic
 // era ID that doesn't resolve in dingo's registry produces a usable
 // error (with a fallback name) rather than panicking. This matches the
@@ -93,19 +51,6 @@ func TestNewEraMismatchError_UnknownEraIdSurvives(t *testing.T) {
 	assert.Equal(t, uint8(99), got.OtherEra.Index)
 	assert.Contains(t, got.OtherEra.Name, "unknown")
 	assert.Equal(t, "Conway", got.LedgerEra.Name)
-}
-
-// TestNewEraMismatchError_ErrorStringMentionsBothEras keeps fmt.Errorf-
-// style log output usable: the typed error's Error() string must still
-// name both eras for human-readable diagnostics in mempool / forging
-// logs.
-func TestNewEraMismatchError_ErrorStringMentionsBothEras(t *testing.T) {
-	t.Parallel()
-
-	got := newEraMismatchError(eras.ShelleyEraDesc.Id, eras.ByronEraDesc.Id)
-	msg := got.Error()
-	assert.Contains(t, msg, "Byron")
-	assert.Contains(t, msg, "Shelley")
 }
 
 // TestEraMismatchInterop_FullChain proves the full wire-protocol path

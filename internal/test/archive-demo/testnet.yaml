@@ -12,7 +12,11 @@
 #   6. Node config (config.json) overrides
 
 --- # Required Testnet Parameters
-poolCount: 2
+# One pool: docker-compose.yml declares a single producer
+# (cardano-producer) and one config volume (p1-configs). A second pool's
+# keys would be generated into the configurator container and discarded
+# with it, leaving half the delegated stake unable to forge.
+poolCount: 1
 poolCost: 0
 poolMargin: 0.0
 poolPledge: 0
@@ -27,19 +31,19 @@ protocolConsts:
   k: 40
 
 --- # Shelley Genesis Override
-# 1s slots, ~8 min epochs, block every ~5s per pool (~2.5s total)
+# 1s slots, ~8 min epochs, one pool at f=0.4 so a block every ~2.5s
 # nonceStabilityWindow = 4k/f = 4*40/0.4 = 400 < 500 = epochLength ✓
 # blockfetchStabilityWindow = 3k/f = 3*40/0.4 = 300 < 500 = epochLength ✓
 # Candidate nonce freezes 400 slots before epoch end (at slot 100).
-# Partition tolerance: K / per-pool-rate where per-pool-rate = 1-(1-f)^(1/n)
-# With f=0.4, n=2: per-pool-rate ≈ 0.225, so K / per-pool-rate ≈ 40/0.225 ≈ 178s (~3 min)
+# Single producer, so the chain grows at the full rate f=0.4 and K is
+# reached in 40/0.4 = 100s.
 epochLength: 500
 slotLength: 1
 activeSlotsCoeff: 0.4
 securityParam: 40
 # The generator creates both a staked and an unstaked genesis address per
-# pool, so delegatedSupply=2T produces 4T of circulating genesis UTxOs.
-# Matches the working DevNet configuration (internal/test/devnet/testnet.yaml).
+# delegated-supply pot, so delegatedSupply=2T produces 4T of circulating
+# genesis UTxOs regardless of poolCount (internal/test/preflight-genesis-supply.sh).
 maxLovelaceSupply: 6000000000000
 protocolParams:
   decentralisationParam: 0

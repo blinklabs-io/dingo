@@ -22,6 +22,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,8 +34,8 @@ import (
 // It is a real block from the Musashi prototype network rather than a
 // constructed one, and its shape matches what the live network serves: fetched
 // from leios-node.play.dev.cardano.org:3001 (network magic 164) while
-// diagnosing #3761, a tip block decoded to the same two top-level components
-// and twelve-field header body this fixture carries.
+// diagnosing a Musashi decode failure, a tip block decoded to the same two
+// top-level components and twelve-field header body this fixture carries.
 func musashiDijkstraBlock(t *testing.T) []byte {
 	t.Helper()
 	encoded, err := os.ReadFile("testdata/musashi_dijkstra_block.hex")
@@ -43,29 +45,32 @@ func musashiDijkstraBlock(t *testing.T) []byte {
 	return raw
 }
 
-// TestDecodeConwayBlockAcceptsDijkstraLayout is the regression for #3761: a
-// from-genesis Musashi sync could not advance past origin because every
-// BlockFetch block failed to decode.
-//
-// The respun chain carries the Dijkstra two-component block layout while still
-// tagging blocks as Conway (NtN block type 7) on the wire, so neither the
-// strict Conway decoder nor the five-component Leios-extended reconstruct
-// recognized them, and the strict Conway error surfaced:
+// TestDecodeConwayBlockRejectsObsoleteDijkstraLayout pins the pre-respin
+// Musashi block shape. Its two-component block envelope and extended header
+// remain useful fixtures, but its four-component body predates the current
+// three-component Dijkstra block-body schema and must not be accepted:
 //
 //	cbor: cannot unmarshal array into Go value of type conway.tmpConwayBlock
 //	(cannot decode CBOR array to struct with different number of elements)
-func TestDecodeConwayBlockAcceptsDijkstraLayout(t *testing.T) {
+func TestDecodeConwayBlockRejectsObsoleteDijkstraLayout(t *testing.T) {
 	raw := musashiDijkstraBlock(t)
 
 	block, err := models.DecodeConwayBlock(raw)
-	require.NoError(
-		t,
-		err,
-		"a Musashi block in the Dijkstra layout must decode; without this a "+
-			"from-genesis sync never advances past origin",
-	)
-	require.NotNil(t, block)
-	require.Equal(t, uint64(566037), block.SlotNumber())
+	require.Error(t, err, "the pre-respin four-field block body is obsolete")
+	require.Nil(t, block)
+}
+
+func TestDecodeStoredConwayBlockAcceptsLegacyDijkstraLayout(t *testing.T) {
+	raw := musashiDijkstraBlock(t)
+
+	block, err := (models.Block{
+		Type: ledger.BlockTypeConway,
+		Cbor: raw,
+	}).Decode()
+	require.NoError(t, err)
+	_, ok := block.(*dijkstra.DijkstraBlock)
+	require.True(t, ok)
+	require.Equal(t, raw, block.Cbor())
 }
 
 // TestMusashiFixtureHasDijkstraLayout pins the shape the fix depends on, so a
@@ -84,6 +89,10 @@ func TestMusashiFixtureHasDijkstraLayout(t *testing.T) {
 		"Dijkstra blocks are [header, block_body]; the five-component "+
 			"Leios-extended Conway reconstruct cannot apply to them",
 	)
+	var blockBody []cbor.RawMessage
+	_, err = cbor.Decode(components[1], &blockBody)
+	require.NoError(t, err)
+	require.Len(t, blockBody, 4, "the captured fixture uses the legacy body schema")
 
 	var headerParts []cbor.RawMessage
 	_, err = cbor.Decode(components[0], &headerParts)

@@ -14,6 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
+
+# Every path below is relative: the config, the genesis files the sed calls
+# rewrite, and the .devnet directory that gets emptied. Run from the
+# repository root so `rm -rf .devnet/*` cannot reach a caller's own .devnet.
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 export CARDANO_NETWORK=devnet
 export CARDANO_CONFIG=./config/cardano/devnet/config.json
 export CARDANO_DATABASE_PATH=.devnet
@@ -25,7 +32,7 @@ conf="$(dirname "$CARDANO_CONFIG")"
 now=$(date -u +%s)
 echo "setting start time in $conf to $now"
 sed -i -e "s/startTime\": .*,/startTime\": $now,/" "$conf/byron-genesis.json"
-sed -i -e "s/systemStart\": .*,/systemStart\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ --date=@$now)\",/" "$conf/shelley-genesis.json"
+sed -i -e "s/systemStart\": .*,/systemStart\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ --date=@"$now")\",/" "$conf/shelley-genesis.json"
 
 echo resetting .devnet
 rm -rf .devnet/*

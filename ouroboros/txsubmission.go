@@ -21,6 +21,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -97,6 +98,12 @@ func txsubmissionWireSize(eraId uint16, bodyLen int) uint64 {
 	return 1 + cborHeadLen(uint64(eraId)) + 2 + cborHeadLen(body) + body
 }
 
+// txsubmissionTxDecoder decodes one MsgReplyTxs body. validateTxsubmissionReply
+// receives it rather than naming the ledger decoder directly, so the panic
+// containment wrapped around the call can be driven by a decoder that really
+// panics; production always supplies ledger.NewTransactionFromCbor.
+type txsubmissionTxDecoder func(txType uint, txCbor []byte) (ledger.Transaction, error)
+
 type validatedTxsubmissionBody struct {
 	body txsubmission.TxBody
 	tx   ledger.Transaction
@@ -113,9 +120,16 @@ type validatedTxsubmissionBody struct {
 // within the reference TxSubmission V2 discrepancy in either direction. The
 // aggregate predecode allowance accounts for the same bounded discrepancy
 // without removing the byte-budget guard.
+//
+// A body whose bytes panic the decoder is contained here and reported as an
+// ordinary decode failure wrapping safedecode.ErrDecodePanic, so it leaves by
+// the route a malformed body already takes -- the whole reply dropped, nothing
+// admitted -- instead of unwinding into the per-peer protocol goroutine, which
+// has no recover above it and would take the process down with it.
 func validateTxsubmissionReply(
 	requested []txsubmission.TxIdAndSize,
 	returned []txsubmission.TxBody,
+	decode txsubmissionTxDecoder,
 ) ([]validatedTxsubmissionBody, error) {
 	if len(returned) > len(requested) {
 		return nil, fmt.Errorf(
@@ -163,10 +177,9 @@ func validateTxsubmissionReply(
 	}
 	validatedByIndex := make(map[int]validatedTxsubmissionBody, len(returned))
 	for i, txBody := range returned {
-		tx, err := ledger.NewTransactionFromCbor(
-			uint(txBody.EraId),
-			txBody.TxBody,
-		)
+		tx, err := safedecode.Guard(func() (ledger.Transaction, error) {
+			return decode(uint(txBody.EraId), txBody.TxBody)
+		})
 		if err != nil {
 			return nil, fmt.Errorf(
 				"txsubmission reply transaction %d decode failed: %w",
@@ -307,8 +320,7 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		var fullErr *mempool.MempoolFullError
-		if !errors.As(err, &fullErr) {
+		if _, ok := errors.AsType[*mempool.MempoolFullError](err); !ok {
 			return err
 		}
 		retryStreak++
@@ -429,7 +441,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 ) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
+		conn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
 		if conn == nil {
 			return
 		}
@@ -447,7 +459,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
 					1,
-					conn.ErrorChan(),
+					connDone,
 				) {
 					return
 				}
@@ -471,7 +483,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			}()
 			select {
 			case <-done:
-			case <-conn.ErrorChan():
+			case <-connDone:
 				return
 			}
 			if err != nil {
@@ -551,7 +563,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						) {
 							continue
 						}
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 				} else {
@@ -593,7 +605,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						))
 						select {
 						case <-backoffTimer.C:
-						case <-conn.ErrorChan():
+						case <-connDone:
 							return
 						}
 						continue
@@ -601,7 +613,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
 						advertisedBytes+maxDiscrepancyBytes,
-						conn.ErrorChan(),
+						connDone,
 					) {
 						return
 					}
@@ -638,6 +650,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 				validatedTxs, err := validateTxsubmissionReply(
 					requestedTxs,
 					txs,
+					ledger.NewTransactionFromCbor,
 				)
 				o.recordTxsubmissionReplyOutcome(
 					validatedTxs,
@@ -682,7 +695,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					select {
 					case <-backoffTimer.C:
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 					continue
@@ -713,7 +726,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 							func() bool {
 								return headroom.WaitForAdmissionHeadroom(
 									int64(len(txBody.TxBody)),
-									conn.ErrorChan(),
+									connDone,
 								)
 							},
 							o.recordTxsubmissionAdmissionRetry,

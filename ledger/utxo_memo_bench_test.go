@@ -23,25 +23,21 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
-
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
-
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
 // This file benchmarks (*LedgerState).ValidateTx and LedgerView.UtxoById
-// using real Preprod chain bytes for blinklabs-io/dingo#4226 (the per-view
-// UTxO memo): the same fixtures
-// ledger/eras/conway_plutus_preprod_fixture_test.go uses to pin execution
+// using real Preprod chain bytes for the per-view UTxO memo: the same fixtures
+// ledger/eras/conway_test.go uses to pin execution
 // units against producer-declared budgets. That test documents the
 // fixture's provenance: a producer-accepted Preprod block and the funding
 // transactions for one Plutus transaction inside it, fetched over NtN
@@ -57,7 +53,7 @@ import (
 const utxoMemoBenchFixtureDir = "eras/testdata"
 
 // preprod slot/time conversion constants, duplicated from
-// ledger/eras/conway_plutus_preprod_fixture_test.go (unexported there). The
+// ledger/eras/conway_test.go (unexported there). The
 // Conway V3 script context encodes the tx validity range as POSIX
 // milliseconds, so an approximate conversion would change the bytes the
 // Plutus script branches on and desync the benchmark from the real,
@@ -67,29 +63,6 @@ const (
 	utxoMemoBenchByronSlots    = 86_400
 	utxoMemoBenchByronSlotSecs = 20
 )
-
-func utxoMemoBenchSlotToTime(slot uint64) (time.Time, error) {
-	if slot < utxoMemoBenchByronSlots {
-		return time.Unix(
-			utxoMemoBenchSystemStart+int64(slot)*utxoMemoBenchByronSlotSecs,
-			0,
-		).UTC(), nil
-	}
-	byronEnd := int64(utxoMemoBenchSystemStart) +
-		int64(utxoMemoBenchByronSlots)*utxoMemoBenchByronSlotSecs
-	return time.Unix(byronEnd+int64(slot-utxoMemoBenchByronSlots), 0).UTC(), nil
-}
-
-func utxoMemoBenchTimeToSlot(t time.Time) (uint64, error) {
-	byronEnd := int64(utxoMemoBenchSystemStart) +
-		int64(utxoMemoBenchByronSlots)*utxoMemoBenchByronSlotSecs
-	if t.Unix() < byronEnd {
-		return uint64(
-			(t.Unix() - utxoMemoBenchSystemStart) / utxoMemoBenchByronSlotSecs,
-		), nil
-	}
-	return utxoMemoBenchByronSlots + uint64(t.Unix()-byronEnd), nil
-}
 
 func readUtxoMemoBenchFixture(tb testing.TB, name string) []byte {
 	tb.Helper()
@@ -241,8 +214,8 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 	// The production (*LedgerState).SlotToTime path (ledger/slot.go) has no
 	// Byron-era segment here: it extrapolates the single flat-rate epoch
 	// below (1000ms/slot from slot 0) using only ShelleyGenesis().SystemStart.
-	// Real Preprod mixes 86400 Byron slots at 20s with 1s Shelley+ slots
-	// (utxoMemoBenchSlotToTime above), so SystemStart is back-dated by the
+	// Real Preprod mixes 86400 Byron slots at 20s with 1s Shelley+ slots.
+	// SystemStart is back-dated by the
 	// Byron/Shelley slot-length difference so that a flat 1s/slot walk from
 	// slot 0 lands on the same wall-clock instant at the fixture's real slot
 	// that the real mixed schedule does.
@@ -288,7 +261,7 @@ func loadUtxoMemoPreprodFixture(tb testing.TB) *utxoMemoPreprodFixture {
 
 // BenchmarkLedgerStateValidateTxUtxoMemo measures the DB-backed
 // (*LedgerState).ValidateTx path and the LedgerView.UtxoById resolution it
-// repeats per input, before/after blinklabs-io/dingo#4226's per-view memo.
+// repeats per input, before and after the per-view memo.
 func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 	fx := loadUtxoMemoPreprodFixture(b)
 
@@ -297,7 +270,7 @@ func BenchmarkLedgerStateValidateTxUtxoMemo(b *testing.B) {
 		// ls.db.UtxoByRef -> blob fetch + CBOR decode), one open read
 		// transaction and one LedgerView reused across iterations. After
 		// the first iteration, every further call hits the per-view memo
-		// added by #4226 instead of the database.
+		// instead of the database.
 		b.ReportAllocs()
 		txn := fx.db.Transaction(false)
 		defer txn.Release()

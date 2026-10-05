@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -98,7 +99,6 @@ type mockListener struct {
 	acceptErr   error
 	closed      atomic.Bool
 	closeCh     chan struct{}
-	acceptDelay time.Duration
 }
 
 func newMockListener() *mockListener {
@@ -109,9 +109,6 @@ func newMockListener() *mockListener {
 
 func (m *mockListener) Accept() (net.Conn, error) {
 	m.acceptCalls.Add(1)
-	if m.acceptDelay > 0 {
-		time.Sleep(m.acceptDelay)
-	}
 	if m.closed.Load() {
 		return nil, net.ErrClosed
 	}
@@ -242,22 +239,23 @@ func (m *toggleMockListener) WaitForSuccess(timeout time.Duration) bool {
 	}
 }
 
-// WaitForErrors waits until at least minErrors have occurred since the baseline,
-// or until timeout expires. Returns the number of errors observed.
+// WaitForErrors waits until at least minErrors have occurred since the baseline
+// and returns the number observed.
 func (m *toggleMockListener) WaitForErrors(
+	t *testing.T,
 	baseline int,
 	minErrors int,
 	timeout time.Duration,
 ) int {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		current := int(m.errorCount.Load()) - baseline
-		if current >= minErrors {
-			return current
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return int(m.errorCount.Load()) - baseline
+	t.Helper()
+	observed := func() int { return int(m.errorCount.Load()) - baseline }
+	testutil.WaitForCondition(
+		t,
+		func() bool { return observed() >= minErrors },
+		timeout,
+		"accept errors did not reach the expected count",
+	)
+	return observed()
 }
 
 // WaitForAcceptEntered waits for Accept() to be called, or until timeout expires.
@@ -694,6 +692,7 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 		},
 	}
 
+	start := time.Now()
 	cm := NewConnectionManager(cfg)
 	err := cm.Start(context.Background())
 	require.NoError(t, err)
@@ -703,14 +702,18 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 		return mockLn.AcceptCount() >= 1
 	}, 2*time.Second, 5*time.Millisecond, "accept should be called at least once")
 
-	// Allow some time for backoff to accumulate a few calls
-	// With backoff starting at 10ms, we expect roughly:
-	// - First call: immediate
-	// - Second call: after 10ms (first error)
-	// - Third call: after 20ms
-	// - Fourth call: after 40ms
-	// So in 100ms we should see around 4-5 calls
-	time.Sleep(100 * time.Millisecond)
+	// Reaching the fourth Accept takes at least the first three backoffs
+	// (10ms + 20ms + 40ms); a tight retry loop would get there immediately.
+	// Load can only lengthen the wait, so the lower bound cannot flake.
+	testutil.WaitForCondition(t, func() bool {
+		return mockLn.AcceptCount() >= 4
+	}, 5*time.Second, "accept should be retried with backoff")
+	assert.GreaterOrEqual(
+		t,
+		time.Since(start),
+		50*time.Millisecond,
+		"retries should be spaced by the exponential backoff",
+	)
 
 	// Stop the connection manager
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -723,8 +726,8 @@ func TestAcceptLoopBackoffOnError(t *testing.T) {
 	acceptCount := mockLn.AcceptCount()
 	t.Logf("Accept was called %d times", acceptCount)
 
-	// With exponential backoff, we expect around 3-5 calls in 100ms
-	// Be generous to account for test timing variations
+	// The loop is stopped right after the fourth Accept, so a few more calls
+	// at most; a tight loop would have run far past this bound by then.
 	assert.Less(t, acceptCount, 20, "backoff should limit accept calls")
 	assert.Greater(
 		t,
@@ -764,7 +767,7 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	// Phase 1: Wait for errors to accumulate (proves backoff is being applied)
-	phase1Errors := mockLn.WaitForErrors(0, 3, 5*time.Second)
+	phase1Errors := mockLn.WaitForErrors(t, 0, 3, 5*time.Second)
 	require.GreaterOrEqual(
 		t,
 		phase1Errors,
@@ -807,48 +810,6 @@ func TestAcceptLoopResetBackoffOnSuccess(t *testing.T) {
 	// 3. The loop continued and returned to Accept() (phase 3)
 	// The backoff reset (consecutiveErrors = 0) is implicitly verified because
 	// the loop continued operating normally after the success.
-}
-
-// concurrentMockListener delivers connections from multiple goroutines
-// simultaneously to exercise the race condition in the inbound limit check.
-type concurrentMockListener struct {
-	mu       sync.Mutex
-	closed   atomic.Bool
-	closeCh  chan struct{}
-	connCh   chan net.Conn
-	accepted atomic.Int32
-}
-
-func newConcurrentMockListener() *concurrentMockListener {
-	return &concurrentMockListener{
-		closeCh: make(chan struct{}),
-		connCh:  make(chan net.Conn, 200),
-	}
-}
-
-func (m *concurrentMockListener) Accept() (net.Conn, error) {
-	if m.closed.Load() {
-		return nil, net.ErrClosed
-	}
-	select {
-	case conn := <-m.connCh:
-		m.accepted.Add(1)
-		return conn, nil
-	case <-m.closeCh:
-		return nil, net.ErrClosed
-	}
-}
-
-func (m *concurrentMockListener) Close() error {
-	if m.closed.Swap(true) {
-		return nil
-	}
-	close(m.closeCh)
-	return nil
-}
-
-func (m *concurrentMockListener) Addr() net.Addr {
-	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345}
 }
 
 func TestTryReserveInboundSlot_Concurrent(t *testing.T) {

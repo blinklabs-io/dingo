@@ -428,9 +428,13 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 	require.Equal(t, big.NewRat(2, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(46_283), result.EffectiveRewards)
-	require.Equal(t, uint64(953_717), result.Undistributed)
-	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
+	// The pool has no BlocksProduced set, so it made zero blocks this epoch:
+	// it earns nothing at every decentralization value, matching
+	// mkPoolRewardInfo's Left. The whole available pot falls through to
+	// reserves as undistributed.
+	require.Equal(t, uint64(0), result.EffectiveRewards)
+	require.Equal(t, uint64(1_000_000), result.Undistributed)
+	require.Equal(t, uint64(100_000_000), result.UpdatedPots.Reserves)
 
 	params.Decentralization = big.NewRat(1, 1)
 	result, err = Calculate(Pots{Reserves: 100_000_000}, snapshot, params)
@@ -438,8 +442,8 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(
 	require.Equal(t, big.NewRat(0, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(46_283), result.EffectiveRewards)
-	require.Equal(t, uint64(953_717), result.Undistributed)
+	require.Equal(t, uint64(0), result.EffectiveRewards)
+	require.Equal(t, uint64(1_000_000), result.Undistributed)
 }
 
 func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
@@ -1332,6 +1336,78 @@ func TestApparentPerformanceHonorsDecentralizationThreshold(t *testing.T) {
 		big.NewRat(2, 1),
 		apparentPerformance(big.NewRat(0, 1), 10, 100, 2, 10),
 	)
+}
+
+// TestCalculatePoolRewardZeroBlocksEarnsNothing matches cardano-ledger's
+// mkPoolRewardInfo, which returns Left (excluding the pool from reward
+// construction entirely) whenever a pool made no blocks in the epoch -
+// Cardano.Ledger.Shelley.Rewards.hs, mkPoolRewardInfo. apparentPerformance
+// alone does not encode that rule: it returns 1 once d >= 4/5 regardless of
+// blocksProduced, matching mkApparentPerformance exactly, so a
+// pool with zero blocks earned the pool's optimalReward instead of nothing.
+func TestCalculatePoolRewardZeroBlocksEarnsNothing(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name           string
+		decentralized  *big.Rat
+		blocksProduced uint64
+		wantEarns      bool
+	}{
+		{
+			name:           "zero blocks at d >= 4/5 earns nothing",
+			decentralized:  big.NewRat(4, 5),
+			blocksProduced: 0,
+			wantEarns:      false,
+		},
+		{
+			name:           "zero blocks below d = 4/5 earns nothing (control)",
+			decentralized:  big.NewRat(1, 2),
+			blocksProduced: 0,
+			wantEarns:      false,
+		},
+		{
+			name:           "pool that produced blocks earns at d >= 4/5 (control)",
+			decentralized:  big.NewRat(4, 5),
+			blocksProduced: 5,
+			wantEarns:      true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			params := testParams()
+			params.Decentralization = tc.decentralized
+			pool := Pool{
+				ID:             testPoolID(1),
+				Margin:         big.NewRat(1, 10),
+				Pledge:         100,
+				Cost:           50,
+				DelegatedStake: 1_000,
+				OwnerStake:     500,
+				BlocksProduced: tc.blocksProduced,
+			}
+
+			reward, err := calculatePoolRewards(
+				pool,
+				1_000_000,
+				10_000,
+				10_000,
+				100,
+				params,
+			)
+			require.NoError(t, err)
+
+			if tc.wantEarns {
+				require.NotZero(t, reward.OptimalReward, "optimal reward")
+				require.NotZero(t, reward.PoolReward, "pool reward")
+				require.NotZero(t, reward.LeaderReward, "leader reward")
+			} else {
+				require.Zero(t, reward.PoolReward, "pool reward")
+				require.Zero(t, reward.LeaderReward, "leader reward")
+			}
+		})
+	}
 }
 
 func TestRewardEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
@@ -2378,15 +2454,42 @@ func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
 	require.Empty(t, result.AccountRewards)
 }
 
-// L below the minimum of 1 is rejected when the feature is enabled.
-func TestCalculateRejectsPledgeLeverageBelowMinimum(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(1, 2))
-	require.ErrorIs(t, err, ErrInvalidParameters)
+func TestCalculateAllowsPledgeLeverageAcrossReferenceDomain(t *testing.T) {
+	for _, tc := range []struct {
+		leverage    *big.Rat
+		wantDeficit bool
+	}{
+		{leverage: big.NewRat(0, 1), wantDeficit: true},
+		{leverage: big.NewRat(20_000, 1)},
+	} {
+		result, err := leverageCalc(100, 100, true, tc.leverage)
+		require.NoError(t, err, "leverage %s", tc.leverage)
+		require.Len(t, result.PoolRewards, 1)
+		if tc.wantDeficit {
+			require.Positive(t, result.PoolRewards[0].LeaderRewardDeficit,
+				"leverage %s must preserve the negative leader reward", tc.leverage)
+		} else {
+			require.Positive(t, result.PoolRewards[0].PoolReward,
+				"leverage %s must produce a positive pool reward", tc.leverage)
+		}
+	}
 }
 
-// L above the maximum of 10000 is rejected when the feature is enabled.
-func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(10_001, 1))
+func TestCalculatePledgeLeverageBelowOne(t *testing.T) {
+	pots, snapshot, params := negativeLeaderRewardSnapshot(true)
+	result, err := Calculate(pots, snapshot, params)
+	require.NoError(t, err)
+	require.Len(t, result.NegativeLeaderRewards, 1)
+	require.Equal(t, testPoolID(1), result.NegativeLeaderRewards[0].PoolID)
+	require.Positive(t, result.NegativeLeaderRewards[0].Amount)
+	require.True(t, result.NegativeLeaderRewards[0].Spendable)
+	require.Zero(t, result.PoolRewards[0].OptimalReward)
+	require.Zero(t, result.PoolRewards[0].PoolReward)
+	require.Equal(t, uint64(2_038_395), result.PoolRewards[0].LeaderRewardDeficit)
+}
+
+func TestCalculateRejectsNegativePledgeLeverage(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(-1, 2))
 	require.ErrorIs(t, err, ErrInvalidParameters)
 }
 
@@ -2395,14 +2498,6 @@ func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
 func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
 	_, err := leverageCalc(100, 100, true, nil)
 	require.ErrorIs(t, err, ErrInvalidParameters)
-}
-
-// The inclusive bounds L=1 and L=10000 are accepted.
-func TestCalculateAllowsPledgeLeverageAtBounds(t *testing.T) {
-	_, err := leverageCalc(100, 100, true, big.NewRat(1, 1))
-	require.NoError(t, err)
-	_, err = leverageCalc(100, 100, true, big.NewRat(10_000, 1))
-	require.NoError(t, err)
 }
 
 // --- CIP-0163 full-pot reward distribution -------------------------------
@@ -2620,6 +2715,48 @@ func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
 	require.Equal(t, on.AvailableRewards, on.Undistributed)
 	require.Equal(t, off.Undistributed, on.Undistributed)
 	require.Equal(t, off.UpdatedPots, on.UpdatedPots)
+}
+
+// TestCalculateFullPotExcludesZeroBlockPool pins the CIP-0163 interaction with
+// mkPoolRewardInfo's Left exclusion: a pool that made no blocks contributes a
+// zero base reward B_i, so the largest-remainder apportionment gives it neither
+// a floor share (0*R/W == 0) nor a leftover lovelace (its remainder is 0, and
+// the D leftovers only ever reach pools with a nonzero remainder, since
+// D == sum(rem)/W < the count of such pools). Decentralization is 4/5, where
+// apparentPerformance returns 1 regardless of blocksProduced, so without the
+// zero-block guard the idle pool would be apportioned a share of the pot.
+func TestCalculateFullPotExcludesZeroBlockPool(t *testing.T) {
+	t.Parallel()
+
+	snap := fullPotTwoPoolSnapshot()
+	idle := &snap.Pools[1]
+	idle.BlocksProduced = 0
+	forging := snap.Pools[0]
+
+	params := testParams()
+	params.FullPotRewardsEnabled = true
+	params.Decentralization = big.NewRat(4, 5)
+	result, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+	require.NoError(t, err)
+
+	require.Equal(t, idle.ID, result.PoolRewards[1].PoolID)
+	require.Zero(t, result.PoolRewards[1].PoolReward, "idle pool total")
+	require.Zero(t, result.PoolRewards[1].LeaderReward, "idle leader reward")
+	for _, reward := range result.AccountRewards {
+		require.NotEqual(t, idle.ID, reward.PoolID,
+			"an idle pool pays neither its operator nor its members")
+	}
+
+	// The forging pool is the only nonzero base reward, so the Hamilton
+	// apportionment hands it the entire pot rather than leaving the idle
+	// pool's would-be share undistributed.
+	require.Equal(t, forging.ID, result.PoolRewards[0].PoolID)
+	require.Equal(
+		t,
+		result.AvailableRewards,
+		result.PoolRewards[0].PoolReward,
+		"forging pool takes the whole pot",
+	)
 }
 
 // TestCalculateFullPotComposesWithMinPoolMargin verifies that when BOTH CIP-0163

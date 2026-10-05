@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
+	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
@@ -51,6 +52,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -382,7 +384,15 @@ func TestLiveLifecycleRebuildPreservesLeiosHandlers(t *testing.T) {
 	require.NoError(t, n.ouroboros().SetLeiosPipeline(pipeline))
 
 	before := n.ouroboros()
-	require.NoError(t, n.reinitializeNetworkingCore(context.Background()))
+	// Held for the same reason Restore and Truncate hold it around this
+	// call: the node is live here, and its ledger read-chain loop reads
+	// n.chainsyncState under this lock once per gather pass (see
+	// reinitializeNetworkingCore's doc comment). Reassigning it unlocked
+	// races that reader.
+	n.liveLifecycleMu.Lock()
+	rebuildErr := n.reinitializeNetworkingCore(context.Background())
+	n.liveLifecycleMu.Unlock()
+	require.NoError(t, rebuildErr)
 
 	require.NotSame(t, before, n.ouroboros())
 	require.NotNil(
@@ -646,8 +656,8 @@ func registerGenesisForkTestPeer(
 }
 
 // generateValidatedConwayForkChain is fixtures.GenerateConwayChain's
-// structural counterpart with genuine VRF/KES crypto: issue #3528 made
-// header admission require real cryptographic verification (previously
+// structural counterpart with genuine VRF/KES crypto: header admission
+// requires real cryptographic verification (previously
 // skipped whenever ValidateHistorical was disabled, the ordinary bulk-sync
 // default), so a competing fork exercised through the normal chainsync
 // event path now needs a real, verifiable VRF proof against the ledger's
@@ -799,8 +809,8 @@ func requireGenesisDeepForkWins(
 	)
 
 	// Real, genuinely VRF/KES-signed Conway blocks rather than
-	// fixtures.GenerateConwayChain's crypto-free stubs: issue #3528 made
-	// header admission require real cryptographic verification against the
+	// fixtures.GenerateConwayChain's crypto-free stubs: header admission
+	// requires real cryptographic verification against the
 	// ledger's actual cached epoch nonce, so a fork driven through the
 	// ordinary chainsync event path needs a real proof to be admitted at
 	// all. Their headers round-trip through CBOR, so the ledger sees the
@@ -881,7 +891,7 @@ func requireGenesisDeepForkWins(
 }
 
 // TestLiveTruncatePreservesGenesisForkSelection is the behavioral guard for
-// issue #3273: reinitializeCoreStorage rebuilt LedgerStateConfig without
+// the case where reinitializeCoreStorage rebuilt LedgerStateConfig without
 // GenesisSelectionStateFunc, so a node that had Ouroboros Genesis selection
 // active silently fell back to Praos-length-only fork resolution after a
 // live truncate and stayed there until the process restarted.
@@ -979,7 +989,7 @@ func TestLiveTruncateIsSerializedAgainstConcurrentCalls(t *testing.T) {
 }
 
 // TestLiveTruncateRejectsTargetAheadOfTipWithoutTearingDownNode guards
-// against a severe finding from live testing (dingo#1651 follow-up): a
+// against a severe finding from live testing: a
 // live Truncate whose target is rejected during read-only validation (here,
 // a block number ahead of the current tip — unlike a too-high slot, which
 // ResolveTargetBySlot treats as a no-op resolving to the tip itself, an
@@ -1258,7 +1268,8 @@ func TestLiveTruncateCancelsInsteadOfResumingWhenStorageDrainUnconfirmed(
 // commit timestamp set without a matching blob one, mirroring
 // TestCheckCommitTimestamp_MetadataOnly in the database package) via the
 // node's own already-open db handle, then invokes Truncate with a target
-// ahead of the tip so the resulting error is classified
+// that is deliberately in range, so the corrupted commit timestamp is the
+// only thing that can classify the result as
 // lifecycle.ErrTruncateNotStarted (nothing on disk was touched, so resume
 // is expected to succeed). If tmpDB leaked its lock, reinitializeCoreStorage's
 // own reopen attempt fails with a lock error instead of gracefully
@@ -1270,6 +1281,18 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 
 	const numBlocks = 10
 	n, points := newLiveLifecycleTestNode(t, numBlocks)
+
+	// Nothing may commit between the corruption below and Truncate's tmpDB
+	// open: a both-store read-write commit rewrites BOTH commit timestamps
+	// to time.Now() (database.Txn.Commit's updateCommitTimestamp), which
+	// heals the injected mismatch, so the truncate below would really run
+	// and succeed instead of being classified ErrTruncateNotStarted. The
+	// helper leaves the ledger's startup work running (block processing,
+	// the database worker pool, the reward precompute), and Truncate only
+	// drains it later, inside its own quiesce -- so close the ledger state
+	// first, before the corruption lands. Truncate closes it again, which
+	// LedgerState.Close replays from its memoized result.
+	require.NoError(t, n.ledgerState.Close())
 
 	// Corrupt the on-disk commit timestamps via the node's own already-open
 	// db handle: set metadata's without touching blob's, so the NEXT fresh
@@ -1310,6 +1333,42 @@ func TestLiveTruncateClosesTmpDBBeforeResumingAfterOpenFailure(t *testing.T) {
 	tip, tipErr := n.db.GetTip(nil)
 	require.NoError(t, tipErr)
 	require.Equal(t, points[len(points)-1].Slot, tip.Point.Slot)
+}
+
+// A live restore/truncate reinitialization follows its own commit-timestamp
+// recovery path. It must run the same deferred settings checks as ordinary
+// startup before resuming any component, including the Alonzo pparams
+// provenance gate added for gouroboros v0.205.7.
+func TestLiveTruncateRecoveryRechecksAlonzoPParamsUnit(t *testing.T) {
+	t.Parallel()
+
+	n, points := newLiveLifecycleTestNode(t, 10)
+	require.NoError(t, n.db.SetPParams(
+		[]byte{0x80},
+		0,
+		0,
+		alonzo.EraIdAlonzo,
+		nil,
+	))
+	require.NoError(t, n.db.Metadata().SetNodeSettingsGates(
+		nodesettings.Values{
+			nodesettings.AlonzoPParamsUnitGateName: nodesettings.AlonzoPParamsUnitLegacyByteV0,
+		},
+		0,
+		0,
+	))
+	metaTxn := n.db.Metadata().Transaction(t.Context())
+	require.NoError(t, n.db.Metadata().SetCommitTimestamp(123456789, metaTxn))
+	require.NoError(t, metaTxn.Commit())
+
+	targetSlot := points[len(points)/2].Slot
+	_, err := n.Truncate(
+		context.Background(),
+		dblifecycle.TruncateTarget{Slot: &targetSlot},
+	)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "resume also failed")
+	require.ErrorContains(t, err, "legacy byte units")
 }
 
 // TestLiveRestoreRebuildsStorageAndKeepsNodeUsable verifies the Restore
@@ -1374,7 +1433,7 @@ func TestStopForPendingRestoreRollbackCancelsNode(t *testing.T) {
 }
 
 // TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss guards against a
-// severe regression found via manual live testing (dingo#1651 follow-up):
+// severe regression found via manual live testing:
 // a Restore that failed because the blob backup was corrupted used to
 // delete the node's OWN current data directory before validating the
 // incoming snapshot at all, then bring the whole node process down — an
@@ -1446,7 +1505,7 @@ func TestLiveRestoreRejectsCorruptedSnapshotWithoutDataLoss(t *testing.T) {
 // network onto a running node must be rejected by the manifest compatibility
 // callback before restore preflight can reset either remote store, with the node's own
 // data and tip left completely untouched and the node still usable,
-// rather than the node being torn down (dingo#1651 follow-up).
+// rather than the node being torn down.
 func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	t.Parallel()
 
@@ -1509,7 +1568,7 @@ func TestLiveRestoreRejectsNetworkMismatchWithoutDataLoss(t *testing.T) {
 	}
 }
 
-// --- Crash-recoverable directory swap (dingo#1651 follow-up) ---
+// --- Crash-recoverable directory swap ---
 //
 // These exercise swapInRestoredDataDir, reconcileInterruptedLiveRestoreSwap,
 // and removeConfirmedRestoreBackup directly against a minimal *Node
@@ -1850,7 +1909,7 @@ func TestReconcileInterruptedLiveRestoreSwapPropagatesRollbackFailure(
 // smallEpochGenesisCfgForLifecycleTest returns a CardanoNodeConfig with
 // epochLength=100 — the real preview genesis newNodeTestCardanoNodeCfg
 // loads has an epochLength far larger than any small block count could
-// reach, which mattered for a manual-testing bug (dingo#1651 follow-up)
+// reach, which mattered for a manual-testing bug
 // specifically tied to crossing epoch boundaries after a live truncate:
 // with the real genesis, a reproduction never actually exercises the
 // epoch-rollover/stake-snapshot code path at all.
@@ -1900,7 +1959,7 @@ func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
 }
 
 // TestSecondLiveTruncateResumesTipAdvancement is a regression reproduction
-// found via manual live testing (dingo#1651 follow-up): after a SECOND
+// found via manual live testing: after a SECOND
 // consecutive live truncate on the same long-running node, new blocks kept
 // getting added to the chain but the reported tip stayed stuck at the
 // second truncate's landing point forever — the rebuilt ledger-processing

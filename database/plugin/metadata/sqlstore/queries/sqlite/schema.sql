@@ -149,6 +149,7 @@ CREATE TABLE pool_stake_snapshot (
     captured_slot INTEGER NOT NULL,
     leios_key_public BLOB,
     leios_key_possession_proof BLOB,
+    leios_key_registration_epoch INTEGER,
     calculation_version INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote INTEGER NOT NULL DEFAULT 0,
     reward_account_auto_vote_resolved BOOLEAN NOT NULL DEFAULT FALSE,
@@ -173,7 +174,8 @@ CREATE TABLE reward_ada_pots (
     reserves TEXT NOT NULL,
     fees TEXT NOT NULL,
     rewards TEXT NOT NULL,
-    captured_slot INTEGER NOT NULL
+    captured_slot INTEGER NOT NULL,
+    imported_epoch_fees TEXT
 );
 
 CREATE TABLE reward_snapshot (
@@ -257,6 +259,7 @@ CREATE TABLE reward_pool_output (
     optimal_reward TEXT NOT NULL,
     total_reward TEXT NOT NULL,
     leader_reward TEXT NOT NULL,
+    leader_reward_deficit TEXT NOT NULL DEFAULT '0',
     member_reward_total TEXT NOT NULL,
     owner_stake TEXT NOT NULL,
     undistributed TEXT NOT NULL,
@@ -278,6 +281,7 @@ CREATE TABLE reward_account_output (
     guarded BOOLEAN NOT NULL DEFAULT FALSE,
     captured_slot INTEGER NOT NULL,
     boundary_slot INTEGER NOT NULL,
+    folded BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (
         epoch, credential_tag, staking_key, pool_key_hash, reward_type
     )

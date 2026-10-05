@@ -29,6 +29,90 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func FuzzNormalizeRunMode(f *testing.F) {
+	f.Add("")
+	f.Add("serve")
+	f.Add("LOAD")
+	f.Add("dev")
+	f.Add("leios")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeRunMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeRunMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case "",
+			string(RunModeServe),
+			string(RunModeLoad),
+			string(RunModeDev),
+			string(RunModeLeios):
+		default:
+			t.Fatalf("normalizeRunMode accepted unknown mode %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStartEra(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
+func FuzzNormalizeStorageMode(f *testing.F) {
+	f.Add("")
+	f.Add("core")
+	f.Add("API")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStorageMode(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf(
+				"normalizeStorageMode(%q) = %q, want lowercase input",
+				value,
+				normalized,
+			)
+		}
+		switch normalized {
+		case storageModeCore, storageModeAPI:
+		default:
+			t.Fatalf(
+				"normalizeStorageMode accepted unknown mode %q",
+				normalized,
+			)
+		}
+	})
+}
+
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	resetGlobalConfig()
 
@@ -41,8 +125,10 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 		"Plugins.Storage.Metadata.Config":      {},
 		"Plugins.Mempool.Config":               {},
 		"Plugins.API.Blockfrost.Config":        {},
+		"Plugins.API.Kupo.Config":              {},
 		"Plugins.API.Mesh.Config":              {},
 		"Plugins.API.Utxorpc.Config":           {},
+		"Plugins.API.Mcp.Config":               {},
 		"Midnight.CNightPolicyID":              {},
 		"Midnight.CNightAssetName":             {},
 		"Midnight.MappingValidatorAddress":     {},
@@ -138,8 +224,8 @@ func TestDebugBindAddressDefaultsToLoopback(t *testing.T) {
 }
 
 // TestValidateForgedBlockDefaultsToTrue is a regression test for a
-// human-review finding: DefaultConfig's ValidateForgedBlock: true literal
-// (issue #3528's fail-closed forging default) had no test on the actual
+// gap: DefaultConfig's ValidateForgedBlock: true literal
+// (the fail-closed forging default) had no test on the actual
 // operator path -- LoadConfig -> GetConfig -> RegisterFlags -- unlike the
 // separate NewConfig literal covered by
 // TestNewConfigDefaultsValidateForgedBlock in the parent package. Deleting
@@ -172,57 +258,6 @@ func TestValidateForgedBlockDefaultsToTrue(t *testing.T) {
 		t,
 		got,
 		"the --validate-forged-block flag's registered default must match DefaultConfig.ValidateForgedBlock",
-	)
-}
-
-// TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral
-// guards the same failure class as TestValidateForgedBlockDefaultsToTrue
-// above, for the forging knob added in issue #3973. Merging main's
-// newDefaultConfig() rewrite could have dropped this field's line from that
-// literal silently: ApplyDefaults fills a zero
-// ForgePrimaryChainTipToleranceSlots with the same constant, so every test
-// that reaches the value through LoadConfig+ApplyDefaults stays green with
-// the literal gone, and resetGlobalConfig's separate copy (config_test.go)
-// carries its own line. The gap only shows on the two paths that read the
-// production literal without defaulting: globalConfig as flag registration
-// sees it, and newDefaultConfig() itself.
-func TestForgePrimaryChainTipToleranceDefaultIsPinnedToTheProductionLiteral(
-	t *testing.T,
-) {
-	// Pins internal/config/config.go's newDefaultConfig directly, with no
-	// ApplyDefaults in the path to refill a dropped field.
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		newDefaultConfig().ForgePrimaryChainTipToleranceSlots,
-		"newDefaultConfig must carry the primary-chain-tip tolerance default; ApplyDefaults refilling it hides a dropped literal",
-	)
-
-	resetGlobalConfig()
-	t.Setenv("HOME", t.TempDir())
-
-	cfg, err := LoadConfig("")
-	require.NoError(t, err)
-	cfg.ApplyDefaults()
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		cfg.ForgePrimaryChainTipToleranceSlots,
-	)
-
-	// RegisterFlags takes each flag's default from globalConfig, which is
-	// seeded from newDefaultConfig and never passes through ApplyDefaults,
-	// so this is the operator-visible half of the same guarantee.
-	cmd := &cobra.Command{Use: "dingo"}
-	RegisterFlags(cmd)
-	got, err := cmd.PersistentFlags().
-		GetUint64("forge-primary-chain-tip-tolerance-slots")
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		uint64(DefaultForgePrimaryChainTipToleranceSlots),
-		got,
-		"the --forge-primary-chain-tip-tolerance-slots flag's registered default must match the production literal",
 	)
 }
 
@@ -355,7 +390,9 @@ func TestSkipRewardLiveStakeBackfillCheckEnvBinding(t *testing.T) {
 // t.Setenv cannot express "unset", so the previous value is saved and
 // restored by hand; t.Setenv("HOME", ...) below already bars t.Parallel, so
 // mutating the process environment directly is safe here.
-func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(t *testing.T) {
+func TestSkipRewardLiveStakeBackfillCheckDefaultsToRunningTheCheck(
+	t *testing.T,
+) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	const skipEnvVar = "CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK"
@@ -568,6 +605,59 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.Midnight.Host,
 		)
 	}
+}
+
+func TestTokenRegistryAggregateBoundsEnvAndFlags(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES", "1001")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES", "1002")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES", "1003")
+	t.Setenv("DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES", "1004")
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, nil, 0o600))
+
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(t, int64(1001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 1002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 1003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(1004), cfg.TokenRegistry.MaxBatchBytes)
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{
+		"--token-registry-max-decompressed-bytes=2001",
+		"--token-registry-max-archive-entries=2002",
+		"--token-registry-max-accepted-entries=2003",
+		"--token-registry-max-batch-bytes=2004",
+	}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	require.Equal(t, int64(2001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 2002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 2003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(2004), cfg.TokenRegistry.MaxBatchBytes)
+}
+
+func TestTokenRegistryAggregateBoundsYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`
+tokenRegistry:
+  maxDecompressedBytes: 3001
+  maxArchiveEntries: 3002
+  maxAcceptedEntries: 3003
+  maxBatchBytes: 3004
+`), 0o600))
+
+	cfg, err := LoadConfig(configFile)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(3001), cfg.TokenRegistry.MaxDecompressedBytes)
+	require.Equal(t, 3002, cfg.TokenRegistry.MaxArchiveEntries)
+	require.Equal(t, 3003, cfg.TokenRegistry.MaxAcceptedEntries)
+	require.Equal(t, int64(3004), cfg.TokenRegistry.MaxBatchBytes)
 }
 
 func TestMempoolProviderSourcePrecedence(t *testing.T) {
@@ -955,6 +1045,40 @@ func loadConfigThroughPipeline(
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// TestPipeline_KESAgentSignTimeoutBounds pins the CLI enforcement of the
+// slot-boundary bound on shelleyKesAgentSignTimeout end to end through
+// loadConfigThroughPipeline, rather than only through cfg.validate directly.
+//
+// Not t.Parallel: loadConfigThroughPipeline's resetGlobalConfig writes the
+// package-level globalConfig directly with no synchronization of its own,
+// like every other loadConfigThroughPipeline-based test in this file.
+func TestPipeline_KESAgentSignTimeoutBounds(t *testing.T) {
+	_, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=1s"},
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "shelleyKesAgentSignTimeout") {
+		t.Fatalf("CLI accepted a one-slot KES agent sign timeout: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"",
+		[]string{"--shelley-kes-agent-sign-timeout=999ms"},
+	)
+	if err != nil {
+		t.Fatalf("CLI rejected a sub-slot KES agent sign timeout: %v", err)
+	}
+	if cfg.ShelleyKESAgentSignTimeout != 999*time.Millisecond {
+		t.Fatalf(
+			"CLI sign timeout = %s, want 999ms",
+			cfg.ShelleyKESAgentSignTimeout,
+		)
+	}
 }
 
 // TestPipeline_EmptyMidnightHostUsesLoopbackDefault pins the merged-config

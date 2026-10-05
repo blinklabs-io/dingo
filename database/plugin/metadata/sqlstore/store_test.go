@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -494,13 +495,7 @@ func TestStoreCheckpointLifecycle(t *testing.T) {
 	require.Equal(t, uint32(1), calls.Load())
 }
 
-// TestStoreCheckpointTickerIndependentOfMaintenance proves the two tickers
-// run on separate cadences: a Checkpoint ticking every millisecond fires
-// several times while a single Maintenance call (configured to run once,
-// slowly) is still in flight, so a slow VACUUM can never delay or skip a WAL
-// checkpoint and vice versa -- the two must not share one ticker or one
-// admission gate.
-func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
+func TestStoreVacuumTickerIsIndependentFromMaintenance(t *testing.T) {
 	t.Parallel()
 	db, err := sql.Open(
 		"sqlite",
@@ -510,28 +505,117 @@ func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
-	maintenanceStarted := make(chan struct{})
-	maintenanceRelease := make(chan struct{})
+	started := make(chan struct{})
 	var maintenanceCalls atomic.Uint32
+	var vacuumCalls atomic.Uint32
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Maintenance: func(context.Context) error {
+			maintenanceCalls.Add(1)
+			return nil
+		},
+		MaintenanceInterval: 24 * time.Hour,
+		Vacuum: func(ctx context.Context) error {
+			if vacuumCalls.Add(1) == 1 {
+				close(started)
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		VacuumInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vacuum did not start on its own ticker")
+	}
+	require.Equal(t, uint32(0), maintenanceCalls.Load())
+	require.NoError(t, store.Close())
+	require.Equal(t, uint32(1), vacuumCalls.Load())
+	require.Zero(t, maintenanceCalls.Load())
+}
+
+func TestStoreCloseContextCanWaitAfterVacuumTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	store, err := New(Config{
+		WriteDB: db,
+		Dialect: SQLiteDialect(),
+		Vacuum: func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			<-release
+			return ctx.Err()
+		},
+		VacuumInterval: time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	defer store.Close()
+	defer releaseOnce.Do(func() { close(release) })
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("vacuum did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, store.CloseContext(ctx), context.DeadlineExceeded)
+	require.NoError(t, db.Ping(), "pool closed before vacuum callback drained")
+	cancelledCtx, cancelLater := context.WithCancel(context.Background())
+	cancelLater()
+	require.ErrorIs(t, store.CloseContext(cancelledCtx), context.Canceled)
+
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, store.CloseContext(context.Background()))
+	require.Error(t, db.Ping())
+}
+
+// TestStoreCheckpointTickerIndependentOfVacuum proves a slow VACUUM cannot
+// delay or skip WAL checkpoint ticks: they use separate tickers and admission
+// gates.
+func TestStoreCheckpointTickerIndependentOfVacuum(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open(
+		"sqlite",
+		fmt.Sprintf(
+			"file:sqlstore_%d?mode=memory&cache=shared",
+			testStoreSequence.Add(1),
+		),
+	)
+	require.NoError(t, err)
+	vacuumStarted := make(chan struct{})
+	vacuumRelease := make(chan struct{})
+	var vacuumCalls atomic.Uint32
 	var checkpointCalls atomic.Uint32
 	store, err := New(Config{
 		WriteDB: db,
 		Dialect: SQLiteDialect(),
-		Maintenance: func(ctx context.Context) error {
-			// The 1ms MaintenanceInterval can re-admit and call this again
-			// before the test calls store.Close(), which is what actually
-			// stops the ticker: guard the one-shot close(maintenanceStarted)
-			// against a second invocation rather than closing it unconditionally.
-			if maintenanceCalls.Add(1) == 1 {
-				close(maintenanceStarted)
+		Vacuum: func(ctx context.Context) error {
+			if vacuumCalls.Add(1) == 1 {
+				close(vacuumStarted)
 			}
 			select {
-			case <-maintenanceRelease:
+			case <-vacuumRelease:
 			case <-ctx.Done():
 			}
 			return ctx.Err()
 		},
-		MaintenanceInterval: time.Millisecond,
+		VacuumInterval: time.Millisecond,
 		Checkpoint: func(ctx context.Context) error {
 			checkpointCalls.Add(1)
 			return nil
@@ -542,17 +626,17 @@ func TestStoreCheckpointTickerIndependentOfMaintenance(t *testing.T) {
 	require.NoError(t, store.Start(context.Background()))
 
 	select {
-	case <-maintenanceStarted:
+	case <-vacuumStarted:
 	case <-time.After(2 * time.Second):
-		t.Fatal("maintenance did not start")
+		t.Fatal("vacuum did not start")
 	}
-	// Maintenance is now blocked in-flight (holding its own admission slot).
+	// Vacuum is now blocked in-flight (holding its own admission slot).
 	// Give the checkpoint ticker time to fire multiple times regardless.
 	require.Eventually(t, func() bool {
 		return checkpointCalls.Load() >= 3
-	}, 2*time.Second, time.Millisecond, "checkpoint ticker must keep running while maintenance is blocked")
+	}, 2*time.Second, time.Millisecond, "checkpoint ticker must keep running while vacuum is blocked")
 
-	close(maintenanceRelease)
+	close(vacuumRelease)
 	require.NoError(t, store.Close())
 }
 
@@ -597,4 +681,137 @@ func TestStoreStartsForPostgresDialect(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, store.Ready())
 	require.NoError(t, store.Close())
+}
+
+// TestTransactionAlreadyCanceledContextFailsImmediately guards the simplest
+// case: a ctx canceled before Transaction/ReadTransaction is even called
+// must fail the begin outright rather than opening a transaction nothing
+// can ever commit. Mirrors migrations/runner_test.go's
+// TestProcessLockerCancellation shape: an already-canceled context is a
+// deterministic guarantee, not a timing race.
+func TestTransactionAlreadyCanceledContextFailsImmediately(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	writeErr := store.Transaction(ctx).Commit()
+	require.ErrorIs(t, writeErr, context.Canceled)
+
+	readErr := store.ReadTransaction(ctx).Commit()
+	require.ErrorIs(t, readErr, context.Canceled)
+}
+
+// TestTransactionContextDeadlineAbortsBlockedBegin guards the core promise
+// of threading a caller's ctx into Transaction: a caller waiting for a
+// connection (here, SQLite's single-writer pool held by another
+// transaction) is unblocked by its own deadline instead of waiting out
+// whoever is holding the connection. Adapts
+// TestSQLiteBulkModeKeepsPlannerAndWritersAvailable's blocking shape
+// (store_test.go), swapping the blocking cause's resolution from "the
+// holder commits" to "the waiter's own deadline fires".
+func TestTransactionContextDeadlineAbortsBlockedBegin(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+
+	holder := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = holder.Rollback() })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	waiter := store.Transaction(ctx)
+	err := waiter.Commit()
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(
+		t, elapsed, 2*time.Second,
+		"the waiter must return on its own deadline, not wait for the holder",
+	)
+
+	// The holder is unaffected by the waiter's unrelated deadline.
+	require.NoError(t, holder.Commit())
+}
+
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction is the
+// regression test for a statement-retention bug: production
+// applies many outputs within one shared write transaction (a whole block
+// batch via LedgerDeltaBatch.apply, or the entire genesis UTxO set in one
+// txn.Do), not one transaction per output, so insertUtxoModel's INSERT and
+// asset-id lookup are each consulted many times against the same *sql.Tx.
+// Both route through queryRowCached, which derives a Tx-scoped *sql.Stmt via
+// stmtForQueryer/txScopedStmt (prepared_stmt.go). Before
+// perf/reward-live-stake-touch-cache's fix (00bedb10), txScopedStmt called
+// (*sql.Tx).StmtContext on every invocation and database/sql retained every
+// result until commit or rollback, so retention was linear in outputs
+// inserted per transaction: 20000 outputs, each carrying one asset, would
+// have retained 20000 Tx-scoped statements. txScopedStmt now derives the
+// Tx-scoped statement once per (tx, cached) pair and reuses it, so this
+// asserts retention stays bounded regardless of output count.
+func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	const outputCount = 20_000
+
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+
+	require.NoError(t, store.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for i := range uint32(outputCount) {
+				utxo := utxoForInsertCacheTest(1, i, 1_000_000+uint64(i))
+				utxo.Assets = []models.Asset{
+					{
+						Name:     []byte("token"),
+						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
+						Fingerprint: []byte(
+							"asset1cccccccccccccccccccccccccccccccccccccccc",
+						),
+						Amount: types.Uint64(1),
+					},
+				}
+				if err := store.insertUtxoModel(ctx, db, utxo, true); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	))
+
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+
+	// insertUtxoModel here consults exactly three distinct cached queries --
+	// insertUtxoQueryIgnoreConflict, importAssetQuery, and getAssetIDQuery --
+	// so 3 is the exact bound, not just an upper one.
+	require.LessOrEqual(
+		t,
+		retained,
+		3,
+		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
+		outputCount,
+		retained,
+	)
+}
+
+func TestUpdatePlannerStatsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.NoError(t, store.UpdatePlannerStatsContext(t.Context()))
 }

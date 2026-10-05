@@ -49,15 +49,23 @@ func (s *Store) SaveRewardAdaPots(
 	if err != nil {
 		return err
 	}
+	var importedEpochFees sql.NullString
+	if pots.ImportedEpochFees != nil {
+		importedEpochFees = sql.NullString{
+			String: decimalUint64(*pots.ImportedEpochFees),
+			Valid:  true,
+		}
+	}
 	id, err := queries.SaveRewardAdaPots(
 		ctx,
 		sqlitequery.SaveRewardAdaPotsParams{
-			Epoch:        epoch,
-			Treasury:     decimalUint64(pots.Treasury),
-			Reserves:     decimalUint64(pots.Reserves),
-			Fees:         decimalUint64(pots.Fees),
-			Rewards:      decimalUint64(pots.Rewards),
-			CapturedSlot: capturedSlot,
+			Epoch:             epoch,
+			Treasury:          decimalUint64(pots.Treasury),
+			Reserves:          decimalUint64(pots.Reserves),
+			Fees:              decimalUint64(pots.Fees),
+			Rewards:           decimalUint64(pots.Rewards),
+			CapturedSlot:      capturedSlot,
+			ImportedEpochFees: importedEpochFees,
 		},
 	)
 	if err != nil {
@@ -103,14 +111,26 @@ func (s *Store) GetRewardAdaPots(
 	if err != nil {
 		return nil, err
 	}
+	var importedEpochFees *types.Uint64
+	if row.ImportedEpochFees.Valid {
+		imported, err := parseUint64(
+			"imported_epoch_fees",
+			row.ImportedEpochFees.String,
+		)
+		if err != nil {
+			return nil, err
+		}
+		importedEpochFees = (*types.Uint64)(&imported)
+	}
 	return &models.RewardAdaPots{
-		ID:           uint(row.ID),
-		Epoch:        uint64(row.Epoch),
-		Treasury:     types.Uint64(treasury),
-		Reserves:     types.Uint64(reserves),
-		Fees:         types.Uint64(fees),
-		Rewards:      types.Uint64(rewards),
-		CapturedSlot: uint64(row.CapturedSlot),
+		ID:                uint(row.ID),
+		Epoch:             uint64(row.Epoch),
+		Treasury:          types.Uint64(treasury),
+		Reserves:          types.Uint64(reserves),
+		Fees:              types.Uint64(fees),
+		Rewards:           types.Uint64(rewards),
+		ImportedEpochFees: importedEpochFees,
+		CapturedSlot:      uint64(row.CapturedSlot),
 	}, nil
 }
 
@@ -692,30 +712,190 @@ func (s *Store) SaveRewardStakeInputs(
 	inputs []*models.RewardStakeInput,
 	txn types.Txn,
 ) error {
-	return s.saveRewardRows(
-		"stake inputs",
-		len(inputs),
+	if len(inputs) == 0 {
+		return nil
+	}
+	params := make([]sqlitequery.SaveRewardStakeInputParams, len(inputs))
+	for index, input := range inputs {
+		if input == nil {
+			return errors.New("save reward stake inputs: input is nil")
+		}
+		value, err := rewardStakeInputParams(input)
+		if err != nil {
+			return fmt.Errorf("save reward stake input %d: %w", index, err)
+		}
+		params[index] = value
+	}
+	// A multi-row upsert that names one unique key twice is rejected by
+	// PostgreSQL; row-at-a-time saving let the last row win, so keep that.
+	uniqueParams := make(
+		[]sqlitequery.SaveRewardStakeInputParams,
+		0,
+		len(params),
+	)
+	latestIndex := make(map[rewardStakeInputKey]int, len(params))
+	for _, value := range params {
+		key := rewardStakeInputKeyOf(value)
+		if index, ok := latestIndex[key]; ok {
+			uniqueParams[index] = value
+			continue
+		}
+		latestIndex[key] = len(uniqueParams)
+		uniqueParams = append(uniqueParams, value)
+	}
+	resolvedIDs := make(map[rewardStakeInputKey]uint, len(uniqueParams))
+	err := s.withWriteTransaction(
 		txn,
-		func(queries *sqlitequery.Queries, ctx context.Context, index int) error {
-			input := inputs[index]
-			if input == nil {
-				return errors.New("input is nil")
+		func(db queryer, ctx context.Context) error {
+			// One statement per row cost ~200us of SQL parsing each on
+			// SQLite, which at 1.3M mainnet delegators was minutes inside the
+			// epoch-boundary transaction.
+			chunkSize := min(1000, max(1, s.dialect.ParameterLimit()/9))
+			for start := 0; start < len(uniqueParams); start += chunkSize {
+				end := min(start+chunkSize, len(uniqueParams))
+				ids, err := s.saveRewardStakeInputChunk(
+					ctx, db, uniqueParams[start:end],
+				)
+				if err != nil {
+					return err
+				}
+				for index, id := range ids {
+					resolvedIDs[rewardStakeInputKeyOf(
+						uniqueParams[start+index],
+					)] = uint(id)
+				}
 			}
-			params, err := rewardStakeInputParams(input)
-			if err != nil {
-				return err
-			}
-			id, err := queries.SaveRewardStakeInput(
-				ctx,
-				params,
-			)
-			if err != nil {
-				return err
-			}
-			input.ID = uint(id)
 			return nil
 		},
 	)
+	if err != nil {
+		return fmt.Errorf("save reward stake inputs: %w", err)
+	}
+	for index, value := range params {
+		id, ok := resolvedIDs[rewardStakeInputKeyOf(value)]
+		if !ok {
+			return fmt.Errorf(
+				"save reward stake inputs: missing ID at index %d", index,
+			)
+		}
+		inputs[index].ID = id
+	}
+	return nil
+}
+
+type rewardStakeInputKey struct {
+	epoch         int64
+	poolKeyHash   string
+	credentialTag int64
+	stakingKey    string
+}
+
+func rewardStakeInputKeyOf(
+	value sqlitequery.SaveRewardStakeInputParams,
+) rewardStakeInputKey {
+	return rewardStakeInputKey{
+		epoch:         value.Epoch,
+		poolKeyHash:   string(value.PoolKeyHash),
+		credentialTag: value.CredentialTag,
+		stakingKey:    string(value.StakingKey),
+	}
+}
+
+func (s *Store) saveRewardStakeInputChunk(
+	ctx context.Context,
+	db queryer,
+	params []sqlitequery.SaveRewardStakeInputParams,
+) ([]int64, error) {
+	if len(params) == 0 {
+		return nil, nil
+	}
+	const columns = "pool_key_hash, staking_key, epoch, credential_tag, stake, owner, registered, captured_slot, boundary_slot"
+	values := make([]string, len(params))
+	args := make([]any, 0, len(params)*9)
+	for index, value := range params {
+		values[index] = "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		args = append(
+			args,
+			value.PoolKeyHash,
+			value.StakingKey,
+			value.Epoch,
+			value.CredentialTag,
+			value.Stake,
+			value.Owner,
+			value.Registered,
+			value.CapturedSlot,
+			value.BoundarySlot,
+		)
+	}
+	query := `INSERT INTO reward_stake_input (` + columns + `)
+VALUES ` + strings.Join(values, ", ") + `
+ON CONFLICT (epoch, pool_key_hash, credential_tag, staking_key)
+DO UPDATE SET stake = excluded.stake, owner = excluded.owner,
+registered = excluded.registered, captured_slot = excluded.captured_slot,
+boundary_slot = excluded.boundary_slot`
+	if _, err := db.ExecContext(ctx, query, args...); err != nil {
+		return nil, fmt.Errorf("insert reward stake input batch: %w", err)
+	}
+	rowSelectTemplate := "SELECT ? AS epoch, ? AS pool_key_hash, ? AS credential_tag, ? AS staking_key"
+	switch s.dialect.Name() {
+	case "postgres":
+		// An untyped derived-table parameter resolves to text on
+		// PostgreSQL, which then fails the join against BIGINT/BYTEA.
+		rowSelectTemplate = "SELECT CAST(? AS BIGINT) AS epoch, CAST(? AS BYTEA) AS pool_key_hash, CAST(? AS BIGINT) AS credential_tag, CAST(? AS BYTEA) AS staking_key"
+	case "mysql":
+		// See addAccountRewardCreditBatch: MySQL character-set converts an
+		// uncast derived-table parameter.
+		rowSelectTemplate = "SELECT ? AS epoch, CAST(? AS BINARY) AS pool_key_hash, ? AS credential_tag, CAST(? AS BINARY) AS staking_key"
+	}
+	rowSelects := make([]string, len(params))
+	lookupArgs := make([]any, 0, len(params)*4)
+	for index, value := range params {
+		rowSelects[index] = rowSelectTemplate
+		lookupArgs = append(
+			lookupArgs,
+			value.Epoch,
+			value.PoolKeyHash,
+			value.CredentialTag,
+			value.StakingKey,
+		)
+	}
+	rows, err := db.QueryContext(ctx, s.dialect.Rebind(
+		`SELECT i.id, i.epoch, i.pool_key_hash, i.credential_tag, i.staking_key
+FROM reward_stake_input i JOIN (`+strings.Join(rowSelects, " UNION ALL ")+`) v
+ON i.epoch = v.epoch AND i.pool_key_hash = v.pool_key_hash AND
+   i.credential_tag = v.credential_tag AND i.staking_key = v.staking_key`,
+	), lookupArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("lookup reward stake input batch IDs: %w", err)
+	}
+	defer rows.Close()
+	ids := make(map[rewardStakeInputKey]int64, len(params))
+	for rows.Next() {
+		var id, epoch, credentialTag int64
+		var poolKeyHash, stakingKey []byte
+		if err := rows.Scan(
+			&id, &epoch, &poolKeyHash, &credentialTag, &stakingKey,
+		); err != nil {
+			return nil, fmt.Errorf("scan reward stake input batch IDs: %w", err)
+		}
+		ids[rewardStakeInputKey{
+			epoch, string(poolKeyHash), credentialTag, string(stakingKey),
+		}] = id
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate reward stake input batch IDs: %w", err)
+	}
+	result := make([]int64, len(params))
+	for index, value := range params {
+		id, ok := ids[rewardStakeInputKeyOf(value)]
+		if !ok {
+			return nil, fmt.Errorf(
+				"reward stake input batch missing key at index %d", index,
+			)
+		}
+		result[index] = id
+	}
+	return result, nil
 }
 
 func (s *Store) GetRewardStakeInputs(
@@ -734,6 +914,46 @@ func (s *Store) GetRewardStakeInputs(
 	rows, err := queries.GetRewardStakeInputs(ctx, sqlEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("get reward stake inputs: %w", err)
+	}
+	ret := make([]*models.RewardStakeInput, 0, len(rows))
+	for _, row := range rows {
+		input, err := rewardStakeInputFromSQLite(row)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, input)
+	}
+	return ret, nil
+}
+
+func (s *Store) GetRewardStakeInputsInPoolKeyHashRange(
+	epoch uint64,
+	poolKeyHashLo []byte,
+	poolKeyHashHi []byte,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	queries := s.operationalQueries(db)
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := queries.GetRewardStakeInputsInPoolKeyHashRange(
+		ctx,
+		sqlitequery.GetRewardStakeInputsInPoolKeyHashRangeParams{
+			Epoch:         sqlEpoch,
+			PoolKeyHash:   poolKeyHashLo,
+			PoolKeyHash_2: poolKeyHashHi,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get reward stake inputs in pool key hash range: %w",
+			err,
+		)
 	}
 	ret := make([]*models.RewardStakeInput, 0, len(rows))
 	for _, row := range rows {
@@ -995,6 +1215,11 @@ boundary_slot = excluded.boundary_slot`
 	// per-term index seeks, and this runs on every epoch boundary for every
 	// account earning a reward.
 	rowSelectTemplate := "SELECT ? AS epoch, ? AS credential_tag, ? AS staking_key, ? AS pool_key_hash, ? AS reward_type"
+	if s.dialect.Name() == "mysql" {
+		// See saveRewardStakeInputChunk: an uncast parameter takes the
+		// connection character set and loses hash bytes above 0x7f.
+		rowSelectTemplate = "SELECT ? AS epoch, ? AS credential_tag, CAST(? AS BINARY) AS staking_key, CAST(? AS BINARY) AS pool_key_hash, ? AS reward_type"
+	}
 	if s.dialect.Name() == "postgres" {
 		// See GetAccountsByCredential's identical cast for why: an otherwise
 		// untyped derived-table parameter resolves to text on Postgres rather
@@ -1278,16 +1503,21 @@ func (s *Store) DeleteRewardStateAfterSlot(
 			); err != nil {
 				return err
 			}
+			// A reward output depends only on inputs captured at or before
+			// its captured slot, so a rollback that stays above that slot
+			// leaves it valid even before it is applied: its boundary slot is
+			// the future boundary that applies it.
 			if err := q.DeleteRewardPoolOutputsAfterSlot(
-				ctx,
-				sqlitequery.DeleteRewardPoolOutputsAfterSlotParams(pair),
+				ctx, sqlSlot,
 			); err != nil {
 				return err
 			}
-			return q.DeleteRewardAccountOutputsAfterSlot(
-				ctx,
-				sqlitequery.DeleteRewardAccountOutputsAfterSlotParams(pair),
-			)
+			if err := q.DeleteRewardAccountOutputsAfterSlot(
+				ctx, sqlSlot,
+			); err != nil {
+				return err
+			}
+			return s.deleteRewardCreditRoundsAfterSlot(ctx, db, slot)
 		},
 	)
 	if err != nil {
@@ -1300,23 +1530,53 @@ func (s *Store) DeleteRewardStateBeforeEpoch(
 	epoch uint64,
 	txn types.Txn,
 ) error {
-	return s.deleteRewardPair(
+	err := s.deleteRewardPair(
 		"state before epoch",
 		epoch,
 		txn,
 		func(q *sqlitequery.Queries, ctx context.Context, value int64) error {
-			if err := q.DeleteRewardStakeInputsBeforeEpoch(
-				ctx,
-				value,
-			); err != nil {
-				return err
-			}
-			return q.DeleteRewardAccountOutputsBeforeEpoch(
+			return q.DeleteRewardStakeInputsBeforeEpoch(
 				ctx,
 				value,
 			)
 		},
 	)
+	if err != nil {
+		return err
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			return s.deleteRewardAccountOutputsBeforeEpoch(ctx, db, epoch)
+		},
+	)
+}
+
+// deleteRewardAccountOutputsBeforeEpoch prunes reward outputs before epoch
+// except a credited round's unfolded credits, which are part of their
+// account's balance until a withdrawal folds them.
+func (s *Store) deleteRewardAccountOutputsBeforeEpoch(
+	ctx context.Context,
+	db queryer,
+	epoch uint64,
+) error {
+	sqlEpoch, err := checkedInt64(epoch)
+	if err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, s.dialect.Rebind(`
+DELETE FROM reward_account_output
+WHERE epoch < ?
+  AND NOT (
+      spendable = TRUE AND guarded = FALSE AND folded = FALSE
+      AND EXISTS (
+          SELECT 1 FROM reward_credit_round rcr
+          WHERE rcr.snapshot_epoch = reward_account_output.epoch
+      )
+  )`), sqlEpoch); err != nil {
+		return fmt.Errorf("delete reward account outputs before epoch: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) DeleteRewardStakeInputBeforeEpoch(
@@ -1654,6 +1914,7 @@ func rewardPoolOutputParams(
 		OptimalReward:       decimalUint64(output.OptimalReward),
 		TotalReward:         decimalUint64(output.TotalReward),
 		LeaderReward:        decimalUint64(output.LeaderReward),
+		LeaderRewardDeficit: decimalUint64(output.LeaderRewardDeficit),
 		MemberRewardTotal:   decimalUint64(output.MemberRewardTotal),
 		OwnerStake:          decimalUint64(output.OwnerStake),
 		Undistributed:       decimalUint64(output.Undistributed),
@@ -1671,6 +1932,7 @@ func rewardPoolOutputFromSQLite(
 			row.OptimalReward,
 			row.TotalReward,
 			row.LeaderReward,
+			row.LeaderRewardDeficit,
 			row.MemberRewardTotal,
 			row.OwnerStake,
 			row.Undistributed,
@@ -1692,10 +1954,11 @@ func rewardPoolOutputFromSQLite(
 		OptimalReward:       types.Uint64(values[0]),
 		TotalReward:         types.Uint64(values[1]),
 		LeaderReward:        types.Uint64(values[2]),
-		MemberRewardTotal:   types.Uint64(values[3]),
-		OwnerStake:          types.Uint64(values[4]),
-		Undistributed:       types.Uint64(values[5]),
-		Unspendable:         types.Uint64(values[6]),
+		LeaderRewardDeficit: types.Uint64(values[3]),
+		MemberRewardTotal:   types.Uint64(values[4]),
+		OwnerStake:          types.Uint64(values[5]),
+		Undistributed:       types.Uint64(values[6]),
+		Unspendable:         types.Uint64(values[7]),
 		CapturedSlot:        uint64(row.CapturedSlot),
 		BoundarySlot:        uint64(row.BoundarySlot),
 	}, nil
@@ -1731,7 +1994,7 @@ func rewardAccountOutputParams(
 }
 
 func rewardAccountOutputFromSQLite(
-	row sqlitequery.RewardAccountOutput,
+	row sqlitequery.GetRewardAccountOutputsRow,
 ) (*models.RewardAccountOutput, error) {
 	amount, err := parseUint64("reward account amount", row.Amount)
 	if err != nil {

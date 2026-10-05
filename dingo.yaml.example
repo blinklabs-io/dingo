@@ -1,35 +1,37 @@
 # Example config file for dingo
-# The values shown below correspond to the in-code defaults unless a
-# setting is left commented out to preserve a storage-mode-specific
-# runtime default.
+# No settings are required. Uncomment a setting only to override its in-code
+# default.
 
 # Public bind address for the Dingo server
 # CLI: --bind-addr
-bindAddr: "0.0.0.0"
+# bindAddr: "0.0.0.0"
 
 # Path to the Cardano node configuration file
 #
 # Can be overridden with the config environment variable
 # CLI: --cardano-config
-cardanoConfig: "./config/cardano/preview/config.json"
+# cardanoConfig: "./config/cardano/preview/config.json"
 
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
-databasePath: ".dingo"
+# databasePath: ".dingo"
 
 # Compiled-in plugin selection and provider configuration.
-plugins:
-  storage:
-    blob:
-      provider: "badger"
-      config:
+# plugins:
+  # storage:
+    # blob:
+      # provider: "badger"
+      # config:
         # Optional Badger data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
-    metadata:
-      provider: "sqlite"
-      config:
+    # metadata:
+      # provider: "sqlite"
+      # config:
         # Optional SQLite data directory. When unset, databasePath applies.
         # dataDir: ".dingo"
+        # Full VACUUM can pause SQLite writers. It is disabled by default;
+        # set an interval in seconds only when that maintenance pause is acceptable.
+        # vacuumIntervalSeconds: 86400
     # PostgreSQL metadata alternative (replace the metadata block above):
     # metadata:
     #   provider: "postgres"
@@ -49,12 +51,12 @@ plugins:
     #     # DATABASE.md.
     #     statementTimeout: "30s"
     #     lockTimeout: "10s"
-  mempool:
+  # mempool:
     # "fifo" preserves successful-admission order. "dag" additionally indexes
     # transaction dependencies and uses deterministic topological ordering.
     # "default" remains a compatibility alias for "fifo".
-    provider: "fifo"
-    config:
+    # provider: "fifo"
+    # config:
       # Mempool capacity in bytes. Left commented out so the run-mode default
       # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
       # leios run mode. An explicit value here overrides both defaults, so a
@@ -63,13 +65,13 @@ plugins:
       # capacity: 1048576
       # FIFO begins oldest-first eviction here. DAG never evicts and applies
       # TxSubmission backpressure as it approaches rejectionWatermark.
-      evictionWatermark: 0
-      rejectionWatermark: 1.0
-  api:
-    blockfrost:
-      provider: "builtin"
-      config:
-        port: 3000
+      # evictionWatermark: 0
+      # rejectionWatermark: 1.0
+  # api:
+    # blockfrost:
+      # provider: "builtin"
+      # config:
+        # port: 3000
         # Per-provider override of the shared api.tls default below
         # (uncomment to use). Any field left unset here inherits the
         # corresponding api.tls field; mode: disabled explicitly keeps this
@@ -78,21 +80,34 @@ plugins:
         #   mode: server
         #   certFilePath: "/run/secrets/blockfrost.crt"
         #   keyFilePath: "/run/secrets/blockfrost.key"
-    mesh:
-      provider: "builtin"
-      config:
-        port: 8080
-    utxorpc:
-      provider: "builtin"
-      config:
-        port: 9090
+    # kupo:
+      # provider: "builtin"
+      # config:
+        # port: 1442
+    # mesh:
+      # provider: "builtin"
+      # config:
+        # port: 8080
+    # utxorpc:
+      # provider: "builtin"
+      # config:
+        # port: 9090
+    # mcp:
+      # Built-in Model Context Protocol (MCP) server for AI agent integration.
+      # SQL tools require plugins.storage.metadata.provider: "sqlite".
+      # Port 0 skips MCP startup; set 8088 to enable it on loopback.
+      # MCP is opt-in because authentication is unset by default.
+      # provider: "builtin"
+      # config:
+        # port: 0
 
 # Shared optional TLS default for every selected plugins.api.* provider
-# (Blockfrost, Mesh, UTxO RPC). Each field resolves independently:
+# (Blockfrost, Kupo, Mesh, UTxO RPC, MCP). Each field resolves independently:
 # plugins.api.<name>.config.tls overrides a field for that provider only
 # (see the commented example above). Leaving this section out keeps the API
-# listeners plaintext. API listeners use the root bindAddr, whose default is
-# 0.0.0.0. CORS remains operator-chosen through corsAllowedOrigins.
+# listeners plaintext. Blockfrost, Kupo, Mesh, and UTxO RPC use the root bindAddr,
+# whose default is 0.0.0.0. MCP defaults to its own host: 127.0.0.1.
+# CORS remains operator-chosen through corsAllowedOrigins; MCP ignores "*".
 #
 # api:
 #   tls:
@@ -102,11 +117,11 @@ plugins:
 #     keyFilePath: "/run/secrets/api.key"
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
-socketPath: "dingo.socket"
+# socketPath: "dingo.socket"
 
 # Name of the Cardano network
 # CLI: --network
-network: "preview"
+# network: "preview"
 
 # Logging output configuration
 # format: "text" (default, human-readable) or "json" (machine-parseable,
@@ -114,9 +129,9 @@ network: "preview"
 # level:  "debug", "info" (default), "warn", or "error".
 #         The --debug flag overrides this to "debug".
 # Env: DINGO_LOGGING_FORMAT, DINGO_LOGGING_LEVEL
-logging:
-  format: text
-  level: info
+# logging:
+  # format: text
+  # level: info
 
 # TLS certificate file path. Also used by Bark (bark/) when barkPort is set.
 #
@@ -131,19 +146,19 @@ logging:
 # a complete certificate/key pair is required only when TLS is enabled.
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
-tlsCertFilePath: ""
+# tlsCertFilePath: ""
 
 # TLS private key file path, paired with tlsCertFilePath above.
 #
 # Can be overridden with the TLS_KEY_FILE_PATH environment variable
-tlsKeyFilePath: ""
+# tlsKeyFilePath: ""
 
 # Path to the topology configuration file for Cardano node
-topology: ""
+# topology: ""
 
 # TCP port to bind for Prometheus metrics endpoint
 # CLI: --metrics-port
-metricsPort: 12798
+# metricsPort: 12798
 
 # TCP port for the liveness/readiness probe listener. 0 disables it.
 # Binds bindAddr, like the relay and metrics listeners: a kubelet or
@@ -164,7 +179,7 @@ metricsPort: 12798
 # Both bodies are JSON carrying the readiness verdict, a reason, and the
 # observed tip gap.
 # CLI: --health-port  Env: DINGO_HEALTH_PORT
-healthPort: 12799
+# healthPort: 12799
 
 # How far the chain tip may trail the wall-clock slot while /readyz still
 # reports ready. Matches forgeStaleGapThresholdSlots: both answer "has this
@@ -172,19 +187,19 @@ healthPort: 12799
 # more readily than the forger's own staleness gate would evict a node the
 # forger still considers current. 0 takes the default.
 # CLI: --health-ready-gap-slots  Env: DINGO_HEALTH_READY_GAP_SLOTS
-healthReadyGapSlots: 1000
+# healthReadyGapSlots: 1000
 
 # TCP port to bind for pprof debug endpoints (heap, profile, goroutine, etc).
 # 0 disables. Operators opt in; never enable in production by default — debug
 # endpoints expose internal state and run on a separate listener from metrics.
 # CLI: --debug-port  Env: DINGO_DEBUG_PORT
-debugPort: 0
+# debugPort: 0
 
 # Address for the unauthenticated pprof listener. This is deliberately
 # independent of bindAddr and privateBindAddr and stays on loopback by default.
 # Set a wildcard address only when an external network control protects it.
 # CLI: --debug-bind-addr  Env: DINGO_DEBUG_BIND_ADDR
-debugBindAddr: "127.0.0.1"
+# debugBindAddr: "127.0.0.1"
 
 # Enable OpenTelemetry tracing. Disabled by default: with no collector
 # listening, the OTLP exporter logs noisy connection errors. When enabled,
@@ -192,31 +207,31 @@ debugBindAddr: "127.0.0.1"
 # OTEL_EXPORTER_OTLP_* env vars documented for
 # go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp.
 # CLI: --tracing  Env: DINGO_TRACING_ENABLED
-tracing: false
+# tracing: false
 
 # Export traces to stdout instead of OTLP. Requires tracing to also be
 # enabled. Mostly useful for local debugging.
 # CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
-tracingStdout: false
+# tracingStdout: false
 
 # Internal/private address to bind for listening for Ouroboros NtC
-privateBindAddr: "127.0.0.1"
+# privateBindAddr: "127.0.0.1"
 
 # TCP port to bind for listening for Ouroboros NtC
 # CLI: --private-port
-privatePort: 3002
+# privatePort: 3002
 
 # TCP port to bind for listening for Ouroboros NtN
 #
 # Can be overridden with the port environment variable
 # CLI: --port
-relayPort: 3001
+# relayPort: 3001
 
 # Storage mode controls how much data is persisted.
 # - "core": Only consensus data (UTxOs, certs, pools, pparams). Suitable for
-#   block producers and relay nodes. API ports are ignored in core mode.
+#   block producers and relay nodes. Only MCP can serve API requests in core mode.
 # - "api": Core data plus full transaction metadata (witnesses, scripts, datums,
-#   redeemers). All APIs start automatically on their default ports.
+#   redeemers). APIs with nonzero configured ports start; MCP is opt-in.
 #
 # Storage mode also controls how long per-account reward history is kept: in
 # "core" mode, per-account reward rows (reward_account_output) are pruned to
@@ -229,22 +244,22 @@ relayPort: 3001
 #
 # Can be overridden with DINGO_STORAGE_MODE
 # CLI: --storage-mode
-storageMode: "core"
+# storageMode: "core"
 
 # API ports are configured under plugins.api above. Set a port to 0 to
-# disable that API. APIs remain inactive outside API storage mode.
+# disable that API. Other APIs remain inactive outside API storage mode; MCP supports both modes.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for
 # expired or missing historical blocks.
 # Can be overridden with DINGO_BARK_BASE_URL
 # CLI: --bark-url
-barkBaseUrl: ""
+# barkBaseUrl: ""
 
 # TCP port bind for listening for Bark RPC calls. Enable this on archive nodes.
 # Can be overridden with DINGO_BARK_PORT
 # CLI: --bark-port
-barkPort: 0
+# barkPort: 0
 
 # Interface Bark binds to. Left empty (the default), Bark binds to all
 # interfaces UNLESS the database lifecycle service is also enabled (see
@@ -256,7 +271,7 @@ barkPort: 0
 # defense in depth, not a substitute for configuring a client CA.
 # Can be overridden with DINGO_BARK_HOST
 # CLI: --bark-host
-barkHost: ""
+# barkHost: ""
 
 # PEM CA bundle Bark verifies client certificates (mTLS) against. Required
 # whenever the database lifecycle service is enabled (barkPort set alongside
@@ -266,7 +281,7 @@ barkHost: ""
 # --client-cert/--client-key/--ca-cert flags are the client side of this.
 # Can be overridden with DINGO_BARK_CLIENT_CA_FILE_PATH
 # CLI: --bark-client-ca-file-path
-barkClientCaFilePath: ""
+# barkClientCaFilePath: ""
 
 # SHA-256 fingerprints of client certificate DER bytes authorized to invoke
 # destructive DatabaseService RPCs (CreateSnapshot, DeleteSnapshot,
@@ -277,18 +292,18 @@ barkClientCaFilePath: ""
 # destructive ones.
 # Can be overridden with DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS
 # CLI: --bark-operator-certificate-fingerprints
-barkOperatorCertificateFingerprints: []
+# barkOperatorCertificateFingerprints: []
 
 # Local immutable block history expiry. When enabled, Dingo replaces block CBOR
 # older than the ledger-derived stability window with an expired-history marker
 # while retaining local indexes and metadata. Bark fallback is optional.
-historyExpiry:
+# historyExpiry:
   # Can be overridden with DINGO_HISTORY_EXPIRY_ENABLED
   # CLI: --history-expiry-enabled
-  enabled: false
+  # enabled: false
   # Can be overridden with DINGO_HISTORY_EXPIRY_FREQUENCY
   # CLI: --history-expiry-frequency
-  frequency: 1h
+  # frequency: 1h
 
 # Optional CIP-26 off-chain token registry sync (API storage mode only).
 # When enabled, Dingo periodically pulls the community token registry and
@@ -301,49 +316,68 @@ historyExpiry:
 # Disabled by default because the mainnet registry is a roughly 240MB
 # download. Subsequent syncs send a conditional request, so an unchanged
 # registry costs no download at all.
-tokenRegistry:
+# tokenRegistry:
   # Can be overridden with DINGO_TOKEN_REGISTRY_ENABLED
   # CLI: --token-registry-enabled
-  enabled: false
+  # enabled: false
   # Registry tarball URL. Empty selects by network: the Cardano Foundation
   # registry for mainnet, the IOG testnet registry otherwise. Set this to
   # point at a mirror.
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
-  sourceUrl: ""
+  # sourceUrl: ""
   # How often the registry is re-checked. Each check is a conditional
   # request, so an unchanged registry costs no download. Values below one
   # minute are raised to it: polling a source that serves a roughly 240MB
   # artifact faster than that is abusive rather than useful.
   # Can be overridden with DINGO_TOKEN_REGISTRY_INTERVAL
   # CLI: --token-registry-interval
-  interval: 6h
+  # interval: 6h
   # Budget for the whole download, not one request round trip.
   # Can be overridden with DINGO_TOKEN_REGISTRY_REQUEST_TIMEOUT
   # CLI: --token-registry-request-timeout
-  requestTimeout: 15m
+  # requestTimeout: 15m
   # HTTP user agent sent with the registry request. Empty uses the default.
   # Can be overridden with DINGO_TOKEN_REGISTRY_USER_AGENT
   # CLI: --token-registry-user-agent
-  userAgent: ""
+  # userAgent: ""
   # Cap on the compressed registry download. 0 uses the default (768MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BYTES
   # CLI: --token-registry-max-bytes
-  maxBytes: 0
+  # maxBytes: 0
+  # Cap on all decompressed tar content. 0 uses the default (2GB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_DECOMPRESSED_BYTES
+  # CLI: --token-registry-max-decompressed-bytes
+  # maxDecompressedBytes: 0
   # Cap on a single registry mapping document. 0 uses the default (4MB).
   # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ENTRY_BYTES
   # CLI: --token-registry-max-entry-bytes
-  maxEntryBytes: 0
+  # maxEntryBytes: 0
+  # Cap on all tar entries, including non-mapping files. 0 uses the default
+  # (100000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ARCHIVE_ENTRIES
+  # CLI: --token-registry-max-archive-entries
+  # maxArchiveEntries: 0
+  # Cap on parsed mappings and database row-upsert work. 0 uses the default
+  # (50000).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_ACCEPTED_ENTRIES
+  # CLI: --token-registry-max-accepted-entries
+  # maxAcceptedEntries: 0
+  # Cap on retained mapping payload in each database batch. 0 uses the
+  # default (64MB).
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MAX_BATCH_BYTES
+  # CLI: --token-registry-max-batch-bytes
+  # maxBatchBytes: 0
   # Persist base64 token logos. Logos are roughly 90% of registry bytes and
   # most consumers only need name/ticker/decimals, so this is off by default.
   # Can be overridden with DINGO_TOKEN_REGISTRY_STORE_LOGOS
   # CLI: --token-registry-store-logos
-  storeLogos: false
+  # storeLogos: false
   # Allow syncing from private, loopback, and link-local addresses. Leave
   # false for the default SSRF guard; set true only for a local mirror.
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --token-registry-allow-private-addresses
-  allowPrivateAddresses: false
+  # allowPrivateAddresses: false
 
 # Optional in-process Koios reward-parity observer (dingo #3098). When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
@@ -353,42 +387,50 @@ tokenRegistry:
 # This is a one-off validation aid for preview/preprod, not a permanent
 # subsystem; leave disabled for normal node operation. See
 # internal/koiosparity and ARCHITECTURE.md's "Koios Parity Tracker" section.
-koiosParity:
+# koiosParity:
   # Can be overridden with DINGO_KOIOS_PARITY_ENABLED
   # CLI: --koios-parity-enabled
-  enabled: false
+  # enabled: false
   # Koios network to validate against: preview or preprod. Empty defaults to
   # this node's own `network` setting.
   # Can be overridden with DINGO_KOIOS_PARITY_NETWORK
   # CLI: --koios-parity-network
-  network: ""
+  # network: ""
   # Can be overridden with DINGO_KOIOS_PARITY_CACHE_PATH
   # CLI: --koios-parity-cache-path
-  cachePath: ""
+  # cachePath: ""
   # Can be overridden with DINGO_KOIOS_PARITY_API_KEY
   # CLI: --koios-parity-api-key
-  apiKey: ""
+  # apiKey: ""
   # Koios v1 API root override, for a self-hosted or mirrored instance.
   # Empty selects the public host for the network above. A custom host is not
   # subject to the public tier's burst cap, since that ceiling describes
   # koios.rest's own published tiers.
   # Can be overridden with DINGO_KOIOS_PARITY_BASE_URL
   # CLI: --koios-parity-base-url
-  baseUrl: ""
+  # baseUrl: ""
   # Allow a plain-HTTP baseUrl. The API key is attached as a Bearer token to
   # every request, so cleartext transport exposes it, and tampered reference
   # data can make a parity comparison report a false PASS. Local dev/test only.
   # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_INSECURE_HTTP
   # CLI: --koios-parity-allow-insecure-http
-  allowInsecureHttp: false
-  # Stop/cancel the node on the first Koios/tool error or exact parity
-  # mismatch instead of logging it and continuing normal operation.
+  # allowInsecureHttp: false
+  # Allow a private, loopback, or special-use baseUrl. Leave false for the
+  # default outbound request guard; set true only for an intentionally local
+  # or private self-hosted Koios deployment.
+  # Can be overridden with DINGO_KOIOS_PARITY_ALLOW_PRIVATE_ADDRESSES
+  # CLI: --koios-parity-allow-private-addresses
+  # allowPrivateAddresses: false
+  # Stop/cancel the node on the first Koios/tool error or non-pass parity
+  # result instead of logging it and continuing normal operation. An epoch
+  # whose only significant mismatches are reference_lag (Koios has not caught
+  # up yet) is logged and recorded but never stops the node.
   # Can be overridden with DINGO_KOIOS_PARITY_STRICT
   # CLI: --koios-parity-strict
-  strict: true
+  # strict: true
   # Can be overridden with DINGO_KOIOS_PARITY_GRACE_HOURS
   # CLI: --koios-parity-grace-hours
-  graceHours: 24
+  # graceHours: 24
 
 # ---
 # Deployment pattern examples (uncomment one block):
@@ -451,7 +493,7 @@ koiosParity:
 
 # Ignore prior chain history and start from current tip (default: false)
 # This is experimental and may break — use with caution
-intersectTip: false
+# intersectTip: false
 
 # Mempool capacity and watermarks are configured under plugins.mempool.
 
@@ -470,8 +512,8 @@ intersectTip: false
 # forgeSyncToleranceSlots controls how far the local chain can lag the upstream
 # tip before forging is skipped. forgeStaleGapThresholdSlots controls when to
 # log an error if the chain tip is far ahead of the slot clock.
-forgeSyncToleranceSlots: 0
-forgeStaleGapThresholdSlots: 0
+# forgeSyncToleranceSlots: 0
+# forgeStaleGapThresholdSlots: 0
 
 # validateForgedBlock re-validates a locally-forged block (header crypto,
 # body hash, per-tx ledger rules including Plutus phase-2 evaluation)
@@ -497,14 +539,14 @@ forgeStaleGapThresholdSlots: 0
 #
 # Can be overridden with the DINGO_RUN_MODE environment variable
 # CLI: --run-mode
-runMode: "serve"
+# runMode: "serve"
 
 # Experimental startup era. Empty follows the genesis protocol version.
 # Set to "dijkstra" only for Dijkstra/Leios test networks.
 #
 # Can be overridden with the DINGO_START_ERA environment variable
 # CLI: --start-era
-startEra: ""
+# startEra: ""
 
 # Leios voting (experimental, leios runMode only)
 #
@@ -529,12 +571,12 @@ startEra: ""
 #
 # Can be overridden with the DINGO_IMMUTABLE_DB_PATH environment variable
 # CLI: --immutable-db-path
-immutableDbPath: ""
+# immutableDbPath: ""
 
 # Validate historical blocks during ledger processing (default: true).
 # Set false only when intentionally syncing from a non-genesis intersection
 # whose source does not provide the complete historical state.
-validateHistorical: true
+# validateHistorical: true
 
 # Decode blocks in the chainsync replay loop with a small parallel worker
 # pool instead of one at a time (default: false). Not consensus-affecting --
@@ -543,7 +585,7 @@ validateHistorical: true
 #
 # Can be overridden with the DINGO_BLOCK_PIPELINE_ENABLED environment variable
 # CLI: --block-pipeline-enabled
-blockPipelineEnabled: false
+# blockPipelineEnabled: false
 
 # Also validate VRF/KES and OpCert crypto during block-pipeline replay with a
 # parallel worker pool (default: false). Requires blockPipelineEnabled.
@@ -555,7 +597,7 @@ blockPipelineEnabled: false
 # Can be overridden with the DINGO_BLOCK_PIPELINE_VALIDATE_ENABLED
 # environment variable
 # CLI: --block-pipeline-validate-enabled
-blockPipelineValidateEnabled: false
+# blockPipelineValidateEnabled: false
 
 # Error out (instead of silently skipping) when a consumed UTxO cannot be
 # found or recovered for a block past the recorded Mithril sync boundary.
@@ -564,7 +606,7 @@ blockPipelineValidateEnabled: false
 #
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
-strictUtxoValidation: true
+# strictUtxoValidation: true
 
 # Skip the startup consistency check between reward_live_stake and the live
 # UTxO/account set (default: false, i.e. the check runs).
@@ -586,7 +628,7 @@ strictUtxoValidation: true
 # Can be overridden with the CARDANO_SKIP_REWARD_LIVE_STAKE_BACKFILL_CHECK
 # environment variable
 # CLI: --skip-reward-live-stake-backfill-check
-skipRewardLiveStakeBackfillCheck: false
+# skipRewardLiveStakeBackfillCheck: false
 
 # Peer targets - target number of peers in each state
 # Known, established, and active peer targets are goals, not hard limits.
@@ -596,16 +638,16 @@ skipRewardLiveStakeBackfillCheck: false
 #
 # Target number of known (cold) peers
 # CLI: --target-known-peers
-targetNumberOfKnownPeers: 0
+# targetNumberOfKnownPeers: 0
 # Target number of established (warm) peers
 # CLI: --target-established-peers
-targetNumberOfEstablishedPeers: 0
+# targetNumberOfEstablishedPeers: 0
 # Target number of active (hot) peers
 # CLI: --target-active-peers
-targetNumberOfActivePeers: 0
+# targetNumberOfActivePeers: 0
 # Target number of root peers selected from topology
 # CLI: --target-root-peers
-targetNumberOfRootPeers: 0
+# targetNumberOfRootPeers: 0
 
 # Per-source quotas for active peers
 # These specify how active peer slots are distributed by source.
@@ -613,11 +655,11 @@ targetNumberOfRootPeers: 0
 # Default: topology=3, gossip=12, ledger=5
 #
 # Active peer slots for topology sources (local + public roots)
-activePeersTopologyQuota: 0
+# activePeersTopologyQuota: 0
 # Active peer slots for gossip sources
-activePeersGossipQuota: 0
+# activePeersGossipQuota: 0
 # Active peer slots for ledger sources
-activePeersLedgerQuota: 0
+# activePeersLedgerQuota: 0
 
 # Inbound peer governance budget (phase 1)
 # These define explicit operator intent for inbound peers as a governed source.
@@ -626,38 +668,38 @@ activePeersLedgerQuota: 0
 #
 # Target number of inbound peers to keep in warm state.
 # CLI: --inbound-warm-target
-inboundWarmTarget: 0
+# inboundWarmTarget: 0
 # Quota for inbound peers in hot state.
 # CLI: --inbound-hot-quota
-inboundHotQuota: 0
+# inboundHotQuota: 0
 # Minimum tenure before inbound peers are eligible for hot promotion.
 # CLI: --inbound-min-tenure
-inboundMinTenure: 0s
+# inboundMinTenure: 0s
 # Minimum score threshold for inbound hot promotion.
 # CLI: --inbound-hot-score-threshold
-inboundHotScoreThreshold: 0
+# inboundHotScoreThreshold: 0
 # Future prune grace window for inbound peers.
 # CLI: --inbound-prune-after
-inboundPruneAfter: 0s
+# inboundPruneAfter: 0s
 # Future duplex policy knob for inbound peers.
 # CLI: --inbound-duplex-only-for-hot
-inboundDuplexOnlyForHot: false
+# inboundDuplexOnlyForHot: false
 # Future cooldown knob for inbound peer governance actions.
 # CLI: --inbound-cooldown
-inboundCooldown: 0s
+# inboundCooldown: 0s
 
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
 # exits Genesis mode automatically near the best known peer tip.
-genesisBootstrap:
+# genesisBootstrap:
   # Enable/disable Genesis bootstrap mode (default: true).
-  enabled: true
+  # enabled: true
   # Override the Genesis comparison window in slots.
   # 0 auto-derives the window from genesis params (3k/f).
-  windowSlots: 0
+  # windowSlots: 0
   # Minimum diversity groups to prefer while promoting peers during bootstrap.
   # 0 uses the peer-governor default.
-  promotionMinDiversityGroups: 0
+  # promotionMinDiversityGroups: 0
   # Independent peers that must report the same recent blocks before a fast
   # (shallow) block source may drive Genesis-mode chain selection. This is the
   # Ouroboros Genesis trust control for biased fast-sync sources such as the
@@ -665,7 +707,15 @@ genesisBootstrap:
   # denied selection and stalls rather than steering the local chain. Pair it
   # with a trustable localRoots peer plus a ledger peer snapshot in the topology
   # file. 0 disables corroboration (density-only Genesis selection).
-  corroborationPeers: 0
+  # corroborationPeers: 0
+  # Genesis Limit on Patience: while Genesis selection is active, disconnect a
+  # ChainSync peer that delivers its advertised progress more slowly than
+  # limitOnPatienceRate headers per second, beyond a limitOnPatienceCapacity
+  # token allowance. Each header that raises the peer's block number earns one
+  # token. 0 selects the defaults (1000 tokens, 5 per second).
+  # limitOnPatienceEnabled: true
+  # limitOnPatienceCapacity: 0
+  # limitOnPatienceRate: 0
 
 # Midnight indexer configuration
 # Indexing requires BOTH enabled: true AND API storage mode; either alone is
@@ -680,69 +730,69 @@ genesisBootstrap:
 #   DINGO_MIDNIGHT_REFLECTION_ENABLED,
 #   DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
 # Midnight chain addresses and policy-ID/asset-name constants are YAML only.
-midnight:
+# midnight:
   # Enable the Midnight indexer. Default: false.
-  enabled: false
+  # enabled: false
   # Enable the Midnight gRPC server. Default: false.
-  serverEnabled: false
+  # serverEnabled: false
   # Expose gRPC service discovery. Requires serverEnabled. Default: false.
-  reflectionEnabled: false
+  # reflectionEnabled: false
   # gRPC listen port. Must be non-zero when serverEnabled is true.
-  port: 50051
+  # port: 50051
   # gRPC listen address. Plaintext is supported.
-  host: "127.0.0.1"
+  # host: "127.0.0.1"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
-  cnightPolicyId: ""
-  cnightAssetName: ""
-  mappingValidatorAddress: ""
+  # cnightPolicyId: ""
+  # cnightAssetName: ""
+  # mappingValidatorAddress: ""
   # Auth token policy ID (28-byte / 56 hex char). When set, only tokens minted
   # under this exact policy are accepted as registration auth tokens.
-  authTokenPolicyId: ""
-  authTokenAssetName: ""
-  committeeCandidateAddress: ""
-  technicalCommitteeAddress: ""
-  technicalCommitteePolicyId: ""
-  councilAddress: ""
-  councilPolicyId: ""
-  permissionedCandidatePolicy: ""
+  # authTokenPolicyId: ""
+  # authTokenAssetName: ""
+  # committeeCandidateAddress: ""
+  # technicalCommitteeAddress: ""
+  # technicalCommitteePolicyId: ""
+  # councilAddress: ""
+  # councilPolicyId: ""
+  # permissionedCandidatePolicy: ""
 
 # Cache configuration for tiered CBOR cache system
 # This controls the in-memory caching of UTxO and transaction CBOR data
-cache:
+# cache:
   # Number of entries in the hot UTxO cache (LFU eviction)
   # Default: 50000
   # CLI: --cache-hot-utxo-entries
-  hotUtxoEntries: 50000
+  # hotUtxoEntries: 50000
   # Number of entries in the hot transaction cache (LFU eviction)
   # Default: 10000
-  hotTxEntries: 10000
+  # hotTxEntries: 10000
   # Maximum memory in bytes for hot transaction cache
   # Default: 268435456 (256 MB)
-  hotTxMaxBytes: 268435456
+  # hotTxMaxBytes: 268435456
   # Number of blocks to keep in the block LRU cache
   # Default: 500
   # CLI: --cache-block-lru-entries
-  blockLruEntries: 500
+  # blockLruEntries: 500
   # Number of recent blocks to warm up on startup
   # Default: 1000
-  warmupBlocks: 1000
+  # warmupBlocks: 1000
   # Wait for cache warmup to complete before serving requests
   # Default: true
   # CLI: --cache-warmup-sync
-  warmupSync: true
+  # warmupSync: true
 
 # Multi-client ChainSync (header synchronization) configuration
-chainsync:
+# chainsync:
   # Maximum number of concurrent ChainSync client connections
   # Default: 3
   # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
-  maxClients: 3
+  # maxClients: 3
   # Duration with no activity after which a ChainSync client is
   # considered stalled and eligible for failover/recycling
   # Default: "2m"
   # CLI: --chainsync-stall-timeout  Env: DINGO_CHAINSYNC_STALL_TIMEOUT
-  stallTimeout: "2m"
+  # stallTimeout: "2m"
   # Header-sync strategy: how headers from multiple eligible peers drive
   # ledger ingress.
   # - "primary":     a single active peer drives ingress, failing over to
@@ -755,33 +805,33 @@ chainsync:
   #                  eligible peers over time.
   # Default: "primary"
   # CLI: --chainsync-strategy  Env: DINGO_CHAINSYNC_STRATEGY
-  strategy: "primary"
+  # strategy: "primary"
 
 # Mithril snapshot bootstrap configuration
 # Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
 # CLI: --mithril-enabled, --mithril-verify-certs
-mithril:
+# mithril:
   # Enable Mithril integration (default: true)
-  enabled: true
+  # enabled: true
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
-  aggregatorUrl: ""
+  # aggregatorUrl: ""
   # Allow the aggregator URL and snapshot artifact locations to use plain
   # HTTP instead of HTTPS. Default: false. This is an explicit escape
   # hatch for local development and tests against a plaintext aggregator;
   # do not enable it in production.
-  allowInsecureHttp: false
+  # allowInsecureHttp: false
   # Mithril artifact backend: "v2" (default) restores from incremental
   # per-immutable-file archives verified against the certified merkle
   # root; "v1" uses the legacy full snapshot tarballs (being phased
   # out upstream)
   # CLI: --mithril-backend
-  backend: "v2"
+  # backend: "v2"
   # Optional exact artifact identity for a fresh bootstrap: a v1 snapshot
   # digest or v2 Cardano database artifact hash. It is rejected for catch-up
   # runs and cannot override an interrupted import's durable pin.
   # CLI: --mithril-pinned-digest  Env: DINGO_MITHRIL_PINNED_DIGEST
-  pinnedDigest: ""
+  # pinnedDigest: ""
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""
@@ -795,11 +845,11 @@ mithril:
   # downloadMaxIdleRetries: 0
   # Remove temporary files after loading completes
   # Default: true
-  cleanupAfterLoad: true
+  # cleanupAfterLoad: true
   # Verify STM certificates back to the pinned Mithril genesis key from the
   # selected Cardano network config. Set false only for an unverified bootstrap.
   # Default: true
-  verifyCertificates: true
+  # verifyCertificates: true
 
 # ---
 # CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)
@@ -822,15 +872,16 @@ mithril:
 # minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
 
 # ---
-# CIP-50 pledge-leverage staking rewards (experimental, consensus-affecting)
+# Experimental pre-Dijkstra CIP-50 override (consensus-affecting)
 #
-# Adds the CIP-50 leverage cap to the staking-reward formula: a pool's
+# Adds the leverage cap to the staking-reward formula: a pool's
 # reward-eligible stake is capped at L times its pledge, so a zero-pledge pool
 # earns nothing and an over-leveraged pool plateaus. This changes the ledger
 # reward calculation, so it MUST only be enabled on a network where every node
 # also enables it (a devnet or custom network). Enabling it off-consensus, e.g.
 # on mainnet or the public testnets, will fork this node off the network. It is
-# disabled by default.
+# disabled by default. In Dijkstra, the enacted maxPledgeLeverage protocol
+# parameter is authoritative and this setting is ignored.
 #
 # CLI: --pledge-leverage-enabled / --pledge-leverage
 # Env: DINGO_PLEDGE_LEVERAGE_ENABLED / DINGO_PLEDGE_LEVERAGE
@@ -885,14 +936,14 @@ mithril:
 # `dingo database snapshot|restore|truncate` CLI commands, and — when
 # bark is enabled (barkPort > 0) — the base directory bark's
 # DatabaseService CreateSnapshot/Restore RPCs use.
-databaseLifecycle:
+# databaseLifecycle:
   # Capture automatic database snapshots at epoch boundaries. Unsupported
   # when the primary blob provider is s3 or gcs: their remote-object backup
   # walk can hold the commit barrier for an unbounded duration. Manual
   # `dingo database snapshot` remains available in that configuration.
   # Default: false
   # CLI: --db-snapshot-enabled
-  snapshotEnabled: false
+  # snapshotEnabled: false
   # Local filesystem directory automatic and bark-triggered snapshots are
   # written under (one subdirectory per snapshot). Required if
   # snapshotEnabled is true, and required for bark's DatabaseService to be
@@ -913,7 +964,7 @@ databaseLifecycle:
   # fail to start with a clear "not writable" error instead of a raw
   # filesystem permission error surfacing later during a snapshot attempt.
   # CLI: --db-snapshot-dir
-  snapshotDir: ""
+  # snapshotDir: ""
   # Optional cloud destination to additionally mirror every snapshot to,
   # as a URI: s3://bucket/prefix or gcs://bucket/prefix. The local copy
   # under snapshotDir is always kept — this is a mirror, not a
@@ -922,7 +973,7 @@ databaseLifecycle:
   # Application Default Credentials; there is no explicit key/secret
   # config here. Restore also accepts this same URI form as its source.
   # CLI: --db-snapshot-cloud-destination
-  snapshotCloudDestination: ""
+  # snapshotCloudDestination: ""
   # Additional path segment appended after snapshotCloudDestination and
   # before each snapshot's own ID (e.g. epoch-<N> for automatic snapshots).
   # Automatic epoch-boundary snapshots use a deterministic name, so if
@@ -931,12 +982,12 @@ databaseLifecycle:
   # otherwise their uploads race each other at the same remote key and can
   # corrupt each other's snapshots. Leave unset for a single node.
   # CLI: --db-snapshot-cloud-destination-prefix
-  snapshotCloudDestinationPrefix: ""
+  # snapshotCloudDestinationPrefix: ""
   # Number of automatic snapshots to retain before pruning older ones
   # 0 keeps all of them
   # CLI: --db-snapshot-retention
-  snapshotRetention: 0
+  # snapshotRetention: 0
   # Capture an automatic snapshot every N epoch boundaries instead of
   # every single one
   # CLI: --db-snapshot-every-n-epochs
-  snapshotEveryNEpochs: 1
+  # snapshotEveryNEpochs: 1

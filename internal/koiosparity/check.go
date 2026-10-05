@@ -41,7 +41,7 @@ type CheckConfig struct {
 	FromEpoch    uint64 // 0 = all unchecked/stale
 	ThroughEpoch uint64 // 0 = no upper bound
 	GraceHours   int    // pools/epochs missing from Dingo within this window → reference_lag, not FAIL
-	// AccountsEnabled runs #3097's per-account exact-parity comparison phase
+	// AccountsEnabled runs the per-account exact-parity comparison phase
 	// (CompareAccountEpoch) alongside the existing epoch-aggregate/pool
 	// phases, consulting koios_account_rewards/koios_account_coverage —
 	// which only ever get populated when the corresponding fetch phase was
@@ -250,7 +250,7 @@ func Check(
 }
 
 // CheckEpoch compares the Koios reference cache against source (either a
-// standalone DingoDB connection or the dingo #3098 in-process
+// standalone DingoDB connection or the in-process
 // DatabaseSource) for exactly one epoch, persisting the result the same way
 // checkEpoch's callers inside Check do. This is the primitive both Check's
 // batch CLI/watch-loop mode and the in-process epoch observer (observer.go)
@@ -296,12 +296,26 @@ func CheckEpoch(
 // valid "go" stake snapshot (see koiosStakeEpoch's doc comment for the
 // mark/set/go derivation). fetchEpoch commits a PreStaking marker instead of
 // erroring/retrying forever for epoch <= preStakingThroughEpoch;
-// checkEpoch/koiosStakeEpoch/the #3097 account-fetch path
+// checkEpoch/koiosStakeEpoch/the account-fetch path
 // (FetchEpochAccountsWithAddrs) all key off this same constant so the
 // pre-staking exclusion stays consistent across every phase — a null
 // active_stake on any epoch above this value is a real, retryable error
 // instead.
 const preStakingThroughEpoch = 1
+
+// IsPreStakingEpoch reports whether Koios legitimately has no active_stake
+// for epoch, because no valid "go" stake snapshot exists for it yet. Koios
+// returns active_stake=null there permanently, so a caller must treat that
+// null as "not comparable" rather than as a fault; above this boundary the
+// same null means Koios has not finished processing a just-closed epoch, or
+// something is genuinely wrong upstream, and is a real error.
+//
+// Exported so internal/nodeparity draws the boundary from the same constant
+// the fetch and check phases already use, rather than hardcoding an epoch
+// number that would silently diverge if the derivation ever changed.
+func IsPreStakingEpoch(epoch uint64) bool {
+	return epoch <= preStakingThroughEpoch
+}
 
 // koiosStakeEpoch returns the Dingo epoch whose reward_pool_input/
 // reward_pool_output rows and epoch_summary/mark stake distribution actually
@@ -323,14 +337,14 @@ const preStakingThroughEpoch = 1
 // Parity Tracker "Epoch alignment" section for the full derivation and
 // koiosParamEpoch below for the distinct offset reward_pool_input's
 // BlocksProduced field needs instead. Margin/FixedCost share this stake-epoch
-// offset rather than that one (dingo #3484).
+// offset rather than that one.
 //
 // ok is false for koiosEpoch <= preStakingThroughEpoch (0 and 1), neither of
 // which has a valid stake epoch (checkEpoch never reaches this for those
 // epochs in practice — it's already filtered out by the PreStaking marker
 // fetch commits for epochs 0-1 — but the guard both avoids a uint64
 // underflow for epoch 0 and keeps epoch 1 from being treated as having a
-// real stakeEpoch of 0, which previously let #3097's account-fetch path
+// real stakeEpoch of 0, which previously let the account-fetch path
 // wastefully run Koios requests for a pre-staking epoch).
 func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 	if koiosEpoch <= preStakingThroughEpoch {
@@ -347,7 +361,7 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 // stake-epoch offset above, which governs the same row's DelegatedStake/
 // DelegatorCount/Margin/Cost instead. BlocksProduced is the only field read
 // at this offset: a mark snapshot records the pool parameters as of its own
-// boundary, so Margin/FixedCost belong with the stake epoch (dingo #3484).
+// boundary, so Margin/FixedCost belong with the stake epoch.
 // See koiosStakeEpoch's doc comment and ARCHITECTURE.md.
 // poolDepartedAtParamEpoch reports whether keyHex provably left the pool set
 // by K+1, from either of two independent routes.
@@ -356,8 +370,7 @@ func koiosStakeEpoch(koiosEpoch uint64) (epoch uint64, ok bool) {
 // certificate as of the K+1 boundary is a retirement effective at or before
 // K. That is a positive fact about this pool alone, so unlike the pool-set
 // route it needs no argument that some set was completely recorded, and it
-// survives the snapshot retention window a trailing observer runs behind
-// (dingo #3925).
+// survives the snapshot retention window a trailing observer runs behind.
 //
 // The comparison epoch is K, not the K+1 boundary the certificates are
 // resolved as of. epochBoundarySnapshotSlot captures the K+1 mark pool set at
@@ -407,6 +420,40 @@ func koiosParamEpoch(koiosEpoch uint64) uint64 {
 // fees, compared in CompareEpochTotals) is unaffected and still read at
 // epoch itself: it is a point-in-time ledger pot balance captured at the
 // boundary into that same epoch, not a delayed reward-calculation input.
+// checkedScopes names the mismatch scopes a check run owns, so its commit
+// replaces exactly the evidence it recomputed. An aggregate-only run must not
+// name ScopeAccount: deleting the account phase's rows would leave that
+// phase's recorded failure with nothing behind it.
+func checkedScopes(accountsChecked bool) []string {
+	if accountsChecked {
+		return AllMismatchScopes
+	}
+	return []string{ScopeAggregate}
+}
+
+// passedCheckEpochStatus builds the status row for an epoch that has no
+// comparison surface at all — pre-staking, or below this node's earliest
+// available ledger epoch. Both phases pass vacuously when both were asked
+// for, so a stored failure from either clears rather than outliving the
+// reason it was recorded.
+func passedCheckEpochStatus(
+	network string,
+	epoch uint64,
+	now time.Time,
+	accountsEnabled bool,
+) CheckEpochStatus {
+	status := CheckEpochStatus{
+		Network:         network,
+		Epoch:           epoch,
+		LastCheckedAt:   now,
+		AggregateStatus: StatusPass,
+	}
+	if accountsEnabled {
+		status.AccountStatus = StatusPass
+	}
+	return status
+}
+
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
@@ -435,15 +482,17 @@ func checkEpoch(
 	// Dingo-side pool as pool_only_dingo. Nothing fallible needs to complete
 	// first, so it's safe to replace any prior evidence immediately.
 	if koiosEpoch.PreStaking {
-		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+		if err := cache.CommitEpochMismatches(
+			network,
+			epoch,
+			nil,
+			checkedScopes(accountsEnabled)...,
+		); err != nil {
 			return nil, fmt.Errorf("commit mismatches: %w", err)
 		}
-		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-			Network:       network,
-			Epoch:         epoch,
-			LastCheckedAt: now,
-			Status:        StatusPass,
-		}); err != nil {
+		if err := cache.UpsertCheckEpochStatus(passedCheckEpochStatus(
+			network, epoch, now, accountsEnabled,
+		)); err != nil {
 			return nil, fmt.Errorf("upsert check status: %w", err)
 		}
 		logger.Debug("koiosparity: epoch predates staking, skipping comparison",
@@ -451,9 +500,10 @@ func checkEpoch(
 			"epoch", epoch,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -461,7 +511,7 @@ func checkEpoch(
 	// local reward-calculation state to compare against, regardless of
 	// whether Koios itself has real reference data for them: a
 	// Mithril-bootstrapped node has no ledger history before its bootstrap
-	// boundary by construction (dingo #4172), unlike preStakingThroughEpoch
+	// boundary by construction, unlike preStakingThroughEpoch
 	// above, which is a protocol-wide floor Koios itself has no data below.
 	// Treated identically to the PreStaking branch — record PASS with zero
 	// mismatches rather than reading Dingo's total absence of local state as
@@ -476,15 +526,17 @@ func checkEpoch(
 		)
 	}
 	if haveEarliestAvailable && epoch < earliestAvailable {
-		if err := cache.CommitEpochMismatches(network, epoch, nil); err != nil {
+		if err := cache.CommitEpochMismatches(
+			network,
+			epoch,
+			nil,
+			checkedScopes(accountsEnabled)...,
+		); err != nil {
 			return nil, fmt.Errorf("commit mismatches: %w", err)
 		}
-		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-			Network:       network,
-			Epoch:         epoch,
-			LastCheckedAt: now,
-			Status:        StatusPass,
-		}); err != nil {
+		if err := cache.UpsertCheckEpochStatus(passedCheckEpochStatus(
+			network, epoch, now, accountsEnabled,
+		)); err != nil {
 			return nil, fmt.Errorf("upsert check status: %w", err)
 		}
 		logger.Debug(
@@ -497,9 +549,10 @@ func checkEpoch(
 			earliestAvailable,
 		)
 		return &EpochCompareResult{
-			Network: network,
-			Epoch:   epoch,
-			Status:  StatusPass,
+			Network:       network,
+			Epoch:         epoch,
+			Status:        StatusPass,
+			CheckedScopes: checkedScopes(accountsEnabled),
 		}, nil
 	}
 
@@ -571,7 +624,7 @@ func checkEpoch(
 		CompareEpochTotals(network, epoch, koiosTotals, dingoEpochPots, now)...,
 	)
 
-	// 1d. Compare the per-epoch protocol parameters (dingo #3931). Read at
+	// 1d. Compare the per-epoch protocol parameters. Read at
 	// `epoch` itself, with no stake-epoch offset: /epoch_params?_epoch_no=K
 	// reports the parameters in force during K, and Dingo's effective
 	// `pparams` row for K is the same thing — unlike total_active_stake,
@@ -634,7 +687,7 @@ func checkEpoch(
 	// absence from it is the evidence that the pool really did leave the set.
 	// Resolved once here so every pool in this epoch is judged against the
 	// same read. A lookup error or an empty set leaves membership unproven,
-	// which keeps the stricter dingo_db_missing classification (dingo #3485).
+	// which keeps the stricter dingo_db_missing classification.
 	// Absence is only departure proof when the set it is measured against is
 	// known complete. A non-empty read is not enough on its own: if the K+1
 	// summary declares two pools and only one mark row comes back, the
@@ -644,7 +697,7 @@ func checkEpoch(
 	// two is what establishes completeness. Anything short of that -- a read
 	// error, an empty set, no ready summary, a zero count, or a count that
 	// disagrees -- leaves membership unproven and keeps the stricter
-	// dingo_db_missing classification (dingo #3485).
+	// dingo_db_missing classification.
 	var paramEpochPools map[string]struct{}
 	var declaredParamPools uint64
 	var paramBoundarySlot uint64
@@ -703,14 +756,23 @@ func checkEpoch(
 	// short of an exact match — a degraded pool omitted from reward_pool_input
 	// while it stays in the pool set, a skipped bundle, an unread pool map —
 	// leaves membership unproven and keeps the stricter classification
-	// (dingo #3795, preserving #3485's direction).
-	if paramEpochPools == nil && declaredParamPools > 0 && dingoPoolErr == nil {
-		paramInputs := make(map[string]struct{}, len(dingoPoolMap))
+	// (preserving the stricter direction).
+	// paramInputs is every pool with a K+1 reward_pool_input row
+	// (ParamsPresent), independent of which completeness route below ends up
+	// using it. Both the epoch_summary-based departure fallback immediately
+	// below and the reward_snapshot-based zero-stake route further down
+	// need the same set, so it is built once here regardless
+	// of whether paramEpochPools is already resolved.
+	var paramInputs map[string]struct{}
+	if dingoPoolErr == nil {
+		paramInputs = make(map[string]struct{}, len(dingoPoolMap))
 		for keyHex, dingoPool := range dingoPoolMap {
 			if dingoPool != nil && dingoPool.ParamsPresent {
 				paramInputs[keyHex] = struct{}{}
 			}
 		}
+	}
+	if paramEpochPools == nil && declaredParamPools > 0 && paramInputs != nil {
 		if uint64(len(paramInputs)) == declaredParamPools {
 			paramEpochPools = paramInputs
 		} else {
@@ -741,8 +803,7 @@ func checkEpoch(
 	// reward_pool_input row. Resolved once per epoch, and only against the
 	// K+1 summary's own boundary slot -- without one there is no point in
 	// the chain to resolve each pool's latest certificate as of, so the
-	// route stays closed and the stricter classification stands (dingo
-	// #3925).
+	// route stays closed and the stricter classification stands.
 	var retiredByParamEpoch map[string]struct{}
 	if paramBoundarySlot > 0 {
 		retired, rErr := dingo.GetPoolsRetiredByEpoch(
@@ -761,6 +822,66 @@ func checkEpoch(
 			)
 		} else {
 			retiredByParamEpoch = retired
+		}
+	}
+	// paramEpochPositiveStakeProven: whether paramInputs is provably the
+	// network's complete positive-stake pool set at K+1.
+	// reward_snapshot.TotalPoolCount is written by
+	// ledger/snapshot/rotation.go's buildRewardStateInputs from exactly the
+	// set reward_pool_input holds rows for -- the reward-stake distribution
+	// after rewardStakeDistribution has already dropped every zero-stake
+	// pool -- unlike epoch_summary.TotalPoolCount above, which counts any
+	// pool with a delegator regardless of stake and can therefore never
+	// equal len(paramInputs) on a network with any zero-stake-but-delegated
+	// pool (observed on Preview: epoch 160 declared 113 pools via
+	// epoch_summary against 111 real reward-input rows). Equality against
+	// reward_snapshot's count is a genuine completeness proof instead of one
+	// that route can structurally never satisfy.
+	//
+	// ExcludedActiveStake must be known and exactly zero. A degraded pool
+	// dropped from reward_pool_input for stale registration data
+	// is excluded from paramInputs for a reason that IS a genuine
+	// gap, and reward_snapshot.TotalPoolCount already reflects that
+	// exclusion -- so a nonzero (or unknown, pre-tracking) ExcludedActiveStake
+	// means a matching count proves nothing about whether any particular
+	// absent pool is safe, and the route must stay closed.
+	//
+	// A pool absent from this proven-complete set genuinely has no positive
+	// stake at K+1 -- not departed, just contributing nothing to the
+	// reward-stake distribution -- so ComparePoolEpoch reports it under
+	// CategoryPoolZeroStake rather than folding it into CategoryPoolDeparted
+	// (poolDepartedAtParamEpoch above), which would misstate that the pool
+	// left the network.
+	var paramEpochPositiveStakeProven bool
+	if paramInputs != nil {
+		rewardSnapshot, rsErr := dingo.GetRewardSnapshot(ctx, paramEpoch)
+		switch {
+		case rsErr != nil:
+			logger.Debug(
+				"koiosparity: could not resolve param-epoch reward snapshot",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"error", rsErr,
+			)
+		case rewardSnapshot == nil:
+			// No mark reward_snapshot captured for this param epoch.
+		case !rewardSnapshot.ExcludedActiveStakeKnown ||
+			rewardSnapshot.ExcludedActiveStake != 0:
+			// Unknown or nonzero exclusion: a degraded pool may account for
+			// some of paramInputs's shortfall, so completeness is unproven.
+		case rewardSnapshot.TotalPoolCount != uint64(len(paramInputs)):
+			logger.Debug(
+				"koiosparity: param-epoch reward snapshot pool count does "+
+					"not match the reward-input set",
+				"network", network,
+				"epoch", epoch,
+				"param_epoch", paramEpoch,
+				"reward_inputs", len(paramInputs),
+				"snapshot_total", rewardSnapshot.TotalPoolCount,
+			)
+		default:
+			paramEpochPositiveStakeProven = true
 		}
 	}
 	if dingoPoolErr != nil {
@@ -824,6 +945,7 @@ func checkEpoch(
 					retiredByParamEpoch,
 					keyHex,
 				),
+				paramEpochPositiveStakeProven,
 			)
 			allMismatches = append(allMismatches, poolMismatches...)
 
@@ -849,7 +971,7 @@ func checkEpoch(
 			// pool_history row for it until K+2, so comparing presence at K
 			// would report a divergence where both sides agree the pool did
 			// not yet exist. Only a pool actually in K's stake basis can be
-			// present-only-in-Dingo (dingo #3483).
+			// present-only-in-Dingo.
 			if !dingoPool.StakePresent {
 				continue
 			}
@@ -873,54 +995,79 @@ func checkEpoch(
 		}
 	}
 
-	// 5. Per-account exact parity (#3097) — opt-in (accountsEnabled), and
+	// 5. Per-account exact parity — opt-in (accountsEnabled), and
 	// only for epochs with a valid stake epoch (mirrors the pool-comparison
 	// phases above; PreStaking epochs never reach here at all, so
 	// hasStakeEpoch is always true in practice — see koiosStakeEpoch's doc
 	// comment). Gated behind the account-coverage completeness check so an
 	// interrupted or not-yet-run account fetch can never be silently treated
 	// as "nothing to compare" — see KoiosAccountCoverage's doc comment.
+	// Read before the account phase appends to allMismatches, so the two
+	// phases' verdicts stay separable without re-partitioning the combined
+	// slice afterwards.
+	aggregateStatus := DetermineStatus(allMismatches)
+	aggregateCount := len(allMismatches)
+
+	var accountMismatches []CheckMismatch
 	if accountsEnabled && hasStakeEpoch {
 		rewardsPending := accountRewardsPending(dingoPoolMap)
-		allMismatches = append(
-			allMismatches,
-			compareEpochAccounts(
-				ctx,
-				cache,
-				dingo,
-				network,
-				epoch,
-				stakeEpoch,
-				now,
-				graceHours,
-				epochEndTime,
-				rewardsPending,
-				logger,
-			)...,
+		accountMismatches = compareEpochAccounts(
+			ctx,
+			cache,
+			dingo,
+			network,
+			epoch,
+			stakeEpoch,
+			now,
+			graceHours,
+			epochEndTime,
+			rewardsPending,
+			logger,
 		)
+		// Tagged by provenance rather than derived from Category, which
+		// cannot tell the phases apart: both emit CategoryDBError.
+		for i := range accountMismatches {
+			accountMismatches[i].Scope = ScopeAccount
+		}
+		allMismatches = append(allMismatches, accountMismatches...)
 	}
 
-	status := DetermineStatus(allMismatches)
+	accountStatus := ""
+	if accountsEnabled && hasStakeEpoch {
+		// Recorded even when the account comparison produced nothing, so a
+		// clean account pass clears a previously stored account failure. Left
+		// empty when the comparison did not run at all, which must leave the
+		// stored account verdict alone rather than assert a pass for it.
+		accountStatus = DetermineStatus(accountMismatches)
+	}
+	status := MergeCheckStatus(aggregateStatus, accountStatus)
 
 	// Every fallible read above has already succeeded by this point, so it's
 	// safe to replace prior evidence now. CommitEpochMismatches deletes and
 	// (re)inserts in one transaction: if the insert fails partway through,
 	// the delete rolls back with it and the previous record is left intact
 	// instead of being erased with nothing to replace it.
-	if err := cache.CommitEpochMismatches(network, epoch, allMismatches); err != nil {
+	if err := cache.CommitEpochMismatches(
+		network,
+		epoch,
+		allMismatches,
+		checkedScopes(accountStatus != "")...,
+	); err != nil {
 		return nil, fmt.Errorf("commit mismatches: %w", err)
 	}
 
 	if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
-		Network:        network,
-		Epoch:          epoch,
-		LastCheckedAt:  now,
-		Status:         status,
-		MismatchCount:  len(allMismatches),
-		DingoPoolCount: dingoFound,
-		KoiosPoolCount: len(koiosPools),
-		OnlyDingoPools: MarshalPoolList(onlyDingo),
-		OnlyKoiosPools: MarshalPoolList(onlyKoios),
+		Network:                network,
+		Epoch:                  epoch,
+		LastCheckedAt:          now,
+		DingoPoolCount:         dingoFound,
+		KoiosPoolCount:         len(koiosPools),
+		OnlyDingoPools:         MarshalPoolList(onlyDingo),
+		OnlyKoiosPools:         MarshalPoolList(onlyKoios),
+		AggregateStatus:        aggregateStatus,
+		AggregateMismatchCount: aggregateCount,
+		AccountStatus:          accountStatus,
+		AccountMismatchCount:   len(accountMismatches),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert check status: %w", err)
 	}
@@ -944,12 +1091,15 @@ func checkEpoch(
 		KoiosPoolCount: len(koiosPools),
 		OnlyDingo:      onlyDingo,
 		OnlyKoios:      onlyKoios,
+		// The same set the mismatch commit above replaces, so the verdict and
+		// the evidence behind it always name the same phases.
+		CheckedScopes: checkedScopes(accountStatus != ""),
 	}, nil
 }
 
 // accountRewardsPending reports whether the whole stake epoch's rewards are
 // still unapplied, which is the only condition under which an account-level
-// presence or amount difference is timing rather than divergence (#3857).
+// presence or amount difference is timing rather than divergence.
 //
 // An epoch Dingo has not computed yet makes every Koios reward look absent.
 // The pool rows already carry that answer: when the reward output for the
@@ -973,7 +1123,7 @@ func accountRewardsPending(dingoPoolMap map[string]*DingoPoolEpochData) bool {
 	return true
 }
 
-// compareEpochAccounts runs #3097's per-account exact-parity comparison for
+// compareEpochAccounts runs the per-account exact-parity comparison for
 // one epoch: it first consults KoiosAccountCoverage to make sure a complete
 // Koios account-reward fetch actually exists for this epoch (never treating
 // an absent/incomplete coverage row as "nothing to compare" — see
@@ -1202,8 +1352,8 @@ func creditedAccountRewards(
 	return rows, credentialErrs, poolErrs
 }
 
-// accountLifecycleMismatches (dingo #3099) reports the two account
-// dimensions #3097's CompareAccountEpoch structurally cannot: confirmed
+// accountLifecycleMismatches reports the two account
+// dimensions CompareAccountEpoch structurally cannot: confirmed
 // zero-reward accounts and newly-registered/deregistered accounts between
 // adjacent stake epochs. Purely informational: every mismatch returned here
 // uses one of CategoryAcctZeroReward/CategoryAcctNewlyRegistered/

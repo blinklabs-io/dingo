@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"testing"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // TestSQLiteRestoreModeKeepsRaisedWALAutocheckpoint guards against
@@ -79,6 +81,18 @@ func TestTranslateMySQLUpsertRewritesBigintCast(t *testing.T) {
 	require.Equal(
 		t,
 		`SELECT SUM(CAST(amount AS SIGNED)) FROM utxo WHERE credential_tag = ? AND staking_key = ? AND deleted_slot = 0`,
+		translateMySQLUpsert(query),
+	)
+}
+
+func TestTranslateMySQLSyncStateUpsert(t *testing.T) {
+	t.Parallel()
+	query := `INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+ON CONFLICT (sync_key) DO UPDATE SET value = excluded.value`
+	require.Equal(
+		t,
+		`INSERT INTO sync_state (sync_key, value) VALUES (?, ?)
+ON DUPLICATE KEY UPDATE value = VALUES(value)`,
 		translateMySQLUpsert(query),
 	)
 }
@@ -205,4 +219,145 @@ func TestUnwrapDialectQueryerFindsDialectUnderCountingQueryer(t *testing.T) {
 	got, ok := unwrapDialectQueryer(wrapped)
 	require.True(t, ok)
 	require.Equal(t, "mysql", got.dialect)
+}
+
+// TestUpdateFromJoinSQLStandardFormUnqualifiesAssignmentTargets covers the
+// SQLite/PostgreSQL shape: both accept UPDATE ... SET ... FROM ... WHERE, and
+// both reject a table-qualified assignment target ("UPDATE t SET t.col = ..."
+// is a syntax error on both), unlike MySQL's JOIN form below.
+func TestUpdateFromJoinSQLStandardFormUnqualifiesAssignmentTargets(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, dialect := range []Dialect{SQLiteDialect(), PostgresDialect()} {
+		got := dialect.UpdateFromJoinSQL(
+			"pool", "latest", "latest.pool_id = pool.id",
+			[]JoinAssignment{
+				{Column: "pledge", Expr: "latest.pledge"},
+				{Column: "cost", Expr: "latest.cost"},
+			},
+		)
+		require.Equal(
+			t,
+			"UPDATE pool SET pledge = latest.pledge, cost = latest.cost "+
+				"FROM latest WHERE latest.pool_id = pool.id",
+			got,
+			dialect.Name(),
+		)
+	}
+}
+
+// TestUpdateFromJoinSQLMySQLQualifiesAssignmentTargets covers MySQL's lack of
+// UPDATE ... FROM syntax: it needs UPDATE ... JOIN ... ON ... SET ..., and
+// every assignment target must be qualified with the target table, since the
+// joined source here projects columns with the same names as the target's
+// own and an unqualified SET is ambiguous (MySQL error 1052).
+func TestUpdateFromJoinSQLMySQLQualifiesAssignmentTargets(t *testing.T) {
+	t.Parallel()
+	got := MySQLDialect().UpdateFromJoinSQL(
+		"pool", "latest", "latest.pool_id = pool.id",
+		[]JoinAssignment{
+			{Column: "pledge", Expr: "latest.pledge"},
+			{Column: "cost", Expr: "latest.cost"},
+		},
+	)
+	require.Equal(
+		t,
+		"UPDATE pool JOIN latest ON latest.pool_id = pool.id "+
+			"SET pool.pledge = latest.pledge, pool.cost = latest.cost",
+		got,
+	)
+}
+
+// TestRestorePoolStateAtSlotQueryClassifiesAsOtherNamedInsteadOfUnknown
+// guards the instrumentation fix for RestorePoolStateAtSlot's CTE-based
+// UPDATE: classifySQLStatement deliberately calls any WITH-leading statement
+// "other" rather than guessing a verb (see that function's doc comment), but
+// before the query carried a "-- name:" comment it fell into the generic
+// "unknown" bucket in dingo_database_sql_query_duration_seconds, aggregating
+// it with every other unnamed hand-written query in the store. This must hold
+// for all three dialects' assembled statement text, not only SQLite's.
+func TestRestorePoolStateAtSlotQueryClassifiesAsOtherNamedInsteadOfUnknown(
+	t *testing.T,
+) {
+	t.Parallel()
+	for _, dialect := range []Dialect{
+		SQLiteDialect(), PostgresDialect(), MySQLDialect(),
+	} {
+		op, name := classifySQLStatement(
+			restorePoolDenormalizedFieldsQuery(dialect),
+		)
+		require.Equal(t, "other", op, dialect.Name())
+		require.Equal(t, "RestorePoolStateAtSlot", name, dialect.Name())
+	}
+}
+
+// TestApplyMIRCertificatePersistsProjectedDeltas proves the persistence path
+// writes exactly what the certificate's reward projection returns, for every
+// credential, rather than a value it re-derives from the underlying field.
+// RewardsAmount is *big.Int on every gouroboros release, so this is the path a
+// signed delta travels once the underlying field is widened to delta_coin.
+func TestApplyMIRCertificatePersistsProjectedDeltas(t *testing.T) {
+	t.Parallel()
+	store := newMigratedTestStore(t)
+
+	first := mirTestCredential(0x21)
+	second := mirTestCredential(0x22)
+	cert := decodeMIRDistributionCertificate(
+		t,
+		uint(lcommon.MirSourceReserves),
+		map[*lcommon.Credential]uint64{
+			first:  1_200,
+			second: 450,
+		},
+	)
+	_, err := applyMIRCertificate(
+		context.Background(),
+		newDialectQueryer(store.writeDB, store.dialect.Name()),
+		cert,
+		0,
+		400,
+	)
+	require.NoError(t, err)
+
+	want := map[string]string{}
+	for credential, amount := range cert.Reward.RewardsAmount() {
+		want[string(credential.Credential[:])] = amount.String()
+	}
+	require.Len(t, want, 2)
+
+	effects, err := store.GetMIRCertsInSlotRange(0, 1_000, nil)
+	require.NoError(t, err)
+	require.Len(t, effects, 1)
+	got := map[string]string{}
+	for _, reward := range effects[0].Rewards {
+		require.NotNil(t, reward.Amount)
+		got[string(reward.Credential)] = reward.Amount.String()
+	}
+	assert.Equal(t, want, got)
+}
+
+// decodeMIRDistributionCertificate builds a distribution MIR certificate
+// through the CBOR decoder, so the test does not depend on the Go type of the
+// reward map.
+func decodeMIRDistributionCertificate(
+	t *testing.T,
+	source uint,
+	rewards map[*lcommon.Credential]uint64,
+) *lcommon.MoveInstantaneousRewardsCertificate {
+	t.Helper()
+	encoded, err := cbor.Encode(struct {
+		cbor.StructAsArray
+		Source  uint
+		Rewards map[*lcommon.Credential]uint64
+	}{
+		Source:  source,
+		Rewards: rewards,
+	})
+	require.NoError(t, err)
+	cert := &lcommon.MoveInstantaneousRewardsCertificate{
+		CertType: uint(lcommon.CertificateTypeMoveInstantaneousRewards),
+	}
+	require.NoError(t, cert.Reward.UnmarshalCBOR(encoded))
+	return cert
 }

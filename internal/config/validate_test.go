@@ -71,6 +71,57 @@ func TestValidateDefaultsPass(t *testing.T) {
 	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateTokenRegistryAggregateBounds(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		field  string
+		mutate func(*Config)
+	}{
+		"decompressed bytes": {
+			field: "tokenRegistry.maxDecompressedBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxDecompressedBytes = -1
+			},
+		},
+		"archive entries": {
+			field: "tokenRegistry.maxArchiveEntries",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxArchiveEntries = -1
+			},
+		},
+		"accepted entries": {
+			field: "tokenRegistry.maxAcceptedEntries",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxAcceptedEntries = -1
+			},
+		},
+		"batch bytes": {
+			field: "tokenRegistry.maxBatchBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxBatchBytes = -1
+			},
+		},
+		"batch smaller than entry": {
+			field: "tokenRegistry.maxBatchBytes",
+			mutate: func(cfg *Config) {
+				cfg.TokenRegistry.MaxEntryBytes = 2048
+				cfg.TokenRegistry.MaxBatchBytes = 1024
+			},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := validTestConfig()
+			test.mutate(cfg)
+
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+			require.ErrorContains(t, err, test.field)
+		})
+	}
+}
+
 func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
@@ -168,6 +219,29 @@ func TestValidate(t *testing.T) {
 			wantErr: "metricsPort must be set",
 		},
 		{
+			name:    "MCP port range in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, 65536) },
+			wantErr: "invalid plugins.api.mcp.config.port",
+		},
+		{
+			name:    "MCP collision in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "MCP empty host inherits node bind address",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.Plugins.API.Mcp.Config["host"] = ""
+				setPluginPort(&c.Plugins.API.Mcp, c.RelayPort)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name:   "MCP distinct host avoids collision",
+			modify: func(c *Config) { c.BindAddr = "127.0.0.2"; setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+		},
+		{
 			name: "optional port disabled with zero",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
@@ -187,7 +261,7 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			// UTxORPC/Blockfrost/Mesh/Midnight bind only under API storage
+			// UTxORPC/Blockfrost/Kupo/Mesh/Midnight bind only under API storage
 			// mode; in core mode their ports never bind, so even an
 			// out-of-range or privileged value must not be rejected.
 			name: "core mode skips inactive API port validation",
@@ -428,6 +502,64 @@ func TestValidate(t *testing.T) {
 				c.ShelleyKESKey = "/keys/kes.skey"
 				c.ShelleyOperationalCertificate = "/keys/node.cert"
 			},
+		},
+		{
+			name: "block producer with KES agent socket instead of local key",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+		},
+		{
+			name: "block producer with local and agent KES keys",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyKESAgentSocket = "/run/kes-agent.sock"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+			wantErr: "cannot set both shelleyKesKey and shelleyKesAgentSocket",
+		},
+		{
+			name:    "invalid KES agent mode",
+			modify:  func(c *Config) { c.ShelleyKESAgentMode = "signing" },
+			wantErr: "invalid shelleyKesAgentMode",
+		},
+		{
+			name: "negative KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = -time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "explicit KES agent sign timeout",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 300 * time.Millisecond
+			},
+		},
+		{
+			name: "KES agent sign timeout defaults at zero",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = 0
+			},
+		},
+		{
+			name: "KES agent sign timeout at slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
+		},
+		{
+			name: "KES agent sign timeout above slot boundary",
+			modify: func(c *Config) {
+				c.ShelleyKESAgentSignTimeout = time.Second + time.Nanosecond
+			},
+			wantErr: "shelleyKesAgentSignTimeout",
 		},
 		{
 			name: "no network and no magic",

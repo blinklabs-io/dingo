@@ -15,11 +15,14 @@
 package ledger
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -43,6 +46,9 @@ import (
 type headerValidationError struct {
 	BlockPoint ocommon.Point
 	Cause      error
+	// Source is the connection that supplied the block, or the zero value when
+	// it is not known (a marker restored after restart carries none).
+	Source ouroboros.ConnectionId
 }
 
 func (e *headerValidationError) Error() string {
@@ -90,6 +96,9 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	ls.RLock()
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
+	sameFailureAtTip := ls.lastHeaderValidationFailure != nil &&
+		pointMatches(ls.lastHeaderValidationFailure.BlockPoint, validationErr.BlockPoint) &&
+		pointMatches(ls.lastHeaderValidationTip, ledgerTip.Point)
 
 	// The ledger tip is normally the last block that applied cleanly, so it
 	// already precedes the failing block and rewinding to it drops the
@@ -105,7 +114,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	// stuck-pipeline signal is suppressed, because every restart looks like
 	// a successful recovery. Decline instead and let the failure surface.
 	rewindPoint := ledgerTip.Point
-	if rewindPoint.Slot >= validationErr.BlockPoint.Slot {
+	if !ls.recoveryRewindTargetPrecedes(rewindPoint, validationErr.BlockPoint) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
 				"header validation rejected a block at or behind the ledger tip; no rewind target precedes it, so recovery cannot drop it",
@@ -179,31 +188,44 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		if err := ls.rewindPrimaryChainForRecovery(
-			rewindPoint,
-		); err != nil {
-			if ls.yieldedToChainSelection(
-				err, validationErr, rewindPoint, "rewind",
-			) {
-				yielded = true
-				return nil
+		// The destructive boundary nests inside the prune boundary here and
+		// at every other rollback entry point, so the two locks are always
+		// taken in the same order. The floor check above stays outside it:
+		// it is a read, and a refused recovery must not hold coordinated
+		// snapshots off.
+		return ls.withDestructiveDatabaseTransition(func() error {
+			if err := ls.rewindPrimaryChainForRecovery(
+				rewindPoint,
+			); err != nil {
+				if ls.yieldedToChainSelection(
+					err, validationErr, rewindPoint, "rewind",
+				) {
+					yielded = true
+					return nil
+				}
+				return fmt.Errorf(
+					"rewind primary chain after header validation failure: %w",
+					err,
+				)
 			}
-			return fmt.Errorf(
-				"rewind primary chain after header validation failure: %w",
-				err,
-			)
-		}
-		// The chain prune alone leaves the ledger reflecting the rejected
-		// block's post-apply state; the matching ledger rollback has to be
-		// explicit, for the same reason it is on the transaction-validation
-		// path.
-		if err := ls.rollbackWithResync(rewindPoint, true); err != nil {
-			return fmt.Errorf(
-				"rollback ledger state after header validation failure: %w",
-				err,
-			)
-		}
-		return nil
+			// The chain prune alone leaves the ledger reflecting the rejected
+			// block's post-apply state; the matching ledger rollback has to be
+			// explicit, for the same reason it is on the transaction-validation
+			// path. The first recovery at this tip may still need to repair
+			// metadata the rejected block left above it; a repeat of the same
+			// failure at the same tip reuses what that repair restored.
+			if err := ls.rollbackWithBlocks(
+				rewindPoint,
+				nil,
+				!sameFailureAtTip && pointMatches(rewindPoint, ledgerTip.Point),
+			); err != nil {
+				return fmt.Errorf(
+					"rollback ledger state after header validation failure: %w",
+					err,
+				)
+			}
+			return nil
+		})
 	})
 	if err != nil {
 		return false, err
@@ -211,6 +233,10 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 	if yielded {
 		return true, nil
 	}
+	// Record only an attempt that completed the rewind and metadata rollback.
+	// A declined or failed attempt must not consume the first same-tip repair.
+	ls.lastHeaderValidationFailure = validationErr
+	ls.lastHeaderValidationTip = ledgerTip.Point
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
@@ -222,8 +248,38 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 				},
 			),
 		)
+		if validationErr.Source != (ouroboros.ConnectionId{}) &&
+			headerFailureBlamesPeer(validationErr.Cause) {
+			ls.config.EventBus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: validationErr.Source,
+						Reason: event.
+							ChainsyncResyncReasonDeferredHeaderValidationFailure,
+						Point: rewindPoint,
+					},
+				),
+			)
+		}
 	}
 	return true, nil
+}
+
+// headerFailureBlamesPeer reports whether a header validation failure is a
+// verdict on the block a peer supplied. Failures that only say this node lacks
+// the state to decide (still deferred, a missing or pruned snapshot, no nonce,
+// a failed state read) are not: they clear once local state catches up, and
+// penalizing the peer would punish an honest one.
+func headerFailureBlamesPeer(cause error) bool {
+	return !IsHeaderVerificationDeferred(cause) &&
+		!errors.Is(cause, errLeaderStakeSnapshotUnavailable) &&
+		!errors.Is(cause, errVrfKeyRegistrationHistoryUnavailable) &&
+		!errors.Is(cause, errPoolSnapshotPruned) &&
+		!errors.Is(cause, errHeaderStateLookupFailed) &&
+		!errors.Is(cause, errHeaderLocalConfiguration) &&
+		!errors.Is(cause, errBlockPipelineEta0Unavailable)
 }
 
 // yieldedToChainSelection reports whether err says the primary chain no
@@ -271,4 +327,50 @@ func (ls *LedgerState) yieldedToChainSelection(
 		)
 	}
 	return true
+}
+
+// recoveryRewindTargetPrecedes reports whether rewindPoint is an earlier
+// block than the one whose validation failed, and so is a target a rollback
+// can drop that block by rewinding to.
+//
+// The slot alone does not settle it. A Byron epoch-boundary block takes the
+// first slot of its epoch and the epoch's first regular block takes the same
+// slot whenever one is minted there, so a single chain holds two distinct
+// blocks at one slot at every such boundary -- on mainnet the genesis EBB is
+// the parent of a block carrying the same slot 0. Reading equal slots as "no
+// rewind target precedes it" declined recovery for a target that was a real
+// predecessor, leaving the pipeline to re-read the rejected block until the
+// stuck detector fired.
+//
+// An equal slot with an equal hash is the failing block itself and stays a
+// decline: rolling back to it drops nothing, and reporting a recovery there
+// hides the failure instead of surfacing it. Any other block at that slot was
+// reached after rewindPoint, because the pipeline only ever reads forward from
+// the ledger tip. A target the primary chain no longer holds is refused
+// downstream by Chain.ValidateRollback, which resolves the point by slot and
+// hash, so this test does not repeat that membership check.
+func (ls *LedgerState) recoveryRewindTargetPrecedes(
+	rewindPoint, failing ocommon.Point,
+) bool {
+	if rewindPoint.Slot != failing.Slot {
+		return rewindPoint.Slot < failing.Slot
+	}
+	if bytes.Equal(rewindPoint.Hash, failing.Hash) || ls.db == nil {
+		return false
+	}
+	rewindBlock, err := database.BlockByPoint(ls.db, rewindPoint)
+	if err != nil {
+		return false
+	}
+	failingBlock, err := database.BlockByPoint(ls.db, failing)
+	if err != nil {
+		return false
+	}
+	if bytes.Equal(failingBlock.PrevHash, rewindBlock.Hash) {
+		return true
+	}
+	if bytes.Equal(rewindBlock.PrevHash, failingBlock.Hash) {
+		return false
+	}
+	return rewindBlock.Number < failingBlock.Number
 }

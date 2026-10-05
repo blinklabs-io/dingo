@@ -84,6 +84,8 @@ var logURIConfigFields = []string{
 // recursively and classified per key rather than as a whole.
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
+	"Plugins.API.Kupo.Config",
+	"Plugins.API.Mcp.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -137,14 +139,19 @@ var logPlainConfigFields = []string{
 	"DelegatorInactivity",
 	"DelegatorInactivityEnabled",
 	"ForgeAppliedTipStalenessSlots",
+	"ForgeEBMaxBytes",
+	"ForgeEBMaxTxRefs",
+	"ForgeEBSelectionReserve",
 	"ForgeEndorserBlockStalenessSlots",
-	"ForgePrimaryChainTipToleranceSlots",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",
 	"ForgeUpstreamStalenessSlots",
 	"FullPotRewardsEnabled",
 	"GenesisBootstrap.CorroborationPeers",
 	"GenesisBootstrap.Enabled",
+	"GenesisBootstrap.LimitOnPatienceCapacity",
+	"GenesisBootstrap.LimitOnPatienceEnabled",
+	"GenesisBootstrap.LimitOnPatienceRate",
 	"GenesisBootstrap.PromotionMinDiversityGroups",
 	"GenesisBootstrap.WindowSlots",
 	"HealthPort",
@@ -165,6 +172,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.AccountChunkSize",
 	"KoiosParity.Accounts",
 	"KoiosParity.AllowInsecureHTTP",
+	"KoiosParity.AllowPrivateAddresses",
 	"KoiosParity.CachePath",
 	"KoiosParity.Enabled",
 	"KoiosParity.GraceHours",
@@ -177,6 +185,7 @@ var logPlainConfigFields = []string{
 	"MaxConnectionsPerIP",
 	"MaxInboundConns",
 	"MaxNtCConns",
+	"MaxTrustedLocalNtCConns",
 	"MaxNtCConnectionsPerIP",
 	"MaxKESEvolutions",
 	"MetricsPort",
@@ -219,6 +228,8 @@ var logPlainConfigFields = []string{
 	"PledgeLeverage",
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
+	"Plugins.API.Kupo.Provider",
+	"Plugins.API.Mcp.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",
@@ -229,6 +240,13 @@ var logPlainConfigFields = []string{
 	"ReconcileInterval",
 	"RelayPort",
 	"RunMode",
+	// The agent socket is a filesystem path, classified the same way as the
+	// key and certificate paths below it: the path is not the secret, the
+	// material behind it is, and an operator diagnosing a misconfigured
+	// socket needs to see which path failed.
+	"ShelleyKESAgentMode",
+	"ShelleyKESAgentSignTimeout",
+	"ShelleyKESAgentSocket",
 	"ShelleyKESKey",
 	"ShelleyOperationalCertificate",
 	"ShelleyVRFKey",
@@ -248,7 +266,11 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.AllowPrivateAddresses",
 	"TokenRegistry.Enabled",
 	"TokenRegistry.Interval",
+	"TokenRegistry.MaxAcceptedEntries",
+	"TokenRegistry.MaxArchiveEntries",
+	"TokenRegistry.MaxBatchBytes",
 	"TokenRegistry.MaxBytes",
+	"TokenRegistry.MaxDecompressedBytes",
 	"TokenRegistry.MaxEntryBytes",
 	"TokenRegistry.RequestTimeout",
 	"TokenRegistry.StoreLogos",
@@ -296,7 +318,7 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }
 

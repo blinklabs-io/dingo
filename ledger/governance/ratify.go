@@ -55,6 +55,7 @@ type RatifyInputs struct {
 	CurrentEpoch          uint64
 	ActiveDRepCount       int // reserved for future min-DRep-count gate
 	ActiveCCCount         int
+	CommitteeAbsent       bool
 	CCQuorum              *big.Rat
 	MajorVersion          uint
 	CommitteeNoConfidence bool
@@ -124,8 +125,13 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	// DRep approval: actions with no DRep gate or a zero threshold pass
 	// automatically. Otherwise requires
 	// yesStake/(totalStake-abstainStake) >= threshold per CIP-1694.
+	// CIP-1694 chooses UpdateCommittee thresholds from the presence of an
+	// elected committee in enact state. A missing committee without an
+	// enacted NoConfidence action is still absent; conversely, a committee
+	// remains present when its members have all expired.
+	committeePresent := !in.CommitteeAbsent
 	drepThreshold := getDRepThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParameterChange, committeePresent,
 	)
 	if inBootstrap || drepThreshold == nil || drepThreshold.Sign() == 0 {
 		decision.DRepApproved = true
@@ -138,7 +144,7 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	// threshold is nil and approval is automatic. Others require
 	// yesStake/(totalStake-abstainStake) >= threshold of the pool snapshot.
 	spoThreshold := getSPOThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParameterChange, committeePresent,
 	)
 	if spoThreshold == nil || spoThreshold.Sign() == 0 {
 		decision.SPOApproved = true
@@ -156,25 +162,17 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	case in.CommitteeNoConfidence:
 		decision.CCApproved = false
 		decision.FailureReason = "cc in no-confidence state"
-	case in.ActiveCCCount == 0:
-		// Check zero-members before the min-size comparison so the
-		// failure reason distinguishes "no members" from "below
-		// minimum" even when MinCommitteeSize >= 1. Bootstrap bypasses
-		// only the minimum-size gate; it does not create committee approval
-		// when no active members exist.
+	case in.CommitteeAbsent:
 		decision.CCApproved = false
-		decision.FailureReason = "cc has no active members"
+		decision.FailureReason = "committee absent"
 	case !inBootstrap && in.ActiveCCCount < int(in.PParams.MinCommitteeSize): //nolint:gosec
 		decision.CCApproved = false
 		decision.FailureReason = "cc below minimum committee size"
-	case in.CCQuorum == nil || in.CCQuorum.Sign() == 0:
-		// Fail-safe: a missing or zero quorum signals a plumbing bug,
-		// not "no quorum required". Auto-approving here would silently
-		// ratify CC-gated actions (ParameterChange, HardForkInitiation,
-		// TreasuryWithdrawal, NewConstitution) whenever the caller
-		// forgot to pass a quorum.
+	case in.CCQuorum == nil:
 		decision.CCApproved = false
-		decision.FailureReason = "cc quorum missing or zero"
+		decision.FailureReason = "cc quorum missing"
+	case in.CCQuorum.Sign() == 0:
+		decision.CCApproved = true
 	default:
 		ratio := in.Tally.CCYesRatio()
 		decision.CCApproved = ratio.Cmp(in.CCQuorum) >= 0
@@ -211,13 +209,13 @@ func committeeTermsWithinLimit(
 // type, or nil if DReps do not vote on this action. For ParameterChange
 // the threshold depends on which parameter groups the decoded action touches;
 // a nil action selects the most restrictive group.
-// committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
-// for UpdateCommittee when the committee is in a no-confidence state.
+// committeePresent selects CommitteeNormal when enact state contains an
+// elected committee, and CommitteeNoConfidence when it does not.
 func getDRepThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
 	parameterChange lcommon.ParameterChangeGovAction,
-	committeeNoConfidence bool,
+	committeePresent bool,
 ) *big.Rat {
 	t := &pparams.DRepVotingThresholds
 	switch actionType {
@@ -225,11 +223,10 @@ func getDRepThreshold(
 		// CIP-1694 Motion of No Confidence uses MotionNoConfidence.
 		return rateToRat(t.MotionNoConfidence)
 	case lcommon.GovActionTypeUpdateCommittee:
-		// Per CIP-1694: when the committee is already in an
-		// explicitly enacted no-confidence state, proposals to seat a
-		// new committee are evaluated against CommitteeNoConfidence;
-		// otherwise CommitteeNormal applies.
-		if committeeNoConfidence {
+		// Per CIP-1694, threshold selection depends on whether enact
+		// state contains an elected committee, not on the previous
+		// committee-purpose action's type.
+		if !committeePresent {
 			return rateToRat(t.CommitteeNoConfidence)
 		}
 		return rateToRat(t.CommitteeNormal)
@@ -256,13 +253,13 @@ func getDRepThreshold(
 // not vote and approval is automatic. For ParameterChange, the SPO
 // threshold only applies when the decoded action touches the security
 // parameter group; callers without the decoded action receive nil.
-// committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
-// for UpdateCommittee when the committee is in a no-confidence state.
+// committeePresent selects CommitteeNormal when enact state contains an
+// elected committee, and CommitteeNoConfidence when it does not.
 func getSPOThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
 	parameterChange lcommon.ParameterChangeGovAction,
-	committeeNoConfidence bool,
+	committeePresent bool,
 ) *big.Rat {
 	t := &pparams.PoolVotingThresholds
 	switch actionType {
@@ -271,9 +268,10 @@ func getSPOThreshold(
 		// for SPOs as well.
 		return rateToRat(t.MotionNoConfidence)
 	case lcommon.GovActionTypeUpdateCommittee:
-		// Per CIP-1694: use CommitteeNoConfidence when the committee
-		// is in a no-confidence state, CommitteeNormal otherwise.
-		if committeeNoConfidence {
+		// Per CIP-1694, threshold selection depends on whether enact
+		// state contains an elected committee, not on the previous
+		// committee-purpose action's type.
+		if !committeePresent {
 			return rateToRat(t.CommitteeNoConfidence)
 		}
 		return rateToRat(t.CommitteeNormal)
@@ -375,9 +373,10 @@ const (
 )
 
 // parameterChangeDRepGroups classifies the fields touched by a concrete
-// Conway or Dijkstra parameter-change action. Dijkstra keys 34 through 37 are
-// network-group parameters for DRep voting and security-group parameters for
-// SPO voting (the latter is supplied by SecurityGroupFields above).
+// Conway or Dijkstra parameter-change action. Dijkstra keys 34-37 and 40-48
+// are NetworkGroup parameters, while keys 38-39 are TechnicalGroup and
+// EconomicGroup parameters respectively. SecurityGroupFields supplies the
+// independent SPO threshold classification.
 func parameterChangeDRepGroups(
 	action lcommon.ParameterChangeGovAction,
 ) drepParameterGroups {
@@ -401,9 +400,23 @@ func parameterChangeDRepGroups(
 			a.ParamUpdate.MaxRefScriptSizePerTx != nil ||
 			a.ParamUpdate.RefScriptCostStride != nil ||
 			a.ParamUpdate.RefScriptCostMultiplier != nil ||
-			a.ParamUpdate.CommitteeStakeCoverage != nil ||
-			a.ParamUpdate.QuorumStakeThreshold != nil {
+			a.ParamUpdate.LeiosAnnouncementPeriodLength != nil ||
+			a.ParamUpdate.LeiosVotePeriodLength != nil ||
+			a.ParamUpdate.LeiosDiffusionPeriodLength != nil ||
+			a.ParamUpdate.LeiosCommitteeSize != nil ||
+			a.ParamUpdate.LeiosQuorumStakeThreshold != nil ||
+			a.ParamUpdate.MaxEndorserBlockReferencesSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockTxsSize != nil ||
+			a.ParamUpdate.MaxEndorserBlockExUnits != nil ||
+			a.ParamUpdate.MaxRefScriptSizePerEndorserBlock != nil {
 			groups |= drepParameterGroupNetwork
+		}
+		if a.ParamUpdate.MaxPledgeLeverageSet ||
+			a.ParamUpdate.MaxPledgeLeverage != nil {
+			groups |= drepParameterGroupTechnical
+		}
+		if a.ParamUpdate.MinPoolMargin != nil {
+			groups |= drepParameterGroupEconomic
 		}
 	default:
 		return allDRepParameterGroups

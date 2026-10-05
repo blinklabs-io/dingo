@@ -44,7 +44,6 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		// that goroutine is free to apply the post-rollback chain the
 		// moment the truncation lands. emitRollbackTransactionEvents is
 		// called from the rollback path instead, before the truncation.
-		// See blinklabs-io/dingo#2287.
 	}
 }
 
@@ -132,7 +131,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // events, and applying a block's transactions out of order -- or applying a
 // rollback's undo after the redo that followed it -- leaves that state wrong
 // in ways no later event corrects. PublishAsync cannot be used here because
-// the shared worker pool reorders (blinklabs-io/dingo#2287).
+// the shared worker pool reorders.
 //
 // This stays asynchronous rather than becoming a PublishBlocking like
 // publishBlockEvent: the forward path calls it from a database AfterCommit
@@ -208,7 +207,8 @@ func (ls *LedgerState) publishBlockEvent(
 }
 
 // validateAndEmitRollbackUndo rejects a rollback that the chain will not
-// accept, then emits the undo events for the blocks it is about to discard.
+// accept, durably records the block bodies needed for undo notification
+// recovery, then emits the undo events for the blocks it is about to discard.
 //
 // The two steps belong together and callers must use this rather than pairing
 // them by hand. The emit has to happen before the truncation for ordering (see
@@ -219,19 +219,15 @@ func (ls *LedgerState) publishBlockEvent(
 // rollback path from acquiring the emit without the guard, which is how
 // rollbackPrimaryChainInSecurityParamWindows initially shipped it.
 //
-// It does not close the window completely: the chain can still grow between
-// this validation and the rollback and push the rollback past the security
-// parameter, and an I/O failure mid-truncation is not predictable at all.
-// Both leave the chain needing recovery regardless -- see
-// validateAndEmitRollbackUndoEmitted for the one caller that can retry the
-// first of those instead. rollbackChainAndState (this function's caller)
-// still separately calls LedgerState.rollback after the emit, which can
-// itself fail -- reconcilePrimaryChainTipWithLedgerTip had the identical
-// shape (issue #3516) until it was closed by decoupling
-// LedgerState.rollback's durable commit from its resync-event publish
-// (wolf31o2 review, PR #3611: see rollbackWithResync/rollbackWithoutResync
-// and the reconciler's two branches). Whether the same decoupling is safe
-// to adopt here too remains tracked as issue #3817.
+// The durable record is written before the emit and before chain rollback. A
+// chain rollback deletes the block bodies, so persisting only the point after
+// the chain mutation would leave recovery unable to reconstruct the events if
+// metadata truncation then fails.
+//
+// The durable record lets startup recovery repeat an undo if the chain or
+// metadata rollback fails after publication. Reconciliation uses the same
+// outbox with blocks captured from applied ledger state before it publishes
+// its undo events.
 func (ls *LedgerState) validateAndEmitRollbackUndo(
 	point ocommon.Point,
 ) error {
@@ -252,31 +248,79 @@ func (ls *LedgerState) validateAndEmitRollbackUndo(
 func (ls *LedgerState) validateAndEmitRollbackUndoEmitted(
 	point ocommon.Point,
 ) (bool, error) {
+	existing, _, pending, loadErr := loadRollbackIntent(ls.db)
+	if loadErr != nil || (pending && !pointMatches(existing, point) &&
+		point.Slot >= existing.Slot) {
+		if err := ls.recoverRollbackIntentLocked(); err != nil {
+			return false, fmt.Errorf("complete previous rollback intent: %w", err)
+		}
+	}
 	if err := ls.chain.ValidateRollback(point); err != nil {
 		return false, err
 	}
-	blocks := ls.blocksAboveSlot(point.Slot)
+	ls.RLock()
+	currentTip := ls.currentTip
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+	resolved, err := ls.resolveRollbackTarget(point, currentTip)
+	if err != nil {
+		return false, err
+	}
+	if mithrilLedgerSlot > 0 && resolved.Slot < mithrilLedgerSlot {
+		return false, ErrRollbackExceedsMithrilBoundary
+	}
+	belowPruneFloor, pruneFloor, err := ls.rollbackBelowConsumedUtxoPruneFloor(
+		resolved,
+	)
+	if err != nil {
+		return false, fmt.Errorf("determine consumed UTxO prune floor: %w", err)
+	}
+	if belowPruneFloor {
+		return false, fmt.Errorf(
+			"%w: target slot %d, prune floor %d",
+			ErrRollbackBelowUtxoPruneFloor,
+			resolved.Slot,
+			pruneFloor,
+		)
+	}
+	// The primary chain can be ahead of the applied ledger during catch-up.
+	// No ledger state will be rolled back in that case, so do not persist an
+	// intent that a crash could later misinterpret as an interrupted rollback.
+	durableTip, err := ls.db.GetTip(nil)
+	if err != nil {
+		return false, fmt.Errorf("read durable ledger tip: %w", err)
+	}
+	if point.Slot > durableTip.Point.Slot {
+		return false, nil
+	}
+	blocks, err := ls.readBlocksAboveSlot(point.Slot)
+	if err != nil {
+		return false, fmt.Errorf("read rollback undo blocks: %w", err)
+	}
+	if len(blocks) == 0 {
+		return false, nil
+	}
+	if err := ls.ensureRollbackIntent(point, blocks); err != nil {
+		if !errors.Is(err, errRollbackIntentTooLarge) {
+			return false, err
+		}
+		ls.config.Logger.Warn(
+			"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
+			"component", "ledger",
+			"error", err,
+		)
+	}
 	ls.emitRollbackTransactionEvents(blocks)
 	return len(blocks) > 0, nil
 }
 
-// blocksAboveSlot returns the blocks a rollback to slot would discard,
-// newest first, or nil when they cannot be read.
-//
-// The descending order matters: it is the reverse of the order the blocks
-// were applied in, which is the order their effects have to be undone in, and
-// it matches the order chain.rollbackLocked itself reports rolled-back blocks
-// (it walks the chain down from the tip). BlocksAfterSlotTxn returns ascending
-// slot order, so the result is reversed here.
-//
-// It must be called before the chain is truncated, while those blocks still
-// exist. A read failure is logged and yields no undo events rather than
-// failing the rollback: the rollback itself is what keeps the ledger correct,
-// and refusing to roll back because a notification could not be built would
-// trade a subscriber's derived state for the node's own.
-func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
+// readBlocksAboveSlot returns the blocks a rollback to slot would discard,
+// newest first. It returns storage errors rather than degrading to a partial
+// read, so a caller can fail before mutating the chain without having captured
+// a durable undo payload.
+func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) {
 	if ls.config.EventBus == nil || ls.db == nil {
-		return nil
+		return nil, nil
 	}
 	// Skip the read entirely when nothing consumes ledger.tx, which is the
 	// default node: this runs under chainsyncMutex on every rollback, and
@@ -292,7 +336,7 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 	// ledger.error would otherwise stop seeing rollback decode failures.
 	if !ls.config.EventBus.HasSubscribers(TransactionEventType) &&
 		!ls.config.EventBus.HasSubscribers(LedgerErrorEventType) {
-		return nil
+		return nil, nil
 	}
 	var blocks []models.Block
 	txn := ls.db.Transaction(false)
@@ -302,23 +346,17 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 		return err
 	})
 	if err != nil {
-		ls.config.Logger.Warn(
-			"failed to read rolled-back blocks for tx undo events",
-			"component", "ledger",
-			"error", err,
-			"slot", slot,
-		)
-		return nil
+		return nil, err
 	}
 	slices.Reverse(blocks)
-	return blocks
+	return blocks, nil
 }
 
 // reconciliationUndoBlocks returns the blocks the ledger itself applied
 // between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
-// for the primary-chain/ledger divergence reconciler (issue #3516).
+// for the primary-chain/ledger divergence reconciler.
 //
-// It deliberately does not reuse blocksAboveSlot: that helper reads
+// It deliberately does not reuse readBlocksAboveSlot: that helper reads
 // whatever the primary chain's blob store currently holds above a slot,
 // which is correct for a live, not-yet-applied rollback (the blocks being
 // discarded are still there), but wrong here. By the time this reconciler
@@ -346,7 +384,8 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // connection, all considerably worse than an incomplete notification -- an
 // unresolved point is skipped, logged at error level, and counted via
 // reconciliationUndoUnresolved so the gap is observable rather than silent.
-// This is the same best-effort degradation blocksAboveSlot uses for a
+// This is the same best-effort degradation emitRollbackTransactionEvents
+// uses for a
 // decode failure: the reconciliation is what keeps the ledger correct, and
 // it must not fail because a notification could not be built.
 //
@@ -360,9 +399,9 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // blocks already has no era-agnostic durable record of applied points to
 // resolve an ancestor from, let alone build undo events for. Closing that
 // would mean adding an era-agnostic applied-block record the rest of the
-// reconciler doesn't have either -- out of scope for issue #3516, which
-// bounds and correctly sources this rewind's data, not the reconciler's
-// pre-existing era coverage. Tracked separately as issue #3778.
+// reconciler doesn't have either -- out of scope here, since the rewind bound
+// and its data sourcing are separate from the reconciler's pre-existing era
+// coverage, and remains a known gap.
 //
 // Because such a block has no row to iterate over at all, this cannot name
 // it the way an unresolvable block is named -- but it can detect that one
@@ -376,9 +415,8 @@ func (ls *LedgerState) blocksAboveSlot(slot uint64) []models.Block {
 // counted via reconciliationUndoMissingRecord, distinctly from
 // reconciliationUndoUnresolved, so an operator can tell "we know what's
 // missing but can't reach it" apart from "we don't even have a record of
-// it existing" (wolf31o2 review, PR #3611). Skipped when ancestor's own
-// block cannot be resolved (e.g., after a restart) rather than reporting a
-// false gap from a missing baseline.
+// it existing". Skipped when ancestor's own block cannot be resolved (e.g.,
+// after a restart) rather than reporting a false gap from a missing baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,

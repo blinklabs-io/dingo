@@ -223,18 +223,6 @@ var Manifest = []Index{
 		Notes:   "Policy lookup", Critical: true,
 	},
 	{
-		Name:    "idx_asset_fingerprint",
-		Table:   "asset",
-		Columns: []string{"fingerprint"},
-		Notes:   "Fingerprint lookup",
-	},
-	{
-		Name:    "idx_asset_amount",
-		Table:   "asset",
-		Columns: []string{"amount"},
-		Notes:   "Amount range scan",
-	},
-	{
 		Name:    "idx_datum_added_slot",
 		Table:   "datum",
 		Columns: []string{"added_slot"},
@@ -272,7 +260,7 @@ var Manifest = []Index{
 	// transaction written, so per-transaction cost grows with the rows
 	// already present and historical backfill turns quadratic: measured on
 	// preview, Mithril backfill fell from 3311 to 9 blocks/sec by 2%
-	// progress while its own ETA climbed from 30m to 177h (issue #3253).
+	// progress while its own ETA climbed from 30m to 177h.
 	// plutus_data, the fourth table the same loop clears, was never
 	// deferred; these three now match it.
 	{
@@ -313,8 +301,8 @@ var Manifest = []Index{
 // Removing an entry from Manifest does not restore it on databases already on
 // disk. A shipped binary whose manifest still held the entry drops it at the
 // start of a bulk-load cycle and recreates it only in the full rebuild, so a
-// database interrupted inside that window -- a multi-hour Mithril backfill,
-// for issue #3253 -- still has the index missing. The newer binary's
+// database interrupted inside that window -- a multi-hour Mithril backfill
+// -- still has the index missing. The newer binary's
 // BuildDeferredIndexes no longer carries the entry, and the versioned
 // migration that created it is already recorded complete, so
 // CREATE INDEX IF NOT EXISTS never runs again: the full-table scan the
