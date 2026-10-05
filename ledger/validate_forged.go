@@ -110,7 +110,10 @@ func (ls *LedgerState) validateForgedBodyHash(block ledger.Block) error {
 // current ledger state using an intra-block UTxO overlay. The overlay
 // accumulates outputs produced by earlier transactions so that later
 // transactions in the same block can spend them correctly.
-func (ls *LedgerState) validateForgedTxs(ctx context.Context, block ledger.Block) error {
+func (ls *LedgerState) validateForgedTxs(
+	ctx context.Context,
+	block ledger.Block,
+) error {
 	txs := block.Transactions()
 	if len(txs) == 0 {
 		return nil
@@ -124,47 +127,55 @@ func (ls *LedgerState) validateForgedTxs(ctx context.Context, block ledger.Block
 	// double-spend).
 	// createdUtxos: outputs produced within this block and not yet in the
 	// persistent UTxO set.
-	return ls.WithTxValidationSession(ctx, func(validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error, stillCurrent func() bool) error {
-		consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
-		createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
+	return ls.WithTxValidationSession(
+		ctx,
+		func(validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo) error, stillCurrent func() bool) error {
+			consumedUtxos := make(map[utxoref.Key]struct{}, len(txs)*2)
+			createdUtxos := make(map[utxoref.Key]lcommon.Utxo, len(txs)*4)
 
-		for _, tx := range txs {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if !stillCurrent() {
-				return errors.New("ledger state changed during forged transaction validation")
-			}
-			if err := validate(tx, consumedUtxos, createdUtxos); err != nil {
-				return fmt.Errorf(
-					"tx %s in forged block at slot %d: %w",
-					tx.Hash(),
-					block.SlotNumber(),
-					err,
-				)
+			for _, tx := range txs {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if !stillCurrent() {
+					return errors.New(
+						"ledger state changed during forged transaction validation",
+					)
+				}
+				if err := validate(tx, consumedUtxos, createdUtxos); err != nil {
+					return fmt.Errorf(
+						"tx %s in forged block at slot %d: %w",
+						tx.Hash(),
+						block.SlotNumber(),
+						err,
+					)
+				}
+
+				// Advance the overlay with this transaction's effects.
+				for _, utxo := range tx.Produced() {
+					createdUtxos[utxoref.ForUtxo(utxo)] = utxo
+				}
+				// Use Consumed() instead of Inputs(): for a phase-2 failed Plutus tx
+				// the regular inputs are NOT spent; only the collateral inputs are.
+				// Inputs() would falsely mark regular inputs as consumed and reject
+				// a later tx in the same block that spends those still-valid UTxOs.
+				for _, input := range tx.Consumed() {
+					consumedUtxos[utxoref.ForInput(input)] = struct{}{}
+				}
 			}
 
-			// Advance the overlay with this transaction's effects.
-			for _, utxo := range tx.Produced() {
-				createdUtxos[utxoref.ForUtxo(utxo)] = utxo
-			}
-			// Use Consumed() instead of Inputs(): for a phase-2 failed Plutus tx
-			// the regular inputs are NOT spent; only the collateral inputs are.
-			// Inputs() would falsely mark regular inputs as consumed and reject
-			// a later tx in the same block that spends those still-valid UTxOs.
-			for _, input := range tx.Consumed() {
-				consumedUtxos[utxoref.ForInput(input)] = struct{}{}
-			}
-		}
-
-		return nil
-	})
+			return nil
+		},
+	)
 }
 
 // ValidateBlockReferenceScripts checks a locally built block's aggregate
 // reference-script budget before adoption. It does not run header crypto or
 // transaction scripts, and is required even when full self-validation is off.
-func (ls *LedgerState) ValidateBlockReferenceScripts(ctx context.Context, block ledger.Block) error {
+func (ls *LedgerState) ValidateBlockReferenceScripts(
+	ctx context.Context,
+	block ledger.Block,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -178,15 +189,17 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(ctx context.Context, block 
 	if ls.skipDijkstraTxValidation(snapshot.currentEra.Id) {
 		return nil
 	}
-	pp := snapshot.currentPParams
-	if uint(block.Era().Id)+1 == snapshot.currentEra.Id &&
-		snapshot.prevEraPParams != nil {
-		pp = snapshot.prevEraPParams
-	}
-	return ls.db.Transaction(ctx, false).
-		Do(func(txn *database.Txn) error {
-			lv := &LedgerView{txn: txn, ls: ls}
-			err := validateBlockReferenceScripts(block, pp, lv)
-			return storageFaultOrErr(lv, err)
-		})
+
+	pp := referenceScriptParams(
+		block,
+		snapshot.currentEra,
+		ls.eraList(),
+		snapshot.currentPParams,
+		snapshot.prevEraPParams,
+	)
+	return ls.db.Transaction(ctx, false).Do(func(txn *database.Txn) error {
+		lv := &LedgerView{txn: txn, ls: ls}
+		err := validateBlockReferenceScripts(block, pp, lv)
+		return storageFaultOrErr(lv, err)
+	})
 }

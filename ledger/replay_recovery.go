@@ -630,11 +630,9 @@ func isRewardWithdrawalMismatch(err error) bool {
 // itself, after validation has already accepted the amount against that same
 // row (or with validation disabled, on blocks this node has already accepted
 // as trusted). The two layers disagreeing about one balance is a property of
-// local state, not of the block, so it is the state-specific source. Note that
-// it reaches the pipeline as a plain apply error from LedgerDelta.apply
-// ("record transaction"), not as a *txValidationError, so today only the
-// generic restart path observes it; the classification here is what a future
-// wrapping of apply errors would need.
+// local state, not of the block, so it is the state-specific source.
+// LedgerDelta.apply wraps it in a *txValidationError so it reaches this
+// classification.
 func isRewardWithdrawalStateDivergence(err error) bool {
 	return errors.Is(err, models.ErrRewardWithdrawalExceedsBalance)
 }

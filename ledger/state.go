@@ -4090,8 +4090,10 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		}
 		ls.config.Logger.Warn(
 			"rollback undo payload exceeds durable outbox limit; continuing with live delivery",
-			"component", "ledger",
-			"error", err,
+			"component",
+			"ledger",
+			"error",
+			err,
 		)
 	}
 	// Bracket every rollback mutation so split reward precomputation cannot
@@ -7986,9 +7988,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					if err != nil {
 						ls.config.Logger.Debug(
 							"could not position persisted Byron parent for envelope validation",
-							"component", "ledger",
-							"slot", snapshotTip.Point.Slot,
-							"error", err,
+							"component",
+							"ledger",
+							"slot",
+							snapshotTip.Point.Slot,
+							"error",
+							err,
 						)
 					}
 					parentEnvelope = positioned
@@ -8821,15 +8826,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := ls.verifyDeferredBlockHeaderState(ctx, txn, point, block); err != nil {
 		return nil, err
 	}
+	// The aggregate reference-script check and the per-transaction validators
+	// resolve the same inputs, so one prefetch serves both. It runs after any
+	// endorser transactions have applied and before this block's own mutations.
+	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	if shouldValidate {
+		prefetchedUtxos = ls.prefetchBlockUtxos(ctx, txn, block.Transactions())
+	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
 	// The explicitly non-validating Musashi prototype keeps its trust policy.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
-		referenceParams := pparams
-		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
-			referenceParams = prevEraPParams
+		referenceParams := referenceScriptParams(
+			block, currentEra, ls.eraList(), pparams, prevEraPParams,
+		)
+		refScriptsLV := &LedgerView{
+			txn:             txn,
+			ls:              ls,
+			prefetchedUtxos: prefetchedUtxos,
 		}
-		refScriptsLV := &LedgerView{txn: txn, ls: ls}
 		err := validateBlockReferenceScripts(
 			block,
 			referenceParams,
@@ -8852,10 +8867,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
-	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
-	if shouldValidate {
-		prefetchedUtxos = ls.prefetchBlockUtxos(ctx, txn, block.Transactions())
-	}
+
 	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
@@ -13318,7 +13330,9 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 			return fmt.Errorf("leios endorser transaction %d is empty", i)
 		}
 		if uint64(len(txCbor)) > (16<<20)-totalBytes {
-			return errors.New("leios endorser block exceeds validation byte limit")
+			return errors.New(
+				"leios endorser block exceeds validation byte limit",
+			)
 		}
 		totalBytes += uint64(len(txCbor))
 	}
@@ -13361,7 +13375,11 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					txCbor,
 				)
 				if err != nil {
-					return fmt.Errorf("decode leios endorser transaction %d: %w", i, err)
+					return fmt.Errorf(
+						"decode leios endorser transaction %d: %w",
+						i,
+						err,
+					)
 				}
 				if err := validate(tx, consumed, created); err != nil {
 					return fmt.Errorf(
@@ -13381,7 +13399,11 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 					header.BlockNumber(),
 				)
 				if applyErr != nil {
-					return fmt.Errorf("apply leios endorser transaction %d: %w", i, applyErr)
+					return fmt.Errorf(
+						"apply leios endorser transaction %d: %w",
+						i,
+						applyErr,
+					)
 				}
 				for _, utxo := range tx.Produced() {
 					created[utxoref.ForUtxo(utxo)] = utxo

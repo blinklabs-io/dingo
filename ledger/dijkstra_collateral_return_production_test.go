@@ -57,6 +57,8 @@ type dijkstraCollateralReturnFixture struct {
 	offsets  *database.BlockIngestionResult
 	inputIds [][]byte
 	startTip ochainsync.Tip
+	key      ed25519.PrivateKey
+	address  lcommon.Address
 }
 
 func (fx *dijkstraCollateralReturnFixture) rawBlock() chain.RawBlock {
@@ -234,6 +236,8 @@ func newDijkstraCollateralReturnFixture(
 		offsets:  offsets,
 		inputIds: [][]byte{regularInputId, collateralInputId},
 		startTip: startTip,
+		key:      privateKey,
+		address:  paymentAddress,
 	}
 }
 
@@ -241,6 +245,21 @@ func newDijkstraCollateralReturnBlock(
 	t *testing.T,
 	tx *gdijkstra.DijkstraTransaction,
 ) *gdijkstra.DijkstraBlock {
+	t.Helper()
+	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(
+		dijkstraCollateralReturnBlockCbor(t, tx),
+	)
+	require.NoError(t, err)
+	return decoded
+}
+
+// dijkstraCollateralReturnBlockCbor encodes a block carrying tx without
+// decoding it, so a transaction that the decoder rejects can still be framed
+// as a block.
+func dijkstraCollateralReturnBlockCbor(
+	t *testing.T,
+	tx *gdijkstra.DijkstraTransaction,
+) []byte {
 	t.Helper()
 	block := &gdijkstra.DijkstraBlock{
 		BlockHeader: &gdijkstra.DijkstraBlockHeader{
@@ -264,9 +283,7 @@ func newDijkstraCollateralReturnBlock(
 	block.BlockHeader.Body.BlockBodySize = uint64(len(bodyCbor))
 	blockCbor, err := block.MarshalCBOR()
 	require.NoError(t, err)
-	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(blockCbor)
-	require.NoError(t, err)
-	return decoded
+	return blockCbor
 }
 
 func newDijkstraCollateralReturnReplayFixture(
@@ -298,19 +315,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		fx := newDijkstraCollateralReturnFixture(t, lcommon.AddressTypeKeyPointer)
 		assertDijkstraPointerReturnFailure(t, fx.ls.ValidateTx(fx.tx))
 
-		pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
-			Validator:       fx.ls,
-			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-			PromRegistry:    prometheus.NewRegistry(),
-			MempoolCapacity: 1024 * 1024,
-		})
-		require.NoError(t, err)
-		require.NoError(t, pool.Start(context.Background()))
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			require.NoError(t, pool.Stop(ctx))
-		})
+		pool := newDijkstraTestMempool(t, fx.ls)
 		assertDijkstraPointerReturnFailure(
 			t,
 			pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor),
@@ -323,19 +328,7 @@ func TestDijkstraCollateralReturnPointerThroughLedgerAndMempool(t *testing.T) {
 		fx := newDijkstraCollateralReturnFixture(t, lcommon.AddressTypeKeyNone)
 		require.NoError(t, fx.ls.ValidateTx(fx.tx))
 
-		pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
-			Validator:       fx.ls,
-			Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
-			PromRegistry:    prometheus.NewRegistry(),
-			MempoolCapacity: 1024 * 1024,
-		})
-		require.NoError(t, err)
-		require.NoError(t, pool.Start(context.Background()))
-		t.Cleanup(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			require.NoError(t, pool.Stop(ctx))
-		})
+		pool := newDijkstraTestMempool(t, fx.ls)
 		require.NoError(t, pool.AddTransaction(uint(gdijkstra.TxTypeDijkstra), fx.txCbor))
 		require.Len(t, pool.Transactions(), 1)
 	})
@@ -450,4 +443,25 @@ func TestDijkstraCollateralReturnPointerRejectedDuringBlockReplay(t *testing.T) 
 		require.NoError(t, err)
 		require.Equal(t, initialUtxos[index], utxo)
 	}
+}
+
+func newDijkstraTestMempool(
+	t *testing.T,
+	ls *LedgerState,
+) *dingomempool.Mempool {
+	t.Helper()
+	pool, err := dingomempool.NewMempool(dingomempool.MempoolConfig{
+		Validator:       ls,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		PromRegistry:    prometheus.NewRegistry(),
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, pool.Start(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, pool.Stop(ctx))
+	})
+	return pool
 }
