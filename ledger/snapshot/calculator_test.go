@@ -944,7 +944,8 @@ func TestCalculateEpochBoundaryStakeUsesLiveAggregate(t *testing.T) {
 
 	// Make the maintained live aggregate deliberately differ from the
 	// historical UTxO reconstruction. The authoritative SNAP-point path must
-	// consume this table directly; rebuilding history here is issue #2948.
+	// consume this table directly; rebuilding history here hangs ledger apply
+	// at the epoch boundary.
 	raw := snapshotSQLDB(t, db)
 	_, err := raw.Exec(
 		"UPDATE reward_live_stake SET total_stake = '75' WHERE staking_key = ?",

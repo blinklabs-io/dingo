@@ -41,16 +41,16 @@ type StakeDistributionProvider interface {
 	// snapshot. Reading them through two separate transactions lets a
 	// snapshot re-capture land between them and yields a sigma whose
 	// numerator and denominator come from different writes -- a leader
-	// schedule that is not reproducible from either snapshot alone
-	// (dingo #3815). The pair is returned by one method precisely so that
-	// no implementation can express the torn read.
+	// schedule that is not reproducible from either snapshot alone.
+	// The pair is returned by one method precisely so that no implementation
+	// can express the torn read.
 	//
 	// The denominator MUST come from the same store accessor the header
 	// verification path resolves it through
 	// (Metadata().GetTotalActiveStake), so that a node cannot forge against
-	// one denominator and validate against another (dingo #3814). See the
-	// reference-rule commentary below this interface for what that value
-	// is and why it must not be re-derived per code path.
+	// one denominator and validate against another. See the reference-rule
+	// commentary below this interface for what that value is and why it must
+	// not be re-derived per code path.
 	GetPoolAndTotalActiveStake(
 		epoch uint64,
 		poolKeyHash []byte,
@@ -59,9 +59,8 @@ type StakeDistributionProvider interface {
 
 // The sigma denominator, per the cardano-ledger reference implementation
 // (IntersectMBO/cardano-ledger@9bac33a, master, 2026-09-03). Written down
-// here because two prior investigations (dingo #2798 and #3626) were sent to
-// the wrong cause by a stale comment that called this "the sum of all pool
-// stakes".
+// here because two prior investigations were sent to the wrong cause by a stale
+// comment that called this "the sum of all pool stakes".
 //
 // The reference computes the denominator as a sum over resolved stake
 // CREDENTIALS, not over the per-pool distribution:
@@ -109,7 +108,7 @@ type StakeDistributionProvider interface {
 //
 // Dingo relies on the same invariant, maintained at the same point: see
 // ledger/poolreap.go, which calls ClearDelegationsToRetiredPool for each
-// reaped pool (dingo #3794 -- failing to clear inflates the total active
+// reaped pool (failing to clear inflates the total active
 // stake above the network's and makes every other pool's threshold too
 // small). Dingo also runs its SNAP stake read before POOLREAP, matching
 // EPOCH's sub-rule order (Conway/Rules/Epoch.hs:289-294; dingo
@@ -118,7 +117,7 @@ type StakeDistributionProvider interface {
 // Consequences for this package: summing the numerators is the correct
 // denominator ONLY while that invariant holds. It is therefore not a safe
 // thing to derive independently in a second code path -- hence the single
-// accessor required below (dingo #3814).
+// accessor required below.
 //
 // One thing the reference does NOT do: there is no stake-credential
 // inactivity gate. CIP-0163-style inactivity in the reference is DRep
@@ -736,9 +735,9 @@ func (e *Election) validatePersistedSchedule(
 	}
 
 	// Reject schedules whose compute path is no longer compatible with the
-	// running build — pre-PR persisted schedules were derived without the
-	// per-era consensus mode and would mis-pick leader slots if reused.
-	// Pre-format-version entries decode to FormatVersion == 0.
+	// running build — persisted schedules from before the format version were
+	// derived without the per-era consensus mode and would mis-pick leader
+	// slots if reused. Pre-format-version entries decode to FormatVersion == 0.
 	if schedule.FormatVersion != ScheduleFormatVersion {
 		return false, fmt.Sprintf(
 			"schedule format version mismatch: got %d want %d",
@@ -779,7 +778,7 @@ func (e *Election) validatePersistedSchedule(
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 	// One atomic read: revalidating a persisted schedule against a torn
 	// (numerator, denominator) pair could accept a schedule that matches
-	// neither snapshot, or discard a still-valid one (dingo #3815).
+	// neither snapshot, or discard a still-valid one.
 	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
 		snapshotEpoch,
 		e.poolId[:],
@@ -842,8 +841,8 @@ func (e *Election) computeSchedule(
 
 	// Read the sigma numerator and denominator together. Two separate
 	// reads let a snapshot re-capture land between them, producing a
-	// schedule computed from a sigma that exists in no single snapshot
-	// (dingo #3815). The zero-stake short circuit below therefore happens
+	// schedule computed from a sigma that exists in no single snapshot.
+	// The zero-stake short circuit below therefore happens
 	// after the pair is in hand rather than between the two reads.
 	stakeLookupStart := time.Now()
 	poolStake, totalStake, err := e.stakeProvider.GetPoolAndTotalActiveStake(
@@ -956,7 +955,7 @@ func (e *Election) computeSchedule(
 	// schedule that disagrees with `cardano-cli query leadership-schedule` can
 	// be diffed against the reference node's `query stake-snapshot` and
 	// `query protocol-state` from logs alone, without re-running with extra
-	// instrumentation (dingo #2798). Never log per slot.
+	// instrumentation. Never log per slot.
 	e.logger.Info(
 		"leader schedule calculated",
 		"component", "leader",

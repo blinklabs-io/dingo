@@ -737,7 +737,7 @@ func TestTransactionContextDeadlineAbortsBlockedBegin(t *testing.T) {
 }
 
 // TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction is the
-// regression test for the retention bug raised against this PR: production
+// regression test for a statement-retention bug: production
 // applies many outputs within one shared write transaction (a whole block
 // batch via LedgerDeltaBatch.apply, or the entire genesis UTxO set in one
 // txn.Do), not one transaction per output, so insertUtxoModel's INSERT and
@@ -802,4 +802,16 @@ func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
 		outputCount,
 		retained,
 	)
+}
+
+func TestUpdatePlannerStatsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.NoError(t, store.UpdatePlannerStatsContext(t.Context()))
 }

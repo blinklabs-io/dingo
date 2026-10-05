@@ -41,11 +41,12 @@ const accountFetchConcurrency = 5
 var afterChunkCancelForTest func()
 
 // ResolveKoiosAccountUniverse returns the bech32 stake address of every
-// account Koios has ever seen — the Koios side of #3097's address universe.
-// Hoist this once per Fetch run (or once per Observer fetch cycle) and reuse
-// it across every epoch via FetchAccountRewardsForEpoch's addressUniverse
-// parameter, exactly the way resolvePoolUniverse's poolIDs/firstActiveEpochs
-// are hoisted once and reused across epochs for pool history.
+// account Koios has ever seen — the Koios side of the per-account address
+// universe. Hoist this once per Fetch run (or once per Observer fetch cycle)
+// and reuse it across every epoch via FetchAccountRewardsForEpoch's
+// addressUniverse parameter, exactly the way resolvePoolUniverse's
+// poolIDs/firstActiveEpochs are hoisted once and reused across epochs for pool
+// history.
 func ResolveKoiosAccountUniverse(
 	ctx context.Context,
 	koios *KoiosClient,
@@ -61,7 +62,7 @@ func ResolveKoiosAccountUniverse(
 // the cache, for a caller that resolves the universe once per epoch rather
 // than once per run. The crawl is 304 sequential /account_list requests for
 // Preview's 303k accounts, and paying it per epoch is why the in-process
-// observer could not keep pace with a syncing node (dingo #3796).
+// observer could not keep pace with a syncing node.
 //
 // notBefore is the point the cached crawl has to be no older than — the end of
 // the epoch being checked. An account that earned a reward in a closed epoch
@@ -225,15 +226,15 @@ func BuildAccountAddressUniverse(
 // addressUniverse is split into koiosAccountChunkSize-sized groups and
 // fetched with accountFetchConcurrency-bounded parallelism, mirroring
 // fetchEpoch's per-pool worker pool. This is the minimal viable
-// chunking/concurrency for #3097 — bounding a single request's blast radius
+// chunking/concurrency — bounding a single request's blast radius
 // and the outbound payload size, nothing more. Byte-size-aware request
 // shaping, mid-fetch resumable checkpointing across process restarts,
-// adaptive rate-limiting, and duplicate-page detection are #3099's scope;
-// see this function's own scope-boundary note in ARCHITECTURE.md's Koios
-// Parity Tracker "Per-account exact parity (#3097)" subsection. A process
-// restart mid-fetch simply redoes the whole epoch's account fetch from
-// scratch on the next attempt — safe (idempotent, same final state) even if
-// not maximally efficient, exactly like FetchEpochWithClient's identical
+// adaptive rate-limiting, and duplicate-page detection are out of scope for
+// this base chunking; see this function's own scope-boundary note in
+// ARCHITECTURE.md's Koios Parity Tracker "Per-account exact parity" subsection.
+// A process restart mid-fetch simply redoes the whole epoch's account fetch
+// from scratch on the next attempt — safe (idempotent, same final state) even
+// if not maximally efficient, exactly like FetchEpochWithClient's identical
 // note about the pool-history fetch.
 //
 // On a permanent Koios error (quota/auth) mid-fetch, remaining chunks are
@@ -291,7 +292,7 @@ func FetchAccountRewardsForEpoch(
 // signature — every existing direct caller/test of that function keeps
 // working unchanged.
 //
-// dingo #3099 adds durable, resumable checkpointing on top of #3097's
+// This function adds durable, resumable checkpointing on top of the
 // original single-shot implementation: each chunk's fetched rows and
 // per-address "checked" markers are saved to
 // koios_account_fetch_staged_rows/koios_account_checked
@@ -302,7 +303,7 @@ func FetchAccountRewardsForEpoch(
 // fetch from scratch. The final commit step — reading back every staged row
 // (Cache.GetStagedAccountRows) and calling the existing, unmodified
 // Cache.CommitAccountRewardsForEpoch exactly once — is otherwise identical to
-// #3097's original single-shot commit: still one atomic, all-or-nothing
+// the original single-shot commit: still one atomic, all-or-nothing
 // write, still gated by graceHours/epochEndTime the same way, still never
 // setting complete=true except when every chunk in the current plan has
 // succeeded.
@@ -537,7 +538,7 @@ outer:
 				// fetchCtx (this call's own per-epoch context derived from
 				// ctx above), never the caller's shared multi-epoch context,
 				// so an isolated transient failure still just drops this one
-				// epoch for a later retry — and, unlike #3097's original
+				// epoch for a later retry — and, unlike the original
 				// implementation, whichever chunks already checkpointed
 				// before this error fired survive for that later retry to
 				// resume from.
@@ -708,7 +709,7 @@ outer:
 // time" would let an empty account fetch bypass the grace gate and commit
 // as complete, suppressing retries and risking a false PASS.
 //
-// chunkSize/chunkMaxBytes (dingo #3099) thread operator-configured
+// chunkSize/chunkMaxBytes thread operator-configured
 // --account-chunk-size/--account-chunk-max-bytes through to
 // fetchAccountRewardsForEpoch's dual-bounded chunking; 0 for either means
 // "use the package default" (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault).

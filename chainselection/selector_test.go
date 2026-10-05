@@ -2749,7 +2749,7 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 // lone-claim bound: a frontier beyond the localTip+2*K catch-up ceiling that no
 // other connection corroborates stays rejected on every retry, because a
 // rejected frontier is never recorded as a reference. The gap (>4M blocks at
-// K=432) matches the live report on dingo #3624.
+// K=432) matches a live Preview report.
 func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(
 	t *testing.T,
 ) {
@@ -4099,7 +4099,7 @@ func TestValencyOneUpstreamBeyondKIsRetainedNotEvicted(t *testing.T) {
 }
 
 // TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber exercises
-// normal multi-peer selection (blinklabs-io/dingo#4413): an incumbent peer
+// normal multi-peer selection: an incumbent peer
 // on a Byron regular tip, and a second peer that delivers the EBB successor
 // sharing the same protocol block number, the way Byron routes an EBB and
 // its predecessor. Without the era-aware tiebreak this is exactly
@@ -4215,7 +4215,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so the call that drove
+// EventBus.PublishOrdered, so the call that drove
 // the decision returns before the lane worker has handed the event to any
 // subscriber. A lane is a FIFO drained by exactly one worker, so a sentinel
 // enqueued after those switches is delivered after them: receiving it back is
@@ -4746,7 +4746,7 @@ func TestUnadvertisedTipIsNotSameChainEvidence(t *testing.T) {
 // chainselection.peer_activity subscription. The mechanism under test is
 // buffer-size independent: a handler that stops returning stops draining, and
 // the buffer only decides how long that takes to become visible. In the
-// blinklabs-io/dingo#3550 Preview run the 1024-slot buffer took 12h31m of
+// Preview run the 1024-slot buffer took 12h31m of
 // keepalive traffic to fill, which is exactly why the buffer is shrunk here
 // rather than the events slowed down.
 const peerActivityStallBuffer = 4
@@ -4826,7 +4826,7 @@ func newStalledSelectionFixture(
 
 // A blocked downstream consumer must not stop the internal
 // chainselection.peer_activity subscriber from draining. The Preview run in
-// blinklabs-io/dingo#3550 shows the opposite: the handler stopped returning,
+// shows the opposite: the handler stopped returning,
 // its 1024-slot buffer filled over the next 12h31m, and from then on every
 // keepalive response parked a protocol goroutine inside EventBus.Publish
 // (ouroboros/keepalive.go) with 299 of them blocked by the end of the log.

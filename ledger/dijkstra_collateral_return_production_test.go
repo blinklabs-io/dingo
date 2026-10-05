@@ -275,29 +275,10 @@ func newDijkstraCollateralReturnReplayFixture(
 ) *dijkstraCollateralReturnFixture {
 	t.Helper()
 	fx := newDijkstraCollateralReturnFixture(t, returnAddressType)
-	cm, err := chain.NewManager(fx.db, nil)
-	require.NoError(t, err)
-	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{fx.rawBlock()}))
-
-	ls, err := NewLedgerState(LedgerStateConfig{
-		Database:              fx.db,
-		ChainManager:          cm,
-		CardanoNodeConfig:     fx.ls.config.CardanoNodeConfig,
-		Logger:                fx.ls.config.Logger,
-		PromRegistry:          prometheus.NewRegistry(),
-		ValidateHistorical:    true,
-		EnableDijkstra:        true,
-		ManualBlockProcessing: true,
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, ls.Close()) })
-	ls.currentEra = eras.DijkstraEraDesc
-	ls.currentPParams = fx.ls.currentPParams
-	ls.currentEpoch = fx.ls.currentEpoch
-	ls.epochCache = []models.Epoch{ls.currentEpoch}
-	ls.currentTip = ochainsync.Tip{}
-	ls.publishSnapshotsLocked()
-	require.NoError(t, cm.SetLedger(ls))
+	ls := newReplayTestLedger(
+		t, fx.db, fx.block, uint(gledger.BlockTypeDijkstra),
+		eras.DijkstraEraDesc, fx.ls.currentPParams,
+	)
 	fx.ls = ls
 	return fx
 }

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -35,9 +36,10 @@ import (
 )
 
 // requiredDatumFixture is a script-locked UTxO carrying a datum hash, plus a
-// key-locked collateral UTxO, both seeded in the database.
+// collateral UTxO locked by key, both seeded in the database.
 type requiredDatumFixture struct {
 	db             *database.Database
+	key            ed25519.PrivateKey
 	script         lcommon.Script
 	datum          lcommon.Datum
 	spendTxId      []byte
@@ -61,7 +63,10 @@ func newRequiredDatumFixture(
 ) *requiredDatumFixture {
 	t.Helper()
 	f := &requiredDatumFixture{
-		db:             newTestDB(t),
+		db: newTestDB(t),
+		key: ed25519.NewKeyFromSeed(
+			bytes.Repeat([]byte{0xd3}, ed25519.SeedSize),
+		),
 		script:         script,
 		datum:          decodeRequiredDatum(t),
 		spendTxId:      bytes.Repeat([]byte{0xd1}, 32),
@@ -77,7 +82,7 @@ func newRequiredDatumFixture(
 	keyAddr, err := lcommon.NewAddressFromParts(
 		lcommon.AddressTypeKeyNone,
 		lcommon.AddressNetworkTestnet,
-		bytes.Repeat([]byte{0x44}, lcommon.AddressHashSize),
+		lcommon.Blake2b224Hash(f.key.Public().(ed25519.PublicKey)).Bytes(),
 		nil,
 	)
 	require.NoError(t, err)
@@ -166,6 +171,18 @@ func conwayRequiredDatumBlock(
 		nil,
 	})
 	require.NoError(t, err)
+	return conwayTestBlock(t, txCbor, uint(lcommon.ProtocolVersionPlomin), slot)
+}
+
+// conwayTestBlock wraps one encoded Conway transaction in a block at slot
+// whose header announces major, and returns it with the transaction's offset.
+func conwayTestBlock(
+	t *testing.T,
+	txCbor []byte,
+	major uint,
+	slot uint64,
+) (*conway.ConwayBlock, *database.BlockIngestionResult) {
+	t.Helper()
 	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
 	require.NoError(t, err)
 	block := &conway.ConwayBlock{
@@ -179,8 +196,8 @@ func conwayRequiredDatumBlock(
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot
-	block.BlockHeader.Body.ProtoVersion.Major = 10
-	if !valid {
+	block.BlockHeader.Body.ProtoVersion.Major = uint64(major)
+	if !tx.IsValid() {
 		block.InvalidTransactions = []uint{0}
 	}
 	encoded, err := cbor.EncodeGeneric(block)

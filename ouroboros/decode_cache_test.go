@@ -66,7 +66,7 @@ func benchConwayHeaderFixture(b *testing.B) (headerType uint, raw []byte) {
 
 // --- Blocks -----------------------------------------------------------
 
-// BenchmarkBlockDecodeDirect is the pre-#489 baseline: decode every delivery
+// BenchmarkBlockDecodeDirect is the baseline: decode every delivery
 // directly, no cache, no hashing, no locking. Every other block benchmark
 // below should be read relative to this number.
 func BenchmarkBlockDecodeDirect(b *testing.B) {
@@ -134,7 +134,7 @@ func BenchmarkBlockDecodeCacheAllUnique(b *testing.B) {
 	}
 }
 
-// BenchmarkBlockDecodeConcurrentDirect is the concurrent pre-#489 baseline:
+// BenchmarkBlockDecodeConcurrentDirect is the concurrent baseline:
 // many simulated peer connections decoding in parallel with no shared state
 // at all, so it should scale cleanly with GOMAXPROCS.
 func BenchmarkBlockDecodeConcurrentDirect(b *testing.B) {
@@ -916,7 +916,7 @@ func TestDecodeCacheConcurrentDifferentKeysDoNotSerialize(t *testing.T) {
 }
 
 // TestDecodeCacheNoGoroutineLeakOnFailure covers the failure-fan-out case
-// discussed for #489: when N callers are waiting on one in-flight decode and
+// when N callers are waiting on one in-flight decode and
 // it fails, every waiter must be woken with that failure, not left hanging.
 func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 	t.Parallel()
@@ -978,18 +978,18 @@ func TestDecodeCacheNoGoroutineLeakOnFailure(t *testing.T) {
 }
 
 // TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey is the regression
-// test for dingo #3511: decodeFn panicking (CBOR decode on adversarial bytes
-// can, in principle, panic instead of erroring) used to leave the key's
-// in-flight claim held and any concurrent waiters parked forever, since
-// nothing ever closed their channels or released the claim; a later fix made
-// getOrDecode recover and release waiters but still re-raised the panic to
-// the leader's own caller, letting a decoder panic escape uncontained into
-// the calling protocol worker. This confirms the current behavior: every
-// caller -- the leader that actually ran decodeFn included -- gets back a
-// normal error instead of a panic, the in-flight claim is released, and --
-// since the panic is now a cached failure like any other -- a later call for
-// the identical bytes fails fast without invoking decodeFn (and therefore
-// without panicking) again.
+// test for panic containment: decodeFn panicking (CBOR decode on adversarial
+// bytes can, in principle, panic instead of erroring) used to leave the key's
+// in-flight claim held and any concurrent waiters parked forever, since nothing
+// ever closed their channels or released the claim; a later fix made
+// getOrDecode recover and release waiters but still re-raised the panic to the
+// leader's own caller, letting a decoder panic escape uncontained into the
+// calling protocol worker. This confirms the current behavior: every caller --
+// the leader that actually ran decodeFn included -- gets back a normal error
+// instead of a panic, the in-flight claim is released, and -- since the panic
+// is now a cached failure like any other -- a later call for the identical
+// bytes fails fast without invoking decodeFn (and therefore without panicking)
+// again.
 func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 	t.Parallel()
 
@@ -1065,7 +1065,7 @@ func TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey(t *testing.T) {
 // claim would never be released, and every current and future waiter for
 // these exact bytes would block forever. This confirms a panic(nil)
 // decodeFn is still detected and still finishes the entry and wakes waiters,
-// exactly like panicking with any other value, and (dingo #3511) that
+// exactly like panicking with any other value, and that
 // getOrDecode itself returns a normal error instead of re-raising.
 func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 	t *testing.T,
@@ -1106,8 +1106,8 @@ func TestDecodeCachePanicNilDuringDecodeDoesNotStrandWaitersOrKey(
 }
 
 // TestDecodeWithPanicSafeMetricsRecordsMissOnPanic is the regression test for
-// dingo #3511: a decodeFn panic must be fully contained by getOrDecode (see
-// TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so
+// panic containment: a decodeFn panic must be fully contained by getOrDecode
+// (see TestDecodeCachePanicDuringDecodeDoesNotStrandWaitersOrKey above), so
 // decodeWithPanicSafeMetrics returns normally to
 // blockfetchClientBlockRaw/chainsyncClientRollForwardRaw with a plain error
 // instead of letting the panic escape into the calling protocol worker, and
@@ -1477,7 +1477,7 @@ func TestHeaderDecodeCacheIntegrationRealConwayHeader(t *testing.T) {
 }
 
 // TestBlockDecodeCacheCorruptedDeliveryDoesNotContaminateGoodEntry covers the
-// "4 peers, one sends a corrupted copy" scenario discussed for #489: a
+// "4 peers, one sends a corrupted copy" scenario: a
 // tampered copy of a real block hashes to a different key than the genuine
 // bytes, so it is decoded (and fails) completely independently, and can
 // never poison the cache entry the honest bytes produce.

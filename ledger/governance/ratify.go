@@ -125,8 +125,13 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	// DRep approval: actions with no DRep gate or a zero threshold pass
 	// automatically. Otherwise requires
 	// yesStake/(totalStake-abstainStake) >= threshold per CIP-1694.
+	// CIP-1694 chooses UpdateCommittee thresholds from the presence of an
+	// elected committee in enact state. A missing committee without an
+	// enacted NoConfidence action is still absent; conversely, a committee
+	// remains present when its members have all expired.
+	committeePresent := !in.CommitteeAbsent
 	drepThreshold := getDRepThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParameterChange, committeePresent,
 	)
 	if inBootstrap || drepThreshold == nil || drepThreshold.Sign() == 0 {
 		decision.DRepApproved = true
@@ -139,7 +144,7 @@ func ShouldRatify(in RatifyInputs) RatifyDecision {
 	// threshold is nil and approval is automatic. Others require
 	// yesStake/(totalStake-abstainStake) >= threshold of the pool snapshot.
 	spoThreshold := getSPOThreshold(
-		actionType, in.PParams, in.ParameterChange, in.CommitteeNoConfidence,
+		actionType, in.PParams, in.ParameterChange, committeePresent,
 	)
 	if spoThreshold == nil || spoThreshold.Sign() == 0 {
 		decision.SPOApproved = true
@@ -204,13 +209,13 @@ func committeeTermsWithinLimit(
 // type, or nil if DReps do not vote on this action. For ParameterChange
 // the threshold depends on which parameter groups the decoded action touches;
 // a nil action selects the most restrictive group.
-// committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
-// for UpdateCommittee when the committee is in a no-confidence state.
+// committeePresent selects CommitteeNormal when enact state contains an
+// elected committee, and CommitteeNoConfidence when it does not.
 func getDRepThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
 	parameterChange lcommon.ParameterChangeGovAction,
-	committeeNoConfidence bool,
+	committeePresent bool,
 ) *big.Rat {
 	t := &pparams.DRepVotingThresholds
 	switch actionType {
@@ -218,11 +223,10 @@ func getDRepThreshold(
 		// CIP-1694 Motion of No Confidence uses MotionNoConfidence.
 		return rateToRat(t.MotionNoConfidence)
 	case lcommon.GovActionTypeUpdateCommittee:
-		// Per CIP-1694: when the committee is already in an
-		// explicitly enacted no-confidence state, proposals to seat a
-		// new committee are evaluated against CommitteeNoConfidence;
-		// otherwise CommitteeNormal applies.
-		if committeeNoConfidence {
+		// Per CIP-1694, threshold selection depends on whether enact
+		// state contains an elected committee, not on the previous
+		// committee-purpose action's type.
+		if !committeePresent {
 			return rateToRat(t.CommitteeNoConfidence)
 		}
 		return rateToRat(t.CommitteeNormal)
@@ -249,13 +253,13 @@ func getDRepThreshold(
 // not vote and approval is automatic. For ParameterChange, the SPO
 // threshold only applies when the decoded action touches the security
 // parameter group; callers without the decoded action receive nil.
-// committeeNoConfidence selects CommitteeNoConfidence over CommitteeNormal
-// for UpdateCommittee when the committee is in a no-confidence state.
+// committeePresent selects CommitteeNormal when enact state contains an
+// elected committee, and CommitteeNoConfidence when it does not.
 func getSPOThreshold(
 	actionType lcommon.GovActionType,
 	pparams *conway.ConwayProtocolParameters,
 	parameterChange lcommon.ParameterChangeGovAction,
-	committeeNoConfidence bool,
+	committeePresent bool,
 ) *big.Rat {
 	t := &pparams.PoolVotingThresholds
 	switch actionType {
@@ -264,9 +268,10 @@ func getSPOThreshold(
 		// for SPOs as well.
 		return rateToRat(t.MotionNoConfidence)
 	case lcommon.GovActionTypeUpdateCommittee:
-		// Per CIP-1694: use CommitteeNoConfidence when the committee
-		// is in a no-confidence state, CommitteeNormal otherwise.
-		if committeeNoConfidence {
+		// Per CIP-1694, threshold selection depends on whether enact
+		// state contains an elected committee, not on the previous
+		// committee-purpose action's type.
+		if !committeePresent {
 			return rateToRat(t.CommitteeNoConfidence)
 		}
 		return rateToRat(t.CommitteeNormal)

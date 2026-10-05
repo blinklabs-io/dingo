@@ -171,7 +171,7 @@ func TestClassicPParamQuorumRequiresIdenticalValues(t *testing.T) {
 		want      *shelley.ShelleyProtocolParameters
 	}{
 		{
-			// dingo#4542: five delegates, five different updates.
+			// Five delegates, five different updates.
 			name:   "five delegates with five different updates",
 			quorum: 5,
 			proposals: func(t *testing.T) []classicTestProposal {
