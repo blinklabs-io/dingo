@@ -18290,3 +18290,39 @@ func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
 	assert.True(t, required)
 	assert.Equal(t, ouroboros.ConnectionId{}, source)
 }
+
+// An attributed marker with no in-memory entry, as on an apply retry after the
+// entry was consumed, still forces the apply-time check and names its peer.
+func TestDeferredHeaderAttributedMarkerReadFromDatabase(t *testing.T) {
+	t.Parallel()
+
+	for _, remote := range []string{"10.0.0.1:3001", "[2001:db8::1]:3001"} {
+		t.Run(remote, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{51}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			addr, err := net.ResolveTCPAddr("tcp", remote)
+			require.NoError(t, err)
+			point := ocommon.NewPoint(
+				tb.block.SlotNumber(),
+				tb.block.Hash().Bytes(),
+			)
+			require.NoError(t, db.SetSyncState(
+				deferredHeaderValidationSyncStateKey(point),
+				deferredHeaderMarkerValue(
+					ouroboros.ConnectionId{RemoteAddr: addr},
+				),
+				nil,
+			))
+
+			required, source, err := ls.deferredHeaderValidationRequired(
+				point,
+				nil,
+			)
+			require.NoError(t, err)
+			assert.True(t, required, "attributed marker not recognized")
+			require.NotNil(t, source.RemoteAddr, "marker source not read")
+			assert.Equal(t, addr.String(), source.RemoteAddr.String())
+		})
+	}
+}
