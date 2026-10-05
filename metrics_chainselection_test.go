@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -42,7 +43,7 @@ func newMetricsTestNode(t *testing.T) (*Node, *prometheus.Registry) {
 			promRegistry: registry,
 		},
 	}
-	n.registerChainSelectionMetrics()
+	n.registerChainSelectionMetrics(promutil.NewRegistration(registry))
 	require.NotNil(t, n.chainSelectionMetrics)
 	return n, registry
 }

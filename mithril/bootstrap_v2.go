@@ -29,12 +29,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/semaphore"
 )
 
 // immutableDownloadWorkers is the number of concurrent immutable
@@ -45,6 +47,105 @@ import (
 // default across constrained pods; bandwidth/CPU-rich hosts can go
 // higher with diminishing returns past ~32.
 const immutableDownloadWorkers = 16
+
+// Compressed-size limits for one v2 object, used when no operator limit is
+// set. They are constants rather than values read from the artifact because
+// the aggregator chooses the artifact's advertised sizes.
+const (
+	// A mainnet immutable archive is tens of megabytes compressed.
+	immutableArchiveMaxBytes int64 = 1 << 30
+	// The digest list is JSON that grows by a few hundred bytes per immutable;
+	// mainnet holds about 3 MB of it.
+	digestListMaxBytes int64 = 256 << 20
+	// digestListMaxMemberBytes bounds the expanded JSON, with room for years
+	// of growth over today's size.
+	digestListMaxMemberBytes int64 = 64 << 20
+	// The ancillary archive holds the ledger state, which is the largest v2
+	// object.
+	ancillaryMaxBytes int64 = 64 << 30
+
+	// immutableInflightBytes bounds the compressed bytes the immutable pool
+	// may have in flight, counting each download at its size limit. At the
+	// default limit the whole pool fits; raising the limit lowers concurrency
+	// until only one download fits. An override above this budget requires
+	// enough capacity for that single download.
+	immutableInflightBytes = immutableDownloadWorkers * immutableArchiveMaxBytes
+)
+
+// ancillaryMemberPattern matches the immutable trio an ancillary archive may
+// carry alongside its ledger state.
+var ancillaryMemberPattern = regexp.MustCompile(
+	`^immutable/[0-9]+\.(chunk|primary|secondary)$`,
+)
+
+func immutableDownloadBudget(cfg BootstrapConfig) (*semaphore.Weighted, int64) {
+	weight := cfg.objectMaxBytes(immutableArchiveMaxBytes)
+	return semaphore.NewWeighted(max(immutableInflightBytes, weight)), weight
+}
+
+// immutableArchiveLimits admits an immutable archive's own certified trio, and
+// hashes each file as it is written. The ledger tree is also admitted because
+// v1-layout archives keep the ledger state there and the extraction directory
+// is searched for it when no ancillary archive is usable.
+func immutableArchiveLimits(
+	num uint64,
+	digests map[string]string,
+) archiveLimits {
+	own := map[string]string{}
+	for _, ext := range immutableFileExtensions {
+		name := fmt.Sprintf("%05d.%s", num, ext)
+		if digest, ok := digests[name]; ok {
+			own["immutable/"+name] = digest
+		}
+	}
+	return archiveLimits{
+		maxEntries:     64,
+		maxMemberBytes: maxExtractFileSize,
+		maxTotalBytes:  maxTotalExtractSize,
+		digests:        own,
+		allow: func(name string) bool {
+			if _, ok := own[name]; ok {
+				return true
+			}
+			return name == "immutable" || name == "ledger" ||
+				strings.HasPrefix(name, "ledger/")
+		},
+	}
+}
+
+// digestListLimits admits a single top-level JSON file.
+func digestListLimits() archiveLimits {
+	return archiveLimits{
+		maxEntries:     4,
+		maxMemberBytes: digestListMaxMemberBytes,
+		maxTotalBytes:  digestListMaxMemberBytes,
+		allow: func(name string) bool {
+			return !strings.Contains(name, "/") &&
+				strings.HasSuffix(name, ".json")
+		},
+	}
+}
+
+// ancillaryLimits admits the signed manifest, the ledger tree and the next
+// in-progress immutable trio.
+func ancillaryLimits() archiveLimits {
+	return archiveLimits{
+		allow: func(name string) bool {
+			return name == ancillaryManifestFilename ||
+				name == "ledger" || strings.HasPrefix(name, "ledger/") ||
+				name == "immutable" || ancillaryMemberPattern.MatchString(name)
+		},
+	}
+}
+
+// objectMaxBytes is the compressed-size limit for a v2 object whose built-in
+// limit is def. An operator-set DownloadMaxBytes replaces it.
+func (cfg BootstrapConfig) objectMaxBytes(def int64) int64 {
+	if cfg.DownloadMaxBytes > 0 {
+		return cfg.DownloadMaxBytes
+	}
+	return def
+}
 
 // ancillaryManifestFilename is the signed manifest file inside a v2
 // ancillary archive.
@@ -339,6 +440,21 @@ func bootstrapV2(
 			}
 			if ancErr != nil {
 				ancillaryErr = ancErr
+				// A fully downloaded archive that failed extraction or
+				// verification is removed here because no result is
+				// returned for Cleanup to act on. Left in place, the next
+				// run's resume request is answered 416 with a matching
+				// total and the same bad archive is accepted again. A
+				// failed download keeps its partial file so it can resume,
+				// and a cancelled run keeps its archive: an interrupted
+				// extraction says nothing about the bytes.
+				var dlErr *ancillaryDownloadError
+				if archPath != "" && ancCtx.Err() == nil &&
+					!errors.As(ancErr, &dlErr) {
+					ancillaryArchivePath = removeBadAncillaryArchive(
+						cfg.Logger, archPath,
+					)
+				}
 				return
 			}
 			// The handle the manifest was checked through, carried straight
@@ -710,10 +826,10 @@ func downloadDigestsArchive(
 	uri string,
 	artifact *CardanoDatabaseSnapshot,
 	downloadDir string,
-) ([]CardanoDatabaseDigestEntry, error) {
+) (_ []CardanoDatabaseDigestEntry, retErr error) {
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			MaxBytes: cfg.DownloadMaxBytes,
+			MaxBytes: cfg.objectMaxBytes(digestListMaxBytes),
 			URL:      uri,
 			DestDir:  downloadDir,
 			Filename: filepath.Base(fmt.Sprintf(
@@ -735,6 +851,14 @@ func downloadDigestsArchive(
 	if err != nil {
 		return nil, err
 	}
+	// Once the archive is fully downloaded, any failure to use it discards
+	// it: a cached file of the right size is otherwise accepted again by the
+	// resume request's 416 answer. Cancellation is not such a failure.
+	defer func() {
+		if retErr != nil && ctx.Err() == nil {
+			removeDigestsCache(artifact, downloadDir)
+		}
+	}()
 	destDir := filepath.Join(
 		downloadDir,
 		filepath.Base("digests-"+truncateDigest(artifact.Hash)),
@@ -750,6 +874,7 @@ func downloadDigestsArchive(
 			"artifact", "immutable_digest_list",
 		),
 		WithReplaceDestination(),
+		withArchiveLimits(digestListLimits()),
 	); err != nil {
 		return nil, fmt.Errorf("extracting digests archive: %w", err)
 	}
@@ -891,6 +1016,10 @@ func downloadImmutables(
 		Timeout:   0,
 		Transport: dlTransport,
 	}
+	cfg.immutableDigests = digests
+	// Each in-flight download is charged at its size limit, since the real
+	// size is not known until it has arrived.
+	inflight, inflightWeight := immutableDownloadBudget(cfg)
 
 	// Optional download<->processing pipeline: chunks are fetched in
 	// parallel (out of order) but seq invokes OnChunkContiguous in strict
@@ -1001,6 +1130,10 @@ func downloadImmutables(
 					"error", cacheErr,
 				)
 			}
+			if err := inflight.Acquire(gctx, inflightWeight); err != nil {
+				return err
+			}
+			defer inflight.Release(inflightWeight)
 			var bytes int64
 			fetched := false
 			for i, location := range locations {
@@ -1213,7 +1346,7 @@ func fetchImmutableArchive(
 	archiveFilename := filepath.Base(archivePath)
 	_, root, dlErr := downloadSnapshot(
 		ctx, DownloadConfig{
-			MaxBytes:            cfg.DownloadMaxBytes,
+			MaxBytes:            cfg.objectMaxBytes(immutableArchiveMaxBytes),
 			URL:                 location.ImmutableArchiveURI(num),
 			DestDir:             archiveDir,
 			Filename:            archiveFilename,
@@ -1262,9 +1395,18 @@ func fetchImmutableArchive(
 	// Merge: every immutable archive extracts into one shared directory,
 	// concurrently, so this destination accumulates across calls and must
 	// not be staged-and-swapped.
+	extractOpts := []ExtractOption{WithMergeIntoDestination()}
+	if cfg.immutableDigests != nil {
+		extractOpts = append(
+			extractOpts,
+			withArchiveLimits(
+				immutableArchiveLimits(num, cfg.immutableDigests),
+			),
+		)
+	}
 	if _, err := extractArchiveFile(
 		ctx, file, archivePath, extractDir, extractLogger,
-		WithMergeIntoDestination(),
+		extractOpts...,
 	); err != nil {
 		return fmt.Errorf("extracting: %w", err)
 	}
@@ -1397,6 +1539,33 @@ func sha256Reader(r io.Reader, name string) (string, int64, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), size, nil
 }
 
+// removeBadAncillaryArchive deletes an ancillary archive that failed
+// extraction or verification and returns the path still left for Cleanup
+// to remove: empty once the file is gone.
+func removeBadAncillaryArchive(logger *slog.Logger, path string) string {
+	if err := os.Remove(path); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		logger.Warn(
+			"failed to remove bad ancillary archive",
+			"component", "mithril",
+			"path", path,
+			"error", err,
+		)
+		return path
+	}
+	return ""
+}
+
+// ancillaryDownloadError marks a failure to fetch the ancillary archive, as
+// opposed to a failure to use a complete one.
+type ancillaryDownloadError struct{ err error }
+
+func (e *ancillaryDownloadError) Error() string {
+	return "downloading ancillary archive: " + e.err.Error()
+}
+
+func (e *ancillaryDownloadError) Unwrap() error { return e.err }
+
 // downloadAncillaryV2 downloads and extracts the v2 ancillary archive
 // (ledger state plus the next in-progress immutable trio) and, when
 // certificate verification is enabled, verifies the signed ancillary
@@ -1445,7 +1614,7 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				MaxBytes: cfg.DownloadMaxBytes,
+				MaxBytes: cfg.objectMaxBytes(ancillaryMaxBytes),
 				URL:      loc.URI,
 				DestDir:  downloadDir,
 				Filename: ancillaryFilename,
@@ -1487,10 +1656,7 @@ func downloadAncillaryV2(
 			DestDir:  downloadDir,
 			Filename: ancillaryFilename,
 		})
-		return nil, nil, dest, fmt.Errorf(
-			"downloading ancillary archive: %w",
-			err,
-		)
+		return nil, nil, dest, &ancillaryDownloadError{err: err}
 	}
 
 	ancillaryDir := filepath.Join(
@@ -1508,6 +1674,7 @@ func downloadAncillaryV2(
 			"artifact", "ancillary_ledger_state",
 		),
 		WithReplaceDestination(),
+		withArchiveLimits(ancillaryLimits()),
 	); extractErr != nil {
 		return nil, nil, ancillaryPath, fmt.Errorf(
 			"extracting ancillary archive: %w",
