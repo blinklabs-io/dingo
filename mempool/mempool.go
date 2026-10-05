@@ -234,21 +234,20 @@ type revalidationCandidate struct {
 	txByHash     map[string]*MempoolTransaction
 	sizeBytes    int64
 	invalid      map[string]*MempoolTransaction
-	// invalidUtxos maps each output of a rejected transaction to that
-	// transaction's hash, so removing a rejected transaction clears the
-	// markers it left.
-	invalidUtxos map[utxoref.Key]string
 }
 
 func newRevalidationCandidate() *revalidationCandidate {
 	return &revalidationCandidate{
-		overlay:      newUtxoOverlay(),
-		txByHash:     make(map[string]*MempoolTransaction),
-		invalid:      make(map[string]*MempoolTransaction),
-		invalidUtxos: make(map[utxoref.Key]string),
+		overlay:  newUtxoOverlay(),
+		txByHash: make(map[string]*MempoolTransaction),
+		invalid:  make(map[string]*MempoolTransaction),
 	}
 }
 
+// reject records a transaction that failed revalidation. Its outputs leave
+// the candidate overlay, but its descendants are still validated: a parent
+// fails because a block confirmed it as readily as because it became invalid,
+// and only the ledger can tell which, by holding the parent's outputs or not.
 func (c *revalidationCandidate) reject(
 	at appliedTx,
 	tx *MempoolTransaction,
@@ -256,18 +255,6 @@ func (c *revalidationCandidate) reject(
 	if tx != nil {
 		c.invalid[at.hash] = tx
 	}
-	for utxo := range at.created {
-		c.invalidUtxos[utxo] = at.hash
-	}
-}
-
-func (c *revalidationCandidate) dependsOnInvalid(at appliedTx) bool {
-	for _, utxo := range at.consumed {
-		if _, invalid := c.invalidUtxos[utxo]; invalid {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
@@ -275,12 +262,6 @@ func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
 		return
 	}
 	c.overlay.removeByHashes(hashes)
-	// A removed transaction was confirmed or expired, so a rejected one's
-	// outputs no longer make its descendants invalid.
-	maps.DeleteFunc(c.invalidUtxos, func(_ utxoref.Key, owner string) bool {
-		_, removed := hashes[owner]
-		return removed
-	})
 	remaining := make([]*MempoolTransaction, 0, len(c.transactions))
 	for _, tx := range c.transactions {
 		if _, remove := hashes[tx.Hash]; remove {
@@ -307,9 +288,6 @@ func (c *revalidationCandidate) add(
 	c.txByHash[at.hash] = tx
 	c.sizeBytes += int64(len(tx.Cbor))
 	delete(c.invalid, at.hash)
-	for utxo := range at.created {
-		delete(c.invalidUtxos, utxo)
-	}
 }
 
 // appliedTx records a pending transaction and its UTxO effects for overlay
@@ -1420,10 +1398,6 @@ func (m *Mempool) revalidateAppliedTx(
 			"tx_type",
 			at.txType,
 		)
-		return
-	}
-	if candidate.dependsOnInvalid(at) {
-		candidate.reject(at, tx)
 		return
 	}
 	tmpTx, err := safedecode.Transaction(at.txType, tx.Cbor)

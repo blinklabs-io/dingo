@@ -6323,9 +6323,14 @@ cursors and swaps the candidate overlay, ordered transaction slice, hash index,
 and byte totals; DAG additionally rebuilds and swaps its dependency graph. Its
 work is independent of total pool occupancy. Shutdown terminates an in-flight
 rebuild, and bounded ledger-generation retries prevent chain activity from
-creating a busy loop. If an overlay entry is unexpectedly missing from the
-transaction hash index, both FIFO and DAG reject its dependent transaction cone
-rather than retaining descendants whose parent body cannot be revalidated.
+creating a busy loop. A transaction that fails revalidation leaves the
+candidate overlay, but its descendants are still validated rather than dropped
+with it: a parent fails as readily because a block confirmed it as because it
+became invalid, and only the ledger tells the two apart, by holding the
+parent's outputs or not. A descendant of a confirmed parent therefore stays,
+and one of an invalid parent fails on its missing input. An overlay entry
+unexpectedly missing from the transaction hash index is rejected the same
+way, and its descendants are judged against the ledger without its outputs.
 
 `LedgerState.WithTxValidationSession` is the narrow boundary for every backend
 rebuild. It pins one published ledger generation (tip, era, and protocol

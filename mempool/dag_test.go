@@ -45,6 +45,9 @@ type oneShotBlockingValidator struct {
 	startOnce        sync.Once
 }
 
+// countingFailValidator rejects failHash and, as a ledger would, any
+// transaction spending an output of failHash that the pending overlay does not
+// hold: a rejected, unconfirmed transaction's outputs exist nowhere.
 type countingFailValidator struct {
 	failHash string
 	calls    int
@@ -57,12 +60,20 @@ func (v *countingFailValidator) ValidateTx(gledger.Transaction) error {
 func (v *countingFailValidator) ValidateTxWithOverlay(
 	tx gledger.Transaction,
 	_ map[utxoref.Key]struct{},
-	_ map[utxoref.Key]lcommon.Utxo,
+	created map[utxoref.Key]lcommon.Utxo,
 	_ *utxoref.StateOverlay,
 ) error {
 	v.calls++
 	if tx.Hash().String() == v.failHash {
 		return errors.New("rejected for test")
+	}
+	for _, input := range tx.Inputs() {
+		if input.Id().String() != v.failHash {
+			continue
+		}
+		if _, ok := created[utxoref.ForInput(input)]; !ok {
+			return errors.New("input not found")
+		}
 	}
 	return nil
 }
@@ -625,7 +636,10 @@ func TestDAGRevalidationJournalOverflowLeavesLiveStateUntouched(t *testing.T) {
 	assert.False(t, pool.journalActive)
 }
 
-func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
+// TestDAGRevalidationValidatesDescendantOfInvalidParent pins that a descendant
+// of a rejected parent is validated rather than dropped unseen: only the
+// validator can tell a confirmed parent from an invalid one.
+func TestDAGRevalidationValidatesDescendantOfInvalidParent(t *testing.T) {
 	parentBytes, childBytes, parentHash, _ := getDependentTestTxBytes(t)
 	validator := &countingFailValidator{}
 	pool, err := NewDAG(MempoolConfig{
@@ -648,7 +662,7 @@ func TestDAGRevalidationSkipsInvalidDescendantValidation(t *testing.T) {
 	validator.calls = 0
 	require.NoError(t, pool.rebuildOverlay())
 
-	assert.Equal(t, 1, validator.calls)
+	assert.Equal(t, 2, validator.calls)
 	assert.Empty(t, pool.Transactions())
 	assert.Empty(t, pool.dag.nodes)
 }
@@ -675,16 +689,17 @@ func TestFIFORevalidationPrunesDescendantsOfMissingIndexedTransaction(
 	)
 
 	// Simulate an inconsistent live index. The missing parent has no
-	// transaction body to add to the invalid set, but its outputs must still
-	// poison the child during the shared FIFO/DAG revalidation pass.
+	// transaction body to revalidate, so its outputs leave the overlay and the
+	// child is judged against a ledger that does not hold them.
 	pool.Lock()
 	delete(pool.txByHash, parentHash)
 	pool.Unlock()
+	validator.failHash = parentHash
 	validator.calls = 0
 
 	require.NoError(t, pool.rebuildOverlay())
 
-	assert.Zero(t, validator.calls)
+	assert.Equal(t, 1, validator.calls)
 	assert.Empty(t, pool.Transactions())
 	assert.Empty(t, pool.overlay.applied)
 }
