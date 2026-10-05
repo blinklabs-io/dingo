@@ -66,7 +66,7 @@ func gracefulShutdown(
 	timeout time.Duration,
 ) error {
 	shutdownErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,
@@ -104,11 +104,13 @@ func shutdownNodeResources(
 	)
 	defer cancel()
 	var err error
-	if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
-		err = errors.Join(
-			err,
-			fmt.Errorf("metrics server shutdown: %w", shutdownErr),
-		)
+	if metricsServerShutdown != nil {
+		if shutdownErr := metricsServerShutdown(shutdownCtx); shutdownErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("metrics server shutdown: %w", shutdownErr),
+			)
+		}
 	}
 	if debugServerShutdown != nil {
 		if shutdownErr := debugServerShutdown(shutdownCtx); shutdownErr != nil {
@@ -186,8 +188,11 @@ func serveAuxiliaryListenerOn(
 
 // newMetricsServer builds the Prometheus listener on its own dedicated
 // mux so pprof or other handlers registered on DefaultServeMux are never
-// exposed.
+// exposed, or returns nil when metricsPort is 0.
 func newMetricsServer(cfg *config.Config) *http.Server {
+	if cfg.MetricsPort == 0 {
+		return nil
+	}
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
 	return &http.Server{
@@ -457,11 +462,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		return err
 	}
 	metricsServer := newMetricsServer(cfg)
-	logger.Info(
-		"serving prometheus metrics on "+metricsServer.Addr,
-		"component",
-		"node",
-	)
+	if metricsServer != nil {
+		logger.Info(
+			"serving prometheus metrics on "+metricsServer.Addr,
+			"component",
+			"node",
+		)
+	}
 	// Optional debug listener with pprof handlers, on a separate port from
 	// metrics so monitoring scrapers never see profiling endpoints.
 	debugServer := newPprofDebugServer(cfg)
@@ -494,10 +501,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	// bind/serve failures are logged but never queued here, so a port
 	// conflict on them cannot take down the node.
 	errChan := make(chan error, 1)
-	if listener := bindAuxiliaryListener(
-		"metrics", metricsServer, logger,
-	); listener != nil {
-		go serveAuxiliaryListenerOn("metrics", metricsServer, listener, logger)
+	if metricsServer != nil {
+		if listener := bindAuxiliaryListener(
+			"metrics", metricsServer, logger,
+		); listener != nil {
+			go serveAuxiliaryListenerOn(
+				"metrics", metricsServer, listener, logger,
+			)
+		}
 	}
 	if debugServer != nil {
 		if listener := bindAuxiliaryListener(
@@ -565,7 +576,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	signalCtxStop()
 
 	cleanupErr := shutdownNodeResources(
-		metricsServer.Shutdown,
+		optionalShutdown(metricsServer),
 		optionalShutdown(debugServer),
 		optionalShutdown(healthServer),
 		d.Stop,

@@ -342,7 +342,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.MetricsBindAddr,
 			c.MetricsPort,
 			auxListeners,
-			serving,
+			false,
 		},
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},

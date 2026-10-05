@@ -8437,7 +8437,8 @@ or serve failures are logged, never fatal):
 Prometheus metrics on `metricsBindAddr:metricsPort` (loopback by default;
 remote scraping requires setting `metricsBindAddr`, which the container image
 does through `DINGO_METRICS_BIND_ADDR=0.0.0.0` so orchestrator probes and
-scrapers reach it), pprof on `debugPort`
+scrapers reach it; `metricsPort` `0` disables it here and in `dingo mithril
+sync`), pprof on `debugPort`
 when enabled, and the health listener on `healthPort` (default `12799`, `0` disables).
 
 The health listener is **not** gated on storage mode. The four API

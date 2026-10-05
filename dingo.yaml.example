@@ -162,7 +162,7 @@
 # Path to the topology configuration file for Cardano node
 # topology: ""
 
-# TCP port to bind for Prometheus metrics endpoint
+# TCP port to bind for Prometheus metrics endpoint. 0 disables the listener.
 # CLI: --metrics-port
 # metricsPort: 12798
 

@@ -669,6 +669,40 @@ func TestMetricsServerUsesDedicatedBindAddress(t *testing.T) {
 	}
 }
 
+func TestMetricsServerDisabledByZeroPort(t *testing.T) {
+	t.Parallel()
+
+	srv := newMetricsServer(&config.Config{
+		MetricsBindAddr: "0.0.0.0",
+		MetricsPort:     0,
+	})
+	if srv != nil {
+		t.Fatalf("metricsPort 0 must start no listener, got %q", srv.Addr)
+	}
+}
+
+func TestShutdownNodeResourcesSkipsDisabledMetrics(t *testing.T) {
+	t.Parallel()
+
+	stopped := false
+	err := shutdownNodeResources(
+		optionalShutdown(newMetricsServer(&config.Config{})),
+		nil,
+		nil,
+		func() error {
+			stopped = true
+			return nil
+		},
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("unexpected shutdown error: %v", err)
+	}
+	if !stopped {
+		t.Fatal("node must stop when metrics are disabled")
+	}
+}
+
 func TestWaitForSignalOrErrorReturnsSignalWithoutQueuedError(t *testing.T) {
 	t.Parallel()
 

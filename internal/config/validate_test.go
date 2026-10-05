@@ -215,9 +215,8 @@ func TestValidate(t *testing.T) {
 			wantErr: "port (relay/NtN) must be set",
 		},
 		{
-			name:    "metrics port set to zero",
-			modify:  func(c *Config) { c.MetricsPort = 0 },
-			wantErr: "metricsPort must be set",
+			name:   "metrics port zero disables the listener",
+			modify: func(c *Config) { c.MetricsPort = 0 },
 		},
 		{
 			name:    "MCP port range in core mode",
@@ -1287,7 +1286,7 @@ func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
 // one-shot sync and mithril invocations neither require the serving
 // listener ports nor an ImmutableDB source, even though the configured
 // runMode is the default serve. Their metrics/debug listeners accept an
-// unset port, which the runtime binds ephemerally.
+// unset port, which disables them.
 func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
 		t.Run(string(mode), func(t *testing.T) {
