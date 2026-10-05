@@ -406,6 +406,16 @@ var importBoundaryRules = []importBoundaryRule{
 			"ledger/dijkstra_collateral_return_production_test.go": {
 				"mempool",
 			},
+			// Validates a pending Dijkstra batch's account effects through
+			// mempool admission against a real ledger state.
+			"ledger/dijkstra_batch_mempool_test.go": {
+				"mempool",
+			},
+			// Revalidates a mempool against a real ledger state after a
+			// block confirms a pending parent.
+			"ledger/mempool_revalidation_test.go": {
+				"mempool",
+			},
 		},
 	},
 	{
