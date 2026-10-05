@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/blinklabs-io/dingo/ledger"
@@ -319,6 +320,10 @@ Dingo is a modular, high-performance Cardano node written in Go.
    - Exposes tools, resources, and documentation for autonomous AI agents and operator interfaces.
 `
 
+// tableEnumerationTimeout bounds the one-time construction query that lists
+// tables for per-table schema resources.
+const tableEnumerationTimeout = 30 * time.Second
+
 // RegisterResources registers passive MCP resources for schema exploration and db-sync guidance.
 func RegisterResources(
 	server *mcp.Server,
@@ -491,12 +496,23 @@ func RegisterResources(
 
 	// Register dynamic resource for tables if db is available
 	if db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		// Enumeration runs once at construction, so the per-request
+		// timeout must not bound it: a slow database would otherwise leave
+		// the server permanently without per-table resources.
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			tableEnumerationTimeout,
+		)
 		defer cancel()
 		rows, err := db.QueryContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		)
-		if err == nil {
+		if err != nil {
+			slog.Warn(
+				"MCP table schema resources not registered",
+				"error", err,
+			)
+		} else {
 			defer rows.Close()
 			for rows.Next() {
 				var tbl string
@@ -574,7 +590,10 @@ func RegisterResources(
 				}
 			}
 			if err := rows.Err(); err != nil {
-				return
+				slog.Warn(
+					"MCP table schema resource enumeration incomplete",
+					"error", err,
+				)
 			}
 		}
 	}

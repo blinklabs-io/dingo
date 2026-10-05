@@ -525,3 +525,33 @@ func TestReviewGovernanceQueryFailure(t *testing.T) {
 	require.Contains(t, result, "count active DReps")
 	require.NotContains(t, result, "**Active Registered DReps**: 0")
 }
+
+func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`)
+	require.NoError(t, err)
+	// Hold the only connection so the construction-time enumeration query
+	// cannot start until after the (tiny) per-request timeout has elapsed.
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(200 * time.Millisecond)
+		_ = conn.Close()
+	}()
+	t.Cleanup(func() { <-released })
+	cfg := DefaultProviderConfig()
+	cfg.QueryTimeout = 10 * time.Millisecond
+	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
+	require.NoError(t, err)
+	cs := reviewSession(t, server)
+	res, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"})
+	require.NoError(t, err, "table resource must be registered despite slow startup enumeration")
+	require.Len(t, res.Contents, 1)
+	require.Contains(t, res.Contents[0].Text, "transaction")
+}
