@@ -4169,6 +4169,7 @@ func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
 	require.NoError(t, ls.db.SetPParams(
 		historicalCbor, 300, 3, conwayEraId, nil,
 	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
 	}, nil))
@@ -4229,18 +4230,13 @@ func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive
-// covers the companion case: an unconditional network_state floor would
-// reject a point every real query would have answered whenever
-// totalCirculatingSupply itself never reaches GetNetworkStateAsOfSlot --
-// no CardanoNodeConfig (as here, and as every other ledger test in this
-// repository already constructs a LedgerState), no ShelleyGenesis, or a
-// genesis with no MaxLovelaceSupply. Identical to
-// TestVerifyPointQueryable_NoNetworkStateRow_Rejected (same missing row)
-// except CardanoNodeConfig is left nil, so this one must accept where that
-// one must reject -- proving the floor is genuinely conditional, not just
-// present or absent.
-func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
+// TestVerifyPointQueryable_NoNetworkStateRow_RejectedWithoutGenesis covers
+// the case TestVerifyPointQueryable_NoNetworkStateRow_Rejected cannot: with
+// CardanoNodeConfig nil, totalCirculatingSupply never reads network_state, so
+// the stake-distribution floor is inactive, but GetAccountState still needs
+// a row at or before the point. The point must be refused at Acquire, and
+// accepted once a row covers it.
+func TestVerifyPointQueryable_NoNetworkStateRow_RejectedWithoutGenesis(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -4260,9 +4256,13 @@ func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(350, hash),
 	}, nil))
+	at := QueryPoint{Slot: 350, Hash: hash}
 
-	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
-	require.NoError(t, err)
+	err := ls.VerifyPointQueryable(nil, at)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, ls.VerifyPointQueryable(nil, at))
 }
 
 // TestVerifyPointQueryable_UnknownEraId_Rejected covers a regression:

@@ -2265,7 +2265,14 @@ func TestGetUtxosByAddressAsOfSelectsRowsLiveAtSlot(t *testing.T) {
 
 	live, err := store.GetUtxosByAddress(patterns, 10, nil)
 	require.NoError(t, err)
-	require.Len(t, live, 2, "live: the never-spent row and the one added later")
+	liveAmounts := make([]uint64, 0, len(live))
+	for _, u := range live {
+		liveAmounts = append(liveAmounts, uint64(u.Amount))
+	}
+	require.ElementsMatch(
+		t, []uint64{1, 4}, liveAmounts,
+		"live: the never-spent row and the one added later",
+	)
 
 	_, err = store.GetUtxosByAddressAsOf(patterns, math.MaxUint64, 10, nil)
 	require.Error(t, err, "a slot above math.MaxInt64 must be rejected")

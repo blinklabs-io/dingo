@@ -407,3 +407,28 @@ func TestQuery_PinnedPointReachesUtxoByAddressAccountStateAndStakeSnapshots(
 	require.NotNil(t, snapshot)
 	require.Equal(t, uint64(500), snapshot.StakeMark)
 }
+
+// TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned covers the
+// Acquire side of GetStakeSnapshots' go-snapshot floor: a point in epoch 4,
+// whose mark snapshot is retained at live epoch 6 but whose go snapshot is
+// not, must be refused at Acquire rather than accepted and then failing
+// GetStakeSnapshots after the session can no longer report a failure.
+func TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newStakeSnapshotsLedger(t, repeatedBytes(28, 0x26), 10, 10)
+	require.NoError(t, ls.db.Metadata().SetNetworkState(0, 0, 0, nil))
+	pruned := repeatedBytes(32, 0x61)
+	retained := repeatedBytes(32, 0x62)
+	seedBlockAtSlot(t, ls, 450, pruned)
+	seedBlockAtSlot(t, ls, 550, retained)
+
+	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 450, Hash: pruned})
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	require.NoError(
+		t,
+		ls.VerifyPointQueryable(nil, QueryPoint{Slot: 550, Hash: retained}),
+	)
+}

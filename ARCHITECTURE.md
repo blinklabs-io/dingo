@@ -11314,8 +11314,11 @@ rejected rather than answered with zeros. `GetStakeSnapshots`
 (`queryShelleyStakeSnapshots`) reads the mark, set and go snapshots of the
 pinned point's epoch and the two before it, rejects the point once the go
 snapshot leaves the pool-snapshot retention window, and takes the protocol
-version for its PV11 zero-pool rule from that epoch's persisted protocol
-parameters. The per-credential, per-pool and per-proposal queries
+version for its PV11 zero-pool rule from that epoch's protocol parameters:
+the live consensus snapshot's for the current epoch, the persisted row for
+an earlier one. `VerifyPointQueryable` applies both of these conditions at
+Acquire, so outside API storage mode a point more than one epoch behind the
+live tip is refused there rather than failing a later `GetStakeSnapshots`. The per-credential, per-pool and per-proposal queries
 (`GetFilteredDelegationsAndRewardAccounts`, `GetStakeDelegDeposits`,
 `GetDRepState`, `GetFilteredVoteDelegatees`, `GetStakePools`,
 `GetProposals`) and `DebugChainDepState` still ignore the acquired point:

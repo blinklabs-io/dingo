@@ -393,6 +393,18 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if _, err := ls.queryShelleyCurrentProtocolParams(at, txn); err != nil {
 		return err
 	}
+	// GetStakeSnapshots needs the go snapshot two epochs before at's, one
+	// epoch further back than verifyStakeDistributionRetentionOnly checks,
+	// and GetAccountState needs a network_state row at or before at even
+	// where totalCirculatingSupply would not read one.
+	if _, _, err := ls.stakeSnapshotsAsOf(
+		ls.loadConsensusSnapshot(), at, txn,
+	); err != nil {
+		return err
+	}
+	if _, err := ls.queryShelleyAccountState(at, txn); err != nil {
+		return err
+	}
 	// queryHardFork's HardForkCurrentEraQuery case (GetCurrentEra) is
 	// point-aware and returns ErrHistoricalStateUnavailable when
 	// resolveAsOfEpoch can't resolve at to an epoch -- exercised here for
