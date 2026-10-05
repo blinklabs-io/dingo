@@ -16,6 +16,7 @@ package chainselection
 
 import (
 	"bytes"
+	"slices"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -270,7 +271,7 @@ func (p *PeerChainTip) trimAdmittedTipHistory(point ocommon.Point) {
 		p.admittedTipHistory = nil
 		return
 	}
-	for i := len(p.admittedTipHistory) - 1; i >= 0; i-- {
+	for i := range slices.Backward(p.admittedTipHistory) {
 		admitted := p.admittedTipHistory[i]
 		if admitted.Slot == point.Slot && bytes.Equal(admitted.Hash, point.Hash) {
 			p.admittedTipHistory = p.admittedTipHistory[:i+1]

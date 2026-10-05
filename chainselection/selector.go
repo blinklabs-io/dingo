@@ -946,9 +946,13 @@ func (cs *ChainSelector) truncatePendingPeerTipsLocked(
 	if n == 0 {
 		delete(cs.pendingPeerTips, connId)
 	} else {
+		pending := cs.pendingPeerTips[connId]
+		if n < 0 || n > len(pending) {
+			panic("pending peer tip truncation exceeds staged candidates")
+		}
 		cs.pendingPeerTips[connId] = append(
 			[]peerTipAdmissionCandidate(nil),
-			cs.pendingPeerTips[connId][:n]...,
+			pending[:n]...,
 		)
 	}
 	cs.rebuildPeerTipAdmissionFrontierLocked(connId)
