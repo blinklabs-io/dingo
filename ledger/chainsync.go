@@ -791,7 +791,7 @@ func (ls *LedgerState) evictStaleDeferredHeadersLocked(
 // is idempotent (SetDeferredHeaderMarker of the same key) and runs with no lock
 // held, so it closes the window without reintroducing the lock inversion.
 func (ls *LedgerState) deletePersistedDeferredMarkers(mapKeys []string) error {
-	if len(mapKeys) == 0 || ls.db == nil || ls.db.Metadata() == nil {
+	if len(mapKeys) == 0 || ls.db == nil {
 		return nil
 	}
 	// The membership test is taken under the lock, but the lock is RELEASED
@@ -5080,7 +5080,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 				}
 				if blockfetchMutexHeld && !ls.blockfetchEventCurrent(e) {
 					ls.clearDeferredHeaderValidation(e.Point)
-					if ls.db != nil && ls.db.Metadata() != nil {
+					if ls.db != nil {
 						if err := ls.withBlockfetchMutexReleased(
 							func() error {
 								return ls.deleteDeferredMarkerUnlessReadmitted(
