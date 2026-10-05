@@ -13658,7 +13658,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    distributions (summed from protocol version 5, replaced before it) and
    net pot transfers, and the cutoff. Every transaction's certificates are
    written immediately after that transaction validates, so this is always
-   caught up as of the currently validating slot. For legacy stake
+   caught up as of the currently validating slot. The gouroboros
+   `UtxoValidateDelegation` rule in the same rule lists checks
+   `MIRProducesNegativeUpdate` again from protocol version 5, reading the
+   pending rewards through `*LedgerView.PendingInstantaneousRewards` (the
+   epoch's committed distributions for one credential and pot, summed);
+   without that capability it rejects any negative delta an earlier
+   transaction covers as undecidable. For legacy stake
    certificates the same walk enforces `StakeKeyAlreadyRegisteredDELEG`,
    `StakeKeyNotRegisteredDELEG` and `StakeKeyNonZeroAccountBalanceDELEG`,
    with withdrawals drained first. For genesis key delegation certificates it
