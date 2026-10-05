@@ -5950,7 +5950,12 @@ func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
 		nil,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
+	assert.Equal(
+		t,
+		"true@127.0.0.1:3001",
+		value,
+		"the persisted marker names the supplying peer",
+	)
 }
 
 // TestBlockfetchSkipsHeaderCryptoForVerifiedNonHeadQueuedHeader pins the
@@ -18189,4 +18194,62 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	fixture.ls.resyncCoalesceMutex.Unlock()
 	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
 	waitFor(4, "a request after the window must be published")
+}
+
+// A deferred marker restored after a restart keeps the address of the peer
+// that supplied the block, so a later apply-time failure still names it.
+func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
+	t.Parallel()
+
+	connId := testRecycleConnId()
+	tb := createTestBlock(t, [32]byte{48}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	require.NoError(t, handleEventBlockfetchBlockDeferred(ls, BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        tb.block,
+		Point:        point,
+	}, nil))
+
+	restarted := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
+
+	required, source, err := restarted.deferredHeaderValidationRequired(
+		point,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, required)
+	require.NotNil(t, source.RemoteAddr, "restored marker lost its source")
+	assert.Equal(t, connId.RemoteAddr.String(), source.RemoteAddr.String())
+}
+
+// A marker written by an earlier release carries no source and still restores.
+func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{49}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	require.NoError(t, db.SetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	))
+	require.NoError(t, ls.repopulateDeferredHeaderValidation())
+
+	required, source, err := ls.deferredHeaderValidationRequired(point, nil)
+	require.NoError(t, err)
+	assert.True(t, required)
+	assert.Equal(t, ouroboros.ConnectionId{}, source)
 }

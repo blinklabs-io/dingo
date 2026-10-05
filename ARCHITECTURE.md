@@ -3844,6 +3844,9 @@ the verdict is computed, not *whether* it is enforced; the marker
 what forces that apply-time recheck, so its retention is load-bearing (see the
 retention-floor, eviction-horizon, and marker-restore invariants below and in
 `DATABASE.md`).
+The persisted marker also carries the supplying peer's remote address, restored
+at startup, so a deterministic apply-time failure after a restart still names the
+peer for the chainsync deny cooldown.
 
 The concrete acceptance case the defer *does* exist for is a genesis-delegate
 **reassignment** that the apply cursor has not reached yet. A

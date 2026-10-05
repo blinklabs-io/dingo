@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -147,6 +148,9 @@ const (
 
 	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
 	deferredHeaderValidationSyncStateValue  = "true"
+	// deferredHeaderMarkerSourceSeparator splits the marker from the address
+	// of the peer that supplied the block.
+	deferredHeaderMarkerSourceSeparator = "@"
 	// deferredHeaderValidationFloorSyncStateKey must not start with
 	// deferredHeaderValidationSyncStatePrefix, which marker scans match.
 	deferredHeaderValidationFloorSyncStateKey = "deferred_header_validation_floor"
@@ -894,11 +898,10 @@ func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	}
 	var restoreErr error
 	for attempt := 1; attempt <= deferredMarkerRestoreMaxAttempts; attempt++ {
-		restoreErr = ls.db.SetSyncState(
-			syncKey,
-			deferredHeaderValidationSyncStateValue,
-			nil,
-		)
+		ls.deferredHeaderValidationMu.Lock()
+		value := deferredHeaderMarkerValue(ls.deferredHeaderValidation[k])
+		ls.deferredHeaderValidationMu.Unlock()
+		restoreErr = ls.db.SetSyncState(syncKey, value, nil)
 		if restoreErr == nil {
 			return nil
 		}
@@ -985,9 +988,23 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		if mapKey == "" || mapKey == syncKey {
 			continue
 		}
-		// A restored marker has no known source: connection identifiers do
-		// not survive a restart.
-		ls.deferredHeaderValidation[mapKey] = ouroboros.ConnectionId{}
+		// Only the remote address survives a restart: the connection itself
+		// is gone, but the address still names the peer to penalize. A
+		// marker that cannot be read back, or predates the source suffix,
+		// restores unattributed.
+		var source ouroboros.ConnectionId
+		value, valueErr := ls.db.GetSyncState(syncKey, nil)
+		if valueErr != nil {
+			ls.config.Logger.Warn(
+				"failed to read deferred-header marker source",
+				"key", syncKey,
+				"error", valueErr,
+				"component", "ledger",
+			)
+		} else {
+			source = deferredHeaderMarkerSource(value)
+		}
+		ls.deferredHeaderValidation[mapKey] = source
 		restored++
 	}
 	ls.deferredHeaderValidationMu.Unlock()
@@ -1010,7 +1027,7 @@ func (ls *LedgerState) persistDeferredHeaderValidation(
 	}
 	if err := ls.db.SetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
-		deferredHeaderValidationSyncStateValue,
+		deferredHeaderMarkerValue(ls.deferredHeaderSource(point)),
 		txn,
 	); err != nil {
 		return fmt.Errorf("set deferred header validation marker: %w", err)
@@ -1058,9 +1075,44 @@ func (ls *LedgerState) deferredHeaderValidationRequired(
 			err,
 		)
 	}
-	return required || value == deferredHeaderValidationSyncStateValue,
-		source,
-		nil
+	marked := strings.HasPrefix(value, deferredHeaderValidationSyncStateValue)
+	if marked && source == (ouroboros.ConnectionId{}) {
+		source = deferredHeaderMarkerSource(value)
+	}
+	return required || marked, source, nil
+}
+
+// deferredHeaderMarkerValue encodes a persisted deferred marker. The value is
+// the bare marker for an unattributed block, and the marker followed by the
+// supplying peer's remote address otherwise, so a reader that only checks the
+// prefix still recognizes it.
+func deferredHeaderMarkerValue(source ouroboros.ConnectionId) string {
+	if source.RemoteAddr == nil {
+		return deferredHeaderValidationSyncStateValue
+	}
+	return deferredHeaderValidationSyncStateValue +
+		deferredHeaderMarkerSourceSeparator +
+		source.RemoteAddr.String()
+}
+
+// deferredHeaderMarkerSource decodes the peer address stored by
+// deferredHeaderMarkerValue. It returns the zero value when the marker carries
+// no parseable address.
+func deferredHeaderMarkerSource(value string) ouroboros.ConnectionId {
+	_, addr, found := strings.Cut(
+		value,
+		deferredHeaderMarkerSourceSeparator,
+	)
+	if !found {
+		return ouroboros.ConnectionId{}
+	}
+	addrPort, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return ouroboros.ConnectionId{}
+	}
+	return ouroboros.ConnectionId{
+		RemoteAddr: net.TCPAddrFromAddrPort(addrPort),
+	}
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
