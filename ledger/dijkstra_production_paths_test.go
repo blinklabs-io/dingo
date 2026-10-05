@@ -857,7 +857,11 @@ func TestDijkstraMalformedRequiredGuardsRejectedBeforeStateChange(
 					child = 0
 				}
 				txCbor, blockCbor := f.withBodyField(0, child, 24, test.field)
-				require.Error(t, f.mempoolAddRaw(txCbor))
+				require.ErrorContains(
+					t,
+					f.mempoolAddRaw(txCbor),
+					"decode transaction",
+				)
 				_, err := gledger.NewTransactionFromCbor(
 					gledger.TxTypeDijkstra,
 					txCbor,

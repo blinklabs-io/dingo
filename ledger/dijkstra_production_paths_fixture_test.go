@@ -619,7 +619,8 @@ func (f *pathFixture) rewardOf(tag uint8, key byte) uint64 {
 	return uint64(account.Reward)
 }
 
-// inputSpent reports whether the transaction's top-level input was consumed.
+// inputUnspent reports whether the transaction's top-level input is still
+// unspent.
 func (f *pathFixture) inputUnspent(index int) bool {
 	f.t.Helper()
 	input := f.txs[index].Inputs()[0]
