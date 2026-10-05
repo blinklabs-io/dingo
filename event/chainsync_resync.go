@@ -44,8 +44,13 @@ const (
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed      = "blockfetch timeout retry failed on all available connections"
 	ChainsyncResyncReasonBlockfetchRangeUnavailable        = "blockfetch could not obtain the queued header range"
 	ChainsyncResyncReasonHeaderValidationRecovery          = "deferred header validation recovery"
-	ChainsyncResyncReasonForkQueueOverflowRestartFailed    = "failed to restart blockfetch after fork-resolution header-queue overflow"
-	ChainsyncResyncReasonForkExtensionRestartFailed        = "failed to restart blockfetch after fork extension"
+	// ChainsyncResyncReasonDeferredHeaderValidationFailure names the peer that
+	// supplied a block whose deferred header validation failed with a verdict
+	// the peer is responsible for. Unlike HeaderValidationRecovery, which
+	// re-syncs every client, it targets only that peer's connection.
+	ChainsyncResyncReasonDeferredHeaderValidationFailure = "deferred header validation failure"
+	ChainsyncResyncReasonForkQueueOverflowRestartFailed  = "failed to restart blockfetch after fork-resolution header-queue overflow"
+	ChainsyncResyncReasonForkExtensionRestartFailed      = "failed to restart blockfetch after fork extension"
 	// ChainsyncResyncReasonFutureHeaderAdmissionRecovery re-intersects the
 	// ChainSync mini-protocol after a resolvable header was deliberately dropped
 	// outside the permitted clock-skew window. It is not a peer-fault signal and

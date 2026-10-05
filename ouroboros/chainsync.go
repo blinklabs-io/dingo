@@ -490,6 +490,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
 	default:
@@ -516,6 +517,7 @@ func chainsyncResyncDeniesPeer(reason string) bool {
 	case event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
 		event.ChainsyncResyncReasonPeerTipBehindMithril:
 		return true
 	default:
