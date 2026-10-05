@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
@@ -41,6 +42,160 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type startupBoundaryParams struct {
+	mockPParamsProvider
+}
+
+func (provider *startupBoundaryParams) ProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	if slot >= 100 {
+		return &babbage.BabbageProtocolParameters{}
+	}
+	return provider.pparams
+}
+
+func TestStartupOpCertCounterAtEraBoundary(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		slot      uint64
+		counter   uint64
+		wantError string
+	}{
+		{"tpraos stale", 99, 4, "below last seen"},
+		{"tpraos equal", 99, 5, ""},
+		{"tpraos next", 99, 6, ""},
+		{"tpraos gap", 99, 7, ""},
+		{"praos stale", 100, 4, "below last seen"},
+		{"praos equal", 100, 5, ""},
+		{"praos next", 100, 6, ""},
+		{"praos gap at boundary", 100, 7, "skips ahead"},
+		{"praos gap after boundary", 101, 7, "skips ahead"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			credentials := newCredsForLedger(t)
+			credentials.opCert.IssueNumber = testCase.counter
+			view := &fakeLedgerView{
+				registered: true,
+				regVRFHash: lcommon.Blake2b256Hash(credentials.vrfVKey),
+				seqFound:   true,
+				latestSeq:  5,
+			}
+			params := &startupBoundaryParams{
+				mockPParamsProvider: mockPParamsProvider{
+					pparams: &alonzo.AlonzoProtocolParameters{},
+				},
+			}
+			result, err := credentials.ValidateAgainstLedgerAtSlot(
+				view, params, testCase.slot,
+			)
+			require.True(t, result.Registered)
+			require.True(t, result.VRFMatched)
+			require.NoError(t, result.EraUnevaluable)
+			if testCase.wantError == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, testCase.wantError)
+			}
+		})
+	}
+}
+
+// funcParamsProvider is a nil-able non-pointer kind implementing
+// ProtocolParamsProvider, so the typed-nil guard is exercised beyond
+// reflect.Pointer. Calling it while nil panics, which is what the guard
+// prevents.
+type funcParamsProvider func(slot uint64) lcommon.ProtocolParameters
+
+func (provider funcParamsProvider) GetCurrentPParams() lcommon.ProtocolParameters {
+	return provider(0)
+}
+
+func (provider funcParamsProvider) ProtocolParamsForSlot(
+	slot uint64,
+) lcommon.ProtocolParameters {
+	return provider(slot)
+}
+
+// TestStartupOpCertCounterUnresolvedEraDoesNotRefuse covers the era contexts a
+// startup check can fail to resolve. None of them is a counter violation, so
+// none may refuse: the staleness rule stays in force, the no-gap rule is
+// reported as unevaluated, and the forge loop applies it per leader slot once
+// the node is near the tip.
+func TestStartupOpCertCounterUnresolvedEraDoesNotRefuse(t *testing.T) {
+	var typedNilProvider *mockPParamsProvider
+	for _, testCase := range []struct {
+		name       string
+		provider   ProtocolParamsProvider
+		wantReason string
+	}{
+		{"missing provider", nil, "no protocol parameters provider"},
+		{"typed nil provider", typedNilProvider, "no protocol parameters provider"},
+		{
+			"typed nil func provider",
+			funcParamsProvider(nil),
+			"no protocol parameters provider",
+		},
+		{
+			"missing parameters",
+			&mockPParamsProvider{},
+			"parameters unavailable for slot 100",
+		},
+		{
+			"typed nil parameters",
+			&mockPParamsProvider{
+				pparams: (*babbage.BabbageProtocolParameters)(nil),
+			},
+			"nil *babbage.BabbageProtocolParameters pointer",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			credentials := newCredsForLedger(t)
+			// Seven against an observed five is a gap Praos refuses. The
+			// era here is unknown, so the gap rule is not evaluable and
+			// startup must proceed anyway.
+			credentials.opCert.IssueNumber = 7
+			view := &fakeLedgerView{
+				registered: true,
+				regVRFHash: lcommon.Blake2b256Hash(credentials.vrfVKey),
+				seqFound:   true,
+				latestSeq:  5,
+			}
+			result, err := credentials.ValidateAgainstLedgerAtSlot(
+				view, testCase.provider, 100,
+			)
+			require.NoError(t, err)
+			require.True(t, result.Registered)
+			require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
+			require.ErrorContains(
+				t,
+				result.EraUnevaluable,
+				testCase.wantReason,
+			)
+		})
+	}
+}
+
+// TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter pins the half
+// of the rule an unresolved era does not excuse. A counter below the observed
+// on-chain value is a stale or stolen hot key whatever the era, so it must
+// still refuse startup.
+func TestStartupOpCertCounterUnresolvedEraStillRejectsStaleCounter(t *testing.T) {
+	t.Parallel()
+	credentials := newCredsForLedger(t)
+	credentials.opCert.IssueNumber = 4
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(credentials.vrfVKey),
+		seqFound:   true,
+		latestSeq:  5,
+	}
+	result, err := credentials.ValidateAgainstLedgerAtSlot(view, nil, 100)
+	require.ErrorContains(t, err, "below last seen")
+	require.ErrorIs(t, result.EraUnevaluable, ErrOpCertEraUnevaluable)
+}
 
 // Sample test keys from config/cardano/devnet/keys/
 const (
@@ -1638,4 +1793,67 @@ func TestArmKesProtocolLifetime_RequiresSigningMaterial(t *testing.T) {
 	assert.Contains(t, err.Error(), "signing material not loaded")
 	assert.Zero(t, pc.OpCertExpiryPeriod())
 	assert.Zero(t, pc.PeriodsRemaining(1))
+}
+
+// TestValidateAgainstLedgerVRFMismatchPrintsBothHashesInSingleHex pins both
+// VRF key hashes in the startup mismatch error to their 64-character hex form.
+//
+// The message exists to be read as a comparison, but its two operands had
+// different types: the registered hash arrives from the ledger view as a plain
+// [32]byte, while the loaded key is hashed to an lcommon.Blake2b256, which
+// implements fmt.Stringer with a hex String method. fmt routes the x verb
+// through String for such operands, so %x hex-encoded that hex string and the
+// loaded hash printed at 128 characters beside a 64-character registered hash.
+// An operator checking whether they had started the node with the wrong VRF
+// key was shown two ids that cannot be compared, in the one message whose only
+// purpose is comparing them.
+func TestValidateAgainstLedgerVRFMismatchPrintsBothHashesInSingleHex(
+	t *testing.T,
+) {
+	pc := newCredsForLedger(t)
+	registeredHash := lcommon.Blake2b256Hash(bytes32(0xDD))
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: registeredHash,
+	}
+
+	_, _, err := pc.ValidateAgainstLedger(view)
+	require.Error(t, err)
+
+	registeredHex := hex.EncodeToString(registeredHash[:])
+	loadedHex := lcommon.Blake2b256Hash(pc.vrfVKey).String()
+	require.Len(t, registeredHex, 2*lcommon.Blake2b256Size)
+	require.Len(t, loadedHex, 2*lcommon.Blake2b256Size)
+	require.NotEqual(t, registeredHex, loadedHex)
+
+	msg := err.Error()
+	require.Contains(t, msg, "pool registration has "+registeredHex)
+	require.Contains(t, msg, "loaded VRF key hashes to "+loadedHex)
+	require.NotContains(
+		t,
+		msg,
+		hex.EncodeToString([]byte(loadedHex)),
+		"loaded VRF key hash must not be hex-encoded twice",
+	)
+
+	// Both hashes must be the same width, or the message cannot be read as
+	// the comparison it is written as.
+	for _, field := range []string{
+		"pool registration has ",
+		"loaded VRF key hashes to ",
+	} {
+		idx := strings.Index(msg, field)
+		require.GreaterOrEqual(t, idx, 0)
+		rest := msg[idx+len(field):]
+		if space := strings.IndexAny(rest, " "); space >= 0 {
+			rest = rest[:space]
+		}
+		require.Len(
+			t,
+			rest,
+			2*lcommon.Blake2b256Size,
+			"hash after %q must be a single-hex-encoded 32-byte hash",
+			field,
+		)
+	}
 }

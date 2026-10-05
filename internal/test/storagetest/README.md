@@ -46,8 +46,9 @@ domain's behavior.
 
 ## Adding a new plugin's conformance test
 
-Add a `conformance_test.go` in the plugin's own package (in-package so it
-can use the plugin's real constructor):
+Add the conformance test in the plugin's own package (in-package so it can
+use the plugin's real constructor), in the `_test.go` file named for the
+implementation file it exercises:
 
 ```go
 func TestBlobStoreConformance(t *testing.T) {
@@ -65,7 +66,7 @@ func TestBlobStoreConformance(t *testing.T) {
 so construction against a real bucket or database stays cheap. A
 cloud- or database-backed plugin should skip cleanly (never fail
 `go test ./...`) when its backend is not configured — see the credential
-checks already in `database/plugin/blob/aws/conformance_test.go` etc. for
+checks already in `database/plugin/blob/aws/tests_test.go` etc. for
 the pattern, and the table below for which environment variables each
 backend reads.
 

@@ -21,7 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -308,8 +308,8 @@ func TestLedgerProcessBlockDijkstraValidityOutcomeStateTransitions(
 }
 
 // TestLedgerProcessBlockHistoricalValidationRunsPhase2 verifies the
-// configuration decision at the real block-application boundary. Issue
-// #3528: a historical-sync/TrustedReplay phase-2 skip shortcut used to live
+// configuration decision at the real block-application boundary. A
+// historical-sync/TrustedReplay phase-2 skip shortcut used to live
 // at this call site, but historicalBlockValidationDecision forces
 // shouldValidateBlock (and so all per-tx validation, phase 1 and phase 2)
 // to false whenever TrustedReplay is set, making a "skip phase 2 only"

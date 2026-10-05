@@ -79,8 +79,7 @@ jobs:
       #
       # These are steps of a single `lint` job rather than a matrix on
       # purpose. Branch protection matches a required context by name, and a
-      # matrix would render `lint (root)`, `lint (examples/dingo-gov-lens)`
-      # and so on.
+      # matrix would render separate required check contexts.
       #
       # internal/docsparity's TestLintCoversEveryGoModule derives the module
       # list from the tree and fails until every go.mod has a step here, so a
@@ -88,14 +87,6 @@ jobs:
       # are written out by hand.
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-      - name: golangci-lint (internal/test/antithesis)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: internal/test/antithesis
-      - name: golangci-lint (examples/dingo-gov-lens)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: examples/dingo-gov-lens
       # Folded in from the retired config-parity.yml pull-request job. The
       # network configs under config/cardano/ exist twice: embedded in the
       # binary here (config/cardano/embed.go), and in

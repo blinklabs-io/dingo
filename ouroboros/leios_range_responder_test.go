@@ -37,12 +37,12 @@ func newLeiosFetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 	return peer
 }
 
-// TestLeiosFetchBlockRangeRequestIsDeclined is the Dingo-owned half of issue
-// #3623. Dingo registers a BlockRangeRequestFunc but does not serve ranges.
-// gouroboros reads a nil return from that callback as "an async process was
-// started that will send NextBlockAndTxsInRange / LastBlockAndTxsInRange", so
-// returning nil without sending anything left this server holding leios-fetch
-// agency in StateBlockRange forever.
+// TestLeiosFetchBlockRangeRequestIsDeclined is the Dingo-owned half of the
+// backfill stall fix. Dingo registers a BlockRangeRequestFunc but does not
+// serve ranges. gouroboros reads a nil return from that callback as "an async
+// process was started that will send NextBlockAndTxsInRange /
+// LastBlockAndTxsInRange", so returning nil without sending anything left this
+// server holding leios-fetch agency in StateBlockRange forever.
 //
 // A peer in that state is wedged permanently: its protocol send loop waits on
 // agency the state map only returns when the missing response arrives, so it

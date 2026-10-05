@@ -23,6 +23,8 @@ provides pluggable storage and client interfaces.
   and [stake pool operation](https://docs.blinklabs.io/guides/dingo/spo-guides/000-spo-guide/).
 - **Application developers:** [APIs and archive services](https://docs.blinklabs.io/guides/dingo/006-apis-and-archive/)
   and [using Dingo with Cardano CLI](https://docs.blinklabs.io/guides/dingo/004-using-dingo-with-cardano-cli/).
+- The Kupo-compatible API is disabled by default. To enable it, configure
+  `DINGO_PLUGINS_API_KUPO_CONFIG_PORT` and use API storage mode.
 - **Dingo contributors:** [development guide](docs/development.md),
   [local DevNet](docs/devnet.md), [benchmarks and profiling](docs/benchmarks.md),
   [architecture](ARCHITECTURE.md), [database design](DATABASE.md), and
@@ -57,6 +59,7 @@ environments, and profiling. For basic node setup and usage, follow the
 - [Development](docs/development.md)
 - [Architecture](ARCHITECTURE.md)
 - [Database](DATABASE.md)
+- [MCP integration](docs/mcp/README.md)
 - [Local DevNet](docs/devnet.md)
 - [Benchmarks and profiling](docs/benchmarks.md)
 - [Monitoring dashboards](docs/dashboards/README.md)

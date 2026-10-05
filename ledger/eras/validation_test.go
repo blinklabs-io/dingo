@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
@@ -18,11 +18,16 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"iter"
 	"math"
 	"math/big"
+	"reflect"
+	"runtime"
+	"slices"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -39,6 +44,574 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestCheckPoolMarginFloorErrorPoolIdIsSingleHexEncoded pins the pool id in
+// the CIP-23 margin-floor rejection to its 56-character hex form.
+//
+// lcommon.PoolKeyHash is an alias for Blake2b224, which implements fmt.Stringer
+// with a hex String method, and fmt routes the x verb through String for such
+// operands. Formatting the value itself with %x therefore hex-encoded its hex
+// string and named the pool by an id twice the correct length, matching no
+// real pool key hash.
+func TestCheckPoolMarginFloorErrorPoolIdIsSingleHexEncoded(t *testing.T) {
+	operatorHex := "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	operatorBytes, err := hex.DecodeString(operatorHex)
+	require.NoError(t, err)
+	require.Len(t, operatorBytes, lcommon.Blake2b224Size)
+
+	cert := cip23PoolCert(1, 1000) // 0.1%, below the floor below
+	copy(cert.Operator[:], operatorBytes)
+
+	err = checkPoolMarginFloor(
+		[]lcommon.Certificate{cert},
+		big.NewRat(150, 10_000), // 1.5%
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "pool "+operatorHex+" margin")
+	require.NotContains(
+		t,
+		err.Error(),
+		hex.EncodeToString([]byte(operatorHex)),
+		"pool id must not be hex-encoded twice",
+	)
+}
+
+// utxoValidationRuleName reports the runtime function name of a validation
+// rule. It exists for assertions and diagnostics only: production resolution
+// keys on the upstream rule Id, because common.ComposeUtxoValidationRules
+// replaces phase-2-gated rules with anonymous wrappers and upstream moves
+// shared rules between era packages. Never use it as a lookup key.
+func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
+	if fn == nil {
+		return ""
+	}
+	pc := reflect.ValueOf(fn).Pointer()
+	if runtimeFn := runtime.FuncForPC(pc); runtimeFn != nil {
+		return runtimeFn.Name()
+	}
+	return fmt.Sprintf("%x", pc)
+}
+
+// TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule is the
+// regression guard: it fails if
+// resolveUtxoValidationSkipIndex ever goes back to matching upstream rules by
+// validation function identity or runtime name.
+//
+// common.ComposeUtxoValidationRules replaces every phase-2-gated entry with an
+// anonymous wrapper closure, so the original function is unreachable from the
+// composed list. A function-keyed resolver panics; an Id-keyed one does not.
+func TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule(t *testing.T) {
+	descriptors := []lcommon.UtxoValidationRuleDescriptor{
+		{
+			Id:        lcommon.UtxoValidationRuleMetadata,
+			Validator: conway.UtxoValidateMetadata,
+		},
+		{
+			Id:        lcommon.UtxoValidationRuleCommitteeCertificates,
+			Validator: conway.UtxoValidateCommitteeCertificates,
+		},
+		{
+			Id:        lcommon.UtxoValidationRuleUnknownVoters,
+			Validator: conway.UtxoValidateUnknownVoters,
+		},
+	}
+	rules := lcommon.ComposeUtxoValidationRules(
+		lcommon.AlwaysUtxoValidationRules(descriptors[0].Validator),
+		lcommon.Phase2ValidUtxoValidationRules(
+			descriptors[1].Validator,
+			descriptors[2].Validator,
+		),
+	)
+	require.Len(t, rules, len(descriptors))
+
+	// Premise of the guard: the gated entries really are wrapped, so neither
+	// function identity nor function name can find them. Without this the
+	// assertions below could pass vacuously against a future upstream that
+	// stops wrapping.
+	require.Equal(
+		t,
+		utxoValidationRuleName(descriptors[0].Validator),
+		utxoValidationRuleName(rules[0]),
+		"an always-run rule must keep its function identity",
+	)
+	for _, index := range []int{1, 2} {
+		require.NotEqual(
+			t,
+			utxoValidationRuleName(descriptors[index].Validator),
+			utxoValidationRuleName(rules[index]),
+			"a phase-2-gated rule must be wrapped by upstream compose",
+		)
+	}
+
+	require.Equal(t, 0, resolveUtxoValidationSkipIndex(
+		descriptors, rules, lcommon.UtxoValidationRuleMetadata,
+	))
+	require.Equal(t, 1, resolveUtxoValidationSkipIndex(
+		descriptors, rules, lcommon.UtxoValidationRuleCommitteeCertificates,
+	))
+	require.Equal(t, 2, resolveUtxoValidationSkipIndex(
+		descriptors, rules, lcommon.UtxoValidationRuleUnknownVoters,
+	))
+}
+
+// TestConwayUpstreamGatedRulesAreWrapped proves the wrapping the guard above
+// simulates is what the pinned gouroboros release actually does, so the
+// package-init panic reported cannot silently stop being reachable.
+func TestConwayUpstreamGatedRulesAreWrapped(t *testing.T) {
+	descriptors := conway.UtxoValidationRuleDescriptors()
+	require.Len(t, conway.UtxoValidationRules, len(descriptors))
+	for _, id := range []lcommon.UtxoValidationRuleId{
+		lcommon.UtxoValidationRuleCommitteeCertificates,
+		lcommon.UtxoValidationRuleUnknownVoters,
+	} {
+		index := slices.IndexFunc(
+			descriptors,
+			func(d lcommon.UtxoValidationRuleDescriptor) bool {
+				return d.Id == id
+			},
+		)
+		require.GreaterOrEqual(t, index, 0, string(id))
+		require.NotEqual(
+			t,
+			utxoValidationRuleName(descriptors[index].Validator),
+			utxoValidationRuleName(conway.UtxoValidationRules[index]),
+			"upstream %s is no longer wrapped; the #3821 guard needs review",
+			id,
+		)
+	}
+}
+
+func TestResolveUtxoValidationSkipIndexPanics(t *testing.T) {
+	descriptors := []lcommon.UtxoValidationRuleDescriptor{
+		{
+			Id:        lcommon.UtxoValidationRuleMetadata,
+			Validator: conway.UtxoValidateMetadata,
+		},
+	}
+	rules := []lcommon.UtxoValidationRuleFunc{conway.UtxoValidateMetadata}
+
+	t.Run("empty id", func(t *testing.T) {
+		require.PanicsWithValue(
+			t,
+			"UTxO validation skip rule Id is empty",
+			func() {
+				resolveUtxoValidationSkipIndex(descriptors, rules, "")
+			},
+		)
+	})
+	t.Run("absent id", func(t *testing.T) {
+		require.Panics(t, func() {
+			resolveUtxoValidationSkipIndex(
+				descriptors, rules, lcommon.UtxoValidationRuleUnknownVoters,
+			)
+		})
+	})
+	t.Run("duplicate id", func(t *testing.T) {
+		dup := append(
+			slices.Clone(descriptors),
+			descriptors[0],
+		)
+		require.Panics(t, func() {
+			resolveUtxoValidationSkipIndex(
+				dup,
+				append(slices.Clone(rules), rules[0]),
+				lcommon.UtxoValidationRuleMetadata,
+			)
+		})
+	})
+	t.Run("descriptor and rule count diverge", func(t *testing.T) {
+		require.Panics(t, func() {
+			resolveUtxoValidationSkipIndex(
+				descriptors,
+				append(slices.Clone(rules), conway.UtxoValidateMetadata),
+				lcommon.UtxoValidationRuleMetadata,
+			)
+		})
+	})
+	t.Run("nil upstream rule", func(t *testing.T) {
+		require.Panics(t, func() {
+			resolveUtxoValidationSkipIndex(
+				descriptors,
+				[]lcommon.UtxoValidationRuleFunc{nil},
+				lcommon.UtxoValidationRuleMetadata,
+			)
+		})
+	})
+}
+
+// utxoValidationRuleReplacement is the Dingo rule installed in place of an
+// upstream rule, together with the upstream function name expected at that
+// rule's Id. The function name is an assertion, not a lookup key: it catches
+// an upstream Id being reattached to a different validator.
+type utxoValidationRuleReplacement struct {
+	upstreamFuncName string
+	dingoFunc        lcommon.UtxoValidationRuleFunc
+}
+
+type eraUtxoValidationRuleComposition struct {
+	era         string
+	descriptors []lcommon.UtxoValidationRuleDescriptor
+	upstream    []lcommon.UtxoValidationRuleFunc
+	built       []indexedUtxoValidationRule
+	// dropped maps each removed rule Id to the upstream function name expected
+	// at that Id.
+	dropped map[lcommon.UtxoValidationRuleId]string
+	// replaced maps each rule Id whose upstream rule Dingo swaps out.
+	replaced map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement
+	// retained lists rule Ids that must still run, with the upstream function
+	// name expected at each. This is the negative case: resolving by Id must
+	// not remove a rule Dingo does not intend to remove.
+	retained map[lcommon.UtxoValidationRuleId]string
+}
+
+func eraUtxoValidationRuleCompositions() []eraUtxoValidationRuleComposition {
+	return []eraUtxoValidationRuleComposition{
+		{
+			era:         "shelley",
+			descriptors: shelley.UtxoValidationRuleDescriptors(),
+			upstream:    shelley.UtxoValidationRules,
+			built:       shelleyUtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleFeeTooSmall: "shelley.UtxoValidateFeeTooSmallUtxo",
+				lcommon.UtxoValidationRuleMaxTxSize:   "shelley.UtxoValidateMaxTxSizeUtxo",
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleValueNotConserved: "shelley.UtxoValidateValueNotConservedUtxo",
+				lcommon.UtxoValidationRuleSignatures:        "shelley.UtxoValidateSignatures",
+			},
+		},
+		{
+			era:         "allegra",
+			descriptors: allegra.UtxoValidationRuleDescriptors(),
+			upstream:    allegra.UtxoValidationRules,
+			built:       allegraUtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleFeeTooSmall: "allegra.UtxoValidateFeeTooSmallUtxo",
+				lcommon.UtxoValidationRuleMaxTxSize:   "allegra.UtxoValidateMaxTxSizeUtxo",
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleValueNotConserved:       "allegra.UtxoValidateValueNotConservedUtxo",
+				lcommon.UtxoValidationRuleOutsideValidityInterval: "allegra.UtxoValidateOutsideValidityIntervalUtxo",
+			},
+		},
+		{
+			era:         "alonzo",
+			descriptors: alonzo.UtxoValidationRuleDescriptors(),
+			upstream:    alonzo.UtxoValidationRules,
+			built:       alonzoUtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRulePlutusScripts: "alonzo.UtxoValidatePlutusScripts",
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleExtraneousRedeemers: "alonzo.UtxoValidateExtraneousRedeemers",
+				lcommon.UtxoValidationRuleNativeScripts:       "alonzo.UtxoValidateNativeScripts",
+				lcommon.UtxoValidationRuleDelegation:          "alonzo.UtxoValidateDelegation",
+			},
+		},
+		{
+			era:         "babbage",
+			descriptors: babbage.UtxoValidationRuleDescriptors(),
+			upstream:    babbage.UtxoValidationRules,
+			built:       babbageUtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRulePlutusScripts: "babbage.UtxoValidatePlutusScripts",
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleMalformedReferenceScripts: "babbage.UtxoValidateMalformedReferenceScripts",
+				lcommon.UtxoValidationRuleWithdrawals:               "babbage.UtxoValidateWithdrawals",
+			},
+		},
+		{
+			era:         "conway",
+			descriptors: conway.UtxoValidationRuleDescriptors(),
+			upstream:    conway.UtxoValidationRules,
+			built:       conwayUtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleFeeTooSmall:   "conway.UtxoValidateFeeTooSmallUtxo",
+				lcommon.UtxoValidationRulePlutusScripts: "conway.UtxoValidatePlutusScripts",
+			},
+			replaced: map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement{
+				lcommon.UtxoValidationRuleConwayFeaturesWithPlutusV1V2: {
+					upstreamFuncName: "conway.UtxoValidateConwayFeaturesWithPlutusV1V2",
+					dingoFunc:        validateConwayFeaturesWithNeededPlutusV1V2,
+				},
+				lcommon.UtxoValidationRuleCommitteeCertificates: {
+					upstreamFuncName: "conway.UtxoValidateCommitteeCertificates",
+					dingoFunc:        validateCommitteeCertificates,
+				},
+				lcommon.UtxoValidationRuleUnknownVoters: {
+					upstreamFuncName: "conway.UtxoValidateUnknownVoters",
+					dingoFunc:        validateUnknownVoters,
+				},
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				// Added upstream in gouroboros v0.202.6 and intentionally not
+				// skipped: Conway validation now enforces a declared
+				// currentTreasuryValue (transaction body key 21).
+				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
+				lcommon.UtxoValidationRuleExUnitsTooBig:        "conway.UtxoValidateExUnitsTooBigUtxo",
+				lcommon.UtxoValidationRuleNativeScripts:        "conway.UtxoValidateNativeScripts",
+				lcommon.UtxoValidationRuleCertificateDeposits:  "conway.UtxoValidateCertificateDeposits",
+			},
+		},
+		{
+			era:         "dijkstra",
+			descriptors: gdijkstra.UtxoValidationRuleDescriptors(),
+			upstream:    gdijkstra.UtxoValidationRules,
+			built:       dijkstraPhase1UtxoValidationRules,
+			dropped: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRulePlutusScripts: "dijkstra.UtxoValidatePlutusScripts",
+			},
+			replaced: map[lcommon.UtxoValidationRuleId]utxoValidationRuleReplacement{
+				lcommon.UtxoValidationRuleCommitteeCertificates: {
+					upstreamFuncName: "dijkstra.UtxoValidateCommitteeCertificates",
+					dingoFunc:        validateCommitteeCertificates,
+				},
+				lcommon.UtxoValidationRuleUnknownVoters: {
+					upstreamFuncName: "dijkstra.UtxoValidateUnknownVoters",
+					dingoFunc:        validateUnknownVoters,
+				},
+			},
+			retained: map[lcommon.UtxoValidationRuleId]string{
+				lcommon.UtxoValidationRuleCurrentTreasuryValue: "common.UtxoValidateCurrentTreasuryValue",
+				lcommon.UtxoValidationRuleExUnitsTooBig:        "dijkstra.UtxoValidateExUnitsTooBigUtxo",
+				lcommon.UtxoValidationRuleCertificateDeposits:  "dijkstra.UtxoValidateCertificateDeposits",
+			},
+		},
+	}
+}
+
+// TestEraUtxoValidationRuleCompositions pins, for every era that removes or
+// replaces an upstream rule, which upstream rule Ids Dingo drops, which it
+// swaps for a local implementation, and that nothing else is disturbed.
+//
+// Resolving by Id is only correct if the Ids select the same rules the previous
+// pin's function names did, so each expected Id is cross-checked against the
+// upstream function name at that Id. An upstream reorder, rename, or Id
+// reassignment fails here instead of silently changing what Dingo validates.
+func TestEraUtxoValidationRuleCompositions(t *testing.T) {
+	for _, era := range eraUtxoValidationRuleCompositions() {
+		t.Run(era.era, func(t *testing.T) {
+			require.Len(
+				t,
+				era.upstream,
+				len(era.descriptors),
+				"upstream descriptor and rule lists must stay aligned",
+			)
+
+			resolveExpected := func(
+				id lcommon.UtxoValidationRuleId,
+				wantFuncName string,
+			) int {
+				index := resolveUtxoValidationSkipIndex(
+					era.descriptors,
+					era.upstream,
+					id,
+				)
+				require.Equal(t, id, era.descriptors[index].Id)
+				require.Equal(
+					t,
+					wantFuncName,
+					shortUtxoValidationRuleName(
+						era.descriptors[index].Validator,
+					),
+					"upstream rule %s is no longer implemented by %s",
+					id,
+					wantFuncName,
+				)
+				return index
+			}
+
+			droppedIndexes := map[int]lcommon.UtxoValidationRuleId{}
+			for id, wantFuncName := range era.dropped {
+				droppedIndexes[resolveExpected(id, wantFuncName)] = id
+			}
+			replacedIndexes := map[int]lcommon.UtxoValidationRuleId{}
+			for id, replacement := range era.replaced {
+				index := resolveExpected(id, replacement.upstreamFuncName)
+				replacedIndexes[index] = id
+				droppedIndexes[index] = id
+			}
+
+			// The built list must be exactly the upstream list minus the
+			// dropped indexes, with the replaced indexes reinstated, each once,
+			// in ascending upstream order.
+			wantIndexes := make([]int, 0, len(era.upstream))
+			for index := range era.upstream {
+				if _, dropped := droppedIndexes[index]; dropped {
+					if _, replaced := replacedIndexes[index]; !replaced {
+						continue
+					}
+				}
+				wantIndexes = append(wantIndexes, index)
+			}
+			gotIndexes := make([]int, 0, len(era.built))
+			for _, rule := range era.built {
+				gotIndexes = append(gotIndexes, rule.index)
+			}
+			require.Equal(
+				t,
+				wantIndexes,
+				gotIndexes,
+				"built rule positions must match the upstream list minus the dropped rules",
+			)
+
+			byIndex := map[int]lcommon.UtxoValidationRuleFunc{}
+			for _, rule := range era.built {
+				byIndex[rule.index] = rule.validationFunc
+			}
+
+			for index, id := range replacedIndexes {
+				replacement := era.replaced[id]
+				require.Equal(
+					t,
+					utxoValidationRuleName(replacement.dingoFunc),
+					utxoValidationRuleName(byIndex[index]),
+					"%s must run Dingo's replacement rule", id,
+				)
+			}
+			for index, id := range droppedIndexes {
+				if _, replaced := replacedIndexes[index]; replaced {
+					continue
+				}
+				require.NotContains(
+					t,
+					byIndex,
+					index,
+					"upstream rule %s must be removed", id,
+				)
+			}
+			for id, wantFuncName := range era.retained {
+				index := resolveExpected(id, wantFuncName)
+				require.Contains(
+					t,
+					byIndex,
+					index,
+					"upstream rule %s must still run", id,
+				)
+				require.Equal(
+					t,
+					utxoValidationRuleName(era.upstream[index]),
+					utxoValidationRuleName(byIndex[index]),
+					"upstream rule %s must run the upstream implementation", id,
+				)
+			}
+		})
+	}
+}
+
+// shortUtxoValidationRuleName trims the module path from a validation rule's
+// runtime function name, leaving "<package>.<Func>".
+func shortUtxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
+	name := utxoValidationRuleName(fn)
+	for i := len(name) - 1; i >= 0; i-- {
+		if name[i] == '/' {
+			return name[i+1:]
+		}
+	}
+	return name
+}
+
+// treasuryUnavailableLedgerState mirrors *ledger.LedgerView while
+// is open: TreasuryValue is a mandatory
+// common.LedgerState method that Dingo does not implement yet.
+type treasuryUnavailableLedgerState struct {
+	*mockLedgerState
+	calls int
+}
+
+func (s *treasuryUnavailableLedgerState) TreasuryValue() (uint64, error) {
+	s.calls++
+	return 0, errors.New("not implemented")
+}
+
+// newConwayTreasuryTx decodes a Conway transaction body from a CBOR key map so
+// the presence of transaction-body key 21 comes from the real decoder rather
+// than from a hand-set field. An absent key and an explicitly declared zero are
+// different states and only the decoder distinguishes them.
+func newConwayTreasuryTx(
+	t *testing.T,
+	body map[int]any,
+) *conway.ConwayTransaction {
+	t.Helper()
+	if _, ok := body[0]; !ok {
+		body[0] = cbor.NewSetType([]shelley.ShelleyTransactionInput{}, true)
+	}
+	if _, ok := body[1]; !ok {
+		body[1] = []any{}
+	}
+	if _, ok := body[2]; !ok {
+		body[2] = uint64(0)
+	}
+	cborData, err := cbor.Encode(body)
+	require.NoError(t, err)
+	tx := &conway.ConwayTransaction{TxIsValid: true}
+	require.NoError(t, tx.Body.UnmarshalCBOR(cborData))
+	return tx
+}
+
+// TestCurrentTreasuryValueRuleGuardsOnDeclaredValue pins the guard the
+// gouroboros v0.202.6 bump depends on.
+//
+// common.UtxoValidateCurrentTreasuryValue is new in v0.202.6 and now runs for
+// every Conway and Dijkstra transaction, but it reads
+// LedgerState.TreasuryValue only for a transaction that declares
+// currentTreasuryValue (transaction body key 21). Dingo's provider still
+// returns an error, so this rule must stay unreachable for ordinary traffic
+// until lands. If upstream drops the guard, or stops
+// distinguishing an absent key 21 from a declared zero, this test fails
+// instead of the node rejecting ordinary transactions.
+func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
+	pp := &conway.ConwayProtocolParameters{}
+	for _, tc := range []struct {
+		name       string
+		body       map[int]any
+		wantCalls  int
+		wantErrors bool
+	}{
+		{
+			name: "key 21 absent",
+			body: map[int]any{2: uint64(100)},
+		},
+		{
+			name:       "key 21 declared zero",
+			body:       map[int]any{2: uint64(100), 21: 0},
+			wantCalls:  1,
+			wantErrors: true,
+		},
+		{
+			name:       "key 21 declared non-zero",
+			body:       map[int]any{2: uint64(100), 21: 7},
+			wantCalls:  1,
+			wantErrors: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := newConwayTreasuryTx(t, tc.body)
+			require.Equal(
+				t,
+				tc.wantCalls > 0,
+				lcommon.TransactionCurrentTreasuryValuePresent(tx),
+				"decoded key 21 presence must match the case under test",
+			)
+			ls := &treasuryUnavailableLedgerState{
+				mockLedgerState: newMockLedgerState(),
+			}
+			err := lcommon.UtxoValidateCurrentTreasuryValue(tx, 0, ls, pp)
+			if tc.wantErrors {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(
+				t,
+				tc.wantCalls,
+				ls.calls,
+				"TreasuryValue must be consulted only for a declared value",
+			)
+		})
+	}
+}
 
 // mockTransaction implements lcommon.Transaction for
 // testing.
@@ -267,6 +840,7 @@ type mockWitnessSet struct {
 	plutusV1Scripts []lcommon.PlutusV1Script
 	plutusV2Scripts []lcommon.PlutusV2Script
 	plutusV3Scripts []lcommon.PlutusV3Script
+	plutusData      []lcommon.Datum
 }
 
 func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
@@ -282,7 +856,7 @@ func (m *mockWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
 }
 
 func (m *mockWitnessSet) PlutusData() []lcommon.Datum {
-	return nil
+	return m.plutusData
 }
 
 func (m *mockWitnessSet) PlutusV1Scripts() []lcommon.PlutusV1Script {
@@ -392,10 +966,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// comment): this script never invokes an actual builtin function, only
 	// CEK machine steps, so it reproduces the exact 112100/800 numbers
 	// plutigo's own default cost model already produced before
-	// requiredCostModel (issue #3528) started rejecting the incomplete
-	// cost models that used to silently trigger that fallback. These
-	// numbers would still change if plutigo's DefaultMachineCosts changes,
-	// same as before.
+	// requiredCostModel started rejecting the incomplete cost models that used
+	// to silently trigger that fallback. These numbers would still change if
+	// plutigo's DefaultMachineCosts changes, same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -1761,18 +2334,6 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 255,
 		},
 		{
-			name:     "typical alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 4096),
-			expected: 4095,
-		},
-		{
-			name:     "large alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 16384),
-			expected: 16383,
-		},
-		{
 			// Mary (pre-Alonzo) TX: no subtraction.
 			name:     "mary transaction full size",
 			txType:   3, // Mary
@@ -2449,47 +3010,6 @@ func TestCalculateMinFee(t *testing.T) {
 			expected:    240701,
 		},
 		{
-			// Multiple scripts - the exUnits represent the
-			// sum of all script execution units.
-			// Two scripts: script1(mem=500000, steps=100000000)
-			//              script2(mem=500000, steps=100000000)
-			// Total: mem=1000000, steps=200000000
-			// Same as single script test above.
-			name:   "multiple scripts summed exunits",
-			txSize: 300,
-			exUnits: lcommon.ExUnits{
-				Memory: 1000000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    240701,
-		},
-		{
-			// Three scripts with different costs summed:
-			// script1(mem=300000, steps=50000000)
-			// script2(mem=200000, steps=80000000)
-			// script3(mem=100000, steps=70000000)
-			// Total: mem=600000, steps=200000000
-			// baseFee = 44*400 + 155381 = 172981
-			// memFee = ceil(577*600000/10000) = ceil(34620) = 34620
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// total = 172981 + 34620 + 14420 = 222021
-			name:   "three scripts summed",
-			txSize: 400,
-			exUnits: lcommon.ExUnits{
-				Memory: 600000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    222021,
-		},
-		{
 			// Ceiling behavior: single ceiling over sum.
 			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
 			// pricesMem=1/3, mem=1 => 1/3
@@ -2661,100 +3181,6 @@ func TestCalculateMinFee(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
-	// Verify that a transaction with scripts costs more
-	// than the same transaction without scripts.
-	txSize := uint64(300)
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-
-	// Fee with no scripts
-	feeNoScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{Memory: 0, Steps: 0},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// Fee with scripts
-	feeWithScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{
-			Memory: 1000000,
-			Steps:  200000000,
-		},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	assert.Greater(
-		t,
-		feeWithScripts,
-		feeNoScripts,
-		"fee with scripts should be greater than base fee",
-	)
-
-	// The difference should equal the script execution fee
-	scriptFee := feeWithScripts - feeNoScripts
-	// memFee = ceil(577*1000000/10000) = 57700
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	assert.Equal(
-		t,
-		uint64(72120),
-		scriptFee,
-		"script fee component mismatch",
-	)
-}
-
-func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
-	// Verify that running N scripts with individual
-	// ExUnits that sum to a total produces the same
-	// fee as the total ExUnits directly.
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-	txSize := uint64(400)
-
-	// Three individual scripts
-	scripts := []lcommon.ExUnits{
-		{Memory: 300000, Steps: 50000000},
-		{Memory: 200000, Steps: 80000000},
-		{Memory: 100000, Steps: 70000000},
-	}
-
-	// Sum them up (simulating what EvaluateTx does)
-	var totalExUnits lcommon.ExUnits
-	for _, s := range scripts {
-		totalExUnits.Memory += s.Memory
-		totalExUnits.Steps += s.Steps
-	}
-
-	require.Equal(t, int64(600000), totalExUnits.Memory)
-	require.Equal(t, int64(200000000), totalExUnits.Steps)
-
-	fee := CalculateMinFee(
-		txSize,
-		totalExUnits,
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// baseFee = 44*400 + 155381 = 172981
-	// memFee = ceil(577*600000/10000) = 34620
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	// total = 172981 + 34620 + 14420 = 222021
-	assert.Equal(t, uint64(222021), fee)
 }
 
 func TestCalculateConwayRefScriptFee_Tiered(t *testing.T) {
@@ -4545,7 +4971,7 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 // other's member.
 //
 // This test passes both with and without the fail-closed change by design; it
-// covers the tag-preservation behavior this PR adds, not the availability
+// covers the tag-preservation behavior, not the availability
 // gate. It fails if the tag is ever dropped or defaulted in voter resolution.
 func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
 	var hash lcommon.Blake2b224
@@ -4678,8 +5104,8 @@ func committeeCert(
 	}
 }
 
-// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
-// dingo#4377: a committee cold credential resignation is rejected both when
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins:
+// a committee cold credential resignation is rejected both when
 // it was already resigned before the transaction and when an earlier
 // certificate in the same transaction resigned it. Dingo's replacement
 // previously checked member.Resigned only on the authorize path and queried
@@ -4916,4 +5342,459 @@ func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
 			&conway.ConwayProtocolParameters{},
 		))
 	})
+}
+
+// conwayParameterChangeProposal builds a proposal procedure carrying a
+// ConwayParameterChangeGovAction. When protocolVersion is non-nil, the
+// action sets protocol-version key 14, which requires rejecting.
+func conwayParameterChangeProposal(
+	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
+) lcommon.ProposalProcedure {
+	minFeeA := uint(1)
+	return conway.ConwayProposalProcedure{
+		PPGovAction: conway.ConwayGovAction{
+			Type: uint(lcommon.GovActionTypeParameterChange),
+			Action: &conway.ConwayParameterChangeGovAction{
+				ParamUpdate: conway.ConwayProtocolParameterUpdate{
+					MinFeeA:         &minFeeA,
+					ProtocolVersion: protocolVersion,
+				},
+			},
+		},
+	}
+}
+
+// dijkstraParameterChangeProposal is the Dijkstra analogue of
+// conwayParameterChangeProposal.
+func dijkstraParameterChangeProposal(
+	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
+) lcommon.ProposalProcedure {
+	minFeeA := uint(1)
+	return conway.ConwayProposalProcedure{
+		PPGovAction: conway.ConwayGovAction{
+			Type: uint(lcommon.GovActionTypeParameterChange),
+			Action: &gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+					MinFeeA:         &minFeeA,
+					ProtocolVersion: protocolVersion,
+				},
+			},
+		},
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsConway pins
+// validateParameterChangeExcludesProtocolVersion's Conway branch directly,
+// independent of any other Conway validation rule.
+func TestValidateParameterChangeExcludesProtocolVersionRejectsConway(
+	t *testing.T,
+) {
+	for _, major := range []uint{9, 10, 11} {
+		t.Run(
+			fmt.Sprintf("PV%d", major),
+			func(t *testing.T) {
+				tx := &mockConwayFeeTx{
+					proposalProcedures: []lcommon.ProposalProcedure{
+						conwayParameterChangeProposal(
+							&lcommon.ProtocolParametersProtocolVersion{
+								Major: major,
+							},
+						),
+					},
+				}
+				err := validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				)
+				var protocolVersionErr ParameterChangeProtocolVersionError
+				require.ErrorAs(t, err, &protocolVersionErr)
+				require.Equal(t, 0, protocolVersionErr.ProposalIndex)
+			},
+		)
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra is the
+// Dijkstra analogue: the same protocol-version key 14 exclusion carries into
+// Dijkstra's ParameterChange action ( "apply the same protection
+// to Dijkstra" acceptance criterion, PV12).
+func TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra(
+	t *testing.T,
+) {
+	tx := &mockConwayFeeTx{
+		proposalProcedures: []lcommon.ProposalProcedure{
+			dijkstraParameterChangeProposal(
+				&lcommon.ProtocolParametersProtocolVersion{
+					Major: gdijkstra.MinProtocolVersionDijkstra,
+				},
+			),
+		},
+	}
+	err := validateParameterChangeExcludesProtocolVersion(
+		tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+	)
+	var protocolVersionErr ParameterChangeProtocolVersionError
+	require.ErrorAs(t, err, &protocolVersionErr)
+	require.Equal(t, 0, protocolVersionErr.ProposalIndex)
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate is
+// the negative case: a ParameterChange that never touches protocol version
+// must not be rejected by this rule, in either era's action type.
+func TestValidateParameterChangeExcludesProtocolVersionAllowsOrdinaryUpdate(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name     string
+		proposal lcommon.ProposalProcedure
+	}{
+		{"Conway", conwayParameterChangeProposal(nil)},
+		{"Dijkstra", dijkstraParameterChangeProposal(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					tc.proposal,
+				},
+			}
+			require.NoError(
+				t,
+				validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				),
+			)
+		})
+	}
+}
+
+// decodeConwayParamUpdateFromRawFields CBOR-encodes fields as a map and
+// decodes it into a ConwayProtocolParameterUpdate through the type's own
+// UnmarshalCBOR, so the returned value's Cbor() carries the real raw bytes
+// -- unlike a struct literal, which leaves Cbor() empty. This is what lets a
+// test exercise parameterChangeSetsProtocolVersionKey's raw-CBOR path.
+func decodeConwayParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) conway.ConwayProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update conway.ConwayProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// decodeDijkstraParamUpdateFromRawFields is the Dijkstra analogue of
+// decodeConwayParamUpdateFromRawFields.
+func decodeDijkstraParamUpdateFromRawFields(
+	t *testing.T,
+	fields map[uint]any,
+) gdijkstra.DijkstraProtocolParameterUpdate {
+	t.Helper()
+	raw, err := cbor.Encode(fields)
+	require.NoError(t, err)
+	var update gdijkstra.DijkstraProtocolParameterUpdate
+	_, err = cbor.Decode(raw, &update)
+	require.NoError(t, err)
+	return update
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14
+// verifies that a decoded ParamUpdate whose raw CBOR carries key 14 with an
+// explicit null value decodes ProtocolVersion
+// to the same nil the field takes when key 14 is absent entirely, so the
+// decoded-pointer check alone cannot reject it. The reference rejects a
+// ParameterChange carrying key 14 at all, regardless of its value, so this
+// must be rejected via the raw-CBOR path in
+// parameterChangeSetsProtocolVersionKey.
+func TestValidateParameterChangeExcludesProtocolVersionRejectsPresentNullKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	conwayRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	dijkstraRaw, err := cbor.Encode(map[uint]any{0: minFeeA, 14: nil})
+	require.NoError(t, err)
+	var conwayUpdate conway.ConwayProtocolParameterUpdate
+	conwayUpdate.MinFeeA = &minFeeA
+	conwayUpdate.SetCbor(conwayRaw)
+	var dijkstraUpdate gdijkstra.DijkstraProtocolParameterUpdate
+	dijkstraUpdate.MinFeeA = &minFeeA
+	dijkstraUpdate.SetCbor(dijkstraRaw)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: conwayUpdate,
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: dijkstraUpdate,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
+				},
+			}
+			err := validateParameterChangeExcludesProtocolVersion(
+				tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+			)
+			var protocolVersionErr ParameterChangeProtocolVersionError
+			require.ErrorAs(t, err, &protocolVersionErr)
+		})
+	}
+}
+
+// TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14
+// is the negative case alongside the test above: a raw-CBOR-decoded update
+// that never carries key 14 must still pass, proving
+// parameterChangeSetsProtocolVersionKey does not over-reject an ordinary
+// decoded update.
+func TestValidateParameterChangeExcludesProtocolVersionAllowsRawUpdateWithoutKey14(
+	t *testing.T,
+) {
+	minFeeA := uint(1)
+	for _, tc := range []struct {
+		name   string
+		action lcommon.GovAction
+	}{
+		{
+			"Conway",
+			&conway.ConwayParameterChangeGovAction{
+				ParamUpdate: decodeConwayParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+		{
+			"Dijkstra",
+			&gdijkstra.DijkstraParameterChangeGovAction{
+				ParamUpdate: decodeDijkstraParamUpdateFromRawFields(
+					t,
+					map[uint]any{0: minFeeA},
+				),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					conway.ConwayProposalProcedure{
+						PPGovAction: conway.ConwayGovAction{
+							Type: uint(
+								lcommon.GovActionTypeParameterChange,
+							),
+							Action: tc.action,
+						},
+					},
+				},
+			}
+			require.NoError(
+				t,
+				validateParameterChangeExcludesProtocolVersion(
+					tx, 0, newMockLedgerState(), conwayDivergencePparams(),
+				),
+			)
+		})
+	}
+}
+
+// Slots used by the tests below: the transaction is applied inside the era
+// forecast horizon but its TTL falls past it, which is the shape of a real
+// preview transaction (block slot 699109, TTL 785381, horizon 777600) that
+// wedged `dingo load`.
+const (
+	testAppliedSlot     = 699_109
+	testHorizonSlot     = 777_600
+	testPastHorizonSlot = 785_381
+)
+
+// pastHorizonLedgerState resolves slots to times only inside the era forecast
+// horizon, mirroring ledger.LedgerState.SlotToTime once the current era is
+// bounded by its safe zone.
+type pastHorizonLedgerState struct {
+	*mockLedgerState
+	horizonSlot     uint64
+	slotToTimeCalls int
+}
+
+func newPastHorizonLedgerState() *pastHorizonLedgerState {
+	return &pastHorizonLedgerState{
+		mockLedgerState: newMockLedgerState(),
+		horizonSlot:     testHorizonSlot,
+	}
+}
+
+// withoutBabbageUtxoValidationRules drops the gouroboros phase-1 rule set so a
+// test can exercise the dingo-side script handling in isolation, mirroring
+// withoutConwayUtxoValidationRules.
+func withoutBabbageUtxoValidationRules(t *testing.T) {
+	t.Helper()
+
+	orig := babbageUtxoValidationRules
+	babbageUtxoValidationRules = nil
+	t.Cleanup(func() {
+		babbageUtxoValidationRules = orig
+	})
+}
+
+// newTestTxCbor builds transaction CBOR with a single input, a fee, and a TTL.
+func newTestTxCbor(
+	t *testing.T,
+	ttl uint64,
+	witnessSet map[uint]any,
+) []byte {
+	t.Helper()
+
+	inputHash := make([]byte, 32)
+	inputHash[0] = 0xaa
+	bodyMap := map[uint]any{
+		0: []any{
+			[]any{inputHash, uint64(0)},
+		},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		2: uint64(200_000),
+		3: ttl,
+	}
+	txCbor, err := cbor.Encode(
+		[]any{bodyMap, witnessSet, true, nil},
+	)
+	require.NoError(t, err)
+	return txCbor
+}
+
+// redeemerWitnessSet is a witness set carrying one spend redeemer, which is
+// what makes a transaction require Plutus evaluation.
+func redeemerWitnessSet() map[uint]any {
+	return map[uint]any{
+		5: []any{
+			[]any{
+				uint64(0), // tag: spend
+				uint64(0), // index
+				uint64(42),
+				[]any{uint64(1_000), uint64(2_000)},
+			},
+		},
+	}
+}
+
+// A transaction with no redeemers runs no Plutus script, so no script context
+// may be built for it: building one translates its TTL to wall-clock time,
+// which fails past the era forecast horizon and rejects a canonical block.
+func TestValidateTxBabbageSkipsScriptContextWithoutRedeemers(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testPastHorizonSlot, map[uint]any{}),
+	)
+	require.NoError(t, err)
+	require.False(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.NoError(t, err)
+	assert.Zero(
+		t,
+		ls.slotToTimeCalls,
+		"no slot/time translation may happen for a redeemerless transaction",
+	)
+}
+
+// The gate must not weaken the horizon for transactions that do run scripts:
+// those still translate their validity interval, and a past-horizon TTL is a
+// genuine translation failure (cardano-ledger's TimeTranslationPastHorizon).
+func TestValidateTxBabbageKeepsHorizonForRedeemerTx(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testPastHorizonSlot, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	require.True(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.ErrorIs(t, err, hardfork.ErrPastHorizon)
+	assert.Positive(t, ls.slotToTimeCalls)
+}
+
+// The accept half of the redeemer class: a transaction that does run scripts
+// and whose validity bound is inside the horizon must have its script context
+// built, which means its validity interval is translated and the translation
+// succeeds. Only the reject half was pinned before, so a regression that
+// refused every redeemer transaction's translation would have gone unnoticed.
+//
+// The transaction carries no matching script, so evaluation cannot proceed past
+// the redeemer lookup; reaching that lookup is the proof that the script
+// context was built rather than skipped or refused.
+func TestValidateTxBabbageBuildsScriptContextInsideHorizon(t *testing.T) {
+	withoutBabbageUtxoValidationRules(t)
+
+	tx, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot+100, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	require.True(t, txHasRedeemers(tx))
+
+	ls := newPastHorizonLedgerState()
+	ls.addUtxo(tx.Inputs()[0], newTestOutput(1_000_000))
+
+	err = ValidateTxBabbage(
+		tx,
+		testAppliedSlot,
+		ls,
+		&babbage.BabbageProtocolParameters{},
+	)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, hardfork.ErrPastHorizon,
+		"a validity bound inside the horizon must translate")
+	assert.ErrorContains(t, err, "could not find script with hash",
+		"validation must reach redeemer resolution, which only happens once "+
+			"the script context has been built")
+	assert.Positive(t, ls.slotToTimeCalls,
+		"building the script context must translate the validity interval")
+}
+
+func TestTxHasRedeemers(t *testing.T) {
+	withRedeemer, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot, redeemerWitnessSet()),
+	)
+	require.NoError(t, err)
+	assert.True(t, txHasRedeemers(withRedeemer))
+
+	withoutRedeemer, err := babbage.NewBabbageTransactionFromCbor(
+		newTestTxCbor(t, testAppliedSlot, map[uint]any{}),
+	)
+	require.NoError(t, err)
+	assert.False(t, txHasRedeemers(withoutRedeemer))
 }

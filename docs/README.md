@@ -23,8 +23,10 @@ current branch.
 | How do I run Dingo locally against a single-node devnet? | [Local DevNet helper](devnet.md) |
 | How do I run benchmarks or collect profiles? | [Benchmarks and profiling](benchmarks.md) |
 | How do I run conformance tests? | [Conformance tests](../internal/test/conformance/README.md) |
-| How do I exercise archive and history-expiry behavior? | [Archive node demo](../internal/test/archive-demo/README.md) |
-| Where are runnable API examples? | [Examples](../examples/README.md) |
+| How do I exercise archive and history-expiry behavior? | [Dingo archive node demo](https://github.com/blinklabs-io/cardano-compose-stacks/tree/main/dingo-archive-demo) |
+| How do I connect AI assistants (Claude, Cursor, Codex) to Dingo via MCP? | [MCP Guide](mcp/README.md) |
+| How do natural-language questions map to MCP tools & requests? | [MCP Tool Intent Mapping](mcp/README.md#4-semantic-architecture--intent-mapping-taxonomy) |
+| How is the MCP server structured? | [MCP Architecture Manual](mcp/architecture.md) |
 | How do I install the Grafana dashboards? | [Dashboards](dashboards/README.md) |
 
 Contributor rules live in [`AGENTS.md`](../AGENTS.md) and

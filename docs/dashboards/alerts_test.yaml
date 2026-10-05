@@ -1,0 +1,65 @@
+# promtool test cases for docs/dashboards/alerts.yaml.
+#
+#   promtool test rules docs/dashboards/alerts_test.yaml
+#
+# Scoped to NodeParityFromGenesisStalled's startup window, which is the case
+# a plain `promtool check rules` cannot see: the rule parses and the PromQL
+# is valid, but on a fresh process it fired against a healthy replay.
+# node_parity_epochs_total and node_parity_epoch_checks_incomplete_total are
+# pre-materialized at 0, so rate() over them is a real 0 rather than absent
+# data, and the rule was true from the second scrape onward.
+rule_files:
+  - alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # A fresh process whose first epoch takes 20 minutes -- ordinary for a
+  # from-genesis replay, and more so for an --at-slot resume that starts at
+  # a deep epoch rather than the cheap early ones. Nothing may fire before
+  # the process has been up as long as the rule's own [2h] window.
+  - interval: 1m
+    name: a healthy fresh run does not alert during its first epoch
+    input_series:
+      - series: 'node_parity_epochs_total{network="preview",job="node-parity",instance="localhost:9464"}'
+        values: '0+0x20 1+0x40'
+      - series: 'node_parity_epoch_checks_incomplete_total{network="preview",job="node-parity",instance="localhost:9464",field="utxo"}'
+        values: '0+0x60'
+      # Process started at t=0, so age in seconds equals the eval time.
+      - series: 'process_start_time_seconds{job="node-parity",instance="localhost:9464"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: NodeParityFromGenesisStalled
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: NodeParityFromGenesisStalled
+        exp_alerts: []
+      - eval_time: 59m
+        alertname: NodeParityFromGenesisStalled
+        exp_alerts: []
+
+  # The case the rule exists for: a process well past the grace window that
+  # has genuinely stopped advancing. The gate must not suppress this.
+  - interval: 1m
+    name: a real stall past the grace window still alerts
+    input_series:
+      - series: 'node_parity_epochs_total{network="preview",job="node-parity",instance="localhost:9464"}'
+        values: '0+0x400'
+      - series: 'node_parity_epoch_checks_incomplete_total{network="preview",job="node-parity",instance="localhost:9464",field="utxo"}'
+        values: '0+0x400'
+      - series: 'process_start_time_seconds{job="node-parity",instance="localhost:9464"}'
+        values: '0+0x400'
+    alert_rule_test:
+      # 2h grace, then "for: 15m".
+      - eval_time: 136m
+        alertname: NodeParityFromGenesisStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              network: preview
+              job: node-parity
+              instance: localhost:9464
+            exp_annotations:
+              summary: "node-parity from-genesis has stopped advancing on preview"
+              description: "localhost:9464 (job node-parity) has recorded no from-genesis epoch, verified or incomplete, in the last 2 hours -- the replay is stalled rather than merely slow."

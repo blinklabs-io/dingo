@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -23,7 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -374,10 +375,10 @@ func TestDecodeReadChainBatchMirrorsSerialValidationGates(t *testing.T) {
 		name   string
 		mutate func(*LedgerState, models.Block)
 		// wantOk records whether the block should still decode despite the
-		// wrong nonce configured below. Issue #3528: a coarse
-		// ValidateHistorical=false historical-sync toggle must not exempt
-		// header VRF/KES/OpCert crypto from validation -- only a slot a
-		// Mithril certificate already covers may skip it.
+		// wrong nonce configured below. A coarse ValidateHistorical=false
+		// historical-sync toggle must not exempt header VRF/KES/OpCert crypto
+		// from validation -- only a slot a Mithril certificate already covers
+		// may skip it.
 		wantOk bool
 	}{
 		{
@@ -813,4 +814,161 @@ func TestBlockPipelineEta0Provider_NoNonceForEpoch(t *testing.T) {
 		errors.Is(err, errBlockPipelineEta0Unavailable),
 		"a covered epoch without a nonce must retain the eta0-unavailable sentinel",
 	)
+}
+
+// newAdmissionSkipTestLedger returns a pipeline-validating ledger whose epoch
+// cache holds a nonce the block was NOT proven against and whose pipeline reads
+// that cache through the production nonce provider. Header verification run
+// against it genuinely fails, so a block is accepted only if that verification
+// is skipped. With validNonce the cache holds the proven nonce instead.
+func newAdmissionSkipTestLedger(
+	t *testing.T,
+	vb testutil.ValidatedConwayBlock,
+	validNonce bool,
+) *LedgerState {
+	t.Helper()
+	ls := newValidatedPipelineTestLedger(t, vb)
+	if !validNonce {
+		wrongNonce, err := hex.DecodeString(
+			wrongNonceHexFor(t, vb.EpochNonceHex),
+		)
+		require.NoError(t, err)
+		ls.epochCache[0].Nonce = wrongNonce
+		ls.publishSnapshotsLocked()
+	}
+	require.NoError(t, ls.blockPipeline.Stop())
+	ls.blockPipeline = pipeline.NewBlockPipeline(
+		pipeline.WithDecodeWorkers(1),
+		pipeline.WithValidateWorkers(1),
+		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+		pipeline.WithSlotsPerKesPeriod(vb.SlotsPerKesPeriod),
+		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	)
+	require.NoError(t, ls.blockPipeline.Start(t.Context()))
+	return ls
+}
+
+// TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock pins that a
+// block whose header passed admission verification is not verified again at
+// replay, while a block that bypassed admission, or that shares a slot with
+// one that did not, still is.
+func TestDecodeReadChainBatchSkipsCryptoForAdmissionVerifiedBlock(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	var seed [32]byte
+	seed[0] = 31
+	block, vb := buildValidatedTestModelsBlock(t, seed, 7, 100, 1)
+	point := ocommon.NewPoint(block.Slot, block.Hash)
+
+	t.Run("admission verified is skipped", func(t *testing.T) {
+		t.Parallel()
+		ls := newAdmissionSkipTestLedger(t, vb, false)
+		ls.markAdmissionVerified(point)
+
+		decoded, ok := ls.decodeReadChainBatch(
+			t.Context(), []models.Block{block},
+		)
+		require.True(t, ok, "admission-verified block must not be re-verified")
+		require.Len(t, decoded, 1)
+		assert.False(
+			t,
+			ls.consumeAdmissionVerified(point),
+			"replay must consume the admission record",
+		)
+	})
+	t.Run("bypassed admission is verified", func(t *testing.T) {
+		t.Parallel()
+		ls := newAdmissionSkipTestLedger(t, vb, false)
+
+		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+		assert.False(
+			t,
+			ok,
+			"block without an admission record must be verified",
+		)
+	})
+	t.Run("same slot different hash is verified", func(t *testing.T) {
+		t.Parallel()
+		ls := newAdmissionSkipTestLedger(t, vb, false)
+		ls.markAdmissionVerified(
+			ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+		)
+
+		_, ok := ls.decodeReadChainBatch(t.Context(), []models.Block{block})
+		assert.False(
+			t,
+			ok,
+			"an admission record for another hash must not exempt this block",
+		)
+	})
+	t.Run(
+		"same slot different hash valid block is accepted",
+		func(t *testing.T) {
+			t.Parallel()
+			ls := newAdmissionSkipTestLedger(t, vb, true)
+			ls.markAdmissionVerified(
+				ocommon.NewPoint(block.Slot, bytes.Repeat([]byte{0xAB}, 32)),
+			)
+
+			decoded, ok := ls.decodeReadChainBatch(
+				t.Context(), []models.Block{block},
+			)
+			require.True(t, ok)
+			require.Len(t, decoded, 1)
+		},
+	)
+}
+
+// TestAdmissionVerifiedSetIsBounded pins that the admission record cannot grow
+// without limit while replay lags, and that records replay has passed free
+// room for new ones.
+func TestAdmissionVerifiedSetIsBounded(t *testing.T) {
+	t.Parallel()
+
+	const limit = 4
+	ls := &LedgerState{maxAdmissionVerified: limit}
+	ls.publishSnapshotsLocked()
+	for slot := uint64(10); slot < 10+limit+3; slot++ {
+		ls.markAdmissionVerified(ocommon.NewPoint(slot, []byte{byte(slot)}))
+	}
+	ls.admissionVerifiedMu.Lock()
+	assert.Len(t, ls.admissionVerified, limit)
+	ls.admissionVerifiedMu.Unlock()
+
+	ls.currentTip.Point.Slot = 100
+	ls.publishSnapshotsLocked()
+	late := ocommon.NewPoint(200, []byte{0xCC})
+	ls.markAdmissionVerified(late)
+	assert.True(t, ls.consumeAdmissionVerified(late))
+}
+
+// TestBlockPipelineEta0ProviderSkipsAdmissionVerifiedSlot pins that the
+// validate stage is told to skip a slot whose block was verified at admission,
+// so the VRF/KES work is not repeated, and only that slot.
+func TestBlockPipelineEta0ProviderSkipsAdmissionVerifiedSlot(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		epochCache: []models.Epoch{{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 432000,
+			Nonce:         []byte{0x01, 0x02, 0x03},
+		}},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            testLogger(),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	ls.markAdmissionVerified(ocommon.NewPoint(1000, []byte{0x01}))
+
+	_, err := ls.blockPipelineEta0Provider(1000)
+	require.ErrorIs(t, err, errBlockPipelineAdmissionVerified)
+
+	nonceHex, err := ls.blockPipelineEta0Provider(1001)
+	require.NoError(t, err)
+	assert.Equal(t, "010203", nonceHex)
 }

@@ -32,12 +32,17 @@ import (
 
 var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Config contains backend-neutral dependencies for a Store.
+// Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
-	WriteDB *sql.DB
-	ReadDB  *sql.DB
-	Dialect Dialect
-	Logger  *slog.Logger
+	// SQLitePath identifies the file opened by the provider, including its
+	// dataDir override. Reconstructing it from the node's global directory
+	// could point introspection clients at a different database. It is empty
+	// for in-memory SQLite and other backends, and immutable after construction.
+	SQLitePath string
+	WriteDB    *sql.DB
+	ReadDB     *sql.DB
+	Dialect    Dialect
+	Logger     *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -124,6 +129,7 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	sqlitePath  string
 	writeDB     *sql.DB
 	readDB      *sql.DB
 	dialect     Dialect
@@ -269,6 +275,7 @@ func New(config Config) (*Store, error) {
 	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
+		sqlitePath:                  config.SQLitePath,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
@@ -937,6 +944,90 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 	return tx, nil, err
 }
 
+// ReserveRead takes one read-pool connection without beginning a
+// transaction on it, implementing types.ReadReserver.
+//
+// database.NewReadSnapshotContext uses it to keep the read-pool wait out of
+// the commit barrier it holds while fixing its two read views. Its lifetime
+// admission cap also leaves one connection outside coordinated snapshots for
+// operational reads during rollback.
+func (s *Store) ReserveRead(
+	ctx context.Context,
+) (types.ReadReservation, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !s.ready.Load() {
+		return nil, errors.New("sqlstore: store is not ready")
+	}
+	conn, err := s.readDB.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &readReservation{owner: s, conn: conn, ctx: ctx}, nil
+}
+
+// ReadSnapshotLimit leaves one read-pool connection available for operational
+// reads performed inside destructive transitions while coordinated snapshots
+// remain open for client-paced responses.
+func (s *Store) ReadSnapshotLimit() int {
+	return max(1, s.readDB.Stats().MaxOpenConnections-1)
+}
+
+// readReservation holds a reserved read-pool connection. releaseOnce makes
+// Release idempotent so the reserving caller can defer it unconditionally
+// alongside a Begin that may already have handed ownership to a sqlTxn.
+type readReservation struct {
+	owner       *Store
+	conn        *sql.Conn
+	ctx         context.Context
+	releaseOnce sync.Once
+	begun       bool
+}
+
+func (r *readReservation) Begin() types.Txn {
+	if r.begun {
+		return &sqlTxn{
+			owner:    r.owner,
+			ctx:      r.ctx,
+			beginErr: errors.New("sqlstore: read reservation already begun"),
+		}
+	}
+	r.begun = true
+	tx, err := r.conn.BeginTx(r.ctx, r.owner.dialect.BeginOptions(true))
+	if err != nil {
+		// Nothing owns the connection now, so the reservation returns it
+		// here rather than leaving it to a Rollback that reports beginErr
+		// without reaching releaseConnection.
+		r.releaseConn()
+		return &sqlTxn{owner: r.owner, ctx: r.ctx, beginErr: err}
+	}
+	return &sqlTxn{
+		owner:   r.owner,
+		tx:      tx,
+		ctx:     r.ctx,
+		release: r.releaseConn,
+	}
+}
+
+func (r *readReservation) Release() {
+	if r.begun {
+		return
+	}
+	r.releaseConn()
+}
+
+func (r *readReservation) releaseConn() {
+	r.releaseOnce.Do(func() {
+		if err := r.conn.Close(); err != nil {
+			r.owner.logger.Debug(
+				"sqlstore: release reserved read connection",
+				"error", err,
+			)
+		}
+	})
+}
+
 type queryer interface {
 	Execer
 	PrepareContext(context.Context, string) (*sql.Stmt, error)
@@ -1117,12 +1208,22 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
+	return s.UpdatePlannerStatsContext(context.Background())
+}
+
+// UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
+func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkMu.RLock()
 	defer s.bulkMu.RUnlock()
 	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 	}
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
 }
+
+// SQLitePath returns the active provider's on-disk SQLite location, if any.
+// This optional capability lets clients own separate read-only pools without
+// exposing the provider's pools or requiring it on every MetadataStore.
+func (s *Store) SQLitePath() string { return s.sqlitePath }

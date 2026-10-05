@@ -41,7 +41,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Cleanup expired deny list entries
 	p.cleanupDenyList()
+	p.cleanupInboundFlapHistoryLocked(now)
 	p.cleanupNetworkMismatchDenyList()
+	events = p.syncUpstreamWithholdLocked(events)
 
 	// Reconcile ledger-derived address bookkeeping against currently
 	// retained peers so addresses from peers that left the peer list (deny,
@@ -155,6 +157,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				if p.isTopologyPeer(peer.Source) {
 					continue
 				}
+				// With no eligible upstream this peer is one of the node's
+				// last leads back onto the network. A removed peer is not
+				// restored when its deny entry expires, so keep it for the
+				// emergency redial path.
+				if p.countEligibleUpstreamsLocked() == 0 {
+					continue
+				}
 				p.denyList[peer.NormalizedAddress] = now.
 					Add(p.config.DenyDuration)
 				knownRemoved++
@@ -225,7 +234,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		candidates := make([]promotionCandidate, 0, len(p.peers))
 		for _, peer := range p.peers {
 			if peer != nil && peer.State == PeerStateWarm &&
-				peer.hasClientConnection() {
+				p.usableClientLocked(peer) {
 				// Skip bootstrap peers if bootstrap has been exited
 				if p.isBootstrapPeer(peer) && !p.canPromoteBootstrapPeer() {
 					continue
@@ -759,6 +768,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 		}
 		if applyCooldown {
 			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+			p.rememberInboundFlapLocked(peer, now, cooldownDuration)
 			p.recordInboundLifecycle("cooled-down")
 		}
 		p.config.Logger.Info(

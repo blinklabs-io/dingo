@@ -682,3 +682,136 @@ func TestStoreStartsForPostgresDialect(t *testing.T) {
 	require.True(t, store.Ready())
 	require.NoError(t, store.Close())
 }
+
+// TestTransactionAlreadyCanceledContextFailsImmediately guards the simplest
+// case: a ctx canceled before Transaction/ReadTransaction is even called
+// must fail the begin outright rather than opening a transaction nothing
+// can ever commit. Mirrors migrations/runner_test.go's
+// TestProcessLockerCancellation shape: an already-canceled context is a
+// deterministic guarantee, not a timing race.
+func TestTransactionAlreadyCanceledContextFailsImmediately(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	writeErr := store.Transaction(ctx).Commit()
+	require.ErrorIs(t, writeErr, context.Canceled)
+
+	readErr := store.ReadTransaction(ctx).Commit()
+	require.ErrorIs(t, readErr, context.Canceled)
+}
+
+// TestTransactionContextDeadlineAbortsBlockedBegin guards the core promise
+// of threading a caller's ctx into Transaction: a caller waiting for a
+// connection (here, SQLite's single-writer pool held by another
+// transaction) is unblocked by its own deadline instead of waiting out
+// whoever is holding the connection. Adapts
+// TestSQLiteBulkModeKeepsPlannerAndWritersAvailable's blocking shape
+// (store_test.go), swapping the blocking cause's resolution from "the
+// holder commits" to "the waiter's own deadline fires".
+func TestTransactionContextDeadlineAbortsBlockedBegin(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	store.writeDB.SetMaxOpenConns(1)
+
+	holder := store.Transaction(t.Context())
+	t.Cleanup(func() { _ = holder.Rollback() })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	waiter := store.Transaction(ctx)
+	err := waiter.Commit()
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(
+		t, elapsed, 2*time.Second,
+		"the waiter must return on its own deadline, not wait for the holder",
+	)
+
+	// The holder is unaffected by the waiter's unrelated deadline.
+	require.NoError(t, holder.Commit())
+}
+
+// TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction is the
+// regression test for a statement-retention bug: production
+// applies many outputs within one shared write transaction (a whole block
+// batch via LedgerDeltaBatch.apply, or the entire genesis UTxO set in one
+// txn.Do), not one transaction per output, so insertUtxoModel's INSERT and
+// asset-id lookup are each consulted many times against the same *sql.Tx.
+// Both route through queryRowCached, which derives a Tx-scoped *sql.Stmt via
+// stmtForQueryer/txScopedStmt (prepared_stmt.go). Before
+// perf/reward-live-stake-touch-cache's fix (00bedb10), txScopedStmt called
+// (*sql.Tx).StmtContext on every invocation and database/sql retained every
+// result until commit or rollback, so retention was linear in outputs
+// inserted per transaction: 20000 outputs, each carrying one asset, would
+// have retained 20000 Tx-scoped statements. txScopedStmt now derives the
+// Tx-scoped statement once per (tx, cached) pair and reuses it, so this
+// asserts retention stays bounded regardless of output count.
+func TestInsertUtxoModelBoundsTxScopedStatementRetentionInOneTransaction(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	ctx := context.Background()
+
+	const outputCount = 20_000
+
+	txn := store.Transaction(ctx)
+	sqlTransaction, ok := txn.(*sqlTxn)
+	require.True(t, ok)
+	require.NoError(t, sqlTransaction.beginErr)
+
+	require.NoError(t, store.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			for i := range uint32(outputCount) {
+				utxo := utxoForInsertCacheTest(1, i, 1_000_000+uint64(i))
+				utxo.Assets = []models.Asset{
+					{
+						Name:     []byte("token"),
+						PolicyId: bytes.Repeat([]byte{0xCC}, 28),
+						Fingerprint: []byte(
+							"asset1cccccccccccccccccccccccccccccccccccccccc",
+						),
+						Amount: types.Uint64(1),
+					},
+				}
+				if err := store.insertUtxoModel(ctx, db, utxo, true); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	))
+
+	retained := retainedTxStmtCount(t, sqlTransaction.tx)
+	require.NoError(t, txn.Commit())
+
+	// insertUtxoModel here consults exactly three distinct cached queries --
+	// insertUtxoQueryIgnoreConflict, importAssetQuery, and getAssetIDQuery --
+	// so 3 is the exact bound, not just an upper one.
+	require.LessOrEqual(
+		t,
+		retained,
+		3,
+		"expected bounded Tx-scoped statement retention for %d outputs, got %d",
+		outputCount,
+		retained,
+	)
+}
+
+func TestUpdatePlannerStatsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.ErrorIs(t, store.UpdatePlannerStatsContext(ctx), context.Canceled)
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.NoError(t, store.UpdatePlannerStatsContext(t.Context()))
+}
