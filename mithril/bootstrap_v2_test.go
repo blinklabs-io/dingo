@@ -32,9 +32,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -144,6 +146,15 @@ func validImmutableFiles(
 }
 
 func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
+	return minimalLedgerStateWithUTxOMap(t, slot, hash, nil)
+}
+
+func minimalLedgerStateWithUTxOMap(
+	t *testing.T,
+	slot uint64,
+	hash []byte,
+	utxoMap cbor.RawMessage,
+) []byte {
 	t.Helper()
 	emptyMap, err := cbor.Encode(map[uint64]uint64{})
 	require.NoError(t, err)
@@ -174,7 +185,10 @@ func minimalLedgerState(t *testing.T, slot uint64, hash []byte) []byte {
 		cbor.RawMessage(dState),
 	})
 	require.NoError(t, err)
-	utxoState, err := cbor.Encode([]any{cbor.RawMessage(emptyMap)})
+	if len(utxoMap) == 0 {
+		utxoMap = emptyMap
+	}
+	utxoState, err := cbor.Encode([]any{cbor.RawMessage(utxoMap)})
 	require.NoError(t, err)
 	ledgerState, err := cbor.Encode([]any{
 		cbor.RawMessage(certState),
@@ -271,10 +285,21 @@ type v2FixtureOptions struct {
 	// immutable location templates, the way cloud-storage locations carry
 	// their credentials. The mux routes on path only, so it changes nothing
 	// but what an error is at risk of quoting.
-	signedImmutableQuery bool
-	missingAncillary     bool
-	validImmutable       bool
-	fallbackLedgerState  bool
+	signedImmutableQuery       bool
+	missingAncillary           bool
+	validImmutable             bool
+	fallbackLedgerState        bool
+	fallbackLedgerStateSlot    uint64
+	fallbackLedgerStateUTxOMap cbor.RawMessage
+	ancillaryLedgerState       []byte
+	ancillaryLedgerSlot        uint64
+	// ancillaryHonorsRange serves the ancillary archive with Range support,
+	// so resuming a fully cached file yields 416 with the total size, the way
+	// object storage does.
+	ancillaryHonorsRange bool
+	// ancillaryFailsMidBody announces the full ancillary length and drops
+	// the connection halfway through the body.
+	ancillaryFailsMidBody bool
 }
 
 type v2Fixture struct {
@@ -296,6 +321,12 @@ type v2Fixture struct {
 	ancillaryVKey        string
 	genesisVKey          string
 	immutableHits        atomic.Int32
+	// immutableGate, when set, runs on each immutable archive request before
+	// the response is written. Set it before the first request.
+	immutableGate func()
+
+	// ancillaryServed, when set, replaces ancillaryArchive on the wire.
+	ancillaryServed atomic.Pointer[[]byte]
 }
 
 // newV2Fixture fabricates a complete, internally-consistent v2 mock
@@ -327,9 +358,23 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				var blockHash []byte
 				files, blockHash = validImmutableFiles(t, 1000)
 				if opts.fallbackLedgerState {
+					stateSlot := opts.fallbackLedgerStateSlot
+					if stateSlot == 0 {
+						stateSlot = 1000
+					}
+					stateHash := blockHash
+					if stateSlot == 999 {
+						stateHash = files["immutable/00000.secondary"][16:48]
+					}
 					files["ledger/100/state"] = minimalLedgerState(
-						t, 1000, blockHash,
+						t, stateSlot, stateHash,
 					)
+					if opts.fallbackLedgerStateUTxOMap != nil {
+						files["ledger/100/state"] = minimalLedgerStateWithUTxOMap(
+							t, stateSlot, stateHash,
+							opts.fallbackLedgerStateUTxOMap,
+						)
+					}
 				}
 				break
 			}
@@ -405,8 +450,16 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	require.NoError(t, err)
 	fixture.ancillaryVKey = mithrilJSONHexKey(t, ancillaryPub)
 	nextTrio := opts.immutableFileNumber + 1
+	ancillaryLedgerState := []byte("ledger state data")
+	if len(opts.ancillaryLedgerState) > 0 {
+		ancillaryLedgerState = opts.ancillaryLedgerState
+	}
+	ancillaryLedgerSlot := opts.ancillaryLedgerSlot
+	if ancillaryLedgerSlot == 0 {
+		ancillaryLedgerSlot = 100
+	}
 	ancillaryFiles := map[string][]byte{
-		"ledger/100/state": []byte("ledger state data"),
+		fmt.Sprintf("ledger/%d/state", ancillaryLedgerSlot): ancillaryLedgerState,
 	}
 	for _, ext := range []string{"chunk", "primary", "secondary"} {
 		name := fmt.Sprintf("immutable/%05d.%s", nextTrio, ext)
@@ -609,7 +662,21 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 				}
 				_, _ = w.Write(fixture.digestArchive)
 			case p == "/files/ancillary.tar.zst":
-				_, _ = w.Write(fixture.ancillaryArchive)
+				body := fixture.ancillaryArchive
+				if served := fixture.ancillaryServed.Load(); served != nil {
+					body = *served
+				}
+				if opts.ancillaryFailsMidBody {
+					serveHalfThenAbort(w, body)
+				}
+				if opts.ancillaryHonorsRange {
+					http.ServeContent(
+						w, r, "ancillary.tar.zst", time.Time{},
+						bytes.NewReader(body),
+					)
+					return
+				}
+				_, _ = w.Write(body)
 			case strings.HasPrefix(p, "/files/imm-bad/"):
 				name := strings.TrimSuffix(
 					strings.TrimPrefix(p, "/files/imm-bad/"),
@@ -634,6 +701,9 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 					return
 				}
 				fixture.immutableHits.Add(1)
+				if fixture.immutableGate != nil {
+					fixture.immutableGate()
+				}
 				_, _ = w.Write(archive)
 			case strings.HasPrefix(p, "/certificate/"):
 				hash := strings.TrimPrefix(p, "/certificate/")
@@ -685,6 +755,18 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 	)
 
 	return fixture
+}
+
+// serveHalfThenAbort announces len(body) bytes, sends the first half and then
+// aborts the connection, so the client sees a transfer fail mid-body.
+func serveHalfThenAbort(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body[:len(body)/2])
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // publishNewerArtifact advertises a newer artifact for the same chain content
@@ -1450,8 +1532,8 @@ func TestFetchImmutableArchiveSurvivesArchiveDirSwapAfterDownload(
 }
 
 // TestFetchImmutableArchiveCleansUpThroughRootOnExtractionFailure is the
-// error-path counterpart to the test above, covering the case wolf31o2's
-// review specifically called out: downloadImmutables used to clean up after
+// error-path counterpart to the test above, covering the case:
+// downloadImmutables used to clean up after
 // a failed fetchImmutableArchive itself, by joining archiveDir -- a bare
 // path -- with the filename and calling os.Remove. Swapping archiveDir for a
 // symlink between the download finishing and that cleanup running let it
@@ -1705,4 +1787,254 @@ func TestBootstrapV2CarriesTheVerifiedAncillaryHandle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, got,
 		"AncillaryVerified must describe the tree the handle refers to")
+}
+
+// A corrupt ancillary archive left in the download directory must not be
+// re-accepted on the next run: the resume request for a file whose size
+// equals the server's total returns 416, which is indistinguishable from a
+// complete download when no expected size is configured.
+func TestBootstrapV2RedownloadsAfterCorruptAncillaryArchive(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber:  1,
+		ancillaryHonorsRange: true,
+	})
+	corrupt := bytes.Repeat([]byte{'x'}, len(fixture.ancillaryArchive))
+	fixture.ancillaryServed.Store(&corrupt)
+	downloadDir := t.TempDir()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := Bootstrap(context.Background(), cfg)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "extracting ancillary archive")
+
+	fixture.ancillaryServed.Store(nil)
+	result, err := Bootstrap(context.Background(), cfg)
+	require.NoError(t, err)
+	defer result.Cleanup(cfg.Logger)
+	assert.NotEmpty(t, result.AncillaryDir)
+}
+
+// A cached digests archive that fails extraction must be removed, or the
+// next attempt's resume request is answered 416 with a matching total and
+// the same bad archive is accepted again.
+func TestDownloadDigestsArchiveDiscardsCorruptCache(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	var served atomic.Pointer[[]byte]
+	corrupt := bytes.Repeat([]byte{'x'}, len(fixture.digestArchive))
+	served.Store(&corrupt)
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.ServeContent(
+				w, r, "digests.tar.zst", time.Time{},
+				bytes.NewReader(*served.Load()),
+			)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP: true,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	_, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.ErrorContains(t, err, "extracting digests archive")
+
+	served.Store(&fixture.digestArchive)
+	entries, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.NoError(t, err)
+	assert.NotEmpty(t, entries)
+}
+
+// cancelOnDownloadComplete cancels a context when the downloader reports a
+// finished transfer of a file whose path ends in suffix, so a test can land
+// cancellation between a complete download and its extraction.
+type cancelOnDownloadComplete struct {
+	suffix string
+	cancel context.CancelFunc
+}
+
+func (h *cancelOnDownloadComplete) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *cancelOnDownloadComplete) Handle(
+	_ context.Context,
+	r slog.Record,
+) error {
+	if r.Message != "download complete" {
+		return nil
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "path" && strings.HasSuffix(a.Value.String(), h.suffix) {
+			h.cancel()
+			return false
+		}
+		return true
+	})
+	return nil
+}
+
+func (h *cancelOnDownloadComplete) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *cancelOnDownloadComplete) WithGroup(string) slog.Handler {
+	return h
+}
+
+// Cancellation says nothing about the archive: a complete ancillary download
+// interrupted before extraction must stay cached for the next run.
+func TestBootstrapV2KeepsAncillaryArchiveOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	downloadDir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(&cancelOnDownloadComplete{
+		suffix: "-ancillary.tar.zst",
+		cancel: cancel,
+	})
+
+	_, err := Bootstrap(ctx, cfg)
+	require.ErrorIs(t, err, context.Canceled)
+
+	matches, err := filepath.Glob(
+		filepath.Join(downloadDir, "*-ancillary.tar.zst"),
+	)
+	require.NoError(t, err)
+	require.Len(t, matches, 1)
+	data, err := os.ReadFile(matches[0])
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancillaryArchive, data)
+}
+
+func TestDownloadDigestsArchiveKeepsCacheOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.ServeContent(
+				w, r, "digests.tar.zst", time.Time{},
+				bytes.NewReader(fixture.digestArchive),
+			)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP: true,
+		Logger: slog.New(&cancelOnDownloadComplete{
+			suffix: ".tar.zst",
+			cancel: cancel,
+		}),
+	}
+	_, err := downloadDigestsArchive(ctx, cfg, srv.URL, fixture.artifact, dir)
+	require.ErrorIs(t, err, context.Canceled)
+
+	data, err := os.ReadFile(filepath.Join(dir, filepath.Base(fmt.Sprintf(
+		"digests-%s.tar.zst", truncateDigest(fixture.artifact.Hash),
+	))))
+	require.NoError(t, err)
+	assert.Equal(t, fixture.digestArchive, data)
+}
+
+// A bad ancillary archive that cannot be removed stays recorded, so the
+// result's Cleanup of an unverified bootstrap, which continues without
+// ancillary data, still owns it.
+func TestRemoveBadAncillaryArchiveKeepsPathWhenRemovalFails(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := t.TempDir()
+
+	file := filepath.Join(dir, "preprod-abc-ancillary.tar.zst")
+	require.NoError(t, os.WriteFile(file, []byte("bad"), 0o600))
+	assert.Empty(t, removeBadAncillaryArchive(logger, file))
+	assert.NoFileExists(t, file)
+
+	assert.Empty(t, removeBadAncillaryArchive(logger, file),
+		"an archive already gone needs no cleanup")
+
+	// A non-empty directory makes os.Remove fail on every platform.
+	stuck := filepath.Join(dir, "stuck-ancillary.tar.zst")
+	require.NoError(t, os.MkdirAll(filepath.Join(stuck, "child"), 0o700))
+	assert.Equal(t, stuck, removeBadAncillaryArchive(logger, stuck))
+}
+
+// A failed ancillary download keeps its partial file at the destination path,
+// so the next run resumes the transfer instead of starting it again.
+func TestBootstrapV2KeepsPartialAncillaryOnDownloadFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{
+		immutableFileNumber:   1,
+		ancillaryFailsMidBody: true,
+	})
+	downloadDir := t.TempDir()
+	cfg := fixture.bootstrapConfig(downloadDir)
+	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg.DownloadMaxTransientRetries = -1
+
+	_, err := Bootstrap(context.Background(), cfg)
+	var dlErr *ancillaryDownloadError
+	require.ErrorAs(t, err, &dlErr)
+
+	data, err := os.ReadFile(filepath.Join(downloadDir, fmt.Sprintf(
+		"%s-%s-ancillary.tar.zst",
+		fixture.artifact.Network,
+		truncateDigest(fixture.artifact.Hash),
+	)))
+	require.NoError(t, err)
+	half := len(fixture.ancillaryArchive) / 2
+	assert.Equal(t, fixture.ancillaryArchive[:half], data)
+}
+
+// A failed digests download keeps its partial file for the same reason; only
+// a complete archive that cannot be used is discarded.
+func TestDownloadDigestsArchiveKeepsPartialOnDownloadFailure(t *testing.T) {
+	t.Parallel()
+
+	fixture := newV2Fixture(t, v2FixtureOptions{immutableFileNumber: 1})
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			serveHalfThenAbort(w, fixture.digestArchive)
+		},
+	))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := BootstrapConfig{
+		AllowInsecureHTTP:           true,
+		DownloadMaxTransientRetries: -1,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+	}
+	_, err := downloadDigestsArchive(
+		context.Background(), cfg, srv.URL, fixture.artifact, dir,
+	)
+	require.Error(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, filepath.Base(fmt.Sprintf(
+		"digests-%s.tar.zst", truncateDigest(fixture.artifact.Hash),
+	))))
+	require.NoError(t, err)
+	half := len(fixture.digestArchive) / 2
+	assert.Equal(t, fixture.digestArchive[:half], data)
 }

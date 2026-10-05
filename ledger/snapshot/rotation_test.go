@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"math/big"
+	"strconv"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -26,12 +27,13 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // setupTestDBWithStorageMode mirrors setupTestDB (calculator_test.go) but
 // pins the storage mode, so retention tests can compare CORE vs API mode
-// pruning of reward_account_output (dingo #1875).
+// pruning of reward_account_output.
 func setupTestDBWithStorageMode(
 	t *testing.T,
 	storageMode string,
@@ -49,10 +51,10 @@ func setupTestDBWithStorageMode(
 }
 
 // TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput pins that CORE
-// storage mode's retention behavior is unchanged by dingo #1875: both
+// storage mode's retention behavior is unchanged: both
 // reward_stake_input and reward_account_output are pruned to the same
 // rotation/reward-replay window. Also pins pool_stake_snapshot's own
-// CORE-mode window (dingo#1900/#382: no test previously exercised the
+// CORE-mode window (/: no test previously exercised the
 // apiStorageMode branch cleanupOldSnapshots gained for this table) -- CORE
 // mode's pool-snapshot pruning is unchanged from before that commit.
 func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
@@ -125,12 +127,12 @@ func TestCleanupOldSnapshotsCoreModePrunesRewardAccountOutput(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the dingo #1875
+// TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput is the
 // regression test: in API storage mode, reward_account_output must be
 // retained WITHOUT BOUND (so the Blockfrost account reward-history endpoint
 // can serve an account's full history), while reward_stake_input still
 // cannot be kept and continues to be pruned to the rotation/reward-replay
-// window exactly as in core mode. Also the dingo#1900/#382 regression test:
+// window exactly as in core mode. Also the / regression test:
 // pool_stake_snapshot must likewise be retained WITHOUT BOUND in API mode,
 // so a from-genesis historical Acquire pinned well outside the ordinary
 // 3-epoch window can still be validated
@@ -204,7 +206,7 @@ func TestCleanupOldSnapshotsAPIModeRetainsRewardAccountOutput(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the dingo #4188
+// TestCleanupOldSnapshotsKoiosParityRetentionUnbounded is the
 // regression test: enabling SetRewardAccountOutputRetentionUnbounded on a
 // CORE-mode database (the koios-parity observer's node.go wiring) must retain
 // reward_account_output without bound, exactly like API storage mode, instead
@@ -273,7 +275,7 @@ func TestCleanupOldSnapshotsKoiosParityRetentionUnbounded(t *testing.T) {
 }
 
 // TestDeleteRewardStateAfterSlotUnaffectedByAPIModeRetention is the rollback
-// correctness check for dingo #1875: retaining reward_account_output without
+// correctness check: retaining reward_account_output without
 // bound in API storage mode must not stop a rollback from removing rows
 // captured above the rollback point. DeleteRewardStateAfterSlot is
 // unconditional (it does not read storage mode at all), so this pins that
@@ -440,12 +442,12 @@ func seedRetentionRows(
 }
 
 // TestCleanupOldSnapshotsRetainsEpochSummaries pins the retention split that
-// dingo #2987 turned up. Rows that scale with delegator count stay bounded to
-// the rotation/reward-replay window, while the three tables that scale with
-// epoch or pool count — epoch_summary, reward_snapshot, reward_pool_input — are
-// kept for the life of the database, so historical closed-epoch comparison has
-// per-epoch aggregates and a per-pool reward basis to compare against (and a
-// missing summary keeps meaning "never captured").
+// Mithril-imported nodes exposed. Rows that scale with delegator count stay
+// bounded to the rotation/reward-replay window, while the three tables that
+// scale with epoch or pool count — epoch_summary, reward_snapshot,
+// reward_pool_input — are kept for the life of the database, so historical
+// closed-epoch comparison has per-epoch aggregates and a per-pool reward basis
+// to compare against (and a missing summary keeps meaning "never captured").
 func TestCleanupOldSnapshotsRetainsEpochSummaries(t *testing.T) {
 	t.Parallel()
 
@@ -813,7 +815,7 @@ func TestRotateSnapshotsPreservesLeiosKeyWhenImportedAgeIsUnknown(
 }
 
 // TestCleanupOldSnapshotsRetentionFloorRetainsDeferredHeaderEpochs is the
-// snapshot-side regression guard for issue #3727. When a queued/deferred header
+// snapshot-side regression guard. When a queued/deferred header
 // still needs an older epoch's mark snapshot for leader validation, the
 // retention-floor provider reports that epoch and cleanupOldSnapshots must keep
 // the pool_stake_snapshot rows at/above it instead of pruning them at the
@@ -931,12 +933,12 @@ func TestCleanupOldSnapshotsRetentionFloorAboveWindowIsNoop(t *testing.T) {
 	}
 }
 
-// TestCleanupOldSnapshotsRetentionDepthCapBounds proves the hard backstop
-// (issue #3727, finding 5): even when the retention floor would pin a very old
-// epoch, cleanupOldSnapshots never retains more than poolSnapshotRetentionMaxDepth
-// epochs BELOW the current epoch of pool snapshots (the boundary epoch
-// current-MaxDepth is retained, so the retained span is MaxDepth+1 epochs
-// inclusive), so a stuck deferred header cannot pin them without bound.
+// TestCleanupOldSnapshotsRetentionDepthCapBounds proves the hard backstop:
+// even when the retention floor would pin a very old epoch, cleanupOldSnapshots
+// never retains more than poolSnapshotRetentionMaxDepth epochs BELOW the
+// current epoch of pool snapshots (the boundary epoch current-MaxDepth is
+// retained, so the retained span is MaxDepth+1 epochs inclusive), so a stuck
+// deferred header cannot pin them without bound.
 func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 	t.Parallel()
 
@@ -982,4 +984,96 @@ func TestCleanupOldSnapshotsRetentionDepthCapBounds(t *testing.T) {
 			epoch,
 		)
 	}
+}
+
+// rewardPoolBlockCountsFixture seeds an epoch [100, 200) whose blocks above a
+// mid-epoch Mithril anchor were observed locally.
+func rewardPoolBlockCountsFixture(
+	t *testing.T,
+	withImported bool,
+) (*database.Database, []lcommon.PoolKeyHash) {
+	t.Helper()
+	const anchorSlot = uint64(150)
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 2, StartSlot: 100, LengthInSlots: 100},
+	})
+	meta := db.Metadata()
+	var poolA, poolB lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x91}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x92}, len(poolB)))
+	require.NoError(t, meta.SetSyncState(
+		"mithril_ledger_slot", strconv.FormatUint(anchorSlot, 10), nil,
+	))
+	for _, slot := range []uint64{160, 170} {
+		require.NoError(t, db.UpdatePoolOpCertSequence(poolA, slot, slot, nil))
+	}
+	require.NoError(t, db.UpdatePoolOpCertSequence(poolB, 180, 180, nil))
+	if withImported {
+		retired := bytes.Repeat([]byte{0x93}, len(poolA))
+		require.NoError(t, meta.SaveImportedPoolBlockCounts(
+			[]models.ImportedPoolBlockCount{
+				{
+					Epoch:          2,
+					PoolKeyHash:    poolA[:],
+					BlocksProduced: 5,
+					CapturedSlot:   anchorSlot,
+				},
+				{
+					Epoch:          2,
+					PoolKeyHash:    poolB[:],
+					BlocksProduced: 3,
+					CapturedSlot:   anchorSlot,
+				},
+				{
+					Epoch:          2,
+					PoolKeyHash:    retired,
+					BlocksProduced: 2,
+					CapturedSlot:   anchorSlot,
+				},
+			},
+			nil,
+		))
+		require.NoError(
+			t,
+			meta.SaveImportedEpochBlockTotal(2, 10, anchorSlot, nil),
+		)
+	}
+	return db, []lcommon.PoolKeyHash{poolA, poolB}
+}
+
+// An epoch the Mithril anchor falls inside must record the whole epoch's
+// counts, not the blocks above the anchor.
+func TestRewardPoolBlockCountsIncludeImportedCountsBelowAnchor(t *testing.T) {
+	t.Parallel()
+
+	db, pools := rewardPoolBlockCountsFixture(t, true)
+	counts, total, err := rewardPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		pools,
+		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, total)
+	assert.Equal(t, uint64(2+5), counts[string(pools[0][:])])
+	assert.Equal(t, uint64(1+3), counts[string(pools[1][:])])
+	assert.Equal(t, uint64(3+10), *total)
+}
+
+// An anchored epoch with no imported counts is unknown, which is recorded as
+// NULL rather than as a smaller epoch.
+func TestRewardPoolBlockCountsUnknownWithoutImportedCounts(t *testing.T) {
+	t.Parallel()
+
+	db, pools := rewardPoolBlockCountsFixture(t, false)
+	counts, total, err := rewardPoolBlockCounts(
+		db.Metadata(),
+		nil,
+		pools,
+		event.EpochTransitionEvent{PreviousEpoch: 2, BoundarySlot: 200},
+	)
+	require.NoError(t, err)
+	assert.Nil(t, counts)
+	assert.Nil(t, total)
 }

@@ -102,7 +102,7 @@ func TestBuildRenameInformationEmptyName(t *testing.T) {
 	)
 }
 
-// These tests cover the case issue #3228 says the directory-component walk
+// These tests cover a case the directory-component walk
 // (openVerifiedParent/openVerifiedRoot) cannot catch by itself: a component
 // the walk already verified is substituted afterward, while the walk's own
 // handle on it is still held. Under the old MoveFile/DeleteFile/RemoveDirectory

@@ -130,7 +130,7 @@ func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(
 			Connection:       &PeerConnection{IsClient: true},
 		},
 		// A warm replacement so the demotion below is not also blocked by
-		// the "no promotable replacement" guard (dingo#4783): this test
+		// the "no promotable replacement" guard: this test
 		// is specifically about the last-eligible-upstream protection.
 		{
 			Address:          "ledger1:3001",
@@ -180,7 +180,7 @@ func TestPeerGovernor_GossipChurn_ChurnsGossipWhenTopologyUpstreamExists(
 			Connection:       &PeerConnection{IsClient: true},
 		},
 		// A warm replacement so the demotion below is not also blocked by
-		// the "no promotable replacement" guard (dingo#4783): this test
+		// the "no promotable replacement" guard: this test
 		// is specifically about churn still operating with a topology
 		// upstream present.
 		{
@@ -361,8 +361,8 @@ func TestPeerGovernor_RedialCandidates_EmergencyOnlyWhenNoEligibleUpstream(
 
 	// With a healthy upstream present but the hot set still far below
 	// MinHotPeers and no warm candidates to close that gap, cold
-	// gossip/ledger peers must still become redial candidates
-	// (dingo#4783): a single eligible upstream is not "healthy" when the
+	// gossip/ledger peers must still become redial candidates:
+	// a single eligible upstream is not "healthy" when the
 	// configured hot-peer target is 10 and nothing else is in flight to
 	// reach it.
 	pg.mu.Lock()
@@ -553,7 +553,7 @@ func TestPeerGovernor_Reconcile_RedialsGossipPeerWhenNoUpstream(t *testing.T) {
 }
 
 // TestPeerGovernor_Reconcile_RedialsColdGossipPeerBelowMinHotPeers is the
-// dingo#4783 regression for the redial side: before this fix, gossip/ledger
+// regression for the redial side: before this fix, gossip/ledger
 // peers were only ever redialed in the zero-eligible-upstream emergency.
 // A node with one eligible upstream but a hot set well below MinHotPeers,
 // and no warm candidates to close that gap, never dialed any of its

@@ -1967,16 +1967,12 @@ DELETE FROM account_withdrawal_witness WHERE added_slot > ?`,
 // account_reward_delta/account_withdrawal_witness rows with added_slot >
 // slot for exactly the given credentials, without reversing any balance.
 //
-// Ledger-state import uses this instead of DeleteAccountRewardsAfterSlot.
-// The credentials passed in are exactly the accounts cert-state import has
-// just written from the snapshot's own authoritative reward value, so there
-// is no "previous" balance to reverse from that is guaranteed consistent: a
-// credential re-imported after an earlier, pre-fix import already had its
-// account.reward reset to the snapshot value without ever including a
-// post-anchor credit, and subtracting that credit a second time underflows
-// a balance that never held it. The snapshot's value simply wins for every
-// credential it covers, so this only needs to clear the stale journal rows;
-// ordinary replay then inserts fresh ones against that value.
+// Ledger-state import uses this instead of DeleteAccountRewardsAfterSlot. The
+// caller has just overwritten account.reward from the snapshot, so the current
+// balance is not the one the journal rows were applied against, and reversing
+// them by subtraction can underflow. The snapshot's value is authoritative for
+// every credential it covers, so only the stale journal rows are cleared;
+// replay then inserts fresh ones against that value.
 //
 // A credential cert-state import did not write this run must not appear in
 // refs: nothing else touches its account.reward, so deleting its journal

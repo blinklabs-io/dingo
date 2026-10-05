@@ -66,7 +66,7 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	const expectedScenarioCount = 5
+	const expectedScenarioCount = 7
 	if len(vectors) != expectedScenarioCount {
 		t.Fatalf(
 			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
@@ -80,6 +80,8 @@ func TestConsensusConformanceVectors(t *testing.T) {
 		"fork_and_select_v1":               true,
 		"slot_battle_v1":                   true,
 		"exceeds_k_no_switch_v1":           true,
+		"intersect_non_origin_v1":          true,
+		"within_k_fork_winner_first_v1":    true,
 	}
 	profileCounts := map[string]int{
 		"single-peer": 0,
@@ -240,7 +242,7 @@ const (
 // delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so EvaluateAndSwitch
+// EventBus.PublishOrdered, so EvaluateAndSwitch
 // returns before the lane worker has handed them to subscribers. A lane is a
 // FIFO drained by exactly one worker, so a sentinel enqueued after those
 // switches is delivered after them: receiving it back is proof that every
@@ -263,17 +265,10 @@ type replayAdapter struct {
 	tipCh      <-chan event.Event
 	switchCh   <-chan event.Event
 	switches   []format.SwitchEvent
-	headers    map[string]replayHeader
 	downstream []format.ServedMessage
 
 	headersFed    int
 	tipEventsSeen int
-}
-
-type replayHeader struct {
-	hash     []byte
-	prevHash []byte
-	slot     uint64
 }
 
 func newReplayAdapter(
@@ -328,7 +323,6 @@ func newReplayAdapter(
 		capture:  capture,
 		tipCh:    tipCh,
 		switchCh: switchCh,
-		headers:  make(map[string]replayHeader),
 	}
 }
 
@@ -345,13 +339,6 @@ func (a *replayAdapter) RollForward(
 	); err != nil {
 		return err
 	}
-	hash := hdr.Hash()
-	prevHash := hdr.PrevHash()
-	a.headers[string(hash[:])] = replayHeader{
-		hash:     append([]byte(nil), hash[:]...),
-		prevHash: append([]byte(nil), prevHash[:]...),
-		slot:     hdr.SlotNumber(),
-	}
 	a.headersFed++
 	return nil
 }
@@ -360,10 +347,7 @@ func (a *replayAdapter) RollBackward(
 	peerID uint64, point format.Point, tip format.Tip,
 ) error {
 	connId := a.connFor(peerID)
-	rollbackPoint := ocommon.Point{
-		Slot: point.Slot,
-		Hash: append([]byte(nil), point.Hash...),
-	}
+	rollbackPoint := toGouroborosPoint(point)
 	rollbackTip := toGouroborosTip(tip)
 	if err := a.o.chainsyncClientRollBackward(
 		ochainsync.CallbackContext{ConnectionId: connId},
@@ -400,7 +384,110 @@ func (a *replayAdapter) Stabilize() {
 	})
 	a.cs.EvaluateAndSwitch()
 	a.collectSwitchesThroughBarrier()
-	a.downstream = a.selectedPeerTrace()
+	a.downstream = a.observeDownstream(a.selectedPeerTrace())
+}
+
+// observeDownstream serves the selected peer's chain from Dingo's ChainSync
+// server to a node-to-node client that intersects where the selected peer's
+// trace starts, and returns what the server sent before its first AwaitReply.
+// A trace that opens with a RollBackward to a block intersected above origin;
+// the server cannot find that point without a block there, so a stand-in
+// block with the point's slot and hash anchors the chain one block below the
+// first header served. The stand-in is never served: the client intersects at
+// it, and the first header must extend it.
+//
+// The replay has headers and no ledger, so the harness stands in for block
+// fetch: each header the selected peer rolled forward is added to the server's
+// chain as a block whose CBOR is a one-element array holding that header. A
+// node-to-node RollForward carries only a block's first element, so this is
+// everything a downstream peer could observe. The ledger tip is set to the
+// tip the selector adopted, which is the tip the harness's final_tip assertion
+// reads: a peer can advertise a tip beyond the last header it served.
+func (a *replayAdapter) observeDownstream(
+	selected []format.ServedMessage,
+) []format.ServedMessage {
+	a.t.Helper()
+	if len(selected) == 0 {
+		return nil
+	}
+	f := newChainsyncServerFixture(a.t, csmock.ModeNtN)
+	ls := f.o.ledgerState
+	intersect := ocommon.NewPointOrigin()
+	if m := selected[0]; m.MsgType == format.ChainSyncMsgRollBackward &&
+		len(m.Point.Hash) > 0 {
+		intersect = toGouroborosPoint(*m.Point)
+	}
+	anchored := len(intersect.Hash) == 0
+	for _, m := range selected {
+		switch m.MsgType {
+		case format.ChainSyncMsgRollForward:
+			hdr, err := gledger.NewBlockHeaderFromCbor(*m.Era, m.HeaderCbor)
+			require.NoError(a.t, err)
+			if !anchored {
+				require.Positive(a.t, hdr.BlockNumber(),
+					"header extending a non-origin intersect has block number 0")
+				require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+					BlockHeader: &testBlockHeader{
+						hash:        gledger.NewBlake2b256(intersect.Hash),
+						slotNumber:  intersect.Slot,
+						blockNumber: hdr.BlockNumber() - 1,
+					},
+					blockType: int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+					cbor:      []byte{0x80},
+				}, nil))
+				anchored = true
+			}
+			blockCbor, err := cbor.Encode([]cbor.RawMessage{
+				cbor.RawMessage(m.HeaderCbor),
+			})
+			require.NoError(a.t, err)
+			require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+				BlockHeader: hdr,
+				blockType:   int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+				cbor:        blockCbor,
+			}, nil))
+		case format.ChainSyncMsgRollBackward:
+			if !anchored {
+				continue
+			}
+			require.NoError(a.t, ls.Chain().Rollback(toGouroborosPoint(*m.Point)))
+		}
+	}
+	bestTip, ok := a.BestTip()
+	require.True(a.t, ok, "selector has no best tip")
+	ls.SetTipForTesting(toGouroborosTip(bestTip))
+
+	require.NoError(a.t, f.h.FindIntersect([]ocommon.Point{intersect}))
+	require.True(a.t, f.observe(a.t).IsIntersectFound(), "expected IntersectFound")
+	var served []format.ServedMessage
+	for {
+		require.NoError(a.t, f.h.RequestNext())
+		msg := f.observe(a.t)
+		if msg.IsAwaitReply() {
+			return served
+		}
+		tip, ok := msg.Tip()
+		require.True(a.t, ok, "server message %d carries no tip", msg.Type())
+		formatTip := fromGouroborosTip(tip)
+		out := format.ServedMessage{
+			Protocol: format.ProtocolChainSync,
+			Tip:      &formatTip,
+		}
+		if header, _, ok := msg.RollForwardNtN(); ok {
+			era := header.Era
+			out.MsgType = format.ChainSyncMsgRollForward
+			out.Era = &era
+			out.HeaderCbor = header.HeaderCbor()
+		} else {
+			point, ok := msg.Point()
+			require.True(a.t, msg.IsRollBackward() && ok,
+				"unexpected server message type %d", msg.Type())
+			formatPoint := fromGouroborosPoint(point)
+			out.MsgType = format.ChainSyncMsgRollBackward
+			out.Point = &formatPoint
+		}
+		served = append(served, out)
+	}
 }
 
 // collectSwitchesThroughBarrier records every chain switch the selector has
@@ -425,11 +512,15 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 		case switchBarrier:
 			return
 		case chainselection.ChainSwitchEvent:
-			a.switches = append(a.switches, format.SwitchEvent{
-				PreviousTip:   fromGouroborosTip(e.PreviousTip),
-				NewTip:        fromGouroborosTip(e.NewTip),
-				RollbackPoint: a.rollbackPoint(e),
-			})
+			sw := format.SwitchEvent{
+				PreviousTip: fromGouroborosTip(e.PreviousTip),
+				NewTip:      fromGouroborosTip(e.NewTip),
+			}
+			if e.RollbackPoint != nil {
+				point := fromGouroborosPoint(*e.RollbackPoint)
+				sw.RollbackPoint = &point
+			}
+			a.switches = append(a.switches, sw)
 		default:
 			// Only the selector and the barrier above publish on this
 			// lane, so anything else is a bug in one of them. Skipping it
@@ -477,53 +568,6 @@ func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
 	return nil
 }
 
-func (a *replayAdapter) rollbackPoint(e chainselection.ChainSwitchEvent) *format.Point {
-	previous := e.PreviousObservedTip
-	if len(previous.Point.Hash) == 0 && previous.Point.Slot == 0 {
-		previous = e.PreviousTip
-	}
-	newTip := e.NewObservedTip
-	if !e.NewObservedTipSet {
-		newTip = e.NewTip
-	}
-
-	newAncestors := a.ancestors(newTip)
-	for current := previous; ; {
-		key := string(current.Point.Hash)
-		if header, ok := newAncestors[key]; ok {
-			return &format.Point{
-				Slot: header.slot,
-				Hash: append(format.HexBytes(nil), header.hash...),
-			}
-		}
-		header, ok := a.headers[key]
-		if !ok || isZeroHash(header.prevHash) {
-			break
-		}
-		current.Point.Hash = append([]byte(nil), header.prevHash...)
-		current.Point.Slot = 0
-	}
-	return &format.Point{}
-}
-
-func (a *replayAdapter) ancestors(tip ochainsync.Tip) map[string]replayHeader {
-	ancestors := make(map[string]replayHeader)
-	current := tip.Point.Hash
-	for len(current) != 0 && !isZeroHash(current) {
-		header, ok := a.headers[string(current)]
-		if !ok {
-			break
-		}
-		ancestors[string(current)] = header
-		current = header.prevHash
-	}
-	return ancestors
-}
-
-func isZeroHash(hash []byte) bool {
-	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
-}
-
 func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {
 	cloned := make([]format.ServedMessage, len(messages))
 	for i, message := range messages {
@@ -566,22 +610,24 @@ func drainEvents(ch <-chan event.Event, f func(event.Event)) {
 	}
 }
 
+func toGouroborosPoint(p format.Point) ocommon.Point {
+	return ocommon.Point{Slot: p.Slot, Hash: append([]byte(nil), p.Hash...)}
+}
+
+func fromGouroborosPoint(p ocommon.Point) format.Point {
+	return format.Point{Slot: p.Slot, Hash: append(format.HexBytes(nil), p.Hash...)}
+}
+
 func toGouroborosTip(t format.Tip) ochainsync.Tip {
 	return ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: t.Slot,
-			Hash: append([]byte(nil), t.Hash...),
-		},
+		Point:       toGouroborosPoint(format.Point{Slot: t.Slot, Hash: t.Hash}),
 		BlockNumber: t.BlockNumber,
 	}
 }
 
 func fromGouroborosTip(t ochainsync.Tip) format.Tip {
-	return format.Tip{
-		Slot:        t.Point.Slot,
-		Hash:        append(format.HexBytes(nil), t.Point.Hash...),
-		BlockNumber: t.BlockNumber,
-	}
+	p := fromGouroborosPoint(t.Point)
+	return format.Tip{Slot: p.Slot, Hash: p.Hash, BlockNumber: t.BlockNumber}
 }
 
 // testDijkstraAnnouncementHeaderRawFor builds a ranking-block header
@@ -609,8 +655,11 @@ func testDijkstraAnnouncementHeaderRawFor(
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
+	// A Dijkstra header body has exactly 12 fields; the last two are
+	// leios_certified and eb_references_announcement, so replace them.
+	require.Len(t, headerBody, 12)
 	headerBody = append(
-		headerBody,
+		headerBody[:10],
 		mustCbor(t, false),
 		mustCbor(t, []any{ebHash.Bytes(), ebSize}),
 	)
@@ -701,7 +750,7 @@ func testEbHash(point ocommon.Point) lcommon.Blake2b256 {
 // their own announcements. Rejecting the second occurrence just because a
 // live announcement already exists for the hash at a different slot would
 // drop that occurrence's offer/fetch and endorser data for whichever ranking
-// block referenced it (wolf31o2 review; issue #3513).
+// block referenced it.
 func TestStoreLeiosEndorserBlockAcceptsDifferentSlotOfSameHashWhileFirstIsLive(
 	t *testing.T,
 ) {
@@ -1017,7 +1066,7 @@ func TestPeerOfferedLedgerInvalidEndorserBlockIsNotVoted(t *testing.T) {
 }
 
 // TestPeerOfferedStoreUnderFabricatedSlotStaysPermanentlyUnverified is the
-// core issue #3513 attack in its store-first ordering: a peer offers an
+// core attack in its store-first ordering: a peer offers an
 // authentic, correctly-hashed manifest under a slot of its choosing before
 // the genuine announcement arrives. The fabricated slot must never be voted
 // on or reach the ledger. Unlike the pre-composite-key design, the genuine
@@ -1411,7 +1460,7 @@ func TestFetchEndorserBlockByPointRejectsStaleReloadedSlot(t *testing.T) {
 // other. A peer-offered store matching its own live announcement must
 // succeed and coexist with the authoritative entry, not be rejected as if
 // the authoritative source's slot were the hash's only valid one (issue
-// #3513 review; wolf31o2 review).
+// review; wolf31o2 review).
 func TestStoreLeiosEndorserBlockAuthoritativeAndAnnouncedOccurrencesCoexist(
 	t *testing.T,
 ) {
@@ -1506,7 +1555,7 @@ func TestEndorserBlockTxHashesByHashWithholdsUnverifiedSlot(t *testing.T) {
 // registered on it must stay parked until bindLeiosEndorserBlockSlot
 // corroborates the slot -- otherwise the node-to-client merge path (which
 // waits on this same closure) could consume an unverified slot the same way
-// EndorserBlockTxsByHash could before issue #3513.
+// EndorserBlockTxsByHash could before.
 func TestLeiosClosureCompleteLockedWithholdsUnverifiedEntry(t *testing.T) {
 	t.Parallel()
 
@@ -2003,7 +2052,7 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 	h.observed++
 }
 
-// Investigation for dingo #2729.
+// Investigation.
 //
 // A from-genesis musashi Leios sync stalls in the epoch-15 endorser-block
 // region: a ranking block references an endorser block whose manifest is
@@ -2034,7 +2083,7 @@ func (h *recordingLeiosPipelineHandler) ObserveEndorserBlock(
 //     decoding), a peer that serves an empty manifest for a valid endorser-block
 //     point is diagnosed as a "point hash mismatch" (a fetch/serving error the
 //     backfill can retry against other peers) rather than the misleading decode
-//     invariant failure that made #2729 look like a consensus/decode defect.
+// invariant failure that made look like a consensus/decode defect.
 
 // bareRefMapFromArrayWrapped strips the single-element array wrapper produced by
 // LeiosEndorserBlock.MarshalCBOR (0x81 || refMap) to yield the bare {hash=>size}
@@ -2056,7 +2105,7 @@ func bareRefMapFromArrayWrapped(t *testing.T, arrayWrapped []byte) []byte {
 // TestLeiosEndorserBlockLargeMapDecodesAllRefs proves the manifest decoder reads
 // every reference of a large map. 1200 refs requires a 2-byte CBOR map-header
 // length (0xb9 || uint16); 300 also needs the multi-byte branch. If the header
-// parsing dropped or mis-counted refs for large maps (the #2729 "decode to zero"
+// parsing dropped or mis-counted refs for large maps (the "decode to zero"
 // hypothesis), these would fail.
 func TestLeiosEndorserBlockLargeMapDecodesAllRefs(t *testing.T) {
 	t.Parallel()
@@ -2108,7 +2157,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	_, err = lcommon.NewLeiosEndorserBlockFromCbor([]byte{0x81, 0xa0})
 	require.ErrorContains(t, err, zeroRefsMsg)
 
-	// A large, non-empty manifest of the size reported in #2729 (~1000 refs is
+	// A large, non-empty manifest of the size reported in (~1000 refs is
 	// ~35 KB) does NOT produce the zero-refs error in either wire shape.
 	_, arrayWrapped := testLeiosEndorserBlockRawWithRefs(t, 15, 1000)
 	require.Greater(t, len(arrayWrapped), 30000, "manifest should be ~35 KB")
@@ -2122,7 +2171,7 @@ func TestLeiosEndorserBlockZeroRefsErrorOnlyFromEmptyManifest(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the #2729
+// TestStoreLeiosEndorserBlockEmptyManifestIsHashMismatch reproduces the
 // field scenario at the dingo store boundary: a peer returns an empty manifest
 // (0xa0) in response to a by-point fetch for a valid, non-empty endorser block.
 //
@@ -2650,7 +2699,7 @@ func (p *haskellBlockTxsPeer) BlockTxsRequest(
 }
 
 // TestLeiosFetchHaskellEncodedBlockTxsIsConsumed is an interoperability
-// regression for the Haskell reference node's leios-fetch encoding (#3623).
+// regression for the Haskell reference node's leios-fetch encoding.
 // The endorser block has 70 transactions, so the fetch spans two 64-tx bitmap
 // windows. Its manifest, point hash and MsgLeiosBlockTxs response are encoded
 // the way the reference node encodes them. Dingo must send a request the
@@ -2729,7 +2778,7 @@ func (r *diffusingBlockTxsRequester) BlockTxsRequest(
 // A fetch that runs out of diffused transactions must retain what it already
 // holds against the cached endorser block instead of discarding it. Before
 // this, the partial prefix was dropped on the floor and the next offer
-// re-fetched the whole block from scratch (issue #2629).
+// re-fetched the whole block from scratch.
 func TestFetchLeiosEbTxsRetainsPartialTailOnIncompleteFetch(t *testing.T) {
 	t.Parallel()
 
@@ -3093,7 +3142,7 @@ func waitForLeiosServeWaiter(t *testing.T, f *chainsyncServerFixture) {
 	)
 }
 
-// TestLeiosServeWaitReleasedByRealPeerDisconnect is the issue #3514 regression
+// TestLeiosServeWaitReleasedByRealPeerDisconnect is the regression
 // test. It runs against the real NtC chainsync server connection the shared
 // ouroboros-mock harness builds, and tears that connection down the way a peer
 // actually does (Harness.Disconnect closes the driver end of the bearer)
@@ -3504,7 +3553,7 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 // is the most-significant bit (bit 63). Encoding it LSB-first round-tripped
 // fine against a dingo peer but made the relay serve only the high-index
 // transactions of a partial window -- and nothing at all for a final window of
-// <=32 txs -- so from-genesis catch-up stalled mid-epoch (issue #2656). This
+// <=32 txs -- so from-genesis catch-up stalled mid-epoch. This
 // guards the request encode, the decode, and the server serve/validate paths
 // against silently reverting to LSB (which a self-consistent mock would miss).
 func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
@@ -3619,7 +3668,6 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 // endorser block but echoes a response bitmap that also references a window
 // far beyond txCount, simulating a relay (malicious or buggy) that declares a
 // tiny transaction count yet returns a disproportionately large bitmap
-// (issue #3523).
 type oversizedBitmapRequester struct {
 	// extraWindow, when non-zero, is set to extraMask in the response bitmap
 	// in addition to the legitimately served windows. extraMask has no effect
@@ -3649,7 +3697,7 @@ func (r *oversizedBitmapRequester) BlockTxsRequest(
 // window (1000, all 64 bits). A response bitmap that claims transactions the
 // block cannot possibly have must be rejected outright (with an error
 // mentioning "leios-fetch response bitmap"), not silently expanded into a
-// huge index list (issue #3523).
+// huge index list.
 func TestFetchLeiosEbTxsBatchedRejectsOversizedResponseBitmap(t *testing.T) {
 	t.Parallel()
 
@@ -4013,7 +4061,7 @@ func (l *listenerWithAddress) Close() error { return nil }
 
 func (l *listenerWithAddress) Addr() net.Addr { return l.addr }
 
-// TestIsTrustedNtCListener is the blinklabs-io/dingo#4183 review regression:
+// TestIsTrustedNtCListener is the review regression:
 // ConfigureListeners used to grant every UseNtC listener gouroboros' relaxed
 // mux/query timeouts and 2GiB reassembly buffer unconditionally, on the
 // premise that "NtC is a trusted local channel" -- true for a Unix socket,
@@ -4202,7 +4250,7 @@ func TestConfigureListenersClassifiesSuppliedListenerByBoundAddress(t *testing.T
 }
 
 // TestConfigureListeners_NormalizesTCPListenAddressToNumeric is the
-// blinklabs-io/dingo#4183 review regression for a TOCTOU in
+// review regression for a TOCTOU in
 // isTrustedNtCListener: it resolved l.ListenAddress to classify the
 // listener, but connmanager's startListener later binds the same
 // listener's ListenAddress by calling net.Listen on the original,

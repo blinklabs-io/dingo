@@ -40,7 +40,7 @@ import (
 )
 
 // TestChainsyncRollbackToAbandonedForkDoesNotSpliceChain is the ledger-level
-// regression for issue #3005.
+// regression for the cross-fork splice.
 //
 // After the node abandons a fork, the rolled-back blocks stay resolvable
 // through the chain manager's retained block cache with the block indexes the
@@ -497,14 +497,15 @@ func armRearmFixture(
 	return ls, logBuf.String(), producerTxId
 }
 
-// TestContinuationAuditRearmPreservesInFlightProducer is the regression for
-// issue #4102. Fork churn re-arms the audit repeatedly, and every rollback
-// target in that issue's run sat ahead of the blocks the previous window had
-// already vetted. Such a rollback truncates nothing those blocks occupy, so
-// they stay on the primary chain -- unapplied, because ledger apply lags
-// blockfetch by design, and never re-fetched, because the chain still has
-// them. Forgetting them at the rearm therefore leaves the next audited spend
-// of their outputs with no way to resolve, which is the false report.
+// TestContinuationAuditRearmPreservesInFlightProducer is the regression for the
+// audit re-arming during early replay. Fork churn re-arms the audit repeatedly,
+// and every rollback target in the failing run sat ahead of the blocks the
+// previous window had already vetted. Such a rollback truncates nothing those
+// blocks occupy, so they stay on the primary chain -- unapplied, because ledger
+// apply lags blockfetch by design, and never re-fetched, because the chain
+// still has them. Forgetting them at the rearm therefore leaves the next
+// audited spend of their outputs with no way to resolve, which is the false
+// report.
 func TestContinuationAuditRearmPreservesInFlightProducer(t *testing.T) {
 	t.Parallel()
 

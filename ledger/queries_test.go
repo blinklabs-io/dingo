@@ -66,7 +66,7 @@ func seedEpochs(
 }
 
 // TestPoolStakeDistribution_AsOfSlot_ReadsHistoricalEpochSnapshot covers the
-// core #382 stake-distribution fix: a pinned point in an older epoch must
+// core stake-distribution fix: a pinned point in an older epoch must
 // read that epoch's own mark snapshot, not the live tip's -- the two are
 // seeded with deliberately different stake for the same pool so a test that
 // silently fell back to live data would be caught.
@@ -185,7 +185,7 @@ func TestPoolStakeDistribution_AsOfSlot_AheadOfLiveRejected(t *testing.T) {
 }
 
 // TestQueryShelleyCurrentProtocolParams_SameEpochAsLive_Succeeds covers the
-// safe case for #382's protocol-parameters gap: a pinned point in the same
+// safe case for protocol-parameters gap: a pinned point in the same
 // epoch as the live tip is answerable, since protocol parameters only
 // change at epoch boundaries -- "as of asOfSlot" and "live right now" are
 // necessarily the same value within one epoch.
@@ -324,7 +324,7 @@ func TestQueryShelleyCurrentProtocolParams_NoPersistedRow_Rejected(
 
 // TestQueryShelleyCurrentProtocolParams_HistoricalRowStripsSyntheticV2CostModel
 // covers a pinned epoch whose persisted pparams row still carries
-// HardForkBabbage's fabricated PlutusV2 cost model (blinklabs-io/dingo#3825):
+// HardForkBabbage's fabricated PlutusV2 cost model:
 // transitionToEraFrom persists newPParams verbatim, synthetic or not, so a
 // historical epoch from before real V2 data arrived carries that same
 // fabrication in its persisted CBOR. Answering it unfiltered would show a
@@ -486,9 +486,9 @@ func TestQueryShelleyEpochNo_AsOfSlot_ReadsHistoricalEpoch(t *testing.T) {
 
 // TestQueryHardFork_CurrentEra_PinnedPointResolvesEraAtThatPoint is the
 // regression test for the gap this session's node-parity --from-genesis
-// live validation surfaced (blinklabs-io/dingo#1900): HardForkCurrentEraQuery
+// live validation surfaced: HardForkCurrentEraQuery
 // used to always answer with dingo's live era regardless of the pinned
-// point, a real point-pinning gap #382's original scope decision left open
+// point, a real point-pinning gap original scope decision left open
 // (it covered queryShelleyCurrentProtocolParams and friends, not this
 // HardFork-mini-protocol query type). gouroboros's client-side
 // GetCurrentProtocolParams queries this first specifically to decide which
@@ -1010,7 +1010,6 @@ func seedBlockAtSlot(t *testing.T, ls *LedgerState, slot uint64, hash []byte) {
 // TestQuery_PinnedPointOnChain_Succeeds covers the common case: a pinned
 // point naming a block this node's current chain actually has at that slot
 // must be accepted, dispatching through to the query as normal
-// (blinklabs-io/dingo#382, #5 in the follow-up review).
 func TestQuery_PinnedPointOnChain_Succeeds(t *testing.T) {
 	t.Parallel()
 
@@ -1230,7 +1229,7 @@ func utxoByTxInAsOf(
 }
 
 // TestQueryShelleyUtxoByTxIn_AsOfSlot_LiveBetweenCreationAndSpend covers the
-// core #1900 UTxO-query fix: a pinned point between a UTxO's creation
+// core UTxO-query fix: a pinned point between a UTxO's creation
 // (slot 100, via seedBabbageUtxo) and its later spend (marked deleted at
 // slot 500) must report it live. Before this fix, this handler ignored the
 // pinned point entirely and always answered from live state -- exactly the
@@ -1337,7 +1336,7 @@ func TestQueryShelleyUtxoByTxIn_AsOfSlot_SpentAtExactSlot_Absent(t *testing.T) {
 
 // TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent covers a pinned
 // point after the UTxO was spent: it must be reported absent, not the
-// live-state answer this handler gave before the #1900 fix.
+// live-state answer this handler gave before the fix.
 func TestQueryShelleyUtxoByTxIn_AsOfSlot_AfterSpend_Absent(t *testing.T) {
 	t.Parallel()
 
@@ -1873,7 +1872,7 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 
 // TestQueryShelleyUtxoByAddress_MultipleAddresses proves the local-state-query
 // handler resolves UTxOs for every address in the request, not just the
-// first (#391) -- the wire query already carries the full set via q.Addrs.
+// first -- the wire query already carries the full set via q.Addrs.
 func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	t.Parallel()
 
@@ -1954,7 +1953,7 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 }
 
 // TestQueryShelleyUtxoByTxIn_MultipleInputs proves the GetUTxOByTxIn query
-// resolves every requested TxIn in one call (#392), not just the first, and
+// resolves every requested TxIn in one call, not just the first, and
 // silently omits a requested TxIn that has no matching live UTxO instead of
 // failing the whole query.
 //
@@ -2086,7 +2085,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 		poolHash28(0x11),
 		poolHash28(0x99),
 	}
-	result := stakePoolsResult(keyHashes)
+	result, err := stakePoolsResult(keyHashes)
+	require.NoError(t, err)
 
 	// Wire shape: []any{ cbor.Set{ poolIds... } }
 	require.Len(t, result, 1)
@@ -2121,7 +2121,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 func TestStakePoolsResult_Empty(t *testing.T) {
 	t.Parallel()
 
-	result := stakePoolsResult(nil)
+	result, err := stakePoolsResult(nil)
+	require.NoError(t, err)
 	require.Len(t, result, 1)
 	set, ok := result[0].(cbor.Set)
 	require.True(t, ok, "inner element must be a cbor.Set")
@@ -3867,8 +3868,8 @@ func protocolParamsQuery() *olocalstatequery.BlockQuery {
 }
 
 // conwayPParamsWithCostModels builds a Conway pparams value with every
-// cbor.Rat-bearing field populated, not just CostModels -- blinklabs-io/dingo#3825's
-// PR review (wolf31o2): a fixture that only sets CostModels type-asserts fine
+// cbor.Rat-bearing field populated, not just CostModels --
+// a fixture that only sets CostModels type-asserts fine
 // but is not actually encodable, since cbor.Rat.MarshalCBOR panics on the nil
 // *big.Rat a zero-value cbor.Rat (or a nil *cbor.Rat pointer field) carries,
 // and PoolVotingThresholds/DRepVotingThresholds's value-typed cbor.Rat fields
@@ -3915,7 +3916,7 @@ func conwayPParamsWithCostModels(
 }
 
 // TestQueryShelleyCurrentProtocolParams_OmitsSyntheticV2CostModel is the
-// end-to-end regression test for blinklabs-io/dingo#3825: confirmed against
+// end-to-end regression test: confirmed against
 // a real cardano-node's raw wire bytes (captured via a temporary diagnostic,
 // decoded with the real client-side type, independent of any display-layer
 // bug) that on a chain which has never received a real PlutusV2

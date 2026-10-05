@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/plutigo/builtin"
@@ -72,39 +73,7 @@ func blockV3CertificateBlock(
 	}
 	txCbor, err := cbor.Encode(&tx)
 	require.NoError(t, err)
-	decoded, err := conway.NewConwayTransactionFromCbor(txCbor)
-	require.NoError(t, err)
-	block := &conway.ConwayBlock{
-		BlockHeader: &conway.ConwayBlockHeader{},
-		TransactionBodies: []conway.ConwayTransactionBody{
-			decoded.Body,
-		},
-		TransactionWitnessSets: []conway.ConwayTransactionWitnessSet{
-			decoded.WitnessSet,
-		},
-	}
-	block.BlockHeader.Body.BlockNumber = 1
-	block.BlockHeader.Body.Slot = slot
-	block.BlockHeader.Body.ProtoVersion.Major = uint64(major)
-	encoded, err := cbor.EncodeGeneric(block)
-	require.NoError(t, err)
-	block.SetCbor(encoded)
-	bodySize, err := serializedBlockBodySize(block)
-	require.NoError(t, err)
-	block.BlockHeader.Body.BlockBodySize = bodySize
-	encoded, err = cbor.EncodeGeneric(block)
-	require.NoError(t, err)
-	block.SetCbor(encoded)
-	var txHash [32]byte
-	copy(txHash[:], block.Transactions()[0].Hash().Bytes())
-	return block, &database.BlockIngestionResult{
-		TxOffsets: map[[32]byte]database.CborOffset{
-			txHash: {
-				BlockSlot:  slot,
-				ByteLength: uint32(len(txCbor)),
-			}, // #nosec G115
-		},
-	}
+	return conwayTestBlock(t, txCbor, major, slot)
 }
 
 // TestLedgerProcessBlockConwayV3TxInfoFollowsBlockProtocolVersion applies a
@@ -427,4 +396,94 @@ func blockV3Apply(
 		term = &syn.Apply[syn.DeBruijn]{Function: term, Argument: arg}
 	}
 	return term
+}
+
+// TestConwayV3TxInfoFollowsProtocolParametersOffTheChainSyncPath covers the
+// two other routes into Conway Plutus evaluation: replay through
+// ledgerProcessBlocksFromSource, and LedgerState.EvaluateTx, which serves the
+// transaction-evaluation APIs. A V3 certificate script expects the deposit
+// option the current protocol parameters define, Nothing at PV9 and Just at
+// PV10, while the block header announces the next major version. Both routes
+// must evaluate with the parameters.
+func TestConwayV3TxInfoFollowsProtocolParametersOffTheChainSyncPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		major  uint
+		option data.PlutusData
+	}{
+		{major: lcommon.ProtocolVersionConway, option: data.NewConstr(1)},
+		{
+			major: lcommon.ProtocolVersionPlomin,
+			option: data.NewConstr(
+				0,
+				data.NewInteger(big.NewInt(blockExplicitStakeAmount)),
+			),
+		},
+	} {
+		t.Run(fmt.Sprintf("PV%d", tc.major), func(t *testing.T) {
+			t.Parallel()
+			plutusScript := lcommon.PlutusV3Script(
+				blockV3StakeAmountObserver(t, tc.option),
+			)
+			certificate := lcommon.CertificateWrapper{
+				Type: uint(lcommon.CertificateTypeRegistration),
+				Certificate: &lcommon.RegistrationCertificate{
+					CertType: uint(lcommon.CertificateTypeRegistration),
+					StakeCredential: lcommon.Credential{
+						CredType:   lcommon.CredentialTypeScriptHash,
+						Credential: plutusScript.Hash(),
+					},
+					Amount: blockExplicitStakeAmount,
+				},
+			}
+			block, _ := blockV3CertificateBlock(
+				t, plutusScript, certificate, tc.major+1, 10,
+			)
+			pparams := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: tc.major,
+				},
+				CostModels: map[uint][]int64{
+					2: blockV3MachineCostModel(t, lang.LanguageVersionV3),
+				},
+				MaxBlockBodySize:   100_000,
+				MaxBlockHeaderSize: 100_000,
+				MaxTxExUnits: lcommon.ExUnits{
+					Memory: 10_000_000, Steps: 100_000_000,
+				},
+				MaxBlockExUnits: lcommon.ExUnits{
+					Memory: 50_000_000, Steps: 500_000_000,
+				},
+			}
+			// Replay runs this in place of the era validator, so the
+			// transaction needs no phase-1 validity.
+			var replayErr error
+			called := false
+			testEra := eras.ConwayEraDesc
+			testEra.ValidateTxFunc = func(
+				tx lcommon.Transaction,
+				_ uint64,
+				view lcommon.LedgerState,
+				pp lcommon.ProtocolParameters,
+			) error {
+				called = true
+				_, _, _, replayErr = eras.EvaluateTxConway(tx, view, pp)
+				return errBlockTxInfoEvaluated
+			}
+			ls := newReplayTestLedger(
+				t, newTestDB(t), block, uint(gledger.BlockTypeConway),
+				testEra, pparams,
+			)
+			ls.activeEras = []eras.EraDesc{testEra}
+
+			require.ErrorIs(t, replayTestBlock(ls, block), errBlockTxInfoEvaluated)
+			require.True(t, called)
+			require.NoError(t, replayErr)
+			_, _, _, err := ls.EvaluateTx(block.Transactions()[0])
+			require.NoError(t, err)
+		})
+	}
 }

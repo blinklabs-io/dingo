@@ -83,7 +83,7 @@ func TestRemainingTxnEntriesIsExact(t *testing.T) {
 // seen from the caller's side: stop one short of the reported budget and the
 // commit timestamp Txn.Commit writes into the same transaction still fits, so
 // the transaction commits. Running the budget to zero instead is what wedges
-// a startup rollback (blinklabs-io/dingo#4657).
+// a startup rollback.
 func TestRemainingTxnEntriesLeavesRoomForCommitTimestamp(t *testing.T) {
 	store := newBudgetTestStore(t)
 

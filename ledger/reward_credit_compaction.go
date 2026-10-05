@@ -53,9 +53,7 @@ func (ls *LedgerState) queueRewardCreditCompaction() {
 		return
 	}
 	ls.rewardCreditCompacting = true
-	ls.rewardCreditCompactionWG.Add(1)
-	go func() {
-		defer ls.rewardCreditCompactionWG.Done()
+	ls.rewardCreditCompactionWG.Go(func() {
 		retryDelay := rewardCreditCompactionRetryInitial
 		for {
 			err := ls.compactRewardCreditRounds()
@@ -107,7 +105,7 @@ func (ls *LedgerState) queueRewardCreditCompaction() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 // compactRewardCreditRounds folds, one bounded transaction at a time, every

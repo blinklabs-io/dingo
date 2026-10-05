@@ -373,11 +373,11 @@ func (c *byronUpdateBlockfetchChain) startApply(
 	return done, cancel
 }
 
-// TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote covers #4378
-// end to end: blocks reach the ledger through the blockfetch handler, whose
-// header checks pass for a re-signed header carrying a correct upd_proof, and
-// the block whose update payload votes with a bad signature for a registered
-// proposal is refused when the chain is applied.
+// TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote covers
+// update-vote validation end to end: blocks reach the ledger through the
+// blockfetch handler, whose header checks pass for a re-signed header carrying
+// a correct upd_proof, and the block whose update payload votes with a bad
+// signature for a registered proposal is refused when the chain is applied.
 func TestByronBlockfetchRejectsBodyProofedBlockWithInvalidUpdateVote(
 	t *testing.T,
 ) {

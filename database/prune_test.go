@@ -164,6 +164,20 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	defer blobTxn.Release()
 	_, _, err = db.Blob().GetBlock(blobTxn.Blob(), slot, hash)
 	assert.ErrorIs(t, err, types.ErrHistoryExpired)
+	point, err := BlockPointBySlotTxn(blobTxn, slot)
+	require.NoError(t, err)
+	assert.Equal(t, slot, point.Slot)
+	assert.Equal(t, hash, point.Hash)
+	blockID, err := BlockIDByPointLocalTxn(blobTxn, point)
+	require.NoError(t, err)
+	point, err = BlockPointAtOrBeforeSlotBoundedTxn(blobTxn, slot+5, blockID)
+	require.NoError(t, err)
+	assert.Equal(t, slot, point.Slot)
+	assert.Equal(t, hash, point.Hash)
+	point, err = BlockPointAtOrAfterSlotTxn(t.Context(), blobTxn, slot)
+	require.NoError(t, err)
+	assert.Equal(t, slot, point.Slot)
+	assert.Equal(t, hash, point.Hash)
 	rawBp, err := db.Blob().Get(blobTxn.Blob(), types.BlockBlobKey(slot, hash))
 	require.NoError(t, err,
 		"bp key must still exist post-prune so bi/bh references stay valid")
@@ -225,7 +239,7 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 }
 
 // TestPruneBlock_LeavesChainIteratorAtHistoryExpired exercises the post-fix
-// behavior for issue #2104. After prune the chain-iterator path resolves
+// behavior. After prune the chain-iterator path resolves
 // the (id|hash) → block-key mapping locally (bi/bh and metadata are kept)
 // and reaches the GetBlock call inside blockByKey, which now surfaces
 // ErrHistoryExpired. That sentinel is the explicit handoff point for a

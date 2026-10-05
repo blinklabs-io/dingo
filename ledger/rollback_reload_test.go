@@ -49,16 +49,16 @@ func (s getEpochsFailingMetadataStore) GetEpochs(
 	return nil, s.err
 }
 
-// TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins case R3
-// of blinklabs-io/dingo#1649: rollbackWithBlocks's post-commit reload of
-// epochCache/currentEra/currentPParams can fail after the metadata truncation
-// has already committed. Today that failure is logged at Warn and the
-// rollback still reports success (nil), leaving those in-memory caches at
-// their pre-rollback values even though the database itself was truncated --
-// a later block then validates against stale era/epoch/protocol-parameter
-// state. After the fix this must surface as a rollbackCommittedError and
-// invoke FatalErrorFunc, so a supervised restart reloads the caches from the
-// database before any further block is validated.
+// TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit pins the
+// fail-fast case for epoch reload after commit: rollbackWithBlocks's
+// post-commit reload of epochCache/currentEra/currentPParams can fail after the
+// metadata truncation has already committed. Today that failure is logged at
+// Warn and the rollback still reports success (nil), leaving those in-memory
+// caches at their pre-rollback values even though the database itself was
+// truncated -- a later block then validates against stale
+// era/epoch/protocol-parameter state. After the fix this must surface as a
+// rollbackCommittedError and invoke FatalErrorFunc, so a supervised restart
+// reloads the caches from the database before any further block is validated.
 func TestRollbackWithResyncFailsFastWhenEpochReloadFailsAfterCommit(
 	t *testing.T,
 ) {

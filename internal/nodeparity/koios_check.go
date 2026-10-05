@@ -14,7 +14,7 @@
 
 package nodeparity
 
-// Koios-backed comparison (blinklabs-io/dingo#1900): validates a Dingo
+// Koios-backed comparison: validates a Dingo
 // instance replaying from genesis against Koios instead of a reference
 // cardano-node, epoch by epoch.
 //
@@ -59,7 +59,7 @@ package nodeparity
 //     The per-pool loop only iterates the pools Dingo itself reports via
 //     GetPoolDistr2, so on its own it cannot see a pool Dingo's ledger
 //     state is missing entirely -- that looks identical to "this pool just
-//     isn't active yet" from here (dingo#4321). compareTotalActiveStake
+//     isn't active yet" from here. compareTotalActiveStake
 //     closes that: Dingo's per-pool stakes are summed and compared against
 //     Koios's epoch-wide active_stake, so a dropped pool carrying stake
 //     moves the sum and is reported, without needing Koios's own
@@ -86,7 +86,7 @@ package nodeparity
 //
 // Each of the three runs its own independent Acquire, on its own
 // connection, rather than sharing one the way Check's live-tip-agreement
-// mode does. #4320 added Acquire-time validation (VerifyPointQueryable) that
+// mode does. Acquire-time validation (VerifyPointQueryable)
 // rejects a point up front if ANY point-aware query type's own retention
 // floor has passed it, not only the one the caller actually intends to ask,
 // so a shared Acquire would cut protocol params and stake off at the UTxO
@@ -97,10 +97,10 @@ package nodeparity
 //
 // Running Dingo with --storage-mode api removes the UTxO half of that
 // exposure entirely (checkUtxoRetentionWindow skips its own retention check
-// in that mode, the same way cleanupConsumedUtxos does). #4320 added the
-// equivalent carve-out to pool-stake snapshot pruning
-// (ledger/snapshot/rotation.go's cleanupOldSnapshots), so in API mode the
-// stake comparison is no longer bounded by that window either.
+// in that mode, the same way cleanupConsumedUtxos does). Pool-stake snapshot
+// pruning has the equivalent carve-out (ledger/snapshot/rotation.go's
+// cleanupOldSnapshots), so in API mode the stake comparison is no longer
+// bounded by that window either.
 
 import (
 	"context"
@@ -683,7 +683,7 @@ const ReasonKoiosEpochInfoUnavailable = "koios epoch_info fetch failed"
 // ReasonKoiosEpochNotPublished marks an epoch Koios has not computed
 // pool_history for yet. Every pool then looks absent, so without this the
 // per-pool loop reports one mismatch per pool -- 646 observed on preview --
-// for an epoch that simply does not exist on the reference side (#4820).
+// for an epoch that simply does not exist on the reference side.
 const ReasonKoiosEpochNotPublished = "koios has not published this epoch yet"
 
 // koiosPublishGrace is how long after an epoch closes Koios may still be
@@ -715,7 +715,7 @@ const koiosPublishGrace = 12 * time.Hour
 // calls the per-pool comparison already makes.
 // It also returns the epoch's end time, zero when Koios does not report
 // one, because CheckStakeDistribution needs it to tell an epoch Koios has
-// not published yet from one it genuinely disagrees about (dingo#4820).
+// not published yet from one it genuinely disagrees about.
 // Returned together so the whole check costs one /epoch_info request, not
 // two.
 func koiosActiveStakeForEpoch(
@@ -751,8 +751,8 @@ func koiosActiveStakeForEpoch(
 	return strings.TrimSpace(*resp.ActiveStake), endTime, nil
 }
 
-// compareTotalActiveStake closes the blind spot in the per-pool loop above
-// (dingo#4321): that loop iterates only the pools GetPoolDistr2 reports, so a
+// compareTotalActiveStake closes the blind spot in the per-pool loop above:
+// that loop iterates only the pools GetPoolDistr2 reports, so a
 // pool Dingo dropped entirely is never looked up and the epoch reports a
 // clean match. Summing what Dingo did report and comparing against Koios's
 // epoch-wide active_stake detects the omission without needing to know which
@@ -849,7 +849,7 @@ func compareTotalActiveStake(
 // koiosparity.KoiosClient.GetTxInfos, completing the set: protocol params
 // (CheckProtocolParams) and stake distribution (CheckStakeDistribution)
 // already consult the shared cache before Koios, and this makes the UTxO
-// half do the same (blinklabs-io/dingo#1900).
+// half do the same.
 //
 // Unlike those two, /tx_info is a BATCH endpoint, so an all-or-nothing cache
 // check would throw away almost all of the benefit: one uncached transaction

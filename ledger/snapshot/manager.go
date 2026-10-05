@@ -51,14 +51,14 @@ type Manager struct {
 	configurationLocked        bool
 
 	// rewardAccountOutputRetentionUnbounded mirrors whether the in-process
-	// Koios parity observer (dingo #3098) is enabled, from node/load
-	// construction. When true, cleanupOldSnapshots retains reward_account_output
-	// without bound in CORE storage mode too, exactly as it already does
-	// unconditionally in API storage mode (dingo #1875) — see
-	// cleanupOldSnapshots's doc comment. Not consensus-affecting: it only
-	// widens local historical retention, so it carries no configurationLocked
-	// gate and may be changed at any time. Default false preserves CORE mode's
-	// existing pruning behavior when the observer is disabled (dingo #4188).
+	// Koios parity observer is enabled, from node/load construction. When true,
+	// cleanupOldSnapshots retains reward_account_output without bound in CORE
+	// storage mode too, exactly as it already does unconditionally in API
+	// storage mode — see cleanupOldSnapshots's doc comment. Not
+	// consensus-affecting: it only widens local historical retention, so it
+	// carries no configurationLocked gate and may be changed at any time.
+	// Default false preserves CORE mode's existing pruning behavior when the
+	// observer is disabled.
 	rewardAccountOutputRetentionUnbounded bool
 
 	// deferRewardStakeInputs makes the authoritative boundary capture stage
@@ -82,7 +82,7 @@ type Manager struct {
 
 	// retentionGuard, when set, runs the pool-stake snapshot prune under the
 	// deferred-header lock so the retention-floor selection and the prune are
-	// atomic with respect to deferred-header admission (issue #3727 race).
+	// atomic with respect to deferred-header admission.
 	// cleanupOldSnapshots passes its default currentEpoch-3 boundary and a
 	// prune closure that deletes+commits pool snapshots below the boundary the
 	// guard hands back (lowered to keep snapshots a queued/deferred header
@@ -347,10 +347,10 @@ func (m *Manager) inactivityPeriod() uint64 {
 }
 
 // SetRewardAccountOutputRetentionUnbounded mirrors whether the in-process
-// Koios parity observer (dingo #3098) is enabled into the snapshot manager's
+// Koios parity observer is enabled into the snapshot manager's
 // cleanup path. When enabled is true, cleanupOldSnapshots retains
 // reward_account_output without bound in CORE storage mode, matching API
-// storage mode's existing unbounded retention (dingo #1875).
+// storage mode's existing unbounded retention.
 //
 // The Koios parity observer validates each closed epoch against Koios only
 // after fetching and comparing over the network, which can fall arbitrarily
@@ -359,7 +359,7 @@ func (m *Manager) inactivityPeriod() uint64 {
 // cleanupOldSnapshots otherwise prunes to. Without this, reward_account_output
 // for an epoch is routinely pruned before the observer ever reads it, and the
 // koios-parity check for that epoch fails permanently with a
-// reward_account_output row that genuinely no longer exists (dingo #4188).
+// reward_account_output row that genuinely no longer exists.
 //
 // Not consensus-affecting — it only widens local historical retention — so
 // unlike SetDelegatorInactivity this is not gated by configurationLocked and
@@ -398,8 +398,7 @@ func (m *Manager) SetPromRegistry(reg prometheus.Registerer) {
 // clamps it UP to minBefore, a hard backstop bounding how many historical
 // epochs the pin can ever hold. All of this — plus eviction of deferred
 // headers the apply cursor has passed — happens under one lock so admission
-// cannot interleave (issue #3727). prune must delete AND commit before
-// returning.
+// cannot interleave. prune must delete AND commit before returning.
 type PoolSnapshotRetentionGuard func(
 	defaultBefore uint64,
 	minBefore uint64,
@@ -409,7 +408,7 @@ type PoolSnapshotRetentionGuard func(
 // SetPoolSnapshotRetentionGuard installs the guard cleanupOldSnapshots uses to
 // prune pool snapshots atomically with the deferred-header retention floor, so
 // a snapshot a queued/deferred header still needs is retained beyond the
-// default currentEpoch-3 window until the header resolves (issue #3727). Pass
+// default currentEpoch-3 window until the header resolves. Pass
 // nil to clear it. It should be set before Start; a nil guard (the default)
 // preserves the original pruning behaviour exactly.
 func (m *Manager) SetPoolSnapshotRetentionGuard(g PoolSnapshotRetentionGuard) {
@@ -1465,7 +1464,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// and it is still persisted below: the reward rounds at the boundaries
 	// into epochs 1, 2 and 3 all resolve against snapshot epoch 0, and without
 	// the row every one of them skips for a missing reward snapshot and the
-	// ADA pots never move (dingo #3381).
+	// ADA pots never move.
 	//
 	// That branch is taken only when the lookup above positively determined
 	// the current epoch to be 0. An undetermined epoch is not a fresh sync.
