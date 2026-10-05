@@ -92,7 +92,7 @@ const (
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultHealthPort                  = 12799
-	DefaultMithrilServerPort           = 8080
+	DefaultMithrilServerPort           = 8081
 	// DefaultHealthReadyGapSlots matches
 	// DefaultForgeStaleGapThresholdSlots: both answer "has this node
 	// stopped following the chain?", and a readiness probe that flapped
@@ -148,23 +148,27 @@ const (
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
-	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
-	// modes used only for validation, not configurable runMode values
-	// (RunMode.Valid rejects them); cmd/dingo passes the one matching the
-	// invoked command to Config.Validate. None of them starts the
-	// relay/private serving listeners or the API listeners. They differ
-	// in their auxiliary-listener surface: RunModeSync is the Mithril
-	// snapshot sync operation (via `dingo sync --mithril` or `dingo
-	// mithril sync`), which starts a Prometheus metrics listener and an
-	// optional pprof debug listener; RunModeMithril is the read-only
-	// Mithril query subcommands (`list`, `show`, and bare `mithril`),
-	// which start no listeners at all; RunModeDatabase is the offline
+	// RunModeSync, RunModeMithril, RunModeMithrilServe, and
+	// RunModeDatabase are effective run modes used only for validation,
+	// not configurable runMode values (RunMode.Valid rejects them);
+	// cmd/dingo passes the one matching the invoked command to
+	// Config.Validate. None of them starts the relay/private serving
+	// listeners or the API listeners. They differ in their
+	// auxiliary-listener surface: RunModeSync is the Mithril snapshot sync
+	// operation (via `dingo sync --mithril` or `dingo mithril sync`),
+	// which starts a Prometheus metrics listener and an optional pprof
+	// debug listener; RunModeMithril is the Mithril query and snapshot
+	// production subcommands (`list`, `show`, `snapshot create`, and bare
+	// `mithril`), which start no listeners at all; RunModeMithrilServe is
+	// `dingo mithril serve`, which starts only the artifact server on
+	// mithril.server.port; RunModeDatabase is the offline
 	// `dingo database snapshot|restore|truncate` maintenance commands,
 	// which also start no listeners. Keeping them distinct lets Validate
 	// check exactly the ports each invocation binds.
-	RunModeSync     RunMode = "sync"
-	RunModeMithril  RunMode = "mithril"
-	RunModeDatabase RunMode = "database"
+	RunModeSync         RunMode = "sync"
+	RunModeMithril      RunMode = "mithril"
+	RunModeMithrilServe RunMode = "mithril-serve"
+	RunModeDatabase     RunMode = "database"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -180,7 +184,7 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeSync, RunModeMithril, RunModeMithrilServe, RunModeDatabase:
 		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
@@ -205,7 +209,8 @@ func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeSync, RunModeMithril, RunModeDatabase:
+	case RunModeLoad, RunModeSync, RunModeMithril, RunModeMithrilServe,
+		RunModeDatabase:
 		return false
 	default:
 		return false

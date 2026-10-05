@@ -199,11 +199,14 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 		// starts a metrics listener and an optional pprof debug listener.
 		return config.RunModeSync
 	case "mithril":
-		// Only `mithril sync` binds the metrics/debug listeners; the
-		// read-only `mithril list` / `mithril show` (and bare `mithril`)
-		// query the aggregator and start nothing.
-		if cmd.Name() == "sync" {
+		// `mithril sync` binds the metrics/debug listeners and `mithril
+		// serve` binds only the artifact server; `list`, `show`,
+		// `snapshot create` and bare `mithril` start nothing.
+		switch cmd.Name() {
+		case "sync":
 			return config.RunModeSync
+		case "serve":
+			return config.RunModeMithrilServe
 		}
 		return config.RunModeMithril
 	case "database":

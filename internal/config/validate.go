@@ -92,7 +92,9 @@ func ValidateMithrilPublicBaseURL(value string) error {
 		addr, parseErr := netip.ParseAddr(host)
 		if host != "localhost" &&
 			(parseErr != nil || !addr.Unmap().IsLoopback()) {
-			return errors.New("plain HTTP public URL is allowed only on loopback")
+			return errors.New(
+				"plain HTTP public URL is allowed only on loopback",
+			)
 		}
 	}
 	return nil
@@ -807,55 +809,60 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.Mithril.Server.KeepSnapshots,
 		))
 	}
-	if c.Mithril.Server.PublicBaseURL != "" {
-		if err := ValidateMithrilPublicBaseURL(
-			c.Mithril.Server.PublicBaseURL,
+	// The server settings are read only by `dingo mithril serve`; other
+	// commands sharing the configuration file never bind its port.
+	if effectiveMode == RunModeMithrilServe {
+		if c.Mithril.Server.PublicBaseURL != "" {
+			if err := ValidateMithrilPublicBaseURL(
+				c.Mithril.Server.PublicBaseURL,
+			); err != nil {
+				errs = append(errs, fmt.Errorf(
+					"invalid mithril.server.publicBaseUrl: %w", err,
+				))
+			}
+		}
+		if err := validatePort(
+			"mithril.server.port", c.Mithril.Server.Port, false, minBindable,
 		); err != nil {
-			errs = append(errs, fmt.Errorf(
-				"invalid mithril.server.publicBaseUrl: %w", err,
-			))
+			errs = append(errs, err)
 		}
-	}
-	if err := validatePort(
-		"mithril.server.port", c.Mithril.Server.Port, false, minBindable,
-	); err != nil {
-		errs = append(errs, err)
-	}
-	if agg := c.Mithril.Server.Aggregator; agg.Enabled {
-		if agg.Epoch < 1 {
-			errs = append(errs, errors.New(
-				"invalid mithril.server.aggregator.epoch: must be at least 1",
-			))
-		}
-		if agg.K == 0 || agg.M == 0 {
-			errs = append(errs, errors.New(
-				"mithril.server.aggregator.k and mithril.server.aggregator.m "+
-					"must be positive",
-			))
-		}
-		if !(agg.PhiF > 0 && agg.PhiF <= 1) {
-			errs = append(errs, fmt.Errorf(
-				"invalid mithril.server.aggregator.phiF %v: must be in (0, 1]",
-				agg.PhiF,
-			))
-		}
-		if agg.GenesisSigningKeyFile == "" {
-			errs = append(errs, errors.New(
-				"mithril.server.aggregator.genesisSigningKeyFile is required "+
-					"when the aggregator is enabled",
-			))
-		}
-		if agg.OperatorTokenFile == "" {
-			errs = append(errs, errors.New(
-				"mithril.server.aggregator.operatorTokenFile is required "+
-					"when the aggregator is enabled",
-			))
-		}
-		if !isLoopbackListenHost(c.BindAddr) && !c.Mithril.Server.TLSEnabled {
-			errs = append(errs, errors.New(
-				"mithril.server.tlsEnabled is required when the aggregator "+
-					"uses a non-loopback bindAddr",
-			))
+		if agg := c.Mithril.Server.Aggregator; agg.Enabled {
+			if agg.Epoch < 1 {
+				errs = append(errs, errors.New(
+					"invalid mithril.server.aggregator.epoch: must be at least 1",
+				))
+			}
+			if agg.K == 0 || agg.M == 0 || agg.K > agg.M {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.k and mithril.server.aggregator.m "+
+						"must be positive and k must not exceed m",
+				))
+			}
+			if !(agg.PhiF > 0 && agg.PhiF <= 1) {
+				errs = append(errs, fmt.Errorf(
+					"invalid mithril.server.aggregator.phiF %v: must be in (0, 1]",
+					agg.PhiF,
+				))
+			}
+			if agg.GenesisSigningKeyFile == "" {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.genesisSigningKeyFile is required "+
+						"when the aggregator is enabled",
+				))
+			}
+			if agg.OperatorTokenFile == "" {
+				errs = append(errs, errors.New(
+					"mithril.server.aggregator.operatorTokenFile is required "+
+						"when the aggregator is enabled",
+				))
+			}
+			if !isLoopbackListenHost(c.BindAddr) &&
+				!c.Mithril.Server.TLSEnabled {
+				errs = append(errs, errors.New(
+					"mithril.server.tlsEnabled is required when the aggregator "+
+						"uses a non-loopback bindAddr",
+				))
+			}
 		}
 	}
 

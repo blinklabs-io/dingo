@@ -710,6 +710,67 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid mithril.server.keepSnapshots",
 		},
 		{
+			name:    "invalid chainsync strategy",
+			modify:  func(c *Config) { c.Chainsync.Strategy = "fastest" },
+			wantErr: "invalid chainsync.strategy",
+		},
+		{
+			name:   "chainsync strategy round_robin alias",
+			modify: func(c *Config) { c.Chainsync.Strategy = "round_robin" },
+		},
+		{
+			name:    "negative chainsync max clients",
+			modify:  func(c *Config) { c.Chainsync.MaxClients = -1 },
+			wantErr: "invalid chainsync.maxClients",
+		},
+		{
+			name: "negative genesis corroboration peers",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = -1
+			},
+			wantErr: "invalid genesisBootstrap.corroborationPeers",
+		},
+		{
+			name: "zero genesis corroboration peers allowed",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = 0
+			},
+		},
+		{
+			name:    "invalid mithril backend",
+			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
+			wantErr: "invalid mithril.backend",
+		},
+		{
+			name:   "empty mithril backend",
+			modify: func(c *Config) { c.Mithril.Backend = "" },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.modify(cfg)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMithrilServer covers the settings only `dingo mithril serve`
+// uses, so they are validated in that effective mode.
+func TestValidateMithrilServer(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr string
+	}{
+		{
 			name: "mithril server port above range",
 			modify: func(c *Config) {
 				c.Mithril.Server.Port = 70000
@@ -738,6 +799,29 @@ func TestValidate(t *testing.T) {
 				c.Mithril.Server.Aggregator.K = 0
 			},
 			wantErr: "mithril.server.aggregator.k and",
+		},
+		{
+			name: "enabled mithril aggregator needs positive m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.M = 0
+			},
+			wantErr: "mithril.server.aggregator.k and",
+		},
+		{
+			name: "enabled mithril aggregator k above m",
+			modify: func(c *Config) {
+				c.Mithril.Server.Aggregator = validMithrilAggregator()
+				c.Mithril.Server.Aggregator.K = 41
+			},
+			wantErr: "k must not exceed m",
+		},
+		{
+			name: "mithril server privileged port",
+			modify: func(c *Config) {
+				c.Mithril.Server.Port = 443
+			},
+			wantErr: "invalid mithril.server.port",
 		},
 		{
 			name: "enabled mithril aggregator phiF above one",
@@ -797,57 +881,41 @@ func TestValidate(t *testing.T) {
 			name: "mithril server retention and port in range",
 			modify: func(c *Config) {
 				c.Mithril.Server.KeepSnapshots = 3
-				c.Mithril.Server.Port = 8080
+				c.Mithril.Server.Port = 8081
 			},
-		},
-		{
-			name:    "invalid chainsync strategy",
-			modify:  func(c *Config) { c.Chainsync.Strategy = "fastest" },
-			wantErr: "invalid chainsync.strategy",
-		},
-		{
-			name:   "chainsync strategy round_robin alias",
-			modify: func(c *Config) { c.Chainsync.Strategy = "round_robin" },
-		},
-		{
-			name:    "negative chainsync max clients",
-			modify:  func(c *Config) { c.Chainsync.MaxClients = -1 },
-			wantErr: "invalid chainsync.maxClients",
-		},
-		{
-			name: "negative genesis corroboration peers",
-			modify: func(c *Config) {
-				c.GenesisBootstrap.CorroborationPeers = -1
-			},
-			wantErr: "invalid genesisBootstrap.corroborationPeers",
-		},
-		{
-			name: "zero genesis corroboration peers allowed",
-			modify: func(c *Config) {
-				c.GenesisBootstrap.CorroborationPeers = 0
-			},
-		},
-		{
-			name:    "invalid mithril backend",
-			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
-			wantErr: "invalid mithril.backend",
-		},
-		{
-			name:   "empty mithril backend",
-			modify: func(c *Config) { c.Mithril.Backend = "" },
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validTestConfig()
 			tt.modify(cfg)
-			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			err := cfg.validate(RunModeMithrilServe, minUnprivilegedPort)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
 				return
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateMithrilServerSettingsOnlyForMithrilServe guards the other
+// commands sharing a configuration file: a server port this process may not
+// bind, or an aggregator that is unusable as configured, must not stop a
+// command that never starts the Mithril server.
+func TestValidateMithrilServerSettingsOnlyForMithrilServe(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []RunMode{
+		RunModeServe, RunModeSync, RunModeMithril, RunModeDatabase,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.Mithril.Server.Port = 443
+			cfg.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
+			cfg.Mithril.Server.Aggregator = validMithrilAggregator()
+			cfg.Mithril.Server.Aggregator.K = 41
+			assert.NoError(t, cfg.validate(mode, minUnprivilegedPort))
 		})
 	}
 }

@@ -858,9 +858,9 @@
   # A public origin is required by 'dingo mithril serve' and is embedded in
   # snapshot download locations. Use HTTPS except for an HTTP loopback origin.
   # server:
-    # Port for 'dingo mithril serve' (default: 8080)
+    # Port for 'dingo mithril serve' (default: 8081)
     # CLI: --mithril-server-port
-    # port: 8080
+    # port: 8081
     # Public HTTPS origin used in snapshot download locations. Plain HTTP is
     # accepted only for loopback. Forwarded headers are not used to build URLs.
     # CLI: --mithril-server-public-base-url

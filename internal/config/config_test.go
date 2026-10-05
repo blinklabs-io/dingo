@@ -2136,3 +2136,27 @@ func TestCloneConfigIsolatesMCP(t *testing.T) {
 		cfg.Plugins.API.Mcp.Config["tls"].(map[string]any)["enabled"],
 	)
 }
+
+// TestDefaultMithrilServerPortIsUnshared guards running `dingo mithril serve`
+// beside a node with default settings: both bind the shared bindAddr, and the
+// two commands are validated separately, so a shared default port would only
+// fail at bind time.
+func TestDefaultMithrilServerPortIsUnshared(t *testing.T) {
+	t.Parallel()
+	cfg := newDefaultConfig()
+	api := cfg.Plugins.API
+	for name, port := range map[string]uint{
+		"relay":      cfg.RelayPort,
+		"private":    cfg.PrivatePort,
+		"metrics":    cfg.MetricsPort,
+		"health":     cfg.HealthPort,
+		"midnight":   cfg.Midnight.Port,
+		"blockfrost": APIPluginPort(api.Blockfrost),
+		"kupo":       APIPluginPort(api.Kupo),
+		"mesh":       APIPluginPort(api.Mesh),
+		"utxorpc":    APIPluginPort(api.Utxorpc),
+		"mcp":        APIPluginPort(api.Mcp),
+	} {
+		assert.NotEqual(t, port, cfg.Mithril.Server.Port, name)
+	}
+}
