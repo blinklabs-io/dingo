@@ -12328,7 +12328,10 @@ storage or a configured `dev` run mode — which forces `api` storage — the
 UTxORPC/Blockfrost/Mesh listeners and an explicitly enabled Midnight listener);
 the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
-and debug listeners; the read-only `mithril list`/`show` and `load` start none.
+and debug listeners; `mithril serve` starts only the artifact server, and only
+that command validates the `mithril.server` port, public URL and aggregator
+settings; `mithril list`/`show`, `mithril snapshot create` and `load` start
+none.
 A port configured for an inactive listener cannot bind, so it is neither
 range-checked nor counted toward a collision; two active listeners are only
 reported as colliding when their bind addresses overlap (equal, or either
