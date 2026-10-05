@@ -238,9 +238,8 @@ services:
       start_period: 10s
 
   txpump-dingo:
-    build:
-      context: ../../..
-      dockerfile: internal/test/antithesis/Dockerfile.txpump
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main}
+    pull_policy: always
     profiles: ["dingo"]
     init: true
     user: "0:0"
@@ -392,9 +391,8 @@ services:
       start_period: 10s
 
   txpump:
-    build:
-      context: ../../..
-      dockerfile: internal/test/antithesis/Dockerfile.txpump
+    image: ${TXPUMP_IMAGE:-ghcr.io/blinklabs-io/cardano-txpump:main}
+    pull_policy: always
     profiles: ["conformance"]
     init: true
     # Named Docker volumes are root-owned on first mount; txpump writes

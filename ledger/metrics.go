@@ -241,12 +241,11 @@ type stateMetrics struct {
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
-	// absent from the query, the shape of a Byron-era applied block: Byron's
-	// BFT/PoA consensus writes no VRF nonce, so it is invisible to a
-	// block_nonce-keyed search. A rising value means an applied block's
-	// ledger.tx undo event could not even be attempted for lack of a
-	// durable per-block record, not merely because the content was no
-	// longer reachable.
+	// absent from the query, the shape of a Byron-era block applied before
+	// applied points were recorded for every era. A rising value means an
+	// applied block's ledger.tx undo event could not even be attempted for
+	// lack of a durable per-block record, not merely because the content
+	// was no longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -1156,7 +1155,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.reconciliationUndoMissingRecord = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_reconciliation_undo_missing_record_total",
-			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era applied block (issue #3778)",
+			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era block applied before applied points were recorded for every era",
 		},
 	)
 	// Cross-fork continuation audit verdicts, labelled by result:
