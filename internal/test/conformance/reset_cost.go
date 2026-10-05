@@ -98,8 +98,8 @@ type backendResetter struct {
 
 	// probeDirty reports which of the given qualified tables hold rows.
 	// Injectable so reset's skip/subset behavior is testable without a
-	// server; nil means nonEmptyTables, which is what both real backends
-	// use.
+	// server; nil means the prepared batched probe, which is what both real
+	// backends use.
 	probeDirty func(context.Context, *sql.DB, []string) ([]string, error)
 
 	// mu guards tables, discovered and the prepared probe across the
@@ -108,12 +108,11 @@ type backendResetter struct {
 	mu         sync.Mutex
 	tables     []string
 	discovered bool
-	probeStmt  *sql.Stmt
-	probeSQL   string
+	probeStmts map[string]*sql.Stmt
 }
 
-// probeStatement returns the prepared form of the non-empty probe, compiling
-// it at most once per distinct table list.
+// probeStatement returns the prepared form of the non-empty probe query,
+// compiling it at most once per distinct query text.
 //
 // Preparing matters because the probe's text is one UNION ALL branch per
 // managed table -- 89 of them here -- and every Reset re-sent it. Almost all
@@ -123,27 +122,26 @@ type backendResetter struct {
 // instrumented Go in modernc.org/sqlite.
 //
 // The table list is discovered once and cannot change afterwards, so in
-// practice this compiles exactly one statement; the text is still compared so
-// a caller that somehow probes a different set gets a correct statement rather
+// practice this compiles one statement per batch; keying by text still gives
+// a caller that somehow probes a different set a correct statement rather
 // than a stale one.
 func (r *backendResetter) probeStatement(
 	ctx context.Context,
-	qualified []string,
+	query string,
 ) (*sql.Stmt, error) {
-	query := nonEmptyTablesQuery(qualified)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.probeStmt != nil && r.probeSQL == query {
-		return r.probeStmt, nil
+	if stmt, ok := r.probeStmts[query]; ok {
+		return stmt, nil
 	}
 	stmt, err := r.db.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("prepare non-empty table probe: %w", err)
 	}
-	if r.probeStmt != nil {
-		_ = r.probeStmt.Close()
+	if r.probeStmts == nil {
+		r.probeStmts = make(map[string]*sql.Stmt)
 	}
-	r.probeStmt, r.probeSQL = stmt, query
+	r.probeStmts[query] = stmt
 	return stmt, nil
 }
 
@@ -196,18 +194,30 @@ func (r *backendResetter) dirtyTables(
 	if len(qualified) == 0 {
 		return nil, nil
 	}
-	// The statement is cached for the resetter's lifetime and closed by
-	// Close, so it deliberately outlives this call.
-	//nolint:sqlclosecheck
-	stmt, err := r.probeStatement(ctx, qualified)
-	if err != nil {
-		return nil, err
+	var dirty []string
+	for start := 0; start < len(qualified); start += nonEmptyTablesBatchSize {
+		end := min(start+nonEmptyTablesBatchSize, len(qualified))
+		// The statement is cached for the resetter's lifetime and closed by
+		// Close, so it deliberately outlives this call.
+		//nolint:sqlclosecheck
+		stmt, err := r.probeStatement(
+			ctx,
+			nonEmptyTablesQuery(qualified, start, end),
+		)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := stmt.QueryContext(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("probe non-empty tables: %w", err)
+		}
+		batch, err := scanNonEmptyTables(rows, qualified, start, end)
+		if err != nil {
+			return nil, err
+		}
+		dirty = append(dirty, batch...)
 	}
-	rows, err := stmt.QueryContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("probe non-empty tables: %w", err)
-	}
-	return scanNonEmptyTables(rows, qualified)
+	return dirty, nil
 }
 
 // cachedTables returns the managed table list, discovering it at most once.
@@ -247,23 +257,28 @@ func (r *backendResetter) Close() error {
 // closing that connection.
 func (r *backendResetter) closeProbe() error {
 	r.mu.Lock()
-	stmt := r.probeStmt
-	r.probeStmt, r.probeSQL = nil, ""
+	stmts := r.probeStmts
+	r.probeStmts = nil
 	r.mu.Unlock()
-	if stmt == nil {
-		return nil
+	var err error
+	for _, stmt := range stmts {
+		err = errors.Join(err, stmt.Close())
 	}
-	return stmt.Close()
+	return err
 }
 
-// nonEmptyTablesQuery renders the probe that reports which of qualified
-// currently holds at least one row, in a single round trip.
+// nonEmptyTablesBatchSize bounds the UNION ALL branches in one probe so the
+// server's compound-query parsing stays bounded while round trips stay few.
+const nonEmptyTablesBatchSize = 16
+
+// nonEmptyTablesQuery renders the probe that reports which of
+// qualified[start:end] currently holds at least one row.
 //
 // The query is one UNION ALL of EXISTS probes, selecting each table's index
 // rather than its name so no identifier ever has to survive being embedded in
 // a string literal. Asking per table instead would trade the per-table
 // statement this exists to avoid for a per-table SELECT, which is cheaper but
-// still O(tables) round trips; this stays at one regardless of schema size.
+// still O(tables) round trips.
 //
 // EXISTS stops at the first row, so a probe against a large table is no more
 // expensive than against a small one.
@@ -274,10 +289,11 @@ func (r *backendResetter) closeProbe() error {
 // FROM-less `SELECT ... WHERE ...`, so no dummy FROM is needed; the MySQL
 // restriction on that shape applies to 5.x, and this repository's services
 // pin mysql:8.
-func nonEmptyTablesQuery(qualified []string) string {
+func nonEmptyTablesQuery(qualified []string, start, end int) string {
 	var query strings.Builder
-	for i, table := range qualified {
-		if i > 0 {
+	for i := start; i < end; i++ {
+		table := qualified[i]
+		if i > start {
 			query.WriteString(" UNION ALL ")
 		}
 		// The literal is a decimal index this function generated, never
@@ -293,10 +309,12 @@ func nonEmptyTablesQuery(qualified []string) string {
 	return query.String()
 }
 
-// scanNonEmptyTables maps the probe's returned indexes back to table names.
+// scanNonEmptyTables maps the probe's returned indexes back to table names,
+// rejecting any index outside the probed [start, end) range.
 func scanNonEmptyTables(
 	rows *sql.Rows,
 	qualified []string,
+	start, end int,
 ) ([]string, error) {
 	defer rows.Close()
 
@@ -307,7 +325,7 @@ func scanNonEmptyTables(
 			return nil, fmt.Errorf("scan non-empty table index: %w", err)
 		}
 		idx, err := strconv.Atoi(raw)
-		if err != nil || idx < 0 || idx >= len(qualified) {
+		if err != nil || idx < start || idx >= end {
 			return nil, fmt.Errorf(
 				"non-empty table probe returned unusable index %q",
 				raw,
