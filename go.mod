@@ -12,7 +12,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/XSAM/otelsql v0.44.0
 	github.com/aws/aws-sdk-go-v2 v1.47.1
-	github.com/aws/aws-sdk-go-v2/config v1.33.0
+	github.com/aws/aws-sdk-go-v2/config v1.33.6
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.6
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.34
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.113.1
@@ -20,7 +20,7 @@ require (
 	github.com/blinklabs-io/bark v0.2.0
 	github.com/blinklabs-io/bursa v0.17.1
 	github.com/blinklabs-io/gouroboros v0.209.0
-	github.com/blinklabs-io/ouroboros-mock v0.20.3
+	github.com/blinklabs-io/ouroboros-mock v0.20.4
 	github.com/blinklabs-io/plutigo v0.7.2
 	github.com/blockfrost/blockfrost-go v0.5.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
