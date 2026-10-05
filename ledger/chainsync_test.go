@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17930,4 +17931,226 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 		e.Reason,
 	)
 	require.Equal(t, fixture.connId, e.ConnectionId)
+}
+
+// A peer repeating a rollback to our own tip must cost constant work: the
+// no-op is recognised before any rollback history is recorded.
+func TestHandleEventChainsyncRollbackToCurrentTipRecordsNoHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	tipPoint := fixture.ls.chain.HeaderTip().Point
+
+	for range 3 * rollbackLoopThreshold {
+		require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+			ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        tipPoint,
+			},
+			nil,
+		))
+	}
+
+	assert.Equal(
+		t,
+		0,
+		len(fixture.ls.rollbackHistory),
+		"a rollback to the current tip must not be recorded",
+	)
+}
+
+func TestRecordRollbackBoundsHistory(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	now := time.Now()
+	for i := range 4 * maxRollbackHistory {
+		ls.recordRollback(
+			"conn",
+			ocommon.NewPoint(uint64(i), []byte{byte(i), byte(i >> 8)}),
+			now,
+		)
+	}
+
+	assert.Equal(t, maxRollbackHistory, len(ls.rollbackHistory))
+	assert.Equal(
+		t,
+		uint64(4*maxRollbackHistory-1),
+		ls.rollbackHistory[len(ls.rollbackHistory)-1].point.Slot,
+		"the newest record must be retained",
+	)
+}
+
+func TestRecordRollbackCountsRepeatAfterHistoryEviction(t *testing.T) {
+	t.Parallel()
+	ls := &LedgerState{}
+	now := time.Now()
+	point := ocommon.NewPoint(7, []byte("repeated"))
+
+	assert.Equal(t, 1, ls.recordRollback("conn", point, now))
+	for i := range maxRollbackHistory {
+		ls.recordRollback(
+			"conn",
+			ocommon.NewPoint(
+				uint64(100+i),
+				[]byte{byte(i), byte(i >> 8)},
+			),
+			now,
+		)
+	}
+	assert.Equal(t, maxRollbackHistory, len(ls.rollbackHistory))
+	assert.Equal(
+		t,
+		2,
+		ls.recordRollback("conn", point, now),
+		"the loop count survives eviction of its first event record",
+	)
+}
+
+func TestRecordRollbackCountsRepeatsFromOneConnection(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	now := time.Now()
+	point := ocommon.NewPoint(7, []byte("p"))
+
+	assert.Equal(t, 1, ls.recordRollback("a", point, now))
+	assert.Equal(t, 1, ls.recordRollback("b", point, now))
+	assert.Equal(t, 2, ls.recordRollback("a", point, now))
+	assert.Equal(
+		t,
+		1,
+		ls.recordRollback(
+			"a",
+			point,
+			now.Add(rollbackLoopWindow+time.Second),
+		),
+		"records older than the detection window must be pruned",
+	)
+}
+
+// One divergence episode on a connection delivers many headers that do not
+// fit. They must produce one resync request, not one per header.
+func TestHandleEventChainsyncBlockHeaderCoalescesResyncPerConnection(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 16)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			if e, ok := evt.Data.(event.ChainsyncResyncEvent); ok {
+				resyncCh <- e
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	for i := range 5 {
+		header := mockHeader{
+			hash: lcommon.NewBlake2b256(
+				testHashBytes(fmt.Sprintf("stale-block-%d", i)),
+			),
+			prevHash: lcommon.NewBlake2b256(
+				testHashBytes(fmt.Sprintf("missing-ancestor-%d", i)),
+			),
+			blockNumber: fixture.currentTip.BlockNumber + 1,
+			slot:        fixture.currentTip.Point.Slot + 10 + uint64(i),
+		}
+		point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+		require.NoError(t, fixture.ls.handleEventChainsyncBlockHeader(
+			ChainsyncEvent{
+				ConnectionId: fixture.connId,
+				Point:        point,
+				BlockHeader:  header,
+				Tip: ochainsync.Tip{
+					Point:       point,
+					BlockNumber: header.BlockNumber(),
+				},
+			},
+		))
+	}
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"expected one chainsync resync event",
+	)
+	assert.Equal(t, fixture.connId, resync.ConnectionId)
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"one divergence episode must publish a single resync",
+	)
+}
+
+func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	var published atomic.Int32
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(event.Event) { published.Add(1) },
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+	waitFor := func(want int32, msg string) {
+		t.Helper()
+		testutil.WaitForCondition(
+			t,
+			func() bool { return published.Load() == want },
+			testutil.AsyncWait,
+			msg,
+		)
+	}
+	otherConn := ouroboros.ConnectionId{
+		LocalAddr:  fixture.connId.LocalAddr,
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(10, 9, 8, 7), Port: 3001},
+	}
+
+	fixture.ls.requestChainsyncResync(fixture.connId, "first", nil)
+	fixture.ls.requestChainsyncResync(fixture.connId, "second", nil)
+	fixture.ls.requestChainsyncResync(otherConn, "other peer", nil)
+	waitFor(2, "one request per connection must be published")
+	require.Never(
+		t,
+		func() bool { return published.Load() > 2 },
+		200*time.Millisecond,
+		10*time.Millisecond,
+		"a coalesced request must not be published late",
+	)
+
+	fixture.ls.handleConnectionClosedEvent(event.Event{
+		Type: ConnectionClosedEventType,
+		Data: ConnectionClosedEvent{ConnectionId: fixture.connId},
+	})
+	fixture.ls.requestChainsyncResync(fixture.connId, "reconnected", nil)
+	waitFor(3, "a reused connection tuple starts a new episode after close")
+
+	// Once the window has passed the next divergence is a new episode.
+	fixture.ls.resyncCoalesceMutex.Lock()
+	fixture.ls.resyncCoalesce[connIdKey(fixture.connId)].at = time.Now().
+		Add(-2 * chainsyncResyncCoalesceWindow)
+	fixture.ls.resyncCoalesceMutex.Unlock()
+	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
+	waitFor(4, "a request after the window must be published")
 }
