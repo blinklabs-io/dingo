@@ -3275,6 +3275,11 @@ address rules (`byronValidateUnknownAttributes`, `byronValidateOutputNetwork`)
 still cover every output. Later outputs remain in the transaction body and its
 ID, and a transaction is not rejected for having more outputs.
 
+Input indexes are Word16 as well: the gouroboros decoder and
+`NewByronTransactionInput` refuse an index above 65535, and
+`byronValidateInputIndexes` repeats the bound for a transaction assembled
+without the decoder, so a UTxO stored at a wider index is never resolved.
+
 The Byron update state is not persisted. It is rebuilt by replaying the stored
 chain from its first block, so a restart or a rollback restores the limits and
 fee policy adopted as of the new tip. A stored chain that begins after genesis,

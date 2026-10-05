@@ -18154,3 +18154,26 @@ func TestRequestChainsyncResyncCoalescesPerConnectionWithinWindow(
 	fixture.ls.requestChainsyncResync(fixture.connId, "next episode", nil)
 	waitFor(4, "a request after the window must be published")
 }
+
+// TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis proves a node with no
+// Conway genesis configured says so, rather than silently skipping the
+// committee seed.
+func TestEnsureGenesisCommitteeWarnsWithoutConwayGenesis(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(&logs, nil)),
+		},
+	}
+	require.Nil(t, ls.config.CardanoNodeConfig.ConwayGenesis())
+
+	require.NoError(t, ls.ensureGenesisCommittee(nil))
+	require.Contains(
+		t,
+		logs.String(),
+		"level=WARN msg=\"conway genesis not configured, genesis committee not seeded\"",
+	)
+}
