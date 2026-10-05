@@ -24,11 +24,12 @@ import (
 // unregistered or unknown-stake relays discoverable, just rarely.
 const minSampleWeight = 1
 
-// weightedSample picks up to n relays without replacement, each draw
-// proportional to the relay's Stake among those not yet picked. A relay with
-// zero stake carries minSampleWeight. The result is in selection order, so
-// a prefix of it is itself a weighted sample. It returns nil for an empty
-// input or n <= 0, and every relay when n covers them all.
+// weightedSample picks up to n relays without replacement. Each round draws
+// pools without replacement in proportion to their delegated stake and picks
+// one relay from each pool. Further relays from a pool become eligible only
+// after every other pool with a relay has had the same opportunity. Relays
+// without a pool identity are treated independently for compatibility with
+// non-ledger providers and restored peer snapshots.
 //
 // A Fenwick tree makes each draw and removal O(log len(relays)), which
 // matters because mainnet registers thousands of relays.
@@ -36,8 +37,66 @@ func weightedSample(relays []PoolRelay, n int) []PoolRelay {
 	if len(relays) == 0 || n <= 0 {
 		return nil
 	}
-	count := len(relays)
-	n = min(n, count)
+	n = min(n, len(relays))
+	groups := groupRelaysByPool(relays)
+	picked := make([]PoolRelay, 0, n)
+	for len(picked) < n {
+		for _, groupIndex := range weightedPoolOrder(groups) {
+			group := &groups[groupIndex]
+			//nolint:gosec // relay spread within one authenticated pool identity
+			relayIndex := int(rand.Uint64N(uint64(len(group.relays))))
+			picked = append(picked, group.relays[relayIndex])
+			group.relays[relayIndex] = group.relays[len(group.relays)-1]
+			group.relays = group.relays[:len(group.relays)-1]
+			if len(picked) == n {
+				return picked
+			}
+		}
+	}
+	return picked
+}
+
+type relayPoolGroup struct {
+	stake  uint64
+	relays []PoolRelay
+}
+
+func groupRelaysByPool(relays []PoolRelay) []relayPoolGroup {
+	groups := make([]relayPoolGroup, 0, len(relays))
+	byPool := make(map[string]int, len(relays))
+	for _, relay := range relays {
+		if len(relay.PoolKeyHash) == 0 {
+			groups = append(groups, relayPoolGroup{
+				stake: relay.Stake, relays: []PoolRelay{relay},
+			})
+			continue
+		}
+		key := string(relay.PoolKeyHash)
+		if index, ok := byPool[key]; ok {
+			groups[index].relays = append(groups[index].relays, relay)
+			continue
+		}
+		byPool[key] = len(groups)
+		groups = append(groups, relayPoolGroup{
+			stake: relay.Stake, relays: []PoolRelay{relay},
+		})
+	}
+	return groups
+}
+
+// weightedPoolOrder returns every non-empty group once in stake-weighted
+// order. Calling it again forms the next round for groups with relays left.
+func weightedPoolOrder(groups []relayPoolGroup) []int {
+	active := make([]int, 0, len(groups))
+	for i := range groups {
+		if len(groups[i].relays) > 0 {
+			active = append(active, i)
+		}
+	}
+	count := len(active)
+	if count == 0 {
+		return nil
+	}
 
 	// Keep exact weights whenever their sum fits; otherwise scale every
 	// weight together, preserving proportions rather than clipping whales.
@@ -47,8 +106,8 @@ func weightedSample(relays []PoolRelay, n int) []PoolRelay {
 	for shift := uint(0); ; shift++ {
 		total = 0
 		overflow := false
-		for i, relay := range relays {
-			w := max(relay.Stake>>shift, minSampleWeight)
+		for i, groupIndex := range active {
+			w := max(groups[groupIndex].stake>>shift, minSampleWeight)
 			if math.MaxUint64-total < w {
 				overflow = true
 				break
@@ -68,9 +127,9 @@ func weightedSample(relays []PoolRelay, n int) []PoolRelay {
 	}
 
 	highBit := 1 << (bits.Len(uint(count)) - 1)
-	picked := make([]PoolRelay, 0, n)
-	for len(picked) < n {
-		//nolint:gosec // relay spread, not security-sensitive
+	ordered := make([]int, 0, count)
+	for len(ordered) < count {
+		//nolint:gosec // stake-weighted peer spread, not a secret draw
 		target := rand.Uint64N(total)
 		// Descend to the first index whose prefix sum exceeds target.
 		pos := 0
@@ -81,11 +140,11 @@ func weightedSample(relays []PoolRelay, n int) []PoolRelay {
 				target -= tree[next]
 			}
 		}
-		picked = append(picked, relays[pos])
+		ordered = append(ordered, active[pos])
 		total -= weights[pos]
 		for i := pos + 1; i <= count; i += i & -i {
 			tree[i] -= weights[pos]
 		}
 	}
-	return picked
+	return ordered
 }

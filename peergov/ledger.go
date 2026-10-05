@@ -77,6 +77,9 @@ type PoolRelay struct {
 
 	// Port is the port number of the relay. If 0, defaults to 3001.
 	Port uint
+	// PoolKeyHash identifies the pool that registered this relay. Empty means
+	// the provider cannot associate the relay with a pool.
+	PoolKeyHash []byte
 
 	// Stake is the total delegated stake, in lovelace, of the pool that owns
 	// this relay. Weighted sampling gives zero stake a floor weight.

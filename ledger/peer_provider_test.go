@@ -642,7 +642,7 @@ func relayByPort(t *testing.T, relays []PoolRelay, port uint) PoolRelay {
 func TestPoolRelayProviderPopulatesStake(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
-	seedStakedPools(t, db)
+	poolA, poolB := seedStakedPools(t, db)
 	adapter := newTestAdapter(t, db, nil, time.Minute)
 
 	relays, err := adapter.GetPoolRelays()
@@ -650,7 +650,9 @@ func TestPoolRelayProviderPopulatesStake(t *testing.T) {
 	require.Len(t, relays, 3)
 
 	require.Equal(t, uint64(700), relayByPort(t, relays, 3001).Stake)
+	require.Equal(t, poolA, relayByPort(t, relays, 3001).PoolKeyHash)
 	require.Zero(t, relayByPort(t, relays, 3002).Stake)
+	require.Equal(t, poolB, relayByPort(t, relays, 3002).PoolKeyHash)
 	foundMulti := false
 	for _, r := range relays {
 		if r.Hostname == "multi.example.com" {
@@ -706,8 +708,15 @@ func TestPoolRelayProviderStakeLookupGetsUniquePoolHashes(t *testing.T) {
 func TestCopyPoolRelaysCopiesStakeAndMultiHost(t *testing.T) {
 	t.Parallel()
 	original := []PoolRelay{
-		{Hostname: "multi.example.com", Stake: 99, IsMultiHost: true},
+		{
+			Hostname:    "multi.example.com",
+			PoolKeyHash: []byte{0xaa},
+			Stake:       99,
+			IsMultiHost: true,
+		},
 	}
 	result := copyPoolRelays(original)
 	require.Equal(t, original, result)
+	result[0].PoolKeyHash[0] = 0xbb
+	require.Equal(t, byte(0xaa), original[0].PoolKeyHash[0])
 }

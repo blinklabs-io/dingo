@@ -6012,10 +6012,11 @@ the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
 `ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
 batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
 stake at zero rather than failing discovery) and flags MultiHostName relays
-(hostname, no port). Discovery draws relay addresses without replacement
-weighted by that stake (`weightedSample` in `peergov/weighted_selection.go`,
-zero stake carrying a floor weight so such relays stay discoverable) and walks
-the draw until the ledger-peer deficit is filled. A MultiHostName relay is
+(hostname, no port). Discovery draws pools without replacement weighted by
+their stake (`weightedSample` in `peergov/weighted_selection.go`, zero stake
+carrying a floor weight so such pools stay discoverable), chooses one relay
+from each drawn pool per round, and walks the resulting relay order until the
+ledger-peer deficit is filled. A MultiHostName relay is
 carried as `host:0`; resolution looks up its SRV record for target and port,
 falls back to A/AAAA on the default port, and never leaves port 0 as the
 dial target. MultiHost reconnects preserve SRV-selected ports and absolute

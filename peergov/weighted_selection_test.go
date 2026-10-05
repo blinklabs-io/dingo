@@ -136,6 +136,53 @@ func TestWeightedSample_AllZeroStakeUniform(t *testing.T) {
 	}
 }
 
+func TestWeightedSamplePoolStakeIsNotMultipliedByRelayCount(t *testing.T) {
+	t.Parallel()
+	for _, stake := range []uint64{0, 100} {
+		t.Run(fmt.Sprintf("stake_%d", stake), func(t *testing.T) {
+			poolA := []byte{0xaa}
+			poolB := []byte{0xbb}
+			relays := make([]PoolRelay, 0, 51)
+			for i := range 50 {
+				relays = append(relays, PoolRelay{
+					Hostname:    fmt.Sprintf("a-%d.example.com", i),
+					PoolKeyHash: poolA,
+					Stake:       stake,
+				})
+			}
+			relays = append(relays, PoolRelay{
+				Hostname: "b.example.com", PoolKeyHash: poolB, Stake: stake,
+			})
+
+			for range 100 {
+				got := weightedSample(relays, 2)
+				require.Len(t, got, 2)
+				require.NotEqual(
+					t,
+					string(got[0].PoolKeyHash),
+					string(got[1].PoolKeyHash),
+					"one pool's relay count must not multiply its sampling weight",
+				)
+			}
+		})
+	}
+}
+
+func TestWeightedSampleRepeatsPoolsOnlyInLaterRounds(t *testing.T) {
+	t.Parallel()
+	poolA := []byte{0xaa}
+	poolB := []byte{0xbb}
+	relays := []PoolRelay{
+		{Hostname: "a-1.example.com", PoolKeyHash: poolA, Stake: 100},
+		{Hostname: "a-2.example.com", PoolKeyHash: poolA, Stake: 100},
+		{Hostname: "b.example.com", PoolKeyHash: poolB, Stake: 1},
+	}
+	got := weightedSample(relays, len(relays))
+	require.Len(t, got, len(relays))
+	require.NotEqual(t, string(got[0].PoolKeyHash), string(got[1].PoolKeyHash))
+	require.Equal(t, string(poolA), string(got[2].PoolKeyHash))
+}
+
 // Stakes near the uint64 limit must not overflow the running total: if they
 // did, the draw range would collapse and one relay would always win.
 func TestWeightedSample_HugeStakesDoNotOverflow(t *testing.T) {

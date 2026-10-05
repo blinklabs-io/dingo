@@ -36,6 +36,8 @@ type PoolRelay struct {
 	IPv4     *net.IP
 	IPv6     *net.IP
 	Port     uint
+	// PoolKeyHash identifies the pool that registered this relay.
+	PoolKeyHash []byte
 	// Stake is the delegated stake, in lovelace, of the pool owning the
 	// relay. StakeKnown reports whether the lookup succeeded.
 	Stake uint64
@@ -157,8 +159,11 @@ func (p *PoolRelayProvider) GetPoolRelays() (
 	for _, relay := range relays {
 		_, known := stakes[string(relay.PoolKeyHash)]
 		pr := PoolRelay{
-			Hostname:   relay.Hostname,
-			Port:       relay.Port,
+			Hostname: relay.Hostname,
+			Port:     relay.Port,
+			PoolKeyHash: append(
+				[]byte(nil), relay.PoolKeyHash...,
+			),
 			Stake:      stakes[string(relay.PoolKeyHash)],
 			StakeKnown: known && err == nil,
 			// The relay row stores no relay type, so a hostname with no port
@@ -239,6 +244,7 @@ func copyPoolRelays(relays []PoolRelay) []PoolRelay {
 		result[i] = PoolRelay{
 			Hostname:    r.Hostname,
 			Port:        r.Port,
+			PoolKeyHash: append([]byte(nil), r.PoolKeyHash...),
 			Stake:       r.Stake,
 			StakeKnown:  r.StakeKnown,
 			IsMultiHost: r.IsMultiHost,
