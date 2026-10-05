@@ -1136,7 +1136,7 @@ emits nothing while it runs.
 | `FindMidnightCandidateRemovalsByBlock(txn, blockNumber)` | Returns the candidate-spend journal rows for a rolled-back block. |
 | `DeleteMidnightCandidateRemovalsByBlock(txn, blockNumber)` | Deletes candidate-spend journal rows after a successful rollback. |
 | `DeleteMidnightCandidateRemovalsBeforeBlock(txn, blockNumber)` | Prunes candidate-spend journal rows older than the rollback window. |
-| `UpsertMidnightEpochTransition(txn, *MidnightEpochTransition)` | Insert or replace the pre-advance epoch recorded for a block. |
+| `UpsertMidnightEpochTransition(txn, *MidnightEpochTransition)` | Insert the pre-advance epoch for a block, preserving the first journal row during replay. |
 | `GetMidnightEpochTransitionByBlock(txn, blockNumber)` | Returns the epoch transition journal row for a rolled-back block, or nil. |
 | `DeleteMidnightEpochTransitionsByBlock(txn, blockNumber)` | Deletes the epoch transition journal row after a successful rollback. |
 | `DeleteMidnightEpochTransitionsBeforeBlock(txn, blockNumber)` | Prunes epoch transition journal rows older than the rollback window. |

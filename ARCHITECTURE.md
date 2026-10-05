@@ -11518,7 +11518,9 @@ candidates are observed.
 
 The epoch and its initialization state before an advance or cold start are
 journaled in `midnight_epoch_transitions` in the same transaction, before
-`currentEpoch` changes. A rollback restores both even after a restart, so
+`currentEpoch` changes. Replaying an applied block preserves the first journal
+row, including when restart begins with uninitialized epoch tracking. A rollback
+restores both even after a restart, so
 undoing the first indexed block permits a replacement branch to initialize
 its own epoch without snapshotting the removed branch. Both rollback
 journals are pruned past `candidateRollbackDepth` in the block's transaction.

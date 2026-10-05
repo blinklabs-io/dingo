@@ -1664,8 +1664,9 @@ func TestCandidateAddRemove(t *testing.T) {
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
 	idx.mu.Lock()
-	idx.advanceEpochLocked(2, 2, nil)
+	err := idx.advanceEpochLocked(2, 2, nil)
 	idx.mu.Unlock()
+	require.NoError(t, err)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
@@ -2413,6 +2414,27 @@ func TestRollbackAfterRestartRestoresCandidateAndEpoch(t *testing.T) {
 		snapshots[len(snapshots)-1].Epoch,
 		"re-applying the block must advance from the restored epoch and snapshot it",
 	)
+}
+
+func TestEpochJournalSurvivesReplayAfterRestart(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block, txs, _, _ := candidateSpendAndEpochAdvanceFixture(t, idx, "ca60")
+	restarted := setupGovIndexer(t, store)
+	require.NoError(t, restarted.processBlock(block, txs, 2_000))
+	transition, err := store.GetMidnightEpochTransitionByBlock(nil, block.Number)
+	require.NoError(t, err)
+	require.NotNil(t, transition)
+	require.True(t, transition.PreviousExists)
+	require.Equal(t, uint64(1), transition.PreviousEpoch)
+	require.ErrorIs(t, restarted.rollbackBlock(block), errIncompleteRollback)
+	require.True(t, restarted.hasCurrentEpoch)
+	require.Equal(t, uint64(1), restarted.currentEpoch)
+	require.NoError(t, restarted.processBlock(block, txs, 2_000))
+	snapshots := epochCandidateSnapshots(t, store)
+	require.NotEmpty(t, snapshots)
+	require.Equal(t, uint64(1), snapshots[len(snapshots)-1].Epoch)
 }
 
 // failingEpochJournalStore fails the epoch-transition journal delete while

@@ -899,7 +899,7 @@ DELETE FROM midnight_candidate_removals WHERE block_number < ?;
 -- name: UpsertMidnightEpochTransition :exec
 INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists)
 VALUES (?, ?, ?)
-ON CONFLICT (block_number) DO UPDATE SET previous_epoch = excluded.previous_epoch, previous_exists = excluded.previous_exists;
+ON CONFLICT (block_number) DO NOTHING;
 
 -- name: GetMidnightEpochTransitionByBlock :one
 SELECT block_number, previous_epoch, previous_exists
