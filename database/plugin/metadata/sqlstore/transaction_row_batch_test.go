@@ -445,20 +445,23 @@ func TestRowBatchFlushSplitsAtParameterLimit(t *testing.T) {
 		ctx, `SELECT id FROM "transaction"`,
 	).Scan(&transactionID))
 
+	parameterLimit := store.dialect.ParameterLimit()
+	rowsPerStatement := parameterLimit / len(vkeyWitnessShape.columns)
+	require.Positive(t, rowsPerStatement)
+	rowCount := rowsPerStatement + 1
 	var rows rowBatch
-	for i := range 5 {
+	for i := range rowCount {
 		rows.add(
 			vkeyWitnessShape,
-			[]byte{byte(i), 0x01}, []byte{byte(i), 0x02},
+			[]byte(fmt.Sprintf("vkey-%d", i)),
+			[]byte(fmt.Sprintf("signature-%d", i)),
 			transactionID, 0,
 		)
 	}
 	insertsBefore := counterValue(t, reg, "insert")
-	// Four columns per row and a limit of nine parameters: two rows per
-	// statement, so five rows take three statements.
-	require.NoError(t, rows.flush(ctx, db, 9))
-	require.Equal(t, float64(3), counterValue(t, reg, "insert")-insertsBefore)
-	require.Equal(t, 5, keyWitnessCount(t, store, txn))
+	require.NoError(t, rows.flush(ctx, db, parameterLimit))
+	require.Equal(t, float64(2), counterValue(t, reg, "insert")-insertsBefore)
+	require.Equal(t, rowCount, keyWitnessCount(t, store, txn))
 	require.True(t, rows.empty())
 }
 
@@ -477,28 +480,83 @@ func (q *recordingQueryer) ExecContext(
 }
 
 // TestRowBatchFlushTranslatesForProviders pins the PostgreSQL and MySQL
-// renderings of the multi-row statements: placeholders numbered across every
-// row, reserved identifiers quoted, and each ON CONFLICT clause rewritten.
+// rendering of every multi-row shape, including placeholders, quoted
+// identifiers, and conflict-clause rewrites.
 func TestRowBatchFlushTranslatesForProviders(t *testing.T) {
 	t.Parallel()
 	var rows rowBatch
-	for range 2 {
-		rows.add(redeemerShape, []byte{0x01}, int64(7), 1, 2, 0, 0)
-		rows.add(metadataLabelShape, int64(7), 1, 300, []byte{0x02}, nil)
-		rows.add(datumShape, []byte{0x03}, []byte{0x04}, 300)
+	for i := range 2 {
+		seed := byte(i + 1)
+		rows.add(
+			vkeyWitnessShape,
+			[]byte{seed, 0x01}, []byte{seed, 0x02}, int64(seed), 0,
+		)
+		rows.add(
+			bootstrapWitnessShape,
+			[]byte{seed, 0x03}, []byte{seed, 0x04}, []byte{seed, 0x05},
+			[]byte{seed, 0x06}, int64(seed), 1,
+		)
+		rows.add(witnessScriptShape, []byte{seed, 0x07}, int64(seed), 1)
+		rows.add(plutusDataShape, []byte{seed, 0x08}, int64(seed))
+		rows.add(redeemerShape, []byte{seed, 0x01}, int64(seed), 1, 2, int64(i), 0)
+		rows.add(
+			addressTransactionShape,
+			[]byte{seed, 0x09}, []byte{seed, 0x0a}, 1,
+			int64(seed), 300, int64(i),
+		)
+		rows.add(metadataLabelShape, int64(7), i+1, 300, []byte{seed, 0x02}, nil)
+		rows.add(datumShape, []byte{seed, 0x03}, []byte{seed, 0x04}, 300)
 	}
 	want := map[string][]string{
 		"postgres": {
-			`INSERT INTO redeemer (data, transaction_id, ex_units_memory, ex_units_cpu, "index", tag) VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)`,
-			"INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)\n" +
+			"INSERT INTO key_witness (vkey, signature, transaction_id, type) " +
+				"VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)",
+			"INSERT INTO key_witness (signature, public_key, chain_code, " +
+				"attributes, transaction_id, type) " +
+				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
+			"INSERT INTO witness_scripts (script_hash, transaction_id, type) " +
+				"VALUES ($1, $2, $3), ($4, $5, $6)",
+			"INSERT INTO plutus_data (data, transaction_id) " +
+				"VALUES ($1, $2), ($3, $4)",
+			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
+				"ex_units_cpu, \"index\", tag) " +
+				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
+			"INSERT INTO address_transaction (payment_key, staking_key, " +
+				"credential_tag, transaction_id, slot, tx_index) " +
+				"VALUES ($1, $2, $3, $4, $5, $6), ($7, $8, $9, $10, $11, $12)",
+			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
+				"slot, cbor_value, json_value) " +
+				"VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)\n" +
 				metadataLabelShape.suffix,
-			"INSERT INTO datum (hash, raw_datum, added_slot) VALUES ($1, $2, $3), ($4, $5, $6)\nON CONFLICT (hash) DO NOTHING",
+			"INSERT INTO datum (hash, raw_datum, added_slot) " +
+				"VALUES ($1, $2, $3), ($4, $5, $6)\n" +
+				"ON CONFLICT (hash) DO NOTHING",
 		},
 		"mysql": {
-			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, ex_units_cpu, `index`, tag) VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
-			"INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)\n" +
-				"ON DUPLICATE KEY UPDATE slot = VALUES(slot),\n    cbor_value = VALUES(cbor_value),\n    json_value = VALUES(json_value)",
-			"INSERT INTO datum (hash, raw_datum, added_slot) VALUES (?, ?, ?), (?, ?, ?)\nON DUPLICATE KEY UPDATE hash = hash",
+			"INSERT INTO key_witness (vkey, signature, transaction_id, type) " +
+				"VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+			"INSERT INTO key_witness (signature, public_key, chain_code, " +
+				"attributes, transaction_id, type) " +
+				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO witness_scripts (script_hash, transaction_id, type) " +
+				"VALUES (?, ?, ?), (?, ?, ?)",
+			"INSERT INTO plutus_data (data, transaction_id) " +
+				"VALUES (?, ?), (?, ?)",
+			"INSERT INTO redeemer (data, transaction_id, ex_units_memory, " +
+				"ex_units_cpu, `index`, tag) " +
+				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO address_transaction (payment_key, staking_key, " +
+				"credential_tag, transaction_id, slot, tx_index) " +
+				"VALUES (?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO transaction_metadata_label (transaction_id, label, " +
+				"slot, cbor_value, json_value) " +
+				"VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)\n" +
+				"ON DUPLICATE KEY UPDATE slot = VALUES(slot),\n" +
+				"    cbor_value = VALUES(cbor_value),\n" +
+				"    json_value = VALUES(json_value)",
+			"INSERT INTO datum (hash, raw_datum, added_slot) " +
+				"VALUES (?, ?, ?), (?, ?, ?)\n" +
+				"ON DUPLICATE KEY UPDATE hash = hash",
 		},
 	}
 	for dialect, statements := range want {
