@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
@@ -189,6 +190,55 @@ func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 	db := newHookedDB(t, nil, hooks)
 	_, err := snapshotAt(t.Context(), db, filepath.Join(t.TempDir(), "snap"))
 	require.NoError(t, err)
+}
+
+func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	db := newHookedDB(t, reg, &backupHooks{})
+	writer := database.NewTxn(db, true)
+	rolledBack := false
+	defer func() {
+		if !rolledBack {
+			_ = writer.Rollback()
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	dir := filepath.Join(t.TempDir(), "snapshot")
+	go func() {
+		_, err := snapshotAt(
+			ctx, db, dir,
+			lifecycle.WithMaxCommitPause(150*time.Millisecond),
+		)
+		result <- err
+	}()
+
+	waitStart := time.Now()
+	testutil.RequireNoReceive(
+		t, result, 400*time.Millisecond,
+		"snapshot returned while a write transaction held the commit barrier",
+	)
+	barrierWait := time.Since(waitStart)
+	require.NoError(t, writer.Rollback())
+	rolledBack = true
+	require.NoError(
+		t, testutil.RequireReceive(t, result, 5*time.Second, "snapshot completion"),
+	)
+
+	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
+	require.NotNil(t, pause)
+	for _, metric := range pause.GetMetric() {
+		if metricLabel(metric, "result") == "ok" {
+			require.Equal(t, uint64(1), metric.GetHistogram().GetSampleCount())
+			require.Less(t, metric.GetHistogram().GetSampleSum(), barrierWait.Seconds())
+			return
+		}
+	}
+	t.Fatal("successful snapshot pause metric was not recorded")
 }
 
 func TestSnapshotRejectsNegativeMaxCommitPause(t *testing.T) {
@@ -379,18 +429,23 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 
 func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	release := make(chan struct{})
 	finished := make(chan struct{})
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
 	hooks.read = func() error {
-		<-release
-		close(finished)
-		return nil
+		select {
+		case <-release:
+			close(finished)
+			return nil
+		case <-ctx.Done():
+			close(finished)
+			return ctx.Err()
+		}
 	}
 	dir := filepath.Join(t.TempDir(), "snapshot")
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
 	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
 	close(release)
 	select {

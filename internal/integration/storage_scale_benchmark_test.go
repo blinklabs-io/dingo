@@ -22,6 +22,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -165,19 +166,94 @@ func insertScaleUtxos(tb testing.TB, raw *sql.DB, lo, hi int) {
 	require.NoError(tb, tx.Commit())
 }
 
-func dirBytes(tb testing.TB, dir string) int64 {
+func allocatedFileBytes(fi os.FileInfo) (int64, bool) {
+	stat := reflect.ValueOf(fi.Sys())
+	if !stat.IsValid() {
+		return 0, false
+	}
+	if stat.Kind() == reflect.Pointer {
+		if stat.IsNil() {
+			return 0, false
+		}
+		stat = stat.Elem()
+	}
+	if stat.Kind() != reflect.Struct {
+		return 0, false
+	}
+	blocks := stat.FieldByName("Blocks")
+	if !blocks.IsValid() {
+		return 0, false
+	}
+	var count uint64
+	switch blocks.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		signed := blocks.Int()
+		if signed < 0 {
+			return 0, false
+		}
+		count = uint64(signed)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		count = blocks.Uint()
+	default:
+		return 0, false
+	}
+	// Unix stat reports allocated storage in 512-byte blocks, unlike Size().
+	const bytesPerStatBlock = 512
+	if count > uint64(int64(^uint64(0)>>1)/bytesPerStatBlock) {
+		return 0, false
+	}
+	return int64(count) * bytesPerStatBlock, true
+}
+
+func dirAllocatedBytes(tb testing.TB, dir string) (int64, bool) {
 	tb.Helper()
 	var total int64
-	require.NoError(tb, filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+	supported := true
+	err := filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !fi.IsDir() {
-			total += fi.Size()
+			bytes, ok := allocatedFileBytes(fi)
+			if !ok {
+				supported = false
+				return nil
+			}
+			if bytes > int64(^uint64(0)>>1)-total {
+				return fmt.Errorf("allocated directory size overflows int64")
+			}
+			total += bytes
 		}
 		return nil
-	}))
-	return total
+	})
+	require.NoError(tb, err)
+	if !supported {
+		return 0, false
+	}
+	return total, true
+}
+
+func reportDirAllocatedBytes(b *testing.B, dir, metric string) {
+	b.Helper()
+	if size, ok := dirAllocatedBytes(b, dir); ok {
+		b.ReportMetric(float64(size), metric)
+	}
+}
+
+func TestDirAllocatedBytesUsesStatBlocks(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "sparse")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	require.NoError(t, file.Truncate(1<<20))
+	require.NoError(t, file.Close())
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	allocated, ok := allocatedFileBytes(info)
+	if !ok {
+		t.Skip("filesystem stat does not expose allocated blocks")
+	}
+	require.Less(t, allocated, info.Size(), "sparse file should use fewer allocated bytes than its apparent size")
 }
 
 func reportRSS(b *testing.B) {
@@ -218,7 +294,7 @@ func BenchmarkStorageScaleUtxo(b *testing.B) {
 				b.ReportMetric(
 					float64(n)/seedTime.Seconds(), "seed-rows/s",
 				)
-				b.ReportMetric(float64(dirBytes(b, db.DataDir())), "disk-bytes")
+				reportDirAllocatedBytes(b, db.DataDir(), "data-dir-allocated-bytes")
 				reportRSS(b)
 			})
 
@@ -235,7 +311,7 @@ func BenchmarkStorageScaleUtxo(b *testing.B) {
 				b.StopTimer()
 				rec.report(b, "write-batch")
 				b.ReportMetric(float64(scaleWriteBatch), "rows/batch")
-				b.ReportMetric(float64(dirBytes(b, db.DataDir())), "disk-bytes")
+				reportDirAllocatedBytes(b, db.DataDir(), "data-dir-allocated-bytes")
 				reportRSS(b)
 			})
 		})
@@ -312,14 +388,14 @@ func BenchmarkStorageScaleBlobBlocks(b *testing.B) {
 		// Walk the directory: Badger's Size() is refreshed only
 		// periodically and reads zero right after a short run.
 		blobDir := filepath.Join(db.DataDir(), "blob")
-		b.ReportMetric(float64(dirBytes(b, blobDir)), "blob-dir-bytes")
+		reportDirAllocatedBytes(b, blobDir, "blob-dir-allocated-bytes")
 		if bs, ok := store.(interface{ DB() *badgerdb.DB }); ok {
 			b.ReportMetric(float64(len(bs.DB().Tables())), "sst-tables")
 			start := time.Now()
 			require.NoError(b, bs.DB().Flatten(2))
 			b.ReportMetric(time.Since(start).Seconds(), "flatten-s")
-			b.ReportMetric(
-				float64(dirBytes(b, blobDir)), "blob-dir-bytes-after-flatten",
+			reportDirAllocatedBytes(
+				b, blobDir, "blob-dir-allocated-bytes-after-flatten",
 			)
 		}
 		reportRSS(b)
