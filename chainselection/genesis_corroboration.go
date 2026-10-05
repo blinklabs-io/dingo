@@ -87,27 +87,30 @@ func (cs *ChainSelector) peerCanCorroborateLocked(
 }
 
 // corroboratorIdentity returns the independence group used to de-duplicate
-// corroboration witnesses. It is the group reported by the configured
-// PeerIdentity hook, which the node backs with peer governance's diversity
-// group, so one operator's several addresses count once. Without a hook, or
-// when it reports nothing, witnesses are grouped by remote host. Either is a
-// lower bound on independence, not a guarantee.
+// corroboration witnesses, and whether the connection could be placed in one.
+// With a PeerIdentity hook configured the group is the one it reports, which
+// the node backs with peer governance's diversity group, so one operator's
+// several addresses count once. A connection the hook cannot place has no
+// identity: keying it by remote host instead would put it in a different
+// namespace from its siblings, so an untracked connection and its tracked
+// siblings would count as independent of each other. Without a hook,
+// witnesses are grouped by remote host. Either is a lower bound on
+// independence, not a guarantee.
 func (cs *ChainSelector) corroboratorIdentity(
 	connId ouroboros.ConnectionId,
-) string {
+) (string, bool) {
 	if cs.config.PeerIdentity != nil {
-		if id := cs.config.PeerIdentity(connId); id != "" {
-			return id
-		}
+		id := cs.config.PeerIdentity(connId)
+		return id, id != ""
 	}
 	if connId.RemoteAddr == nil {
-		return connId.String()
+		return connId.String(), true
 	}
 	addr := connId.RemoteAddr.String()
 	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
-		return host
+		return host, true
 	}
-	return addr
+	return addr, true
 }
 
 // witnessSupportsSuffixLocked checks that the witness's delivered block number
@@ -128,11 +131,17 @@ func (cs *ChainSelector) witnessSupportsSuffixLocked(
 // confirms the candidate's recent chain within the Genesis window and reaches
 // its suffix. Any witness sharing the candidate's own identity is excluded, so
 // a Sybil fast source opening several connections cannot self-corroborate.
+// A candidate or witness without an identity fails closed: the candidate has
+// no corroborators and the witness does not count.
 func (cs *ChainSelector) corroboratingPeersLocked(
 	candidate ouroboros.ConnectionId,
 	candidateTip *PeerChainTip,
 ) int {
 	if candidateTip == nil {
+		return 0
+	}
+	candidateIdentity, ok := cs.corroboratorIdentity(candidate)
+	if !ok {
 		return 0
 	}
 	witnesses := make(map[string]struct{})
@@ -143,14 +152,16 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if candidateTip.confirmsRecentChain(peerTip) &&
-			cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
-			witnesses[cs.corroboratorIdentity(connId)] = struct{}{}
+		if !candidateTip.confirmsRecentChain(peerTip) ||
+			!cs.witnessSupportsSuffixLocked(candidateTip, peerTip) {
+			continue
 		}
+		identity, ok := cs.corroboratorIdentity(connId)
+		if !ok || identity == candidateIdentity {
+			continue
+		}
+		witnesses[identity] = struct{}{}
 	}
-	// A witness on the candidate's own identity is the same operator; it
-	// cannot count as independent corroboration.
-	delete(witnesses, cs.corroboratorIdentity(candidate))
 	return len(witnesses)
 }
 

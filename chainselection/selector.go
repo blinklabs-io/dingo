@@ -16,10 +16,12 @@ package chainselection
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,7 +148,9 @@ type ChainSelectorConfig struct {
 	ConnectionLive        func(ouroboros.ConnectionId) bool
 	// PeerIdentity maps a connection to the independence group used to
 	// de-duplicate corroborating witnesses (peer governance's diversity
-	// group). An empty result, or a nil hook, falls back to the remote host.
+	// group). A connection for which it returns "" has no identity and
+	// fails closed in corroboration: it is not corroborated as a candidate
+	// and does not count as a witness. A nil hook groups by remote host.
 	PeerIdentity       func(ouroboros.ConnectionId) string
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
@@ -645,7 +649,13 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			cs.peerTips[connId] = peerTip
 		}
 
-		modeChanged = cs.advanceSelectionModeLocked()
+		// In Genesis mode every update is evaluated below, and evaluation
+		// advances the mode with the trusted frontier it computes for
+		// selection. Advancing here too would pay that corroboration scan
+		// twice per delivered header.
+		if !trackHashes {
+			modeChanged = cs.advanceSelectionModeLocked()
+		}
 
 		cs.config.Logger.Debug(
 			"updated peer tip",
@@ -1492,6 +1502,17 @@ func (cs *ChainSelector) isPeerSelectableWithBestKnownBlockLocked(
 }
 
 func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
+	return cs.selectBestChainWithBestKnownBlockLocked(
+		cs.prepareSelectionLocked(),
+	)
+}
+
+// prepareSelectionLocked advances the selection mode and returns the best known
+// block frontier for one selection pass, or nil when securityParam is 0 and no
+// frontier applies. In Genesis mode the frontier costs a corroboration scan, so
+// it is computed once and shared by the mode check and every candidate; a mode
+// change recomputes it under the new mode's trust rule.
+func (cs *ChainSelector) prepareSelectionLocked() *uint64 {
 	var bestKnownBlock *uint64
 	if cs.mode == SelectionModeGenesis && cs.securityParam > 0 {
 		bestBlock := cs.bestKnownBlockNumber()
@@ -1507,6 +1528,12 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 		bestBlock := cs.bestKnownBlockNumber()
 		bestKnownBlock = &bestBlock
 	}
+	return bestKnownBlock
+}
+
+func (cs *ChainSelector) selectBestChainWithBestKnownBlockLocked(
+	bestKnownBlock *uint64,
+) *ouroboros.ConnectionId {
 	if len(cs.peerTips) == 0 {
 		return nil
 	}
@@ -1555,16 +1582,41 @@ func (cs *ChainSelector) selectBestChainLocked() *ouroboros.ConnectionId {
 // trusted peer (see frontierTrustedLocked). Used to skip peers that are far
 // behind the observed frontier during catch-up. Advertised tips are untrusted
 // and must not suppress peers that have delivered valid headers.
+//
+// In Genesis mode trust costs a corroboration scan, so frontiers are tried
+// from the highest down and the first trusted one is the answer.
 func (cs *ChainSelector) bestKnownBlockNumber() uint64 {
-	var best uint64
-	for connId, pt := range cs.peerTips {
-		blockNumber := pt.SelectionTip().BlockNumber
-		if blockNumber <= best || !cs.frontierTrustedLocked(connId, pt) {
-			continue
+	if cs.mode != SelectionModeGenesis {
+		var best uint64
+		for connId, pt := range cs.peerTips {
+			blockNumber := pt.SelectionTip().BlockNumber
+			if blockNumber <= best || !cs.frontierTrustedLocked(connId, pt) {
+				continue
+			}
+			best = blockNumber
 		}
-		best = blockNumber
+		return best
 	}
-	return best
+	type frontier struct {
+		connId      ouroboros.ConnectionId
+		peerTip     *PeerChainTip
+		blockNumber uint64
+	}
+	frontiers := make([]frontier, 0, len(cs.peerTips))
+	for connId, pt := range cs.peerTips {
+		if blockNumber := pt.SelectionTip().BlockNumber; blockNumber > 0 {
+			frontiers = append(frontiers, frontier{connId, pt, blockNumber})
+		}
+	}
+	slices.SortFunc(frontiers, func(a, b frontier) int {
+		return cmp.Compare(b.blockNumber, a.blockNumber)
+	})
+	for _, f := range frontiers {
+		if cs.frontierTrustedLocked(f.connId, f.peerTip) {
+			return f.blockNumber
+		}
+	}
+	return 0
 }
 
 // frontierLeadIsTransportOnlyLocked reports whether peerTip's shortfall against
@@ -1943,12 +1995,20 @@ func (cs *ChainSelector) appliedLocalTipBlockLocked() uint64 {
 // known peer tip is more than catchUpPinBlockThreshold blocks ahead of the
 // applied local tip. The pin engages in both regimes; this is used only for
 // diagnostics/logging to distinguish catch-up from tip-hold.
-func (cs *ChainSelector) catchingUpLocked() bool {
+//
+// bestKnownBlock is the frontier already computed for this selection pass;
+// nil computes it.
+func (cs *ChainSelector) catchingUpLocked(bestKnownBlock *uint64) bool {
 	local := cs.appliedLocalTipBlockLocked()
 	if local == 0 {
 		return false
 	}
-	best := cs.bestKnownBlockNumber()
+	var best uint64
+	if bestKnownBlock != nil {
+		best = *bestKnownBlock
+	} else {
+		best = cs.bestKnownBlockNumber()
+	}
 	if best <= local {
 		return false
 	}
@@ -2006,6 +2066,7 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	incumbentTip *PeerChainTip,
 	challengerConn ouroboros.ConnectionId,
 	challengerTip *PeerChainTip,
+	bestKnownBlock *uint64,
 ) bool {
 	// Inactive near genesis / before any local tip has been applied.
 	if cs.appliedLocalTipBlockLocked() == 0 {
@@ -2030,7 +2091,12 @@ func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
 	// a MANDATORY release, never subject to the switch-back debounce below:
 	// there is no "keeping" a connection that is gone, ineligible, stale, or
 	// implausible, whoever the challenger is.
-	if !cs.isPeerSelectableLocked(previousBest, incumbentTip) {
+	if !cs.isPeerSelectableWithBestKnownBlockLocked(
+		previousBest,
+		incumbentTip,
+		false,
+		bestKnownBlock,
+	) {
 		return false
 	}
 
@@ -2178,12 +2244,15 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	switchOccurred := false
+	// One frontier serves the whole pass: the mode check, every candidate,
+	// the incumbent re-check and the anti-flap pin.
+	bestKnownBlock := cs.prepareSelectionLocked()
 	// Compute Genesis corroboration status once per evaluation, independent of
 	// which peer (if any) is ultimately selected, so a stalled selection still
 	// reports why the densest fast source was denied.
 	corroborationEvent := cs.genesisCorroborationFailureLocked()
 
-	newBest := cs.selectBestChainLocked()
+	newBest := cs.selectBestChainWithBestKnownBlockLocked(bestKnownBlock)
 	if newBest == nil {
 		// Selection stalled. Stage an explicit selected-to-none transition when
 		// we were previously following a peer, so subscribers can observe the
@@ -2202,7 +2271,12 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	if previousBest != nil && *previousBest != *newBest {
 		previousPeerTip, ok := cs.peerTips[*previousBest]
 		if ok &&
-			cs.isPeerSelectableLocked(*previousBest, previousPeerTip) {
+			cs.isPeerSelectableWithBestKnownBlockLocked(
+				*previousBest,
+				previousPeerTip,
+				false,
+				bestKnownBlock,
+			) {
 			newPeerTip, ok := cs.peerTips[*newBest]
 			if !ok {
 				return false, nil, nil, corroborationEvent
@@ -2231,6 +2305,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 				previousPeerTip,
 				*newBest,
 				newPeerTip,
+				bestKnownBlock,
 			) {
 				// Anti-flap incumbent pin: the challenger is canonically
 				// "better" by the Praos rules, but only via a head micro-fork
@@ -2249,7 +2324,8 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					"challenger_block",
 					newPeerTip.SelectionTip().BlockNumber,
 					"applied_local_block", cs.appliedLocalTipBlockLocked(),
-					"catching_up", cs.catchingUpLocked(),
+					"catching_up",
+					cs.catchingUpLocked(bestKnownBlock),
 				)
 				newBest = previousBest
 			}

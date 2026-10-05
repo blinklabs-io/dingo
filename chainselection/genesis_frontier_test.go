@@ -16,9 +16,11 @@ package chainselection
 
 import (
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -211,6 +213,103 @@ func TestGenesisWitnessIdentityUsesPeerIdentity(t *testing.T) {
 	)
 }
 
+// A connection the identity resolver cannot place has no identity. Keying it
+// by remote host would put it in a different namespace from its siblings, so
+// an untracked candidate could count its own operator's tracked connections as
+// independent witnesses, and an untracked witness could double-count one.
+func TestGenesisCorroborationFailsClosedOnUnknownIdentity(t *testing.T) {
+	t.Parallel()
+	fast := corrConn(1)
+	siblingA := corrConn(2)
+	siblingB := corrConn(3)
+	untracked := corrConn(4)
+	operator := map[ouroboros.ConnectionId]string{
+		siblingA: "group:op",
+		siblingB: "group:op",
+	}
+	var mu sync.Mutex
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 100,
+		PeerIdentity: func(c ouroboros.ConnectionId) string {
+			mu.Lock()
+			defer mu.Unlock()
+			return operator[c]
+		},
+	})
+	for _, conn := range []ouroboros.ConnectionId{
+		fast, siblingA, siblingB, untracked,
+	} {
+		feedChain(cs, conn, "a", 910, 1000, 10)
+	}
+
+	assert.Zero(
+		t,
+		cs.corroboratingPeers(fast),
+		"an untracked candidate must not be corroborated",
+	)
+	assert.False(t, cs.frontierTrusted(fast))
+
+	mu.Lock()
+	operator[fast] = "group:fast"
+	mu.Unlock()
+	assert.Equal(
+		t,
+		1,
+		cs.corroboratingPeers(fast),
+		"an untracked witness must not count beside its group",
+	)
+	assert.True(t, cs.frontierTrusted(fast))
+}
+
+// A witness must have a known delivered height within k blocks of the
+// candidate. One that rolled back to a point outside its retained history keeps
+// the candidate's points but no longer knows its block number, so it cannot
+// vouch for the candidate's height.
+func TestGenesisWitnessSuffixRejectsUnknownHeightAfterDeepRollback(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 1000,
+	})
+	fast := corrConn(1)
+	witness := corrConn(2)
+	feedChain(cs, fast, "a", 2910, 3000, 10)
+	feedChain(cs, witness, "a", 2910, 3300, 10)
+	// The local tip is more than one window behind, so the mode stays Genesis
+	// and the hash frontier is tracked.
+	cs.mutex.RLock()
+	mode := cs.mode
+	cs.mutex.RUnlock()
+	require.Equal(t, SelectionModeGenesis, mode)
+	require.Equal(t, 1, cs.corroboratingPeers(fast))
+
+	rollback := genesisTip(3000, "a3000", 300)
+	cs.HandlePeerRollbackEvent(event.NewEvent(
+		PeerRollbackEventType,
+		PeerRollbackEvent{
+			ConnectionId: witness,
+			Point:        rollback.Point,
+			Tip:          genesisTip(3300, "a3300", 330),
+		},
+	))
+	cs.mutex.RLock()
+	fastTip := cs.peerTips[fast]
+	witnessTip := cs.peerTips[witness]
+	confirms := fastTip.confirmsRecentChain(witnessTip)
+	witnessBlock := witnessTip.SelectionTip().BlockNumber
+	cs.mutex.RUnlock()
+	require.True(t, confirms, "the witness still holds the candidate tip")
+	require.Zero(t, witnessBlock, "the rollback point is outside history")
+
+	assert.Zero(t, cs.corroboratingPeers(fast))
+	assert.False(t, cs.frontierTrusted(fast))
+}
+
 func TestGenesisSelectionComputesBestTrustedFrontierOnce(t *testing.T) {
 	t.Parallel()
 	const peerCount = 16
@@ -242,6 +341,36 @@ func TestGenesisSelectionComputesBestTrustedFrontierOnce(t *testing.T) {
 	// candidate would exceed this quadratic bound.
 	maxCalls := uint64(peerCount * peerCount * 3)
 	assert.LessOrEqual(t, calls, maxCalls)
+}
+
+// Each delivered header in Genesis mode is evaluated, and the trusted frontier
+// costs a corroboration scan. One header must pay for one scan, not one for the
+// mode check and another for selection.
+func TestGenesisPeerTipUpdateScansFrontierOnce(t *testing.T) {
+	t.Parallel()
+	const peerCount = 16
+	var identityCalls atomic.Uint64
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      20,
+		GenesisWindowSlots: 100,
+		PeerIdentity: func(conn ouroboros.ConnectionId) string {
+			identityCalls.Add(1)
+			return conn.String()
+		},
+	})
+	for i := range peerCount {
+		feedChain(cs, corrConn(i+1), "shared", 910, 1000, 10)
+	}
+	cs.EvaluateAndSwitch()
+	best := cs.GetBestPeer()
+	require.NotNil(t, best)
+
+	identityCalls.Store(0)
+	cs.UpdatePeerTip(*best, genesisTip(1000, "shared1000", 100), nil)
+	// One corroboration scan of the highest frontier resolves the candidate's
+	// identity and each confirming witness's once.
+	assert.LessOrEqual(t, identityCalls.Load(), uint64(peerCount))
 }
 
 func (cs *ChainSelector) frontierTrusted(conn ouroboros.ConnectionId) bool {

@@ -4849,27 +4849,35 @@ it. Dingo implements this as a **corroboration gate**
 
 - A candidate peer is **corroborated** when at least `corroborationPeers`
   independent witness peers *confirm the candidate's recent chain*
-  (`confirmsRecentChain`): every block a witness observed within the candidate's
-  retained `k+1` suffix matches the candidate's own `(slot, hash)`, and the
-  witness independently delivered the candidate's current point. The observed
-  frontier is populated per header during chainsync (dense), so two peers on
-  the same chain agree on every block in their overlap. This is deliberately
-  stronger than "share any common point": a fast
-  source that agrees on one old ancestor and then produces different blocks for
+  (`confirmsRecentChain`): every block a witness observed within the slot range
+  of the candidate's observed frontier matches the candidate's own
+  `(slot, hash)`, and the witness independently delivered the candidate's
+  current point. The current-point requirement is what keeps a match in older
+  candidate history from authorizing blocks the witness never observed. The
+  observed frontier is populated per header during chainsync (dense), so two
+  peers on the same chain agree on every block in their overlap. This is
+  deliberately stronger than "share any common point": a fast source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
 - A witness must also **reach the candidate's suffix**: it must have delivered
   the candidate's current point, and its delivered frontier block number must
   remain within the `securityParam` bound (`witnessSupportsSuffixLocked`). A
   witness that only shares an older point, however recently it answered a
-  keepalive, does not count.
+  keepalive, does not count, and neither does one that rolled back to a point
+  outside its retained history: it keeps the candidate's points but its block
+  number is unknown (zero), so it cannot vouch for the candidate's height.
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. The identity is peer governance's
   diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
   `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
-  (IPv4) or /64 (IPv6) prefix, else the host name; without a hook the selector
-  falls back to the remote host. This is a lower bound on independence, not a
+  (IPv4) or /64 (IPv6) prefix, else the host name. A connection the hook
+  cannot place, such as an inbound connection peer governance declined to
+  track at its peer-list cap, has no identity and fails closed: as a candidate
+  it has no corroborators, and as a witness it does not count. Keying it by
+  remote host instead would put it in a different namespace from its tracked
+  siblings, so one operator could corroborate itself. Without a hook the
+  selector groups by remote host. This is a lower bound on independence, not a
   guarantee: genuine independence (distinct operators, ASNs, and chain views)
   depends on the operator's validated topology. Raising `corroborationPeers`
   raises the *count* required, not the independence of the peers supplied —
@@ -4881,7 +4889,12 @@ it. Dingo implements this as a **corroboration gate**
   witnesses (`frontierTrustedLocked`). One uncorroborated peer, or one whose
   connection is gone, therefore cannot make honest candidates look behind. When
   no frontier is trusted nothing is excluded as behind. Outside Genesis mode
-  every eligible, non-stale frontier counts, as before.
+  every eligible, non-stale frontier counts. Trust costs a corroboration scan,
+  so frontiers are tried from the highest down and the first trusted one is
+  the answer, and an evaluation pass computes the frontier once and shares it
+  between the mode check, every candidate, the incumbent re-check and the
+  anti-flap pin. A delivered header in Genesis mode is always evaluated, so it
+  does not advance the mode separately beforehand.
 - In Genesis mode with `corroborationPeers > 0`, an **uncorroborated** candidate
   is denied chain selection (`isPeerSelectableLocked`). A fully divergent fast
   source shares no recent block with any honest peer, so it is never corroborated
