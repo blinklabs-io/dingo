@@ -16,6 +16,7 @@ package eras
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -2187,6 +2188,26 @@ type mainnetFixtureLedgerState struct {
 	*mockLedgerState
 }
 
+type cancelingEvaluationLedgerState struct {
+	mainnetFixtureLedgerState
+	ctx    context.Context
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (ls *cancelingEvaluationLedgerState) EvaluationContext() context.Context {
+	return ls.ctx
+}
+
+func (ls *cancelingEvaluationLedgerState) UtxoById(
+	input lcommon.TransactionInput,
+) (lcommon.Utxo, error) {
+	ls.reads++
+	utxo, err := ls.mainnetFixtureLedgerState.UtxoById(input)
+	ls.cancel()
+	return utxo, err
+}
+
 func (mainnetFixtureLedgerState) SlotToTime(slot uint64) (time.Time, error) {
 	if slot < mainnetByronSlots {
 		return time.Unix(
@@ -4287,4 +4308,37 @@ func TestEvaluateTxConwayStopsAtTransactionWideBudget(t *testing.T) {
 	}
 	_, _, _, err = EvaluateTxConway(tx, ls, &overLimit)
 	require.Error(t, err, "aggregate steps beyond the limit must be refused")
+}
+
+func TestEvaluateTxConwayStopsAfterCanceledInputLookup(t *testing.T) {
+	t.Parallel()
+
+	pp := mainnetFixtureProtocolParams(t)
+	tx, err := conway.NewConwayTransactionFromCbor(
+		readErasFixture(t, mainnetFixtureTxFile),
+	)
+	require.NoError(t, err)
+	require.Greater(t, len(tx.Inputs()), 1, "fixture needs multiple inputs")
+	base := mainnetFixtureLedgerState{mockLedgerState: newMockLedgerState()}
+	base.networkId = uint(lcommon.AddressNetworkMainnet)
+	for _, inputTx := range mainnetFixtureInputTxs(t) {
+		for idx, output := range inputTx.Outputs() {
+			stored, err := gledger.NewTransactionOutputFromCbor(output.Cbor())
+			require.NoError(t, err)
+			base.addUtxo(
+				shelley.NewShelleyTransactionInput(inputTx.Hash().String(), idx),
+				stored,
+			)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	ls := &cancelingEvaluationLedgerState{
+		mainnetFixtureLedgerState: base,
+		ctx:                       ctx,
+		cancel:                    cancel,
+	}
+
+	_, _, _, err = EvaluateTxConway(tx, ls, pp)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, ls.reads)
 }

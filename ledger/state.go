@@ -13363,6 +13363,18 @@ var ErrEvaluationBusy = errors.New("transaction evaluation capacity exhausted")
 func (ls *LedgerState) EvaluateTx(
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	return ls.EvaluateTxContext(context.Background(), tx)
+}
+
+// EvaluateTxContext evaluates transaction scripts until completion or context
+// cancellation.
+func (ls *LedgerState) EvaluateTxContext(
+	ctx context.Context,
+	tx lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	if ls.evalSlots != nil {
 		select {
 		case ls.evalSlots <- struct{}{}:
@@ -13407,6 +13419,7 @@ func (ls *LedgerState) EvaluateTx(
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
 			lv = (&LedgerView{
+				ctx:            ctx,
 				txn:            txn,
 				ls:             ls,
 				epochStartSlot: consensusState.currentEpoch.StartSlot,
@@ -13415,11 +13428,17 @@ func (ls *LedgerState) EvaluateTx(
 				pp,
 			).pinSyntheticV2CostModel(synthetic)
 			var err error
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			fee, totalExUnits, redeemerExUnits, err = validationEra.EvaluateTxFunc(
 				tx,
 				lv,
 				pp,
 			)
+			if err == nil {
+				err = ctx.Err()
+			}
 			return err
 		})
 		err = storageFaultOrErr(lv, err)

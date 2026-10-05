@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -462,6 +463,25 @@ func TestHandleTransactionEvaluateFailureIsNotReportedAsMalformed(
 	assert.Equal(t, "Transaction could not be evaluated.", resp.Message)
 }
 
+func TestHandleTransactionEvaluatePropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	node := evaluateTestNode()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/utils/txs/evaluate",
+		strings.NewReader(hex.EncodeToString(rawEvaluateTxCbor)),
+	).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+
+	newTestBlockfrost(node).handleTransactionEvaluate(w, req)
+
+	require.ErrorIs(t, node.transactionEvaluationCtx.Err(), context.Canceled)
+}
+
 // stubEvaluator stands in for the ledger at the evaluation boundary, so a
 // single EvaluateTx result can be classified in isolation.
 type stubEvaluator struct {
@@ -470,7 +490,10 @@ type stubEvaluator struct {
 	calls   int
 }
 
-func (s *stubEvaluator) EvaluateTx(tx lcommon.Transaction) (
+func (s *stubEvaluator) EvaluateTxContext(
+	_ context.Context,
+	tx lcommon.Transaction,
+) (
 	uint64,
 	lcommon.ExUnits,
 	map[lcommon.RedeemerKey]lcommon.ExUnits,
@@ -503,7 +526,7 @@ func TestTransactionEvaluateStorageFailureIsNotAnEvaluationFailure(
 			}
 			adapter := &NodeAdapter{evaluator: evaluator}
 
-			result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+			result, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 			require.Error(t, err)
 			assert.Nil(t, result)
@@ -535,7 +558,7 @@ func TestTransactionEvaluateScriptFailureStaysAnEvaluationFailure(
 	evaluator := &stubEvaluator{err: evalErr}
 	adapter := &NodeAdapter{evaluator: evaluator}
 
-	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTransactionEvaluation)
@@ -559,7 +582,7 @@ func TestTransactionEvaluateReturnsExecutionUnits(t *testing.T) {
 	}
 	adapter := &NodeAdapter{evaluator: evaluator}
 
-	result, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	result, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, evaluator.calls)
@@ -575,7 +598,7 @@ func TestTransactionEvaluateWithoutEvaluatorIsUnavailable(t *testing.T) {
 
 	adapter := &NodeAdapter{}
 
-	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.ErrorIs(t, err, ErrLedgerUnavailable)
 }
@@ -623,7 +646,7 @@ func TestTransactionEvaluateOverloadIsReportedAsOverload(t *testing.T) {
 		evaluator: &stubEvaluator{err: ledger.ErrEvaluationBusy},
 	}
 
-	_, err := adapter.TransactionEvaluate(submitTestTxCbor(t))
+	_, err := adapter.TransactionEvaluate(t.Context(), submitTestTxCbor(t))
 
 	require.ErrorIs(t, err, ErrEvaluationOverloaded)
 	assert.NotErrorIs(t, err, ErrTransactionEvaluation)

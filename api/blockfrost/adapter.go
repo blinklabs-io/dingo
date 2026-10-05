@@ -133,7 +133,7 @@ type TransactionSubmitter interface {
 // evaluation endpoints depend only on this call, so how an evaluation failure
 // is classified can be exercised without a live ledger.
 type transactionEvaluator interface {
-	EvaluateTx(tx lcommon.Transaction) (
+	EvaluateTxContext(ctx context.Context, tx lcommon.Transaction) (
 		uint64,
 		lcommon.ExUnits,
 		map[lcommon.RedeemerKey]lcommon.ExUnits,
@@ -4036,6 +4036,7 @@ func (a *NodeAdapter) TransactionSubmit(
 // TransactionEvaluate evaluates script execution units for raw transaction
 // CBOR without submitting the transaction.
 func (a *NodeAdapter) TransactionEvaluate(
+	ctx context.Context,
 	txCbor []byte,
 ) (TransactionEvaluationResponse, error) {
 	txType, err := safedecode.TransactionType(txCbor)
@@ -4057,7 +4058,7 @@ func (a *NodeAdapter) TransactionEvaluate(
 	if a.evaluator == nil {
 		return nil, ErrLedgerUnavailable
 	}
-	_, _, redeemerExUnits, err := a.evaluator.EvaluateTx(tx)
+	_, _, redeemerExUnits, err := a.evaluator.EvaluateTxContext(ctx, tx)
 	if err != nil {
 		if errors.Is(err, ledger.ErrEvaluationBusy) {
 			return nil, fmt.Errorf("%w: %w", ErrEvaluationOverloaded, err)

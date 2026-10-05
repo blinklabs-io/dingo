@@ -14,7 +14,10 @@
 
 package blockfrost
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // BlockfrostNode is the interface that the Blockfrost API
 // server uses to query the node for blockchain data. This
@@ -123,7 +126,7 @@ type BlockfrostNode interface {
 
 	// TransactionEvaluate evaluates script execution units for raw transaction
 	// CBOR without submitting the transaction.
-	TransactionEvaluate(txCbor []byte) (TransactionEvaluationResponse, error)
+	TransactionEvaluate(context.Context, []byte) (TransactionEvaluationResponse, error)
 
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)

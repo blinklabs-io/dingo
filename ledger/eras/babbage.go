@@ -475,6 +475,9 @@ func EvaluateTxBabbage(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := checkEvaluationCanceled(ls); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	tmpPparams, ok := pp.(*babbage.BabbageProtocolParameters)
 	if !ok {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
@@ -482,6 +485,9 @@ func EvaluateTxBabbage(
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
 	for _, tmpInput := range tx.Inputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -494,6 +500,9 @@ func EvaluateTxBabbage(
 	// Resolve reference inputs
 	resolvedRefInputs := []lcommon.Utxo{}
 	for _, tmpRefInput := range tx.ReferenceInputs() {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		tmpUtxo, err := ls.UtxoById(tmpRefInput)
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, err
@@ -542,6 +551,9 @@ func EvaluateTxBabbage(
 		}
 	}
 	for _, redeemerPair := range txInfoV2.Redeemers {
+		if err := checkEvaluationCanceled(ls); err != nil {
+			return 0, lcommon.ExUnits{}, nil, err
+		}
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(
@@ -594,6 +606,9 @@ func EvaluateTxBabbage(
 				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
+			if cancelErr := checkEvaluationCanceled(ls); cancelErr != nil {
+				return 0, lcommon.ExUnits{}, nil, cancelErr
+			}
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}
@@ -649,6 +664,9 @@ func EvaluateTxBabbage(
 				remainingExUnits(tmpPparams.MaxTxExUnits, retTotalExUnits),
 				evalContext,
 			)
+			if cancelErr := checkEvaluationCanceled(ls); cancelErr != nil {
+				return 0, lcommon.ExUnits{}, nil, cancelErr
+			}
 			if err != nil {
 				return 0, lcommon.ExUnits{}, nil, err
 			}

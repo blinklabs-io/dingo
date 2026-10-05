@@ -1735,7 +1735,21 @@ type evalBusyLedgerStub struct {
 	UtxorpcLedgerState
 }
 
-func (evalBusyLedgerStub) EvaluateTx(
+type cancelingEvalLedgerStub struct {
+	UtxorpcLedgerState
+	ctx context.Context
+}
+
+func (s *cancelingEvalLedgerStub) EvaluateTxContext(
+	ctx context.Context,
+	_ gledger.Transaction,
+) (uint64, common.ExUnits, map[common.RedeemerKey]common.ExUnits, error) {
+	s.ctx = ctx
+	return 0, common.ExUnits{}, nil, ctx.Err()
+}
+
+func (evalBusyLedgerStub) EvaluateTxContext(
+	context.Context,
 	gledger.Transaction,
 ) (uint64, common.ExUnits, map[common.RedeemerKey]common.ExUnits, error) {
 	return 0, common.ExUnits{}, nil, fmt.Errorf(
@@ -1761,4 +1775,28 @@ func TestEvalTxOverloadReturnsResourceExhausted(t *testing.T) {
 	)
 
 	require.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(err))
+}
+
+func TestEvalTxPropagatesCancellation(t *testing.T) {
+	t.Parallel()
+
+	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
+	stub := &cancelingEvalLedgerStub{}
+	server := &submitServiceServer{
+		utxorpc: NewUtxorpc(UtxorpcConfig{LedgerState: stub}),
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	_, err := server.EvalTx(
+		ctx,
+		connect.NewRequest(&submit.EvalTxRequest{
+			Tx: &submit.AnyChainTx{
+				Type: &submit.AnyChainTx_Raw{Raw: txCbor},
+			},
+		}),
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, stub.ctx.Err(), context.Canceled)
 }

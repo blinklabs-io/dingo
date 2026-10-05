@@ -109,11 +109,17 @@ func TestConnect_StreamsRefusedAtAdmissionLimit(t *testing.T) {
 	)
 	waitForTx, err := submitClient.WaitForTx(
 		ctx,
-		connect.NewRequest(&submit.WaitForTxRequest{Ref: [][]byte{make([]byte, 32)}}),
+		connect.NewRequest(
+			&submit.WaitForTxRequest{Ref: [][]byte{make([]byte, 32)}},
+		),
 	)
 	require.NoError(t, err)
 	require.False(t, waitForTx.Receive())
-	assert.Equal(t, connect.CodeResourceExhausted, connect.CodeOf(waitForTx.Err()))
+	assert.Equal(
+		t,
+		connect.CodeResourceExhausted,
+		connect.CodeOf(waitForTx.Err()),
+	)
 
 	// With the slot free, a stream is admitted again.
 	release()
@@ -195,6 +201,19 @@ func TestConnect_WatchTxReplayBoundedByBlocks(t *testing.T) {
 	tooOld := startWatchTxAt(t, ctx, h, blocks[tip-4])
 	require.False(t, tooOld.Receive())
 	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(tooOld.Err()))
+
+	watchClient := watchconnect.NewWatchServiceClient(
+		h.Client, h.Server.URL, connect.WithGRPC(),
+	)
+	origin, err := watchClient.WatchTx(
+		ctx,
+		connect.NewRequest(&watch.WatchTxRequest{
+			Intersect: []*watch.BlockRef{{}},
+		}),
+	)
+	require.NoError(t, err)
+	require.False(t, origin.Receive())
+	assert.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(origin.Err()))
 }
 
 func TestMempoolStreamQueueRefusesSlowConsumer(t *testing.T) {

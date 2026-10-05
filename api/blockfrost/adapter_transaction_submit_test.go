@@ -524,7 +524,7 @@ func TestTransactionEvaluateRejectsTrailingBytes(t *testing.T) {
 	adapter := &NodeAdapter{}
 	padded := append(submitTestTxCbor(t), 0x00)
 
-	_, err := adapter.TransactionEvaluate(padded)
+	_, err := adapter.TransactionEvaluate(t.Context(), padded)
 
 	require.ErrorIs(t, err, ErrInvalidTransaction)
 }

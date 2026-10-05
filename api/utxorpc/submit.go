@@ -320,11 +320,15 @@ func (s *submitServiceServer) EvalTx(
 		return nil, errors.New("decoded transaction is nil")
 	}
 	// Evaluate TX
-	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTx(
+	fee, totalExUnits, redeemerExUnits, err := s.utxorpc.config.LedgerState.EvaluateTxContext(
+		ctx,
 		tx,
 	)
 	if errors.Is(err, ledger.ErrEvaluationBusy) {
 		return nil, connect.NewError(connect.CodeResourceExhausted, err)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
 	}
 	// Populate response
 	redeemerData := redeemerPlutusDataByKey(tx)

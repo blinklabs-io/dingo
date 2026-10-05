@@ -15,6 +15,7 @@
 package eras
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -38,6 +39,22 @@ var ErrExUnitsOverflow = errors.New(
 
 type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
+}
+
+type evaluationContextProvider interface {
+	EvaluationContext() context.Context
+}
+
+func evaluationContext(ls lcommon.LedgerState) context.Context {
+	provider, ok := ls.(evaluationContextProvider)
+	if !ok || provider.EvaluationContext() == nil {
+		return context.Background()
+	}
+	return provider.EvaluationContext()
+}
+
+func checkEvaluationCanceled(ls lcommon.LedgerState) error {
+	return evaluationContext(ls).Err()
 }
 
 // MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
