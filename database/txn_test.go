@@ -17,6 +17,7 @@ package database
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -1212,6 +1213,123 @@ func TestCommitSyncsBlobAfterBlobCommit(t *testing.T) {
 	tip, err := db.GetTip(nil)
 	require.NoError(t, err)
 	require.Equal(t, syncBarrierTestTip().Point.Slot, tip.Point.Slot)
+}
+
+type cancelOnSyncBlobStore struct {
+	*mockBlobStore
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnSyncBlobStore) Sync() error {
+	s.cancel()
+	return s.mockBlobStore.Sync()
+}
+
+func TestCommitSurvivesCancellationDuringBlobSync(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	store := &cancelOnSyncBlobStore{
+		mockBlobStore: &mockBlobStore{},
+		cancel:        cancel,
+	}
+	db := newSyncBarrierTestDB(t, store)
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	require.NoError(t, txn.Commit())
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Equal(t, 1, store.txns[0].commitCount)
+	require.Equal(t, 1, store.syncCount)
+	tip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Equal(t, syncBarrierTestTip(), tip)
+	metadataTimestamp, err := db.Metadata().GetCommitTimestamp(t.Context())
+	require.NoError(t, err)
+	require.Positive(t, metadataTimestamp)
+}
+
+func TestCommitRejectsCancellationBeforeBlobCommit(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	store := &mockBlobStore{}
+	db := newSyncBarrierTestDB(t, store)
+	txn := db.Transaction(ctx, true)
+	defer txn.Release()
+	require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+	cancel()
+	require.ErrorIs(t, txn.Commit(), context.Canceled)
+	require.Zero(t, store.txns[0].commitCount)
+	require.Zero(t, store.syncCount)
+	tip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	require.Zero(t, tip.Point.Slot)
+	requireCommitBarrierFree(t, db)
+}
+
+// Protecting commit must not detach SQL operations before commit begins.
+func TestWriteTransactionOperationsHonorCancellation(t *testing.T) {
+	t.Parallel()
+	for name, open := range map[string]func(context.Context, *Database) *Txn{
+		"combined": func(ctx context.Context, db *Database) *Txn {
+			return db.Transaction(ctx, true)
+		},
+		"metadata": func(ctx context.Context, db *Database) *Txn {
+			return db.MetadataTxn(ctx, true)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			db := newSyncBarrierTestDB(t, &mockBlobStore{})
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			txn := open(ctx, db)
+			defer txn.Release()
+			require.NoError(t, db.SetTip(syncBarrierTestTip(), txn))
+			cancel()
+			require.Eventually(t, func() bool {
+				err := db.SetTip(syncBarrierTestTip(), txn)
+				return errors.Is(err, context.Canceled) ||
+					errors.Is(err, sql.ErrTxDone)
+			}, 5*time.Second, time.Millisecond)
+			require.ErrorIs(t, txn.Commit(), context.Canceled)
+		})
+	}
+}
+
+func TestWriteTransactionPreservesExpiredDeadline(t *testing.T) {
+	t.Parallel()
+	db := newSyncBarrierTestDB(t, &mockBlobStore{})
+	ctx, cancel := context.WithDeadline(
+		t.Context(),
+		time.Now().Add(-time.Second),
+	)
+	defer cancel()
+	txn := db.MetadataTxn(ctx, true)
+	defer txn.Release()
+	require.ErrorIs(
+		t,
+		db.SetTip(syncBarrierTestTip(), txn),
+		context.DeadlineExceeded,
+	)
+	require.ErrorIs(t, txn.Commit(), context.DeadlineExceeded)
+}
+
+func TestTxnContextPreservesCallerCancellationCause(t *testing.T) {
+	t.Parallel()
+	parent, cancel := context.WithCancelCause(t.Context())
+	defer cancel(context.Canceled)
+	ctx := newTxnContext(parent)
+	defer ctx.release()
+	cause := errors.New("caller stopped the operation")
+	cancel(cause)
+	testutil.RequireReceive(t, ctx.Done(), testutil.AsyncWait,
+		"metadata context must observe caller cancellation")
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.ErrorIs(t, context.Cause(ctx), cause)
 }
 
 // TestCommitDoesNotSyncMetadataOnlyTransaction pins that the fsync is scoped to

@@ -1986,6 +1986,14 @@ span both stores pay the sync; blob-only bulk paths (for example
 own barriers, and `Sync` is a store-wide flush, so the next combined commit also
 makes those earlier batches durable.
 
+Metadata operations follow the caller's context until a write transaction
+begins committing. A caller already canceled at that boundary causes rollback
+before any blob commit. Once commit begins, cancellation and deadlines no
+longer abort the metadata transaction: both stores must finish even if the
+caller cancels during blob sync. Provider or sync failures still report the
+existing partial-commit errors and require recovery. Read-only transactions
+remain cancelable throughout their lifetime.
+
 The ordering exists because the two stores fail asymmetrically. SQLite runs
 `journal_mode=WAL` with `synchronous=NORMAL` (WAL is set once at open by
 `ensureWALJournalMode` rather than as a per-connection `_pragma`: SQLite takes

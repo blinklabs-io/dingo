@@ -182,12 +182,18 @@ Two gaps in that propagation are deliberate:
 
 `database.Database`'s own API carries the caller's `ctx` the rest of the way:
 `Transaction(ctx, readWrite)`, `MetadataTxn(ctx, readWrite)`, `NewTxn` and
-`NewMetadataOnlyTxn` pass it into the metadata store's `Transaction`/
-`ReadTransaction`, and context-aware facade methods that can open their own metadata transaction
-(the block lookups such as `BlockByPoint` and `BlocksRecent`, and the domain
-methods that open one when called with a nil `txn`) takes `ctx` as its first
-parameter. A cancelled caller therefore cancels the metadata-store transaction
-underneath it. HTTP and RPC adapters pass request contexts into these methods.
+`NewMetadataOnlyTxn` carry it into the metadata store's `Transaction`/
+`ReadTransaction`, and context-aware facade methods that can open their own
+metadata transaction (the block lookups such as `BlockByPoint` and
+`BlocksRecent`, and the domain
+methods that open one when called with a nil `txn`) take `ctx` as their first
+parameter. Read transactions follow caller cancellation for their entire
+lifetime. Write transactions forward cancellation until `Txn.Commit` begins;
+an already-canceled caller causes rollback before the blob commit. Commit
+then detaches cancellation so shutdown during blob sync cannot roll back SQL
+after the blob has committed. The cancellation callback and commit transition
+are serialized, and transaction completion releases the context and callback.
+HTTP and RPC adapters pass request contexts into these methods.
 Node listener providers retain the node lifecycle context. Mempool chain workers
 derive a context from startup and cancel it before waiting for shutdown, so
 in-flight validation can release its database transaction. Ratification jobs
