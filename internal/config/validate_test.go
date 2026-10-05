@@ -130,6 +130,55 @@ func TestValidatePublicAPIAllowsLoopback(t *testing.T) {
 	require.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
+func TestValidateMithrilPublicBaseURL(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "https", value: "https://snapshots.example.org"},
+		{name: "https with port", value: "https://snapshots.example.org:8443"},
+		{name: "localhost HTTP", value: "http://localhost:8080"},
+		{name: "IPv4 loopback HTTP", value: "http://127.0.0.1:8080"},
+		{name: "IPv6 loopback HTTP", value: "http://[::1]:8080"},
+		{
+			name: "remote HTTP", value: "http://snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "unsupported scheme", value: "ftp://snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "userinfo", value: "https://user@snapshots.example.org",
+			wantErr: true,
+		},
+		{
+			name: "path", value: "https://snapshots.example.org/path",
+			wantErr: true,
+		},
+		{
+			name: "query", value: "https://snapshots.example.org?query=1",
+			wantErr: true,
+		},
+		{
+			name: "fragment", value: "https://snapshots.example.org#fragment",
+			wantErr: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateMithrilPublicBaseURL(test.value)
+			if test.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -666,6 +715,13 @@ func TestValidate(t *testing.T) {
 				c.Mithril.Server.Port = 70000
 			},
 			wantErr: "invalid mithril.server.port",
+		},
+		{
+			name: "mithril server public HTTP base URL is not loopback",
+			modify: func(c *Config) {
+				c.Mithril.Server.PublicBaseURL = "http://snapshots.example.org"
+			},
+			wantErr: "invalid mithril.server.publicBaseUrl",
 		},
 		{
 			name: "enabled mithril aggregator needs an epoch",

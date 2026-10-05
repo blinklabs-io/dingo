@@ -445,8 +445,7 @@ func TestRemoteStoresServeSnapshotsEndToEnd(t *testing.T) {
 			} {
 				t.Run(mode, func(t *testing.T) {
 					cfg.Store = store
-					srv := httptest.NewServer(NewServerHandler(cfg))
-					t.Cleanup(srv.Close)
+					srv := newMithrilTestServer(t, cfg)
 					result, err := Bootstrap(
 						context.Background(), BootstrapConfig{
 							Network:           "preprod",

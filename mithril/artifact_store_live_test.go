@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -51,8 +50,7 @@ func requireStoreCycle(t *testing.T, store ArtifactStore) {
 	require.Equal(t, hashes[:1], removed)
 	require.Equal(t, hashes[1:], snapshotHashes(t, store))
 
-	srv := httptest.NewServer(NewServerHandler(ServerConfig{Store: store}))
-	t.Cleanup(srv.Close)
+	srv := newMithrilTestServer(t, ServerConfig{Store: store})
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:           "preprod",
 		Backend:           BackendV2,

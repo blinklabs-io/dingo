@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -93,12 +92,11 @@ func (f *aggregatorFixture) start() {
 	})
 	require.NoError(f.t, err)
 	f.aggregator = agg
-	srv := httptest.NewServer(NewServerHandler(ServerConfig{
+	srv := newMithrilTestServer(f.t, ServerConfig{
 		Store:      f.store,
 		Aggregator: agg,
 		Logger:     slog.New(slog.DiscardHandler),
-	}))
-	f.t.Cleanup(srv.Close)
+	})
 	f.url = srv.URL
 	f.client = NewClient(srv.URL, WithAllowInsecureHTTP())
 }

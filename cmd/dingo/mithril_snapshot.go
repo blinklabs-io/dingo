@@ -149,10 +149,13 @@ func mithrilServeCommand() *cobra.Command {
 		Short: "Serve Mithril snapshot artifacts over HTTP",
 		Long: `Serve the snapshots in mithril.server.artifactStore through the
 Mithril aggregator artifact API, with range request support, on the shared
-bindAddr and mithril.server.port. Artifact reads and signature submissions are
-public. With mithril.server.aggregator.enabled, signer registration and explicit
-registration closure require the configured operator bearer token; the
-aggregator certifies stored snapshots.`,
+bindAddr and mithril.server.port. Set mithril.server.publicBaseUrl to the
+absolute HTTPS origin clients use to reach this server (HTTP is allowed only
+for loopback). Artifact download locations use this configured origin.
+Artifact reads and signature submissions are public. With
+mithril.server.aggregator.enabled, signer registration and explicit registration
+closure require the configured operator bearer token; the aggregator certifies
+stored snapshots.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -192,6 +195,12 @@ func newMithrilServer(
 	if server.Port == 0 {
 		return nil, errors.New("mithril.server.port must be set")
 	}
+	if server.PublicBaseURL == "" {
+		return nil, errors.New("mithril.server.publicBaseUrl must be set")
+	}
+	if err := config.ValidateMithrilPublicBaseURL(server.PublicBaseURL); err != nil {
+		return nil, fmt.Errorf("invalid mithril.server.publicBaseUrl: %w", err)
+	}
 	if server.TLSEnabled &&
 		(cfg.TlsCertFilePath == "" || cfg.TlsKeyFilePath == "") {
 		return nil, errors.New(
@@ -213,6 +222,7 @@ func newMithrilServer(
 		),
 		Handler: mithril.NewServerHandler(mithril.ServerConfig{
 			Store:           store,
+			PublicBaseURL:   server.PublicBaseURL,
 			RedirectBaseURL: server.RedirectBaseURL,
 			Aggregator:      aggregator,
 			Logger:          logger,

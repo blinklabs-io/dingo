@@ -217,21 +217,23 @@ func closeRegistrations(regs []stmRegistration) *sealedRegistration {
 
 func (a *Aggregator) registerRoutes(
 	mux *http.ServeMux,
-	publicArtifact func(http.HandlerFunc) http.HandlerFunc,
+	publicRequest func(http.HandlerFunc) http.HandlerFunc,
 ) {
 	mux.HandleFunc("POST /register-signer", a.handleRegisterSigner)
 	mux.HandleFunc("POST /close-registrations", a.handleCloseRegistrations)
 	mux.HandleFunc(
-		"GET /certificate-pending", publicArtifact(a.handlePending),
+		"GET /certificate-pending", publicRequest(a.handlePending),
 	)
-	mux.HandleFunc("POST /register-signatures", a.handleRegisterSignatures)
+	mux.HandleFunc(
+		"POST /register-signatures", publicRequest(a.handleRegisterSignatures),
+	)
 	mux.HandleFunc(
 		"GET /artifact/mithril-stake-distributions",
-		publicArtifact(a.handleDistributions),
+		publicRequest(a.handleDistributions),
 	)
 	mux.HandleFunc(
 		"GET /artifact/mithril-stake-distribution/{hash}",
-		publicArtifact(a.handleDistribution),
+		publicRequest(a.handleDistribution),
 	)
 }
 

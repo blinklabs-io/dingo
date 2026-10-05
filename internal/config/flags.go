@@ -915,6 +915,12 @@ var flagSpecs = []flagSpec{
 		"port for the Mithril snapshot artifact server",
 	),
 	stringFlag(
+		"Mithril.Server.PublicBaseURL",
+		"mithril-server-public-base-url",
+		"",
+		"public HTTPS origin used in snapshot locations (HTTP only on loopback)",
+	),
+	stringFlag(
 		"Mithril.Server.ArtifactStore",
 		"mithril-server-artifact-store",
 		"",

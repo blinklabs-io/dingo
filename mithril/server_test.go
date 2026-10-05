@@ -55,12 +55,26 @@ func newServerFixture(t *testing.T, cfg ServerConfig) *serverFixture {
 	require.NoError(t, err)
 	cfg.Store = store
 	cfg.Logger = slog.New(slog.DiscardHandler)
-	srv := httptest.NewServer(NewServerHandler(cfg))
-	t.Cleanup(srv.Close)
+	srv := newMithrilTestServer(t, cfg)
 	return &serverFixture{
 		srv: srv, store: store, dir: dir, artifact: artifact,
 		pubKey: mithrilJSONHexKey(t, pub),
 	}
+}
+
+func newMithrilTestServer(
+	t *testing.T,
+	cfg ServerConfig,
+) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(http.NotFoundHandler())
+	if cfg.PublicBaseURL == "" {
+		cfg.PublicBaseURL = "http://" + srv.Listener.Addr().String()
+	}
+	srv.Config.Handler = NewServerHandler(cfg)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func get(t *testing.T, url string, header ...string) *http.Response {
@@ -126,6 +140,42 @@ func TestServerListsAndDescribesSnapshots(t *testing.T) {
 		t,
 		base+"/ancillary.tar.zst",
 		detail.Ancillary.Locations[0].URI,
+	)
+}
+
+func TestServerDetailUsesConfiguredPublicBaseURL(t *testing.T) {
+	t.Parallel()
+
+	f := newServerFixture(t, ServerConfig{
+		PublicBaseURL: "https://snapshots.example.test",
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/artifact/cardano-database/"+f.artifact.Hash,
+		nil,
+	)
+	req.Host = "attacker.example"
+	req.Header.Set("X-Forwarded-Host", "forwarded-attacker.example")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	resp := httptest.NewRecorder()
+	f.srv.Config.Handler.ServeHTTP(resp, req)
+
+	require.Equal(t, http.StatusOK, resp.Code)
+	var detail CardanoDatabaseSnapshot
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &detail))
+	wantBase := "https://snapshots.example.test/download/" + f.artifact.Hash
+	require.Len(t, detail.Digests.Locations, 1)
+	assert.Equal(
+		t, wantBase+"/digests.tar.zst", detail.Digests.Locations[0].URI,
+	)
+	require.Len(t, detail.Immutables.Locations, 1)
+	assert.Equal(
+		t, wantBase+"/{immutable_file_number}.tar.zst",
+		detail.Immutables.Locations[0].URITemplate,
+	)
+	require.Len(t, detail.Ancillary.Locations, 1)
+	assert.Equal(
+		t, wantBase+"/ancillary.tar.zst", detail.Ancillary.Locations[0].URI,
 	)
 }
 
@@ -269,16 +319,17 @@ func TestServerServesStoredCertificates(t *testing.T) {
 
 type blockingListStore struct {
 	ArtifactStore
-	entered chan struct{}
-	release chan struct{}
-	calls   atomic.Int32
+	entered  chan struct{}
+	release  chan struct{}
+	calls    atomic.Int32
+	blockAll bool
 }
 
 func (s *blockingListStore) Subdirs(
 	ctx context.Context,
 	_ string,
 ) ([]string, error) {
-	if s.calls.Add(1) > 1 {
+	if call := s.calls.Add(1); call > 1 && !s.blockAll {
 		return nil, nil
 	}
 	s.entered <- struct{}{}
@@ -290,9 +341,69 @@ func (s *blockingListStore) Subdirs(
 	}
 }
 
+func TestServerSignatureRouteUsesSixteenRequestAdmissionLimit(t *testing.T) {
+	t.Parallel()
+
+	const requestLimit = 16
+	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
+	store := &blockingListStore{
+		entered:  make(chan struct{}, requestLimit),
+		release:  make(chan struct{}),
+		blockAll: true,
+	}
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+	})
+	handler := NewServerHandler(ServerConfig{
+		Store:         store,
+		Aggregator:    aggregator,
+		PublicBaseURL: "http://127.0.0.1",
+	})
+	done := make(chan struct{}, requestLimit)
+	for range requestLimit {
+		go func() {
+			handler.ServeHTTP(
+				httptest.NewRecorder(),
+				httptest.NewRequest(
+					http.MethodGet, "/artifact/cardano-database", nil,
+				),
+			)
+			done <- struct{}{}
+		}()
+	}
+	for range requestLimit {
+		testutil.RequireReceive(
+			t, store.entered, testutil.AsyncWait, "admitted artifact request",
+		)
+	}
+
+	rec := &deadlineResponseWriter{header: make(http.Header)}
+	handler.ServeHTTP(
+		rec,
+		httptest.NewRequest(
+			http.MethodPost, "/register-signatures", strings.NewReader(`{}`),
+		),
+	)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.status)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+	assert.NotEmpty(t, rec.readDeadlines)
+
+	close(store.release)
+	for range requestLimit {
+		testutil.RequireReceive(
+			t, done, testutil.AsyncWait, "admitted artifact response",
+		)
+	}
+}
+
 func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 	t.Parallel()
 
+	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
 	store := &blockingListStore{
 		entered: make(chan struct{}, 1),
 		release: make(chan struct{}),
@@ -305,7 +416,7 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 		}
 	})
 	handler := newServerHandler(
-		ServerConfig{Store: store, Aggregator: &Aggregator{}}, 1, time.Minute,
+		ServerConfig{Store: store, Aggregator: aggregator}, 1, time.Minute,
 	)
 	firstDone := make(chan struct{})
 	go func() {
@@ -321,18 +432,25 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 		t, store.entered, testutil.AsyncWait, "first artifact request",
 	)
 
-	for _, target := range []string{
-		"/artifact/cardano-database",
-		"/certificate-pending",
-		"/artifact/mithril-stake-distributions",
+	for _, request := range []struct {
+		method string
+		target string
+		body   string
+	}{
+		{http.MethodGet, "/artifact/cardano-database", ""},
+		{http.MethodGet, "/certificate-pending", ""},
+		{http.MethodGet, "/artifact/mithril-stake-distributions", ""},
+		{http.MethodPost, "/register-signatures", `{}`},
 	} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(
 			rec,
-			httptest.NewRequest(http.MethodGet, target, nil),
+			httptest.NewRequest(
+				request.method, request.target, strings.NewReader(request.body),
+			),
 		)
-		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, target)
-		assert.Equal(t, "1", rec.Header().Get("Retry-After"), target)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, request.target)
+		assert.Equal(t, "1", rec.Header().Get("Retry-After"), request.target)
 	}
 
 	close(store.release)
@@ -342,17 +460,22 @@ func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
 }
 
 type deadlineResponseWriter struct {
-	header      http.Header
-	deadlines   []time.Time
-	written     int
-	deadlineSet chan time.Time
+	header        http.Header
+	status        int
+	deadlines     []time.Time
+	written       int
+	deadlineSet   chan time.Time
+	readDeadlines []time.Time
+	readArmed     *bool
 }
 
 func (w *deadlineResponseWriter) Header() http.Header {
 	return w.header
 }
 
-func (*deadlineResponseWriter) WriteHeader(int) {}
+func (w *deadlineResponseWriter) WriteHeader(status int) {
+	w.status = status
+}
 
 func (w *deadlineResponseWriter) Write(p []byte) (int, error) {
 	w.written += len(p)
@@ -365,6 +488,52 @@ func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
 		w.deadlineSet <- deadline
 	}
 	return nil
+}
+
+func (w *deadlineResponseWriter) SetReadDeadline(deadline time.Time) error {
+	w.readDeadlines = append(w.readDeadlines, deadline)
+	if w.readArmed != nil {
+		*w.readArmed = true
+	}
+	return nil
+}
+
+type deadlineCheckingReader struct {
+	armed  *bool
+	reader *strings.Reader
+}
+
+func (r *deadlineCheckingReader) Read(p []byte) (int, error) {
+	if !*r.armed {
+		return 0, fmt.Errorf("request body read before deadline was armed")
+	}
+	return r.reader.Read(p)
+}
+
+func TestServerArmsSignatureBodyDeadlineBeforeDecode(t *testing.T) {
+	t.Parallel()
+
+	f := newAggregatorFixture(t, lotteryParams)
+	handler := NewServerHandler(ServerConfig{
+		Store:         f.store,
+		Aggregator:    f.aggregator,
+		PublicBaseURL: "http://127.0.0.1",
+	})
+	armed := false
+	w := &deadlineResponseWriter{
+		header: make(http.Header), readArmed: &armed,
+	}
+	req := httptest.NewRequest(
+		http.MethodPost, "/register-signatures", nil,
+	)
+	req.Body = io.NopCloser(&deadlineCheckingReader{
+		armed: &armed, reader: strings.NewReader(`{}`),
+	})
+	// SetReadDeadline is the boundary the production wrapper must arm before
+	// the handler starts decoding an untrusted signature request body.
+	handler.ServeHTTP(w, req)
+	assert.NotEmpty(t, w.readDeadlines)
+	assert.Equal(t, http.StatusConflict, w.status)
 }
 
 func TestServerArmsWriteDeadlineOnlyWhenWriting(t *testing.T) {
@@ -517,8 +686,7 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 		context.Background(), newSnapshotConfig(t, db, store, key),
 	)
 	require.NoError(t, err)
-	srv := httptest.NewServer(NewServerHandler(ServerConfig{Store: store}))
-	t.Cleanup(srv.Close)
+	srv := newMithrilTestServer(t, ServerConfig{Store: store})
 
 	result, err := Sync(context.Background(), SyncConfig{
 		Network:           "preprod",

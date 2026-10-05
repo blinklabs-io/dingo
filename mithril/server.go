@@ -22,6 +22,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"path"
 	"regexp"
 	"slices"
@@ -41,7 +43,8 @@ var (
 
 const (
 	certificatesPrefix           = "certificates"
-	artifactRequestLimit         = 16
+	publicRequestLimit           = 16
+	publicRequestReadTimeout     = 15 * time.Second
 	artifactResponseWriteTimeout = 15 * time.Second
 )
 
@@ -49,6 +52,10 @@ const (
 type ServerConfig struct {
 	// Store holds the produced artifacts.
 	Store ArtifactStore
+	// PublicBaseURL is the configured public HTTP(S) origin used in artifact
+	// download locations. It is required for detail responses and must use
+	// HTTPS except for loopback origins used by local deployments and tests.
+	PublicBaseURL string
 	// RedirectBaseURL, when set, answers artifact file requests with a
 	// redirect to RedirectBaseURL + "/" + key instead of streaming the
 	// object from Store. It is meant for remote stores whose objects are
@@ -59,6 +66,33 @@ type ServerConfig struct {
 	Aggregator *Aggregator
 	// Logger receives request failures; nil discards them.
 	Logger *slog.Logger
+}
+
+func parsePublicBaseURL(value string) (*url.URL, error) {
+	u, err := url.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("invalid public base URL: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if (scheme != "https" && scheme != "http") || u.Host == "" ||
+		u.Hostname() == "" || u.User != nil || u.Opaque != "" ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery ||
+		strings.Contains(value, "#") {
+		return nil, errors.New(
+			"public base URL must be an HTTP(S) origin without credentials, path, query, or fragment",
+		)
+	}
+	if scheme == "http" {
+		host := strings.ToLower(u.Hostname())
+		addr, parseErr := netip.ParseAddr(host)
+		if host != "localhost" &&
+			(parseErr != nil || !addr.Unmap().IsLoopback()) {
+			return nil, errors.New(
+				"plain HTTP public base URL is allowed only on loopback",
+			)
+		}
+	}
+	return &url.URL{Scheme: scheme, Host: u.Host}, nil
 }
 
 // ListSnapshots returns the complete snapshots in store, newest first. A
@@ -128,7 +162,10 @@ func readSnapshot(
 
 type snapshotServer struct {
 	cfg                  ServerConfig
-	artifactRequests     chan struct{}
+	publicBaseURL        *url.URL
+	publicBaseURLErr     error
+	publicRequests       chan struct{}
+	requestReadTimeout   time.Duration
 	responseWriteTimeout time.Duration
 }
 
@@ -138,7 +175,7 @@ type snapshotServer struct {
 func NewServerHandler(cfg ServerConfig) http.Handler {
 	return newServerHandler(
 		cfg,
-		artifactRequestLimit,
+		publicRequestLimit,
 		artifactResponseWriteTimeout,
 	)
 }
@@ -151,41 +188,57 @@ func newServerHandler(
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
+	publicBaseURL, publicBaseURLErr := parsePublicBaseURL(cfg.PublicBaseURL)
 	s := &snapshotServer{
 		cfg:                  cfg,
-		artifactRequests:     make(chan struct{}, requestLimit),
+		publicBaseURL:        publicBaseURL,
+		publicBaseURLErr:     publicBaseURLErr,
+		publicRequests:       make(chan struct{}, requestLimit),
+		requestReadTimeout:   publicRequestReadTimeout,
 		responseWriteTimeout: responseWriteTimeout,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(
 		"GET /artifact/cardano-database",
-		s.withArtifactRequest(s.handleList),
+		s.withPublicRequest(s.handleList),
 	)
 	mux.HandleFunc(
 		"GET /artifact/cardano-database/{hash}",
-		s.withArtifactRequest(s.handleDetail),
+		s.withPublicRequest(s.handleDetail),
 	)
 	mux.HandleFunc(
 		"GET /download/{hash}/{name}",
-		s.withArtifactRequest(s.handleDownload),
+		s.withPublicRequest(s.handleDownload),
 	)
 	mux.HandleFunc(
 		"GET /certificate/{hash}",
-		s.withArtifactRequest(s.handleCertificate),
+		s.withPublicRequest(s.handleCertificate),
 	)
 	if cfg.Aggregator != nil {
-		cfg.Aggregator.registerRoutes(mux, s.withArtifactRequest)
+		cfg.Aggregator.registerRoutes(mux, s.withPublicRequest)
 	}
 	return mux
 }
 
-func (s *snapshotServer) withArtifactRequest(
+func (s *snapshotServer) withPublicRequest(
 	next http.HandlerFunc,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		if r.Method == http.MethodPost {
+			if err := controller.SetReadDeadline(
+				time.Now().Add(s.requestReadTimeout),
+			); err != nil && !errors.Is(err, http.ErrNotSupported) {
+				s.cfg.Logger.Debug(
+					"could not bound public request body read",
+					"error", err,
+				)
+			}
+		}
+
 		select {
-		case s.artifactRequests <- struct{}{}:
-			defer func() { <-s.artifactRequests }()
+		case s.publicRequests <- struct{}{}:
+			defer func() { <-s.publicRequests }()
 		default:
 			w.Header().Set("Retry-After", "1")
 			http.Error(w, "server busy", http.StatusServiceUnavailable)
@@ -194,7 +247,7 @@ func (s *snapshotServer) withArtifactRequest(
 
 		bounded := &progressResponseWriter{
 			ResponseWriter: w,
-			controller:     http.NewResponseController(w),
+			controller:     controller,
 			timeout:        s.responseWriteTimeout,
 			logger:         s.cfg.Logger,
 		}
@@ -298,19 +351,18 @@ func (s *snapshotServer) handleDetail(
 		http.NotFound(w, r)
 		return
 	}
+	if s.publicBaseURLErr != nil {
+		s.fail(w, fmt.Errorf("invalid public base URL: %w", s.publicBaseURLErr))
+		return
+	}
 	snap, err := readSnapshot(r.Context(), s.cfg.Store, hash)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	// The locations name this server, so they are derived from the request
-	// rather than stored: the same stored snapshot is reachable under
-	// whichever address clients use.
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	base := fmt.Sprintf("%s://%s/download/%s", scheme, r.Host, hash)
+	baseURL := *s.publicBaseURL
+	baseURL.Path = "/download/" + hash
+	base := baseURL.String()
 	location := func(uri string) CardanoDatabaseLocation {
 		return CardanoDatabaseLocation{
 			Type:                 locationTypeCloudStorage,

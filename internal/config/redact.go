@@ -74,6 +74,7 @@ var logURIConfigFields = []string{
 	"KoiosParity.BaseURL",
 	"Mithril.AggregatorURL",
 	"Mithril.Server.ArtifactStore",
+	"Mithril.Server.PublicBaseURL",
 	"Mithril.Server.RedirectBaseURL",
 	"OffchainMetadata.IPFSGatewayURL",
 	"TokenRegistry.SourceURL",

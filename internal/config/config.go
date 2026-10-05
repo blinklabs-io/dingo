@@ -1179,6 +1179,9 @@ type MithrilConfig struct {
 type MithrilServerConfig struct {
 	// Port is the TCP port `dingo mithril serve` listens on.
 	Port uint `yaml:"port"                    envconfig:"DINGO_MITHRIL_SERVER_PORT"`
+	// PublicBaseURL is the public HTTPS origin used in snapshot download
+	// locations. Plain HTTP is accepted only for a loopback origin.
+	PublicBaseURL string `yaml:"publicBaseUrl"           envconfig:"DINGO_MITHRIL_SERVER_PUBLIC_BASE_URL"`
 	// ArtifactStore is where produced artifacts are kept and served from: a
 	// filesystem directory, or an s3://bucket/prefix or gcs://bucket/prefix
 	// URI (binaries built with dingo_extra_plugins).

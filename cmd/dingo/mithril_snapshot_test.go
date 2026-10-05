@@ -52,6 +52,7 @@ func snapshotTestConfig(t *testing.T) (*config.Config, string) {
 	cfg := &config.Config{Network: "preprod", BindAddr: "127.0.0.1"}
 	cfg.Mithril.Server = config.MithrilServerConfig{
 		Port:                    8080,
+		PublicBaseURL:           "https://snapshots.example.test",
 		ArtifactStore:           filepath.Join(dir, "store"),
 		AncillarySigningKeyFile: keyFile,
 	}
@@ -156,6 +157,12 @@ func TestNewMithrilServerRejectsIncompleteConfig(t *testing.T) {
 
 	for name, mutate := range map[string]func(*config.Config){
 		"no port": func(c *config.Config) { c.Mithril.Server.Port = 0 },
+		"no public base URL": func(c *config.Config) {
+			c.Mithril.Server.PublicBaseURL = ""
+		},
+		"invalid public base URL": func(c *config.Config) {
+			c.Mithril.Server.PublicBaseURL = "http://snapshots.example.test"
+		},
 		"no store": func(c *config.Config) {
 			c.Mithril.Server.ArtifactStore = ""
 		},

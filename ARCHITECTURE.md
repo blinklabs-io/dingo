@@ -8442,19 +8442,24 @@ N complete snapshots, removing each one's metadata object first.
 
 **Serving** (`mithril.NewServerHandler`) answers `GET /artifact/cardano-database`,
 `/artifact/cardano-database/{hash}`, `/download/{hash}/{name}` and
-`/certificate/{hash}` (a stored `certificates/{hash}.json`, if present). Artifact
-locations are derived from the request host, so one stored snapshot is reachable
-under any address. Archive downloads use `http.ServeContent`, giving range and
-HEAD support; with `mithril.server.redirectBaseUrl` set they instead redirect
-to that base URL plus the object key. Path segments reaching the store are
-matched against a 64-hex-digit hash and a fixed archive-name pattern first.
-With the aggregator mounted, the list omits snapshots that carry no certificate
-yet, since a verifying client bootstraps from the newest listed one.
+`/certificate/{hash}` (a stored `certificates/{hash}.json`, if present).
+`mithril.server.publicBaseUrl` is the absolute origin used in artifact download
+locations; it must use HTTPS except for a loopback HTTP origin. Request Host and
+forwarded headers do not affect generated links. Archive downloads use
+`http.ServeContent`, giving range and HEAD support; with
+`mithril.server.redirectBaseUrl` set they instead redirect to that base URL plus
+the object key. Path segments reaching the store are matched against a
+64-hex-digit hash and a fixed archive-name pattern first. With the aggregator
+mounted, the list omits snapshots that carry no certificate yet, since a
+verifying client bootstraps from the newest listed one.
+
 All public artifact reads, including pending-certificate and stake-distribution
-reads, share a 16-request admission bound and return `503 Service Unavailable`
-when it is full. Each response write refreshes a 15-second progress deadline,
-so an active large snapshot transfer has no absolute duration limit while
-a stalled reader cannot retain its request slot indefinitely.
+reads, and public signature submissions share a 16-request admission bound and
+return `503 Service Unavailable` with `Retry-After: 1` when it is full. A
+15-second request-body read deadline is armed before decoding a signature
+submission. Each response write refreshes a separate 15-second progress
+deadline, so an active large snapshot transfer has no absolute duration limit
+while a stalled reader cannot retain its request slot indefinitely.
 
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the
