@@ -196,9 +196,13 @@ func TestSnapshotWithoutMaxCommitPauseIsUnbounded(t *testing.T) {
 func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 	t.Parallel()
 
+	// The backup holds the barrier for a known minimum, so the recorded
+	// pause must cover it while still excluding the barrier wait.
+	const backupHold = 100 * time.Millisecond
 	reg := prometheus.NewRegistry()
 	db := newHookedDB(t, reg, &backupHooks{
 		blob: func(_ context.Context, w io.Writer) error {
+			time.Sleep(backupHold)
 			_, err := io.WriteString(w, "blob")
 			return err
 		},
@@ -243,7 +247,9 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 	for _, metric := range pause.GetMetric() {
 		if metricLabel(metric, "result") == "ok" {
 			require.Equal(t, uint64(1), metric.GetHistogram().GetSampleCount())
-			require.Less(t, metric.GetHistogram().GetSampleSum(), barrierWait.Seconds())
+			sum := metric.GetHistogram().GetSampleSum()
+			require.GreaterOrEqual(t, sum, backupHold.Seconds())
+			require.Less(t, sum, barrierWait.Seconds())
 			return
 		}
 	}
