@@ -1161,6 +1161,11 @@ type MithrilConfig struct {
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
+	// DownloadMaxBytes bounds each compressed Mithril object, including
+	// resumed bytes. Zero uses the built-in limit for each object type. A
+	// positive value replaces those limits for every object, and raising it
+	// lowers how many immutable archives download concurrently.
+	DownloadMaxBytes int64 `yaml:"downloadMaxBytes"       envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_BYTES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
