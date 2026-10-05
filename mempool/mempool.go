@@ -409,20 +409,15 @@ func (o *utxoOverlay) reset() {
 }
 
 // rebuildAggregates rebuilds consumed/created maps from the applied list.
-// keepState lets the state overlay survive when no state-changing transaction
-// was dropped; pass false when the ledger state under it may have moved.
-func (o *utxoOverlay) rebuildAggregates(keepState bool) {
-	previous := o.accounts
-	if !keepState {
-		previous = nil
-	}
-	o.consumed, o.created, o.accounts = aggregateApplied(o.applied, previous)
+func (o *utxoOverlay) rebuildAggregates() {
+	o.consumed, o.created, o.accounts = aggregateApplied(o.applied, o.accounts)
 }
 
 // aggregateApplied folds ordered applied transactions into the overlay maps.
 // applied must be a subsequence of the transactions previous was built from.
 // When none of the dropped transactions changed ledger state, previous is
 // still the right state overlay and is reused with everything it has folded.
+// A rebuilt overlay keeps previous's base generation.
 func aggregateApplied(
 	applied []appliedTx,
 	previous *utxoref.StateOverlay,
@@ -433,7 +428,7 @@ func aggregateApplied(
 ) {
 	consumed := make(map[utxoref.Key]struct{})
 	created := make(map[utxoref.Key]lcommon.Utxo)
-	accounts := utxoref.NewStateOverlay()
+	accounts := previous.Empty()
 	stateful := 0
 	for _, at := range applied {
 		for _, key := range at.consumed {
@@ -462,7 +457,7 @@ func (o *utxoOverlay) removeByHashes(hashes map[string]struct{}) {
 		}
 	}
 	o.applied = remaining
-	o.rebuildAggregates(false)
+	o.rebuildAggregates()
 }
 
 // removeBatchWithDescendants removes the specified TXs from the applied list,
@@ -515,7 +510,7 @@ func (o *utxoOverlay) removeBatchWithDescendants(
 		}
 	}
 
-	o.rebuildAggregates(true)
+	o.rebuildAggregates()
 	return pruned
 }
 
@@ -1071,6 +1066,16 @@ func (m *Mempool) processChainEvents() {
 
 const maxRevalidationCatchupRounds = 16
 
+// maxAdmissionReconciles bounds how often one admission rebuilds the pool
+// because the ledger moved under it.
+const maxAdmissionReconciles = 2
+
+// errPendingStateMoved means an admission validated against a state overlay
+// whose transactions were recorded under an earlier ledger publication.
+var errPendingStateMoved = errors.New(
+	"mempool: ledger moved since pending transactions were validated",
+)
+
 var errValidationSnapshotChanged = errors.New(
 	"mempool: ledger snapshot changed during revalidation",
 )
@@ -1585,7 +1590,47 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	txHash := tmpTx.Hash().String()
 	var addEvent *event.Event
 	var evictedEvents []event.Event
-	err = func() error {
+	// Each attempt validates against the pool's state overlay. When the ledger
+	// has moved since that overlay's transactions were validated, some may
+	// already be in the ledger, so the pool is rebuilt and the attempt repeats.
+	for attempt := 0; ; attempt++ {
+		addEvent, evictedEvents, err = m.addTransactionAttempt(
+			txType, txBytes, tmpTx, txHash,
+		)
+		if !errors.Is(err, errPendingStateMoved) {
+			break
+		}
+		if attempt == maxAdmissionReconciles {
+			return fmt.Errorf("validate transaction: %w", errPendingStateMoved)
+		}
+		if err := m.rebuildOverlay(); err != nil {
+			return fmt.Errorf("reconcile pending transactions: %w", err)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	// MEM-03: Publish events outside all locks
+	if m.eventBus != nil {
+		for _, evt := range evictedEvents {
+			m.eventBus.Publish(RemoveTransactionEventType, evt)
+		}
+		if addEvent != nil {
+			m.eventBus.Publish(AddTransactionEventType, *addEvent)
+		}
+	}
+	return nil
+}
+
+func (m *Mempool) addTransactionAttempt(
+	txType uint,
+	txBytes []byte,
+	tmpTx gledger.Transaction,
+	txHash string,
+) (*event.Event, []event.Event, error) {
+	var addEvent *event.Event
+	var evictedEvents []event.Event
+	err := func() error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
 		// remains current until the transaction is committed.
@@ -1648,12 +1693,18 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 
 		// The mutation gate keeps this overlay snapshot stable while the
 		// potentially expensive ledger validation runs without the pool locks.
-		if validateErr := m.validator.ValidateTxWithOverlay(
+		validateErr := m.validator.ValidateTxWithOverlay(
 			tmpTx,
 			validConsumed,
 			validCreated,
 			validAccounts,
-		); validateErr != nil {
+		)
+		// Checked before the verdict: a base that already contains some of
+		// the pending transactions yields a wrong verdict either way.
+		if validAccounts.Moved() {
+			return errPendingStateMoved
+		}
+		if validateErr != nil {
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
 
@@ -1705,19 +1756,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		}
 		return nil
 	}()
-	if err != nil {
-		return err
-	}
-	// MEM-03: Publish events outside all locks
-	if m.eventBus != nil {
-		for _, evt := range evictedEvents {
-			m.eventBus.Publish(RemoveTransactionEventType, evt)
-		}
-		if addEvent != nil {
-			m.eventBus.Publish(AddTransactionEventType, *addEvent)
-		}
-	}
-	return nil
+	return addEvent, evictedEvents, err
 }
 
 func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {

@@ -16,7 +16,6 @@ package forging
 
 import (
 	"bytes"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -82,7 +81,7 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 	base := mockledger.NewLedgerStateBuilder().
 		WithRewardAccountBalance(stakeKey, v.balance).
 		Build()
-	state, err := pending.View(base, nil, ocommon.Point{})
+	state, err := pending.View(base, nil, 0)
 	if err != nil {
 		return err
 	}

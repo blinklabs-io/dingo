@@ -15,13 +15,11 @@
 package utxoref
 
 import (
-	"bytes"
 	"fmt"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // StateOverlay holds, in order, the transactions that are pending or already
@@ -33,8 +31,15 @@ import (
 // The fold is incremental: View applies only the transactions recorded since
 // the previous View, so a pool of k transactions costs k applications in
 // total rather than k per validation. The folded state caches what it read
-// from the base, so it is keyed to the ledger tip it was folded at, and a View
-// at a different tip discards it and folds again from the first transaction.
+// from the base, so it is keyed to the base's generation, and a View at a
+// different generation discards it and folds again from the first transaction.
+//
+// A refold keeps the recorded transactions and so cannot tell whether the new
+// base already contains some of them. Moved reports that this happened, and a
+// holder whose transactions can be confirmed must then reconcile its
+// transactions against the new base rather than trust the View. An overlay
+// that holds only transactions yet to be applied to any base, such as the one
+// a block builder fills, can ignore it.
 // A transaction recorded with ApplyEncoded is held only as the caller's CBOR
 // slice and is decoded when folded, so the overlay retains no decoded
 // transaction and adds no bytes the caller does not already count.
@@ -57,8 +62,12 @@ type StateOverlay struct {
 	folded int
 	state  *lcommon.BlockLedgerState
 	base   *swappableState
-	// tip is the ledger tip state was folded at.
-	tip ocommon.Point
+	// gen is the base generation the entries were recorded under, once a View
+	// has observed one.
+	gen      uint64
+	genKnown bool
+	// moved is set when a View found the base generation different from gen.
+	moved bool
 }
 
 type stateEntry struct {
@@ -137,17 +146,42 @@ func (o *StateOverlay) Len() int {
 	return len(o.entries)
 }
 
+// Empty returns an overlay with no transactions that carries this overlay's
+// base generation and Moved state, so a pool rebuilt from survivors does not
+// lose track of the base its survivors were validated against.
+func (o *StateOverlay) Empty() *StateOverlay {
+	if o == nil {
+		return NewStateOverlay()
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return &StateOverlay{gen: o.gen, genKnown: o.genKnown, moved: o.moved}
+}
+
+// Moved reports whether a View ran at a base generation other than the one the
+// recorded transactions were validated under. The flag does not clear.
+func (o *StateOverlay) Moved() bool {
+	if o == nil {
+		return false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.moved
+}
+
 // View returns base with the recorded transactions applied. With nothing
 // recorded it returns base unchanged. pp supplies the key deposit that a
-// pre-Conway stake registration certificate records. tip identifies the
-// ledger state base reads, and must change whenever that state does.
+// pre-Conway stake registration certificate records. generation identifies the
+// published ledger state base reads, and must differ from every earlier
+// generation of the same ledger, because the folded state caches reads from
+// base and is refolded whenever generation changes.
 //
 // A failure to decode or apply a recorded transaction fails the View, and
 // the next View refolds from the first transaction.
 func (o *StateOverlay) View(
 	base lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
-	tip ocommon.Point,
+	generation uint64,
 ) (lcommon.LedgerState, error) {
 	if o == nil {
 		return base, nil
@@ -155,14 +189,17 @@ func (o *StateOverlay) View(
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if len(o.entries) == 0 {
+		o.gen, o.genKnown = generation, true
 		return base, nil
 	}
-	if o.state != nil &&
-		(o.tip.Slot != tip.Slot || !bytes.Equal(o.tip.Hash, tip.Hash)) {
+	if !o.genKnown {
+		o.gen, o.genKnown = generation, true
+	} else if o.gen != generation {
+		o.gen = generation
+		o.moved = true
 		o.state = nil
 	}
 	if o.state == nil {
-		o.tip = tip
 		o.base = &swappableState{}
 		o.state = lcommon.NewBlockLedgerState(o.base)
 		o.folded = 0

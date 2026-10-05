@@ -17,7 +17,8 @@ package mempool
 import (
 	"bytes"
 	"context"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -71,8 +72,35 @@ type balanceValidator struct {
 	balance atomic.Uint64
 	// reads counts reward balance reads against the stored state.
 	reads atomic.Int64
-	// tip is the slot of the ledger tip the stored balance belongs to.
-	tip atomic.Uint64
+	// generation identifies the ledger publication the stored balance belongs to.
+	generation atomic.Uint64
+	// confirmed holds hashes of transactions already in the ledger, which the
+	// ledger rejects because their inputs are spent.
+	confirmedMu sync.Mutex
+	confirmed   map[string]struct{}
+}
+
+// confirm models a block that contains tx: its inputs are spent, and balance
+// and generation describe the ledger afterwards.
+func (v *balanceValidator) confirm(
+	t *testing.T,
+	txCbor []byte,
+	balance uint64,
+) {
+	t.Helper()
+	tx, err := gledger.NewTransactionFromCbor(uint(conway.EraIdConway), txCbor)
+	if err != nil {
+		tx, err = gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	}
+	require.NoError(t, err)
+	v.confirmedMu.Lock()
+	if v.confirmed == nil {
+		v.confirmed = make(map[string]struct{})
+	}
+	v.confirmed[tx.Hash().String()] = struct{}{}
+	v.confirmedMu.Unlock()
+	v.balance.Store(balance)
+	v.generation.Add(1)
 }
 
 type countingLedger struct {
@@ -105,9 +133,15 @@ func (v *balanceValidator) ValidateTxWithOverlay(
 			Build(),
 		reads: &v.reads,
 	}
-	state, err := pending.View(base, nil, ocommon.Point{Slot: v.tip.Load()})
+	state, err := pending.View(base, nil, v.generation.Load())
 	if err != nil {
 		return err
+	}
+	v.confirmedMu.Lock()
+	_, confirmed := v.confirmed[tx.Hash().String()]
+	v.confirmedMu.Unlock()
+	if confirmed {
+		return errors.New("inputs already spent")
 	}
 	return shelley.UtxoValidateWithdrawals(tx, 0, state, nil)
 }
@@ -311,7 +345,7 @@ func TestAdmissionFollowsLedgerTipWithoutRebuild(t *testing.T) {
 
 	// A new block funds the account; the pool has not rebuilt yet.
 	validator.balance.Store(100)
-	validator.tip.Store(1)
+	validator.generation.Add(1)
 
 	require.NoError(
 		t,
@@ -321,4 +355,134 @@ func TestAdmissionFollowsLedgerTipWithoutRebuild(t *testing.T) {
 		),
 		"admission read a balance from before the tip changed",
 	)
+}
+
+// depositTxCbor encodes a Dijkstra transaction that credits amount to the
+// reward account of stakeKey and changes nothing else.
+func depositTxCbor(
+	t *testing.T,
+	seed byte,
+	stakeKey []byte,
+	amount uint64,
+) []byte {
+	t.Helper()
+	body := map[uint]any{
+		0: cbor.Tag{
+			Number: 258,
+			Content: []any{
+				[]any{bytes.Repeat([]byte{seed}, 32), uint64(0)},
+			},
+		},
+		1: []any{map[uint]any{
+			0: append([]byte{0x61}, make([]byte, 28)...),
+			1: uint64(1_000_000),
+		}},
+		2: uint64(200_000),
+		25: map[cbor.ByteString]uint64{
+			cbor.NewByteString(append([]byte{0xe1}, stakeKey...)): amount,
+		},
+	}
+	txCbor, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
+	require.NoError(t, err)
+	_, err = gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return txCbor
+}
+
+func TestAdmissionAfterPendingWithdrawalConfirmed(t *testing.T) {
+	t.Parallel()
+	for _, implementation := range []Implementation{
+		ImplementationFIFO,
+		ImplementationDAG,
+	} {
+		t.Run(string(implementation), func(t *testing.T) {
+			t.Parallel()
+			pool, validator := newWithdrawalPool(t, implementation, 100)
+			first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100)
+			require.NoError(
+				t,
+				pool.AddTransaction(uint(conway.EraIdConway), first),
+			)
+
+			// A block holding the first withdrawal arrives and credits 50;
+			// the pool has not rebuilt.
+			validator.confirm(t, first, 50)
+
+			require.NoError(
+				t,
+				pool.AddTransaction(
+					uint(conway.EraIdConway),
+					withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 50),
+				),
+				"the confirmed withdrawal must not be applied a second time",
+			)
+			require.Len(t, pool.Transactions(), 1)
+		})
+	}
+}
+
+func TestAdmissionAfterPendingDepositConfirmed(t *testing.T) {
+	t.Parallel()
+	for _, implementation := range []Implementation{
+		ImplementationFIFO,
+		ImplementationDAG,
+	} {
+		t.Run(string(implementation), func(t *testing.T) {
+			t.Parallel()
+			pool, validator := newWithdrawalPool(t, implementation, 0)
+			deposit := depositTxCbor(t, 0x01, withdrawalStakeKey, 50)
+			require.NoError(
+				t,
+				pool.AddTransaction(uint(gledger.TxTypeDijkstra), deposit),
+			)
+
+			validator.confirm(t, deposit, 50)
+
+			var incorrect shelley.IncorrectWithdrawalAmountError
+			require.ErrorAs(
+				t,
+				pool.AddTransaction(
+					uint(conway.EraIdConway),
+					withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
+				),
+				&incorrect,
+				"a confirmed deposit must not be credited twice",
+			)
+			require.Equal(t, uint64(50), incorrect.Balance)
+			require.NoError(
+				t,
+				pool.AddTransaction(
+					uint(conway.EraIdConway),
+					withdrawalTxCbor(t, 0x03, withdrawalStakeKey, 50),
+				),
+			)
+			require.Len(t, pool.Transactions(), 1)
+		})
+	}
+}
+
+func TestAdmissionKeepsPendingTxWhenLedgerMovesWithoutConfirming(t *testing.T) {
+	t.Parallel()
+	pool, validator := newWithdrawalPool(t, ImplementationFIFO, 100)
+	require.NoError(
+		t,
+		pool.AddTransaction(
+			uint(conway.EraIdConway),
+			withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 100),
+		),
+	)
+
+	validator.generation.Add(1)
+
+	var incorrect shelley.IncorrectWithdrawalAmountError
+	require.ErrorAs(
+		t,
+		pool.AddTransaction(
+			uint(conway.EraIdConway),
+			withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 100),
+		),
+		&incorrect,
+		"the unconfirmed pending withdrawal still drains the account",
+	)
+	require.Len(t, pool.Transactions(), 1)
 }

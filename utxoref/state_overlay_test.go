@@ -16,7 +16,6 @@ package utxoref_test
 
 import (
 	"bytes"
-	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -105,7 +104,7 @@ func TestStateOverlayViewWithoutTransactionsReturnsBase(t *testing.T) {
 		nilOverlay,
 		utxoref.NewStateOverlay(),
 	} {
-		view, err := overlay.View(base, nil, ocommon.Point{})
+		view, err := overlay.View(base, nil, 0)
 		require.NoError(t, err)
 		require.Same(t, base, view)
 	}
@@ -118,7 +117,7 @@ func TestStateOverlayViewRecordsRegistrationDeposit(t *testing.T) {
 	overlay := utxoref.NewStateOverlay()
 	overlay.Apply(registrationTx(0x01, deposit))
 
-	view, err := overlay.View(base, nil, ocommon.Point{})
+	view, err := overlay.View(base, nil, 0)
 	require.NoError(t, err)
 	require.True(t, view.IsStakeCredentialRegistered(overlayCredential))
 	depositState, ok := lcommon.StakeCredentialDepositStateFor(view)
@@ -143,14 +142,14 @@ func TestStateOverlayViewAppliesTransactionsInOrder(t *testing.T) {
 	overlay := utxoref.NewStateOverlay()
 	overlay.Apply(registrationTx(0x01, 1))
 	overlay.Apply(deregister)
-	view, err := overlay.View(base, nil, ocommon.Point{})
+	view, err := overlay.View(base, nil, 0)
 	require.NoError(t, err)
 	require.False(t, view.IsStakeCredentialRegistered(overlayCredential))
 
 	reversed := utxoref.NewStateOverlay()
 	reversed.Apply(deregister)
 	reversed.Apply(registrationTx(0x01, 1))
-	view, err = reversed.View(base, nil, ocommon.Point{})
+	view, err = reversed.View(base, nil, 0)
 	require.NoError(t, err)
 	require.True(t, view.IsStakeCredentialRegistered(overlayCredential))
 }
@@ -200,7 +199,7 @@ func TestStateOverlayViewCarriesGovernanceAndPoolEffects(t *testing.T) {
 	}
 	require.Equal(t, 3, overlay.Len())
 
-	view, err := overlay.View(base, nil, ocommon.Point{})
+	view, err := overlay.View(base, nil, 0)
 	require.NoError(t, err)
 	require.True(t, view.GovActionExists(lcommon.GovActionId{
 		TransactionId: proposalTx.Hash(),

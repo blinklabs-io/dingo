@@ -434,3 +434,45 @@ func TestValidateTxWithOverlayRejectsSpendOfStoredOutputAlreadySpent(
 		"a second spend of a stored tx's output must be rejected",
 	)
 }
+
+func TestValidateTxWithOverlayFollowsPublicationAtSameTip(t *testing.T) {
+	t.Parallel()
+	f := newPendingAccountsFixture(t, 100)
+	deposit := directDepositTx{
+		Transaction: f.certificateTx(0x03),
+		deposits: []lcommon.DirectDeposit{
+			{Credential: f.credential, Amount: 50},
+		},
+	}
+	pending := f.overlayAfter(deposit)
+
+	var incorrect shelley.IncorrectWithdrawalAmountError
+	require.ErrorAs(
+		t,
+		f.ls.ValidateTxWithOverlay(f.withdrawalTx(0x01, 100), nil, nil, pending),
+		&incorrect,
+	)
+	require.Equal(t, uint64(150), incorrect.Balance)
+
+	// A reward credit commits and the snapshots are republished while the
+	// tip stays where it is, as an epoch rollover does.
+	credential, err := models.CredentialTagFromUint(f.credential.CredType)
+	require.NoError(t, err)
+	require.NoError(t, f.ls.db.AddAccountRewardByCredential(
+		credential,
+		f.credential.Credential[:],
+		100,
+		1,
+		bytes.Repeat([]byte{0xee}, 32),
+		nil,
+	))
+	f.ls.Lock()
+	f.ls.publishSnapshotsLocked()
+	f.ls.Unlock()
+
+	require.NoError(
+		t,
+		f.ls.ValidateTxWithOverlay(f.withdrawalTx(0x02, 250), nil, nil, pending),
+		"the fold must follow the published state, not the tip",
+	)
+}
