@@ -16,10 +16,15 @@ package dingo
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/dblifecycle"
+	"github.com/blinklabs-io/dingo/ledger"
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -125,34 +130,67 @@ func TestDMQStakeAuthorityAcrossLiveTruncate(t *testing.T) {
 	auth := &n.dmqStake
 	auth.setLedgerState(n.ledgerState)
 	stop := make(chan struct{})
+	started := make(chan struct{})
+	var lookups atomic.Int64
 	var wg sync.WaitGroup
 	// Only the detached state may fail a lookup: any other error means a
 	// lookup reached storage that was closed or not yet reopened.
 	var lookupErr error
 	wg.Go(func() {
 		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
 			_, err := auth.PoolActiveStake(ocommon.PoolKeyHash{})
 			if err != nil && err.Error() != "ledger state unavailable" {
 				lookupErr = err
 				return
 			}
+			if lookups.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-stop:
+				return
+			default:
+			}
 		}
 	})
+	<-started
 	targetSlot := points[numBlocks/2].Slot
+	before := lookups.Load()
 	_, err := n.Truncate(
 		context.Background(),
 		dblifecycle.TruncateTarget{Slot: &targetSlot},
 	)
+	during := lookups.Load() - before
 	close(stop)
 	wg.Wait()
 	require.NoError(t, err)
 	require.NoError(t, lookupErr)
-	if _, err = auth.PoolActiveStake(ocommon.PoolKeyHash{}); err != nil {
-		require.NotContains(t, err.Error(), "ledger state unavailable")
+	require.Positive(t, during, "no stake lookup ran during the truncate")
+	_, err = auth.PoolActiveStake(ocommon.PoolKeyHash{})
+	require.NoError(t, err)
+}
+
+// Quiesce must not wait without bound on a stake lookup stalled inside the
+// ledger: a lookup that never returns may still be reading the storage about
+// to be closed, so it escalates like any other unconfirmed drain.
+func TestQuiesceBoundsDMQStakeDetach(t *testing.T) {
+	t.Parallel()
+	n := &Node{}
+	n.dmqStake.setLedgerState(&ledger.LedgerState{})
+	n.config.cfg = &internalconfig.Config{ShutdownTimeout: "20ms"}
+	n.config.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A lookup in flight holds the read side for as long as it runs.
+	n.dmqStake.mu.RLock()
+	t.Cleanup(n.dmqStake.mu.RUnlock)
+
+	done := make(chan error, 1)
+	go func() { done <- n.quiesceForLiveLifecycleOp(context.Background()) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("quiesce waited on a stalled dmq stake lookup without bound")
 	}
+	require.ErrorIs(t, err, errStorageDrainUnconfirmed)
+	require.ErrorContains(t, err, "dmq stake lookups")
 }

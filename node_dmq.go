@@ -66,6 +66,12 @@ func (a *dmqStakeAuthority) setLedgerState(ls *ledger.LedgerState) {
 	a.mu.Unlock()
 }
 
+func (a *dmqStakeAuthority) attached() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ledgerState != nil
+}
+
 func (a *dmqStakeAuthority) PoolActiveStake(
 	pool ocommon.PoolKeyHash,
 ) (uint64, error) {
@@ -108,13 +114,11 @@ func (n *Node) startDMQ() error {
 		PromRegistry: n.retainedComponentPromRegistry(),
 		NetworkMagic: cfg.NetworkMagic,
 		SocketPath:   cfg.SocketPath,
-		MessageTTL: time.Duration(
-			cfg.MessageTTL,
-		) * time.Second, // #nosec G115 -- seconds
-		MaxMempoolBytes: int64(
-			cfg.MaxMempoolSize,
-		) << 20, // #nosec G115 -- MB count
-		Authenticator: authenticator,
+		// #nosec G115 -- validation bounds both to fit int64 once scaled
+		MessageTTL: time.Duration(cfg.MessageTTL) * time.Second,
+		// #nosec G115 -- validation bounds both to fit int64 once scaled
+		MaxMempoolBytes: int64(cfg.MaxMempoolSize) << 20,
+		Authenticator:   authenticator,
 	})
 	if err != nil {
 		return fmt.Errorf("creating dmq stack: %w", err)

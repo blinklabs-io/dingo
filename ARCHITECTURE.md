@@ -6452,22 +6452,25 @@ Notification gives each connection a `NextForPeer` cursor keyed by connection
 ID. A feeder goroutine per connection moves messages into the gouroboros
 notification server's queue (`Server.AddMessage`) and keeps a refused message
 pending, retrying every 100ms, so a consumer with a full queue delays messages
-and never loses one. Feeders wake on `MessageMempool.AddedSignal`, taken before
+and loses only those that expire before delivery. Feeders wake on `MessageMempool.AddedSignal`, taken before
 each drain so an admission between the drain and the wait is not missed. The
 server's authentication and TTL checks are disabled here because pooled
 messages were validated on admission. The connection manager publishes its
 closed event only for node-to-node connections, so the stack learns of a local
 disconnect through `ConnClosedFunc`, which stops the feeder and releases the
-cursor.
+cursor. The inbound-connection subscription that starts feeders uses the bus's
+blocking backpressure policy: a detached subscriber would leave every later
+connection without a feeder.
 
 Metrics are registered against the retained registry (not the rebuildable one,
 which a live restore unregisters) and are all prefixed `dingo_dmq_`:
 `messages_received_total`, `messages_expired_total`, `messages_sent_total`
 (messages queued for a notification consumer),
 `validation_failures_total{reason}`, `mempool_messages`, `mempool_bytes`, and
-`connections`.
+`connections`. Every `reason` series exists from startup, so a `rate()` alert
+sees a reason before its first rejection.
 
-Not yet provided: the node-to-node transport (mini-protocol 18), its listener,
+Not yet provided: the node-to-node message submission transport, its listener,
 topology, peer limits and ledger peer discovery, which the DMQ stack needs
 before it can exchange messages with other nodes. `n2n_port`, `listen_address`,
 `topology_file`, `min_peers` and `max_peers` are therefore not configuration
@@ -6499,9 +6502,12 @@ its own copy.
 election uses (`praos.StakeSnapshotEpoch` of the current epoch), so a message is
 accepted only from a pool that may currently forge blocks. The DMQ stack is not
 stopped by a live restore or truncate, so the `StakeAuthority` holds its own
-ledger reference under a lock: quiesce clears it, waiting for any lookup in
-flight, before storage closes, and reinitialization sets the rebuilt ledger
-state. Submissions in between are rejected as `invalid`.
+ledger reference under a lock: quiesce clears it before storage closes, and
+reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
+flight, so it is one of the quiesce stops bounded by the shutdown timeout: a
+lookup that does not finish escalates to a supervised restart rather than
+letting storage close beneath it. Submissions in between are rejected as
+`invalid`.
 
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus

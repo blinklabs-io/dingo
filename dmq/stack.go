@@ -133,6 +133,11 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		}),
 		feeders: make(map[ouroboros.ConnectionId]context.CancelFunc),
 	}
+	for _, reason := range []string{
+		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
+	} {
+		s.failures.WithLabelValues(reason)
+	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.connMgr = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
@@ -173,8 +178,12 @@ func (s *Stack) Mempool() *MessageMempool {
 // Start opens the local socket and begins serving.
 func (s *Stack) Start(ctx context.Context) error {
 	s.pool.Start()
-	s.inboundSub = s.bus.SubscribeFunc(
+	// Lossless: a detached handler would start no feeder for any later
+	// connection, and nothing would resubscribe it.
+	s.inboundSub = s.bus.SubscribeFuncWithBufferPolicy(
 		connmanager.InboundConnectionEventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
 		s.handleInbound,
 	)
 	if err := s.connMgr.Start(ctx); err != nil {
@@ -338,7 +347,8 @@ func (s *Stack) handleClosed(id ouroboros.ConnectionId) {
 
 // feed moves every message the consumer has not yet seen from the pool into
 // its notification server's queue. A message the queue refuses is held and
-// offered again, so a slow consumer delays messages but never skips one.
+// offered again, so a slow consumer delays messages but skips only those that
+// expire first.
 func (s *Stack) feed(
 	ctx context.Context,
 	consumerID string,

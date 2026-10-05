@@ -22,6 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/event"
+
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/localmessagenotification"
@@ -463,4 +466,67 @@ func TestStackStartFailureStopsPool(t *testing.T) {
 	default:
 		require.FailNow(t, "message pool expiry loop left running")
 	}
+}
+
+// A rate() alert on a reject reason needs the series to exist before the
+// first rejection of that reason.
+func TestStackPreRegistersRejectReasons(t *testing.T) {
+	t.Parallel()
+	_, reg := newTestStack(t, StackConfig{})
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	var reasons []string
+	for _, fam := range families {
+		if fam.GetName() != "dingo_dmq_validation_failures_total" {
+			continue
+		}
+		for _, m := range fam.GetMetric() {
+			reasons = append(reasons, m.GetLabel()[0].GetValue())
+		}
+	}
+	require.ElementsMatch(t, []string{
+		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
+	}, reasons)
+}
+
+// An inbound handler that falls behind for longer than the bus's delivery
+// bound must not be detached, or no later connection would ever get a
+// notification feeder.
+func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{})
+	// Hold the feeder registry so the inbound handler stalls on the first
+	// real connection.
+	s.mu.Lock()
+	newConsumer(t, s)
+	flooded := make(chan struct{})
+	go func() {
+		defer close(flooded)
+		// Unknown connection IDs: the handler returns early for each, once
+		// it is running again. One more than the subscriber buffer parks
+		// the publisher on a full queue.
+		for range event.DefaultSubscriberBuffer + 1 {
+			s.bus.Publish(
+				connmanager.InboundConnectionEventType,
+				event.NewEvent(
+					connmanager.InboundConnectionEventType,
+					connmanager.InboundConnectionEvent{},
+				),
+			)
+		}
+	}()
+	// Outlast the bus's delivery bound for a full subscriber.
+	time.Sleep(event.RemoteDeliverTimeout + time.Second)
+	s.mu.Unlock()
+	select {
+	case <-flooded:
+	case <-time.After(10 * time.Second):
+		require.FailNow(t, "inbound events never drained")
+	}
+
+	c := newConsumer(t, s)
+	require.NoError(t, c.client().RequestMessagesBlocking())
+	submit := submitter(t, s)
+	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
+	require.Equal(t, []string{"after"}, bodies(c.reply(t)))
 }

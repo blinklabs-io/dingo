@@ -64,9 +64,9 @@
 // for a duplicate ID, or other (with the error) when the pool is full.
 //
 // Local message notification gives each connection its own cursor over the
-// pool, so every consumer receives every message once. A feeder goroutine moves
-// messages from the cursor into the connection's notification queue and holds
-// back any message the queue refuses, so a slow consumer delays messages but
-// never loses one. Blocking and non-blocking requests are answered by the
+// pool, so every consumer receives each unexpired message once. A feeder
+// goroutine moves messages from the cursor into the connection's notification
+// queue and holds back any message the queue refuses, so a slow consumer
+// delays messages but loses none except those that expire before delivery. Blocking and non-blocking requests are answered by the
 // gouroboros notification server.
 package dmq

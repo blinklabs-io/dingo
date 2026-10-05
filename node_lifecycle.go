@@ -131,6 +131,15 @@ type namedStop struct {
 // as it did inline, after the koios parity observer.
 func (n *Node) quiesceComponentStops() []namedStop {
 	var stops []namedStop
+	// The DMQ stack keeps serving, so its stake lookups are detached from the
+	// ledger state about to be closed. Detaching waits for a lookup in flight,
+	// which reads storage without a context of its own.
+	if n.dmqStake.attached() {
+		stops = append(stops, namedStop{
+			name: "dmq stake lookups",
+			stop: func() error { n.dmqStake.setLedgerState(nil); return nil },
+		})
+	}
 	if n.blockForger != nil {
 		stops = append(stops, namedStop{
 			name: "block forger",
@@ -237,10 +246,6 @@ func stopWithDeadline(
 
 func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	var err error
-
-	// The DMQ stack keeps serving, so detach its stake lookups from the
-	// ledger state about to be closed.
-	n.dmqStake.setLedgerState(nil)
 
 	// Every component whose Stop cancels its own context and then waits on a
 	// WaitGroup with no deadline of its own is bounded here -- see
