@@ -1482,13 +1482,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		// an operator who enabled bark only for its Archive service
 		// shouldn't get a DatabaseService that fails on first call.
 		if lifecycleEnabled {
-			dbLifecycleService := dblifecycle.NewService(
-				&internalconfig.Config{DatabaseLifecycle: n.config.databaseLifecycle},
-				n.destinationRegistry,
-				n.config.logger,
-			)
-			dbLifecycleService.SetLiveNode(n)
-			barkConfig.Lifecycle = dbLifecycleService
+			barkConfig.Lifecycle = n.barkLifecycleService()
 			barkConfig.SnapshotDir = n.config.databaseLifecycle.SnapshotDir
 			barkConfig.SnapshotCloudDestination = n.config.databaseLifecycle.SnapshotCloudDestination
 		}
@@ -1779,6 +1773,20 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 // cleanupFailedStartup completes a failed startup while Run owns the startup
 // lifecycle gate. The gate is released only after every started component has
 // stopped, so shutdown cannot overlap the LIFO rollback on a startup signal.
+// barkLifecycleService builds the DatabaseService Bark mounts. Its operations
+// delegate to n, but manifest verification reads the trust key from the
+// configuration it is given, so it must carry n's lifecycle configuration for
+// VerifySnapshot to check the same key Node.Snapshot signs with.
+func (n *Node) barkLifecycleService() *dblifecycle.Service {
+	svc := dblifecycle.NewService(
+		&internalconfig.Config{DatabaseLifecycle: n.config.databaseLifecycle},
+		n.destinationRegistry,
+		n.config.logger,
+	)
+	svc.SetLiveNode(n)
+	return svc
+}
+
 func (n *Node) cleanupFailedStartup(started []func()) {
 	defer n.startupLifecycleMu.Unlock()
 	if n.cancel != nil {
