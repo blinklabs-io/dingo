@@ -4767,6 +4767,27 @@ or other speculative rows above it. The first repair restores those rows;
 retries of the same failure reuse the repaired state instead of repeating the
 full sweep. Ordinary same-tip rollback remains a no-op.
 
+# Koios parity cache significant counts
+
+The observer and standalone parity tool share a separate SQLite reference cache.
+Its `check_epoch_status` table stores `significant_mismatch_count` alongside
+`mismatch_count`, plus `aggregate_significant_mismatch_count` and
+`account_significant_mismatch_count`. Significant counts exclude informational
+categories using the same classifier as the epoch verdict. An aggregate-only
+upsert retains the stored account count and recomputes the merged count.
+
+Opening an older cache adds and backfills these columns in one transaction from
+stored `check_mismatches` categories and scopes. Total counts and mismatch rows
+are preserved. Reopening an upgraded cache does not rerun the backfill. Observer retry selection uses the ERROR status of its own phase even when
+Koios reference timestamps have not changed, allowing a later check to observe
+newly committed Dingo state. CLI freshness selection is unchanged.
+Fetch/check errors update only the failed queue's persisted status. The other
+queue's verdict, check timestamp, comparison counts, pool metadata,
+mismatch evidence, and Koios reference rows remain intact. This makes retries
+survive reopening the cache even when a previous PASS reference is still fresh.
+An error before any comparison creates an unchecked row, keeping the initial
+aggregate comparison eligible for freshness-based startup selection.
+
 Flattened Conway certificate snapshots classify nonempty stake-account and
 DRep maps by their value encodings. Empty DState maps do not claim a DRep
 registry, and resignation maps cannot create DRep rows. Imported pool block
