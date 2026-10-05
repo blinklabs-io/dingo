@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"math/bits"
 	"runtime"
 	"runtime/debug"
 	"slices"
@@ -668,6 +669,7 @@ type LedgerStateConfig struct {
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	RejectBlockDecodeCacheFunc  func(uint, []byte)
 	PeersWithBlockFunc          PeersWithBlockFunc
+	SelectBlockfetchPeerFunc    SelectBlockfetchPeerFunc
 	RecordBlockfetchLatencyFunc RecordBlockfetchLatencyFunc
 	BlockfetchLatencyFunc       BlockfetchLatencyFunc
 	BlockfetchLatencyMedianFunc BlockfetchLatencyMedianFunc
@@ -685,6 +687,10 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
+	// RecordBlockfetchThroughputFunc receives each completed batch's
+	// delivery rate: the bytes that followed the first block and the time
+	// they took to arrive.
+	RecordBlockfetchThroughputFunc RecordBlockfetchThroughputFunc
 	// EndorserBlockFetcher actively fetches a referenced endorser block (its
 	// manifest and all transaction bodies) by point and caches it, so the
 	// EndorserBlockProvider can then supply it. Unlike the tip path, which waits
@@ -910,6 +916,22 @@ type PeersWithBlockFunc func(
 	point ocommon.Point,
 ) []ouroboros.ConnectionId
 
+// SelectBlockfetchPeerFunc returns the connection to fetch the range that
+// ends at the given point from. origin is the connection that delivered the
+// header and is the answer when nothing better is known.
+type SelectBlockfetchPeerFunc func(
+	origin ouroboros.ConnectionId,
+	rangeEnd ocommon.Point,
+) ouroboros.ConnectionId
+
+// RecordBlockfetchThroughputFunc records how many bytes a batch delivered
+// after its first block and how long that took.
+type RecordBlockfetchThroughputFunc func(
+	connId ouroboros.ConnectionId,
+	bytes uint64,
+	elapsed time.Duration,
+)
+
 // RecordBlockfetchLatencyFunc records a first-block latency sample
 // for the given connection after a successful RequestRange response.
 type RecordBlockfetchLatencyFunc func(ouroboros.ConnectionId, time.Duration)
@@ -939,10 +961,29 @@ type MempoolProvider interface {
 	// chained descendants, which remain valid against the updated ledger.
 	RemoveTxsByHash(hashes []string)
 }
+
+// resyncCoalesceRecord tracks when a connection's resync request was last
+// published and how many repeats were dropped since.
+type resyncCoalesceRecord struct {
+	at         time.Time
+	suppressed int
+}
+
 type rollbackRecord struct {
 	point     ocommon.Point
 	connKey   string
 	timestamp time.Time
+}
+
+type rollbackCountKey struct {
+	connKey string
+	slot    uint64
+	hash    string
+}
+
+type rollbackCountRecord struct {
+	first  time.Time
+	second time.Time
 }
 
 type forgedBlockCheckerHolder struct {
@@ -1185,6 +1226,17 @@ type LedgerState struct {
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	batchBlocksApplied            int                 // blocks from the current batch that actually extended the chain
+
+	// batchFirstBlockAt and batchLastBlockAt bracket the arrival of the
+	// current batch's blocks, and batchStreamBytes counts the bytes of every
+	// block after the first. Together they give the batch's delivery rate
+	// without charging it the first block's latency.
+	batchFirstBlockAt   time.Time
+	batchLastBlockAt    time.Time
+	batchStreamBytes    uint64
+	batchDeliveryConnId ouroboros.ConnectionId
+	batchDeliveryMixed  bool
+
 	// blockfetchBatchChainGeneration is the value chainRollbackGeneration
 	// held when the current batch was requested. A batch is fetched for the
 	// header queue that existed at request time; a rollback replaces both that
@@ -1589,7 +1641,15 @@ type LedgerState struct {
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
-	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+	rollbackHistory []rollbackRecord // bounded recent rollback records
+	// rollbackCounts preserves exact per-connection/point loop counts across
+	// rollbackHistory's event cap. Each entry keeps only the two timestamps
+	// needed by the loop threshold and is pruned by rollbackLoopWindow.
+	rollbackCounts map[rollbackCountKey]rollbackCountRecord
+	// resyncCoalesce records the last resync request published per
+	// connection, so one divergence episode publishes a single request.
+	resyncCoalesce      map[string]*resyncCoalesceRecord
+	resyncCoalesceMutex sync.Mutex
 
 	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
 	// us to cross to but that we cannot apply locally (block missing below
@@ -8713,15 +8773,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := ls.verifyDeferredBlockHeaderState(txn, point, block); err != nil {
 		return nil, err
 	}
+	// The aggregate reference-script check and the per-transaction validators
+	// resolve the same inputs, so one prefetch serves both. It runs after any
+	// endorser transactions have applied and before this block's own mutations.
+	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	if shouldValidate {
+		prefetchedUtxos = ls.prefetchBlockUtxos(txn, block.Transactions())
+	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
 	// The explicitly non-validating Musashi prototype keeps its trust policy.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
-		referenceParams := pparams
-		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
-			referenceParams = prevEraPParams
+		referenceParams := referenceScriptParams(
+			block, currentEra, ls.eraList(), pparams, prevEraPParams,
+		)
+		refScriptsLV := &LedgerView{
+			txn:             txn,
+			ls:              ls,
+			prefetchedUtxos: prefetchedUtxos,
 		}
-		refScriptsLV := &LedgerView{txn: txn, ls: ls}
 		err := validateBlockReferenceScripts(
 			block,
 			referenceParams,
@@ -8744,10 +8814,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
-	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
-	if shouldValidate {
-		prefetchedUtxos = ls.prefetchBlockUtxos(txn, block.Transactions())
-	}
 	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {
@@ -12350,11 +12416,17 @@ func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
 	if epochLength == 0 {
 		return 0, false
 	}
+	// An epoch whose end does not fit a uint64 has no cutoff: the wrapped
+	// value would report the nonce stable from the epoch's first slot.
+	epochEndSlot, carry := bits.Add64(currentEpoch.StartSlot, epochLength, 0)
+	if carry != 0 {
+		return 0, false
+	}
 	stabilityWindow := ls.nonceStabilityWindow(currentEpoch.EraId)
 	if stabilityWindow >= epochLength {
 		return currentEpoch.StartSlot, true
 	}
-	return currentEpoch.StartSlot + epochLength - stabilityWindow, true
+	return epochEndSlot - stabilityWindow, true
 }
 
 // computeNextEpochNonce speculatively computes the epoch nonce for the
