@@ -2053,7 +2053,9 @@ the dedicated checkpoint connection cannot overlap the import's metadata
 writes; restoring normal pragmas re-enables the ticker. Writer-owned
 `wal_autocheckpoint` remains active at 10000 pages throughout the import, so
 WAL frames are still backfilled while only the independent TRUNCATE attempts
-are postponed until the bulk phase completes.
+are postponed until the bulk phase completes. If the caller's final pragma
+restore fails, the next scheduled checkpoint retries it and runs TRUNCATE only
+after recovery succeeds.
 
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An

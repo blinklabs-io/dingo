@@ -131,15 +131,28 @@ func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
 	store := newTestStore(t)
 	checkpointStarted := make(chan struct{})
 	checkpointRelease := make(chan struct{})
+	checkpointReturned := make(chan struct{})
 	var checkpointCalls atomic.Uint32
 	checkpointErr := errors.New("checkpoint called")
 	store.checkpoint = func(context.Context) error {
 		if checkpointCalls.Add(1) == 1 {
 			close(checkpointStarted)
 			<-checkpointRelease
+			close(checkpointReturned)
 		}
 		return checkpointErr
 	}
+	dialect := store.dialect.(dialect)
+	setBulk := dialect.setBulk
+	dialect.setBulk = func(ctx context.Context, exec Execer) error {
+		select {
+		case <-checkpointReturned:
+		default:
+			return errors.New("bulk mode started before the active checkpoint drained")
+		}
+		return setBulk(ctx, exec)
+	}
+	store.dialect = dialect
 
 	checkpointDone := make(chan error, 1)
 	go func() {
@@ -155,11 +168,6 @@ func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
 	go func() {
 		bulkDone <- store.SetBulkLoadPragmas()
 	}()
-	select {
-	case err := <-bulkDone:
-		t.Fatalf("bulk mode started before the active checkpoint drained: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
 
 	close(checkpointRelease)
 	require.ErrorIs(t, <-checkpointDone, checkpointErr)
@@ -170,6 +178,32 @@ func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
 	require.NoError(t, store.RestoreNormalPragmas())
 	require.ErrorIs(t, store.runCheckpoint(t.Context()), checkpointErr)
 	require.Equal(t, uint32(2), checkpointCalls.Load())
+}
+
+func TestCheckpointRecoversFailedBulkModeRestore(t *testing.T) {
+	store := newTestStore(t)
+	dialect := store.dialect.(dialect)
+	restore := dialect.restore
+	restoreErr := errors.New("restore failed")
+	var restoreCalls atomic.Uint32
+	dialect.restore = func(ctx context.Context, exec Execer) error {
+		if restoreCalls.Add(1) == 1 {
+			return restoreErr
+		}
+		return restore(ctx, exec)
+	}
+	store.dialect = dialect
+	var checkpointCalls atomic.Uint32
+	store.checkpoint = func(context.Context) error {
+		checkpointCalls.Add(1)
+		return nil
+	}
+
+	require.NoError(t, store.SetBulkLoadPragmas())
+	require.ErrorIs(t, store.RestoreNormalPragmas(), restoreErr)
+	require.NoError(t, store.runCheckpoint(t.Context()))
+	require.Equal(t, uint32(2), restoreCalls.Load())
+	require.Equal(t, uint32(1), checkpointCalls.Load())
 }
 
 func TestSumUint64RowsPreservesFullRange(t *testing.T) {

@@ -200,12 +200,14 @@ type Store struct {
 	bulkConnMu       sync.Mutex
 	bulkConn         *sql.Conn
 	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
-	// transition. bulkMode is protected by it. A Mithril import can keep bulk
-	// mode active for hours; checkpointing the same SQLite database during that
-	// interval adds lock traffic without improving recovery, because the import
-	// is explicitly incomplete until its final ready-state transaction commits.
-	scheduledWorkMu sync.RWMutex
-	bulkMode        bool
+	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
+	// import can keep bulk mode active for hours; checkpointing the same SQLite
+	// database during that interval adds lock traffic without improving recovery,
+	// because the import is explicitly incomplete until its final ready-state
+	// transaction commits.
+	scheduledWorkMu    sync.Mutex
+	bulkMode           bool
+	bulkRestorePending bool
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -818,10 +820,17 @@ func (s *Store) startCheckpointTicker() {
 }
 
 func (s *Store) runCheckpoint(ctx context.Context) error {
-	s.scheduledWorkMu.RLock()
-	defer s.scheduledWorkMu.RUnlock()
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	if s.bulkMode {
-		return nil
+		if !s.bulkRestorePending {
+			return nil
+		}
+		if err := s.restoreNormalPragmas(ctx); err != nil {
+			return fmt.Errorf("restoring normal pragmas: %w", err)
+		}
+		s.bulkMode = false
+		s.bulkRestorePending = false
 	}
 	return s.checkpoint(ctx)
 }
@@ -1187,6 +1196,7 @@ func (s *Store) SetBulkLoadPragmas() error {
 	defer s.bulkMu.Unlock()
 	if s.bulkConn != nil {
 		s.bulkMode = true
+		s.bulkRestorePending = false
 		return nil
 	}
 	if s.dialect.Name() == "sqlite" {
@@ -1194,6 +1204,7 @@ func (s *Store) SetBulkLoadPragmas() error {
 			return err
 		}
 		s.bulkMode = true
+		s.bulkRestorePending = false
 		return nil
 	}
 	conn, err := s.writeDB.Conn(context.Background())
@@ -1210,6 +1221,7 @@ func (s *Store) SetBulkLoadPragmas() error {
 	}
 	s.bulkConn = conn
 	s.bulkMode = true
+	s.bulkRestorePending = false
 	return nil
 }
 
@@ -1222,6 +1234,9 @@ func (s *Store) RestoreNormalPragmas() error {
 	err := s.restoreNormalPragmas(context.Background())
 	if err == nil {
 		s.bulkMode = false
+		s.bulkRestorePending = false
+	} else {
+		s.bulkRestorePending = true
 	}
 	return err
 }

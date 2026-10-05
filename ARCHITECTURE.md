@@ -86,7 +86,9 @@ on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
 WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
 reader can prevent either operation from reclaiming space. Bulk metadata
 imports drain and pause the scheduled TRUNCATE callback until normal pragmas
-are restored, while commit-triggered auto-checkpoints remain enabled. The tagged
+are restored, while commit-triggered auto-checkpoints remain enabled. If the
+final restore fails, the next scheduled callback retries it before checkpointing.
+The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in
