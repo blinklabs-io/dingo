@@ -15,6 +15,7 @@
 package cardano
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -336,6 +337,66 @@ func TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam(t *testing.T) {
 	_, err := NewCardanoNodeConfigFromFile(configPath)
 	require.Error(t, err)
 	require.ErrorContains(t, err, "security parameter")
+}
+
+func TestNewCardanoNodeConfigFromFileValidatesShelleyNonceWindow(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	testCases := []struct {
+		name        string
+		epochLength int
+		expectErr   bool
+	}{
+		{
+			name:        "epoch shorter than nonce window is rejected",
+			epochLength: 5,
+			expectErr:   true,
+		},
+		{
+			name:        "epoch equal to nonce window is rejected",
+			epochLength: 8640,
+			expectErr:   true,
+		},
+		{
+			name:        "epoch longer than nonce window is accepted",
+			epochLength: 86400,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			shelleyGenesisJSON := fmt.Sprintf(`{
+				"activeSlotsCoeff": 1.0,
+				"securityParam": 2160,
+				"epochLength": %d,
+				"maxKESEvolutions": 62,
+				"systemStart": "2022-10-25T00:00:00Z"
+			}`, testCase.epochLength)
+			require.NoError(t, os.WriteFile(
+				filepath.Join(tmpDir, "shelley-genesis.json"),
+				[]byte(shelleyGenesisJSON),
+				0o600,
+			))
+			configPath := filepath.Join(tmpDir, "config.json")
+			require.NoError(t, os.WriteFile(
+				configPath,
+				[]byte(`{"ShelleyGenesisFile": "shelley-genesis.json"}`),
+				0o600,
+			))
+
+			_, err := NewCardanoNodeConfigFromFile(configPath)
+			if testCase.expectErr {
+				require.Error(t, err)
+				require.ErrorContains(t, err, "randomness stabilisation window")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 // TestValidateGenesisConsistencyRejectsOverflowingStabilityWindow pins the
