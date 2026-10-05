@@ -332,6 +332,11 @@ func (lv *LedgerView) MIRDelegState(
 // of a silent runtime no-op for every MIR DELEG predicate that reads it.
 var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
 
+// The genesis key delegation predicates discover this capability with a
+// runtime type assertion and skip when it misses, so signature drift would
+// silently disable them rather than fail to build.
+var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
+
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
 // drift would silently reject every transaction whose validation performs a
@@ -806,6 +811,13 @@ func (lv *LedgerView) GenesisDelegateKeyHashes(
 	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
 }
 
+// GenesisDelegState implements eras.GenesisDelegStateProvider.
+func (lv *LedgerView) GenesisDelegState(
+	slot uint64,
+) (eras.GenesisDelegState, error) {
+	return lv.ls.genesisDelegState(slot, lv.metadataTxn())
+}
+
 func (lv *LedgerView) GenesisDelegateForGenesisKey(
 	genesisKeyHash lcommon.Blake2b224,
 	slot uint64,
@@ -1261,9 +1273,9 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	}
 	// Include-deleted rather than the seated set, so an authoritatively empty
 	// committee after a NoConfidence enactment still reports available.
-	// GetCommitteeActiveCount is not a substitute for either: it counts
-	// hot-key authorizations, so a seated committee that has authorized no hot
-	// keys would report zero.
+	// GetCommitteeAuthorizedCount is not a substitute for either: it counts
+	// only members with a hot key, so a seated committee that has authorized
+	// no hot keys would report zero.
 	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(lv.txn)
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
@@ -1826,19 +1838,21 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 
 	members := make([]lcommon.CommitteeMember, 0, len(order))
 	for _, key := range order {
+		found := latest[key]
+		if found == nil {
+			continue
+		}
+		// Validate before the ambiguity filter, or a malformed hash seated
+		// under both tags is dropped silently instead of failing.
+		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted rather than
 		// aliasing a key member onto a script member.
 		if len(tagsByHash[key.hash]) != 1 {
 			continue
-		}
-		found := latest[key]
-		if found == nil {
-			continue
-		}
-		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
-		if err != nil {
-			return nil, fmt.Errorf("committee cold credential: %w", err)
 		}
 		coldCredential := lcommon.Credential{
 			CredType:   uint(found.ColdCredentialTag),
@@ -2679,12 +2693,13 @@ func (lv *LedgerView) GetExpiredDReps(
 	return dreps, nil
 }
 
-// GetCommitteeActiveCount returns the number of active (non-resigned)
-// committee members.
-func (lv *LedgerView) GetCommitteeActiveCount() (int, error) {
-	count, err := lv.ls.db.GetCommitteeActiveCount(lv.txn)
+// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+// committee members that hold a current hot-key authorization. Members
+// without a hot key are not counted and term expiry is not applied.
+func (lv *LedgerView) GetCommitteeAuthorizedCount() (int, error) {
+	count, err := lv.ls.db.GetCommitteeAuthorizedCount(lv.txn)
 	if err != nil {
-		return 0, fmt.Errorf("get committee active count: %w", err)
+		return 0, fmt.Errorf("get committee authorized count: %w", err)
 	}
 	return count, nil
 }
