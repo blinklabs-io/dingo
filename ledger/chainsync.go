@@ -7308,6 +7308,16 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
+	// applyEpochDonations credits these after governance; RATIFY still
+	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
+	pendingDonations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		currentEpoch.EpochId, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"sum donations for epoch %d: %w", currentEpoch.EpochId, err,
+		)
+	}
 	var govOut *governance.EpochOutput
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "governance", func() error {
@@ -7327,6 +7337,7 @@ func (ls *LedgerState) processEpochRollover(
 				CurrentBoundarySPOState:  currentBoundarySPOState,
 				DeferRatification:        true,
 				BoundarySPOStateDeferred: snapDeferred,
+				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
 		},
@@ -7385,9 +7396,9 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
-	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
-	// withdrawal is checked against the pre-donation treasury and the donation
-	// is reflected for subsequent epochs' accounting.
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
+	// enacted withdrawal is checked against the pre-donation treasury, while
+	// the RATIFY pass already counted them through PendingTreasuryDonations.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "donations", func() error {
 			return ls.applyEpochDonations(
