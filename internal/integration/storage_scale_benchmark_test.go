@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -40,8 +41,9 @@ import (
 // cardinality. They are not run at scale by "go test -bench=."; see the
 // bench-storage-scale target and the scale runbook in DATABASE.md.
 //
-// DINGO_BENCH_SCALE is a comma-separated list of UTxO counts. Block
-// benchmarks derive their block count as utxos / DINGO_BENCH_UTXOS_PER_BLOCK.
+// DINGO_BENCH_SCALE is a comma-separated list of UTxO counts.
+// DINGO_BENCH_BLOCKS is the block count, set independently because historical
+// block volume does not follow from live UTxO cardinality.
 
 const (
 	scaleSeedBatch    = 100_000
@@ -52,10 +54,12 @@ const (
 
 var scaleDefault = []int{10_000}
 
+const scaleDefaultBlocks = 1_000
+
 type scaleConfig struct {
 	scales           []int
+	blocks           int
 	blockBytes       int
-	utxosPerBlk      int
 	latencyLimit     int
 	dataDir          string
 	productionBadger bool
@@ -63,19 +67,36 @@ type scaleConfig struct {
 
 func loadScaleConfig(tb testing.TB) scaleConfig {
 	tb.Helper()
+	cfg, err := scaleConfigFrom(os.Getenv)
+	require.NoError(tb, err)
+	return cfg
+}
+
+func scaleConfigFrom(getenv func(string) string) (scaleConfig, error) {
 	var cfg scaleConfig
 	var err error
-	cfg.scales, err = envScales(os.Getenv, envBenchScale, scaleDefault)
-	require.NoError(tb, err)
-	cfg.blockBytes, err = envIntAtLeast(os.Getenv, envBenchBlockBytes, 32<<10, 8)
-	require.NoError(tb, err)
-	cfg.utxosPerBlk, err = envInt(os.Getenv, envBenchUtxosPerBlk, 10)
-	require.NoError(tb, err)
-	cfg.latencyLimit, err = envInt(os.Getenv, envBenchLatencySamps, scaleDefaultSamp)
-	require.NoError(tb, err)
-	cfg.dataDir = os.Getenv(envBenchDataDir)
-	cfg.productionBadger = os.Getenv(envBenchScale) != ""
-	return cfg
+	if cfg.scales, err = envScales(getenv, envBenchScale, scaleDefault); err != nil {
+		return cfg, err
+	}
+	blocks, err := envScales(getenv, envBenchBlocks, []int{scaleDefaultBlocks})
+	if err != nil {
+		return cfg, err
+	}
+	if len(blocks) != 1 {
+		return cfg, fmt.Errorf(
+			"%s takes one block count, got %q", envBenchBlocks, getenv(envBenchBlocks),
+		)
+	}
+	cfg.blocks = blocks[0]
+	if cfg.blockBytes, err = envIntAtLeast(getenv, envBenchBlockBytes, 32<<10, 8); err != nil {
+		return cfg, err
+	}
+	if cfg.latencyLimit, err = envInt(getenv, envBenchLatencySamps, scaleDefaultSamp); err != nil {
+		return cfg, err
+	}
+	cfg.dataDir = getenv(envBenchDataDir)
+	cfg.productionBadger = getenv(envBenchScale) != "" || getenv(envBenchBlocks) != ""
+	return cfg, nil
 }
 
 // newScaleDB opens a file-backed database. Scale runs need real files so the
@@ -257,53 +278,52 @@ func seedScaleBlocks(
 }
 
 // BenchmarkStorageScaleBlobBlocks measures Badger block writes and reads
-// at utxos/DINGO_BENCH_UTXOS_PER_BLOCK blocks of DINGO_BENCH_BLOCK_BYTES, and
-// reports the blob directory size and table count before, and its size and
-// duration after, a full compaction.
+// at DINGO_BENCH_BLOCKS blocks of DINGO_BENCH_BLOCK_BYTES, and reports the
+// blob directory size and table count before, and its size and duration
+// after, a full compaction.
 func BenchmarkStorageScaleBlobBlocks(b *testing.B) {
 	cfg := loadScaleConfig(b)
-	for _, n := range cfg.scales {
-		blocks := max(n/cfg.utxosPerBlk, 1)
-		b.Run("blocks="+scaleLabel(blocks), func(b *testing.B) {
-			db := cfg.newScaleDB(b, nil)
-			store := db.Blob()
-			writeStart := time.Now()
-			seedScaleBlocks(b, store, 0, blocks, cfg.blockBytes)
-			writeTime := time.Since(writeStart)
+	blocks := cfg.blocks
+	b.Run("blocks="+scaleLabel(blocks), func(b *testing.B) {
+		db := cfg.newScaleDB(b, nil)
+		store := db.Blob()
+		writeStart := time.Now()
+		seedScaleBlocks(b, store, 0, blocks, cfg.blockBytes)
+		writeTime := time.Since(writeStart)
 
-			rng := rand.New(rand.NewPCG(2, uint64(blocks))) // #nosec G404 -- deterministic benchmark keys
-			rec := newLatencyRecorder(cfg.latencyLimit)
-			b.ResetTimer()
-			for b.Loop() {
-				i := rng.IntN(blocks)
-				txn := store.NewTransaction(false)
-				start := time.Now()
-				data, _, err := store.GetBlock(txn, uint64(i)*20, scaleTxID(i)) // #nosec G115 -- non-negative benchmark index
-				rec.record(time.Since(start))
-				_ = txn.Rollback()
-				if err != nil || len(data) != cfg.blockBytes {
-					b.Fatalf("read block %d: len=%d err=%v", i, len(data), err)
-				}
+		rng := rand.New(rand.NewPCG(2, uint64(blocks))) // #nosec G404 -- deterministic benchmark keys
+		rec := newLatencyRecorder(cfg.latencyLimit)
+		b.ResetTimer()
+		for b.Loop() {
+			i := rng.IntN(blocks)
+			txn := store.NewTransaction(false)
+			start := time.Now()
+			data, _, err := store.GetBlock(txn, uint64(i)*20, scaleTxID(i)) // #nosec G115 -- non-negative benchmark index
+			rec.record(time.Since(start))
+			_ = txn.Rollback()
+			if err != nil || len(data) != cfg.blockBytes {
+				b.Fatalf("read block %d: len=%d err=%v", i, len(data), err)
 			}
-			b.StopTimer()
-			rec.report(b, "read")
-			b.ReportMetric(float64(blocks)/writeTime.Seconds(), "write-blocks/s")
-			// Walk the directory: Badger's Size() is refreshed only
-			// periodically and reads zero right after a short run.
-			blobDir := filepath.Join(db.DataDir(), "blob")
-			b.ReportMetric(float64(dirBytes(b, blobDir)), "blob-dir-bytes")
-			if bs, ok := store.(interface{ DB() *badgerdb.DB }); ok {
-				b.ReportMetric(float64(len(bs.DB().Tables())), "sst-tables")
-				start := time.Now()
-				require.NoError(b, bs.DB().Flatten(2))
-				b.ReportMetric(time.Since(start).Seconds(), "flatten-s")
-				b.ReportMetric(
-					float64(dirBytes(b, blobDir)), "blob-dir-bytes-after-flatten",
-				)
-			}
-			reportRSS(b)
-		})
-	}
+		}
+		b.StopTimer()
+		rec.report(b, "read")
+		b.ReportMetric(float64(blocks)/writeTime.Seconds(), "write-blocks/s")
+		b.ReportMetric(float64(blocks)*float64(cfg.blockBytes), "block-volume-bytes")
+		// Walk the directory: Badger's Size() is refreshed only
+		// periodically and reads zero right after a short run.
+		blobDir := filepath.Join(db.DataDir(), "blob")
+		b.ReportMetric(float64(dirBytes(b, blobDir)), "blob-dir-bytes")
+		if bs, ok := store.(interface{ DB() *badgerdb.DB }); ok {
+			b.ReportMetric(float64(len(bs.DB().Tables())), "sst-tables")
+			start := time.Now()
+			require.NoError(b, bs.DB().Flatten(2))
+			b.ReportMetric(time.Since(start).Seconds(), "flatten-s")
+			b.ReportMetric(
+				float64(dirBytes(b, blobDir)), "blob-dir-bytes-after-flatten",
+			)
+		}
+		reportRSS(b)
+	})
 }
 
 // BenchmarkStorageScaleSnapshotPause measures how long an explicit snapshot
@@ -311,9 +331,9 @@ func BenchmarkStorageScaleBlobBlocks(b *testing.B) {
 // dingo_snapshot_commit_pause_seconds histogram Snapshot records.
 func BenchmarkStorageScaleSnapshotPause(b *testing.B) {
 	cfg := loadScaleConfig(b)
+	blocks := cfg.blocks
 	for _, n := range cfg.scales {
-		blocks := max(n/cfg.utxosPerBlk, 1)
-		b.Run("utxos="+scaleLabel(n), func(b *testing.B) {
+		b.Run("utxos="+scaleLabel(n)+",blocks="+scaleLabel(blocks), func(b *testing.B) {
 			reg := prometheus.NewRegistry()
 			db := cfg.newScaleDB(b, reg)
 			raw, err := dbtest.RawSQLiteMetadata(b, db)

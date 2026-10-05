@@ -31,7 +31,7 @@ import (
 const (
 	envBenchScale        = "DINGO_BENCH_SCALE"
 	envBenchBlockBytes   = "DINGO_BENCH_BLOCK_BYTES"
-	envBenchUtxosPerBlk  = "DINGO_BENCH_UTXOS_PER_BLOCK"
+	envBenchBlocks       = "DINGO_BENCH_BLOCKS"
 	envBenchDataDir      = "DINGO_BENCH_DATADIR"
 	envBenchLatencySamps = "DINGO_BENCH_LATENCY_SAMPLES"
 )

@@ -156,9 +156,9 @@ test-live-lifecycle: ## Run the live two-node lifecycle integration tests with r
 bench: mod-tidy ## Run mod-tidy, then benchmarks
 	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
 
-bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BENCH_SCALE, see DATABASE.md)
-	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
-	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
+bench-storage-scale: ## Run the scale-parameterised storage benchmarks (DINGO_BENCH_SCALE, DINGO_BENCH_BLOCKS, see DATABASE.md)
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScale(Utxo|BlobBlocks)' -benchtime=100x -benchmem -timeout=0 ./internal/integration
+	DINGO_BENCH_SCALE=$${DINGO_BENCH_SCALE:-1m} DINGO_BENCH_BLOCKS=$${DINGO_BENCH_BLOCKS:-100k} go test $(GO_TAG_FLAGS) -run=^$$ -bench='^BenchmarkStorageScaleSnapshotPause' -benchtime=1x -benchmem -timeout=0 ./internal/integration
 
 bench-leios-db: ## Run the LeiosDB workload benchmark against the default storage providers
 	go run $(GO_TAG_FLAGS) ./cmd/leios-db-bench

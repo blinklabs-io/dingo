@@ -134,3 +134,25 @@ func TestParseVmRSS(t *testing.T) {
 	_, ok = parseVmRSS("VmRSS:\t5 MB\n")
 	require.False(t, ok)
 }
+
+// Block volume is configured independently of the UTxO count: a run at the
+// captured Mainnet UTxO cardinality must be able to pair it with the
+// measured Mainnet block volume.
+func TestScaleConfigBlockCountIsIndependentOfUtxoScale(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{envBenchScale: "11m", envBenchBlocks: "12m"}
+	getenv := func(k string) string { return env[k] }
+	cfg, err := scaleConfigFrom(getenv)
+	require.NoError(t, err)
+	require.Equal(t, []int{11_000_000}, cfg.scales)
+	require.Equal(t, 12_000_000, cfg.blocks)
+
+	cfg, err = scaleConfigFrom(func(string) string { return "" })
+	require.NoError(t, err)
+	require.Equal(t, scaleDefaultBlocks, cfg.blocks)
+
+	env[envBenchBlocks] = "5k,6k"
+	_, err = scaleConfigFrom(getenv)
+	require.Error(t, err, "one block volume per run")
+}
