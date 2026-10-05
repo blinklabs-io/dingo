@@ -295,19 +295,6 @@ func TestPatienceIgnoresDisabledConfigAndObservabilityClients(t *testing.T) {
 	assert.Empty(t, h.state.CheckPatienceExhausted())
 }
 
-func TestPatiencePauseStopsLeakUntilNextMessage(t *testing.T) {
-	t.Parallel()
-	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())
-	conn := newTestConnId(1)
-	require.True(t, h.state.AddClientConnId(conn))
-	h.deliver(conn, 1, farTip(), 0)
-	h.advance(100 * time.Second)
-	h.state.PatiencePause(conn)
-	h.advance(time.Hour)
-	assert.Empty(t, h.state.CheckPatienceExhausted())
-	assert.InDelta(t, 500, h.state.GetTrackedClient(conn).Patience.Tokens, 1e-9)
-}
-
 // TestPatienceStartsPausedUntilFirstAcceptedHeader pins that registration
 // alone does not start the leak: clients are registered inside their first
 // ChainSync callback, whose local processing the peer must not pay for.

@@ -2484,6 +2484,9 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		active, _ := n.chainSelector.GenesisSelectionState()
 		return active
 	}
+	chainsyncCfg.IsRoot = func(connId ouroboros.ConnectionId) bool {
+		return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
+	}
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0
