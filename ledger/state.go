@@ -8759,15 +8759,25 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if err := ls.verifyDeferredBlockHeaderState(txn, point, block); err != nil {
 		return nil, err
 	}
+	// The aggregate reference-script check and the per-transaction validators
+	// resolve the same inputs, so one prefetch serves both. It runs after any
+	// endorser transactions have applied and before this block's own mutations.
+	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
+	if shouldValidate {
+		prefetchedUtxos = ls.prefetchBlockUtxos(txn, block.Transactions())
+	}
 	// Check the ranking block after any applicable endorser transactions,
 	// using their resulting state but before its own transaction mutations.
 	// The explicitly non-validating Musashi prototype keeps its trust policy.
 	if shouldValidate && !ls.skipDijkstraTxValidation(currentEra.Id) {
-		referenceParams := pparams
-		if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
-			referenceParams = prevEraPParams
+		referenceParams := referenceScriptParams(
+			block, currentEra, ls.eraList(), pparams, prevEraPParams,
+		)
+		refScriptsLV := &LedgerView{
+			txn:             txn,
+			ls:              ls,
+			prefetchedUtxos: prefetchedUtxos,
 		}
-		refScriptsLV := &LedgerView{txn: txn, ls: ls}
 		err := validateBlockReferenceScripts(
 			block,
 			referenceParams,
@@ -8790,10 +8800,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
 	intraBlockUtxos := make(map[utxoref.Key]lcommon.Utxo)
-	var prefetchedUtxos map[utxoref.Key]lcommon.Utxo
-	if shouldValidate {
-		prefetchedUtxos = ls.prefetchBlockUtxos(txn, block.Transactions())
-	}
 	var expandedIndexOffset uint64
 	for i, tx := range block.Transactions() {
 		if delta == nil {

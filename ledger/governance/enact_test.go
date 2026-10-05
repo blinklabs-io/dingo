@@ -112,6 +112,65 @@ func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
 		"this update never touched CostModels[1]")
 }
 
+// TestEnactProposal_DijkstraParameterChangeMaxPledgeLeverage enacts stored
+// parameter changes whose tag 38 is null or a ratio. Null clears an existing
+// maximum pledge leverage, including beside another field, and a ratio replaces
+// it; an update that omits tag 38 leaves it alone.
+func TestEnactProposal_DijkstraParameterChangeMaxPledgeLeverage(t *testing.T) {
+	t.Parallel()
+
+	existing := big.NewRat(3, 1)
+	for _, tc := range []struct {
+		name         string
+		update       map[uint]any
+		wantMinFee   uint
+		wantLeverage *big.Rat
+	}{
+		{"null clears", map[uint]any{38: nil}, 1, nil},
+		{"null beside another field", map[uint]any{0: uint64(44), 38: nil}, 44, nil},
+		{"ratio replaces", map[uint]any{38: cbor.Rat{Rat: big.NewRat(5, 2)}}, 1, big.NewRat(5, 2)},
+		{"absent keeps", map[uint]any{0: uint64(44)}, 44, existing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, _ := newTallyTestDB(t)
+			encoded, err := cbor.Encode([]any{uint64(0), nil, tc.update, nil})
+			require.NoError(t, err)
+			pparams := &gdijkstra.DijkstraProtocolParameters{
+				ConwayProtocolParameters: conway.ConwayProtocolParameters{MinFeeA: 1},
+				MaxPledgeLeverage:        &cbor.Rat{Rat: new(big.Rat).Set(existing)},
+			}
+			result, err := EnactProposal(&EnactmentContext{
+				DB:       db,
+				Slot:     2000,
+				Epoch:    42,
+				PParams:  pparams,
+				UpdateFn: eras.PParamsUpdateDijkstra,
+			}, &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0xD4),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				GovActionCbor: encoded,
+				AddedSlot:     500,
+				ExpiresEpoch:  100,
+				AnchorURL:     "https://example.invalid/dijkstra-pledge",
+				AnchorHash:    testBytes(32, 0xD5),
+				ReturnAddress: testBytes(29, 0xD6),
+			})
+			require.NoError(t, err)
+			require.True(t, result.PParamsChanged)
+			updated, ok := result.UpdatedPParams.(*gdijkstra.DijkstraProtocolParameters)
+			require.True(t, ok)
+			require.Equal(t, tc.wantMinFee, updated.MinFeeA)
+			if tc.wantLeverage == nil {
+				require.Nil(t, updated.MaxPledgeLeverage)
+				return
+			}
+			require.NotNil(t, updated.MaxPledgeLeverage)
+			require.Zero(t, tc.wantLeverage.Cmp(updated.MaxPledgeLeverage.Rat))
+		})
+	}
+}
+
 // TestEnactProposal_ConwayParameterChangeWritesPlutusV2CostModel and
 // TestEnactProposal_DijkstraParameterChangeWritesPlutusV2CostModel pins that
 // PlutusV2CostModelWritten must be derived from whether the enacted ParamUpdate
