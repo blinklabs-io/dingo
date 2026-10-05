@@ -27,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -470,4 +472,118 @@ func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
 	gotCbor, err := cbor.Encode(got)
 	require.NoError(t, err)
 	require.Equal(t, "81a0", hex.EncodeToString(gotCbor))
+}
+
+// TestWireOrderRelays checks the byte order of genesis-declared relay
+// addresses against the ledger's queryStakePoolRelays golden, where 10.0.0.5
+// is 0500000a and 2001:db8::1 is b80d0120 00000000 00000000 01000000.
+func TestWireOrderRelays(t *testing.T) {
+	t.Parallel()
+
+	v4 := net.ParseIP("10.0.0.5")
+	v6 := net.ParseIP("2001:db8::1")
+	host := "relay.example"
+	in := []lcommon.PoolRelay{
+		{Type: 0, Ipv4: &v4, Ipv6: &v6},
+		{Type: 1, Hostname: &host},
+	}
+	out := wireOrderRelays(in)
+	require.Equal(t, "0500000a", hex.EncodeToString(*out[0].Ipv4))
+	require.Equal(
+		t,
+		"b80d012000000000000000000100"+"0000",
+		hex.EncodeToString(*out[0].Ipv6),
+	)
+	require.Equal(t, &host, out[1].Hostname)
+	require.Equal(t, "10.0.0.5", in[0].Ipv4.String(), "input is not modified")
+}
+
+// TestStakePoolParamsBlsKeyEncoding places the BLS key as the third element
+// of a ten-element record, and leaves the nine-element record unchanged
+// without one.
+func TestStakePoolParamsBlsKeyEncoding(t *testing.T) {
+	t.Parallel()
+
+	margin := cbor.Rat{Rat: big.NewRat(1, 2)}
+	owners := cbor.NewSetType([]ledger.Blake2b224{}, true)
+	params := stakePoolParams{
+		Pledge:   1,
+		Cost:     2,
+		Margin:   &margin,
+		Owners:   &owners,
+		Relays:   []lcommon.PoolRelay{},
+		BlsKey:   nil,
+		Metadata: nil,
+	}
+	plain, err := cbor.Encode(params)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x89), plain[0])
+
+	params.BlsKey = &lcommon.LeiosKey{
+		PublicKey:       repeatedBytes(96, 0x66),
+		PossessionProof: repeatedBytes(48, 0x77),
+	}
+	withKey, err := cbor.Encode(params)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x8a), withKey[0])
+	keyCbor, err := cbor.Encode(params.BlsKey)
+	require.NoError(t, err)
+	var fields []cbor.RawMessage
+	_, err = cbor.Decode(withKey, &fields)
+	require.NoError(t, err)
+	require.Len(t, fields, 10)
+	require.Equal(t, []byte(keyCbor), []byte(fields[2]))
+}
+
+// TestQueryStakePoolParams_BlsKeyFromProtocolVersion12 reports the registered
+// BLS key only once the live protocol version is 12.
+func TestQueryStakePoolParams_BlsKeyFromProtocolVersion12(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		major  uint
+		fields byte
+	}{{11, 0x89}, {12, 0x8a}} {
+		db := newTestDB(t)
+		ls := newPoolDistr2Ledger(t, db)
+		ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+		setStakePoolParamsLiveState(ls, 0, 0, 10)
+		pool := repeatedBytes(28, 0x11)
+		pp := &conway.ConwayProtocolParameters{}
+		pp.ProtocolVersion.Major = tc.major
+		ls.currentPParams = pp
+		ls.publishSnapshotsLocked()
+		require.NoError(t, ls.db.Metadata().ImportPool(
+			&models.Pool{
+				PoolKeyHash:             pool,
+				VrfKeyHash:              repeatedBytes(32, 0xAA),
+				RewardAccount:           repeatedBytes(28, 0x22),
+				LeiosKeyPublic:          repeatedBytes(96, 0x66),
+				LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
+			},
+			&models.PoolRegistration{
+				PoolKeyHash:             pool,
+				VrfKeyHash:              repeatedBytes(32, 0xAA),
+				RewardAccount:           repeatedBytes(28, 0x22),
+				LeiosKeyPublic:          repeatedBytes(96, 0x66),
+				LeiosKeyPossessionProof: repeatedBytes(48, 0x77),
+				AddedSlot:               1,
+			},
+			nil,
+		))
+
+		got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+		require.NoError(t, err)
+		gotCbor, err := cbor.Encode(got)
+		require.NoError(t, err)
+		// 81 a1 581c<pool> then the record header.
+		require.Equal(t, tc.fields, gotCbor[2+2+28+0], "pv %d", tc.major)
+		if tc.fields == 0x8a {
+			require.Contains(
+				t,
+				hex.EncodeToString(gotCbor),
+				"5860"+strings.Repeat("66", 96)+"5830"+strings.Repeat("77", 48),
+			)
+		}
+	}
 }

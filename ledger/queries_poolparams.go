@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"net"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -28,13 +29,17 @@ import (
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
+// blsKeyMinProtocolMajor is the protocol version from which the ledger
+// encodes a pool's registered BLS voting key in StakePoolParams.
+const blsKeyMinProtocolMajor = 12
+
 // stakePoolParams is the ledger's StakePoolParams record. The owners are in
 // ascending order, a tag-258 set from protocol version 9 and a plain array
 // before it; the margin is a tag-30 rational at every version, an absent
 // metadata is null, and empty owner and relay lists are empty arrays rather
-// than null.
+// than null. A non-nil BlsKey is spliced in as the third element, making a
+// ten-element array; it is set only from protocol version 12.
 type stakePoolParams struct {
-	cbor.StructAsArray
 	Operator      lcommon.Blake2b224
 	VrfKeyHash    lcommon.Blake2b256
 	Pledge        uint64
@@ -44,6 +49,58 @@ type stakePoolParams struct {
 	Owners        *cbor.SetType[lcommon.Blake2b224]
 	Relays        []lcommon.PoolRelay
 	Metadata      *lcommon.PoolMetadata
+	BlsKey        *lcommon.LeiosKey
+}
+
+// MarshalCBOR encodes the record as a flat array, omitting the BLS key
+// element when the pool has none.
+func (p stakePoolParams) MarshalCBOR() ([]byte, error) {
+	fields := []any{p.Operator, p.VrfKeyHash}
+	if p.BlsKey != nil {
+		fields = append(fields, p.BlsKey)
+	}
+	fields = append(
+		fields,
+		p.Pledge,
+		p.Cost,
+		p.Margin,
+		p.RewardAccount,
+		p.Owners,
+		p.Relays,
+		p.Metadata,
+	)
+	return cbor.Encode(fields)
+}
+
+// wireOrderRelays returns relays with their IP addresses in the ledger's
+// wire order: each 32-bit word of an address is little-endian, so an IPv4
+// address is byte-reversed and an IPv6 address is reversed within each
+// four-byte group. Relays read back from chain data already hold wire
+// order; only addresses parsed from text, as in genesis, need this.
+func wireOrderRelays(relays []lcommon.PoolRelay) []lcommon.PoolRelay {
+	out := slices.Clone(relays)
+	for i := range out {
+		if out[i].Ipv4 != nil {
+			out[i].Ipv4 = reverseIPWords(*out[i].Ipv4)
+		}
+		if out[i].Ipv6 != nil {
+			out[i].Ipv6 = reverseIPWords(*out[i].Ipv6)
+		}
+	}
+	return out
+}
+
+func reverseIPWords(ip net.IP) *net.IP {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	swapped := make(net.IP, len(ip))
+	for i := 0; i+4 <= len(ip); i += 4 {
+		for j := range 4 {
+			swapped[i+j] = ip[i+3-j]
+		}
+	}
+	return &swapped
 }
 
 // newStakePoolParams adapts a registration certificate. rewardAccount is
@@ -81,6 +138,7 @@ func newStakePoolParams(
 		Owners:        &ownerSet,
 		Relays:        relays,
 		Metadata:      cert.PoolMetadata,
+		BlsKey:        cert.LeiosKey,
 	}
 }
 
@@ -124,6 +182,10 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 	consensus, tip := ls.loadStateSnapshots()
 	epoch := consensus.currentEpoch
 	tipSlot := tip.currentTip.Point.Slot
+	includeBlsKey := false
+	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+		includeBlsKey = pv.Major >= blsKeyMinProtocolMajor
+	}
 	keyHashes := make([]lcommon.PoolKeyHash, 0, len(poolIds))
 	for _, poolId := range poolIds {
 		keyHashes = append(keyHashes, lcommon.PoolKeyHash(poolId))
@@ -150,6 +212,14 @@ func (ls *LedgerState) queryShelleyStakePoolParams(
 		}, reg)
 		if err != nil {
 			return nil, err
+		}
+		if includeBlsKey &&
+			len(reg.LeiosKeyPublic) > 0 &&
+			len(reg.LeiosKeyPossessionProof) > 0 {
+			cert.LeiosKey = &lcommon.LeiosKey{
+				PublicKey:       slices.Clone(reg.LeiosKeyPublic),
+				PossessionProof: slices.Clone(reg.LeiosKeyPossessionProof),
+			}
 		}
 		rewardAccount, err := rewardAccountAddress(
 			networkID,
@@ -218,6 +288,7 @@ func shelleyExtraConfigCBOR(
 		if err != nil {
 			return nil, err
 		}
+		cert.Relays = wireOrderRelays(cert.Relays)
 		pools[lcommon.Blake2b224(cert.Operator)] = newStakePoolParams(
 			&cert,
 			rewardAccount,
