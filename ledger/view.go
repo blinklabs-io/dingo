@@ -1818,19 +1818,21 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 
 	members := make([]lcommon.CommitteeMember, 0, len(order))
 	for _, key := range order {
+		found := latest[key]
+		if found == nil {
+			continue
+		}
+		// Validate before the ambiguity filter, or a malformed hash seated
+		// under both tags is dropped silently instead of failing.
+		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted rather than
 		// aliasing a key member onto a script member.
 		if len(tagsByHash[key.hash]) != 1 {
 			continue
-		}
-		found := latest[key]
-		if found == nil {
-			continue
-		}
-		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
-		if err != nil {
-			return nil, fmt.Errorf("committee cold credential: %w", err)
 		}
 		coldCredential := lcommon.Credential{
 			CredType:   uint(found.ColdCredentialTag),
