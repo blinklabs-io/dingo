@@ -987,8 +987,8 @@ func (ls *LedgerState) queryShelley(
 // after the pinned slot).
 //
 // Also honors at: ShelleyLedgerTipQuery (answers at itself when pinned), and
-// ShelleyProposedProtocolParamsUpdatesQuery (a constant empty map from Conway
-// on, so the point is irrelevant; refused in earlier eras).
+// ShelleyProposedProtocolParamsUpdatesQuery (resolves at's era like
+// HardForkCurrentEraQuery: an empty map from Conway on, refused earlier).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -1094,18 +1094,38 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyLedgerTipQuery:
 		return ls.queryShelleyLedgerTip(at)
 	case *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery:
-		// Conway replaced update proposals with governance actions, so from
-		// Conway on the ledger holds none to report. Earlier eras do carry
-		// proposals, which this query does not read.
-		if ls.loadConsensusSnapshot().currentEra.Id < eras.ConwayEraDesc.Id {
-			return nil, fmt.Errorf("unsupported query type: %T", q)
-		}
-		return []any{map[any]any{}}, nil
+		return ls.queryShelleyProposedProtocolParamsUpdates(q, at, txn)
 	case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		return ls.queryShelleyStakePoolParams(q.PoolIds.Items())
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+// queryShelleyProposedProtocolParamsUpdates answers GetProposedPParamsUpdates
+// with an empty map when the acquired point is in Conway or later: Conway
+// replaced update proposals with governance actions, so the ledger holds none
+// to report. Earlier eras do carry proposals, which this query does not read,
+// so a point in one of them is refused.
+func (ls *LedgerState) queryShelleyProposedProtocolParamsUpdates(
+	q *olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	eraID, err := ls.queryHardFork(
+		&olocalstatequery.HardForkQuery{
+			Query: &olocalstatequery.HardForkCurrentEraQuery{},
+		},
+		at,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if id, ok := eraID.(uint); !ok || id < eras.ConwayEraDesc.Id {
+		return nil, fmt.Errorf("unsupported query type: %T", q)
+	}
+	return []any{map[any]any{}}, nil
 }
 
 // queryShelleyCbor answers the GetCBOR query combinator. It runs the wrapped

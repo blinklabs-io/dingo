@@ -4161,13 +4161,15 @@ ledger peer snapshot, stake pools, stake pool parameters
 (`GetStakePoolParams`, the parameters in effect this epoch, so a
 re-registration made during the epoch is not reported until the next one),
 the ledger tip (`GetLedgerTip`), the proposed protocol parameter update map
-(always empty from Conway on, and refused in earlier eras), DRep state,
+(empty when the acquired point is in Conway or later, and refused in earlier
+eras), DRep state,
 account state, and the unfiltered stake distribution
 (`GetStakeDistribution`). Pool state, the version-1 pool distribution,
 non-myopic member rewards, reward info, reward provenance and the debug
 epoch-state queries are not answered, and the failed query ends the client's
 session. At node-to-client version 21 the Shelley genesis configuration
-encodes initial funds and staking as empty maps and the genesis injection
+encodes initial funds as an empty map, staking as a record of an empty pools
+map and an empty stake map, and the genesis injection
 data as the ledger's three-field `ShelleyExtraConfig` record, encoded at the
 Shelley protocol version (pool owners as a plain array) with an absent
 section as `NoInjection`; earlier versions keep the legacy layout. `GetCBOR` is a query
@@ -4244,7 +4246,8 @@ always-latest-row read, `GetNetworkStateAsOfSlot` does have a
 historical-by-slot lookup, so a pin pairs a correct historical numerator
 with the reserves genuinely in effect at that same point, not today's.
 `GetLedgerTip`
-answers the pinned point itself, and `GetStakePoolParams` reads live pool
+answers the pinned point itself, `GetProposedPParamsUpdates` resolves the
+era of the pinned point, and `GetStakePoolParams` reads live pool
 registrations. `GetUTxOWhole`
 honors the pin too, through the same `AddedSlot`/`DeletedSlot` predicate
 `GetUTxOByTxIn` uses. `ledger/queries.go`'s

@@ -439,3 +439,35 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 		hex.EncodeToString(result.ExtraConfig),
 	)
 }
+
+// TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway resolves the era
+// of the acquired point: a point in a Shelley epoch is refused even though
+// the live era is Conway, and a point in a Conway epoch answers the empty map.
+func TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentEpoch = models.Epoch{EpochId: 6}
+	ls.publishSnapshotsLocked()
+	require.NoError(t, ls.db.SetEpoch(
+		300, 3, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, ls.db.SetEpoch(
+		600, 6, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil,
+	))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+	query := &olocalstatequery.ShelleyProposedProtocolParamsUpdatesQuery{}
+
+	_, err := ls.queryShelleyLeaf(query, QueryPoint{Slot: 350}, nil, 0)
+	require.Error(t, err)
+
+	got, err := ls.queryShelleyLeaf(query, QueryPoint{Slot: 620}, nil, 0)
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	require.Equal(t, "81a0", hex.EncodeToString(gotCbor))
+}
