@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/utxoref"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -485,4 +486,97 @@ func TestAdmissionKeepsPendingTxWhenLedgerMovesWithoutConfirming(t *testing.T) {
 		"the unconfirmed pending withdrawal still drains the account",
 	)
 	require.Len(t, pool.Transactions(), 1)
+}
+
+// overlappingRebuildValidator holds the first pool rebuild until a second
+// admission has validated against the overlay that rebuild will replace.
+type overlappingRebuildValidator struct {
+	*balanceValidator
+	admissions atomic.Int64
+	overlapped chan struct{}
+	rebuilds   atomic.Int64
+}
+
+func (v *overlappingRebuildValidator) ValidateTx(tx gledger.Transaction) error {
+	return v.ValidateTxWithOverlay(tx, nil, nil, nil)
+}
+
+func (v *overlappingRebuildValidator) ValidateTxWithOverlay(
+	tx gledger.Transaction,
+	consumed map[utxoref.Key]struct{},
+	created map[utxoref.Key]lcommon.Utxo,
+	pending *utxoref.StateOverlay,
+) error {
+	if v.admissions.Add(1) == 2 {
+		close(v.overlapped)
+	}
+	return v.balanceValidator.ValidateTxWithOverlay(
+		tx, consumed, created, pending,
+	)
+}
+
+func (v *overlappingRebuildValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		func() bool,
+	) error,
+) error {
+	if v.rebuilds.Add(1) == 1 {
+		select {
+		case <-v.overlapped:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	return fn(v.balanceValidator.ValidateTxWithOverlay, func() bool { return true })
+}
+
+func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {
+	t.Parallel()
+	validator := &overlappingRebuildValidator{
+		balanceValidator: &balanceValidator{},
+		overlapped:       make(chan struct{}),
+	}
+	pool, err := newMempool(MempoolConfig{
+		Validator:       validator,
+		MempoolCapacity: 1 << 20,
+		PromRegistry:    prometheus.NewRegistry(),
+	}, ImplementationFIFO)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	require.NoError(
+		t,
+		pool.AddTransaction(
+			uint(conway.EraIdConway),
+			withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 0),
+		),
+	)
+	validator.admissions.Store(0)
+	validator.generation.Add(1)
+
+	txs := [][]byte{
+		withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 0),
+		withdrawalTxCbor(t, 0x03, withdrawalStakeKey, 0),
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, len(txs))
+	for i, txCbor := range txs {
+		wg.Go(func() {
+			errs[i] = pool.AddTransaction(uint(conway.EraIdConway), txCbor)
+		})
+	}
+	wg.Wait()
+	require.NoError(t, errs[0])
+	require.NoError(t, errs[1])
+	require.Len(t, pool.Transactions(), 3)
+	require.Equal(
+		t,
+		int64(1),
+		validator.rebuilds.Load(),
+		"an admission rebuilt a pool another admission had already rebuilt",
+	)
 }

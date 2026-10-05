@@ -1572,7 +1572,8 @@ tip) and a validation at another generation folds again from the first
 transaction. A refold cannot tell whether the new ledger state already contains
 some of the recorded transactions, so the overlay reports that its base moved
 and the mempool, which holds transactions that peers' blocks can confirm,
-rebuilds the pool before judging an admission. Block builders hold only
+rebuilds the pool before judging an admission;
+admissions that raced the same move share one rebuild. Block builders hold only
 transactions not yet in any block and ignore the report. It
 tracks no UTxOs: spent and created outputs come from the UTxO overlay, which covers every
 pending transaction. The pool records a state-changing transaction as its own

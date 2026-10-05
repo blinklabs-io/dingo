@@ -1112,7 +1112,29 @@ func (m *Mempool) rebuildOverlay() error {
 	}
 	m.rebuildMutex.Lock()
 	defer m.rebuildMutex.Unlock()
+	return m.rebuildOverlayLocked()
+}
 
+// reconcileOverlay rebuilds the pool for an admission that validated against
+// seen, unless a rebuild has replaced seen since. Without that check every
+// admission that raced the same ledger move would rebuild the whole pool.
+func (m *Mempool) reconcileOverlay(seen *utxoOverlay) error {
+	if m.validator == nil {
+		return ErrNilValidator
+	}
+	m.rebuildMutex.Lock()
+	defer m.rebuildMutex.Unlock()
+	m.RLock()
+	replaced := m.overlay != seen
+	m.RUnlock()
+	if replaced {
+		return nil
+	}
+	return m.rebuildOverlayLocked()
+}
+
+// rebuildOverlayLocked runs rebuildOverlay with rebuildMutex held.
+func (m *Mempool) rebuildOverlayLocked() error {
 	// A ledger publication racing the batch invalidates its pinned view. Retry
 	// once from the new live pool; a later chain event provides further retries
 	// without allowing a busy chain to spin here indefinitely.
@@ -1594,7 +1616,8 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	// has moved since that overlay's transactions were validated, some may
 	// already be in the ledger, so the pool is rebuilt and the attempt repeats.
 	for attempt := 0; ; attempt++ {
-		addEvent, evictedEvents, err = m.addTransactionAttempt(
+		var seen *utxoOverlay
+		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
 			txType, txBytes, tmpTx, txHash,
 		)
 		if !errors.Is(err, errPendingStateMoved) {
@@ -1603,7 +1626,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		if attempt == maxAdmissionReconciles {
 			return fmt.Errorf("validate transaction: %w", errPendingStateMoved)
 		}
-		if err := m.rebuildOverlay(); err != nil {
+		if err := m.reconcileOverlay(seen); err != nil {
 			return fmt.Errorf("reconcile pending transactions: %w", err)
 		}
 	}
@@ -1622,14 +1645,17 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	return nil
 }
 
+// addTransactionAttempt validates and admits one transaction. On
+// errPendingStateMoved it also returns the overlay it validated against.
 func (m *Mempool) addTransactionAttempt(
 	txType uint,
 	txBytes []byte,
 	tmpTx gledger.Transaction,
 	txHash string,
-) (*event.Event, []event.Event, error) {
+) (*event.Event, []event.Event, *utxoOverlay, error) {
 	var addEvent *event.Event
 	var evictedEvents []event.Event
+	var seen *utxoOverlay
 	err := func() error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
@@ -1665,6 +1691,7 @@ func (m *Mempool) addTransactionAttempt(
 			m.Unlock()
 			return retErr
 		}
+		seen = m.overlay
 		validConsumed := m.overlay.consumed
 		validCreated := m.overlay.created
 		validAccounts := m.overlay.accounts
@@ -1756,7 +1783,7 @@ func (m *Mempool) addTransactionAttempt(
 		}
 		return nil
 	}()
-	return addEvent, evictedEvents, err
+	return addEvent, evictedEvents, seen, err
 }
 
 func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
