@@ -588,6 +588,26 @@ type snapshotCatalogItem struct {
 	entry    lifecycle.SnapshotEntry
 }
 
+func (h *databaseServiceHandler) cloudManifestOptions() (
+	[]lifecycle.ManifestOption,
+	error,
+) {
+	if h.bark.config.Lifecycle == nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			errors.New("database lifecycle service is unavailable"),
+		)
+	}
+	opts, err := h.bark.config.Lifecycle.ManifestOptions()
+	if err != nil {
+		return nil, connect.NewError(
+			connect.CodeFailedPrecondition,
+			fmt.Errorf("load snapshot trust key: %w", err),
+		)
+	}
+	return opts, nil
+}
+
 // mergedSnapshotCatalogPage returns one page of the combined local + cloud
 // snapshot catalog, for ListAvailableSnapshots. A cloud entry whose ID
 // already appears in the local catalog is skipped in favor of the local
@@ -637,10 +657,15 @@ func (h *databaseServiceHandler) mergedSnapshotCatalogPage(
 		})
 	}
 
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return nil, "", err
+	}
 	cloudEntries, ok, err := lifecycle.ListCloudSnapshots(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		h.bark.config.SnapshotCloudDestination,
+		manifestOpts...,
 	)
 	if err != nil {
 		// A cloud listing failure is typically connectivity/auth (the same
@@ -751,10 +776,15 @@ func (h *databaseServiceHandler) cloudSnapshotExists(
 		h.bark.config.SnapshotCloudDestination,
 		snapshotID,
 	)
+	manifestOpts, err := h.cloudManifestOptions()
+	if err != nil {
+		return cloudURI, false, err
+	}
 	_, ok, fetchErr := lifecycle.FetchCloudManifest(
 		ctx,
 		h.bark.config.DestinationRegistry,
 		cloudURI,
+		manifestOpts...,
 	)
 	if !ok {
 		return cloudURI, false, nil

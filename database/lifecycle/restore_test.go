@@ -1153,7 +1153,20 @@ func (d *manifestOnlyCloudDestination) FetchManifest(
 	return d.manifest, nil
 }
 
-var _ lifecycle.CloudManifestFetcher = &manifestOnlyCloudDestination{}
+func (d *manifestOnlyCloudDestination) FetchManifestWithOptions(
+	_ context.Context,
+	opts ...lifecycle.ManifestOption,
+) (lifecycle.Manifest, error) {
+	if err := d.manifest.Authenticate(opts...); err != nil {
+		return lifecycle.Manifest{}, err
+	}
+	return d.manifest, nil
+}
+
+var (
+	_ lifecycle.CloudManifestFetcher             = &manifestOnlyCloudDestination{}
+	_ lifecycle.ConfigurableCloudManifestFetcher = &manifestOnlyCloudDestination{}
+)
 
 // Registered directly on the package's shared testDestinationRegistry
 // (defined in destination_test.go) — package-level var initializers all
@@ -1187,14 +1200,29 @@ var manifestOnlyFixture = lifecycle.Manifest{
 // at all.
 func TestPeekManifestUsesLightweightCloudFetchWithoutDownloading(t *testing.T) {
 	t.Parallel()
+	dir := t.TempDir()
+	fixture := manifestOnlyFixture
+	require.NoError(t, lifecycle.WriteManifest(
+		dir, fixture, lifecycle.WithManifestKey(testTrustKey),
+	))
+	fixture, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err)
+	registry := lifecycle.NewDestinationRegistry()
+	registry.Register(
+		"faketest-manifestonly-authenticated",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &manifestOnlyCloudDestination{manifest: fixture}, nil
+		},
+	)
 
 	m, err := lifecycle.PeekManifest(
 		context.Background(),
-		testDestinationRegistry,
-		"faketest-manifestonly://bucket/prefix",
+		registry,
+		"faketest-manifestonly-authenticated://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
-	require.Equal(t, manifestOnlyFixture, m)
+	require.Equal(t, fixture, m)
 }
 
 // noManifestFetcherCloudDestination forwards to a real fakeCloudDestination
@@ -1284,12 +1312,14 @@ func TestPeekManifestFallsBackToDownloadWhenCloudDestinationLacksManifestFetcher
 		lifecycle.TriggerManual, "test-version", "badger", "sqlite",
 		"faketest-nomanifestfetcher://bucket/prefix",
 		"", "",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 
 	peeked, err := lifecycle.PeekManifest(
 		context.Background(), testDestinationRegistry,
 		"faketest-nomanifestfetcher://bucket/prefix/snap-peek",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.Equal(t, m.CommitTimestamp, peeked.CommitTimestamp)

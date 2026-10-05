@@ -853,6 +853,11 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {
+		if c.DatabaseLifecycle.SnapshotTrustKeyFile == "" {
+			errs = append(errs, errors.New(
+				"databaseLifecycle.snapshotTrustKeyFile is required when databaseLifecycle.snapshotCloudDestination is configured",
+			))
+		}
 		u, err := url.Parse(dest)
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			errs = append(errs, fmt.Errorf(

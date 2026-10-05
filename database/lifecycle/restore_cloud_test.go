@@ -81,12 +81,12 @@ func restoreFrom(
 // prefix are never requested.
 func TestRestoreFromCloudFetchesOnlyDeclaredObjects(t *testing.T) {
 	// Not t.Parallel: the fake cloud fixture is process-global.
-	uri, objects, m := cloudSnapshot(t, nil)
+	uri, objects, m := cloudSnapshot(t, testTrustKey)
 	require.NoError(t, os.WriteFile(
 		filepath.Join(objects, "extra.bin"), make([]byte, 1<<20), 0o600,
 	))
 
-	_, err := restoreFrom(t, uri, nil)
+	_, err := restoreFrom(t, uri, testTrustKey)
 	require.NoError(t, err)
 
 	fakeCloudMu.Lock()
@@ -108,7 +108,7 @@ func TestRestoreFromCloudFetchesOnlyDeclaredObjects(t *testing.T) {
 }
 
 // A payload edited in place, or cut short, is refused before the target is
-// touched, whether or not a trust key is configured.
+// touched.
 func TestRestoreRejectsTamperedOrTruncatedPayload(t *testing.T) {
 	// Not t.Parallel: the fake cloud fixture is process-global.
 	for _, tc := range []struct {
@@ -134,13 +134,13 @@ func TestRestoreRejectsTamperedOrTruncatedPayload(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			uri, objects, _ := cloudSnapshot(t, nil)
+			uri, objects, _ := cloudSnapshot(t, testTrustKey)
 			path := filepath.Join(objects, tc.file)
 			data, err := os.ReadFile(path)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(path, tc.mutate(data), 0o600))
 
-			target, err := restoreFrom(t, uri, nil)
+			target, err := restoreFrom(t, uri, testTrustKey)
 			require.ErrorIs(t, err, lifecycle.ErrSnapshotPayloadMismatch)
 			require.ErrorContains(t, err, tc.want)
 			require.NoDirExists(t, target)
@@ -178,4 +178,19 @@ func TestRestoreFromCloudChecksTrustKey(t *testing.T) {
 
 	_, err = restoreFrom(t, uri, testTrustKey)
 	require.NoError(t, err)
+}
+
+// Cloud restores require an operator trust root because a bucket writer can
+// replace both an unkeyed manifest and the payloads it describes.
+func TestRestoreFromCloudRequiresTrustKey(t *testing.T) {
+	// Not t.Parallel: the fake cloud fixture is process-global.
+	uri, _, _ := cloudSnapshot(t, testTrustKey)
+
+	target, err := restoreFrom(t, uri, nil)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.NoDirExists(t, target)
+	fakeCloudMu.Lock()
+	fetched := append([]lifecycle.DownloadFile(nil), fakeCloudFetched...)
+	fakeCloudMu.Unlock()
+	require.Empty(t, fetched, "missing trust root must fail before cloud I/O")
 }

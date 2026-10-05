@@ -53,21 +53,44 @@ func TestSnapshotToCloudLabelsBeforeMirroring(t *testing.T) {
 		"faketest://bucket/prefix",
 		"my-label",
 		"my-description",
+		lifecycle.WithManifestKey(testTrustKey),
 	)
 	require.NoError(t, err)
 	require.Equal(t, "my-label", m.Name)
 	require.Equal(t, "my-description", m.Description)
 
-	local, err := lifecycle.ReadManifest(dir)
+	local, err := lifecycle.ReadManifest(
+		dir, lifecycle.WithManifestKey(testTrustKey),
+	)
 	require.NoError(t, err)
 	require.Equal(t, "my-label", local.Name)
 	require.Equal(t, "my-description", local.Description)
 
 	cloudDir := filepath.Join(backingDir, "prefix", "snap-labeled")
-	cloudManifest, err := lifecycle.ReadManifest(cloudDir)
+	cloudManifest, err := lifecycle.ReadManifest(
+		cloudDir, lifecycle.WithManifestKey(testTrustKey),
+	)
 	require.NoError(t, err)
 	require.Equal(t, "my-label", cloudManifest.Name)
 	require.Equal(t, "my-description", cloudManifest.Description)
+}
+
+func TestMirrorToCloudRejectsUnauthenticatedSnapshot(t *testing.T) {
+	backingDir := t.TempDir()
+	setFakeCloudBackingDir(t, backingDir)
+	dir := filepath.Join(t.TempDir(), "unsigned")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, lifecycle.WriteManifest(dir, lifecycle.Manifest{}))
+
+	err := lifecycle.MirrorToCloud(
+		context.Background(),
+		testDestinationRegistry,
+		dir,
+		"faketest://bucket/prefix",
+		lifecycle.WithManifestKey(testTrustKey),
+	)
+	require.ErrorIs(t, err, lifecycle.ErrManifestUnauthenticated)
+	require.NoDirExists(t, filepath.Join(backingDir, "prefix", "unsigned"))
 }
 
 // TestIsCloudMirroredToDetectsChangedDestination guards the gap a bare

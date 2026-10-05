@@ -146,7 +146,7 @@ func TestRestoreThroughCloudAdaptersRefusesForgedSnapshots(t *testing.T) {
 				require.True(t, ok)
 				sql[len(sql)/2] ^= 0xFF
 				f.fc.Put(downloadTestBucket, "snap/metadata.sqlite", sql)
-				target, err := f.restore(t, scheme, nil)
+				target, err := f.restore(t, scheme, adapterTrustKey)
 				require.ErrorIs(t, err, ErrSnapshotPayloadMismatch)
 				require.NoDirExists(t, target)
 			})

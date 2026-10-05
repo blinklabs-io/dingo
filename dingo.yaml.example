@@ -1002,9 +1002,10 @@
   # File holding a shared secret (at least 16 bytes) that authenticates
   # snapshot manifests. Snapshots are signed with it and a restore refuses a
   # manifest that does not verify, so someone who can write to the cloud
-  # destination cannot substitute payloads. Every node that restores another
-  # node's snapshots must use the same secret. Unset leaves manifests checked
-  # only by their unkeyed checksum.
+  # destination cannot substitute payloads. It is required when a cloud
+  # destination is configured, and every node that restores another node's
+  # snapshots must use the same secret. Local-only snapshots and restores
+  # may use the unkeyed checksum only when this setting is unset.
   # Can be overridden with DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE
   # CLI: --db-snapshot-trust-key-file
   # snapshotTrustKeyFile: ""

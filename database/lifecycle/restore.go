@@ -553,6 +553,12 @@ func PeekManifest(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
+	if !recognizedCloudScheme(registry, snapshotDir) {
+		return ReadManifest(snapshotDir, opts...)
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, err
+	}
 	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir, opts...); ok {
 		return m, err
 	}
@@ -575,6 +581,9 @@ func resolveManifest(
 	}
 	if !recognizedCloudScheme(registry, snapshotDir) {
 		return ReadManifest(snapshotDir, opts...)
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, err
 	}
 	// One byte over the limit lets ReadManifest, not the transfer, report an
 	// oversized manifest as ErrManifestTooLarge.

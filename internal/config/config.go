@@ -1197,8 +1197,9 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotDir, as a URI: s3://<bucket>/<prefix> or
 	// gcs://<bucket>/<prefix> (matching the scheme
 	// database/plugin/blob/gcs already uses, not gs://). Requires dingo to
-	// be built with the dingo_extra_plugins tag. Empty disables cloud
-	// upload. Credentials are resolved from the ambient AWS/GCS SDK
+	// be built with the dingo_extra_plugins tag and SnapshotTrustKeyFile to
+	// be configured. Empty disables cloud upload. Credentials are resolved
+	// from the ambient AWS/GCS SDK
 	// credential chain (env vars, IAM role, ADC, etc.) — there is no
 	// separate credential config here, matching how the existing s3/gcs
 	// blob store plugins work.
@@ -1237,8 +1238,9 @@ type DatabaseLifecycleConfig struct {
 	// that authenticates snapshot manifests. When set, every snapshot's
 	// manifest is signed with it and a restore refuses a manifest that does
 	// not verify, so a writer to the cloud destination cannot substitute
-	// payloads. Without it a manifest is only checked against its own
-	// unkeyed checksum. Every node that restores another's snapshots must
+	// payloads. It is required for cloud snapshot creation and restore.
+	// Local-only snapshots and restores may use the unkeyed checksum only
+	// when this is unset. Every node that restores another's snapshots must
 	// hold the same secret.
 	SnapshotTrustKeyFile string `yaml:"snapshotTrustKeyFile"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_TRUST_KEY_FILE"`
 }

@@ -86,6 +86,16 @@ func manifestKey(opts []ManifestOption) []byte {
 	return cfg.key
 }
 
+func requireManifestKey(opts []ManifestOption) error {
+	if len(manifestKey(opts)) == 0 {
+		return fmt.Errorf(
+			"%w: cloud snapshots require a manifest trust key",
+			ErrManifestUnauthenticated,
+		)
+	}
+	return nil
+}
+
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses
 // MaxManifestBytes (1 MiB); negative values are rejected before I/O.
 func WithManifestMaxBytes(maxBytes int64) ManifestOption {

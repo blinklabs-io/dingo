@@ -163,7 +163,10 @@ type CloudDestinationFactory func(uri *url.URL) (CloudDestination, error)
 type SnapshotLister interface {
 	// ListSnapshots returns one entry per snapshot found under this
 	// destination, each with its manifest already fetched and validated.
-	ListSnapshots(ctx context.Context) ([]SnapshotEntry, error)
+	ListSnapshots(
+		ctx context.Context,
+		opts ...ManifestOption,
+	) ([]SnapshotEntry, error)
 }
 
 // CloudManifestFetcher is optionally implemented by a CloudDestination to
@@ -426,9 +429,13 @@ func ListCloudSnapshots(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	cloudDest string,
+	opts ...ManifestOption,
 ) (entries []SnapshotEntry, ok bool, err error) {
 	if cloudDest == "" {
 		return nil, false, nil
+	}
+	if err := requireManifestKey(opts); err != nil {
+		return nil, false, err
 	}
 	dest, err := ParseCloudDestination(registry, cloudDest)
 	if err != nil {
@@ -439,11 +446,18 @@ func ListCloudSnapshots(
 	if !ok {
 		return nil, false, nil
 	}
-	entries, err = lister.ListSnapshots(ctx)
+	entries, err = lister.ListSnapshots(ctx, opts...)
 	if err != nil {
 		return nil, true, fmt.Errorf(
 			"list snapshots at %q: %w", cloudDest, err,
 		)
+	}
+	for _, entry := range entries {
+		if err := entry.Manifest.Authenticate(opts...); err != nil {
+			return nil, true, fmt.Errorf(
+				"authenticate cloud snapshot %q: %w", entry.ID, err,
+			)
+		}
 	}
 	return entries, true, nil
 }
@@ -451,8 +465,9 @@ func ListCloudSnapshots(
 // FetchCloudManifest resolves the CloudDestination at the given exact
 // snapshot URI (a specific snapshot's own location — see JoinCloudURI,
 // not a base destination) and fetches its manifest, if that destination
-// type implements CloudManifestFetcher. ok=false (nil error) means the
-// destination type doesn't support this. ok=true with a non-nil err
+// type implements ConfigurableCloudManifestFetcher. A manifest trust key is
+// required. ok=false (nil error) means the destination type doesn't support
+// authenticated fetches. ok=true with a non-nil err
 // means an actual fetch was attempted and failed — check errors.Is(err,
 // ErrCloudSnapshotNotFound) to tell "confirmed absent" apart from a real
 // communication failure (auth, network, timeout); only the former should
@@ -466,24 +481,22 @@ func FetchCloudManifest(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, false, err
 	}
+	if err := requireManifestKey(opts); err != nil {
+		return Manifest{}, false, err
+	}
 	dest, err := ParseCloudDestination(registry, snapshotURI)
 	if err != nil {
 		return Manifest{}, false, err
 	}
 	defer closeCloudDestination(dest)
-	if len(opts) > 0 {
-		fetcher, supportsOptions := dest.(ConfigurableCloudManifestFetcher)
-		if !supportsOptions {
-			return Manifest{}, true, errors.New("cloud destination does not support manifest options")
-		}
-		m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
-		return m, true, err
-	}
-	fetcher, ok := dest.(CloudManifestFetcher)
+	fetcher, ok := dest.(ConfigurableCloudManifestFetcher)
 	if !ok {
 		return Manifest{}, false, nil
 	}
-	m, err = fetcher.FetchManifest(ctx)
+	m, err = fetcher.FetchManifestWithOptions(ctx, opts...)
+	if err == nil {
+		err = m.Authenticate(opts...)
+	}
 	return m, true, err
 }
 

@@ -189,6 +189,7 @@ func (d *gcsDestination) DownloadFiles(
 // manifest.json rather than downloading the whole snapshot.
 func (d *gcsDestination) ListSnapshots(
 	ctx context.Context,
+	opts ...ManifestOption,
 ) ([]SnapshotEntry, error) {
 	listPrefix := ""
 	if d.prefix != "" {
@@ -226,7 +227,9 @@ func (d *gcsDestination) ListSnapshots(
 		if snapshotID == "" {
 			continue
 		}
-		manifest, err := d.fetchManifest(ctx, snapshotID)
+		manifest, err := d.fetchManifestWithOptions(
+			ctx, snapshotID, opts...,
+		)
 		if err != nil {
 			// A sub-path with no manifest.json object at all
 			// (ErrCloudSnapshotNotFound) is a snapshot still being
@@ -292,13 +295,21 @@ func (d *gcsDestination) FetchManifest(ctx context.Context) (Manifest, error) {
 }
 
 func (d *gcsDestination) FetchManifestWithOptions(ctx context.Context, opts ...ManifestOption) (Manifest, error) {
+	return d.fetchManifestWithOptions(ctx, "", opts...)
+}
+
+func (d *gcsDestination) fetchManifestWithOptions(
+	ctx context.Context,
+	snapshotID string,
+	opts ...ManifestOption,
+) (Manifest, error) {
 	limit, err := manifestByteLimit(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
 	configured := *d
 	configured.maxManifestBytes = limit
-	m, err := configured.FetchManifest(ctx)
+	m, err := configured.fetchManifest(ctx, snapshotID)
 	if err != nil {
 		return Manifest{}, err
 	}

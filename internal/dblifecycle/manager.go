@@ -440,8 +440,15 @@ func (m *Manager) handleEpochTransition(
 			"dir",
 			destDir,
 		)
+		manifestOpts, err := ManifestOptions(m.cfg)
+		if err != nil {
+			return fmt.Errorf(
+				"retry epoch-boundary snapshot cloud mirror: %w", err,
+			)
+		}
 		if err := lifecycle.MirrorToCloud(
 			ctx, m.destinationRegistry, destDir, cloudDest,
+			manifestOpts...,
 		); err != nil {
 			return fmt.Errorf(
 				"retry epoch-boundary snapshot cloud mirror: %w", err,
@@ -582,8 +589,13 @@ func (m *Manager) retryMirrorToCloud(
 			err = fmt.Errorf("panic retrying cloud mirror: %v", r)
 		}
 	}()
+	manifestOpts, err := ManifestOptions(m.cfg)
+	if err != nil {
+		return err
+	}
 	return lifecycle.MirrorToCloud(
 		ctx, m.destinationRegistry, dir, m.effectiveCloudDestination(),
+		manifestOpts...,
 	)
 }
 
