@@ -8825,8 +8825,9 @@ introduced for this endpoint. Account withdrawals read the rollback-aware
 `account_reward_delta` withdrawal journal joined to its transaction, with
 `LIMIT`/`OFFSET` applied in SQL.
 
-Account transactions is bounded by the requested page size, not by the
-credential's full transaction history: `address_transaction` already carries
+Account and address transaction queries are bounded by the requested page
+size, not by the credential's or address's full transaction history:
+`address_transaction` already carries
 one row per (payment address, transaction) association with its own
 `slot`/`tx_index` columns (populated by the same indexing step that fans a
 transaction's inputs/collateral/reference-inputs/outputs/collateral-return
@@ -8834,11 +8835,13 @@ out into that table), so the query pages directly against it with SQL
 `ORDER BY`/`LIMIT`/`OFFSET` and an inclusive `(slot, tx_index)` range
 predicate for `from`/`to` — no application-level fan-out or filtering
 happens after the query returns. A block number in `from`/`to` is resolved
-to its slot via two bounded index lookups (`Database.BlockByIndex`,
-`Database.BlockAtOrAfterIndex`) rather than a scan: an unresolvable `from`
-(beyond every known block) makes the range unsatisfiable and short-circuits
-to an empty result; an unresolvable `to` degrades to unconstrained on that
-side rather than guessing at a boundary that cannot be looked up backward.
+with bounded index lookups (`Database.BlockByIndex` and, when the exact
+block is absent, `Database.BlockAtOrAfterIndex` for `from` or
+`Database.BlockAtOrBeforeIndex` for `to`) rather than a scan. In an import
+gap, `from` resolves to the next existing block and `to` resolves to the
+preceding existing block. If the needed boundary does not exist, the range
+is empty; a `to` beyond the latest block resolves to the latest block. An
+explicit transaction index applies only when the exact block exists.
 The payment-credential script/key bit needed to reconstruct each row's
 exact address, and the block height/time needed for its response fields,
 are then resolved only for the page's own (<= page size) distinct payment
