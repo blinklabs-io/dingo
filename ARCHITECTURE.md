@@ -1563,7 +1563,10 @@ transactions that change ledger state beyond UTxOs: reward withdrawals,
 certificates, direct deposits and governance proposals. The overlay layers
 them over the ledger view with gouroboros `BlockLedgerState`, so a transaction
 is checked against the balances, registrations and deposits those leave rather
-than the stored ones. The overlay folds each recorded transaction once, on the
+than the stored ones. The layered state does not itself carry the view's
+optional validation capabilities, such as the minimum pool margin, committee
+state and the phase-2 skip, so era validation looks each one up on the state
+it is given and then on the provider beneath its validation adapters. The overlay folds each recorded transaction once, on the
 next validation, so a pool of k such transactions costs k applications in total
 and a pool rebuild costs k, not k per validation. The folded state caches
 what it read from the ledger, so it is keyed to the ledger snapshot
