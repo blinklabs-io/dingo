@@ -18,6 +18,7 @@ package mithril
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -84,6 +86,7 @@ func TestLiveS3ArtifactStore(t *testing.T) {
 		context.Background(), &s3.CreateBucketInput{Bucket: aws.String(bucket)},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { removeS3Bucket(t, s3Store.client, bucket) })
 
 	requireArtifactStoreContract(t, store)
 	requireStoreCycle(t, store)
@@ -107,6 +110,7 @@ func TestLiveGCSArtifactStore(t *testing.T) {
 	require.NoError(t, client.Bucket(bucket).Create(
 		context.Background(), "dingo-test", nil,
 	))
+	t.Cleanup(func() { removeGCSBucket(t, client.Bucket(bucket)) })
 
 	store, err := OpenArtifactStore(
 		context.Background(), "gcs://"+bucket+"/snapshots",
@@ -116,4 +120,44 @@ func TestLiveGCSArtifactStore(t *testing.T) {
 
 	requireArtifactStoreContract(t, store)
 	requireStoreCycle(t, store)
+}
+
+// removeS3Bucket deletes every object in bucket and then the bucket, so runs
+// do not accumulate resources in the service.
+func removeS3Bucket(t *testing.T, client *s3.Client, bucket string) {
+	t.Helper()
+	ctx := context.Background()
+	pages := s3.NewListObjectsV2Paginator(
+		client, &s3.ListObjectsV2Input{Bucket: aws.String(bucket)},
+	)
+	for pages.HasMorePages() {
+		page, err := pages.NextPage(ctx)
+		require.NoError(t, err)
+		for _, obj := range page.Contents {
+			_, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(bucket), Key: obj.Key,
+			})
+			require.NoError(t, err)
+		}
+	}
+	_, err := client.DeleteBucket(
+		ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)},
+	)
+	require.NoError(t, err)
+}
+
+// removeGCSBucket deletes every object in bucket and then the bucket.
+func removeGCSBucket(t *testing.T, bucket *storage.BucketHandle) {
+	t.Helper()
+	ctx := context.Background()
+	objects := bucket.Objects(ctx, nil)
+	for {
+		attrs, err := objects.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		require.NoError(t, err)
+		require.NoError(t, bucket.Object(attrs.Name).Delete(ctx))
+	}
+	require.NoError(t, bucket.Delete(ctx))
 }
