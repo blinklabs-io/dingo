@@ -164,13 +164,16 @@ func TestProviderStorageModeRunModeDefaults(t *testing.T) {
 
 // TestProviderExplicitConfigOverridesDefaults verifies that explicit provider
 // config values win over the storage-mode/run-mode-derived defaults. API mode
-// with the load run mode would otherwise force large caches, compression on,
-// and GC off, so every explicit value below must override those defaults.
+// with the load run mode would otherwise force large caches and compression
+// on, so the explicit cache and compression values must override those
+// defaults. GC is the exception: Badger's Load must be the only operation on
+// the store, so the load run mode keeps GC off even when config sets gc: true.
 func TestProviderExplicitConfigOverridesDefaults(t *testing.T) {
 	store := resolveBadgerProvider(t, map[string]any{
 		"blockCacheSize":   uint64(4096),
 		"indexCacheSize":   uint64(8192),
 		"compression":      false,
+		"gc":               true,
 		"compressionLevel": 7,
 	}, blob.ProviderDependencies{
 		StorageMode: "api",

@@ -176,16 +176,14 @@ func BenchmarkValueLogGC(b *testing.B) {
 				successes := 0
 				reclaimed := int64(0)
 				for range 32 {
-					passBefore, sizeErr := store.DiskSize()
-					require.NoError(b, sizeErr)
+					passBefore := onDiskTotal(b, store)
 					err = store.DB().RunValueLogGC(ratio)
 					if errors.Is(err, badgerdb.ErrNoRewrite) {
 						continue
 					}
 					require.NoError(b, err)
 					successes++
-					passAfter, sizeErr := store.DiskSize()
-					require.NoError(b, sizeErr)
+					passAfter := onDiskTotal(b, store)
 					if passBefore > passAfter &&
 						passBefore-passAfter > reclaimed {
 						reclaimed = passBefore - passAfter
@@ -269,6 +267,14 @@ func populateGCFixture(b testing.TB, store *BlobStoreBadger) {
 	require.NoError(b, store.DB().Sync())
 }
 
+// onDiskTotal returns the LSM and value-log bytes in the store directory.
+func onDiskTotal(tb testing.TB, store *BlobStoreBadger) int64 {
+	tb.Helper()
+	lsm, vlog, err := store.onDiskSize()
+	require.NoError(tb, err)
+	return lsm + vlog
+}
+
 // gcPolicyResult is what one GC policy did against the standard fixture.
 type gcPolicyResult struct {
 	// Passes counts successful value-log rewrites.
@@ -304,11 +310,13 @@ func measureGCPolicy(
 	)
 	require.NoError(tb, err)
 	var (
-		armed   atomic.Bool
-		mu      sync.Mutex
-		result  gcPolicyResult
-		drained = make(chan struct{})
-		once    sync.Once
+		armed    atomic.Bool
+		mu       sync.Mutex
+		result   gcPolicyResult
+		drained  = make(chan struct{})
+		once     sync.Once
+		after    int64
+		afterErr error
 	)
 	store.runValueLogGC = func(r float64) error {
 		if !armed.Load() {
@@ -321,15 +329,21 @@ func measureGCPolicy(
 		if err == nil {
 			result.Passes++
 		} else if errors.Is(err, badgerdb.ErrNoRewrite) && result.Passes > 0 {
-			once.Do(func() { close(drained) })
+			once.Do(func() {
+				// Measured here rather than after Close, which truncates the
+				// preallocated active value-log file and would inflate the
+				// figure.
+				lsm, vlog, sizeErr := store.onDiskSize()
+				after, afterErr = lsm+vlog, sizeErr
+				close(drained)
+			})
 		}
 		return err
 	}
 	require.NoError(tb, store.Start())
 	tb.Cleanup(func() { require.NoError(tb, store.Close()) })
 	populateGCFixture(tb, store)
-	before, err := store.DiskSize()
-	require.NoError(tb, err)
+	before := onDiskTotal(tb, store)
 	started := time.Now()
 	armed.Store(true)
 	select {
@@ -339,10 +353,9 @@ func measureGCPolicy(
 	}
 	elapsed := time.Since(started)
 	require.NoError(tb, store.Close())
-	after, err := store.DiskSize()
-	require.NoError(tb, err)
 	mu.Lock()
 	defer mu.Unlock()
+	require.NoError(tb, afterErr)
 	result.Drain = elapsed
 	if before > after {
 		result.Reclaimed = before - after
@@ -382,6 +395,7 @@ func TestMeasureGCPolicyDrivesProductionWorker(t *testing.T) {
 			require.InDelta(t, ratio, got, 0)
 		}
 		require.Positive(t, result.Drain)
+		require.Positive(t, result.Reclaimed, "no reclaimed bytes reported")
 	}
 }
 

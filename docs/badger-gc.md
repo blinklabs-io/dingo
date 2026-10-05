@@ -22,7 +22,8 @@ GOWORK=off GOCACHE=/tmp/dingo-gc-cache \\
 `BenchmarkValueLogGCPolicy` runs the production GC worker, so the configured
 interval and discard ratio are the ones measured, over the same fixture. It
 reports `rewrites`, `bytes_reclaimed`, and `drain_ms` (time from enabling the
-worker until it reports no further rewrite) for each interval and ratio pair;
+worker until it reports no further rewrite) for each interval and ratio pair,
+with `bytes_reclaimed` taken from the on-disk file sizes at the drain;
 its `ns/op` includes fixture load and should be ignored.
 
 Run the production-worker benchmark separately:
@@ -68,7 +69,9 @@ When Prometheus metrics are configured, inspect:
 - `database_blob_gc_duration_seconds` (time spent inside the Badger
   `RunValueLogGC` call, excluding the pre-GC size snapshot);
 - `database_blob_gc_lsm_bytes`, `..._vlog_bytes`, and
-  `..._reclaimed_bytes`;
+  `..._reclaimed_bytes`, read from the `.sst` and `.vlog` file sizes on disk
+  around each rewrite, because Badger's own size counters refresh only once a
+  minute;
 - `database_blob_gc_consecutive_successes` and
   `database_blob_gc_last_success_timestamp_seconds`.
 

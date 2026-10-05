@@ -507,10 +507,12 @@ func (d *BlobStoreBadger) blobGc(
 			default:
 			}
 			for {
-				var beforeLSM, beforeVlog int64
+				var beforeSize int64
+				sizeKnown := false
 				if d.gcMetrics != nil {
 					d.gcMetrics.attempts.Inc()
-					beforeLSM, beforeVlog = d.DB().Size()
+					lsm, vlog, sizeErr := d.onDiskSize()
+					beforeSize, sizeKnown = lsm+vlog, sizeErr == nil
 				}
 				gcStarted := time.Now()
 				err := d.runValueLogGC(d.gcDiscardRatio)
@@ -539,12 +541,13 @@ func (d *BlobStoreBadger) blobGc(
 				}
 				if d.gcMetrics != nil {
 					d.gcMetrics.successes.Inc()
-					afterLSM, afterVlog := d.DB().Size()
-					d.gcMetrics.lsmBytes.Set(float64(afterLSM))
-					d.gcMetrics.vlogBytes.Set(float64(afterVlog))
-					beforeSize := beforeLSM + beforeVlog
+					afterLSM, afterVlog, sizeErr := d.onDiskSize()
+					if sizeErr == nil {
+						d.gcMetrics.lsmBytes.Set(float64(afterLSM))
+						d.gcMetrics.vlogBytes.Set(float64(afterVlog))
+					}
 					afterSize := afterLSM + afterVlog
-					if beforeSize > afterSize {
+					if sizeKnown && sizeErr == nil && beforeSize > afterSize {
 						d.gcMetrics.reclaimedBytes.Set(
 							float64(beforeSize - afterSize),
 						)
@@ -666,6 +669,39 @@ func (d *BlobStoreBadger) DiskSize() (int64, error) {
 	}
 	lsm, vlog := db.Size()
 	return lsm + vlog, nil
+}
+
+// onDiskSize sums the LSM table and value-log files in the Badger directory.
+// DB.Size reads counters Badger refreshes only at open and once a minute, so
+// it cannot show what a single GC rewrite freed. In-memory stores report 0.
+func (d *BlobStoreBadger) onDiskSize() (lsm, vlog int64, err error) {
+	if d.dataDir == "" {
+		return 0, 0, nil
+	}
+	entries, err := os.ReadDir(filepath.Join(d.dataDir, "blob"))
+	if err != nil {
+		return 0, 0, fmt.Errorf("read badger dir: %w", err)
+	}
+	for _, entry := range entries {
+		ext := filepath.Ext(entry.Name())
+		if ext != ".sst" && ext != ".vlog" {
+			continue
+		}
+		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			// GC or compaction removed the file after ReadDir listed it.
+			continue
+		}
+		if err != nil {
+			return 0, 0, fmt.Errorf("stat badger file: %w", err)
+		}
+		if ext == ".sst" {
+			lsm += info.Size()
+		} else {
+			vlog += info.Size()
+		}
+	}
+	return lsm, vlog, nil
 }
 
 // Sync flushes committed writes to disk. Badger is opened with its default
