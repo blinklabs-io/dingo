@@ -820,6 +820,12 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 		order = append(order, key)
 	}
 	for _, key := range order {
+		// Validate before the ambiguity filter, or a malformed hash seated
+		// under both tags is dropped silently instead of failing.
+		coldHash, err := common.NewBlake2b224Checked([]byte(key.hash))
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted.
 		if len(tagsByHash[key.hash]) != 1 {
@@ -827,7 +833,7 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 		}
 		member, err := p.CommitteeCredentialMember(common.Credential{
 			CredType:   uint(key.tag),
-			Credential: common.NewBlake2b224([]byte(key.hash)),
+			Credential: coldHash,
 		})
 		if err != nil {
 			return nil, err

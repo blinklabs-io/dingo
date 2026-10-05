@@ -19,7 +19,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"math/bits"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -52,6 +54,10 @@ func lookupBlockBeforeSlot(
 // exist in the epoch but no pre-stored nonce rows are found. The caller
 // falls back to the slow CBOR-decode path.
 var errNoncesMissing = errors.New("block nonce rows missing for epoch")
+
+// errEpochRangeOverflow is returned when an epoch's end slot does not fit in
+// a uint64.
+var errEpochRangeOverflow = errors.New("epoch slot range overflows uint64")
 
 // computeCandidateNonce computes the candidate nonce and end-of-epoch
 // evolving nonce for the given epoch.
@@ -113,7 +119,7 @@ func (ls *LedgerState) computeCandidateNonce(
 		prevCandidateNonce,
 		epochStartSlot,
 		epochLengthInSlots,
-		epochStartSlot+epochLengthInSlots,
+		math.MaxUint64, // clamped to the epoch's end by the callee
 	)
 }
 
@@ -142,7 +148,13 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	foldEndSlot uint64,
 ) ([]byte, []byte, error) {
 	stabilityWindow := ls.nonceStabilityWindow(eraId)
-	epochEndSlot := epochStartSlot + epochLengthInSlots
+	epochEndSlot, carry := bits.Add64(epochStartSlot, epochLengthInSlots, 0)
+	if carry != 0 {
+		return nil, nil, fmt.Errorf(
+			"%w: start slot %d, length %d",
+			errEpochRangeOverflow, epochStartSlot, epochLengthInSlots,
+		)
+	}
 
 	// Determine the cutoff slot. Blocks at or past this slot do NOT
 	// update candidateNonce (it freezes), but still update evolvingNonce.
@@ -150,8 +162,7 @@ func (ls *LedgerState) computeCandidateNonceAsOf(
 	if stabilityWindow >= epochLengthInSlots {
 		cutoffSlot = epochStartSlot
 	} else {
-		cutoffSlot = epochStartSlot + epochLengthInSlots -
-			stabilityWindow
+		cutoffSlot = epochEndSlot - stabilityWindow
 	}
 
 	if foldEndSlot > epochEndSlot {
