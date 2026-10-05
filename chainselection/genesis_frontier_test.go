@@ -79,9 +79,9 @@ func TestGenesisBehindExclusionIgnoresUncorroboratedFrontier(t *testing.T) {
 	)
 }
 
-// Suffix support is measured in block numbers, even when the corresponding
-// slot gap is larger than the security parameter.
-func TestGenesisWitnessSuffixUsesBlockNumber(t *testing.T) {
+// A witness must independently deliver the candidate's current point. Sharing
+// an older point does not authorize the candidate's unobserved suffix.
+func TestGenesisWitnessRequiresCandidateTip(t *testing.T) {
 	t.Parallel()
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:        true,
@@ -97,20 +97,25 @@ func TestGenesisWitnessSuffixUsesBlockNumber(t *testing.T) {
 	cs.peerTips[stale].Touch()
 	staleTip := cs.peerTips[stale]
 	fastTip := cs.peerTips[fast]
-	supports := fastTip.confirmsRecentChain(staleTip)
+	confirms := fastTip.confirmsRecentChain(staleTip)
 	cs.mutex.Unlock()
-	require.True(
+	require.False(
 		t,
-		supports,
-		"fixture must share a window point with the fast chain",
+		confirms,
+		"a shared ancestor must not authorize the candidate suffix",
 	)
 
-	assert.Equal(t, 1, cs.corroboratingPeers(fast))
-	assert.True(t, cs.frontierTrusted(fast))
+	assert.Zero(t, cs.corroboratingPeers(fast))
+	assert.False(t, cs.frontierTrusted(fast))
 
 	near := corrConn(4)
 	feedChain(cs, near, "a", 910, 990, 10)
-	assert.Equal(t, 2, cs.corroboratingPeers(fast))
+	assert.Zero(t, cs.corroboratingPeers(fast))
+	assert.False(t, cs.frontierTrusted(fast))
+
+	current := corrConn(5)
+	feedChain(cs, current, "a", 910, 1000, 10)
+	assert.Equal(t, 1, cs.corroboratingPeers(fast))
 	assert.True(t, cs.frontierTrusted(fast))
 }
 

@@ -110,10 +110,10 @@ func (cs *ChainSelector) corroboratorIdentity(
 	return addr
 }
 
-// witnessSupportsSuffixLocked reports whether the witness's delivered tip is
-// no more than k blocks behind the candidate's delivered tip; the distance is
-// measured from the candidate tip. A witness may be ahead. Keepalive activity
-// does not advance this delivered frontier.
+// witnessSupportsSuffixLocked checks that the witness's delivered block number
+// is consistent with the candidate's current point within k blocks. The point
+// itself must match in confirmsRecentChain. Keepalive activity does not advance
+// this delivered frontier.
 func (cs *ChainSelector) witnessSupportsSuffixLocked(
 	candidateTip *PeerChainTip,
 	witnessTip *PeerChainTip,

@@ -4837,18 +4837,19 @@ it. Dingo implements this as a **corroboration gate**
 - A candidate peer is **corroborated** when at least `corroborationPeers`
   independent witness peers *confirm the candidate's recent chain*
   (`confirmsRecentChain`): every block a witness observed within the candidate's
-  window slot range matches the candidate's own `(slot, hash)`, and they share at
-  least one such block. The observed frontier is populated per header during
-  chainsync (dense), so two peers on the same chain agree on every block in their
-  overlap. This is deliberately stronger than "share any common point": a fast
+  retained `k+1` suffix matches the candidate's own `(slot, hash)`, and the
+  witness independently delivered the candidate's current point. The observed
+  frontier is populated per header during chainsync (dense), so two peers on
+  the same chain agree on every block in their overlap. This is deliberately
+  stronger than "share any common point": a fast
   source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
-- A witness must also **reach the candidate's suffix**: its delivered frontier
-  block number may be at most `securityParam` blocks behind the candidate's
-  delivered tip, and may be ahead of it (`witnessSupportsSuffixLocked`). A
-  witness that only shares a point the candidate passed long ago, however
-  recently it answered a keepalive, does not count.
+- A witness must also **reach the candidate's suffix**: it must have delivered
+  the candidate's current point, and its delivered frontier block number must
+  remain within the `securityParam` bound (`witnessSupportsSuffixLocked`). A
+  witness that only shares an older point, however recently it answered a
+  keepalive, does not count.
 - Witnesses are counted by distinct **peer identity**, and a witness with the
   candidate's own identity is excluded, so several connections from one operator
   cannot self-corroborate a private fork. The identity is peer governance's
@@ -5002,18 +5003,12 @@ corroboration is active, so corroboration granted or revoked takes effect
 immediately rather than on the next periodic tick.
 
 **Deferred / not implemented**: Dingo does not yet implement **ChainSync
-Jumping** or **Devoted BlockFetch**. The corroboration gate also cannot
-testify about blocks a fast source produced beyond every witness's frontier: a
-source that stays consistent with honest peers up to their frontiers but forks
-only in the not-yet-witnessed suffix remains corroborated until a witness
-advances past the fork. Intersection-anchored fork resolution still compares
-that fetched suffix against the local candidate, but independent corroboration
-of the suffix necessarily waits for witnesses to observe it. Wiring
+Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
+until independent witnesses deliver its current point; it does not buffer and
+apply only the confirmed prefix of a source that runs ahead. Wiring
 peer-governance demotion to the corroboration-failure event is likewise
-deferred. These remain future work; the corroboration gate confirms only the
-overlap that independent witnesses have observed. Density-at-intersection can
-compare an unseen suffix with the local candidate, but does not independently
-corroborate that suffix.
+deferred. Density-at-intersection can compare an unseen suffix with the local
+candidate, but does not independently corroborate that suffix.
 
 #### Genesis Limit on Patience
 

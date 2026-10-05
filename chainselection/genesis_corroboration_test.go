@@ -432,11 +432,18 @@ func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
 	assert.False(t, cs.ShouldApplyIngress(fast),
 		"uncorroborated fast source must not be apply-eligible")
 
-	// A corroborator arrives: both become apply-eligible.
+	// A corroborator that has not delivered the candidate's current point does
+	// not authorize its unobserved suffix.
 	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 	)
+	assert.False(t, cs.ShouldApplyIngress(fast),
+		"a shared prefix must not authorize an unobserved suffix")
+
+	// Once the corroborator independently delivers the current point, both
+	// peers become apply-eligible.
+	feedFrontier(cs, witness, genesisTip(110, "h110", 110))
 	assert.True(t, cs.ShouldApplyIngress(fast))
 	assert.True(t, cs.ShouldApplyIngress(witness))
 
@@ -492,14 +499,15 @@ func TestChainSelectedNoneEventOnCorroborationRevocation(t *testing.T) {
 
 	fast := corrConn(1)
 	witness := corrConn(2)
-	feedFrontier(cs, fast,
+	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	feedFrontier(cs, witness,
+	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
@@ -536,20 +544,23 @@ func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
 	corroboratorA := corrConn(2)
 	corroboratorB := corrConn(3)
 
-	// Fast source: three blocks in the window (densest).
+	// The first corroborator is not selectable alone. As the fast source catches
+	// up to it, the fast source becomes the corroborated incumbent.
+	feedFrontier(cs, corroboratorA,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
 	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	// Corroborators are on the same chain: they report the SAME hashes at the
-	// slots they have both seen, just fewer blocks (they are slower sources).
-	feedFrontier(cs, corroboratorA,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-	)
+	// A second corroborator independently delivers the same dense chain.
 	feedFrontier(cs, corroboratorB,
 		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 
 	cs.EvaluateAndSwitch()
@@ -852,14 +863,15 @@ func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
 
 	fast := corrConn(1)
 	witness := corrConn(2)
-	feedFrontier(cs, fast,
+	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	feedFrontier(cs, witness,
+	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
@@ -1005,10 +1017,11 @@ func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
 	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, fast, *cs.GetBestPeer())
+	assert.True(t, cs.ShouldApplyIngress(fast))
 }
 
 // Corroboration is opt-in. With MinCorroboratingPeers == 0 (the default), a
@@ -1050,6 +1063,7 @@ func TestGenesisStatusObservability(t *testing.T) {
 		genesisTip(110, "h110", 110),
 	)
 	feedFrontier(cs, corroborator,
+		// This peer joined at the slot-105 intersection.
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
@@ -1060,7 +1074,6 @@ func TestGenesisStatusObservability(t *testing.T) {
 	assert.Equal(t, uint64(30), status.WindowSlots)
 	assert.Equal(t, 1, status.MinCorroboratingPeers)
 	require.NotNil(t, status.BestSource)
-	assert.Equal(t, fast, *status.BestSource)
 
 	byConn := make(
 		map[ouroboros.ConnectionId]GenesisPeerStatus,
@@ -1074,6 +1087,7 @@ func TestGenesisStatusObservability(t *testing.T) {
 	assert.Equal(t, uint64(3), fastStatus.ObservedDensity)
 	assert.GreaterOrEqual(t, fastStatus.CorroboratingPeers, 1)
 	assert.True(t, fastStatus.Corroborated)
+	assert.True(t, byConn[*status.BestSource].Corroborated)
 }
 
 // When the local tip catches up into the Genesis window of the best known

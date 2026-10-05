@@ -415,8 +415,8 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // confirmsRecentChain reports whether witness confirms this peer's (candidate's)
 // recent chain. It considers the candidate tip and the up to k preceding blocks
 // retained in its delivered-tip history. Within that range, every
-// witness-observed point must match the candidate, and the witness must share
-// at least one such point.
+// witness-observed point must match the candidate, and the witness must have
+// independently delivered the candidate's current point.
 //
 // This is deliberately stronger than "share any common point": a fast source
 // that shares only an old ancestor and then diverges for every later block is
@@ -425,7 +425,8 @@ func (p *PeerChainTip) observedHistoryConflictsAt(point ocommon.Point) bool {
 // not overlap the candidate's window at all cannot confirm it (returns false),
 // so corroboration fails closed — the candidate then stalls rather than being
 // followed uncorroborated. A match only in older candidate history does not
-// confirm the current suffix.
+// confirm the current suffix. Requiring the current point prevents a shared
+// ancestor from authorizing candidate blocks the witness has never observed.
 //
 // Both frontiers are kept in strictly-ascending slot order; this is a
 // two-pointer scan. It relies on the observed frontier being populated per
@@ -449,7 +450,7 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 	lo := candidate[0].Slot
 	hi := candidate[len(candidate)-1].Slot
 	i := 0
-	hadMatch := false
+	tipMatched := false
 	for _, w := range witness.observedPoints {
 		if w.Slot < lo {
 			continue
@@ -462,7 +463,7 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 		}
 		if i < len(candidate) && candidate[i].Slot == w.Slot &&
 			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
-			hadMatch = true
+			tipMatched = i == len(candidate)-1
 			continue
 		}
 		// The witness observed a block within the candidate's range that the
@@ -470,7 +471,7 @@ func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
 		// they are on different chains, so this witness does not confirm.
 		return false
 	}
-	return hadMatch
+	return tipMatched
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {
