@@ -1190,6 +1190,7 @@ dingo/
 │   ├── peer_tip.go      # Peer tip tracking
 │   └── vrf.go           # VRF verification
 ├── consensus/praos/     # Praos comparison, snapshots, and ledger views
+├── consensus/peras/     # Peras (CIP-0140) package scaffold, no logic yet
 ├── chainsync/           # Block synchronization protocol state
 │   ├── chainsync.go     # Multi-client sync state, stall detection
 │   └── strategy.go      # Configurable multi-active header-sync strategy
