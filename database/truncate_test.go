@@ -591,3 +591,42 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 	require.Equal(t, rewardBefore, poolAfter.RewardAccount,
 		"reward_account must revert to the surviving pre-truncate registration")
 }
+
+// TestRollbackAfterSlotResetsHistoryExpiryCursor verifies a slot rollback
+// clears the expiry cursor. Replay after the rollback can store blocks below
+// the old cursor, and a pruner resuming there would never expire them.
+func TestRollbackAfterSlotResetsHistoryExpiryCursor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		rollback func(*Database, ocommon.Point) error
+	}{
+		{
+			name: "TruncateAfterSlot",
+			rollback: func(db *Database, point ocommon.Point) error {
+				_, _, err := db.TruncateAfterSlot(point, 0, nil)
+				return err
+			},
+		},
+		{
+			name: "RollbackMetadataAfterSlot",
+			rollback: func(db *Database, point ocommon.Point) error {
+				return db.RollbackMetadataAfterSlot(point, 0, nil)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDB(t)
+			targetBlock := testIndexedBlock(1500, 1, 0x15)
+			require.NoError(t, db.BlockCreate(targetBlock, nil))
+			require.NoError(
+				t,
+				db.SetSyncState(HistoryExpiryCursorSyncKey, "1400", nil),
+			)
+			point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
+			require.NoError(t, tc.rollback(db, point))
+			got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
+			require.NoError(t, err)
+			require.Equal(t, "0", got)
+		})
+	}
+}
