@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/mithril"
-	"github.com/blinklabs-io/dingo/mithril/signer"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/spf13/cobra"
 )
@@ -86,20 +85,10 @@ func serveRun(
 	}
 
 	// Run node
-	if err := node.Run(cfg, logger, nodeServices(cfg)...); err != nil {
+	if err := node.Run(cfg, logger); err != nil {
 		return err
 	}
 	return nil
-}
-
-// nodeServices lists the services the configuration enables. They are built
-// here because their packages import the node's own package.
-func nodeServices(cfg *config.Config) []dingo.NodeService {
-	var services []dingo.NodeService
-	if cfg.Mithril.Signer.Enabled {
-		services = append(services, signer.Service(cfg))
-	}
-	return services
 }
 
 func checkSyncState(

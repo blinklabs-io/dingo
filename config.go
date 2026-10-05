@@ -261,7 +261,6 @@ type Config struct {
 	genesisWindowSlots                                                                  uint64
 	genesisCorroborationPeers                                                           int
 	blockProducer                                                                       bool
-	services                                                                            []NodeService
 	shelleyVRFKey, shelleyKESKey, shelleyOperationalCertificate                         string
 	shelleyKESAgentSocket, shelleyKESAgentMode                                          string
 	shelleyKESAgentSignTimeout                                                          time.Duration

@@ -770,10 +770,6 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
-	if c.Mithril.Signer.Enabled {
-		errs = append(errs, c.validateMithrilSigner()...)
-	}
-
 	if c.DelegatorInactivityEnabled &&
 		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {
 		errs = append(errs, fmt.Errorf(
@@ -1048,104 +1044,4 @@ func validatePathNoTraversal(setting, path string) error {
 		}
 	}
 	return nil
-}
-
-// validateMithrilSigner checks an enabled Mithril signer: every setting is
-// present, the key files exist, the endpoint is well-formed and, when block
-// production is also enabled, the signer shares its KES key and operational
-// certificate.
-func (c *Config) validateMithrilSigner() []error {
-	signer := c.Mithril.Signer
-	var errs []error
-	var missing []string
-	for _, setting := range []struct{ name, value string }{
-		{"kesKey", signer.KESKey},
-		{"operationalCert", signer.OperationalCert},
-		{"coldVkey", signer.ColdVKey},
-		{"stmKey", signer.STMKey},
-	} {
-		if setting.value == "" {
-			missing = append(missing, setting.name)
-		}
-	}
-	if len(missing) > 0 {
-		errs = append(errs, fmt.Errorf(
-			"mithril.signer enabled but missing required settings: %v",
-			missing,
-		))
-	}
-	for _, setting := range []struct{ name, value string }{
-		{"kesKey", signer.KESKey},
-		{"operationalCert", signer.OperationalCert},
-		{"coldVkey", signer.ColdVKey},
-	} {
-		if setting.value == "" {
-			continue
-		}
-		if _, err := os.Stat(setting.value); err != nil {
-			errs = append(errs, fmt.Errorf(
-				"invalid mithril.signer.%s: %w", setting.name, err,
-			))
-		}
-	}
-	if endpoint := signer.AggregatorEndpoint; endpoint != "" {
-		parsed, err := url.Parse(endpoint)
-		switch {
-		case err != nil || parsed.Hostname() == "":
-			errs = append(errs, errors.New(
-				"invalid mithril.signer.aggregatorEndpoint: "+
-					"must be a URL with a host",
-			))
-		case parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" ||
-			parsed.Fragment != "" || strings.Contains(endpoint, "#"):
-			errs = append(errs, errors.New(
-				"invalid mithril.signer.aggregatorEndpoint: "+
-					"must not include userinfo, query, or fragment",
-			))
-		case parsed.Scheme != "https" &&
-			(parsed.Scheme != "http" || !c.Mithril.AllowInsecureHTTP):
-			errs = append(errs, errors.New(
-				"invalid mithril.signer.aggregatorEndpoint: "+
-					"must use https unless mithril.allowInsecureHttp is set",
-			))
-		}
-	}
-	if c.BlockProducer {
-		for _, shared := range []struct{ name, signer, producer string }{
-			{"kesKey", signer.KESKey, c.ShelleyKESKey},
-			{
-				"operationalCert",
-				signer.OperationalCert,
-				c.ShelleyOperationalCertificate,
-			},
-		} {
-			// An unset producer path is reported by the block producer's
-			// own validation, and a KES agent keeps its key off disk.
-			if shared.signer == "" || shared.producer == "" {
-				continue
-			}
-			if !sameFilePath(shared.signer, shared.producer) {
-				errs = append(errs, fmt.Errorf(
-					"mithril.signer.%s %q must match the block producer's %q",
-					shared.name, shared.signer, shared.producer,
-				))
-			}
-		}
-	}
-	return errs
-}
-
-func sameFilePath(first, second string) bool {
-	resolve := func(path string) string {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return filepath.Clean(path)
-		}
-		resolved, err := filepath.EvalSymlinks(absolute)
-		if err == nil {
-			return resolved
-		}
-		return filepath.Clean(absolute)
-	}
-	return resolve(first) == resolve(second)
 }

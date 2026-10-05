@@ -1167,30 +1167,6 @@ type MithrilConfig struct {
 	// pinned Mithril genesis verification key and verifies the chain back to it.
 	// False explicitly selects the unverified bootstrap flow.
 	VerifyCertificates bool `yaml:"verifyCertificates"     envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
-	// Signer configures the Mithril signer, which signs the aggregator's
-	// stake distribution with the pool's KES key and operational certificate.
-	Signer MithrilSignerConfig `yaml:"signer"`
-}
-
-// MithrilSignerConfig holds configuration for the Mithril signer.
-type MithrilSignerConfig struct {
-	// Enabled runs the signer alongside the node.
-	Enabled bool `yaml:"enabled"            envconfig:"DINGO_MITHRIL_SIGNER_ENABLED"`
-	// KESKey is the pool's KES signing key file. When block production is
-	// also enabled it must be the block producer's key file.
-	KESKey string `yaml:"kesKey"             envconfig:"DINGO_MITHRIL_SIGNER_KES_KEY"`
-	// OperationalCert is the pool's operational certificate file. When block
-	// production is also enabled it must be the block producer's file.
-	OperationalCert string `yaml:"operationalCert"    envconfig:"DINGO_MITHRIL_SIGNER_OPERATIONAL_CERT"`
-	// ColdVKey is the pool's cold verification key file.
-	ColdVKey string `yaml:"coldVkey"           envconfig:"DINGO_MITHRIL_SIGNER_COLD_VKEY"`
-	// STMKey is the file holding the signer's own Mithril signing key. It is
-	// created on first start and must be kept, since the aggregator knows the
-	// matching public key.
-	STMKey string `yaml:"stmKey"             envconfig:"DINGO_MITHRIL_SIGNER_STM_KEY"`
-	// AggregatorEndpoint is the aggregator the signer registers and submits
-	// to. If empty, mithril.aggregatorUrl is used, then the network default.
-	AggregatorEndpoint string `yaml:"aggregatorEndpoint" envconfig:"DINGO_MITHRIL_SIGNER_AGGREGATOR_ENDPOINT"`
 }
 
 // DatabaseLifecycleConfig holds configuration for automatic epoch-boundary

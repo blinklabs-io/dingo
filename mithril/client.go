@@ -15,7 +15,6 @@
 package mithril
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -986,52 +985,25 @@ func (c *Client) GetLatestSnapshot(
 	return &snapshots[0], nil
 }
 
-// HTTPStatusError is returned when the aggregator answers with a status the
-// request does not accept.
-type HTTPStatusError struct {
-	StatusCode int
-	// Body is the start of the response body.
-	Body string
-}
-
-func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("unexpected status %d: %s", e.StatusCode, e.Body)
-}
-
 // doGet performs an HTTP GET request and returns the response body.
 // The caller is responsible for closing the returned ReadCloser.
 func (c *Client) doGet(
 	ctx context.Context,
 	reqURL string,
 ) (io.ReadCloser, error) {
-	return c.doRequest(ctx, http.MethodGet, reqURL, nil, http.StatusOK)
-}
-
-// doRequest performs an HTTP request, treating only the listed statuses as
-// success, and returns the response body. A non-nil payload is sent as JSON.
-// The caller is responsible for closing the returned ReadCloser.
-func (c *Client) doRequest(
-	ctx context.Context,
-	method string,
-	reqURL string,
-	payload []byte,
-	okStatuses ...int,
-) (io.ReadCloser, error) {
 	if err := requireSecureURL(reqURL, "mithril aggregator URL", c.allowInsecureHTTP); err != nil {
 		return nil, err
 	}
-	var reqBody io.Reader
-	if payload != nil {
-		reqBody = bytes.NewReader(payload)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, reqURL, reqBody)
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		reqURL,
+		nil,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
 
 	httpClient, err := secureMithrilHTTPClient(
 		c.httpClient,
@@ -1054,15 +1026,16 @@ func (c *Client) doRequest(
 		return nil, errors.New("nil response from server")
 	}
 
-	if !slices.Contains(okStatuses, resp.StatusCode) {
+	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
-		return nil, redactLocationError(&HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Body:       string(bodyBytes),
-		}, reqURL)
+		return nil, redactLocationError(fmt.Errorf(
+			"unexpected status %d: %s",
+			resp.StatusCode,
+			string(bodyBytes),
+		), reqURL)
 	}
 
 	return &limitedReadCloser{

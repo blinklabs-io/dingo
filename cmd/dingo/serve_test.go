@@ -17,6 +17,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -26,9 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -409,15 +409,6 @@ func TestCheckSyncStateDevModeAgreesWithLaterAPIModeOpen(t *testing.T) {
 		gates["storage_mode"],
 		"dev mode's preflight open must have already latched api, not core",
 	)
-}
-
-func TestNodeServicesFollowTheConfiguration(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{}
-	require.Empty(t, nodeServices(cfg))
-
-	cfg.Mithril.Signer.Enabled = true
-	require.Len(t, nodeServices(cfg), 1)
 }
 
 func TestResumeBackfillFinalizesStatsBeforeClearingSync(t *testing.T) {

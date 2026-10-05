@@ -256,14 +256,7 @@ func logStartupConfig(logger *slog.Logger, cfg *config.Config) {
 	logger.Debug("config", "component", "node", "config", cfg)
 }
 
-// Run starts the node and blocks until it stops. Each service runs for the
-// lifetime of the node; they are passed in rather than built here because
-// their packages import this one.
-func Run(
-	cfg *config.Config,
-	logger *slog.Logger,
-	services ...dingo.NodeService,
-) error {
+func Run(cfg *config.Config, logger *slog.Logger) error {
 	logStartupConfig(logger, cfg)
 	logger.Debug(
 		fmt.Sprintf("topology: %+v", config.GetTopologyConfig()),
@@ -432,21 +425,19 @@ func Run(
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
 	)
 
-	dingoCfg := buildDingoConfig(
-		cfg,
-		logger,
-		nodeCfg,
-		listeners,
-		peerSharing,
-		storageMode,
-		shutdownTimeout,
-		chainsyncStallTimeout,
-		chainsyncStrategy,
+	d, err := dingo.New(
+		buildDingoConfig(
+			cfg,
+			logger,
+			nodeCfg,
+			listeners,
+			peerSharing,
+			storageMode,
+			shutdownTimeout,
+			chainsyncStallTimeout,
+			chainsyncStrategy,
+		),
 	)
-	for _, service := range services {
-		dingo.WithNodeService(service)(&dingoCfg)
-	}
-	d, err := dingo.New(dingoCfg)
 	if err != nil {
 		return err
 	}

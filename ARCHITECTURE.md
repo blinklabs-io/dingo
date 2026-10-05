@@ -1336,10 +1336,6 @@ dingo/
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
-│   ├── client_signer.go # Aggregator calls a signer makes (settings, stake, register)
-│   ├── stm_signer.go    # STM signing key, closed registration, individual signatures
-│   ├── signer_wire.go   # KES signature and operational certificate wire forms
-│   ├── signer/          # Mithril signer: registration and signing rounds
 │   └── download.go      # Snapshot download and extraction
 ├── keystore/            # Key management
 │   ├── keystore.go      # Key store interface
@@ -1551,9 +1547,7 @@ When `Node.Run()` is called, components are initialized in this order:
 25. Off-chain metadata fetcher (if API storage mode)
 26. CIP-26 token registry sync (if API storage mode and tokenRegistry.enabled)
 27. Block forger + leader election (if block producer mode)
-28. Node services supplied by the command layer (the Mithril signer, if
-    `mithril.signer.enabled`)
-29. Wait for shutdown signal
+28. Wait for shutdown signal
 ```
 
 Mempool revalidation uses a private candidate overlay while admissions and
@@ -8142,45 +8136,6 @@ selected state behind the stable point is not imported; startup leaves the
 repair marker pending and retries. The repair marker remains until import and
 deferred index rebuilding complete, so an interrupted repair resumes with
 startup blocked instead of serving partially reconciled state.
-
-### Mithril signer
-
-`mithril/signer` runs a Mithril signer for the pool whose KES key and
-operational certificate are configured under `mithril.signer`. `signer.New`
-loads them through `forging.PoolCredentials.LoadKESFromFiles` (the block
-producer's loader without the VRF key), validates the certificate and its KES
-period against the Shelley genesis and the current slot, checks its counter
-against the ledger's, and requires the cold verification key file to match the
-certificate. The signer's own BLS key (`mithril.signer.stmKey`) is generated on
-first start and persisted; it is separate from the KES key.
-
-`signer.Run` is one loop. Each round reads `/epoch-settings`; once per epoch it
-registers the STM verification key with its proof of possession, bound to the
-pool by a KES signature at the current relative KES period, in the
-aggregator's registration round (the next epoch, at which the aggregator
-records the registration), and then signs the
-epoch's Mithril stake distribution. The message is rebuilt locally from the
-aggregator's signer sets and stake (`/signers/registered/{epoch}`) and
-protocol configuration: the commitment to the next epoch's signers, the next
-protocol parameters hash and the current epoch. The signed bytes are the text
-form of the message hash. Signer order, the Merkle commitment, the lottery and
-the wire encodings reuse `mithril/stm_verifier.go`; `STMSigningKey.Sign`
-produces the individual signature with every lottery index it wins. A failed
-round backs off exponentially; a 404 on submission waits for the aggregator to
-open the round, and a 410 ends the attempt for the epoch. Counters
-`dingo_mithril_signer_rounds_total`, `..._signatures_submitted_total` and
-`..._errors_total` report progress. Only the Mithril stake distribution is
-signed.
-
-The mithril packages import `internal/node` (bootstrap), which imports the root
-package, so the root package cannot import the signer. The root package exposes
-`NodeService` instead: services passed with `WithNodeService` start after the
-block producer with a `NodeServiceEnv` (logger, registry, Shelley genesis,
-ledger view, wall-clock slot), and `cmd/dingo` supplies `signer.Service`
-through `internal/node.Run`. Service stops are kept on the node: `quiesceComponentStops`
-stops them first, so shutdown and live restore/truncate stop them before
-storage closes, and `reinitializeAndResume` starts them again against the
-rebuilt ledger. A service failing to start fails node startup.
 
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
