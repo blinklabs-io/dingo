@@ -40,7 +40,7 @@ import (
 )
 
 // TestLedgerProcessBlockRejectsLateMIRCertificate is the block-application
-// half of #4362: a block carrying a MIR certificate inside the final
+// other half: a block carrying a MIR certificate inside the final
 // stability window fails validation, so the certificate is never stored for
 // applyMIRCerts to credit at the boundary.
 func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
@@ -1596,6 +1596,52 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	assert.Equal(t, uint64(50), state.Slot)
 }
 
+// TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary pins the discard taken when
+// one credential's folded delta no longer fits in uint64. Two distributions of
+// the maximum amount to one credential overflow only in the per-credential
+// fold, so addCredit's running total never trips. A valid credit to a second
+// credential separates discarding the boundary from skipping the credential:
+// a skip would still credit it.
+func TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+
+	maxUint := ^uint64(0)
+	overflowCred := mirCred28(0x76)
+	validCred := mirCred28(0x77)
+	for slot, rewards := range map[uint64][]models.MoveInstantaneousRewardsReward{
+		200: {{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)}},
+		300: {
+			{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)},
+			{Credential: validCred, Amount: big.NewInt(100)},
+		},
+	} {
+		seedMIRDistribution(t, gdb, mirPotReserves, slot, rewards)
+	}
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}))
+	}
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
+
+	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+		"an uncreditable MIR fold must not fail the epoch boundary")
+
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), uint64(account.Reward),
+			"the whole boundary is discarded, not just the overflowing credential")
+	}
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	assert.Equal(t, maxUint, uint64(state.Reserves))
+	assert.Equal(t, uint64(50), state.Slot)
+}
+
 // withMIRCutoffEpoch gives ls a Shelley genesis with k=2160 and f=1/20, so a
 // 129,600-slot stability window, and publishes epoch as the only cached
 // epoch, which is what LedgerView.MIRDelegState needs to compute the cutoff.
@@ -1635,9 +1681,9 @@ func mirDelegState(
 	return state
 }
 
-// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example in
-// blinklabs-io/dingo#4362: a boundary at 1,000,000 and a 129,600-slot window
-// put it at 870,400, whichever slot of the epoch asks.
+// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example: a
+// boundary at 1,000,000 and a 129,600-slot window put it at 870,400, whichever
+// slot of the epoch asks.
 func TestLedgerView_MIRDelegState_Cutoff(t *testing.T) {
 	t.Parallel()
 
@@ -1749,14 +1795,13 @@ func TestLedgerView_MIRDelegState_PotsAndTransfers(t *testing.T) {
 	assert.Equal(t, big.NewInt(260), state.DeltaTreasury)
 }
 
-// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover addresses a
-// human review finding on PR #4415: the query must read lv.epochStartSlot, a
-// value pinned once when this view was built for a specific transaction's
-// validation, never a fresh read of LedgerState.currentEpoch -- because a
-// concurrent writer can roll the epoch over while this transaction's
-// validation is still in flight. A view built fresh after the rollover
-// (ls.NewView, exactly what a caller must not do mid-validation) reproduces
-// the bug the review flagged: the rolled-over epoch's later start slot
+// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover pins that the
+// query must read lv.epochStartSlot, a value pinned once when this view was
+// built for a specific transaction's validation, never a fresh read of
+// LedgerState.currentEpoch -- because a concurrent writer can roll the epoch
+// over while this transaction's validation is still in flight. A view built
+// fresh after the rollover (ls.NewView, exactly what a caller must not do
+// mid-validation) reproduces the bug: the rolled-over epoch's later start slot
 // exceeds the still-valid slot and hides every pending delta.
 func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
 	t *testing.T,

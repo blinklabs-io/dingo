@@ -649,6 +649,7 @@ func runMithrilSyncWithRepair(
 		PinnedDigest:            cfg.Mithril.PinnedDigest,
 		DownloadIdleTimeout:     cfg.Mithril.DownloadIdleTimeout,
 		DownloadMaxIdleRetries:  cfg.Mithril.DownloadMaxIdleRetries,
+		DownloadMaxBytes:        cfg.Mithril.DownloadMaxBytes,
 		VerifyCertChain:         cfg.Mithril.VerifyCertificates,
 		CleanupAfterLoad:        cfg.Mithril.CleanupAfterLoad,
 		RepairLegacyRewardState: repairRewardState,

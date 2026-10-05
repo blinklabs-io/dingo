@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -267,7 +268,7 @@ type ChainSelector struct {
 	// LedgerState.recordPeerHeaderHistory), which each hold their own lock
 	// while calling it. Deriving the pair from cs.mode/cs.securityParam under
 	// cs.mutex.RLock() on every call created a lock-order inversion with
-	// chainsync.State.clientConnIdMutex: see #4070. This atomic lets
+	// chainsync.State.clientConnIdMutex. This atomic lets
 	// GenesisSelectionState answer without cs.mutex at all. It is refreshed
 	// under cs.mutex (refreshGenesisSelectionSnapshotLocked) at every point
 	// that can change cs.mode or the derived Genesis window -- construction,
@@ -1268,6 +1269,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
+		removedTip := cs.peerTips[connId]
 		cs.deletePeerLocked(connId)
 
 		// Removing a witness can revoke the incumbent's corroboration even
@@ -1307,6 +1309,9 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
+							),
+							RollbackPoint: fragmentIntersection(
+								removedTip, newPeerTip,
 							),
 						},
 					)
@@ -1416,7 +1421,7 @@ func (cs *ChainSelector) GenesisWindowSlots() uint64 {
 // call. Taking cs.mutex.RLock() here previously created a lock-order
 // inversion against a separate path that holds cs.mutex (write) and calls
 // back into chainsync.State.BlockfetchLatency (clientConnIdMutex.RLock),
-// which deadlocked chain sync under real peer traffic: see #4070. The
+// which deadlocked chain sync under real peer traffic. The
 // snapshot below is kept current by refreshGenesisSelectionSnapshotLocked,
 // called under cs.mutex at every point that can change it.
 func (cs *ChainSelector) GenesisSelectionState() (bool, uint64) {
@@ -1999,7 +2004,7 @@ func (cs *ChainSelector) triggerEvaluation() {
 // subscriber channel inline and waits for buffer capacity, so a subscriber
 // that stops draining stops its producer too.
 //
-// blinklabs-io/dingo#3550 is that chain end to end: a
+// A Preview run showed that chain end to end: a
 // chainselection.chain_switch consumer stopped draining, TouchPeerActivity
 // parked inside publishSelectionEvents -> EventBus.Publish, the internal
 // chainselection.peer_activity subscriber therefore stopped draining, and
@@ -2019,8 +2024,7 @@ func (cs *ChainSelector) triggerEvaluation() {
 // do -- so two goroutines can decide A then B and still enqueue B then A, and
 // a subscriber sees B before A. That window is unchanged from the inline
 // Publish this replaced, and closing it would mean publishing while holding
-// cs.mutex, which is the deadlock shape #3550 is about avoiding (wolf31o2
-// review).
+// cs.mutex, which is the deadlock shape this avoids.
 func (cs *ChainSelector) publishSelection(
 	eventType event.EventType,
 	evt event.Event,
@@ -2457,11 +2461,13 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			var previousTip ochainsync.Tip
 			var previousObservedTip ochainsync.Tip
 			var previousConnId ouroboros.ConnectionId
+			var rollbackPoint *ocommon.Point
 			if previousBest != nil {
 				previousConnId = *previousBest
 				if pt, ok := cs.peerTips[*previousBest]; ok {
 					previousTip = pt.Tip
 					previousObservedTip = pt.SelectionTip()
+					rollbackPoint = fragmentIntersection(pt, newPeerTip)
 				}
 			}
 			// Compute comparison result and block difference
@@ -2492,6 +2498,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					PreviousObservedTip:  previousObservedTip,
 					ComparisonResult:     comparisonResult,
 					BlockDifference:      blockDiff,
+					RollbackPoint:        rollbackPoint,
 				},
 			)
 			switchEvent = &evt
@@ -2878,6 +2885,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 		defer cs.mutex.Unlock()
 
 		var previousBest *ouroboros.ConnectionId
+		var previousBestTip *PeerChainTip
 
 		for connId, peerTip := range cs.peerTips {
 			// Use 2x the stale threshold for "very stale" cleanup. Peers are
@@ -2895,6 +2903,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 					connIdCopy := connId
 					previousBest = &connIdCopy
+					previousBestTip = peerTip
 					cs.bestPeerConn = nil
 				}
 			}
@@ -2929,6 +2938,9 @@ func (cs *ChainSelector) cleanupStalePeers() {
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
+							),
+							RollbackPoint: fragmentIntersection(
+								previousBestTip, newPeerTip,
 							),
 						},
 					)

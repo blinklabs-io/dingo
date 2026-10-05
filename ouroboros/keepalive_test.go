@@ -15,17 +15,23 @@
 package ouroboros
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 )
 
 func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
@@ -82,5 +88,179 @@ func TestKeepaliveConnOptsTimeout(t *testing.T) {
 		t,
 		okeepalive.ServerTimeout,
 		keepaliveTimeoutFor(okeepalive.ServerTimeout+30*time.Second),
+	)
+}
+
+// TestClassifyKeepaliveTimeoutClose pins which close reasons count as a
+// keep-alive pong timeout: only the client's Server-state transition timeout,
+// bare or wrapped. Another protocol's timeout and the server's ping-wait
+// timeout share the message shape and must not match.
+func TestClassifyKeepaliveTimeoutClose(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{
+			"keepalive timeout",
+			errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Server",
+			),
+			true,
+		},
+		{
+			"keepalive timeout wrapped as gouroboros forwards it",
+			fmt.Errorf(
+				"protocol error: %w",
+				errors.New(
+					"keep-alive: timeout waiting on transition from protocol state Server",
+				),
+			),
+			true,
+		},
+		{
+			// The server side waiting on the peer's next ping is not a
+			// pong timeout.
+			"keepalive server ping-wait timeout",
+			errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Client",
+			),
+			false,
+		},
+		{
+			"other protocol timeout",
+			errors.New(
+				"chain-sync: timeout waiting on transition from protocol state Idle",
+			),
+			false,
+		},
+		{
+			"keepalive non-timeout error",
+			errors.New(
+				"keep-alive: unexpected cookie in response, expected 4 but received 5",
+			),
+			false,
+		},
+		{"unrelated error", errors.New("connection reset by peer"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, classifyKeepaliveTimeoutClose(tc.err))
+		})
+	}
+}
+
+// TestHandleConnClosedEventRecordsKeepaliveTimeoutOutcome checks that
+// HandleConnClosedEvent increments dingo_keepalive_timeout_total only when
+// the connection's close reason is a keep-alive timeout, and leaves it
+// unchanged for an unrelated close reason -- the counter must distinguish
+// outcomes, not just count every connection close.
+func TestHandleConnClosedEventRecordsKeepaliveTimeoutOutcome(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 3001},
+	}
+
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error:        errors.New("blockfetch: connection reset by peer"),
+		},
+	})
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
+		"an unrelated close reason must not count as a keep-alive timeout",
+	)
+
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error: errors.New(
+				"keep-alive: timeout waiting on transition from protocol state Server",
+			),
+		},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
+		"a keep-alive timeout close must be counted",
+	)
+}
+
+// TestHandleConnClosedEventCountsRealKeepaliveTimeout drives a real
+// gouroboros connection against a peer that completes the NtN handshake and
+// then never answers the first keep-alive ping, and feeds the error the
+// connection actually reports into HandleConnClosedEvent. gouroboros wraps
+// every mini-protocol error it forwards ("protocol error: %w" in
+// connection.go), so a classifier written against the bare protocol.go
+// message shape never matches in production; this pins the shape
+// connmanager really hands to ConnectionClosedEvent.
+func TestHandleConnClosedEventCountsRealKeepaliveTimeout(t *testing.T) {
+	t.Parallel()
+
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		[]ouroboros_mock.ConversationEntry{
+			ouroboros_mock.ConversationEntryHandshakeRequestGeneric,
+			ouroboros_mock.ConversationEntryHandshakeNtNResponse,
+			ouroboros_mock.ConversationEntryKeepAliveRequest,
+			// No response: the client's pong wait must time out.
+		},
+	)
+	kaCfg := okeepalive.NewConfig(
+		okeepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
+		okeepalive.WithPeriod(time.Minute),
+		okeepalive.WithTimeout(200*time.Millisecond),
+	)
+	oConn, err := ouroboros.New(
+		ouroboros.WithConnection(mockConn),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(kaCfg),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = oConn.Close() })
+
+	var closeErr error
+	select {
+	case closeErr = <-oConn.ErrorChan():
+	case <-time.After(5 * time.Second):
+		t.Fatal("keep-alive pong timeout was never reported")
+	}
+	require.Error(t, closeErr)
+	require.True(
+		t,
+		classifyKeepaliveTimeoutClose(closeErr),
+		"real keep-alive pong timeout not classified: %q",
+		closeErr.Error(),
+	)
+
+	reg := prometheus.NewRegistry()
+	o := newOuroboros(OuroborosConfig{PromRegistry: reg})
+	o.HandleConnClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: oConn.Id(),
+			Error:        closeErr,
+		},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(o.protocolMetrics.keepaliveTimeouts),
 	)
 }

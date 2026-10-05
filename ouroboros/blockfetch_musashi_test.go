@@ -57,7 +57,7 @@ const musashiNetworkMagic = 164
 //	                               header: 2 elements, 12-field header body
 //
 // The type-7 block is the one whose strict Conway decode used to stop
-// from-genesis sync at origin (#3798, #3761). The type-8 pair exercises the
+// from-genesis sync at origin. The type-8 pair exercises the
 // captured block through the production block-fetch path. The corresponding
 // `database/models/testdata/musashi_dijkstra_block.hex` file is also used by
 // model decoding tests.
@@ -118,7 +118,7 @@ func TestDecodeBlockfetchBlockMusashiWireTypes(t *testing.T) {
 			require.NotNil(t, block)
 
 			// The chain-sync header path must reach the same block identity
-			// for the same wire type. #3761 was exactly the two paths
+			// for the same wire type. A past bug was exactly the two paths
 			// disagreeing; assert agreement rather than assuming it.
 			header, err := o.decodeChainsyncHeader(tc.blockType, headerRaw)
 			require.NoError(t, err)
@@ -307,7 +307,7 @@ func (p *musashiBlockfetchPeer) readRequestRangeErr() error {
 
 // rawDeliveryOfUnrepresentableBlockSupported reports whether the linked
 // gouroboros delivers a block its typed decoder cannot represent to
-// BlockRawFunc rather than failing the request (gouroboros #2186).
+// BlockRawFunc rather than failing the request.
 //
 // This is a behavioral probe, not a version comparison: it drives the real
 // block-fetch client with a bare recording raw callback -- not Dingo's
@@ -524,7 +524,7 @@ func runMusashiBlockfetchClientDelivery(
 }
 
 // TestBlockfetchClientDeliversMusashiType7Block is the regression for the
-// symptom reported in #3798.
+// type-8 decoder-fallback bypass.
 //
 // A Musashi block below the type-8 transition arrives tagged as block type 7
 // in a five-component Conway layout with a twelve-field Leios header body.
@@ -533,7 +533,7 @@ func runMusashiBlockfetchClientDelivery(
 // rejected these bytes and failed the request -- tearing down the connection
 // before Dingo's WithBlockRawFunc callback, and therefore
 // decodeBlockfetchBlock's Musashi fallback, ever ran. Every from-genesis sync
-// stalled at origin with no selectable peer, with the error #3798 quotes.
+// stalled at origin with no selectable peer, with a decode error.
 //
 // Direct decoder tests could not catch this: models.DecodeConwayBlock decodes
 // these bytes correctly and always did. The failure was in the dispatch that
@@ -644,8 +644,9 @@ func TestDecodeBlockfetchBlockKeepsThreeComponentDijkstraBody(t *testing.T) {
 }
 
 // TestMusashiDispatchEraAgreement records the era each production dispatch
-// path assigns to the same valid type-7 Musashi block. #3761 was the header
-// and block paths disagreeing, so the mapping is asserted rather than assumed.
+// path assigns to the same valid type-7 Musashi block. A past bug was the
+// header and block paths disagreeing, so the mapping is asserted rather than
+// assumed.
 //
 // The hashes agree for both types. The eras do not for type 7: its
 // five-component Conway envelope is only representable as a Conway block, so
@@ -655,8 +656,8 @@ func TestDecodeBlockfetchBlockKeepsThreeComponentDijkstraBody(t *testing.T) {
 // gouroboros representability limit, not a dispatch choice Dingo can make
 // differently, and it is pinned here so a change to either path is visible.
 //
-// The disagreement is latent rather than a live defect, and is tracked in
-// #3828: the ledger does not gate on a block-derived era. ls.currentEra comes
+// The disagreement is latent rather than a live defect, and is a known gap:
+// the ledger does not gate on a block-derived era. ls.currentEra comes
 // from protocol-version pparams and is passed into ledgerProcessBlock, so on
 // Musashi at protocol version 12 those gates see Dijkstra whatever the block
 // decodes as, and Leios endorser-block application and the Dijkstra

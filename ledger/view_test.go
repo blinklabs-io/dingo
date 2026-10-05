@@ -1153,7 +1153,7 @@ func TestLedgerViewCommitteeStateAvailableTracksSeatedMembers(t *testing.T) {
 // governance.EnactProposal -- the same production entry point epoch-boundary
 // processing calls -- rather than seeding committee_member/auth rows
 // directly, so this test exercises applyUpdateCommittee's actual
-// TermStartSlot-stamping decision (blinklabs-io/dingo#4584).
+// TermStartSlot-stamping decision.
 func enactTestUpdateCommittee(
 	t *testing.T,
 	db *database.Database,
@@ -1190,7 +1190,7 @@ func enactTestUpdateCommittee(
 }
 
 // TestLedgerViewCommitteeHotCredentialSurvivesTermRenewal reproduces the
-// blinklabs-io/dingo#4584 live Preview halt end-to-end, driving the real
+// live Preview halt end-to-end, driving the real
 // enactment path (governance.EnactProposal -> applyUpdateCommittee) rather
 // than seeding raw rows: a continuing committee member's one-time hot-key
 // authorization must survive a later UpdateCommittee action that renews the
@@ -1662,7 +1662,7 @@ func TestLedgerViewCommitteeResignationSurvivesTermRenewal(t *testing.T) {
 }
 
 // TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization
-// is the direct proof for the gouroboros#2574 plural capability: when two
+// is the direct proof for the plural capability: when two
 // cold credentials both currently authorize the same hot credential,
 // CommitteeHotCredentialMembers must return both, not just whichever one the
 // singular CommitteeHotCredentialMember happens to find first (GOVCERT keeps
@@ -1737,7 +1737,7 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 }
 
 // TestValidateTxDijkstraAcceptsVoteWhenSharedHotCredentialColdKeyResignsInTx
-// is the end-to-end regression for gouroboros#2574 through dingo's real
+// is the end-to-end regression for through dingo's real
 // Dijkstra validation path (eras.ValidateTxDijkstra -> a real *LedgerView).
 //
 // Cold A and cold B both currently authorize hot H (persisted, before this
@@ -1751,7 +1751,7 @@ func TestLedgerViewCommitteeHotCredentialMembersReturnsEveryActiveAuthorization(
 // (dijkstraGovernanceStateView) tracks only cold credentials this
 // transaction's own certificates touched (cold A here); for every other cold
 // credential it falls back to what the ledger state reports for hot H. Before
-// gouroboros#2574 that fallback was the singular CommitteeHotCredentialMember,
+// that fallback was the singular CommitteeHotCredentialMember,
 // which returns at most one witness and could return cold A -- correctly
 // excluded as touched, but leaving cold B's authorization undiscovered and the
 // vote wrongly rejected as unknown. LedgerView.CommitteeHotCredentialMembers
@@ -2168,7 +2168,7 @@ func TestLedgerViewConstitutionUnreadableFailsClosed(t *testing.T) {
 // which currently has no wired caller but is exported for a future
 // GetDRepState handler) reports the same CIP-1694 deposit-inclusive voting
 // power ledger/governance.LoadDRepVotingState uses for real ratification and
-// the Blockfrost adapter's DRep reads (blinklabs-io/dingo#4355), not the
+// the Blockfrost adapter's DRep reads, not the
 // plain UTxO+reward figure GetDRepVotingPower alone returns.
 func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T) {
 	t.Parallel()
@@ -2254,7 +2254,7 @@ func TestLedgerViewGetDRepVotingPowerIncludesActiveProposalDeposit(t *testing.T)
 // pool-deposit decision is the case that found this: without an epoch it cannot
 // tell a retired pool from a registered one, charges no deposit for a
 // registration that needs one, and the transaction then fails value
-// conservation by exactly the deposit (issue #3908).
+// conservation by exactly the deposit.
 func TestLedgerViewSatisfiesEpochState(t *testing.T) {
 	t.Parallel()
 
@@ -3053,7 +3053,7 @@ func TestMIRGenesisQuorumThroughEraValidation(t *testing.T) {
 // specific lookups to fail with a caller-supplied error instead of
 // delegating to the wrapped store, reproducing a genuine non-not-found
 // storage fault (a timeout, a lost connection) without corrupting on-disk
-// rows. See blinklabs-io/dingo#1649.
+// rows.
 type errInjectingMetadataStore struct {
 	metadata.MetadataStore
 	getPoolErr                error
@@ -4521,10 +4521,11 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 }
 
 // TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral is the
-// LedgerView-level regression test for issue #4352, exercised through the
-// real certificate-application pipeline rather than the store layer
-// directly: a pool re-registering with a new VRF key mid-epoch must not
-// free its old key before the epoch boundary IsVrfKeyInUse is asked about.
+// LedgerView-level regression test for the VRF reservation across deferred
+// re-registration, exercised through the real certificate-application pipeline
+// rather than the store layer directly: a pool re-registering with a new VRF
+// key mid-epoch must not free its old key before the epoch boundary
+// IsVrfKeyInUse is asked about.
 func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 	t.Parallel()
 
@@ -4745,18 +4746,18 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 }
 
 // TestLedgerViewIsVrfKeyInUseRejectsSameOperatorReuseOfSupersededFutureKey
-// is the LedgerView-level regression test for the PV11+ follow-up to
-// #4352: pool P cycles A -> B -> C within one epoch, then attempts to
+// is the LedgerView-level regression test for the PV11+ follow-up:
+// pool P cycles A -> B -> C within one epoch, then attempts to
 // reuse B again. IsVrfKeyInUse must report B as still claimed by P (even
 // though B is neither P's effective key, A, nor its current pending key,
 // C), which is the signal gouroboros's validatePoolRegistration needs to
 // compare against PoolCurrentState and reject the reuse: PoolCurrentState
 // returns P's latest registration (C), which does not equal the requested
 // key (B).
-// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins dingo#4466 at the
-// LedgerView production entry point: once a pool's same-epoch registration
-// is itself superseded by a later same-epoch registration, IsVrfKeyInUse
-// must report it free, not still claimed.
+// TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey pins release of a
+// superseded future VRF key at the LedgerView production entry point: once a
+// pool's same-epoch registration is itself superseded by a later same-epoch
+// registration, IsVrfKeyInUse must report it free, not still claimed.
 func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 	t *testing.T,
 ) {
@@ -4899,7 +4900,7 @@ func newUnwrittenDijkstraPoolRegistrationTx(
 }
 
 // TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral
-// is the full end-to-end proof of #4352's acceptance criterion "reject a
+// is the full end-to-end proof of the acceptance criterion "reject a
 // different pool registering the active key during the deferral window":
 // not just that IsVrfKeyInUse reports the right owner, but that the real
 // validation entry point actually returns a rejection for it. Protocol
@@ -4966,12 +4967,13 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 }
 
 // TestValidateTxDijkstraRejectsSameOperatorReuseOfSupersededFutureKey is
-// the full end-to-end proof of the PV11+ follow-up to #4352: pool P cycles
+// the full end-to-end proof of the PV11+ follow-up: pool P cycles
 // A -> B -> C within one epoch, then attempts to reuse B again. This
 // proves the actual rejection fires through the real validation entry
 // point, not just that IsVrfKeyInUse and PoolCurrentState individually
 // return the values the rejection depends on.
-// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins dingo#4466
+// TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey pins release of a
+// superseded future VRF key
 // through the full production validation entry point: a key a pool cycled
 // through and then superseded within the same epoch is free for any pool
 // (including the pool that originally proposed it) to register.
@@ -5037,8 +5039,8 @@ func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 	}
 }
 
-// TestLedgerStateNewViewPinsEpochStartSlot is the regression test for a
-// human reviewer finding on this PR: every prior epochStartSlot-pinning
+// TestLedgerStateNewViewPinsEpochStartSlot is the regression test: every prior
+// epochStartSlot-pinning
 // test set the field by hand on a bare &LedgerView{ls: ls}, so a real
 // construction site (NewView, ledgerProcessBlock, validateTxCore,
 // ValidateTxWithOverlay, EvaluateTx) could drop its own epochStartSlot:
@@ -6650,7 +6652,7 @@ func TestEmptyGenesisCommitteeStateAvailable(t *testing.T) {
 
 // TestCreateGenesisBlockSeedsCommittee proves a node initialized from Conway
 // genesis recognizes every genesis Constitutional Committee member for
-// hot-key authorization. Without the seed (blinklabs-io/dingo#3785) a
+// hot-key authorization. Without the seed a
 // genesis member never touched by an UpdateCommittee action has no row at
 // all, and AuthCommitteeHot/ResignCommitteeCold validation rejects it as
 // "not a CC member" even though the real chain has recognized it since the
@@ -7453,7 +7455,7 @@ func requireValueNotConserved(
 }
 
 // TestValueConservationRefundsUnknownStakeDepositAtKeyDeposit is the
-// regression test for #3829. A registration ingested without a computable
+// A registration ingested without a computable
 // deposit records NULL, LedgerView.StakeCredentialDeposit reports absence, and
 // gouroboros' UtxoValidateValueNotConservedUtxo falls back to the current
 // KeyDeposit. Before the fix the three zero-reporting sites stored an
@@ -7597,7 +7599,7 @@ func TestWithoutSyntheticV2CostModel_RemovesKeyWithoutMutatingOriginal(
 }
 
 // TestWithoutSyntheticV2CostModel_CoversEveryEraType covers
-// blinklabs-io/dingo#3825's PR review: the filter's type switch must handle
+// PR review: the filter's type switch must handle
 // every era type ShelleyCurrentProtocolParamsQuery can actually return
 // (Alonzo, Babbage, Conway, Dijkstra), not just Conway -- a regression in
 // any branch would otherwise pass the suite silently.
@@ -7655,7 +7657,7 @@ func cloneMap(m map[uint][]int64) map[uint][]int64 {
 }
 
 // TestWithoutSyntheticV2CostModel_NilPointerDoesNotPanic covers
-// blinklabs-io/dingo#3825's PR review: a concrete-typed nil pointer
+// PR review: a concrete-typed nil pointer
 // (lcommon.ProtocolParameters holding e.g. a nil *conway.ConwayProtocolParameters)
 // still matches its type's case in the switch, so each case must guard
 // against nil before dereferencing rather than panicking.
@@ -7696,10 +7698,10 @@ type unknownProtocolParameters struct {
 }
 
 // TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): a protocol-parameters type
+// a protocol-parameters type
 // the switch doesn't recognize falls to the default branch, which -- unlike
 // every other branch -- returns pp unfiltered even though synthetic is true.
-// That silently reintroduces #3825 for whatever type this is; the least this
+// That silently reintroduces for whatever type this is; the least this
 // path can do is log so the gap is observable instead of invisible.
 func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	t *testing.T,
@@ -7721,8 +7723,8 @@ func TestWithoutSyntheticV2CostModel_UnknownTypeLogsAndReturnsUnfiltered(
 	)
 }
 
-// TestExtractRawCostModels_CoversDijkstra covers blinklabs-io/dingo#3825's PR
-// review (wolf31o2): extractRawCostModels' type switch lacked a Dijkstra
+// TestExtractRawCostModels_CoversDijkstra pins a gap
+// in extractRawCostModels: its type switch lacked a Dijkstra
 // case (falling to its own default: return nil), asymmetric with
 // withoutSyntheticV2CostModel, which does handle Dijkstra -- meaning
 // injectedSyntheticV2CostModel (built on extractRawCostModels) could never
@@ -7776,4 +7778,92 @@ func repeatByte(length int, b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+// A genesis key delegation certificate is checked against the delegations in
+// force and the ones still inside the stability window, through the real
+// LedgerView and the Shelley validation entry point.
+func TestGenesisKeyDelegationThroughEraValidation(t *testing.T) {
+	t.Parallel()
+
+	var keys [5]ed25519.PrivateKey
+	for i := range keys {
+		seed := make([]byte, ed25519.SeedSize)
+		seed[0] = byte(0xb0 + i)
+		keys[i] = ed25519.NewKeyFromSeed(seed)
+	}
+	delegateOf := func(i int) lcommon.Blake2b224 {
+		return lcommon.Blake2b224Hash(keys[i].Public().(ed25519.PublicKey))
+	}
+	genesisKey := func(seed byte) []byte {
+		return bytes.Repeat([]byte{seed}, lcommon.Blake2b224Size)
+	}
+	lv := mirQuorumTestView(
+		t,
+		[3]ed25519.PublicKey{
+			keys[0].Public().(ed25519.PublicKey),
+			keys[1].Public().(ed25519.PublicKey),
+			keys[2].Public().(ed25519.PublicKey),
+		},
+	)
+	// Genesis key 0x11 certified a new delegate at slot 100, which stays
+	// pending for the whole stability window.
+	seedGenesisDelegation(t, lv.ls.db, models.GenesisDelegation{
+		GenesisHash:         genesisKey(0x11),
+		GenesisDelegateHash: delegateOf(3).Bytes(),
+		VrfKeyHash:          bytes.Repeat([]byte{0xf1}, lcommon.Blake2b256Size),
+		AddedSlot:           100,
+	})
+
+	validate := func(
+		genesis []byte,
+		delegate lcommon.Blake2b224,
+		vrf byte,
+	) error {
+		cert := &lcommon.GenesisKeyDelegationCertificate{
+			CertType: uint(
+				lcommon.CertificateTypeGenesisKeyDelegation,
+			),
+			GenesisHash:         genesis,
+			GenesisDelegateHash: delegate.Bytes(),
+		}
+		copy(
+			cert.VrfKeyHash[:],
+			bytes.Repeat([]byte{vrf}, lcommon.Blake2b256Size),
+		)
+		tx := &shelley.ShelleyTransaction{
+			Body: shelley.ShelleyTransactionBody{
+				TxCertificates: []lcommon.CertificateWrapper{{
+					Type: uint(
+						lcommon.CertificateTypeGenesisKeyDelegation,
+					),
+					Certificate: cert,
+				}},
+			},
+		}
+		return eras.ValidateTxShelley(
+			tx, 200, lv, &shelley.ShelleyProtocolParameters{},
+		)
+	}
+
+	var notInMapping eras.GenesisKeyNotInMappingError
+	var duplicateDelegate eras.DuplicateGenesisDelegateError
+	var duplicateVRF eras.DuplicateGenesisVRFError
+
+	err := validate(genesisKey(0x44), delegateOf(3), 0xf9)
+	require.ErrorAs(t, err, &notInMapping)
+
+	err = validate(genesisKey(0x22), delegateOf(2), 0xf9)
+	require.ErrorAs(t, err, &duplicateDelegate, "delegate in force")
+
+	err = validate(genesisKey(0x22), delegateOf(3), 0xf9)
+	require.ErrorAs(t, err, &duplicateDelegate, "delegate pending")
+
+	err = validate(genesisKey(0x22), delegateOf(4), 0xf1)
+	require.ErrorAs(t, err, &duplicateVRF, "VRF key pending")
+
+	// The genesis key that certified the pending delegation may repeat it.
+	err = validate(genesisKey(0x11), delegateOf(3), 0xf1)
+	require.False(t, errors.As(err, &duplicateDelegate), "%v", err)
+	require.False(t, errors.As(err, &duplicateVRF), "%v", err)
 }

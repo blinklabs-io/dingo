@@ -323,8 +323,8 @@ func validateAccessPoint(
 }
 
 // validateRootValencies checks the ordering and access-point bound specified
-// by blinklabs-io/dingo#3291. An empty access-point list is allowed because
-// the shipped network topologies use it with peer snapshots.
+// by the topology validation rules. An empty access-point list is allowed
+// because the shipped network topologies use it with peer snapshots.
 func validateRootValencies(
 	fieldPrefix string,
 	warmValency uint,

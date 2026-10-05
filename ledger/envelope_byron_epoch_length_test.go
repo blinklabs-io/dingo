@@ -58,10 +58,10 @@ func TestByronEpochSlotsFollowsConfiguredSecurityParam(t *testing.T) {
 }
 
 // TestValidateInboundBlockEnvelopeByronOrderingUsesConfiguredEpochLength
-// covers #4408 on a genesis whose epoch is longer than gouroboros' fixed
-// 21,600 slots (k = 3000, 30,000 slots). With the fixed length the last slots
-// of an epoch number higher than the next epoch's boundary block, so valid
-// transitions were rejected.
+// pins Byron EBB ordering on a genesis whose epoch is longer than gouroboros'
+// fixed 21,600 slots (k = 3000, 30,000 slots). With the fixed length the last
+// slots of an epoch number higher than the next epoch's boundary block, so
+// valid transitions were rejected.
 func TestValidateInboundBlockEnvelopeByronOrderingUsesConfiguredEpochLength(
 	t *testing.T,
 ) {
@@ -85,6 +85,12 @@ func TestValidateInboundBlockEnvelopeByronOrderingUsesConfiguredEpochLength(
 			byronOrderingEbb(3, 9),
 			byronOrderingMain(2, 29000, 9),
 			"",
+		},
+		{
+			"regular to EBB at the parent's slot",
+			byronOrderingEbb(1, 5),
+			byronOrderingMain(1, 0, 5),
+			"does not follow parent slot",
 		},
 		{
 			"regular to EBB of its own epoch",

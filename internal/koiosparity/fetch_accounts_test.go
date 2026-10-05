@@ -79,10 +79,10 @@ func writeAccountRewardHistoryRows(w http.ResponseWriter, addrs []string) {
 }
 
 // TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart proves
-// dingo #3099's checkpointing: a chunk that already committed to
+// checkpointing: a chunk that already committed to
 // koios_account_checked/koios_account_fetch_staged_rows on a prior,
 // interrupted call is never re-requested on a resumed call — only the
-// chunk(s) that never succeeded are retried. #3097's original
+// chunk(s) that never succeeded are retried. original
 // implementation had no such checkpoint, so every chunk (including
 // already-succeeded ones) was re-fetched from scratch on every retry.
 func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
@@ -171,7 +171,7 @@ func TestFetchAccountRewardsForEpochResumesOnlyUndoneChunksAfterRestart(
 			"checkpointed progress must be reused, not re-fetched",
 	)
 	// Only the resumed chunk's addresses are freshly checkpointed by this
-	// call — fetched is per-call, not cumulative (mirrors #3097's original
+	// call — fetched is per-call, not cumulative (mirrors original
 	// per-call semantics, preserved by this rewrite).
 	require.Equal(t, len(addrs)-200, fetched)
 
@@ -476,7 +476,7 @@ func TestFetchAccountRewardsForEpochRequiresEveryChunkCurrentBeforeComplete(
 			"while another chunk is still empty-and-lagging within the grace window",
 	)
 
-	// Partial rows are still recorded (matching #3097's original "record
+	// Partial rows are still recorded (matching original "record
 	// progress, gate trust via the separate coverage flag" design) — what
 	// matters is that cov.Complete above stays false, so a future check
 	// never mistakes this for a fully verified reference set.
@@ -913,8 +913,8 @@ func TestFetchAccountRewardsForEpochForceRefreshDowngradesCoverageOnPostDispatch
 // TestFetchAccountRewardsForEpochMegaScenario is the combined exercise the
 // issue asks for directly: large synthetic snapshot plus injected timeout,
 // rate-limit, truncated-response, duplicate-page, and restart failures, all
-// layered onto one run/resume cycle against dingo #3099's checkpointed
-// rewrite of #3097's fetchAccountRewardsForEpoch — rather than each failure
+// layered onto one run/resume cycle against checkpointed
+// rewrite of fetchAccountRewardsForEpoch — rather than each failure
 // mode tested only in isolation.
 //
 // Roles are assigned by chunk content (each chunk's first address), not
@@ -1471,7 +1471,7 @@ func TestFetchAccountRewardsForEpochPermanentErrorAbortsImmediately(
 }
 
 // TestFetchAccountRewardsForEpochZeroRowsWithinGraceLeavesIncomplete proves a
-// just-closed epoch (EpochEndTime within graceHours of now) whose #3097
+// just-closed epoch (EpochEndTime within graceHours of now) whose
 // account fetch returns zero rows across the whole address universe is left
 // with coverage incomplete rather than permanently accepted as "zero
 // accounts earned rewards" — Koios's own /account_reward_history publishing
@@ -1716,7 +1716,7 @@ func TestBuildAccountAddressUniverseNilSourceIsKoiosOnly(t *testing.T) {
 }
 
 // TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError guards
-// against the dispatcher race flagged in review: `select { case
+// against the dispatcher race: `select { case
 // <-fetchCtx.Done(): ...; case sem <- struct{}{}: }` can nondeterministically
 // choose the semaphore branch even after a concurrently-running chunk's
 // error has already called cancel(), because Done() and a buffered
@@ -1773,7 +1773,7 @@ func TestFetchAccountRewardsForEpochStopsDispatchingAfterFirstChunkError(
 	t *testing.T,
 ) {
 	const totalChunks = 30
-	// "stake0poison" sorts before every "stake1addrN" address (dingo #3099's
+	// "stake0poison" sorts before every "stake1addrN" address (as
 	// fetchAccountRewardsForEpoch sorts the address universe before chunking
 	// for content-addressed chunk-hash determinism — see its doc comment),
 	// guaranteeing this still lands in the first-dispatched chunk the way

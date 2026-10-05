@@ -191,7 +191,7 @@ func normalizeOperatorCertificateFingerprints(
 // WrapStreamingHandler/WrapStreamingClient, which are no-ops for every
 // procedure in destructive today (none of them stream) — so the same
 // interceptor and destructive-procedure-set pattern can be reused for
-// bark#17's proposed LifecycleService, which explicitly calls for the same
+// a proposed LifecycleService, which explicitly calls for the same
 // "no anonymous calls" requirement and may include streaming RPCs.
 func newOperatorAuthInterceptor(
 	logger *slog.Logger,
@@ -305,7 +305,7 @@ func (i *operatorAuthInterceptor) WrapStreamingClient(
 
 // WrapStreamingHandler is WrapUnary's server-streaming counterpart, for
 // completeness: no procedure in destructiveDatabaseProcedures streams
-// today, but a future addition (or bark#17's proposed LifecycleService,
+// today, but a future addition (or a proposed LifecycleService,
 // reusing this same interceptor) might, and this ensures authorize runs
 // for that case too rather than silently skipping it.
 func (i *operatorAuthInterceptor) WrapStreamingHandler(

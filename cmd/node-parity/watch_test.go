@@ -177,8 +177,8 @@ func TestWatchCommand_FallbackIntervalMustBePositive(t *testing.T) {
 	assert.Contains(t, err.Error(), "--fallback-interval must be positive")
 }
 
-// TestWatchCommand_RejectsAtPointFlags is the regression test for a
-// blinklabs-io/dingo#4183 review nitpick: --at-slot/--at-hash are
+// TestWatchCommand_RejectsAtPointFlags is the regression test for
+// the fact that --at-slot/--at-hash are
 // registered on the root command (rootCmd.PersistentFlags()), so 'watch'
 // inherits and silently accepted them even though it has no
 // historical-point mode -- only 'check' (via requireAtPoint) does
@@ -351,7 +351,7 @@ func TestWatchCommand_CheckTimeoutMustBePositive(t *testing.T) {
 }
 
 // TestWatchRunFull_ChecksAreBoundedByCheckTimeoutNotFallbackInterval is a
-// regression test for blinklabs-io/dingo#1900's audit finding: full mode's
+// regression test for an audit finding: full mode's
 // default --fallback-interval (2m) used to double as runWatchCycle's own
 // per-cycle deadline, so a genuinely slow (not stuck) full comparison --
 // measured at 7-9+ minutes against a Preview-scale node -- self-cancelled
@@ -418,7 +418,7 @@ func TestWatchRunFull_ChecksAreBoundedByCheckTimeoutNotFallbackInterval(
 }
 
 // TestHandleIncrementalSessionError_RecordsCheckError covers the wiring for
-// blinklabs-io/dingo#1900's incremental-mode audit finding: a per-block
+// an incremental-mode audit finding: a per-block
 // query failure ending an incrementalSession must be recorded via the same
 // checkErrorsTotal counter any other Check failure uses, so the existing
 // NodeParityCheckErrors alert rule can actually see this failure class.

@@ -162,7 +162,7 @@ func TestImportLedgerStateRebuildsDeferredRewardLiveStake(t *testing.T) {
 // (ledger/governance/epoch.go) and the SQL expiry sweep, whose predicate is
 // `expiry_epoch > 0 AND expiry_epoch <= ?` -- so imported DReps stayed in
 // countActiveDReps permanently and inflated the ratification quorum denominator
-// for the life of the database (issue #4492).
+// for the life of the database.
 //
 // The two DReps carry distinct non-zero expiries, so dropping the field fails
 // both assertions and a fix that stamped one shared constant would fail too.
@@ -452,10 +452,15 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 
 	// Model the first Conway epoch. GovState's previous field has already been
 	// translated to Conway, while reward performance for E-1 still needs a
-	// Babbage row. A prior pass stored that exact historical row.
+	// Babbage row. Recover it by applying the ledger's Conway-to-Babbage
+	// downgrade.
 	seedRewardBasisMarkers(t, db, 1395)
 	current, translatedPrevious := distinctConwayPParams(t)
 	storedPrevious, err := cbor.Encode(testBabbagePParams())
+	require.NoError(t, err)
+	expectedPrevious, err := previousPParamsForEra(
+		EraConway, translatedPrevious, EraBabbage,
+	)
 	require.NoError(t, err)
 	require.NoError(t, db.Metadata().SetPParams(
 		storedPrevious, 99_999, 1396, EraBabbage, nil,
@@ -475,7 +480,7 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 		)
 		require.NoError(t, queryErr)
 		require.Len(t, previousRows, 1)
-		require.Equal(t, storedPrevious, previousRows[0].Cbor)
+		require.Equal(t, expectedPrevious, previousRows[0].Cbor)
 		currentRows, queryErr := db.Metadata().GetPParams(
 			1397, EraConway, nil,
 		)
@@ -486,7 +491,7 @@ func TestImportPParamsReentryUsesStoredCrossEraHistory(t *testing.T) {
 	}
 }
 
-func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
+func TestImportPParamsDowngradesTranslatedCrossEraHistory(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -500,7 +505,7 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 	cfg := previewPParamsImportConfig(db, current, previous)
 	// Model an import at the first Conway epoch. GovState's previous payload
 	// is translated to the current-era shape, but the performance epoch is
-	// still Babbage. Persisting it as Babbage would not be exact, so reject it.
+	// still Babbage. Recover its parameters with the ledger downgrade.
 	cfg.State.EraBoundEpoch = previewHistoricalPParamsSnapshotEpoch
 	cfg.State.EraBounds[EraConway] = EraBound{
 		Slot:  100_000,
@@ -513,7 +518,12 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 		1396, EraBabbage, nil,
 	)
 	require.NoError(t, queryErr)
-	require.Empty(t, previousRows)
+	require.Len(t, previousRows, 1)
+	expectedPrevious, err := previousPParamsForEra(
+		EraConway, previous, EraBabbage,
+	)
+	require.NoError(t, err)
+	require.Equal(t, expectedPrevious, previousRows[0].Cbor)
 	currentRows, queryErr := db.Metadata().GetPParams(
 		1397, EraConway, nil,
 	)
@@ -522,7 +532,7 @@ func TestImportPParamsSkipsTranslatedCrossEraHistory(t *testing.T) {
 	require.Equal(t, current, currentRows[0].Cbor)
 }
 
-func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
+func TestImportSnapShotsSeedsGoBasisWithDowngradedCrossEraHistory(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
@@ -556,9 +566,8 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 		context.Background(), cfg, state.Tip.Slot, noProgress,
 	)
 	require.NoError(t, err)
-	// Reproduce the partial state left by the old importer: the provisional Go
-	// basis committed before the pparams phase discovered that its translated
-	// previous payload could not be decoded as the old era.
+	// Seed the provisional Go basis before protocol parameters are imported;
+	// the importer later recovers the old-era parameters by downgrade.
 	require.NoError(t, importSnapShots(
 		context.Background(), cfg, state.Tip.Slot, noProgress, false,
 	))
@@ -586,14 +595,14 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 		state.Epoch-2, "mark", nil,
 	)
 	require.NoError(t, err)
-	require.Nil(t, goBasis,
-		"the Go basis cannot be consumed without old-era historical pparams")
+	require.NotNil(t, goBasis,
+		"the Go basis remains usable after historical pparams are downgraded")
 	goPools, err := db.Metadata().GetRewardPoolInputs(state.Epoch-2, nil)
 	require.NoError(t, err)
-	require.Empty(t, goPools)
+	require.NotEmpty(t, goPools)
 	goStake, err := db.Metadata().GetRewardStakeInputs(state.Epoch-2, nil)
 	require.NoError(t, err)
-	require.Empty(t, goStake)
+	require.NotEmpty(t, goStake)
 	for _, epoch := range []uint64{state.Epoch - 1, state.Epoch} {
 		basis, queryErr := db.Metadata().GetRewardSnapshot(epoch, "mark", nil)
 		require.NoError(t, queryErr)
@@ -606,7 +615,12 @@ func TestImportSnapShotsSkipsGoBasisWithoutCrossEraHistory(t *testing.T) {
 		state.Epoch-1, EraBabbage, nil,
 	)
 	require.NoError(t, err)
-	require.Empty(t, previousRows)
+	require.Len(t, previousRows, 1)
+	expectedPrevious, err := previousPParamsForEra(
+		EraConway, translatedPrevious, EraBabbage,
+	)
+	require.NoError(t, err)
+	require.Equal(t, expectedPrevious, previousRows[0].Cbor)
 	currentRows, err := db.Metadata().GetPParams(
 		state.Epoch, EraConway, nil,
 	)
@@ -1665,7 +1679,7 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 // TestPersistImportedSnapshotMissingPoolsNotResolved verifies that when no
 // pool rows exist in the DB (e.g. the fallback pool import has not yet run),
 // the current-epoch snapshot is NOT falsely marked Resolved=true. This is the
-// main correctness invariant from issue #2440: a missing pool row must not
+// main correctness invariant: a missing pool row must not
 // produce an authoritative Resolved=true, AutoVote=None entry.
 func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 	t.Parallel()
@@ -1720,7 +1734,7 @@ func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
 }
 
 // TestPersistImportedSnapshotPoolPresentAccountStates exercises the
-// current-epoch resolver's three account outcomes for issue #2440:
+// current-epoch resolver's three account outcomes:
 //   - reward account row absent entirely → Resolved=false (data may not be
 //     imported yet; must not be persisted as a false confirmed None);
 //   - reward account present but inactive (deregistered) → Resolved=true,
@@ -2018,16 +2032,20 @@ func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
 		Reconcile:     true,
 		reconcileKeys: newReconcileKeys(),
 	}
-	require.NoError(t, importSnapShots(
+	// The fixture's pool carries no reward account and the state no protocol
+	// parameters, so its reward basis cannot be seeded and the import fails
+	// there. The fallback pool import, and its key recording, run before it.
+	err = importSnapShots(
 		context.Background(), cfg, 999, func(ImportProgress) {}, true,
-	))
+	)
+	require.ErrorIs(t, err, errImportedRewardBasisUnusable)
 	_, ok := cfg.reconcileKeys.pools[string(poolHash[:])]
 	require.True(t, ok,
 		"fallback-imported pool must be recorded in the reconcile key set")
 }
 
 // TestImportSnapShotsFallbackPoolsResolveCurrentEpoch verifies the end-to-end
-// fix from issue #2440: when pools come from the snapshot-pool fallback path
+// fix: when pools come from the snapshot-pool fallback path
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
 // is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
 func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
