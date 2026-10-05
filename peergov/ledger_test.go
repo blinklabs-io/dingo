@@ -713,7 +713,7 @@ func stubSRV(
 func TestResolveAddress_SRVResolvesTargetAndPort(t *testing.T) {
 	stubSRV(t,
 		map[string][]*net.SRV{
-			"pool.example.com": {{Target: "relay1.example.com.", Port: 6000}},
+			"_cardano._tcp.pool.example.com": {{Target: "relay1.example.com.", Port: 6000}},
 		},
 		map[string][]net.IP{
 			"relay1.example.com.": {net.ParseIP("44.0.1.1")},
@@ -752,7 +752,7 @@ func TestResolveAddress_SRVFallbackToARecord(t *testing.T) {
 	stubSRV(
 		t,
 		map[string][]*net.SRV{
-			"pool.example.com": {
+			"_cardano._tcp.pool.example.com": {
 				{Target: "dead.example.com.", Port: 6000},
 				{Target: "also-dead.example.com.", Port: 6001},
 			},
@@ -780,7 +780,7 @@ func TestResolveAddress_SRVFallbackToARecord(t *testing.T) {
 func TestResolveAddress_SRVSkipsUnresolvableTarget(t *testing.T) {
 	stubSRV(t,
 		map[string][]*net.SRV{
-			"pool.example.com": {
+			"_cardano._tcp.pool.example.com": {
 				{Target: "dead.example.com.", Port: 6000},
 				{Target: "alive.example.com.", Port: 6001},
 			},
@@ -791,6 +791,32 @@ func TestResolveAddress_SRVSkipsUnresolvableTarget(t *testing.T) {
 	)
 	pg := discardGovernor()
 	assert.Equal(t, "44.0.2.2:6001", pg.resolveAddress("pool.example.com:0"))
+}
+
+// CIP-0155: the SRV query name is _cardano._tcp.<ledger name>, so a record
+// published at the bare registered name is not consulted.
+//
+// Not t.Parallel: swaps the package-level resolver seams.
+func TestResolveAddress_SRVIgnoresUnprefixedRecord(t *testing.T) {
+	stubSRV(t,
+		map[string][]*net.SRV{
+			"pool.example.com": {{Target: "relay1.example.com.", Port: 6000}},
+		},
+		map[string][]net.IP{
+			"relay1.example.com.": {net.ParseIP("44.0.1.1")},
+			"pool.example.com":    {net.ParseIP("44.0.9.9")},
+		},
+	)
+	pg := discardGovernor()
+	assert.Equal(t, "44.0.9.9:3001", pg.resolveAddress("pool.example.com:0"))
+	assert.Equal(
+		t,
+		"44.0.9.9:3001",
+		pg.resolveLedgerDiscoveryAddress(
+			context.Background(),
+			"pool.example.com:0",
+		),
+	)
 }
 
 // Not t.Parallel: swaps the package-level resolver seams.
@@ -829,7 +855,7 @@ func TestResolveAddress_NormalPortSkipsSRV(t *testing.T) {
 func TestDiscoverLedgerPeers_MultiHostRelayUsesSRV(t *testing.T) {
 	stubSRV(t,
 		map[string][]*net.SRV{
-			"pool.example.com": {{Target: "relay.example.com.", Port: 6000}},
+			"_cardano._tcp.pool.example.com": {{Target: "relay.example.com.", Port: 6000}},
 		},
 		map[string][]net.IP{"relay.example.com.": {net.ParseIP("44.0.7.7")}},
 	)
@@ -869,7 +895,7 @@ func TestMultiHostSRVUnusableTargetsFallBackToHostname(t *testing.T) {
 	stubSRV(
 		t,
 		map[string][]*net.SRV{
-			"pool.example.com": {{Target: "private.example.com.", Port: 6000}},
+			"_cardano._tcp.pool.example.com": {{Target: "private.example.com.", Port: 6000}},
 		},
 		map[string][]net.IP{
 			"private.example.com.": {net.ParseIP("127.0.0.1")},

@@ -56,15 +56,19 @@ var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 	return ips, nil
 }
 
-// lookupSRV resolves the SRV records published directly at a hostname, as a
-// MultiHostName relay does. Like lookupIPAddr it honors the context and is a
-// package var so tests can inject a deterministic resolver.
-var lookupSRV = func(ctx context.Context, host string) ([]*net.SRV, error) {
-	// An empty service and protocol query the name itself, with no
-	// _service._proto prefix.
-	_, records, err := net.DefaultResolver.LookupSRV(ctx, "", "", host)
+// lookupSRV resolves the SRV records published at exactly the given name.
+// Like lookupIPAddr it honors the context and is a package var so tests can
+// inject a deterministic resolver.
+var lookupSRV = func(ctx context.Context, name string) ([]*net.SRV, error) {
+	// An empty service and protocol query the name verbatim; the caller
+	// supplies any _service._proto labels.
+	_, records, err := net.DefaultResolver.LookupSRV(ctx, "", "", name)
 	return records, err
 }
+
+// cardanoSRVPrefix is prepended to a MultiHostName relay's ledger domain to
+// form its SRV query name, per CIP-0155. The ledger carries the bare domain.
+const cardanoSRVPrefix = "_cardano._tcp."
 
 // maxSRVTargets bounds how many SRV targets are resolved for one relay, so a
 // record set padded by its operator cannot multiply discovery-time lookups.
@@ -104,7 +108,7 @@ func (p *PeerGovernor) resolveMultiHost(
 		}
 		return nil
 	}
-	records, err := lookupSRV(ctx, host)
+	records, err := lookupSRV(ctx, cardanoSRVPrefix+host)
 	if err == nil {
 		for i, record := range records {
 			if i >= maxSRVTargets {
