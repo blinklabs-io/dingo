@@ -33,6 +33,7 @@ import (
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
 	cfg := &Config{
+		DatabasePath:         ".dingo",
 		Plugins:              defaultPluginsConfig(),
 		Network:              "preview",
 		RunMode:              RunModeServe,
@@ -1449,4 +1450,14 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateRejectsEmptyDatabasePathForSQLite(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.DatabasePath = ""
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.ErrorContains(t, err, "databasePath must be set")
+	cfg.Plugins.Storage.Metadata.Provider = "postgres"
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }

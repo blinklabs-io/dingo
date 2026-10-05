@@ -4205,11 +4205,14 @@ at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
 (rolled back after acquisition, or never on this node's chain at all).
 
 **Acquired ledger snapshots.** Every `Acquire` -- specific point, volatile tip
-or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits for any
-epoch-boundary job, opens a coordinated read snapshot
+or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits (inside the
+caller's deadline) for any epoch-boundary job, opens a coordinated read
+snapshot
 (`database.NewReadSnapshotContext`, whose blob and metadata views are fixed at
 one commit boundary), and validates the point against it with
-`VerifyPointQueryable`. The
+`VerifyPointQueryable`. A boundary can commit before its job is published, so
+a snapshot that still contains the boundary's pending-ratification record is
+dropped and the open retried once the job settles. The
 returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
 beside the acquired point and owner maps, and every `Query` on the connection
 is answered by `QueryView.Query`, which runs the ordinary query handlers
@@ -4219,15 +4222,17 @@ validated at `Acquire` stays answerable. Chain-tip queries
 (`GetChainPoint`, `GetChainBlockNo`) read the snapshot's own tip. Queries the
 ledger otherwise answers from its in-memory consensus snapshot for an unpinned
 acquire -- current epoch number, era, current protocol parameters, the epoch
-`GetStakeSnapshots` reports, and the tip and current era of `GetEraHistory` --
+`GetStakeSnapshots` reports, and the tip and current era of `GetEraHistory` (pinned or not) --
 resolve from the epoch record covering the snapshot's tip, so a view that
 outlives an epoch boundary keeps answering for the epoch it froze. They fall
 back to the live value when no epoch record covers the tip or, for protocol
 parameters, no row was persisted for the ended epoch. The `GetEraHistory`
 transition forecast stays live: it is predicted state with no stored form.
-Genesis configuration and system start never change. The in-memory
-SQLite used when no data directory is configured gives readers table locks
-rather than a snapshot, so snapshot isolation applies to on-disk databases.
+Genesis configuration and system start never change. In-memory SQLite (no
+data directory) gives readers table locks rather than a snapshot, so a held
+view blocks the ledger's own writes and stalls block production; config
+validation therefore rejects an empty `databasePath` while the metadata
+provider is `sqlite`, and snapshot isolation applies to on-disk databases.
 
 A snapshot pins a database read transaction (holding back WAL checkpoints and
 one read connection), so both its number and its lifetime are bounded. It
@@ -4235,9 +4240,11 @@ counts against the database's read-snapshot admission cap, which always leaves
 one metadata read connection free for the rest of the node; once the cap is
 reached an `Acquire` waits up to five seconds for a snapshot to close and then
 fails. It is closed on `Release`,
-on re-`Acquire` (only after the new snapshot opened: a failed `Acquire` leaves
-the previous session in place), on the connection closing, and on
-`Ouroboros.Close`. A snapshot still held after
+on re-`Acquire` (before the replacement opens, so a connection never needs a
+second admission slot; a failed `Acquire` leaves the session registered with a
+closed view), on the connection closing, and on
+`Ouroboros.Close`, which shutdown calls after connections drain and before the
+ledger and database close. A snapshot still held after
 `localStateQueryViewMaxLifetime` (default `5m`, env
 `DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
 and logged with its age and idle time; the session stays recorded so its next

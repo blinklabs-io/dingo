@@ -679,11 +679,8 @@ func (ls *LedgerState) queryHardFork(
 		}
 		return era.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
-		// A pinned query reports the table as known to the live tip, so only
-		// an unpinned query reads through a held snapshot.
-		if at.pinned() {
-			txn = nil
-		}
+		// The held snapshot answers pinned and unpinned queries alike, so the
+		// table does not change within an acquired session.
 		return ls.queryHardForkEraHistory(txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)

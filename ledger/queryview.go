@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 )
@@ -65,12 +67,84 @@ func (ls *LedgerState) AcquireQueryView(
 	ctx context.Context,
 	at QueryPoint,
 ) (*QueryView, error) {
-	// The latest boundary's mark snapshot and RATIFY marks may still be
-	// written by its background job; open the snapshot only after it has
-	// decided, so the view never freezes a half-written boundary.
-	if err := ls.WaitEpochBoundaryJob(ls.closeCtx()); err != nil {
-		return nil, err
+	for {
+		// The latest boundary's mark snapshot and RATIFY marks may still be
+		// written by its background job; open the snapshot only after it has
+		// decided, so the view never freezes a half-written boundary. The
+		// wait sits inside ctx so a slow job cannot outlast the caller's
+		// deadline.
+		if err := ls.WaitEpochBoundaryJob(ctx); err != nil {
+			return nil, err
+		}
+		txn, cancelView, err := ls.openQueryViewSnapshot(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// A boundary can commit before its AfterCommit callback publishes
+		// the job, so the wait above may have seen no job. The pending
+		// record in the snapshot is the authority: when one is still there
+		// the snapshot froze a half-written boundary, so drop it and wait
+		// for the job to settle.
+		pending, err := loadPendingRatification(ls.db, txn)
+		if err != nil {
+			txn.Release()
+			cancelView()
+			return nil, err
+		}
+		if pending != nil {
+			txn.Release()
+			cancelView()
+			if err := ls.waitPendingBoundaryJob(ctx, *pending); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := ls.VerifyPointQueryable(txn, at); err != nil {
+			txn.Release()
+			cancelView()
+			return nil, err
+		}
+		return &QueryView{ls: ls, at: at, txn: txn, cancel: cancelView}, nil
 	}
+}
+
+// waitPendingBoundaryJob waits until the job for pending is published and
+// settled, or the record is gone. A boundary's commit precedes its job's
+// publication, so the job may not exist yet.
+func (ls *LedgerState) waitPendingBoundaryJob(
+	ctx context.Context,
+	pending pendingRatificationRecord,
+) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		ls.ratificationMu.Lock()
+		job := ls.ratificationJob
+		ls.ratificationMu.Unlock()
+		if job != nil && job.record == pending {
+			return ls.WaitEpochBoundaryJob(ctx)
+		}
+		select {
+		case <-ticker.C:
+			// The record may have been consumed by the next boundary.
+			current, err := loadPendingRatification(ls.db, nil)
+			if err != nil {
+				return err
+			}
+			if current == nil || *current != pending {
+				return nil
+			}
+		case <-ctx.Done():
+			return fmt.Errorf("wait for epoch boundary job: %w", ctx.Err())
+		}
+	}
+}
+
+// openQueryViewSnapshot opens the read snapshot a view holds. ctx bounds
+// only the open.
+func (ls *LedgerState) openQueryViewSnapshot(
+	ctx context.Context,
+) (*database.Txn, context.CancelFunc, error) {
 	viewCtx, cancelView := context.WithCancel(context.WithoutCancel(ctx))
 	stopWatch := context.AfterFunc(ctx, cancelView)
 	txn, _, err := database.NewReadSnapshotContext(viewCtx, ls.db)
@@ -81,18 +155,13 @@ func (ls *LedgerState) AcquireQueryView(
 			txn.Release()
 		}
 		cancelView()
-		return nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
+		return nil, nil, fmt.Errorf("open ledger snapshot: %w", ctx.Err())
 	}
 	if err != nil {
 		cancelView()
-		return nil, err
+		return nil, nil, err
 	}
-	if err := ls.VerifyPointQueryable(txn, at); err != nil {
-		txn.Release()
-		cancelView()
-		return nil, err
-	}
-	return &QueryView{ls: ls, at: at, txn: txn, cancel: cancelView}, nil
+	return txn, cancelView, nil
 }
 
 // Query answers a decoded LocalStateQuery message from the view's snapshot.
@@ -100,7 +169,7 @@ func (ls *LedgerState) AcquireQueryView(
 func (v *QueryView) Query(
 	query any,
 	protocolVersion uint16,
-) (any, error) {
+) (result any, err error) {
 	v.mu.Lock()
 	if v.closed {
 		v.mu.Unlock()
@@ -109,6 +178,21 @@ func (v *QueryView) Query(
 	v.inFlight++
 	v.mu.Unlock()
 	defer v.finishQuery()
+	// Follow Txn.Do's panic contract: a panic in a store helper fails this
+	// query rather than reaching the connection's handler goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			if logger := v.ls.config.Logger; logger != nil {
+				logger.Error(
+					"panic in ledger query view",
+					"component", "ledger",
+					"panic", fmt.Sprintf("%v", r),
+					"stack", string(debug.Stack()),
+				)
+			}
+			result, err = nil, database.NewTxnPanicError("query view", r)
+		}
+	}()
 	return v.ls.queryInTxn(query, v.at, protocolVersion, v.txn)
 }
 

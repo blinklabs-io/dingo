@@ -1247,9 +1247,8 @@ func newTestLedgerStateWithChain(
 }
 
 // newTestLedgerStateWithChainAt is newTestLedgerStateWithChain over a database
-// in dataDir. An empty dataDir is in-memory SQLite, whose shared cache blocks
-// a writer while any read transaction is open; a test that holds a snapshot
-// across a write needs an on-disk database instead.
+// in dataDir. An empty dataDir makes dbtest.NewDatabase use a temporary
+// file-backed SQLite database; pass a dataDir to control where it lives.
 func newTestLedgerStateWithChainAt(
 	t *testing.T,
 	blockCount uint64,

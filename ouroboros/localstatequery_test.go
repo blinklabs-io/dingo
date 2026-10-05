@@ -538,12 +538,12 @@ func TestLocalstatequeryQueryAnswersFromAcquiredSnapshot(t *testing.T) {
 	)
 }
 
-// TestLocalstatequeryFailedReAcquireKeepsSession proves a rejected Acquire
-// does not disturb the session the connection already holds.
-func TestLocalstatequeryFailedReAcquireKeepsSession(t *testing.T) {
+// TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot proves a rejected
+// re-Acquire leaves the session registered with its snapshot closed.
+func TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot(t *testing.T) {
 	t.Parallel()
 
-	o, _, acquiredTip := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
 	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
 	session := acquireSnapshotTestSession(t, o, ctx)
 
@@ -556,9 +556,10 @@ func TestLocalstatequeryFailedReAcquireKeepsSession(t *testing.T) {
 	)
 	require.ErrorIs(t, err, olocalstatequery.ErrAcquireFailurePointNotOnChain)
 
-	got, err := queryChainPoint(t, o, ctx)
-	require.NoError(t, err)
-	require.Equal(t, acquiredTip, got)
+	// The previous snapshot was closed to free its admission slot for the
+	// replacement, so the session stays registered but no longer answers.
+	_, err = queryChainPoint(t, o, ctx)
+	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
 	o.localstatequeryAcquireMutex.Lock()
 	require.Same(t, session, o.localstatequerySessions[ctx.ConnectionId])
 	o.localstatequeryAcquireMutex.Unlock()

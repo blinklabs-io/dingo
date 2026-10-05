@@ -68,7 +68,8 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 		// A QueryView whose epoch ended after it was acquired still has to
 		// answer for the epoch it froze, not the one that replaced it. When
 		// that epoch has no persisted row the live value is the best answer
-		// left, so the historical rejection is not surfaced here.
+		// left, so only that rejection is not surfaced here; any other
+		// historical-state error is propagated.
 		row, err := ls.snapshotEpoch(txn, at)
 		if err != nil {
 			return nil, err
@@ -77,7 +78,7 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 			result, err := ls.historicalProtocolParameters(
 				snapshot, row.EpochId, at, txn,
 			)
-			if !errors.Is(err, ErrHistoricalStateUnavailable) {
+			if !errors.Is(err, errPParamsRowMissing) {
 				return result, err
 			}
 		}
@@ -107,6 +108,10 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 	}
 	return ls.historicalProtocolParameters(snapshot, targetEpoch, at, txn)
 }
+
+// errPParamsRowMissing marks a historical protocol-parameter lookup that found
+// no persisted row for the epoch, as opposed to an unresolvable epoch or era.
+var errPParamsRowMissing = errors.New("no persisted protocol-parameter row")
 
 // historicalProtocolParameters answers from targetEpoch's persisted pparams
 // row, for a targetEpoch other than the live snapshot's epoch.
@@ -149,10 +154,11 @@ func (ls *LedgerState) historicalProtocolParameters(
 	}
 	if pparams == nil {
 		return nil, fmt.Errorf(
-			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
+			"%w: %w: protocol parameters at slot %d (epoch %d) cannot be "+
 				"reconstructed while the live tip is in epoch %d -- no "+
 				"persisted protocol-parameter row exists for epoch %d",
 			ErrHistoricalStateUnavailable,
+			errPParamsRowMissing,
 			at.Slot,
 			targetEpoch,
 			liveEpoch,

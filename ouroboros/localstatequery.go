@@ -173,9 +173,13 @@ func (o *Ouroboros) localstatequeryViewMaxLifetime() time.Duration {
 // always has; a point still on-chain but older than some query type's own
 // retention floor (ErrHistoricalStateUnavailable) fails as "too old".
 //
-// A failed Acquire leaves the connection's previous session, if any, in
-// place: a client that ignores the failure and queries anyway keeps whatever
-// it held before this call.
+// A re-Acquire closes the connection's previous snapshot before opening the
+// replacement, so a connection never needs a second admission slot while its
+// own is held; with the cap full it could otherwise never re-Acquire. A failed
+// Acquire leaves the previous session registered but with its snapshot
+// closed: the protocol returns the connection to Idle on failure, and a client
+// that queries anyway gets ErrQueryViewClosed rather than answers from a
+// snapshot it no longer holds a slot for.
 //
 // Not every query type honors a pinned point yet -- see
 // ledger.LedgerState.Query's doc comment for which ones do.
@@ -201,6 +205,12 @@ func (o *Ouroboros) localstatequeryServerAcquire(
 	// ErrAcquireFailurePointNotOnChain/PointTooOld into one), but a rejection
 	// surfacing later, from the Query callback, has no such path and tears
 	// down the whole connection instead.
+	o.localstatequeryAcquireMutex.Lock()
+	held := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	if held != nil {
+		held.view.Close()
+	}
 	acquireCtx, cancel := context.WithTimeout(
 		context.Background(),
 		localStateQueryAcquireWait,

@@ -409,6 +409,13 @@ func (n *Node) shutdown() error {
 		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
 	)
 
+	// Acquired LocalStateQuery snapshots are read transactions on the
+	// database phase 3 closes; release them first. Close is idempotent, so
+	// Run's deferred call is then a no-op.
+	if ouro := n.ouroboros(); ouro != nil {
+		_ = ouro.Close()
+	}
+
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()

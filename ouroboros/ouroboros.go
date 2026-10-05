@@ -174,7 +174,8 @@ type Ouroboros struct {
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
 	// localstatequerySessions holds each connection's acquired ledger
 	// snapshot. It is guarded by localstatequeryAcquireMutex like the maps
-	// above, and every path that clears one of them clears all three.
+	// above, and every production path that clears one of them clears all
+	// three (SetLocalStateQueryAcquiredPointForTesting clears only owners).
 	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
