@@ -348,7 +348,8 @@ func (s *Stack) handleClosed(id ouroboros.ConnectionId) {
 // feed moves every message the consumer has not yet seen from the pool into
 // its notification server's queue. A message the queue refuses is held and
 // offered again, so a slow consumer delays messages but skips only those that
-// expire first.
+// expire first. It returns once the consumer ends notification with
+// MsgClientDone, which leaves the connection open for submission.
 func (s *Stack) feed(
 	ctx context.Context,
 	consumerID string,
@@ -356,6 +357,10 @@ func (s *Stack) feed(
 ) {
 	var pending *ocommon.DmqMessage
 	for {
+		// Checked on every wake: the server's terminal state has no channel.
+		if server.IsDone() {
+			return
+		}
 		// Take the signal before draining so an admission that lands
 		// between the drain and the wait still wakes this loop.
 		added := s.pool.AddedSignal()

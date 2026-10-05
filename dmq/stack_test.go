@@ -530,3 +530,80 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
 	require.Equal(t, []string{"after"}, bodies(c.reply(t)))
 }
+
+// A consumer that ends both local protocols with MsgDone and MsgClientDone
+// moves the server side of each to its terminal state, and the stack keeps
+// serving other connections.
+func TestStackHandlesClientDone(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{})
+	done := newConsumer(t, s)
+	var id ouroboros.ConnectionId
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for k := range s.feeders {
+			id = k
+		}
+		return len(s.feeders) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+	server := s.connMgr.GetConnectionById(id)
+	require.NotNil(t, server)
+	require.NoError(t, done.conn.LocalMessageSubmission().Client.Stop())
+	require.NoError(t, done.client().Stop())
+	require.Eventually(t, func() bool {
+		return server.LocalMessageSubmission().Server.IsDone() &&
+			server.LocalMessageNotification().Server.IsDone()
+	}, 10*time.Second, 10*time.Millisecond)
+
+	c := newConsumer(t, s)
+	require.NoError(t, c.client().RequestMessagesBlocking())
+	submit := submitter(t, s)
+	require.Nil(t, submit(newTestMessage([]byte("next"), soonExpiry())))
+	require.Equal(t, []string{"next"}, bodies(c.reply(t)))
+}
+
+// MsgClientDone ends notification while the connection stays open for
+// submission; the connection's feeder must stop and release its cursor
+// rather than keep offering messages to a finished server.
+func TestStackStopsFeederOnClientDone(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{})
+	feederIDs := func() []ouroboros.ConnectionId {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		ids := make([]ouroboros.ConnectionId, 0, len(s.feeders))
+		for id := range s.feeders {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	hasCursor := func(id ouroboros.ConnectionId) bool {
+		s.pool.peersMu.Lock()
+		defer s.pool.peersMu.Unlock()
+		_, ok := s.pool.peers[id.String()]
+		return ok
+	}
+	submit := submitter(t, s)
+	require.Eventually(t, func() bool {
+		return len(feederIDs()) == 1
+	}, 10*time.Second, 10*time.Millisecond)
+	submitterID := feederIDs()[0]
+	c := newConsumer(t, s)
+	var consumerID ouroboros.ConnectionId
+	require.Eventually(t, func() bool {
+		for _, id := range feederIDs() {
+			if id != submitterID {
+				consumerID = id
+				return hasCursor(id)
+			}
+		}
+		return false
+	}, 10*time.Second, 10*time.Millisecond)
+
+	require.NoError(t, c.client().Stop())
+	require.Nil(t, submit(newTestMessage([]byte("after"), soonExpiry())))
+	require.Eventually(t, func() bool {
+		return !hasCursor(consumerID)
+	}, 10*time.Second, 10*time.Millisecond)
+}

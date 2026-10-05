@@ -6458,7 +6458,9 @@ server's authentication and TTL checks are disabled here because pooled
 messages were validated on admission. The connection manager publishes its
 closed event only for node-to-node connections, so the stack learns of a local
 disconnect through `ConnClosedFunc`, which stops the feeder and releases the
-cursor. The inbound-connection subscription that starts feeders uses the bus's
+cursor. A consumer that sends `MsgClientDone` keeps its connection open for
+submission; its feeder sees the notification server's terminal state on its
+next wake, exits and releases the cursor. The inbound-connection subscription that starts feeders uses the bus's
 blocking backpressure policy: a detached subscriber would leave every later
 connection without a feeder.
 
