@@ -111,7 +111,7 @@ func TestApplyFlags_APITLSCLIOverridesEnvironment(t *testing.T) {
 }
 
 // TestLoad_APIProviderConfigPerFieldOverride is the end-to-end shape from
-// dingo#2998's issue body: a shared top-level api.tls default plus a
+// issue body: a shared top-level api.tls default plus a
 // provider-level override of only one nested field. It exercises the real
 // LoadConfig YAML path together with apiconfig.MergeProviderConfig (the
 // same merge node.go's apiProviderConfig performs at composition), rather
@@ -205,7 +205,7 @@ func TestLoad_APIProviderConfigInvalidMergedTLSPair(t *testing.T) {
 // TestValidate_InvalidAPITLSMode covers the fail-fast top-level mode
 // enum check: a typo in api.tls.mode is rejected once, with a clear
 // message, by Validate rather than only surfacing later from each of the
-// three API providers that would otherwise inherit it.
+// four API providers that would otherwise inherit it.
 func TestValidate_InvalidAPITLSMode(t *testing.T) {
 	resetGlobalConfig()
 	cfg := GetConfig()

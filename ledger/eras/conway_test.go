@@ -700,7 +700,7 @@ func newConwayFeaturesTestTx(
 //   - only a *needed* PlutusV1 script constrains the transaction, so a V1
 //     script that is merely reachable is ignored.
 //
-// The needed-not-available distinction is the fix from gouroboros #1980.
+// The needed-not-available distinction is the fix from gouroboros.
 
 // newBabbageInlineDatumOutput builds a Babbage output carrying an inline datum
 // at the given address, by round-tripping CBOR rather than asserting a concrete
@@ -952,13 +952,13 @@ func applyProposalPurpose(
 }
 
 // TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript is the case
-// gouroboros #1980 fixed. An unrelated PlutusV1 reference script sits on a
+// gouroboros fixed. An unrelated PlutusV1 reference script sits on a
 // spent UTxO and another spent UTxO carries an inline datum, but no script
 // purpose needs the V1 script, so the transaction is valid.
 //
-// Before #1980 the rule gated on *available* scripts and rejected this shape,
-// which turned an ordinary transaction into a permanent validation failure.
-// dingo #3240 asserted that rejection against the then-current pin; the
+// The rule used to gate on *available* scripts and reject this shape, which
+// turned an ordinary transaction into a permanent validation failure. This
+// test once asserted that rejection against the then-current pin; the
 // assertion is inverted here because the upstream rule now gates on needed
 // scripts.
 func TestConwayInlineDatumRuleIgnoresUnusedPlutusV1ReferenceScript(
@@ -1327,7 +1327,7 @@ func TestConwayPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	t.Run(
 		"missing cost model fails closed instead of reaching evaluation",
 		func(t *testing.T) {
-			// Issue #3528: a protocol-parameters map that never populated
+			// A protocol-parameters map that never populated
 			// the PlutusV1 entry (e.g. a hard-fork/governance update, or a
 			// malformed genesis) must return a configuration error rather
 			// than silently evaluating the script under plutigo's built-in
@@ -1481,6 +1481,34 @@ func TestInvalidPlutusTxInfoUsesBodyOutputs(t *testing.T) {
 			{name: "PlutusV2", version: lang.LanguageVersionV2},
 			{name: "PlutusV3", version: lang.LanguageVersionV3},
 		} {
+			if tc.version != lang.LanguageVersionV3 {
+				t.Run("Babbage/"+tc.name, func(t *testing.T) {
+					tx, input := newContextMintTx(
+						t,
+						txInfoOutputCountScript(t, tc.version, 1, false),
+						false,
+						[]lcommon.TransactionOutput{newTestOutput(1_000_000)},
+						nil,
+						nil,
+					)
+					ls := newMockLedgerState()
+					ls.addUtxo(input, newTestOutput(10_000_000))
+					pp := &babbage.BabbageProtocolParameters{
+						ProtocolMajor: 7,
+						CostModels: map[uint][]int64{
+							0: defaultMachineCostModel(t, lang.LanguageVersionV1),
+							1: defaultMachineCostModel(t, lang.LanguageVersionV2),
+						},
+						MaxTxExUnits: lcommon.ExUnits{Memory: 10_000_000, Steps: 100_000_000},
+					}
+					require.ErrorContains(
+						t,
+						ValidateTxBabbage(tx, 0, ls, pp),
+						"transaction declared invalid but Plutus scripts succeeded",
+					)
+				})
+			}
+
 			t.Run("Conway/"+tc.name, func(t *testing.T) {
 				tx, input := newContextMintTx(
 					t,
@@ -1598,19 +1626,23 @@ func newContextMintTx(
 	proposals []lcommon.ProposalProcedure,
 ) (*mockProducedValidityTx, testInput) {
 	t.Helper()
+	redeemerValue := lcommon.RedeemerValue{
+		Data:    lcommon.Datum{Data: data.NewConstr(0)},
+		ExUnits: lcommon.ExUnits{Memory: 5_000_000, Steps: 50_000_000},
+	}
 	witnesses := &mockWitnessSet{
-		redeemers: &mockRedeemers{entries: []struct {
-			key lcommon.RedeemerKey
-			val lcommon.RedeemerValue
-		}{
-			{
-				key: lcommon.RedeemerKey{Tag: lcommon.RedeemerTagMint, Index: 0},
-				val: lcommon.RedeemerValue{
-					Data:    lcommon.Datum{Data: data.NewConstr(0)},
-					ExUnits: lcommon.ExUnits{Memory: 5_000_000, Steps: 50_000_000},
+		redeemers: &mockRedeemers{
+			entries: []struct {
+				key lcommon.RedeemerKey
+				val lcommon.RedeemerValue
+			}{
+				{
+					key: lcommon.RedeemerKey{Tag: lcommon.RedeemerTagMint, Index: 0},
+					val: redeemerValue,
 				},
 			},
-		}},
+			valueOverride: &redeemerValue,
+		},
 	}
 	switch tmpScript := plutusScript.(type) {
 	case lcommon.PlutusV1Script:
@@ -2239,7 +2271,7 @@ func mainnetFixtureInputTxs(t *testing.T) []*conway.ConwayTransaction {
 // A rendering of that type that drops the datum hash puts NoOutputDatum in the
 // PlutusV3 script context, and the transaction's withdrawal validator calls
 // Plutus `error` on it, rejecting a block the network accepted. See
-// blinklabs-io/dingo#3860 and blinklabs-io/gouroboros#2213.
+// and blinklabs-io/gouroboros.
 func TestValidateTxPlutusConwayMainnetStorageDecodedUtxos(t *testing.T) {
 	pp := mainnetFixtureProtocolParams(t)
 	tx, err := conway.NewConwayTransactionFromCbor(
@@ -2558,8 +2590,7 @@ var preprodSerialiseDataFundingTxIds = []string{
 // indefinite-length field list the Plutus encoder writes. Passing the
 // definite-length wire encoding through instead changes what serialiseData
 // returns, so the policy computed a different asset name than the network
-// minted, called error, and wedged a preprod replay at this block. See
-// blinklabs-io/dingo#3860.
+// minted, called error, and wedged a preprod replay at this block.
 func TestEvaluateTxConwayPreprodSerialiseData(t *testing.T) {
 	t.Parallel()
 	tx, err := conway.NewConwayTransactionFromCbor(
@@ -2798,7 +2829,7 @@ type previewOracleBlockContext struct {
 // serialiseData of a payload containing integers with 101-byte magnitudes. A
 // serialiseData encoding that does not chunk a bignum magnitude makes that
 // validator return "error explicitly called", which rejects a canonical block
-// and freezes the tip. See blinklabs-io/dingo#3780.
+// and freezes the tip.
 func TestValidateTxPlutusConwayPreviewWithdrawalOracle(t *testing.T) {
 	raw, err := os.ReadFile(
 		filepath.Join("testdata", "preview-block-121707875.cbor"),
@@ -3372,8 +3403,8 @@ func newConwayDivergenceTxWithReference(
 // Position is not a stable property. gouroboros composes
 // conway.UtxoValidationRules from the ordered descriptor list, so any upstream
 // insertion renumbers every rule after it; the Id does not move. Tests that
-// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps
-// (issues #3764, #3976, #3983), while production, which keys on the Id, did
+// pinned literal positions broke on the v0.202.5 and v0.202.9 bumps,
+// while production, which keys on the Id, did
 // not.
 func conwayUtxoValidationRuleIndex(
 	t *testing.T,
@@ -3509,7 +3540,7 @@ func TestValidateTxConwayGenuinelyMissingReferenceInputStillRejected(
 }
 
 // TestValidateTxConwayGenuinelyUnbalancedStillRejected is the negative case for
-// the value-conservation half of issue #3678: a transaction whose inputs all
+// the value-conservation half: a transaction whose inputs all
 // resolve but whose consumed and produced values genuinely differ must still be
 // rejected, and must still be reported under the value-not-conserved rule.
 func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
@@ -3549,7 +3580,7 @@ func TestValidateTxConwayGenuinelyUnbalancedStillRejected(t *testing.T) {
 
 	// The input resolved, so bad-inputs must NOT also fire. This is what
 	// separates a genuinely unbalanced transaction from the single-cause
-	// pairing in issue #3678, where one unresolvable input produces both.
+	// pairing, where one unresolvable input produces both.
 	var badInputs shelley.BadInputsUtxoError
 	assert.NotErrorAs(t, err, &badInputs)
 }
@@ -3564,7 +3595,7 @@ const (
 	previewConwaySlot       = 58_083_610
 	previewConwayProtoMajor = 9
 
-	// The malformed reference script's hash, matching dingo#4393's log text
+	// The malformed reference script's hash, matching log text
 	// ("malformed reference scripts: [e985ee15...]") exactly.
 	previewConwayMalformedScriptHash = "e985ee15101d2cef31eab9bd0e6ea55423b26aabf78171b87ed440af"
 )
@@ -3600,7 +3631,7 @@ func previewConwayProtocolParams(
 }
 
 // TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript is the
-// regression test for blinklabs-io/dingo#4393: a genesis Preview sync
+// regression test: a genesis Preview sync
 // deterministically and permanently halted at block 2,423,581 / slot
 // 58083610 because conway UTXO validation rule 45
 // (conway.UtxoValidateMalformedReferenceScripts, wired unmodified into
@@ -3618,7 +3649,7 @@ func previewConwayProtocolParams(
 // time instead, in the same code path used for well-formedness checks of
 // unexecuted reference scripts, so dingo rejected every peer's identical copy
 // of this canonical block and could not resync Preview from genesis on any
-// build. plutigo v0.7.2 (blinklabs-io/plutigo#415) moves the gate to
+// build. plutigo v0.7.2 moves the gate to
 // execution time; this test fails before that bump and passes after it.
 func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 	t *testing.T,
@@ -3649,7 +3680,7 @@ func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 	// This is the exact, unwrapped validation function
 	// buildConwayValidationRules wires into ValidateTxConway's rule table for
 	// upstream rule Id UtxoValidationRuleMalformedReferenceScripts --
-	// dingo#4393's "conway utxo validation rule 45" -- not an extracted
+	// "conway utxo validation rule 45" -- not an extracted
 	// helper the production entry point bypasses.
 	err = conway.UtxoValidateMalformedReferenceScripts(
 		tx,
@@ -3673,7 +3704,7 @@ func TestConwayUtxoRule45AcceptsPreviewMalformedVersionReferenceScript(
 }
 
 // TestConwayPlutusV2ScriptStillRejectsMalformedVersionAtExecution is the
-// negative case dingo#4393's root-cause analysis requires alongside the fix:
+// negative case root-cause analysis requires alongside the fix:
 // the same 123-byte script that rule 45 must now accept as an unexecuted
 // reference script must still be rejected if anything ever tries to execute
 // it, so the fix does not also remove the execution-time gate
@@ -3923,7 +3954,7 @@ func TestConwayWithdrawalOrderPlacesScriptCredentialFirst(t *testing.T) {
 }
 
 // TestValidateTxConwayRejectsParameterChangeProtocolVersion is a production
-// ValidateTxConway regression (dingo#4439's "test through production
+// ValidateTxConway regression ( "test through production
 // ValidateTxConway" and "end-to-end PV9, PV10, and PV11 rejection coverage"
 // criteria). Every other Conway rule is stubbed to a no-op so only the new
 // rule's contribution to the joined error is under test, matching the
@@ -3959,7 +3990,7 @@ func TestValidateTxConwayRejectsParameterChangeProtocolVersion(t *testing.T) {
 }
 
 // TestPParamsUpdateConwayIgnoresProtocolVersion is the defense-in-depth
-// regression for dingo#4439's "remove protocol-version mutation from Conway
+// regression for "remove protocol-version mutation from Conway
 // PPU application" criterion: even called directly with an update that sets
 // protocol version, PParamsUpdateConway must not change it, while still
 // applying every other field normally.

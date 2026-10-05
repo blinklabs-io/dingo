@@ -944,7 +944,7 @@ func rejectDuplicateJSONMembers(raw []byte) error {
 // gouroboros's byron.ByronGenesis decoder (like encoding/json generally)
 // resolves duplicate JSON object keys last-occurrence-wins, which disagrees
 // with the Byron reference's first-occurrence rule. Rather than changing
-// that decoder (an upstream gouroboros concern -- see dingo#4424), this
+// that decoder (an upstream gouroboros concern), this
 // pre-filters the parsed document down to one member per key, keeping
 // whichever occurred first, before handing it to the decoder.
 func loadByronGenesisFromBytes(

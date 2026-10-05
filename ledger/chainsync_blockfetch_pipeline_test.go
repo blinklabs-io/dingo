@@ -119,14 +119,13 @@ func TestBlockfetchMetadataWriteReleasesBlockfetchMutex(t *testing.T) {
 }
 
 // TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup is the
-// direct fail-before proof for issue #4651: before the dispatch-timing
-// rework, a single dispatch issued exactly one RequestRange call and waited
-// for its BatchDone before dispatching another, paying a full peer
-// round-trip at every batch boundary. With more than BlockfetchBatchSize
+// direct fail-before proof for pipelined RequestRange: before the
+// dispatch-timing rework, a single dispatch issued exactly one RequestRange
+// call and waited for its BatchDone before dispatching another, paying a full
+// peer round-trip at every batch boundary. With more than BlockfetchBatchSize
 // headers queued (deep catch-up, not "near tip" -- see
-// shadowBlockfetchMaxHeaders), the first dispatch must also pre-queue a
-// second, non-overlapping range so the peer always has a next request in
-// hand.
+// shadowBlockfetchMaxHeaders), the first dispatch must also pre-queue a second,
+// non-overlapping range so the peer always has a next request in hand.
 func TestStartQueuedBlockfetchPipelinesSecondRequestDuringDeepCatchup(
 	t *testing.T,
 ) {
@@ -354,7 +353,8 @@ func TestHandleEventBlockfetchBatchDoneDiscardsQueuedRequestOnRollbackGeneration
 		},
 	}
 	// Slots 1-80 are Mithril-covered so the block deliveries below skip
-	// header crypto verification (issue #3528 machinery, orthogonal to what
+	// header crypto verification (header-crypto gate machinery, orthogonal to
+	// what
 	// this test proves): these synthetic blocks carry no real VRF/KES
 	// material.
 	ls.mithrilLedgerSlot = 80
@@ -838,7 +838,8 @@ func buildPartiallyAppliedCatchupChain(
 // precondition promotion actually needs. A completed batch applying at least
 // one block does not mean it applied every header it claimed: a body that
 // does not fit the chain tip is swallowed as "ignored" rather than returned
-// (chain.BlockNotFitChainTipError, see issue #4272), and a transport-shaped
+// (chain.BlockNotFitChainTipError, see the non-extending block handling), and a
+// transport-shaped
 // RangeErr can terminate a range after a partial delivery. Either leaves the
 // rest of the claimed headers queued at the front.
 //

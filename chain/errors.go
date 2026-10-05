@@ -58,7 +58,7 @@ var (
 	// cache with their original index, so a point another fork has since
 	// overwritten still looks valid; rolling back to it truncates to a stale
 	// index and moves the tip to a block the chain does not have, splicing a
-	// continuation onto a parent that is absent from the chain (issue #3005).
+	// continuation onto a parent that is absent from the chain.
 	// It wraps models.ErrBlockNotFound so existing callers keep treating an
 	// unusable rollback target as "point not found" and re-intersect.
 	ErrRollbackPointNotOnChain = fmt.Errorf(

@@ -946,6 +946,65 @@ func TestHandleSlotTicksToleratesNilTipGapReporter(t *testing.T) {
 	}
 }
 
+// While the applied ledger is behind the wall clock the slot clock emits no
+// ticks, so handleBehindHorizon is the only thing keeping the gauges live.
+// Before it existed a from-genesis sync read as a fully synced node.
+func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
+	t.Parallel()
+
+	reported := make(chan uint64, 1)
+	ls, _, metrics := newTipGapTestLedgerState(
+		t,
+		6_500_000,
+		func(gap uint64) { reported <- gap },
+	)
+	ls.currentEpoch.LengthInSlots = 432_000
+	ls.publishSnapshotsLocked()
+
+	ls.handleBehindHorizon(74_600_000)
+
+	assert.Equal(t, float64(68_100_000), gaugeValue(t, metrics.tipGapSlots))
+	assert.Equal(t, float64(432_000), gaugeValue(t, metrics.epochLengthSlots))
+	// The readiness probe must not learn a gap from a paused-tick report.
+	select {
+	case gap := <-reported:
+		t.Fatalf("ReportTipGapFunc called during catch-up with gap %d", gap)
+	default:
+	}
+}
+
+// An epoch length that is not yet known is left unset rather than
+// published as a fabricated value.
+func TestHandleBehindHorizonLeavesUnknownEpochLengthUnset(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+
+	ls.handleBehindHorizon(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+	assert.Zero(t, gaugeValue(t, metrics.epochLengthSlots))
+}
+
+// initScheduler is where the slot clock is handed handleBehindHorizon. The
+// handleBehindHorizon tests call it directly and the slot clock tests build
+// their own config, so without this test deleting that wiring leaves every
+// other test green and a from-genesis sync reads as fully synced again.
+func TestInitSchedulerWiresBehindHorizonCallback(t *testing.T) {
+	t.Parallel()
+
+	ls, _, metrics := newTipGapTestLedgerState(t, 100, nil)
+	ls.currentEpoch.SlotLength = 1000
+	require.NoError(t, ls.initScheduler())
+	t.Cleanup(ls.Scheduler.Stop)
+
+	callback := ls.slotClock.config.OnBehindHorizon
+	require.NotNil(t, callback)
+	callback(1_000)
+
+	assert.Equal(t, float64(900), gaugeValue(t, metrics.tipGapSlots))
+}
+
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	t *testing.T,
 ) {
@@ -1394,9 +1453,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -1433,9 +1498,15 @@ func TestCalculateStabilityWindow_EdgeCases(t *testing.T) {
 			"systemStart": "2022-10-25T00:00:00Z"
 		}`
 
-		_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-		_ = cfg.LoadShelleyGenesisFromReader(
-			strings.NewReader(shelleyGenesisJSON),
+		require.NoError(
+			t,
+			loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+		)
+		require.NoError(
+			t,
+			cfg.LoadShelleyGenesisFromReader(
+				strings.NewReader(shelleyGenesisJSON),
+			),
 		)
 
 		ls := &LedgerState{
@@ -1993,11 +2064,17 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 	})
 	assert.Zero(t, ls.UpstreamTipSlot())
 	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-		ConnectionId:      connA,
-		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(100, nil)},
+		ConnectionId: connA,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(100, nil),
+			BlockNumber: 101,
+		},
 		SyncTargetTrusted: true,
 	})
 	assert.Equal(t, uint64(100), ls.UpstreamTipSlot())
+	upstreamTip, upstreamLive := ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(101), upstreamTip.BlockNumber)
 
 	// A→B changes the authoritative active connection before the ledger has
 	// processed the switch. The A snapshot must not be visible as B's target.
@@ -2005,14 +2082,23 @@ func TestUpstreamSyncTargetRequiresTrustedAdmissionAndActiveGeneration(
 	target, active := ls.UpstreamSyncStatus()
 	assert.True(t, active)
 	assert.Zero(t, target)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
 	ls.publishActiveUpstream(connB)
 	assert.Zero(t, ls.UpstreamTipSlot())
 	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
-		ConnectionId:      connB,
-		SyncTarget:        ochainsync.Tip{Point: ocommon.NewPoint(200, nil)},
+		ConnectionId: connB,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(200, nil),
+			BlockNumber: 202,
+		},
 		SyncTargetTrusted: true,
 	})
 	assert.Equal(t, uint64(200), ls.UpstreamTipSlot())
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(202), upstreamTip.BlockNumber)
 
 	// A deferred or rejected header never reaches the trusted publication path.
 	ls.recordAdmittedHeaderFrontier(ChainsyncEvent{ConnectionId: connB}, false)
@@ -2389,7 +2475,7 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 		t.Fatal("timeout waiting for operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 }
 
 // TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError proves
@@ -2442,7 +2528,29 @@ func TestDatabaseWorkerPoolOpFuncPanicReturnsWrappedError(t *testing.T) {
 		t.Fatal("timeout waiting for post-panic operation result")
 	}
 
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
+}
+
+// countGoroutines returns how many live goroutines in a full stack dump satisfy
+// match. The dump buffer grows until runtime.Stack fits, since a truncated dump
+// would hide a goroutine from the scan.
+func countGoroutines(match func(goroutine string) bool) int {
+	stack := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(stack, true)
+		if n < len(stack) {
+			stack = stack[:n]
+			break
+		}
+		stack = make([]byte, len(stack)*2)
+	}
+	count := 0
+	for goroutine := range strings.SplitSeq(string(stack), "\n\n") {
+		if match(goroutine) {
+			count++
+		}
+	}
+	return count
 }
 
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
@@ -2456,43 +2564,75 @@ func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	pool := NewDatabaseWorkerPool(nil, config)
 
 	var completedCount atomic.Int32
-	var wg sync.WaitGroup
+	started := make(chan struct{}, 5)
+	unblock := make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(func() {
+		release()
+		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
+			t.Errorf("shutdown database worker pool during cleanup: %v", err)
+		}
+	})
 
-	// Submit multiple operations
-	for range 5 {
-		wg.Add(1)
+	results := make([]chan DatabaseResult, 5)
+	for i := range results {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				// Simulate work with short delay
-				time.Sleep(10 * time.Millisecond)
+				started <- struct{}{}
+				<-unblock
 				completedCount.Add(1)
 				return nil
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain result in goroutine
-		go func(ch chan DatabaseResult) {
-			defer wg.Done()
-			result := <-ch
-			// Error is expected if shutdown occurred before operation completed
-			// But we should receive the error in the channel
-			_ = result.Error
-		}(resultChan)
 	}
 
-	// Wait for at least one operation to start processing
-	require.Eventually(t, func() bool {
-		return completedCount.Load() > 0
-	}, testutil.AsyncWait, 5*time.Millisecond, "at least one operation should start")
-
-	// Shutdown the pool - this should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
-
-	// Wait for all result handlers
-	wg.Wait()
+	for range config.WorkerPoolSize {
+		testutil.RequireReceive(
+			t,
+			started,
+			testutil.AsyncWait,
+			"worker should start an operation",
+		)
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- pool.Shutdown(5 * time.Second) }()
+	poolAddress := fmt.Sprintf("%p", pool)
+	testutil.WaitForCondition(t, func() bool {
+		select {
+		case err := <-shutdownDone:
+			t.Fatalf(
+				"shutdown returned before in-flight operations completed: %v",
+				err,
+			)
+		default:
+		}
+		if !pool.closed.Load() {
+			return false
+		}
+		shutdownFrame := "(*DatabaseWorkerPool).Shutdown(" + poolAddress
+		return countGoroutines(func(goroutine string) bool {
+			return strings.Contains(goroutine, shutdownFrame) &&
+				strings.Contains(goroutine, "[select")
+		}) > 0
+	}, testutil.AsyncWait, "Shutdown should wait for in-flight operations")
+	testutil.RequireNoReceive(
+		t,
+		shutdownDone,
+		20*time.Millisecond,
+		"shutdown returned before in-flight operations completed",
+	)
+	release()
+	require.NoError(t, <-shutdownDone)
+	for _, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		require.NoError(t, result.Error)
+	}
 
 	// Verify all operations completed
 	assert.Equal(
@@ -2515,14 +2655,15 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 
 	var completedCount atomic.Int32
 
-	// Submit operations, some will error
+	// Submit operations, some will error.
+	results := make([]chan DatabaseResult, 3)
 	for i := range 3 {
 		resultChan := make(chan DatabaseResult, 1)
+		results[i] = resultChan
 		operationIndex := i
 
 		pool.Submit(DatabaseOperation{
 			OpFunc: func(db *database.Database) error {
-				time.Sleep(20 * time.Millisecond)
 				completedCount.Add(1)
 				if operationIndex == 1 {
 					return fmt.Errorf("operation %d failed", operationIndex)
@@ -2531,18 +2672,10 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 			},
 			ResultChan: resultChan,
 		})
-
-		// Drain results
-		go func() {
-			select {
-			case <-resultChan:
-			case <-time.After(10 * time.Second):
-			}
-		}()
 	}
 
 	// Shutdown should wait for all operations to complete
-	pool.Shutdown(5 * time.Second)
+	require.NoError(t, pool.Shutdown(5*time.Second))
 
 	// Verify all operations completed even with errors
 	assert.Equal(
@@ -2551,6 +2684,16 @@ func TestDatabaseWorkerPoolShutdownWithErrors(t *testing.T) {
 		completedCount.Load(),
 		"not all operations completed",
 	)
+	for i, resultChan := range results {
+		result := testutil.RequireReceive(
+			t, resultChan, testutil.AsyncWait, "operation result should be sent",
+		)
+		if i == 1 {
+			require.ErrorContains(t, result.Error, "operation 1 failed")
+		} else {
+			require.NoError(t, result.Error)
+		}
+	}
 }
 
 // TestDatabaseWorkerPoolQueueFull tests behavior when queue is full
@@ -2562,25 +2705,60 @@ func TestDatabaseWorkerPoolQueueFull(t *testing.T) {
 	config.TaskQueueSize = 1 // Very small queue
 
 	pool := NewDatabaseWorkerPool(nil, config)
-
-	// Submit some operations
-	for range 3 {
-		resultChan := make(chan DatabaseResult, 1)
-		pool.Submit(DatabaseOperation{
-			OpFunc: func(db *database.Database) error {
-				return nil
-			},
-			ResultChan: resultChan,
-		})
-
-		// Drain result
-		go func(ch chan DatabaseResult) {
-			<-ch
-		}(resultChan)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseWorker := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		releaseWorker()
+		require.NoError(t, pool.Shutdown(5*time.Second))
+	})
+	firstResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			close(started)
+			<-release
+			return nil
+		},
+		ResultChan: firstResult,
+	})
+	select {
+	case <-started:
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not start")
 	}
 
-	// Shutdown should complete successfully
-	pool.Shutdown(5 * time.Second)
+	queuedResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: queuedResult,
+	})
+
+	fullResult := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc:     func(db *database.Database) error { return nil },
+		ResultChan: fullResult,
+	})
+	select {
+	case result := <-fullResult:
+		require.EqualError(t, result.Error, "database worker pool queue full")
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("full queue did not reject the operation")
+	}
+
+	releaseWorker()
+	require.NoError(t, pool.Shutdown(5*time.Second))
+	select {
+	case result := <-firstResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("first operation did not complete")
+	}
+	select {
+	case result := <-queuedResult:
+		require.NoError(t, result.Error)
+	case <-time.After(testutil.AsyncWait):
+		t.Fatal("queued operation did not complete")
+	}
 }
 
 // TestDatabaseWorkerPoolSubmitAfterShutdown tests that submitting after shutdown fails
@@ -2803,8 +2981,8 @@ func TestDatabaseWorkerPoolShutdownTimesOutOnSlowOperation(t *testing.T) {
 // The current implementation tracks in-flight operations with a
 // mutex-guarded counter and a drained channel Shutdown selects directly, so
 // no goroutine is ever spawned by the timeout path.
-// Not t.Parallel: runtime.NumGoroutine is a process-wide measurement that
-// concurrent tests perturb.
+// Not t.Parallel: a concurrent worker-pool shutdown could look like this
+// test's shutdown waiter in the process-wide goroutine profile.
 func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	t *testing.T,
 ) {
@@ -2817,8 +2995,22 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 	started := make(chan struct{})
 	blockUntil := make(chan struct{})
 	resultChan := make(chan DatabaseResult, 1)
+	workerDone := make(chan struct{})
+	releaseWorker := sync.OnceFunc(func() { close(blockUntil) })
+	t.Cleanup(func() {
+		releaseWorker()
+		if err := pool.Shutdown(testutil.AsyncWait); err != nil {
+			t.Errorf("shutdown database worker pool during cleanup: %v", err)
+		}
+		select {
+		case <-workerDone:
+		case <-time.After(testutil.AsyncWait):
+			t.Error("timeout waiting for database worker to stop")
+		}
+	})
 	pool.Submit(DatabaseOperation{
 		OpFunc: func(db *database.Database) error {
+			defer close(workerDone)
 			close(started)
 			<-blockUntil
 			return nil
@@ -2832,41 +3024,35 @@ func TestDatabaseWorkerPoolShutdownTimeoutSpawnsNoWaiterGoroutine(
 		t.Fatal("timeout waiting for operation to start")
 	}
 
-	// The stuck worker goroutine is already running at this point, so it's
-	// part of the baseline count -- only a goroutine spawned by Shutdown
-	// itself would show up as growth below. GC first so a transient
-	// runtime/GC goroutine isn't baked into the baseline.
-	runtime.GC()
-	baseline := runtime.NumGoroutine()
-
 	err := pool.Shutdown(50 * time.Millisecond)
 	require.Error(t, err)
 
-	// A single immediate snapshot is flaky: a short-lived runtime/GC
-	// goroutine can transiently push the count above baseline with no
-	// relation to Shutdown. Poll briefly instead, matching
-	// storagetest.AssertNoGoroutineLeak's pattern -- since a leaked waiter
-	// goroutine would persist for the stuck operation's full duration, it
-	// would still be caught well within this deadline.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		after := runtime.NumGoroutine()
-		if after <= baseline {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf(
-				"Shutdown's timeout path must not leave behind a goroutine "+
-					"of its own: baseline %d, now %d",
-				baseline,
-				after,
-			)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Positive control: the marker format below is only trustworthy while a
+	// goroutine this package is known to start still matches it. A change to
+	// the runtime's "created by" rendering must fail here instead of reading
+	// as zero waiters.
+	const workerCreatedBy = "created by github.com/blinklabs-io/dingo/ledger.NewDatabaseWorkerPool"
+	require.Positive(
+		t,
+		countGoroutines(func(goroutine string) bool {
+			return strings.Contains(goroutine, workerCreatedBy)
+		}),
+		"goroutine dump no longer renders the created-by frame",
+	)
+	shutdownWaiters := countGoroutines(func(goroutine string) bool {
+		return strings.Contains(
+			goroutine,
+			"created by github.com/blinklabs-io/dingo/ledger.(*DatabaseWorkerPool).Shutdown",
+		)
+	})
+	assert.Zero(
+		t,
+		shutdownWaiters,
+		"Shutdown should not leave behind a goroutine blocked on WaitGroup.Wait",
+	)
 
 	// Unblock the stuck operation so it doesn't leak past the test.
-	close(blockUntil)
+	releaseWorker()
 	select {
 	case <-resultChan:
 	case <-time.After(testutil.AsyncWait):
@@ -3527,6 +3713,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 	var wg sync.WaitGroup
 	readCount := atomic.Int32{}
 	txnStarted := make(chan struct{})
+	readersFinished := make(chan struct{}, 5)
 	txnDone := make(chan struct{})
 	rolloverErr := make(chan error, 1)
 
@@ -3539,15 +3726,16 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		snapshotPParams := ls.currentPParams
 		ls.RUnlock()
 
-		// Signal that transaction is starting
-		close(txnStarted)
-
 		// Execute transaction (simulates DB work)
 		var result *EpochRolloverResult
 		txn := db.Transaction(true)
 		err := txn.Do(func(txn *database.Txn) error {
-			// Add a small delay to give readers time to run
-			time.Sleep(50 * time.Millisecond)
+			close(txnStarted)
+			// Hold the transaction open until each reader has observed the
+			// current ledger state, making the concurrency assertion deterministic.
+			for range 5 {
+				<-readersFinished
+			}
 			var err error
 			result, err = ls.processEpochRollover(
 				txn,
@@ -3575,26 +3763,17 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		close(txnDone)
 	})
 
-	// Start multiple reader goroutines that try to read during the transaction
+	// Start multiple reader goroutines that read while the transaction is open.
 	for range 5 {
 		wg.Go(func() {
 			// Wait for transaction to start
 			<-txnStarted
-
-			// Try to read multiple times during the transaction
-			for range 10 {
-				select {
-				case <-txnDone:
-					return
-				default:
-					ls.RLock()
-					_ = ls.currentEra   // Read era
-					_ = ls.currentEpoch // Read epoch
-					readCount.Add(1)
-					ls.RUnlock()
-					time.Sleep(5 * time.Millisecond)
-				}
-			}
+			ls.RLock()
+			_ = ls.currentEra   // Read era
+			_ = ls.currentEpoch // Read epoch
+			readCount.Add(1)
+			ls.RUnlock()
+			readersFinished <- struct{}{}
 		})
 	}
 
@@ -5897,12 +6076,12 @@ func TestLedgerProcessBlockRejectsStandardDijkstraValidationFailure(
 	assert.Nil(t, stored, "rejected Dijkstra transaction must not be committed")
 }
 
-// TestStrictConsumedInputsEnabled pins the #3005 guard condition, including the
-// P1 transition-batch case: the first batch whose blocks cross the tip cutoff is
-// processed while reachedTip is still false (it is stored true only after that
-// batch commits), so the per-block reachesTip signal must enable the guard on
-// its own. Without it that transition batch could still recover an unapplied
-// producer from the blob store.
+// TestStrictConsumedInputsEnabled pins the strict-consumed-inputs guard
+// condition, including the P1 transition-batch case: the first batch whose
+// blocks cross the tip cutoff is processed while reachedTip is still false (it
+// is stored true only after that batch commits), so the per-block reachesTip
+// signal must enable the guard on its own. Without it that transition batch
+// could still recover an unapplied producer from the blob store.
 func TestStrictConsumedInputsEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -6463,7 +6642,7 @@ func TestWarnOnPreByronPrefixEpochCache(t *testing.T) {
 //
 // (0, true) is now doubly worth pinning. It used to be unreachable at the
 // staleness gate as well, because the sync gate refused every slot on
-// upstreamActive && upstreamTip == 0; #4013 replaced that blanket refusal with
+// upstreamActive && upstreamTip == 0; that blanket refusal was replaced with
 // a bound on the local tip's lag, so a node at tip passes it and the staleness
 // gate does see this pair. What keeps the bound quiet there is its own
 // upstreamTarget > newestKnown term -- see
@@ -6500,12 +6679,34 @@ func TestUpstreamSyncStatusReachableStates(t *testing.T) {
 			"pre-existing sync gate refuses this slot before the stale-tip "+
 			"gate runs, so no stale-tip branch may be written for it",
 	)
+	upstreamTip, upstreamLive := ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
+
+	ls.publishAdmittedUpstreamTarget(ChainsyncEvent{
+		ConnectionId: conn,
+		SyncTarget: ochainsync.Tip{
+			Point:       ocommon.NewPoint(319, nil),
+			BlockNumber: 320,
+		},
+		SyncTargetTrusted: true,
+	})
+	target, active = ls.UpstreamSyncStatus()
+	assert.Equal(t, uint64(319), target)
+	assert.True(t, active)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.True(t, upstreamLive)
+	assert.Equal(t, uint64(320), upstreamTip.BlockNumber)
+	assert.Equal(t, uint64(319), upstreamTip.Point.Slot)
 
 	// No live upstream -- (0, false).
 	live = false
 	target, active = ls.UpstreamSyncStatus()
 	assert.Zero(t, target)
 	assert.False(t, active)
+	upstreamTip, upstreamLive = ls.UpstreamSyncTip()
+	assert.False(t, upstreamLive)
+	assert.Zero(t, upstreamTip.BlockNumber)
 }
 
 func TestSetForgedBlockChecker(t *testing.T) {
@@ -6564,7 +6765,8 @@ func newActiveSlotCoeffLedgerState(
 // nearest binary64 value to 0.05 is strictly GREATER than 1/20, so a threshold
 // derived from it is strictly larger than the reference node's — a node using it
 // can only over-claim leader slots, never miss any. That is the one-sided
-// signature reported in dingo #2798, so the direction is pinned here even though
+// signature of the phantom leader slots seen in the field, so the direction
+// is pinned here even though
 // the magnitude (~5.6e-17 relative) is far too small to account for the three
 // phantom slots per epoch reported there.
 func TestActiveSlotCoeffRatIsExactGenesisRational(t *testing.T) {
@@ -7040,8 +7242,8 @@ func drainCleanupTimerFires(fires <-chan struct{}) {
 	}
 }
 
-// TestCleanupConsumedUtxos_TimerStopsOnClose covers the first half of issue
-// #3439: the cleanup timer callback re-arms itself via
+// TestCleanupConsumedUtxos_TimerStopsOnClose covers a
+// shutdown leak: the cleanup timer callback re-arms itself via
 // scheduleCleanupConsumedUtxos, so a Close that does not stop it leaves a
 // self-perpetuating timer running against a database its owner closes
 // immediately after Close returns (LedgerState does not own the database --
@@ -7311,7 +7513,7 @@ func TestCleanupConsumedUtxos_CoreModePrunes(t *testing.T) {
 // actually prunes must durably record the floor it used, so a later pin
 // check can reject against it even if the tip subsequently moves in a way
 // that would otherwise make a freshly-computed floor look more lenient
-// (blinklabs-io/dingo#382 review -- see persistConsumedUtxoPruneFloor's doc
+// ( review -- see persistConsumedUtxoPruneFloor's doc
 // comment for the rollback and era-transition cases this closes).
 func TestCleanupConsumedUtxos_PersistsPruneFloor(t *testing.T) {
 	t.Parallel()
@@ -7510,8 +7712,8 @@ func TestCleanupConsumedUtxos_RunsWithoutKnownUpstreamTip(t *testing.T) {
 	)
 }
 
-// TestCleanupConsumedUtxos_APIModeRetains is the regression fix for
-// issue #2350: in API storage mode the periodic cleanup must leave
+// TestCleanupConsumedUtxos_APIModeRetains covers API
+// storage mode: the periodic cleanup must leave
 // spent UTxO metadata rows in place so historical transaction queries
 // can resolve input / collateral / reference-input associations via
 // spent_at_tx_id, collateral_by_tx_id, and referenced_by_tx_id.
@@ -8437,7 +8639,7 @@ func TestEmptyGenesisCommitteeReferenceResignation(t *testing.T) {
 }
 
 // hardForkRatifyFixture reproduces the exact Preview Plomin hard-fork
-// incident (dingo#4441) at a real epoch-rollover level: a HardForkInitiation
+// incident at a real epoch-rollover level: a HardForkInitiation
 // proposal, 49 SPO votes' worth of yes/no stake collapsed into two pools
 // carrying the real observed mark[740]/mark[741]/mark[742] ratios
 // (0.4779/0.4757/0.6283), and a single seated CC member voting yes with a
@@ -8483,7 +8685,7 @@ func newHardForkRatifyFixture(t *testing.T) *hardForkRatifyFixture {
 	pparams := donationTestConwayPParams(9)
 	pparams.MinCommitteeSize = 1
 
-	// mark[740]/mark[741]/mark[742], the exact ratios dingo#4441 measured on
+	// mark[740]/mark[741]/mark[742], the exact ratios measured on
 	// Preview. Yes stake is hfrYesPool's explicit Yes vote; the remainder is
 	// hfrSilentPool, which casts no vote at all -- HardForkInitiation always
 	// keeps a silent pool's stake in the active denominator as implicit No
@@ -8751,7 +8953,7 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 		"epoch nonce must no longer be the NeutralNonce-collapsed candidate",
 	)
 	// The one-epoch-shifted assembly (candidate ⭒ epoch 5's OWN lab) must NOT
-	// be produced — that is the #2734 divergence.
+	// be produced — that is the divergence.
 	shifted, err := lcommon.CalculateEpochNonce(
 		candidate,
 		boundaryPrevHash,
@@ -9533,7 +9735,7 @@ func TestIntersectPointsStillEmptyAtOriginWithNoChain(t *testing.T) {
 // or ahead of the ledger tip is unapplied forward work -- possibly a fork that
 // does not descend from the ledger tip at all -- and must NOT be offered as an
 // intersect point, which is the invariant the primary-chain ancestor check
-// (#2309) exists to protect. Only a chain tip strictly below the ledger tip,
+// exists to protect. Only a chain tip strictly below the ledger tip,
 // the signature of an in-flight rewind, qualifies.
 func TestAuthoritativeRecentChainPointsIgnoresChainTipAheadOfLedgerTip(
 	t *testing.T,
@@ -9956,7 +10158,7 @@ func newPipelineLoopLedger(t *testing.T) *LedgerState {
 }
 
 // TestLedgerProcessBlocksStopsRetryingOnUnrepairableFailure covers the terminal
-// half of issue #3261. Recovery raises errHaltLedgerPipeline once it has
+// recovery half. Recovery raises errHaltLedgerPipeline once it has
 // established that no local replay can change a block's verdict; the restart
 // loop must then stop rather than restart into the same block forever, and must
 // leave a terminal signal behind for an operator.
@@ -10307,7 +10509,7 @@ func newMultiEraForecastCfg(
 
 // TestProtocolParamsForSlot_ForecastsPendingPParamUpdateAtNormalBoundary is
 // the normal-boundary counterpart of the era-fork forecast test above, and
-// the regression guard for issue #3061. Preview launches federated (Shelley
+// the regression guard: Preview launches federated (Shelley
 // genesis decentralisationParam = 1) and drops decentralization below 1 at
 // the epoch 1->2 boundary through an ordinary on-chain protocol-parameter
 // update, not an era hard fork. Before the fix, ProtocolParamsForSlot
@@ -10615,7 +10817,7 @@ func (s *scriptedGapLedgerReadIterator) Next(
 }
 
 // TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay is a regression
-// test for dingo#4464's confirmed premature-flush defect: the gather loop
+// test for confirmed premature-flush defect: the gather loop
 // used to flush a batch the moment a non-blocking iter.Next(false) returned
 // chain.ErrIteratorChainTip, even with only one block gathered and 49 more
 // blocks about to arrive. On the harness that produced the issue, this
@@ -10683,7 +10885,7 @@ func TestLedgerReadChainIteratorCoalescesGapsDuringBulkReplay(t *testing.T) {
 }
 
 // TestLedgerReadChainIteratorNearTipFlushesSingleBlockPromptly confirms the
-// coalescing wait added for dingo#4464 does not regress live tip-following
+// coalescing wait added for does not regress live tip-following
 // latency: once isNearTip is true, a solitary new block must still commit
 // immediately rather than wait for a batch that will never fill.
 //
@@ -10783,7 +10985,7 @@ func tryLockGatherMutex(ls *LedgerState) bool {
 }
 
 // TestLedgerReadChainIteratorHoldsGatherMutexAcrossCoalesceWait pins the
-// safety property the dingo#4464 coalescing branch rests on: unlike the
+// safety property the coalescing branch rests on unlike the
 // genuinely-blocking wait for a still-empty batch, the coalescing wait keeps
 // blockPipelineGatherMutex's read lock held, because rawBatch already holds
 // real gathered blocks a concurrent rollback must not race ahead of.
@@ -11347,7 +11549,7 @@ func TestLedgerReadChainIteratorBoundsChainProbesPerCoalesceGap(
 // snapshot makes the next target window+1 below the chain's live tip, and
 // Chain.Rollback refuses it as exceeding K. The whole rewind then fails, the
 // pipeline restarts, and recovery recomputes the same doomed schedule against
-// a tip that has grown further -- issue #3889, where that loop ran for nine
+// a tip that has grown further --, where that loop ran for nine
 // hours and 1150 restarts without the chain ever being truncated.
 //
 // Each step must therefore be derived from the chain's live tip, so it is a
@@ -12064,7 +12266,7 @@ func (f *sameSlotCompetitorFixture) inputInLiveSet(t *testing.T) bool {
 	return live
 }
 
-// TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers issue #3678.
+// TestRollbackSameSlotCompetitorRestoresConsumedUtxo covers.
 //
 // A rollback target that shares the applied tip's slot but carries a different
 // hash used to fall through to database.TruncateAfterSlot's slot-only UTxO
@@ -12124,7 +12326,7 @@ func TestRollbackSameSlotCompetitorRestoresConsumedUtxo(t *testing.T) {
 }
 
 // TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly covers the other
-// half of issue #3678's acceptance criteria: when the contested slot cannot be
+// half of acceptance criteria: when the contested slot cannot be
 // truncated because no applied ancestor below it can be found, the rollback
 // must fail with a persistent diagnostic instead of reporting a repair that
 // left the UTxO set diverged.
@@ -12150,7 +12352,7 @@ func TestRollbackSameSlotCompetitorWithoutAncestorFailsLoudly(t *testing.T) {
 }
 
 // TestInjectedSyntheticV2CostModel_DetectsHardForkBabbagesDefault covers the
-// actual code path this session found responsible for blinklabs-io/dingo#3825:
+// actual code path the regression test exercises:
 // HardForkBabbage fabricates a PlutusV2 cost model whenever the previous
 // era's params don't have one -- real for any Alonzo genesis, since the
 // AlonzoGenesisCostModels format predates PlutusV2 entirely and never has a
@@ -12206,7 +12408,7 @@ func TestInjectedSyntheticV2CostModel_FalseWhenValueIsNotTheKnownDefault(
 }
 
 // TestGetCurrentPParamsForReporting_OmitsSyntheticV2CostModel covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): withoutSyntheticV2CostModel
+// reporting coverage: withoutSyntheticV2CostModel
 // originally had a single call site (queries.go's LocalStateQuery handler),
 // while every other interface reporting current parameters --
 // api/blockfrost, api/utxorpc, api/mesh -- read GetCurrentPParams()
@@ -12267,7 +12469,7 @@ func TestGetCurrentPParamsForReporting_IncludesRealV2CostModel(t *testing.T) {
 }
 
 // TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart covers
-// blinklabs-io/dingo#3825's PR review: LedgerState.syntheticV2CostModel must
+// PR review: LedgerState.syntheticV2CostModel must
 // survive a restart via persistSyntheticV2CostModel/loadSyntheticV2CostModel,
 // not silently reconstruct as false (the zero value) regardless of the
 // chain's real history.
@@ -12297,7 +12499,7 @@ func TestSyntheticV2CostModelPersistence_RoundTripsAcrossRestart(t *testing.T) {
 }
 
 // TestResolveSyntheticV2CostModel_BootstrapsFromValueWhenMarkerAbsent covers
-// blinklabs-io/dingo#3825's PR review (wolf31o2): a database that predates
+// pre-marker databases: a database that predates
 // this marker (or one that was reset by
 // database.RecomputeSyntheticV2CostModelMarkerAfterTruncate) must not
 // silently behave as "not synthetic" -- it must compare the current PlutusV2
@@ -12402,7 +12604,7 @@ func TestMarkRealV2CostModelObserved_KeepsEarliestConfirmationAcrossMultipleUpda
 }
 
 // TestRollbackRestore_LeavesRealPreExistingModelCorrectlyResolvedAsNotSynthetic
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): on a database that
+// covers pre-marker databases: on a database that
 // predates these markers entirely, a real PlutusV2 cost model already in
 // force (differing from the known synthetic default) can still pick up a
 // clearedEpoch marker from the first update tracked AFTER these markers
@@ -12701,7 +12903,7 @@ INSERT INTO auth_committee_hot (
 	}, nil))
 	poolCred := repeatByte(28, 0xDD)
 	// governance.predictedBoundaryStakeEpochFor(currentEpoch) resolves to
-	// currentEpoch itself (dingo#4441): the mid-epoch check tallies the SPO
+	// currentEpoch itself: the mid-epoch check tallies the SPO
 	// vote against mark[currentEpoch], the last mark durably written at the
 	// boundary that opened the currently active epoch. The boundary it
 	// predicts will instead tally mark[currentEpoch+1], which SNAP does not
@@ -13046,6 +13248,11 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := ls.Close(); err != nil {
+			t.Errorf("close pruned UTxO fixture ledger state: %v", err)
+		}
+	})
 	ls.metrics.init(prometheus.NewRegistry())
 
 	// Every fixture block was applied, so each carries a recorded nonce.
@@ -13107,7 +13314,7 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
-// inLiveSet mirrors the probe used by the issue #3678 rollback tests: it asks
+// inLiveSet mirrors the probe used by the rollback tests: it asks
 // the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
 // exercises the deleted_slot filter that decides Conway bad-inputs and, through
 // it, the consumed term of value conservation. A row seeded straight into
@@ -13196,7 +13403,7 @@ func (f *prunedUtxoFixture) assertLiveSetConsistentAtTip(t *testing.T) {
 	}
 }
 
-// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers issue #3766.
+// TestAtTipRecoveryRewindBelowConsumedUtxoPruneFloor covers.
 //
 // cleanupConsumedUtxos hard-deletes consumed UTxO rows whose deleted_slot is at
 // or below tip-stabilityWindow. database.TruncateAfterSlot restores consumed
@@ -13365,7 +13572,7 @@ func TestConsumedUtxoPruneFloorIsReadFromTheDatabase(t *testing.T) {
 }
 
 // TestRollbackChainAndStateRefusesRedirectBelowPruneFloor covers the ordering
-// hazard between the same-slot competitor redirect (issue #3678) and the prune
+// hazard between the same-slot competitor redirect and the prune
 // floor. rollbackChainAndStateDeferred truncates the primary chain and only then
 // synchronizes the ledger. A target sitting exactly on the floor whose hash
 // differs from the applied tip resolves to an applied ancestor strictly below

@@ -30,11 +30,14 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -154,8 +157,8 @@ func firstFixtureBlockFrom(
 //
 // Seeding writes to the block store only. Accounts, pools, DReps, datums,
 // protocol parameters, nonces and registrations are produced by applying a
-// block, not by storing one, so a RealData benchmark querying one of those
-// tables still measures a miss however many blocks are seeded.
+// block, not by storing one, so a benchmark querying one of those tables
+// seeds it separately through the seedFixture* helpers below.
 func seedBlocksAtPoints(
 	b *testing.B,
 	db *database.Database,
@@ -200,85 +203,533 @@ func seedBlocksAtPoints(
 	return seeded
 }
 
-type benchmarkUtxoRef struct {
-	txID      []byte
-	outputIdx uint32
-	address   ledger.Address
+// Fixture windows for the RealData query benchmarks.
+//
+// Storing a block does not populate the tables those benchmarks read:
+// accounts, pools, DReps, datums, protocol parameters, nonces and
+// registrations are written when a block's transactions are applied, not when
+// the block is stored. Each window below names the region of the immutable
+// fixture that actually holds the record kind under test.
+const (
+	// fixtureTxWindowStartSlot opens the fixture's densest transaction
+	// region: 128 blocks from here carry 608 transactions and 499 stake
+	// registration certificates.
+	fixtureTxWindowStartSlot = 675923
+	fixtureTxWindowBlocks    = 128
+	// fixtureTxWindowMaxTxs bounds setup time. Applying one transaction's
+	// certificates costs roughly 3ms, so the whole window is several
+	// seconds.
+	fixtureTxWindowMaxTxs = 256
+
+	// The fixture's pool registrations run from slot 680310 to 712919, far
+	// more thinly than its stake registrations, so the pool window is wide
+	// and seeds only the transactions that carry one.
+	fixturePoolWindowBlocks = 1024
+
+	// The fixture's first Plutus datum is at slot 732615.
+	fixtureDatumWindowStartSlot = 732600
+	fixtureDatumWindowBlocks    = 1024
+
+	// The transaction window is a fan-out burst: 1024 consecutive outputs
+	// there are paid to just two addresses, so a lookup by address would
+	// return over a thousand rows and measure the fan-out rather than the
+	// lookup. The UTxO window is a later, ordinary region where 1024
+	// outputs spread over 357 addresses.
+	fixtureUtxoWindowStartSlot = 1273523
+	fixtureUtxoWindowBlocks    = 256
+	// fixtureUtxoWindowMaxUtxos bounds UTxO setup time.
+	fixtureUtxoWindowMaxUtxos = 1024
+
+	// fixtureNonceWindowBlocks is how many fixture headers are folded into
+	// stored block nonces.
+	fixtureNonceWindowBlocks = 16
+
+	// fixtureDrepCount is how many DRep rows are seeded from fixture stake
+	// credentials.
+	fixtureDrepCount = 10
+)
+
+// fixtureWindowBlock pairs a decoded fixture block with its own point. The
+// name avoids shadowing the function-local fixtureBlock in
+// utxo_prune_floor_test.go, which is an unrelated shape.
+type fixtureWindowBlock struct {
+	block ledger.Block
+	point ocommon.Point
 }
 
-func seedUtxosAtPoints(
+// fixtureBlockWindow returns up to count consecutive decoded fixture blocks at
+// or after startSlot.
+//
+// BlocksFromPoint seeks on slot alone, while ImmutableDb.GetBlock compares the
+// stored hash against the point's and so matches nothing for a point carrying
+// no hash. Iterating is therefore the only way to turn a slot into blocks.
+func fixtureBlockWindow(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	count int,
+) []fixtureWindowBlock {
+	b.Helper()
+	iter, err := immDb.BlocksFromPoint(ocommon.NewPoint(startSlot, nil))
+	if err != nil {
+		b.Fatalf("open fixture iterator at slot %d: %v", startSlot, err)
+	}
+	defer func() { _ = iter.Close() }()
+	window := make([]fixtureWindowBlock, 0, count)
+	for len(window) < count {
+		raw, err := iter.Next()
+		if err != nil {
+			b.Fatalf("read fixture block after slot %d: %v", startSlot, err)
+		}
+		if raw == nil {
+			break
+		}
+		decoded, err := ledger.NewBlockFromCbor(raw.Type, raw.Cbor)
+		if err != nil {
+			b.Fatalf("decode fixture block at slot %d: %v", raw.Slot, err)
+		}
+		window = append(window, fixtureWindowBlock{
+			block: decoded,
+			point: ocommon.NewPoint(raw.Slot, raw.Hash),
+		})
+	}
+	if len(window) == 0 {
+		b.Fatalf("fixture holds no block at or after slot %d", startSlot)
+	}
+	return window
+}
+
+// seededLedgerRecords holds the records a seeding helper actually wrote, so a
+// benchmark queries rows that exist instead of a synthetic key that can only
+// miss.
+type seededLedgerRecords struct {
+	txHashes      [][]byte
+	stakeKeys     [][]byte
+	poolKeyHashes []lcommon.PoolKeyHash
+}
+
+// txHasPoolRegistration reports whether tx carries a pool registration
+// certificate.
+func txHasPoolRegistration(tx lcommon.Transaction) bool {
+	return slices.ContainsFunc(
+		tx.Certificates(),
+		func(cert lcommon.Certificate) bool {
+			_, ok := cert.(*lcommon.PoolRegistrationCertificate)
+			return ok
+		},
+	)
+}
+
+// seedFixtureTransactions applies fixture transactions through
+// Database.SetTransactionMetadataOnly, which writes the transaction row and
+// its certificates -- and through those the account, pool, pool_registration
+// and stake_registration rows -- without the blob offsets a full block apply
+// requires. A nil keep applies every transaction in the window.
+//
+// certDeposits is empty rather than nil deliberately.
+// applyTransactionCertificates rejects only a nil map, and the deposit in
+// force at these slots is not recoverable from the immutable fixture, so an
+// absent entry stores SQL NULL. That is what the Mithril gap path does for the
+// same reason; substituting a current protocol parameter would record a figure
+// the chain never charged.
+func seedFixtureTransactions(
 	b *testing.B,
 	db *database.Database,
 	immDb *immutable.ImmutableDb,
-	points []ocommon.Point,
-	maxRows int,
-) []benchmarkUtxoRef {
+	startSlot uint64,
+	blockCount int,
+	maxTxs int,
+	keep func(lcommon.Transaction) bool,
+) seededLedgerRecords {
 	b.Helper()
+	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
+	records := seededLedgerRecords{}
+	certDeposits := map[int]uint64{}
 	txn := db.Transaction(true)
 	defer txn.Release()
-	seen := make(map[string]struct{})
-	refs := make([]benchmarkUtxoRef, 0, maxRows)
-	for _, point := range points {
-		block, err := immDb.GetBlock(point)
-		if err != nil {
-			b.Fatalf("read UTxO fixture block at slot %d: %v", point.Slot, err)
-		}
-		if block == nil {
-			b.Fatalf("UTxO fixture block at slot %d not found", point.Slot)
-		}
-		ledgerBlock, err := ledger.NewBlockFromCbor(block.Type, block.Cbor)
-		if err != nil {
-			b.Fatalf("decode UTxO fixture block at slot %d: %v", block.Slot, err)
-		}
-		for _, tx := range ledgerBlock.Transactions() {
-			for _, produced := range tx.Produced() {
-				model, err := models.UtxoLedgerToModel(produced, point.Slot)
-				if err != nil {
-					b.Fatalf("convert fixture UTxO at slot %d: %v", point.Slot, err)
+	err := txn.Do(func(t *database.Txn) error {
+		for _, entry := range window {
+			for idx, tx := range entry.block.Transactions() {
+				if len(records.txHashes) >= maxTxs {
+					return nil
 				}
-				key := fmt.Sprintf("%x#%d", model.TxId, model.OutputIdx)
-				if _, dup := seen[key]; dup {
+				if keep != nil && !keep(tx) {
 					continue
 				}
-				seen[key] = struct{}{}
-				if len(model.Cbor) == 0 {
-					b.Fatalf("fixture UTxO %s has no output CBOR", key)
-				}
-				if err := db.CreateUtxo(txn, &model); err != nil {
-					b.Fatalf("seed fixture UTxO %s: %v", key, err)
-				}
-				if err := db.Blob().SetUtxo(
-					txn.Blob(),
-					model.TxId,
-					model.OutputIdx,
-					model.Cbor,
+				if err := db.SetTransactionMetadataOnly(
+					tx,
+					entry.point,
+					// #nosec G115 -- transaction index within a block
+					uint32(idx),
+					certDeposits,
+					t,
 				); err != nil {
-					b.Fatalf("seed fixture UTxO CBOR %s: %v", key, err)
+					return err
 				}
-				refs = append(refs, benchmarkUtxoRef{
-					txID:      append([]byte(nil), model.TxId...),
-					outputIdx: model.OutputIdx,
-					address:   produced.Output.Address(),
-				})
-				if len(refs) == maxRows {
-					break
+				records.txHashes = append(records.txHashes, tx.Hash().Bytes())
+				for _, cert := range tx.Certificates() {
+					switch typed := cert.(type) {
+					case *lcommon.StakeRegistrationCertificate:
+						records.stakeKeys = append(
+							records.stakeKeys,
+							typed.StakeCredential.Credential.Bytes(),
+						)
+					case *lcommon.PoolRegistrationCertificate:
+						records.poolKeyHashes = append(
+							records.poolKeyHashes,
+							typed.Operator,
+						)
+					}
 				}
-			}
-			if len(refs) == maxRows {
-				break
 			}
 		}
-		if len(refs) == maxRows {
+		return nil
+	})
+	if err != nil {
+		b.Fatalf("seed fixture transactions from slot %d: %v", startSlot, err)
+	}
+	if len(records.txHashes) == 0 {
+		b.Fatalf("fixture window at slot %d holds no transaction", startSlot)
+	}
+	return records
+}
+
+// seedFixtureUtxos writes fixture transaction outputs to the metadata UTxO
+// table and to the blob store. Both are required: UtxosByAddress and
+// UtxoByRef resolve the output CBOR through the blob store and fail with
+// ErrUtxoCborUnavailable when only the metadata row exists.
+func seedFixtureUtxos(
+	b *testing.B,
+	db *database.Database,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	blockCount int,
+	maxUtxos int,
+) ([]models.Utxo, []ledger.Address) {
+	b.Helper()
+	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
+	seeded := make([]models.Utxo, 0, maxUtxos)
+	addrs := make([]ledger.Address, 0, maxUtxos)
+	txn := db.Transaction(true)
+	defer txn.Release()
+	err := txn.Do(func(t *database.Txn) error {
+		for _, entry := range window {
+			for _, tx := range entry.block.Transactions() {
+				for _, produced := range tx.Produced() {
+					if len(seeded) >= maxUtxos {
+						return nil
+					}
+					model, err := models.UtxoLedgerToModel(
+						produced,
+						entry.point.Slot,
+					)
+					if err != nil {
+						return err
+					}
+					if err := db.CreateUtxo(t, &model); err != nil {
+						return err
+					}
+					if err := db.Blob().SetUtxo(
+						t.Blob(),
+						model.TxId,
+						model.OutputIdx,
+						produced.Output.Cbor(),
+					); err != nil {
+						return err
+					}
+					seeded = append(seeded, model)
+					addrs = append(addrs, produced.Output.Address())
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		b.Fatalf("seed fixture UTxOs from slot %d: %v", startSlot, err)
+	}
+	if len(seeded) == 0 {
+		b.Fatalf("fixture window at slot %d produces no output", startSlot)
+	}
+	return seeded, addrs
+}
+
+// seedFixtureDatums stores the Plutus data carried by fixture transaction
+// witnesses under its own hash, and returns the hashes stored.
+func seedFixtureDatums(
+	b *testing.B,
+	db *database.Database,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	blockCount int,
+) []lcommon.Blake2b256 {
+	b.Helper()
+	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
+	var hashes []lcommon.Blake2b256
+	txn := db.Transaction(true)
+	defer txn.Release()
+	err := txn.Do(func(t *database.Txn) error {
+		for _, entry := range window {
+			for _, tx := range entry.block.Transactions() {
+				witnesses := tx.Witnesses()
+				if witnesses == nil {
+					continue
+				}
+				for _, datum := range witnesses.PlutusData() {
+					raw := datum.Cbor()
+					hash := lcommon.Blake2b256Hash(raw)
+					if err := db.Metadata().SetDatum(
+						hash,
+						raw,
+						entry.point.Slot,
+						t.Metadata(),
+					); err != nil {
+						return err
+					}
+					hashes = append(hashes, hash)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		b.Fatalf("seed fixture datums from slot %d: %v", startSlot, err)
+	}
+	if len(hashes) == 0 {
+		b.Fatalf("fixture window at slot %d carries no Plutus datum", startSlot)
+	}
+	return hashes
+}
+
+// previewNodeConfig loads the committed preview node configuration. The
+// immutable fixture is preview chain data, so preview's genesis is the right
+// source for protocol parameters and for the era nonce calculators.
+func previewNodeConfig(b *testing.B) *cardano.CardanoNodeConfig {
+	b.Helper()
+	nodeConfig, err := cardano.NewCardanoNodeConfigFromFile(
+		"../config/cardano/preview/config.json",
+	)
+	if err != nil {
+		b.Fatalf("load preview node config: %v", err)
+	}
+	return nodeConfig
+}
+
+// seedPreviewPParams stores the Shelley protocol parameters derived from the
+// committed preview genesis at each requested epoch. No fixture block carries
+// protocol parameters: the node writes them at an era transition from the
+// genesis configuration, which is what this reproduces.
+func seedPreviewPParams(
+	b *testing.B,
+	db *database.Database,
+	epochs []uint64,
+) {
+	b.Helper()
+	nodeConfig := previewNodeConfig(b)
+	pparams, err := eras.HardForkShelley(nodeConfig, nil)
+	if err != nil {
+		b.Fatalf("derive preview Shelley protocol parameters: %v", err)
+	}
+	encoded, err := cbor.Encode(pparams)
+	if err != nil {
+		b.Fatalf("encode protocol parameters: %v", err)
+	}
+	genesis := nodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		b.Fatal("preview node config carries no Shelley genesis")
+	}
+	// #nosec G115 -- epochLength is a positive genesis constant
+	epochLength := uint64(genesis.EpochLength)
+	for _, epoch := range epochs {
+		if err := db.Metadata().SetPParams(
+			encoded,
+			epoch*epochLength,
+			epoch,
+			ledger.EraIdShelley,
+			nil,
+		); err != nil {
+			b.Fatalf(
+				"store protocol parameters for epoch %d: %v",
+				epoch,
+				err,
+			)
+		}
+	}
+}
+
+// seedFixtureBlockNonces folds each fixture header's VRF output into a rolling
+// nonce with that block era's own etaV calculator and stores it against the
+// block's real point.
+//
+// The fold starts from a zero seed rather than the chain's epoch nonce, which
+// the immutable fixture does not carry. The lookup key -- the point -- is real
+// either way, and the nonce value is opaque to GetBlockNonce.
+func seedFixtureBlockNonces(
+	b *testing.B,
+	db *database.Database,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	blockCount int,
+) []ocommon.Point {
+	b.Helper()
+	nodeConfig := previewNodeConfig(b)
+	window := fixtureBlockWindow(b, immDb, startSlot, blockCount)
+	points := make([]ocommon.Point, 0, len(window))
+	rolling := make([]byte, 32)
+	for _, entry := range window {
+		eraId := uint(entry.block.Era().Id)
+		calculate := fixtureEtaVFunc(b, eraId)
+		nonce, err := calculate(nodeConfig, rolling, entry.block)
+		if err != nil {
+			b.Fatalf(
+				"calculate etaV at slot %d: %v",
+				entry.point.Slot,
+				err,
+			)
+		}
+		rolling = nonce
+		if err := db.Metadata().SetBlockNonce(
+			entry.point.Hash,
+			entry.point.Slot,
+			nonce,
+			false,
+			nil,
+		); err != nil {
+			b.Fatalf(
+				"store block nonce at slot %d: %v",
+				entry.point.Slot,
+				err,
+			)
+		}
+		points = append(points, entry.point)
+	}
+	return points
+}
+
+// fixtureEtaVFunc returns the etaV calculator for an era ID.
+func fixtureEtaVFunc(
+	b *testing.B,
+	eraId uint,
+) func(*cardano.CardanoNodeConfig, []byte, ledger.Block) ([]byte, error) {
+	b.Helper()
+	for i := range eras.Eras {
+		if eras.Eras[i].Id != eraId {
+			continue
+		}
+		if eras.Eras[i].CalculateEtaVFunc == nil {
+			b.Fatalf("era ID %d has no etaV calculator", eraId)
+		}
+		return eras.Eras[i].CalculateEtaVFunc
+	}
+	b.Fatalf("unknown era ID %d", eraId)
+	return nil
+}
+
+// seedFixtureDreps registers one DRep per supplied credential.
+//
+// The immutable fixture holds Alonzo and Babbage blocks only, so it carries no
+// Conway DRep registration certificate to apply. The credentials are the
+// fixture's own stake credentials and the rows are created directly.
+func seedFixtureDreps(
+	b *testing.B,
+	db *database.Database,
+	credentials [][]byte,
+	slot uint64,
+) [][]byte {
+	b.Helper()
+	seeded := make([][]byte, 0, len(credentials))
+	for _, credential := range credentials {
+		if err := db.Metadata().CreateDrep(nil, &models.Drep{
+			Credential: credential,
+			AddedSlot:  slot,
+			Active:     true,
+		}); err != nil {
+			b.Fatalf("create DRep %x: %v", credential, err)
+		}
+		seeded = append(seeded, credential)
+	}
+	if len(seeded) == 0 {
+		b.Fatal("seeded no DReps; benchmark would time a miss")
+	}
+	return seeded
+}
+
+// distinctStakeKeys returns up to limit distinct stake credentials.
+func distinctStakeKeys(
+	b *testing.B,
+	stakeKeys [][]byte,
+	limit int,
+) [][]byte {
+	b.Helper()
+	seen := make(map[string]struct{}, limit)
+	ret := make([][]byte, 0, limit)
+	for _, key := range stakeKeys {
+		if _, dup := seen[string(key)]; dup {
+			continue
+		}
+		seen[string(key)] = struct{}{}
+		ret = append(ret, key)
+		if len(ret) == limit {
 			break
 		}
 	}
-	if len(refs) == 0 {
-		b.Fatal("fixture points produced no UTxOs; benchmark would time a miss")
+	if len(ret) == 0 {
+		b.Fatal("fixture window registered no stake credential")
 	}
-	if err := txn.Commit(); err != nil {
-		b.Fatalf("commit fixture UTxOs: %v", err)
+	return ret
+}
+
+// distinctPoolKeyHashes returns up to limit distinct pool key hashes.
+func distinctPoolKeyHashes(
+	b *testing.B,
+	hashes []lcommon.PoolKeyHash,
+	limit int,
+) []lcommon.PoolKeyHash {
+	b.Helper()
+	seen := make(map[string]struct{}, limit)
+	ret := make([]lcommon.PoolKeyHash, 0, limit)
+	for _, hash := range hashes {
+		key := string(hash.Bytes())
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, hash)
+		if len(ret) == limit {
+			break
+		}
 	}
-	return refs
+	if len(ret) == 0 {
+		b.Fatal("fixture window registered no pool")
+	}
+	return ret
+}
+
+// fixtureStakeCredentials returns up to limit distinct stake credentials that
+// the fixture's own registration certificates carry, without writing anything.
+func fixtureStakeCredentials(
+	b *testing.B,
+	immDb *immutable.ImmutableDb,
+	startSlot uint64,
+	blockCount int,
+	limit int,
+) [][]byte {
+	b.Helper()
+	var keys [][]byte
+	for _, entry := range fixtureBlockWindow(b, immDb, startSlot, blockCount) {
+		for _, tx := range entry.block.Transactions() {
+			for _, cert := range tx.Certificates() {
+				registration, ok := cert.(*lcommon.StakeRegistrationCertificate)
+				if !ok {
+					continue
+				}
+				keys = append(
+					keys,
+					registration.StakeCredential.Credential.Bytes(),
+				)
+			}
+		}
+	}
+	return distinctStakeKeys(b, keys, limit)
 }
 
 func fixtureEraTransitionPoints(
@@ -316,8 +767,6 @@ func fixtureEraTransitionPoints(
 	return points
 }
 
-// seedBlocksFromSlots seeds db with the fixture block at or after each
-// requested slot and returns the number stored.
 func seedBlocksFromSlots(
 	b *testing.B,
 	db *database.Database,
@@ -429,38 +878,55 @@ func BenchmarkUtxoLookupByAddressNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkUtxoLookupByAddressRealData queries addresses from decoded fixture outputs.
+// BenchmarkUtxoLookupByAddressRealData benchmarks UTxO lookup by address
+// against addresses the fixture's own transaction outputs were paid to
 func BenchmarkUtxoLookupByAddressRealData(b *testing.B) {
 	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer dbtest.CloseDatabase(db)
+
+	// Seed the UTxO set from real fixture outputs
 	immDb := openImmutableTestDB(b)
-	refs := seedUtxosAtPoints(
-		b, db, immDb, fixturePointsFrom(b, immDb, 0, 100), 256,
+	_, addrs := seedFixtureUtxos(
+		b,
+		db,
+		immDb,
+		fixtureUtxoWindowStartSlot,
+		fixtureUtxoWindowBlocks,
+		fixtureUtxoWindowMaxUtxos,
 	)
-	address := refs[0].address
-	got, err := db.UtxosByAddress(
-		[]ledger.Address{address}, database.MaxUtxosByAddressResults, nil,
-	)
-	if err != nil {
-		b.Fatalf("preflight UTxO address lookup: %v", err)
-	}
-	if len(got) == 0 {
-		b.Fatal("fixture address returned no UTxOs; benchmark would time a miss")
+
+	// Confirm the query hits before timing it. A RealData benchmark that
+	// measures the miss path publishes its NoData twin's figure under
+	// another name.
+	for _, addr := range addrs {
+		found, err := db.UtxosByAddress(
+			[]ledger.Address{addr},
+			database.MaxUtxosByAddressResults,
+			nil,
+		)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(found) == 0 {
+			b.Fatalf("seeded address %s has no UTxO", addr.String())
+		}
 	}
 	b.ResetTimer()
-	for b.Loop() {
+
+	// Benchmark lookup against real seeded data
+	for i := 0; b.Loop(); i++ {
 		if _, err := db.UtxosByAddress(
-			[]ledger.Address{address},
+			[]ledger.Address{addrs[i%len(addrs)]},
 			database.MaxUtxosByAddressResults,
 			nil,
 		); err != nil {
 			b.Fatalf("UTxO address lookup: %v", err)
 		}
 	}
-	b.ReportMetric(float64(len(refs)), "utxos")
+	b.ReportMetric(float64(len(addrs)), "utxos")
 }
 
 // BenchmarkUtxoLookupByRefNoData benchmarks UTxO lookup by reference on empty database
@@ -496,32 +962,49 @@ func BenchmarkUtxoLookupByRefNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkUtxoLookupByRefRealData queries a reference from a decoded fixture output.
+// BenchmarkUtxoLookupByRefRealData benchmarks UTxO lookup by reference against
+// references the fixture's own transaction outputs are stored under
 func BenchmarkUtxoLookupByRefRealData(b *testing.B) {
 	db, err := dbtest.NewDatabase(b, &database.Config{DataDir: ""})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer dbtest.CloseDatabase(db)
+
+	// Seed the UTxO set from real fixture outputs
 	immDb := openImmutableTestDB(b)
-	refs := seedUtxosAtPoints(
-		b, db, immDb, fixturePointsFrom(b, immDb, 0, 100), 256,
+	seeded, _ := seedFixtureUtxos(
+		b,
+		db,
+		immDb,
+		fixtureUtxoWindowStartSlot,
+		fixtureUtxoWindowBlocks,
+		fixtureUtxoWindowMaxUtxos,
 	)
-	ref := refs[0]
-	got, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil)
-	if err != nil {
-		b.Fatalf("preflight UTxO reference lookup: %v", err)
-	}
-	if got == nil {
-		b.Fatal("fixture reference returned no UTxO; benchmark would time a miss")
-	}
-	b.ResetTimer()
-	for b.Loop() {
-		if _, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil); err != nil {
-			b.Fatalf("UTxO reference lookup: %v", err)
+
+	// Confirm the query hits before timing it
+	for _, utxo := range seeded {
+		if _, err := db.UtxoByRef(utxo.TxId, utxo.OutputIdx, nil); err != nil {
+			b.Fatalf(
+				"seeded UTxO %x#%d is not readable: %v",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
 		}
 	}
-	b.ReportMetric(float64(len(refs)), "utxos")
+
+	// Reset timer after seeding
+	b.ResetTimer()
+
+	// Benchmark lookup against real seeded data
+	for i := 0; b.Loop(); i++ {
+		utxo := seeded[i%len(seeded)]
+		if _, err := db.UtxoByRef(utxo.TxId, utxo.OutputIdx, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(len(seeded)), "utxos")
 }
 
 // BenchmarkBlockRetrievalByIndexNoData benchmarks block retrieval by index on empty database
@@ -615,10 +1098,8 @@ func BenchmarkTransactionHistoryQueriesNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkTransactionHistoryQueriesRealData benchmarks transaction lookup by hash against real seeded data
-// NOTE: Currently uses synthetic transaction hashes that won't match seeded data,
-// so this measures query performance against empty results with real blocks present.
-// TODO: Extract real transaction hashes from seeded blocks for more realistic benchmarking.
+// BenchmarkTransactionHistoryQueriesRealData benchmarks transaction lookup by
+// hash against the fixture's own transactions
 func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -630,25 +1111,27 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with fixture blocks
+	// Record real fixture transactions
 	immDb := openImmutableTestDB(b)
+	records := seedFixtureTransactions(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixtureTxWindowBlocks,
+		fixtureTxWindowMaxTxs,
+		nil,
+	)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{10000, 50000, 100000, 150000, 200000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test transaction hashes (use real-looking hashes)
-	// NOTE: These are synthetic hashes that won't match seeded transactions,
-	// making this benchmark equivalent to NoData variant. Real transaction
-	// hash extraction would require parsing block contents, which is complex.
-	testTxHashes := make([][]byte, 10)
-	for j := range testTxHashes {
-		hash := make([]byte, 32)
-		for i := range hash {
-			hash[i] = byte((j*32 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, hash := range records.txHashes {
+		seededTx, err := db.Metadata().GetTransactionByHash(hash, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testTxHashes[j] = hash
+		if seededTx == nil {
+			b.Fatalf("seeded transaction %x is not readable", hash)
+		}
 	}
 
 	// Reset timer after seeding
@@ -656,9 +1139,8 @@ func BenchmarkTransactionHistoryQueriesRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		hash := testTxHashes[i%len(testTxHashes)]
-		_, err := db.Metadata().GetTransactionByHash(hash, nil)
-		if err != nil {
+		hash := records.txHashes[i%len(records.txHashes)]
+		if _, err := db.Metadata().GetTransactionByHash(hash, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -695,7 +1177,8 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkAccountLookupByStakeKeyRealData benchmarks account lookup by stake key against real seeded data
+// BenchmarkAccountLookupByStakeKeyRealData benchmarks account lookup by stake
+// key against accounts the fixture's own registration certificates created
 func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -707,22 +1190,28 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Apply real fixture certificates, which create the account rows
 	immDb := openImmutableTestDB(b)
+	records := seedFixtureTransactions(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixtureTxWindowBlocks,
+		fixtureTxWindowMaxTxs,
+		nil,
+	)
+	stakeKeys := distinctStakeKeys(b, records.stakeKeys, 10)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test stake keys
-	testStakeKeys := make([][]byte, 10)
-	for j := range testStakeKeys {
-		key := make([]byte, 28)
-		for i := range key {
-			key[i] = byte((j*28 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, key := range stakeKeys {
+		account, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testStakeKeys[j] = key
+		if account == nil {
+			b.Fatalf("seeded account %x is not readable", key)
+		}
 	}
 
 	// Reset timer after seeding
@@ -730,9 +1219,9 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		key := testStakeKeys[i%len(testStakeKeys)]
+		key := stakeKeys[i%len(stakeKeys)]
 		_, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
-		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -768,7 +1257,8 @@ func BenchmarkPoolLookupByKeyHashNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkPoolLookupByKeyHashRealData benchmarks pool lookup by key hash against real seeded data
+// BenchmarkPoolLookupByKeyHashRealData benchmarks pool lookup by key hash
+// against pools the fixture's own registration certificates created
 func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -780,22 +1270,28 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Apply the fixture's pool registration certificates
 	immDb := openImmutableTestDB(b)
+	records := seedFixtureTransactions(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixturePoolWindowBlocks,
+		fixtureTxWindowMaxTxs,
+		txHasPoolRegistration,
+	)
+	poolKeyHashes := distinctPoolKeyHashes(b, records.poolKeyHashes, 10)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test pool key hashes
-	testPoolKeyHashes := make([]lcommon.PoolKeyHash, 10)
-	for j := range testPoolKeyHashes {
-		hash := make([]byte, 28)
-		for i := range hash {
-			hash[i] = byte((j*28 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, keyHash := range poolKeyHashes {
+		pool, err := db.Metadata().GetPool(keyHash, false, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testPoolKeyHashes[j] = lcommon.PoolKeyHash(hash)
+		if pool == nil {
+			b.Fatalf("seeded pool %x is not readable", keyHash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
@@ -803,9 +1299,9 @@ func BenchmarkPoolLookupByKeyHashRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		hash := testPoolKeyHashes[i%len(testPoolKeyHashes)]
-		_, err := db.Metadata().GetPool(hash, false, nil)
-		if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
+		poolKeyHash := poolKeyHashes[i%len(poolKeyHashes)]
+		_, err := db.Metadata().GetPool(poolKeyHash, false, nil)
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -841,7 +1337,12 @@ func BenchmarkDRepLookupByKeyHashNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkDRepLookupByKeyHashRealData benchmarks DRep lookup by key hash against real seeded data
+// BenchmarkDRepLookupByKeyHashRealData benchmarks DRep lookup by key hash
+// against registered DReps.
+//
+// The immutable fixture stops in Babbage and so holds no Conway DRep
+// registration certificate to apply. The credentials are the fixture's own
+// stake credentials and the DRep rows are created directly.
 func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -853,22 +1354,30 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Register DReps under real fixture credentials
 	immDb := openImmutableTestDB(b)
+	credentials := seedFixtureDreps(
+		b,
+		db,
+		fixtureStakeCredentials(
+			b,
+			immDb,
+			fixtureTxWindowStartSlot,
+			fixtureTxWindowBlocks,
+			fixtureDrepCount,
+		),
+		fixtureTxWindowStartSlot,
+	)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test DRep credentials
-	testDRepCredentials := make([][]byte, 10)
-	for j := range testDRepCredentials {
-		cred := make([]byte, 32)
-		for i := range cred {
-			cred[i] = byte((j*32 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, credential := range credentials {
+		drep, err := db.Metadata().GetDrep(credential, false, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testDRepCredentials[j] = cred
+		if drep == nil {
+			b.Fatalf("seeded DRep %x is not readable", credential)
+		}
 	}
 
 	// Reset timer after seeding
@@ -876,9 +1385,9 @@ func BenchmarkDRepLookupByKeyHashRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		cred := testDRepCredentials[i%len(testDRepCredentials)]
-		_, err := db.Metadata().GetDrep(cred, false, nil)
-		if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+		credential := credentials[i%len(credentials)]
+		_, err := db.Metadata().GetDrep(credential, false, nil)
+		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -916,7 +1425,8 @@ func BenchmarkDatumLookupByHashNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkDatumLookupByHashRealData benchmarks datum lookup by hash against real seeded data
+// BenchmarkDatumLookupByHashRealData benchmarks datum lookup by hash against
+// the Plutus data the fixture's own transaction witnesses carry
 func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -928,22 +1438,25 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Store the fixture's Plutus data under its own hash
 	immDb := openImmutableTestDB(b)
+	hashes := seedFixtureDatums(
+		b,
+		db,
+		immDb,
+		fixtureDatumWindowStartSlot,
+		fixtureDatumWindowBlocks,
+	)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test datum hashes
-	testDatumHashes := make([]lcommon.Blake2b256, 10)
-	for j := range testDatumHashes {
-		hash := make([]byte, 32)
-		for i := range hash {
-			hash[i] = byte((j*32 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, hash := range hashes {
+		datum, err := db.Metadata().GetDatum(hash, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testDatumHashes[j] = lcommon.Blake2b256(hash)
+		if datum == nil {
+			b.Fatalf("seeded datum %x is not readable", hash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
@@ -951,11 +1464,8 @@ func BenchmarkDatumLookupByHashRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		hash := testDatumHashes[i%len(testDatumHashes)]
-		// GetDatum returns nil, nil for missing datums
-		// This is expected and not an error for benchmarking
-		_, err := db.Metadata().GetDatum(hash, nil)
-		if err != nil {
+		hash := hashes[i%len(hashes)]
+		if _, err := db.Metadata().GetDatum(hash, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -989,7 +1499,8 @@ func BenchmarkProtocolParametersLookupByEpochNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkProtocolParametersLookupByEpochRealData benchmarks protocol parameters lookup by epoch against real seeded data
+// BenchmarkProtocolParametersLookupByEpochRealData benchmarks protocol
+// parameters lookup by epoch against stored parameters
 func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -1001,16 +1512,20 @@ func BenchmarkProtocolParametersLookupByEpochRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
-	immDb := openImmutableTestDB(b)
-
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test epochs
+	// Store the preview genesis parameters at each queried epoch
 	testEpochs := []uint64{1, 10, 50, 100, 200}
+	seedPreviewPParams(b, db, testEpochs)
+
+	// Confirm the query hits before timing it
+	for _, epoch := range testEpochs {
+		rows, err := db.Metadata().GetPParams(epoch, ledger.EraIdShelley, nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(rows) == 0 {
+			b.Fatalf("seeded protocol parameters for epoch %d are not readable", epoch)
+		}
+	}
 
 	// Reset timer after seeding
 	b.ResetTimer()
@@ -1063,7 +1578,8 @@ func BenchmarkBlockNonceLookupNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkBlockNonceLookupRealData benchmarks block nonce lookup against real seeded data
+// BenchmarkBlockNonceLookupRealData benchmarks block nonce lookup against
+// nonces stored at the fixture's own block points
 func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -1075,24 +1591,25 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Fold the fixture's own headers into stored block nonces
 	immDb := openImmutableTestDB(b)
+	points := seedFixtureBlockNonces(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixtureNonceWindowBlocks,
+	)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Synthetic points: the nonce table is empty, so these measure the miss
-	// path. Seeding a block does not store a nonce for it.
-	testPoints := make([]ocommon.Point, 10)
-	for j := range testPoints {
-		slot := uint64(1000 + j*1000)
-		hash := make([]byte, 32)
-		for i := range hash {
-			hash[i] = byte((j*32 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, point := range points {
+		nonce, err := db.Metadata().GetBlockNonce(point, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testPoints[j] = ocommon.NewPoint(slot, hash)
+		if len(nonce) == 0 {
+			b.Fatalf("seeded block nonce at slot %d is not readable", point.Slot)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1100,11 +1617,8 @@ func BenchmarkBlockNonceLookupRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		point := testPoints[i%len(testPoints)]
-		// GetBlockNonce returns empty nonce for missing blocks
-		// This is expected and not an error for benchmarking
-		_, err := db.Metadata().GetBlockNonce(point, nil)
-		if err != nil {
+		point := points[i%len(points)]
+		if _, err := db.Metadata().GetBlockNonce(point, nil); err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
 	}
@@ -1146,7 +1660,8 @@ func BenchmarkStakeRegistrationLookupsNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkStakeRegistrationLookupsRealData benchmarks stake registration lookups against real seeded data
+// BenchmarkStakeRegistrationLookupsRealData benchmarks stake registration
+// lookups against the fixture's own registration certificates
 func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -1158,22 +1673,29 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Apply real fixture certificates
 	immDb := openImmutableTestDB(b)
+	records := seedFixtureTransactions(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixtureTxWindowBlocks,
+		fixtureTxWindowMaxTxs,
+		nil,
+	)
+	stakeKeys := distinctStakeKeys(b, records.stakeKeys, 10)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test stake keys
-	testStakeKeys := make([][]byte, 10)
-	for j := range testStakeKeys {
-		key := make([]byte, 28)
-		for i := range key {
-			key[i] = byte((j*28 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, key := range stakeKeys {
+		registrations, err := db.Metadata().
+			GetStakeRegistrationsByCredential(0, key, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testStakeKeys[j] = key
+		if len(registrations) == 0 {
+			b.Fatalf("seeded stake registration %x is not readable", key)
+		}
 	}
 
 	// Reset timer after seeding
@@ -1181,11 +1703,11 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		stakeKey := testStakeKeys[i%len(testStakeKeys)]
+		stakeKey := stakeKeys[i%len(stakeKeys)]
 		_, err := db.Metadata().
 			GetStakeRegistrationsByCredential(0, stakeKey, nil)
 		if err != nil {
-			b.Fatal(err)
+			b.Fatalf("unexpected error: %v", err)
 		}
 	}
 }
@@ -1225,7 +1747,8 @@ func BenchmarkPoolRegistrationLookupsNoData(b *testing.B) {
 	}
 }
 
-// BenchmarkPoolRegistrationLookupsRealData benchmarks pool registration lookups against real seeded data
+// BenchmarkPoolRegistrationLookupsRealData benchmarks pool registration
+// lookups against the fixture's own pool registration certificates
 func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 	// Set up in-memory database
 	config := &database.Config{
@@ -1237,22 +1760,28 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 	}
 	defer dbtest.CloseDatabase(db)
 
-	// Seed database with real blocks
+	// Apply the fixture's pool registration certificates
 	immDb := openImmutableTestDB(b)
+	records := seedFixtureTransactions(
+		b,
+		db,
+		immDb,
+		fixtureTxWindowStartSlot,
+		fixturePoolWindowBlocks,
+		fixtureTxWindowMaxTxs,
+		txHasPoolRegistration,
+	)
+	poolKeyHashes := distinctPoolKeyHashes(b, records.poolKeyHashes, 10)
 
-	// Sample blocks from across the fixture
-	sampleSlots := []uint64{1000, 5000, 10000, 50000, 100000}
-	seeded := seedBlocksFromSlots(b, db, immDb, sampleSlots)
-	b.Logf("Seeded %d fixture blocks", seeded)
-
-	// Create test pool key hashes
-	testPoolKeyHashes := make([]lcommon.PoolKeyHash, 10)
-	for j := range testPoolKeyHashes {
-		hash := make([]byte, 28)
-		for i := range hash {
-			hash[i] = byte((j*28 + i) % 256)
+	// Confirm the query hits before timing it
+	for _, keyHash := range poolKeyHashes {
+		registrations, err := db.Metadata().GetPoolRegistrations(keyHash, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
-		testPoolKeyHashes[j] = lcommon.PoolKeyHash(hash)
+		if len(registrations) == 0 {
+			b.Fatalf("seeded pool registration %x is not readable", keyHash.Bytes())
+		}
 	}
 
 	// Reset timer after seeding
@@ -1260,9 +1789,11 @@ func BenchmarkPoolRegistrationLookupsRealData(b *testing.B) {
 
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
-		poolKeyHash := testPoolKeyHashes[i%len(testPoolKeyHashes)]
-		_, err := db.Metadata().GetPoolRegistrations(poolKeyHash, nil)
-		if err != nil {
+		poolKeyHash := poolKeyHashes[i%len(poolKeyHashes)]
+		if _, err := db.Metadata().GetPoolRegistrations(
+			poolKeyHash,
+			nil,
+		); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -2701,24 +3232,18 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	if seeded != 10 {
 		b.Fatalf("seeded %d blocks; concurrent query benchmark requires 10", seeded)
 	}
-	refs := seedUtxosAtPoints(
-		b,
-		db,
-		immDb,
-		fixturePointsFrom(b, immDb, 0, 100),
-		256,
-	)
-	addresses := make([]ledger.Address, 0, len(refs))
-	for _, ref := range refs {
-		addresses = append(addresses, ref.address)
-	}
+	seededUtxos, addresses := seedFixtureUtxos(b, db, immDb, 0, 100, 256)
 	addressRows, err := db.UtxosByAddress(
 		addresses[:1], database.MaxUtxosByAddressResults, nil,
 	)
 	if err != nil || len(addressRows) == 0 {
 		b.Fatalf("preflight address query returned %d rows: %v", len(addressRows), err)
 	}
-	refRow, err := db.UtxoByRef(refs[0].txID, refs[0].outputIdx, nil)
+	refRow, err := db.UtxoByRef(
+		seededUtxos[0].TxId,
+		seededUtxos[0].OutputIdx,
+		nil,
+	)
 	if err != nil || refRow == nil {
 		b.Fatalf("preflight UTxO reference query returned %v: %v", refRow, err)
 	}
@@ -2743,7 +3268,7 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 	// Reset timer after setup
 	b.ResetTimer()
 	b.ReportMetric(float64(seeded), "fixture_blocks")
-	b.ReportMetric(float64(len(refs)), "utxos")
+	b.ReportMetric(float64(len(seededUtxos)), "utxos")
 
 	// Run benchmark with concurrent queries
 	queryErrors := make(chan error, 1)
@@ -2773,8 +3298,8 @@ func BenchmarkConcurrentQueries(b *testing.B) {
 				}
 
 			case "utxo_ref":
-				ref := refs[workerID%len(refs)]
-				res, err := db.UtxoByRef(ref.txID, ref.outputIdx, nil)
+				ref := seededUtxos[workerID%len(seededUtxos)]
+				res, err := db.UtxoByRef(ref.TxId, ref.OutputIdx, nil)
 				if err != nil || res == nil {
 					recordQueryError(
 						fmt.Errorf("reference query returned %v: %v", res, err),
@@ -3376,7 +3901,7 @@ func BenchmarkTipSnapshotReadOnly(b *testing.B) {
 // continuously republishes the consensus/tip snapshots (the same
 // publishSnapshotsLocked call a real per-block writer makes), while readers
 // run concurrently. Run with -cpu=1,4,8,16 to see the scaling curve; per
-// #2601's regression, an implementation using a plain RWMutex here would
+// regression, an implementation using a plain RWMutex here would
 // degrade sharply at higher core counts, while the atomic.Pointer
 // implementation should stay close to BenchmarkTipSnapshotReadOnly.
 //

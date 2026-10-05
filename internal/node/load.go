@@ -787,7 +787,7 @@ func LoadWithDB(
 			return snapshotMgr.ComputeEpochBoundarySnapshot(ctx, txn, evt)
 		},
 	)
-	// Governance's same-boundary SPO stake read (dingo#4441): RATIFY tallies
+	// Governance's same-boundary SPO stake read: RATIFY tallies
 	// mark[NewEpoch] -- this same boundary's own mark snapshot -- which is not
 	// durably written until the capture hook below runs, later in the same
 	// rollover. Load replays the exact same governance.ProcessEpoch path as
@@ -829,7 +829,7 @@ func LoadWithDB(
 	// node.go's normal startup path. Without this, replaying a devnet chain
 	// with genesis staking through `dingo load` never creates the epoch-0
 	// mark RewardSnapshot, silently skipping the first reward round applied
-	// at the epoch-3 boundary (#1959). This must run before any epoch
+	// at the epoch-3 boundary. This must run before any epoch
 	// boundaries are processed below.
 	if err := captureLoadGenesisSnapshot(ctx, snapshotMgr, cfg, logger); err != nil {
 		return err

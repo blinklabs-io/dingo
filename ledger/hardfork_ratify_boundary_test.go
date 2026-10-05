@@ -47,7 +47,7 @@ func (f *hardForkRatifyFixture) reloadProposal(
 }
 
 // TestHardForkInitiation_RatifiesAtRealIncidentBoundary reproduces
-// dingo#4441: the Preview Plomin hard fork (protocol major 9 -> 10) must
+// the Preview Plomin hard fork (protocol major 9 -> 10) must
 // ratify at the boundary into epoch 742, using mark[742] (ratio 0.6283),
 // not mark[740] (0.4779) -- reproducing the real network's
 // ratified_epoch=742. Before the stakeEpochFor fix this proposal never
@@ -108,7 +108,7 @@ func TestHardForkInitiation_EnactsOneBoundaryAfterRatification(t *testing.T) {
 }
 
 // hardForkRatifyLiveStakeFixture is hardForkRatifyFixture's sibling for
-// proving the *plumbing* half of dingo#4441, not the epoch-offset half: it
+// proving the *plumbing* half, not the epoch-offset half: it
 // seeds live Pool/Account/UTxO delegation state -- never a pre-written
 // pool_stake_snapshot "mark" row -- and drives the same real
 // processEpochRollover path through the same epoch-boundary hooks node.go
@@ -132,7 +132,7 @@ const (
 // pre-written mark[742] row, and wires the authoritative persist hook
 // unconditionally (see the comment below for why not the SNAP-point
 // fast-path hook too). wireCurrentBoundaryHook controls only the new
-// dingo#4441 hook (SetCurrentBoundarySPOStakeHook), so a test can wire
+// new hook (SetCurrentBoundarySPOStakeHook), so a test can wire
 // everything else exactly like production and isolate what that one hook
 // contributes.
 func newHardForkRatifyLiveStakeFixture(
@@ -345,7 +345,7 @@ func TestHardForkInitiation_RatifiesFromLiveStakeWithHookWired(t *testing.T) {
 }
 
 // TestHardForkInitiation_NeverRatifiesWithoutCurrentBoundaryHook is the
-// negative control for the plumbing half of dingo#4441: even after the
+// negative control for the plumbing half: even after the
 // stakeEpochFor offset fix, wiring only the pre-existing SNAP-point stake
 // and capture hooks (exactly as before this change) leaves governance
 // reading the not-yet-written mark[742] row and permanently unable to

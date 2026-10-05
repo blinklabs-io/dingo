@@ -88,8 +88,9 @@ type followTipTimestampLedger struct {
 
 	tip ochainsync.Tip
 
-	block    models.Block
-	blockErr error
+	block      models.Block
+	blockErr   error
+	blockCalls int
 
 	// slotToTimeErrOnSlot fails SlotToTime for exactly this slot; every
 	// other slot succeeds with a fixed time built from the slot number.
@@ -104,6 +105,7 @@ func (l *followTipTimestampLedger) Tip() ochainsync.Tip {
 func (l *followTipTimestampLedger) GetBlock(
 	ocommon.Point,
 ) (models.Block, error) {
+	l.blockCalls++
 	return l.block, l.blockErr
 }
 
@@ -179,6 +181,30 @@ func TestFollowTipResponse_RollbackSucceedsWithTimestamp(t *testing.T) {
 		reset.Reset_.Timestamp,
 		"timestamp should reflect the stubbed slot time",
 	)
+}
+
+func TestFollowTipResponse_RollbackToOrigin(t *testing.T) {
+	t.Parallel()
+	stub := &followTipTimestampLedger{
+		tip: ochainsync.Tip{Point: ocommon.NewPoint(0, nil)},
+	}
+	srv := newFollowTipTimestampServer(stub)
+
+	resp, err := srv.followTipResponse(&chain.ChainIteratorResult{
+		Point:    ocommon.NewPoint(0, nil),
+		Rollback: true,
+	})
+
+	require.NoError(t, err)
+	require.Zero(t, stub.blockCalls, "rollback to origin must not fetch a block")
+	require.NotNil(t, resp)
+	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
+	require.True(t, ok)
+	require.NotNil(t, reset.Reset_)
+	require.Zero(t, reset.Reset_.Slot)
+	require.Empty(t, reset.Reset_.Hash)
+	require.Zero(t, reset.Reset_.Height)
+	require.Zero(t, reset.Reset_.Timestamp)
 }
 
 // TestFollowTipResponse_TipSlotToTimeErrorPropagates covers the second
@@ -1299,7 +1325,7 @@ func TestConnect_ReadUtxos(t *testing.T) {
 }
 
 // TestConnect_ReadUtxos_MultipleKeys proves ReadUtxos resolves several keys
-// in a single request via the batched UTxO lookup (#392), returning exactly
+// in a single request via the batched UTxO lookup, returning exactly
 // one item per requested key.
 func TestConnect_ReadUtxos_MultipleKeys(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 20})

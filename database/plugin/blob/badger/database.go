@@ -733,7 +733,7 @@ func (d *BlobStoreBadger) Sync() error {
 // be dropped, because y/watermark.go selects between the mark channel and the
 // close signal and Go picks randomly when both are ready. doneUntil then
 // stays behind nextTxnTs-1 permanently and the wait has no context to cancel
-// it. See #3609.
+// it.
 //
 // IsClosed narrows this window rather than eliminating it. A store closed
 // concurrently with this call already breaks the database.New contract, which

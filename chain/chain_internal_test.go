@@ -48,7 +48,7 @@ import (
 // to a value above the blocks the concurrent rollback had already deleted, so
 // the chain claimed a tip it did not store: the ledger's windowed rewind then
 // asked for the point a security parameter behind that tip and was told the
-// block did not exist (issue #3889).
+// block did not exist.
 func TestBatchRestoreIsSafeLocked(t *testing.T) {
 	t.Parallel()
 
@@ -475,11 +475,11 @@ func TestCheckEphemeralBufferSpan(t *testing.T) {
 	}
 }
 
-// TestRollbackForkDepthSaturates keeps issue #3040's underflow fix covered at
+// TestRollbackForkDepthSaturates keeps underflow fix covered at
 // the unit level.
 //
 // TestRollbackRejectsPointAheadOfTip asserts that a rollback point above the
-// tip is refused outright as not-on-chain (issue #3005), so it no longer drives
+// tip is refused outright as not-on-chain, so it no longer drives
 // rollbackForkDepth with such an index. The saturating computation still has to
 // be correct: any future caller that reaches it with a point above the tip must
 // get zero, not a wrapped-around uint64 that reads as a fork deeper than any
