@@ -18224,6 +18224,13 @@ func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
 	}
 	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
 
+	// The block pipeline reads the in-memory map only, with no database
+	// fallback, so the restore itself must carry the source. Read it before
+	// deferredHeaderValidationRequired, which consumes the entry.
+	inMemory := restarted.deferredHeaderSource(point)
+	require.NotNil(t, inMemory.RemoteAddr, "repopulate dropped the source")
+	assert.Equal(t, connId.RemoteAddr.String(), inMemory.RemoteAddr.String())
+
 	required, source, err := restarted.deferredHeaderValidationRequired(
 		point,
 		nil,
@@ -18232,6 +18239,36 @@ func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
 	require.True(t, required)
 	require.NotNil(t, source.RemoteAddr, "restored marker lost its source")
 	assert.Equal(t, connId.RemoteAddr.String(), source.RemoteAddr.String())
+}
+
+// A marker rewritten because its point was re-deferred during the stale delete
+// keeps the supplying peer's address.
+// Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.
+func TestDeferredMarkerRestoreKeepsSource(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{50}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	connId := testRecycleConnId()
+	point := ocommon.Point{Slot: 1_170, Hash: []byte{0x13}}
+	require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+
+	t.Cleanup(func() { afterDeferredMarkerDeleteHook = nil })
+	afterDeferredMarkerDeleteHook = func() {
+		ls.markDeferredHeaderValidationFrom(point, connId)
+	}
+	require.NoError(t, ls.deleteDeferredMarkerUnlessReadmitted(
+		headerValidationPointKey(point),
+	))
+
+	value, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		deferredHeaderMarkerValue(connId),
+		value,
+		"restored marker lost the supplying peer",
+	)
 }
 
 // A marker written by an earlier release carries no source and still restores.

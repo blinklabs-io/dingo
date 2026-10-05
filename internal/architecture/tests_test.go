@@ -411,6 +411,13 @@ var importBoundaryRules = []importBoundaryRule{
 			"ledger/fee_deposit_production_test.go": {
 				"mempool",
 			},
+			// Drives a deferred header failure through ledger recovery, the
+			// ouroboros resync handler, and the peer governor.
+			"ledger/deferred_header_peer_recovery_e2e_test.go": {
+				"connmanager",
+				"mempool",
+				"peergov",
+			},
 		},
 	},
 	{
