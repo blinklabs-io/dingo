@@ -1012,9 +1012,11 @@ func rewardPoolBlockCountsFixture(
 		"mithril_ledger_slot", strconv.FormatUint(anchorSlot, 10), nil,
 	))
 	for _, slot := range []uint64{160, 170} {
-		require.NoError(t, db.UpdatePoolOpCertSequence(poolA, slot, slot, nil))
+		require.NoError(t, db.UpdatePoolOpCertSequence(t.Context(), poolA, slot, slot, nil))
 	}
-	require.NoError(t, db.UpdatePoolOpCertSequence(poolB, 180, 180, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(
+		t.Context(), poolB, 180, 180, nil,
+	))
 	if withImported {
 		retired := bytes.Repeat([]byte{0x93}, len(poolA))
 		require.NoError(t, meta.SaveImportedPoolBlockCounts(

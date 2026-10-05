@@ -559,7 +559,7 @@ func ImportLedgerState(
 	// judge either way. The rollback is unconditional because it is
 	// idempotent and a no-op on a fresh database, which has no post-anchor
 	// rows.
-	if err := cfg.Database.UtxosDeleteRolledback(slot, nil); err != nil {
+	if err := cfg.Database.UtxosDeleteRolledback(ctx, slot, nil); err != nil {
 		return fmt.Errorf(
 			"rolling back post-anchor-created UTxOs: %w",
 			err,

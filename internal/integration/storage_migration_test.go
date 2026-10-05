@@ -17,7 +17,7 @@
 package integration
 
 import (
- "context"
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -435,7 +435,7 @@ func seedMetadataMigrationDataset(
 		StorageMode: types.StorageModeCore,
 		Network:     dataset.network,
 	}))
-	require.NoError(t, store.SetNodeSettingsGates(context.Background(), 
+	require.NoError(t, store.SetNodeSettingsGates(context.Background(),
 		nodesettings.Values{dataset.gateName: dataset.gateValue},
 		1,
 		10,
@@ -453,7 +453,7 @@ func migrateMetadataDataset(
 	src, dest metadata.MetadataStore,
 ) {
 	t.Helper()
-	timestamp, err := src.GetCommitTimestamp()
+	timestamp, err := src.GetCommitTimestamp(context.Background())
 	require.NoError(t, err)
 	settings, err := src.GetNodeSettings(context.Background())
 	require.NoError(t, err)

@@ -957,6 +957,8 @@ func (s *Store) beginWriteTx(ctx context.Context) (*sql.Tx, func(), error) {
 // the commit barrier it holds while fixing its two read views. Its lifetime
 // admission cap also leaves one connection outside coordinated snapshots for
 // operational reads during rollback.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func (s *Store) ReserveRead(
 	ctx context.Context,
 ) (types.ReadReservation, error) {

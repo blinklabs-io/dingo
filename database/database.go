@@ -246,9 +246,24 @@ func (d *Database) PauseCommitsContext(
 // would deadlock that nested write. Ordinary blob-only transactions do not take
 // either barrier and remain safe for helpers such as deleteUtxoBlobs that open
 // one beneath an existing combined write.
+//
+//nolint:contextcheck // Preserve the public context-free compatibility method.
 func (d *Database) BeginDestructiveTransition() (finish func()) {
-	token := d.destructiveTransitionBarrier.Lock()
-	return func() { d.destructiveTransitionBarrier.Unlock(token) }
+	finish, _ = d.BeginDestructiveTransitionContext(context.Background())
+	return finish
+}
+
+// BeginDestructiveTransitionContext prevents coordinated read and lifecycle
+// snapshots from opening while a destructive update spans multiple physical
+// transactions. ctx can cancel a wait before the transition starts.
+func (d *Database) BeginDestructiveTransitionContext(
+	ctx context.Context,
+) (finish func(), err error) {
+	token, err := d.destructiveTransitionBarrier.LockContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return func() { d.destructiveTransitionBarrier.Unlock(token) }, nil
 }
 
 // Config returns the config object used for the database instance

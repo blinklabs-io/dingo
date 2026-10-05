@@ -25,8 +25,10 @@ import (
 // ErrScriptNotFound signals that no indexed script has the requested hash.
 var ErrScriptNotFound = errors.New("script not found")
 
-// GetScript retrieves an indexed script by its hash.
+// GetScript retrieves an indexed script by its hash, using ctx when it needs
+// to open its own transaction.
 func (d *Database) GetScript(
+	ctx context.Context,
 	hash []byte,
 	txn *Txn,
 ) (*models.Script, error) {
@@ -34,7 +36,7 @@ func (d *Database) GetScript(
 		return nil, ErrScriptNotFound
 	}
 	if txn == nil {
-		txn = d.TransactionContext(context.Background(), false)
+		txn = d.TransactionContext(ctx, false)
 		defer txn.Release()
 	}
 	scriptHash := lcommon.NewBlake2b224(hash)

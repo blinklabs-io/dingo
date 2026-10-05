@@ -637,6 +637,7 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	gapBlocksIdle := false
 	_, err = Sync(ctx, SyncConfig{
 		Network:     "preprod",
 		DataDir:     dataDir,
@@ -655,7 +656,14 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 		Logger:                  discard,
 		RepairLegacyRewardState: true,
 		OnProgress: func(progress SyncProgress) {
-			if progress.Phase == PhaseGapBlocks && progress.Active {
+			if progress.Phase != PhaseGapBlocks {
+				return
+			}
+			if !progress.Active {
+				gapBlocksIdle = true
+				return
+			}
+			if gapBlocksIdle {
 				cancel()
 			}
 		},
@@ -669,7 +677,7 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defer dbtest.CloseDatabase(db)
-	exists, err := db.UtxoExists(txID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"post-import cleanup must preserve UTxOs carried by the signed state")
@@ -755,7 +763,7 @@ func testSyncRewardRepairBelowCertifiedTip(t *testing.T, withLocalTail bool) {
 	}
 	utxoTxn := db.Transaction(t.Context(), true)
 	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
 		TxId: txID, AddedSlot: 900, Amount: 42,
 	}))
 	require.NoError(t, db.Metadata().MarkUtxosDeletedAtSlot(
@@ -890,7 +898,7 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	}
 	utxoTxn := db.Transaction(t.Context(), true)
 	t.Cleanup(utxoTxn.Release)
-	require.NoError(t, db.CreateUtxo(utxoTxn, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), utxoTxn, &models.Utxo{
 		TxId:      txID,
 		AddedSlot: 1100,
 	}))
@@ -949,7 +957,7 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 	require.NotNil(t, utxo)
 	require.Zero(t, utxo.DeletedSlot,
 		"Sync must restore snapshot-live outputs spent after its ledger state")
-	exists, err := db.UtxoExists(txID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), txID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists,
 		"ordinary replay must see the snapshot output as live")

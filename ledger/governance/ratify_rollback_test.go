@@ -63,7 +63,7 @@ func rollbackTestRunEpoch(
 	t.Helper()
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
@@ -154,7 +154,7 @@ func TestProcessEpochRatifyErrorWritesNoVerdicts(t *testing.T) {
 	defer txn.Release()
 	// The child's update passes its enactment precondition and then fails
 	// while RATIFY stages it, after the parent was accepted.
-	_, err := ProcessEpoch(&EpochInput{
+	_, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
@@ -168,7 +168,7 @@ func TestProcessEpochRatifyErrorWritesNoVerdicts(t *testing.T) {
 		name string
 		id   []byte
 	}{{"parent", parent.TxHash}, {"child", child.TxHash}} {
-		inTxn, err := db.GetGovernanceProposal(proposal.id, 0, txn)
+		inTxn, err := db.GetGovernanceProposal(t.Context(), proposal.id, 0, txn)
 		require.NoError(t, err)
 		assert.Nil(t, inTxn.RatifiedEpoch, proposal.name)
 	}

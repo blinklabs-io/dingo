@@ -125,7 +125,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 		func(ImportProgress) {},
 	))
 
-	members, err := db.GetCommitteeMembers(nil)
+	members, err := db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	require.Len(t, members, 2)
 	imported := map[string]uint64{}
@@ -151,7 +151,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	defer txn.Release()
 	pp := &conway.ConwayProtocolParameters{}
 	pp.ProtocolVersion.Major = 10
-	out, err := governance.ProcessEpoch(&governance.EpochInput{
+	out, err := governance.ProcessEpoch(t.Context(), &governance.EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    500,
@@ -168,7 +168,7 @@ func TestImportedRatifiedUpdateCommitteeEnactsAtNextBoundary(t *testing.T) {
 	require.Equal(t, 1, out.EnactedCount)
 	require.NoError(t, txn.Commit())
 
-	members, err = db.GetCommitteeMembers(nil)
+	members, err = db.GetCommitteeMembers(context.Background(), nil)
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, m := range members {

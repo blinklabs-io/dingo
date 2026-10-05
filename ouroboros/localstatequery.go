@@ -279,12 +279,20 @@ func (o *Ouroboros) releaseLocalStateQueryAcquiredPointOwner(
 	o.localstatequeryAcquireMutex.Lock()
 	defer o.localstatequeryAcquireMutex.Unlock()
 	requests := o.localstatequeryRequests[connId]
-	for i := len(requests) - 1; i >= 0; i-- {
-		if requests[i].owner == owner {
-			requests[i].cancel()
-			requests = append(requests[:i], requests[i+1:]...)
+	remaining := make([]*localstatequeryRequest, 0, len(requests))
+	for _, request := range requests {
+		if request == nil {
+			continue
 		}
+		if request.owner == owner {
+			if request.cancel != nil {
+				request.cancel()
+			}
+			continue
+		}
+		remaining = append(remaining, request)
 	}
+	requests = remaining
 	if len(requests) == 0 {
 		delete(o.localstatequeryRequests, connId)
 	} else {

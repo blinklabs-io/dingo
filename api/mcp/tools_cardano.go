@@ -1179,7 +1179,7 @@ func RegisterCardanoTools(
 			evalCtx,
 			evaluationGate,
 			func() (evaluationResult, error) {
-				fee, total, redeemers, err := ls.EvaluateTx(tx)
+				fee, total, redeemers, err := ls.EvaluateTxContext(evalCtx, tx)
 				return evaluationResult{fee, total, redeemers}, err
 			},
 		)

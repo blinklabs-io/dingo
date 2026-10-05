@@ -1491,7 +1491,7 @@ func TestVerifyDeferredBlockHeaderStateRunsFullCryptoAtApply(t *testing.T) {
 				ls.markDeferredHeaderValidation(point)
 			}
 
-			err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+			err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 			require.Error(t, err)
 			var hve *headerValidationError
 			assert.ErrorAs(t, err, &hve)
@@ -1541,7 +1541,7 @@ func TestVerifyDeferredBlockHeaderStateAttributesSourcePeer(t *testing.T) {
 			)
 			tc.mark(ls, point)
 
-			err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+			err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 			var hve *headerValidationError
 			require.ErrorAs(t, err, &hve)
 			assert.Equal(t, tc.want, hve.Source)
@@ -1566,7 +1566,7 @@ func TestVerifyDeferredBlockHeaderStateFailsClosedWithoutEpoch(t *testing.T) {
 	ls.epochCache = nil
 	ls.publishSnapshotsLocked()
 
-	err := ls.verifyDeferredBlockHeaderState(nil, point, tb.block)
+	err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block)
 	require.Error(t, err)
 	var hve *headerValidationError
 	assert.ErrorAs(t, err, &hve)
@@ -2245,7 +2245,8 @@ func TestMalformedVrfKeyMetadataDoesNotBlamePeer(t *testing.T) {
 				},
 			}
 
-			_, _, err = ls.electingVrfKeyHashFromSnapshot(
+			_, _, err = ls.electingVrfKeyHashFromSnapshotWithContext(
+				context.Background(),
 				poolKeyHash,
 				epochCache,
 				snapshot,
@@ -2298,8 +2299,8 @@ func TestMalformedCurrentPoolVrfKeyDoesNotBlamePeer(t *testing.T) {
 				ls.mithrilLedgerSlot = 1_500
 			}
 
-			_, _, err = ls.electingVrfKeyHashFromSnapshot(
-				poolKeyHash, epochCache, snap,
+			_, _, err = ls.electingVrfKeyHashFromSnapshotWithContext(
+				context.Background(), poolKeyHash, epochCache, snap,
 			)
 			require.ErrorIs(t, err, errHeaderStateLookupFailed)
 			assert.False(t, headerFailureBlamesPeer(err))
@@ -5018,7 +5019,7 @@ func TestBoundDeferredHeaderValidationWhileAppliedTipStalls(t *testing.T) {
 			ls.deferredHeaderValidationMu.Unlock()
 			require.NoError(t, ls.repopulateDeferredHeaderValidation())
 		}
-		err := ls.verifyDeferredBlockHeaderState(nil, blockPoint, tb.block)
+		err := ls.verifyDeferredBlockHeaderState(context.Background(), nil, blockPoint, tb.block)
 		require.Error(t, err, "restart=%v", restart)
 		var hve *headerValidationError
 		assert.ErrorAs(t, err, &hve)
@@ -5188,7 +5189,7 @@ func TestDeferredHeaderFloorSkipsMithrilCoveredSlots(t *testing.T) {
 	ls.deferredHeaderValidationFloor = tb.block.SlotNumber() + 100
 	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
 
-	require.NoError(t, ls.verifyDeferredBlockHeaderState(nil, point, tb.block))
+	require.NoError(t, ls.verifyDeferredBlockHeaderState(context.Background(), nil, point, tb.block))
 }
 
 // TestRepopulateDeferredHeaderValidation is the restart-durability regression

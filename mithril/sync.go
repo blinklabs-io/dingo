@@ -1391,6 +1391,7 @@ func Sync(
 			}
 		}
 		if err := db.RollbackMetadataAfterSlot(
+			ctx,
 			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
 			0,
 			nil,

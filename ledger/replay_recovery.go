@@ -346,7 +346,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		return ls.withDestructiveDatabaseTransition(func() error {
+		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if rewindPrimaryChain && !primaryChainAlreadyHeld {
 				if err := ls.rewindPrimaryChainForRecovery(
 					rewindPoint,
@@ -830,7 +830,7 @@ func (ls *LedgerState) recoverFromDeterministicTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		return ls.withDestructiveDatabaseTransition(func() error {
+		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if err := ls.rewindPrimaryChainForRecovery(rewindPoint); err != nil {
 				if errors.Is(err, chain.ErrRollbackPointNotOnChain) {
 					yielded = true
@@ -1697,7 +1697,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		if err := ls.checkReplayRecoveryRollbackFloor(rewindPoint); err != nil {
 			return err
 		}
-		return ls.withDestructiveDatabaseTransition(func() error {
+		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if err := ls.rewindPrimaryChainForRecovery(
 				rewindPoint,
 			); err != nil {

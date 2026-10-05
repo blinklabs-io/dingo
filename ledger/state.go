@@ -3783,12 +3783,16 @@ func (ls *LedgerState) cleanupConsumedUtxos(ctx context.Context) {
 // Ordinary writes keep using the commit barrier independently; this scope is
 // only for the cross-transaction destructive boundary.
 func (ls *LedgerState) withDestructiveDatabaseTransition(
+	ctx context.Context,
 	op func() error,
 ) error {
 	if ls.db == nil {
 		return op()
 	}
-	finish := ls.db.BeginDestructiveTransition()
+	finish, err := ls.db.BeginDestructiveTransitionContext(ctx)
+	if err != nil {
+		return fmt.Errorf("begin destructive database transition: %w", err)
+	}
 	defer finish()
 	return op()
 }
@@ -4763,7 +4767,11 @@ func (ls *LedgerState) rollbackChainAndStateDeferred(ctx context.Context,
 	// destructive boundary opens, so a refused rollback never blocks a
 	// coordinated snapshot.
 	if ls.db != nil {
-		defer ls.db.BeginDestructiveTransition()()
+		finishTransition, err := ls.db.BeginDestructiveTransitionContext(ctx)
+		if err != nil {
+			return fmt.Errorf("begin destructive database transition: %w", err)
+		}
+		defer finishTransition()
 	}
 	// Exclude ledgerReadChainIterator's gather-then-submit cycle for the
 	// entire remainder of this function -- see blockPipelineGatherMutex's
@@ -6737,7 +6745,11 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			if errors.Is(valErr, errBlockPipelineAdmissionVerified) {
 				// The slot's admission record was for a different hash, so
 				// the validate stage did not check this block.
-				_, valErr = ls.verifyBlockHeaderStatelessCrypto(block, false)
+				_, _, valErr = ls.verifyBlockHeaderStatelessCryptoWithCache(
+					ctx,
+					block,
+					false,
+				)
 				if valErr == nil {
 					decoded = append(decoded, block)
 					continue
@@ -10584,7 +10596,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip(
 	ctx context.Context,
 ) error {
 	return ls.withConsumedUtxoPruneBoundary(func() error {
-		return ls.withDestructiveDatabaseTransition(func() error {
+		return ls.withDestructiveDatabaseTransition(ctx, func() error {
 			return ls.reconcilePrimaryChainTipWithLedgerTipLocked(ctx)
 		})
 	})
@@ -13470,10 +13482,24 @@ func (ls *LedgerState) ValidateTxWithOverlay(
 }
 
 // EvaluateTx evaluates the scripts in the provided transaction and returns the calculated
-// fee, per-redeemer ExUnits, and total ExUnits
+// fee, per-redeemer ExUnits, and total ExUnits.
+//
+//nolint:contextcheck // Preserve the public context-free compatibility method.
 func (ls *LedgerState) EvaluateTx(
 	tx lcommon.Transaction,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	return ls.EvaluateTxContext(context.Background(), tx)
+}
+
+// EvaluateTxContext evaluates the scripts in tx and cancels storage work with
+// ctx.
+func (ls *LedgerState) EvaluateTxContext(
+	ctx context.Context,
+	tx lcommon.Transaction,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, lcommon.ExUnits{}, nil, err
+	}
 	// Snapshot mutable state from the lock-free consensus snapshot
 	consensusState := ls.loadConsensusSnapshot()
 	snapshotEra := consensusState.currentEra
@@ -13506,9 +13532,12 @@ func (ls *LedgerState) EvaluateTx(
 			isCurrentEraPParams,
 			consensusState.syntheticV2CostModelInEffect,
 		)
-		txn := ls.db.Transaction(context.Background(), false)
+		txn := ls.db.Transaction(ctx, false)
 		var lv *LedgerView
 		err := txn.Do(func(txn *database.Txn) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			lv = (&LedgerView{
 				txn:            txn,
 				ls:             ls,
@@ -13526,6 +13555,13 @@ func (ls *LedgerState) EvaluateTx(
 			return err
 		})
 		err = storageFaultOrErr(lv, err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
+				"TX %s evaluation canceled: %w",
+				tx.Hash(),
+				ctxErr,
+			)
+		}
 		if err != nil {
 			return 0, lcommon.ExUnits{}, nil, fmt.Errorf(
 				"TX %s failed evaluation: %w",

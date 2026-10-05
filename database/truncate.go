@@ -121,22 +121,24 @@ func (d *Database) TruncateAfterSlot(
 	mithrilFloor uint64,
 	txn *Txn,
 ) (retTip ochainsync.Tip, retNonce []byte, retErr error) {
-	return d.rollbackAfterSlot(point, mithrilFloor, txn, true)
+	return d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, true)
 }
 
 // RollbackMetadataAfterSlot reverts slot-scoped metadata after point while
 // leaving the stored blocks and database tip intact. mithrilFloor preserves
 // UTxO and transaction rows needed to replay the gap after a Mithril snapshot.
 func (d *Database) RollbackMetadataAfterSlot(
+	ctx context.Context,
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,
 ) error {
-	_, _, err := d.rollbackAfterSlot(point, mithrilFloor, txn, false)
+	_, _, err := d.rollbackAfterSlot(ctx, point, mithrilFloor, txn, false)
 	return err
 }
 
 func (d *Database) rollbackAfterSlot(
+	ctx context.Context,
 	point ocommon.Point,
 	mithrilFloor uint64,
 	txn *Txn,

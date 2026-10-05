@@ -867,7 +867,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 				blocks = append(blocks, block)
 				require.NoError(t, db.BlockCreate(block, nil))
 			}
-			cm, err := chain.NewManager(db, nil)
+			cm, err := chain.NewManager(context.Background(), db, nil)
 			require.NoError(t, err)
 			require.NoError(
 				t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
@@ -894,7 +894,7 @@ func TestHeaderValidationRecoveryPenalizesOnlyTheResponsiblePeer(t *testing.T) {
 			}
 			ls.currentTip = ledgerTip
 			ls.metrics.init(prometheus.NewRegistry())
-			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip())
+			require.NoError(t, ls.reconcilePrimaryChainTipWithLedgerTip(context.Background()))
 
 			recovered, recoverErr := ls.tryRecoverFromHeaderValidationError(
 				&headerValidationError{

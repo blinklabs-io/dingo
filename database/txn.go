@@ -198,6 +198,8 @@ func NewTxn(ctx context.Context, db *Database, readWrite bool) *Txn {
 // NewTxnContext creates a coordinated transaction whose metadata operations
 // are canceled with ctx. Blob operations do not accept contexts, so callers
 // doing long mixed-store scans must also check ctx between blob reads.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
 	if ctx == nil {
 		ctx = context.Background()
@@ -245,6 +247,8 @@ func NewTxnContext(ctx context.Context, db *Database, readWrite bool) *Txn {
 // transaction is still BEGUN inside the barrier, so the commit boundary the
 // two views share is unchanged; a store that does not implement ReadReserver
 // keeps the previous behavior exactly.
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
 func NewReadSnapshotContext(
 	ctx context.Context,
 	db *Database,
@@ -327,7 +331,6 @@ func NewReadSnapshotContext(
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
-	acquireCommitBarrier(t, false)
 	pinBlobStoreForTxn(t, db)
 	if bs := t.blobStore; bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
@@ -404,7 +407,14 @@ func (t *Txn) DB() *Database {
 // opened here, not the borrowed blob handle -- t (or whatever constructed
 // it) still owns that and keeps using it afterward. Only valid for a
 // read-only t; the only current caller's t is always BlobTxn(false).
-func (t *Txn) withMetadataForRecovery(ctx context.Context) (*Txn, func()) {
+//
+//nolint:contextcheck // Preserve the existing nil-context compatibility behavior.
+func (t *Txn) withMetadataForRecovery(
+	ctx context.Context,
+) (*Txn, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	aug := &Txn{
 		db: t.db,
 		// readWrite carried over from t, not defaulted to false: it is
@@ -422,20 +432,30 @@ func (t *Txn) withMetadataForRecovery(ctx context.Context) (*Txn, func()) {
 	}
 	if t.db != nil {
 		if ms := t.db.Metadata(); ms != nil {
-			// Must be acquired before opening the metadata transaction
-			// below, not just around its eventual Commit -- see
-			// acquireCommitBarrier's own doc comment. Only actually
-			// takes the lock when aug.readWrite is true (checked
-			// internally), matching NewMetadataOnlyTxn's identical call.
-			acquireCommitBarrier(aug, true)
+			if aug.readWrite {
+				if err := t.db.commitBarrier.RLockContext(ctx); err != nil {
+					return nil, nil, fmt.Errorf(
+						"acquire metadata recovery barrier: %w",
+						err,
+					)
+				}
+				aug.barrierHeld = true
+			}
 			if aug.readWrite {
 				aug.metadataTxn = ms.Transaction(ctx)
 			} else {
 				aug.metadataTxn = ms.ReadTransaction(ctx)
 			}
+			if aug.metadataTxn == nil {
+				cleanupErr := aug.Rollback()
+				if err := ctx.Err(); err != nil {
+					return nil, nil, errors.Join(err, cleanupErr)
+				}
+				return nil, nil, errors.Join(types.ErrNilTxn, cleanupErr)
+			}
 		}
 	}
-	return aug, aug.Release
+	return aug, aug.Release, nil
 }
 
 // withBlobForRecovery returns a Txn that adds a fresh blob transaction to

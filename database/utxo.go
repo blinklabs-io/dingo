@@ -350,7 +350,13 @@ func (d *Database) ResolveUtxoCborWithRecovery(
 			var cleanup func()
 			switch {
 			case txn.Metadata() == nil:
-				recoveryTxn, cleanup = txn.withMetadataForRecovery(ctx)
+				recoveryTxn, cleanup, err = txn.withMetadataForRecovery(ctx)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"open metadata recovery transaction: %w",
+						err,
+					)
+				}
 			case txn.Blob() == nil:
 				// A metadata-only caller: recoverUtxoCbor's block lookup
 				// (utxoRecoveryBlockForTx -> BlockByPointTxn) needs a blob

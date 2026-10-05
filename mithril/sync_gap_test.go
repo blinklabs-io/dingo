@@ -930,11 +930,12 @@ func TestCleanupInvalidRepairGapBeforeImport(t *testing.T) {
 		Type:     1,
 	}, nil))
 	staleTxID := testGapHash32("stale-gap-output")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId: staleTxID, AddedSlot: 150,
 	}))
 
 	cleaned, err := cleanupInvalidRepairStoredGapBeforeImport(
+		context.Background(),
 		db,
 		ocommon.NewPoint(100, immutableHash),
 		&preparedLedgerStateImport{state: &ledgerstate.RawLedgerState{
@@ -950,17 +951,17 @@ func TestCleanupInvalidRepairGapBeforeImport(t *testing.T) {
 	require.True(t, cleaned)
 	_, err = database.BlockByHash(context.Background(), db, staleGapHash)
 	require.ErrorIs(t, err, models.ErrBlockNotFound)
-	exists, err := db.UtxoExists(staleTxID, 0, nil)
+	exists, err := db.UtxoExists(context.Background(), staleTxID, 0, nil)
 	require.NoError(t, err)
 	require.False(t, exists)
 
 	// Even a linked partial prefix cannot be tied to a signed state it does
 	// not reach. Importing that state after cleanup leaves its UTxOs intact.
 	snapshotTxID := testGapHash32("signed-snapshot-output")
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+	require.NoError(t, db.CreateUtxo(context.Background(), nil, &models.Utxo{
 		TxId: snapshotTxID, AddedSlot: 200,
 	}))
-	exists, err = db.UtxoExists(snapshotTxID, 0, nil)
+	exists, err = db.UtxoExists(context.Background(), snapshotTxID, 0, nil)
 	require.NoError(t, err)
 	require.True(t, exists)
 }

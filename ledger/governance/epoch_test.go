@@ -901,14 +901,14 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	}
 	// Persist the child first to make row-ID order disagree with the
 	// governance ancestry order when both actions enact at the same boundary.
-	require.NoError(t, db.SetGovernanceProposal(child, nil))
-	require.NoError(t, db.SetGovernanceProposal(parent, nil))
-	require.NoError(t, db.SetGovernanceProposal(treasury, nil))
-	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), child, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), parent, nil))
+	require.NoError(t, db.SetGovernanceProposal(t.Context(), treasury, nil))
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
 	require.NoError(t, err)
-	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
 	require.NoError(t, err)
-	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
 	require.NoError(t, err)
 	drepCred := seedDRepWithStake(t, db, 100)
 	seedDRepYesVote(t, db, parent.ID, drepCred)
@@ -917,7 +917,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    stabilityTestEpoch - 1,
@@ -930,13 +930,13 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	require.NoError(t, txn.Commit())
 	assert.Equal(t, 3, out.RatifiedCount)
 
-	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
 	require.NoError(t, err)
-	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, parent.RatifiedEpoch)
 	require.NotNil(t, child.RatifiedEpoch)
-	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, treasury.RatifiedEpoch)
 	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
@@ -945,7 +945,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 
 	enactTxn := db.MetadataTxn(t.Context(), true)
 	defer enactTxn.Release()
-	enactOut, err := ProcessEpoch(&EpochInput{
+	enactOut, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          enactTxn,
 		PrevEpoch:    stabilityTestEpoch,
@@ -972,15 +972,16 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	)
 	assert.Equal(t, poolDeposit, updatedPParams.PoolDeposit)
 
-	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	parent, err = db.GetGovernanceProposal(t.Context(), parentHash, 0, nil)
 	require.NoError(t, err)
-	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	child, err = db.GetGovernanceProposal(t.Context(), childHash, 0, nil)
 	require.NoError(t, err)
 	require.NotNil(t, parent.EnactedEpoch)
 	require.NotNil(t, child.EnactedEpoch)
 	assert.Equal(t, stabilityTestEpoch+1, *parent.EnactedEpoch)
 	assert.Equal(t, stabilityTestEpoch+1, *child.EnactedEpoch)
 	root, err := db.GetLastEnactedGovernanceProposal(
+		t.Context(),
 		[]uint8{uint8(lcommon.GovActionTypeParameterChange)}, nil,
 	)
 	require.NoError(t, err)
@@ -991,7 +992,7 @@ func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
 	// parameter result from the persisted enacted proposals.
 	replayTxn := db.MetadataTxn(t.Context(), true)
 	defer replayTxn.Release()
-	replayOut, err := ProcessEpoch(&EpochInput{
+	replayOut, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          replayTxn,
 		PrevEpoch:    stabilityTestEpoch,
@@ -1101,17 +1102,17 @@ func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
 				ordered[0], ordered[1] = treasury, parent
 			}
 			for _, proposal := range ordered {
-				require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+				require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
 			}
-			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			parent, err = db.GetGovernanceProposal(t.Context(), parent.TxHash, 0, nil)
 			require.NoError(t, err)
-			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
 			require.NoError(t, err)
 			seedHardForkCommitteeAndSPOVotes(t, db, store, parent, treasury)
 
 			txn := db.MetadataTxn(t.Context(), true)
 			defer txn.Release()
-			out, err := ProcessEpoch(&EpochInput{
+			out, err := ProcessEpoch(t.Context(), &EpochInput{
 				DB:           db,
 				Txn:          txn,
 				PrevEpoch:    stabilityTestEpoch - 1,
@@ -1123,9 +1124,9 @@ func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
 			require.NoError(t, err)
 			require.NoError(t, txn.Commit())
 			assert.Equal(t, 2, out.RatifiedCount)
-			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			parent, err = db.GetGovernanceProposal(t.Context(), parent.TxHash, 0, nil)
 			require.NoError(t, err)
-			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			treasury, err = db.GetGovernanceProposal(t.Context(), treasury.TxHash, 0, nil)
 			require.NoError(t, err)
 			require.NotNil(t, parent.RatifiedEpoch)
 			require.NotNil(t, treasury.RatifiedEpoch)

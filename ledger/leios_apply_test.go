@@ -867,6 +867,7 @@ func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
 	txn := db.Transaction(t.Context(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		_, _, err := ls.applyEndorserBlock(
+			t.Context(),
 			txn,
 			leiosApplyTestRankingPoint(0x7a),
 			1,

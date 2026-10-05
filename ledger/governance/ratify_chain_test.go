@@ -147,11 +147,11 @@ func chainTestStore(
 	t.Helper()
 	loaded := make([]*models.GovernanceProposal, 0, len(proposals))
 	for _, proposal := range proposals {
-		require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+		require.NoError(t, db.SetGovernanceProposal(t.Context(), proposal, nil))
 	}
 	for _, proposal := range proposals {
 		stored, err := db.GetGovernanceProposal(
-			proposal.TxHash, proposal.ActionIndex, nil,
+			t.Context(), proposal.TxHash, proposal.ActionIndex, nil,
 		)
 		require.NoError(t, err)
 		loaded = append(loaded, stored)
@@ -168,7 +168,7 @@ func chainTestRunEpoch(
 	t.Helper()
 	txn := db.MetadataTxn(t.Context(), true)
 	defer txn.Release()
-	out, err := ProcessEpoch(&EpochInput{
+	out, err := ProcessEpoch(t.Context(), &EpochInput{
 		DB:           db,
 		Txn:          txn,
 		PrevEpoch:    newEpoch - 1,
@@ -189,7 +189,7 @@ func chainTestReload(
 ) *models.GovernanceProposal {
 	t.Helper()
 	stored, err := db.GetGovernanceProposal(
-		proposal.TxHash, proposal.ActionIndex, nil,
+		t.Context(), proposal.TxHash, proposal.ActionIndex, nil,
 	)
 	require.NoError(t, err)
 	return stored
@@ -201,6 +201,7 @@ func chainTestParameterRoot(
 ) *models.GovernanceProposal {
 	t.Helper()
 	root, err := db.GetLastEnactedGovernanceProposal(
+		t.Context(),
 		[]uint8{uint8(lcommon.GovActionTypeParameterChange)}, nil,
 	)
 	require.NoError(t, err)

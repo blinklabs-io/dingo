@@ -94,11 +94,11 @@ func TestLedgerDeltaRecordsProposalBlockPosition(t *testing.T) {
 	}
 	txn := db.Transaction(t.Context(), true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.apply(ls, txn)
+		return delta.apply(t.Context(), ls, txn)
 	}))
 
 	for position, tx := range []lcommon.Transaction{first, second} {
-		stored, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
+		stored, err := db.GetGovernanceProposal(t.Context(), tx.Hash().Bytes(), 0, nil)
 		require.NoError(t, err)
 		require.NotNil(t, stored.TxIndex)
 		require.Equal(t, uint32(position), *stored.TxIndex) //nolint:gosec

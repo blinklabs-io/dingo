@@ -269,7 +269,7 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 				for _, utxo := range fx.inputs {
 					id := utxo.Id.Id().Bytes()
 					idx := utxo.Id.Index()
-					if err := db.CreateUtxo(txn, &models.Utxo{
+					if err := db.CreateUtxo(t.Context(), txn, &models.Utxo{
 						TxId: id, OutputIdx: idx, AddedSlot: 1,
 					}); err != nil {
 						return err
@@ -315,6 +315,7 @@ func TestLedgerProcessBlockDijkstraTieredRefScriptFee(t *testing.T) {
 			}
 			processErr := db.Transaction(t.Context(), true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
+					t.Context(),
 					txn,
 					ocommon.NewPoint(10, block.Hash().Bytes()),
 					block,

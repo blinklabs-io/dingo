@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"testing"
+	"time"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -86,4 +87,50 @@ func TestDatabaseStartupSettingsHonorCancelledContext(t *testing.T) {
 	require.NoError(t, db.checkCommitTimestamp(t.Context()))
 	require.NoError(t, db.CheckNodeSettings(t.Context()))
 	require.NoError(t, db.ReconcileAlonzoPParamsUnitAfterRecovery(t.Context()))
+}
+
+func TestMetadataRecoveryHonorsCancelledContextAtCommitBarrier(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	txn := db.BlobTxn(true)
+	t.Cleanup(txn.Release)
+
+	token := db.commitBarrier.Lock()
+	barrierHeld := true
+	t.Cleanup(func() {
+		if barrierHeld {
+			db.commitBarrier.Unlock(token)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, cleanup, err := txn.withMetadataForRecovery(ctx)
+		if cleanup != nil {
+			cleanup()
+		}
+		result <- err
+	}()
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		db.commitBarrier.Unlock(token)
+		barrierHeld = false
+		require.ErrorIs(t, err, context.Canceled)
+	case <-timer.C:
+		db.commitBarrier.Unlock(token)
+		barrierHeld = false
+		err := <-result
+		require.Failf(
+			t,
+			"recovery ignored canceled context while waiting for commit barrier",
+			"recovery returned only after barrier release with error %v",
+			err,
+		)
+	}
 }

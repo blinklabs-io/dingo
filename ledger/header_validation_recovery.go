@@ -194,7 +194,7 @@ func (ls *LedgerState) tryRecoverFromHeaderValidationError(
 		// taken in the same order. The floor check above stays outside it:
 		// it is a read, and a refused recovery must not hold coordinated
 		// snapshots off.
-		return ls.withDestructiveDatabaseTransition(func() error {
+		return ls.withDestructiveDatabaseTransition(ls.closeCtx(), func() error {
 			if err := ls.rewindPrimaryChainForRecovery(
 				rewindPoint,
 			); err != nil {

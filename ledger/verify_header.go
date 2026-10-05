@@ -2169,34 +2169,12 @@ func (ls *LedgerState) electingVrfKeyHash(
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
 ) (lcommon.Blake2b256, bool, error) {
-	return ls.electingVrfKeyHashWithCache(
-		context.Background(),
-		block, epochId, poolKeyHash, ls.epochCacheSnapshot(),
-	)
-}
-
-func (ls *LedgerState) electingVrfKeyHashWithCache(
-	ctx context.Context,
-	block ledger.Block,
-	epochId uint64,
-	poolKeyHash lcommon.PoolKeyHash,
-	epochCache []models.Epoch,
-) (lcommon.Blake2b256, bool, error) {
+	epochCache := ls.epochCacheSnapshot()
 	return ls.electingVrfKeyHashFromSnapshotWithContext(
-		ctx,
+		context.Background(),
 		poolKeyHash,
 		epochCache,
 		ls.resolveElectingSnapshot(block, epochId, poolKeyHash, epochCache),
-	)
-}
-
-func (ls *LedgerState) electingVrfKeyHashFromSnapshot(
-	poolKeyHash lcommon.PoolKeyHash,
-	epochCache []models.Epoch,
-	snap electingSnapshot,
-) (lcommon.Blake2b256, bool, error) {
-	return ls.electingVrfKeyHashFromSnapshotWithContext(
-		context.Background(), poolKeyHash, epochCache, snap,
 	)
 }
 
@@ -2453,20 +2431,9 @@ func (ls *LedgerState) verifyRegisteredVrfKey(
 	block ledger.Block,
 	epochId uint64,
 ) error {
-	return ls.verifyRegisteredVrfKeyWithCache(
-		context.Background(),
-		block, epochId, ls.epochCacheSnapshot(),
-	)
-}
-
-func (ls *LedgerState) verifyRegisteredVrfKeyWithCache(
-	ctx context.Context,
-	block ledger.Block,
-	epochId uint64,
-	epochCache []models.Epoch,
-) error {
+	epochCache := ls.epochCacheSnapshot()
 	return ls.verifyRegisteredVrfKeyFromSnapshot(
-		ctx,
+		context.Background(),
 		block,
 		epochCache,
 		ls.resolveElectingSnapshotForBlock(block, epochId, epochCache),
