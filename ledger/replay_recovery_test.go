@@ -2553,9 +2553,9 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
-	// The error is produced by the real apply path: a withdrawal one lovelace
-	// above the persisted balance, which validation would already have
-	// accepted against that same row.
+	// The error comes from the real apply path, driven with validation
+	// bypassed: a withdrawal one lovelace above the persisted balance stands
+	// in for a balance that changed between validation and apply.
 	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
 	require.NoError(t, ls.db.CreateAccount(nil, &models.Account{
 		StakingKey:    credential,
@@ -2613,7 +2613,9 @@ func applyOverBalanceWithdrawal(
 	builder.WithId(testHashBytes("over-balance-withdrawal-tx"))
 	builder.WithValid(true)
 	builder.WithWithdrawals(
-		map[*lcommon.Address]uint64{&rewardAddr: rewardWithdrawalTestBalance + 1},
+		map[*lcommon.Address]uint64{
+			&rewardAddr: rewardWithdrawalTestBalance + 1,
+		},
 	)
 	var tx lcommon.Transaction = builder
 	var txHash [32]byte
