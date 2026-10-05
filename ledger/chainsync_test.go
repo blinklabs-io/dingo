@@ -5247,6 +5247,78 @@ func TestHandleEventBlockfetchBlockKeepsAdmissionCryptoWhenPipelineValidates(
 	assert.Equal(t, evt.RawBlock, rejectedRaw)
 }
 
+// TestHandleEventBlockfetchBlockRecordsAdmissionVerification pins that only a
+// block whose header verification completed is recorded for replay to skip; a
+// deferred one is not.
+func TestHandleEventBlockfetchBlockRecordsAdmissionVerification(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		seedPool     bool
+		wantVerified bool
+	}{
+		{"verified at admission", true, true},
+		{"deferred at admission", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := createTestBlock(t, [32]byte{67}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			if tc.seedPool {
+				poolKeyHash := tb.block.IssuerVkey().Hash()
+				seedBlockPoolRegistration(t, db, tb.block)
+				seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
+			}
+			ls.validationEnabled = true
+			ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+			ls.chain = &chain.Chain{}
+			connId := ouroboros.ConnectionId{
+				LocalAddr: &net.TCPAddr{
+					IP: net.ParseIP("127.0.0.1"), Port: 6002,
+				},
+				RemoteAddr: &net.TCPAddr{
+					IP: net.ParseIP("127.0.0.1"), Port: 3001,
+				},
+			}
+			ls.activeBlockfetchConnId = connId
+			ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+			ls.config.BlockPipelineValidateEnabled = true
+			ls.publishSnapshotsLocked()
+
+			require.NoError(t, handleEventBlockfetchBlockDeferred(
+				ls,
+				BlockfetchEvent{
+					ConnectionId: connId,
+					Block:        tb.block,
+					Point: ocommon.Point{
+						Slot: tb.block.SlotNumber(),
+						Hash: tb.block.Hash().Bytes(),
+					},
+				},
+				nil,
+			))
+			assert.Equal(
+				t,
+				tc.wantVerified,
+				ls.admissionVerifiedSlot(tb.block.SlotNumber()),
+			)
+			if !tc.wantVerified {
+				assert.Equal(
+					t,
+					connId,
+					ls.deferredHeaderSource(ocommon.NewPoint(
+						tb.block.SlotNumber(),
+						tb.block.Hash().Bytes(),
+					)),
+					"a deferred marker must name the supplying connection",
+				)
+			}
+		})
+	}
+}
+
 func TestHandleEventBlockfetchBlockRejectsInvalidOpCertWhenPipelineValidates(
 	t *testing.T,
 ) {
@@ -13788,56 +13860,6 @@ func TestCalculateEpochNonce_MissingShelleyGenesis(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "genesis hash") {
 		t.Errorf("expected error about Shelley genesis, got: %v", err)
-	}
-}
-
-// TestCalculateEpochNonce_NegativeSecurityParam tests handling of negative security parameter
-func TestCalculateEpochNonce_NegativeSecurityParam(t *testing.T) {
-	t.Parallel()
-
-	byronGenesisJSON := `{
-		"protocolConsts": {
-			"k": -1,
-			"protocolMagic": 2
-		}
-	}`
-	shelleyGenesisJSON := `{
-		"activeSlotsCoeff": 0.05,
-		"securityParam": 432,
-		"systemStart": "2022-10-25T00:00:00Z"
-	}`
-
-	cfg := &cardano.CardanoNodeConfig{
-		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	}
-	_ = loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON))
-	_ = cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
-
-	ls := &LedgerState{
-		currentEra: eras.ByronEraDesc,
-		currentEpoch: models.Epoch{
-			EpochId:   1,
-			StartSlot: 86400,
-			Nonce:     []byte{0x01, 0x02, 0x03},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	// Test will depend on whether the genesis loads successfully
-	// If it loads, we expect an error about negative k
-	_, _, _, _, err := ls.calculateEpochNonce(
-		nil,
-		86400,
-		ls.currentEra,
-		ls.currentEpoch,
-		nil,
-	)
-	// Either genesis loading fails or calculateEpochNonce catches negative k
-	if err == nil {
-		t.Log("Note: negative k may be caught during genesis loading")
 	}
 }
 

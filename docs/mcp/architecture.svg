@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1880" height="880" viewBox="0 0 1880 880" role="img" aria-labelledby="title desc">
+<title id="title">Dingo MCP architecture</title>
+<desc id="desc">MCP clients pass through origin, authentication, and rate-limit middleware, then HTTP transports and MCP tools. Data source cards name which tools read live node services, the active SQLite pool, and the context-aware database API.</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#51627a"/></marker></defs>
+<rect x="0" y="0" width="1880" height="880" fill="#ffffff"/>
+<rect x="40" y="150" width="280" height="680" rx="20" fill="#f4f7fb" stroke="#65758b" stroke-width="2"/>
+<rect x="340" y="150" width="400" height="680" rx="20" fill="#fff7e8" stroke="#bb7a16" stroke-width="2"/>
+<rect x="760" y="150" width="670" height="680" rx="20" fill="#eef6ff" stroke="#3173b9" stroke-width="2"/>
+<rect x="1450" y="150" width="400" height="680" rx="20" fill="#f2f8f3" stroke="#3c8460" stroke-width="2"/>
+<text x="58" y="183.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#65758b">CLIENTS</text>
+<text x="358" y="183.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#bb7a16">HTTP INGRESS</text>
+<text x="778" y="183.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#3173b9">DINGO MCP PROCESS</text>
+<text x="1468" y="183.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#3c8460">DATA SOURCES</text>
+<text x="42" y="70.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="36" font-weight="700" fill="#152238">Dingo MCP architecture</text>
+<text x="42" y="108.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="20" font-weight="400" fill="#51627a">Request flow, security checks, tools, and their data sources</text>
+<line x1="280" y1="350" x2="360" y2="350" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="530" y1="410" x2="530" y2="500" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="700" y1="560" x2="840" y2="560" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="930" y1="620" x2="880" y2="700" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="1080" y1="620" x2="1100" y2="700" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<line x1="1260" y1="620" x2="1320" y2="700" stroke="#51627a" stroke-width="2.5" marker-end="url(#arrow)"/>
+<rect x="70" y="290" width="210" height="120" rx="16" fill="#ffffff" stroke="#65758b" stroke-width="2"/>
+<rect x="360" y="290" width="340" height="120" rx="16" fill="#fff0d3" stroke="#bb7a16" stroke-width="2"/>
+<rect x="360" y="500" width="340" height="120" rx="16" fill="#fff0d3" stroke="#bb7a16" stroke-width="2"/>
+<rect x="840" y="500" width="480" height="120" rx="16" fill="#dceaff" stroke="#3173b9" stroke-width="2"/>
+<rect x="780" y="700" width="200" height="120" rx="16" fill="#ffffff" stroke="#3173b9" stroke-width="2"/>
+<rect x="1000" y="700" width="200" height="120" rx="16" fill="#ffffff" stroke="#3173b9" stroke-width="2"/>
+<rect x="1220" y="700" width="200" height="120" rx="16" fill="#ffffff" stroke="#3173b9" stroke-width="2"/>
+<rect x="1480" y="270" width="340" height="140" rx="16" fill="#ffffff" stroke="#3c8460" stroke-width="2"/>
+<rect x="1480" y="450" width="340" height="160" rx="16" fill="#ffffff" stroke="#3c8460" stroke-width="2"/>
+<rect x="1480" y="650" width="340" height="150" rx="16" fill="#ffffff" stroke="#3c8460" stroke-width="2"/>
+<text x="86" y="326.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">MCP clients</text>
+<text x="86" y="360.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Claude Code · Cursor</text>
+<text x="86" y="382.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Codex</text>
+<text x="378" y="326.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Security middleware</text>
+<text x="378" y="358.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Origin · bearer auth</text>
+<text x="378" y="380.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Rate limit</text>
+<text x="378" y="403.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Public bind: TLS + auth</text>
+<text x="378" y="536.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">HTTP transports</text>
+<text x="378" y="568.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Streamable HTTP · SSE</text>
+<text x="378" y="590.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Health endpoints</text>
+<text x="862" y="536.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">MCP server</text>
+<text x="862" y="568.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">JSON-RPC dispatch</text>
+<text x="862" y="590.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Tools · resources · prompts</text>
+<text x="794" y="734.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Cardano tools</text>
+<text x="794" y="768.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Ledger · UTxO</text>
+<text x="794" y="790.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Governance · Plutus</text>
+<text x="1014" y="734.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">SQLite tools</text>
+<text x="1014" y="768.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Read-only SQL</text>
+<text x="1014" y="790.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Explain · schema</text>
+<text x="1234" y="734.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Resources</text>
+<text x="1234" y="768.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Docs · node status</text>
+<text x="1234" y="790.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Live table catalog</text>
+<text x="1498" y="305.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Dingo node services</text>
+<text x="1498" y="339.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Ledger · mempool · evaluation</text>
+<text x="1498" y="361.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Used by Cardano tools + status</text>
+<text x="1498" y="486.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Active metadata SQLite</text>
+<text x="1498" y="520.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Read-only · query_only pool</text>
+<text x="1498" y="542.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Used by Cardano + SQL tools</text>
+<text x="1498" y="565.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">and schema resources</text>
+<text x="1498" y="686.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="19" font-weight="700" fill="#152238">Injected Database API</text>
+<text x="1498" y="720.0" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Exact-address UTxO pages</text>
+<text x="1498" y="742.5" text-anchor="start" font-family="Inter,Arial,sans-serif" font-size="18" font-weight="400" fill="#34445e">Resolves output CBOR for those queries</text>
+</svg>
