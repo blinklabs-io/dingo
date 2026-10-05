@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -526,13 +527,17 @@ func TestReviewGovernanceQueryFailure(t *testing.T) {
 	require.NotContains(t, result, "**Active Registered DReps**: 0")
 }
 
-func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(t *testing.T) {
+func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(
+	t *testing.T,
+) {
 	t.Parallel()
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
-	_, err = db.Exec(`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`)
+	_, err = db.Exec(
+		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
+	)
 	require.NoError(t, err)
 	// Hold the only connection so the construction-time enumeration query
 	// cannot start until after the (tiny) per-request timeout has elapsed.
@@ -547,11 +552,86 @@ func TestTableResourcesRegisteredWhenEnumerationExceedsQueryTimeout(t *testing.T
 	t.Cleanup(func() { <-released })
 	cfg := DefaultProviderConfig()
 	cfg.QueryTimeout = 10 * time.Millisecond
-	server, _, err := NewMCPServer(cfg, ProviderDependencies{SQLDB: db, Network: "preview"})
+	server, _, err := NewMCPServer(
+		cfg,
+		ProviderDependencies{SQLDB: db, Network: "preview"},
+	)
 	require.NoError(t, err)
 	cs := reviewSession(t, server)
-	res, err := cs.ReadResource(t.Context(), &mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"})
-	require.NoError(t, err, "table resource must be registered despite slow startup enumeration")
+	res, err := cs.ReadResource(
+		t.Context(),
+		&mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"},
+	)
+	require.NoError(
+		t,
+		err,
+		"table resource must be registered despite slow startup enumeration",
+	)
 	require.Len(t, res.Contents, 1)
 	require.Contains(t, res.Contents[0].Text, "transaction")
+}
+
+func TestTableEnumerationFailureLoggedToProviderLogger(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	_, _, err = NewMCPServer(
+		DefaultProviderConfig(),
+		ProviderDependencies{SQLDB: db, Network: "preview", Logger: logger},
+	)
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		logs.String(),
+		"MCP table schema resources not registered",
+	)
+}
+
+func TestTableEnumerationKeepsLongerQueryTimeout(t *testing.T) {
+	t.Parallel()
+	db, err := sql.Open("sqlite", ":memory:")
+	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	_, err = db.Exec(
+		`CREATE TABLE "transaction"(slot INTEGER, block_hash BLOB)`,
+	)
+	require.NoError(t, err)
+	// Hold the only connection past the enumeration floor but well inside
+	// the configured query timeout.
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(200 * time.Millisecond)
+		_ = conn.Close()
+	}()
+	t.Cleanup(func() { <-released })
+	server := mcp.NewServer(
+		&mcp.Implementation{Name: "review", Version: "1"},
+		nil,
+	)
+	registerResources(
+		server,
+		db,
+		nil,
+		"preview",
+		5*time.Second,
+		10*time.Millisecond,
+		slog.Default(),
+	)
+	cs := reviewSession(t, server)
+	_, err = cs.ReadResource(
+		t.Context(),
+		&mcp.ReadResourceParams{URI: "dingo://schema/table/transaction"},
+	)
+	require.NoError(
+		t,
+		err,
+		"a configured query timeout above the floor must bound enumeration",
+	)
 }

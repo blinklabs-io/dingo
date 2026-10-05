@@ -8593,6 +8593,10 @@ new starts and closes its owned pool after listener shutdown; a timed-out start
 is awaited by deferred cleanup before closing that pool.
 
 SQLite-backed tools and resources enforce the configured query timeout.
+Per-table schema resources are enumerated once during server construction,
+bounded by the larger of the query timeout and 30 seconds, so construction
+can wait that long on a busy pool. An enumeration failure is logged through
+the provider logger and leaves those resources unregistered until restart.
 Tip responses report synchronization as unknown without a measured current
 slot, and database lookup failures remain errors rather than missing records.
 

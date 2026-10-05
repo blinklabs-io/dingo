@@ -320,11 +320,12 @@ Dingo is a modular, high-performance Cardano node written in Go.
    - Exposes tools, resources, and documentation for autonomous AI agents and operator interfaces.
 `
 
-// tableEnumerationTimeout bounds the one-time construction query that lists
-// tables for per-table schema resources.
+// tableEnumerationTimeout is the minimum bound on the one-time construction
+// query that lists tables for per-table schema resources.
 const tableEnumerationTimeout = 30 * time.Second
 
 // RegisterResources registers passive MCP resources for schema exploration and db-sync guidance.
+// Registration problems are logged through slog.Default.
 func RegisterResources(
 	server *mcp.Server,
 	db *sql.DB,
@@ -336,6 +337,26 @@ func RegisterResources(
 	if len(timeouts) > 0 && timeouts[0] > 0 {
 		queryTimeout = timeouts[0]
 	}
+	registerResources(
+		server,
+		db,
+		ls,
+		network,
+		queryTimeout,
+		tableEnumerationTimeout,
+		slog.Default(),
+	)
+}
+
+func registerResources(
+	server *mcp.Server,
+	db *sql.DB,
+	ls *ledger.LedgerState,
+	network string,
+	queryTimeout time.Duration,
+	enumerationFloor time.Duration,
+	logger *slog.Logger,
+) {
 	// Resource: dingo://docs/identity
 	server.AddResource(&mcp.Resource{
 		URI:         "dingo://docs/identity",
@@ -496,19 +517,20 @@ func RegisterResources(
 
 	// Register dynamic resource for tables if db is available
 	if db != nil {
-		// Enumeration runs once at construction, so the per-request
+		// Enumeration runs once at construction, so a short per-request
 		// timeout must not bound it: a slow database would otherwise leave
-		// the server permanently without per-table resources.
+		// the server permanently without per-table resources. A longer
+		// configured query timeout still applies.
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
-			tableEnumerationTimeout,
+			max(queryTimeout, enumerationFloor),
 		)
 		defer cancel()
 		rows, err := db.QueryContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 		)
 		if err != nil {
-			slog.Warn(
+			logger.Warn(
 				"MCP table schema resources not registered",
 				"error", err,
 			)
@@ -590,7 +612,7 @@ func RegisterResources(
 				}
 			}
 			if err := rows.Err(); err != nil {
-				slog.Warn(
+				logger.Warn(
 					"MCP table schema resource enumeration incomplete",
 					"error", err,
 				)
