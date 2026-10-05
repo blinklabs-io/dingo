@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/pipeline"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -270,18 +271,15 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	)
 }
 
-// TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks submits more
-// validation-failing blocks than the pipeline's default MaxPendingBlocks.
-// Submit waits for completions that only happen once Results() is consumed,
-// so decodeReadChainBatch must read results while it is still submitting
-// rather than after the whole batch is in.
-func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
+// newNoNonceValidatePipelineLedger returns a LedgerState whose started block
+// pipeline validates blocks against an epoch with no cached Praos nonce, and
+// an idempotent function that stops the pipeline and waits for its error
+// drain. The function is also registered as a deferred-style cleanup by the
+// caller; see stopAndDrainBlockPipeline.
+func newNoNonceValidatePipelineLedger(
 	t *testing.T,
-) {
-	t.Parallel()
-
-	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
-
+) (*LedgerState, func()) {
+	t.Helper()
 	errLog := &capturedErrorLog{}
 	ls := &LedgerState{
 		epochCache: []models.Epoch{
@@ -311,24 +309,48 @@ func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	ls.blockPipelineErrorsDone = make(chan struct{})
 	go ls.drainBlockPipelineErrors()
-	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
-	defer stopAndDrain()
+	return ls, stopAndDrainBlockPipeline(t, ls)
+}
 
-	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
+type decodeBatchResult struct {
+	decoded []gledger.Block
+	err     error
+}
 
-	type batchResult struct {
-		decoded []gledger.Block
-		err     error
-	}
-	done := make(chan batchResult, 1)
+// goDecodeBatch runs decodeReadChainBatchWithError in a goroutine and
+// returns the channel its result arrives on.
+func goDecodeBatch(
+	t *testing.T,
+	ls *LedgerState,
+	rawBatch []models.Block,
+) <-chan decodeBatchResult {
+	t.Helper()
+	done := make(chan decodeBatchResult, 1)
 	go func() {
 		decoded, err := ls.decodeReadChainBatchWithError(t.Context(), rawBatch)
-		done <- batchResult{decoded: decoded, err: err}
+		done <- decodeBatchResult{decoded: decoded, err: err}
 	}()
+	return done
+}
+
+// TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks submits more
+// validation-failing blocks than the pipeline's default MaxPendingBlocks.
+// Submit waits for completions that only happen once Results() is consumed,
+// so decodeReadChainBatch must read results while it is still submitting
+// rather than after the whole batch is in.
+func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
+
+	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
 
 	res := testutil.RequireReceive(
 		t,
-		done,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, numBlocks)),
 		testutil.AsyncWait,
 		"decodeReadChainBatch blocked in Submit on a batch larger than "+
 			"MaxPendingBlocks while Results() was unread",
@@ -338,6 +360,123 @@ func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
 	// come back decoded.
 	require.NoError(t, res.err)
 	require.Len(t, res.decoded, numBlocks)
+}
+
+// TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults fails Submit
+// after a prefix of the batch went in. The prefix's results must be read off
+// the shared results channel before the error is returned; otherwise the next
+// call would take them for its own submissions.
+func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const submitOK = 5
+	errSubmit := errors.New("injected submit failure")
+
+	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		blockType uint,
+		rawCbor []byte,
+		tip ocommon.Tip,
+	) error {
+		calls++
+		if calls > submitOK {
+			return errSubmit
+		}
+		return ls.blockPipeline.Submit(ctx, blockType, rawCbor, tip)
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, submitOK+3)),
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not return after a Submit error",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.Nil(t, res.decoded)
+
+	// A fresh submission must come back as the first result: anything left
+	// over from the failed batch would be read here instead.
+	probe := buildNoNonceValidateBatch(t, submitOK+1)[submitOK]
+	require.NoError(t, ls.blockPipeline.Submit(
+		t.Context(),
+		probe.Type,
+		probe.Cbor,
+		ocommon.Tip{
+			Point:       ocommon.NewPoint(probe.Slot, probe.Hash),
+			BlockNumber: probe.Number,
+		},
+	))
+	item := testutil.RequireReceive(
+		t,
+		ls.blockPipeline.Results(),
+		testutil.AsyncWait,
+		"probe block result",
+	)
+	require.NoError(t, item.DecodeError())
+	require.Equal(t, probe.Slot, item.Block().SlotNumber())
+}
+
+// TestDecodeReadChainBatchJoinsSubmitterOnReturn returns from the batch call
+// while its submitting goroutine is blocked inside Submit, by stopping the
+// pipeline (which closes Results()). The call must cancel the submit context
+// and not return until the goroutine has exited.
+func TestDecodeReadChainBatchJoinsSubmitterOnReturn(t *testing.T) {
+	t.Parallel()
+
+	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var exited atomic.Bool
+	var proceedOnce sync.Once
+	release := func() { proceedOnce.Do(func() { close(proceed) }) }
+	defer release()
+	ls.blockPipelineSubmit = func(
+		ctx context.Context,
+		_ uint,
+		_ []byte,
+		_ ocommon.Tip,
+	) error {
+		close(entered)
+		<-ctx.Done() // only returns if the batch call cancels its context
+		<-proceed
+		exited.Store(true)
+		return ctx.Err()
+	}
+
+	done := goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3))
+	testutil.RequireReceive(
+		t,
+		entered,
+		testutil.AsyncWait,
+		"submitter did not start",
+	)
+	stopAndDrain()
+
+	// The submitter is parked until proceed is closed, so a call that
+	// returns now has not joined it.
+	testutil.RequireNoReceive(
+		t,
+		done,
+		200*time.Millisecond,
+		"decodeReadChainBatch returned before its submitter exited",
+	)
+	release()
+	res := testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"decodeReadChainBatch did not cancel its submit context",
+	)
+	require.Error(t, res.err)
+	require.True(t, exited.Load(), "submitter must have exited at return")
 }
 
 // stopAndDrainBlockPipeline returns an idempotent function that stops ls's

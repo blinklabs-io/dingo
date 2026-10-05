@@ -1447,6 +1447,17 @@ type LedgerState struct {
 	// one attempt's reader goroutine ever submits to it at a time -- see the
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
+	// blockPipelineSubmit, when non-nil, replaces blockPipeline.Submit in
+	// decodeReadChainBatchWithError. Test seam: a real Submit fails only on
+	// pipeline shutdown, which also closes Results(), so the drain of an
+	// already-submitted prefix after a Submit error cannot otherwise be
+	// reached.
+	blockPipelineSubmit func(
+		ctx context.Context,
+		blockType uint,
+		rawCbor []byte,
+		tip ocommon.Tip,
+	) error
 	// blockPipelineErrorsDone is closed once drainBlockPipelineErrors (the
 	// goroutine that continuously reads blockPipeline.Errors() for the
 	// pipeline's full lifetime) has returned. Set alongside blockPipeline.
@@ -6568,20 +6579,17 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // discards the whole batch. The preserved error lets a persisted-block
 // validation failure be recovered with its exact block point.
 //
-// Once a pipeline submission has started, it always runs to completion --
-// submit-and-drain is all-or-nothing, using a background context for the
-// Submit calls and the results drain regardless of ctx. ctx is only checked
-// up front, before anything has been submitted. blockPipeline is a single
-// instance shared across every ledgerProcessBlocks retry attempt (see that
-// method's doc comment): its apply stage reorders decoded results by a
-// single global sequence number with no notion of "whose submission is
-// whose", so a submission that aborted partway through ctx cancellation
-// would leave already-sequenced, already-submitted items in that shared
-// state for a *later* attempt's own call here to mistakenly drain --
-// misattributing decoded blocks across a restart. Bailing out only before
-// the first Submit call is safe because nothing has been submitted yet;
-// once started, only genuine pipeline shutdown (Stop(), which closes the
-// Results channel) can still interrupt the drain.
+// Once a pipeline submission has started, the call drains the result of every
+// block it submitted before returning, whatever the outcome, so none is left
+// on the shared results channel for a later attempt's call to mistake for its
+// own: blockPipeline is a single instance shared across every
+// ledgerProcessBlocks retry attempt (see that method's doc comment) whose
+// apply stage reorders results by one global sequence number. For that reason
+// the Submit calls use a context independent of ctx, which is only checked up
+// front, before anything has been submitted. That context is cancelled, and
+// the submitting goroutine joined, on every return; the only thing that can
+// interrupt the drain is pipeline shutdown (Stop(), which closes the Results
+// channel).
 // decodeReadChainBatchWithError is the error-preserving form used by the
 // ledger reader. Keeping the cause lets a validation failure on an already
 // persisted block enter header-validation recovery instead of silently
@@ -6639,6 +6647,10 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		err       error
 	}
 	submitDone := make(chan submitOutcome, 1)
+	submit := ls.blockPipeline.Submit
+	if ls.blockPipelineSubmit != nil {
+		submit = ls.blockPipelineSubmit
+	}
 	go func() {
 		defer close(submitExited)
 		submitted := 0
@@ -6650,7 +6662,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			//nolint:contextcheck // deliberately not derived from ctx; see the
 			// doc comment above -- a submission must run to completion once
 			// started, not abort partway through a mere per-attempt cancel.
-			if err := ls.blockPipeline.Submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
+			if err := submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
 				ls.config.Logger.Error(
 					"failed to submit block to decode pipeline",
 					"error", err,
