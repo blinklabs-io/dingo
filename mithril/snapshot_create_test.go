@@ -15,8 +15,10 @@
 package mithril
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -331,6 +333,32 @@ func TestCreateSnapshotDetectsFileChangedAfterDigest(t *testing.T) {
 		context.Background(), newSnapshotConfig(t, db, store, key),
 	)
 	require.ErrorContains(t, err, "changed while archiving")
+}
+
+func TestReadAncillaryKeepsSelectedStateBytes(t *testing.T) {
+	t.Parallel()
+
+	db := newCardanoDB(t, 1)
+	originalPath := filepath.Join(db, "ledger", "100", "state")
+	original, err := os.ReadFile(originalPath)
+	require.NoError(t, err)
+	root, err := os.OpenRoot(db)
+	require.NoError(t, err)
+	defer root.Close()
+	ancillary, _, err := readAncillary(root)
+	require.NoError(t, err)
+	defer ancillary.close()
+
+	require.NoError(t, os.Rename(originalPath, originalPath+".old"))
+	require.NoError(t, os.WriteFile(
+		originalPath, minimalLedgerState(t, 2000, bytes.Repeat([]byte{1}, 32)),
+		0o640,
+	))
+	_, key := newSigningKey(t)
+	_, digests, err := ancillary.entries(key)
+	require.NoError(t, err)
+	want := sha256.Sum256(original)
+	require.Equal(t, hex.EncodeToString(want[:]), digests["ledger/100/state"])
 }
 
 func TestParseSigningKey(t *testing.T) {

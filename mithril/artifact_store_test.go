@@ -18,7 +18,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -114,7 +117,9 @@ func requireArtifactStoreContract(t *testing.T, store ArtifactStore) {
 		_, err := store.Open(ctx, bad)
 		require.Error(t, err, bad)
 	}
-	require.Error(t, store.DeletePrefix(ctx, ""))
+	for _, bad := range []string{"", ".", "..", "../escape", "a/../b"} {
+		require.Error(t, store.DeletePrefix(ctx, bad), bad)
+	}
 }
 
 func TestLocalArtifactStoreContract(t *testing.T) {
@@ -129,4 +134,67 @@ func TestOpenArtifactStoreRejectsEmptyLocation(t *testing.T) {
 
 	_, err := OpenArtifactStore(context.Background(), "")
 	require.Error(t, err)
+}
+
+func TestOpenArtifactStoreRejectsRemoteURIWithoutBucket(t *testing.T) {
+	t.Parallel()
+
+	for _, location := range []string{"s3:///tmp/artifacts", "gcs:///tmp/artifacts"} {
+		_, err := OpenArtifactStore(context.Background(), location)
+		require.ErrorContains(t, err, "requires a bucket", location)
+	}
+	for _, location := range []string{"s3://%zz", "gcs://%zz"} {
+		_, err := OpenArtifactStore(context.Background(), location)
+		require.ErrorContains(t, err, "invalid", location)
+		require.NotContains(t, err.Error(), location)
+	}
+}
+
+type stagedReader struct {
+	first   string
+	rest    string
+	started chan struct{}
+	resume  chan struct{}
+	once    sync.Once
+	stage   int
+}
+
+func (r *stagedReader) Read(p []byte) (int, error) {
+	switch r.stage {
+	case 0:
+		r.stage++
+		r.once.Do(func() { close(r.started) })
+		return copy(p, r.first), nil
+	case 1:
+		<-r.resume
+		r.stage++
+		return copy(p, r.rest), nil
+	default:
+		return 0, io.EOF
+	}
+}
+
+func TestLocalArtifactStoreConcurrentPutPublishesWholeObject(t *testing.T) {
+	t.Parallel()
+
+	store, dir := newLocalStore(t)
+	first := &stagedReader{
+		first: "first-", rest: "complete-value",
+		started: make(chan struct{}), resume: make(chan struct{}),
+	}
+	firstErr := make(chan error, 1)
+	go func() {
+		firstErr <- store.Put(t.Context(), "same.bin", first)
+	}()
+	<-first.started
+	require.NoError(t, store.Put(
+		t.Context(), "same.bin", strings.NewReader("second-complete-value"),
+	))
+	close(first.resume)
+	require.NoError(t, <-firstErr)
+	data, err := os.ReadFile(filepath.Join(dir, "same.bin"))
+	require.NoError(t, err)
+	require.Contains(t, []string{
+		"first-complete-value", "second-complete-value",
+	}, string(data))
 }

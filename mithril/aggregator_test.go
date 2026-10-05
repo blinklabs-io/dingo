@@ -506,6 +506,29 @@ func TestAggregatorOperatorCanUpdateRegistration(t *testing.T) {
 	require.Equal(t, uint64(250), pc.Signers[0].Stake)
 }
 
+func TestAggregatorPartyCannotReplaceVerificationKey(t *testing.T) {
+	t.Parallel()
+	f := newAggregatorFixture(t, lotteryParams)
+	f.newSnapshot(2)
+	original := newTestSTMSigner(1, 100)
+	code, body := f.register(original)
+	require.Equal(t, http.StatusCreated, code, body)
+
+	replacement := newTestSTMSigner(2, 250)
+	replacement.partyID = original.partyID
+	code, body = f.register(replacement)
+	require.Equal(t, http.StatusConflict, code, body)
+
+	code, body = f.closeRegistrations()
+	require.Equal(t, http.StatusNoContent, code, body)
+	_, pending := f.pending()
+	require.NotNil(t, pending)
+	require.Len(t, pending.Signers, 1)
+	key, err := hex.DecodeString(pending.Signers[0].VerificationKey)
+	require.NoError(t, err)
+	require.Equal(t, original.verificationKey(), key)
+}
+
 func TestAggregatorPendingReadDoesNotCloseRegistration(t *testing.T) {
 	t.Parallel()
 	f := newAggregatorFixture(t, lotteryParams)

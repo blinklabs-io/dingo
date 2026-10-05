@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -58,9 +59,28 @@ func OpenArtifactStore(
 	if location == "" {
 		return nil, errors.New("artifact store location is empty")
 	}
+	remoteScheme := ""
+	for _, scheme := range []string{"s3", "gcs"} {
+		if strings.HasPrefix(strings.ToLower(location), scheme+":") {
+			remoteScheme = scheme
+			break
+		}
+	}
 	u, err := url.Parse(location)
-	if err == nil && u.Scheme != "" && u.Host != "" {
+	if err != nil && remoteScheme != "" {
+		return nil, fmt.Errorf("invalid %s artifact store URI", remoteScheme)
+	}
+	if err == nil && remoteScheme != "" {
+		if u.Host == "" {
+			return nil, fmt.Errorf(
+				"artifact store %s URI requires a bucket", remoteScheme,
+			)
+		}
+		u.Scheme = remoteScheme
 		return openRemoteArtifactStore(ctx, u)
+	}
+	if err == nil && u.Scheme != "" && strings.Contains(location, "://") {
+		return nil, fmt.Errorf("unsupported artifact store scheme %q", u.Scheme)
 	}
 	return newLocalArtifactStore(location)
 }
@@ -110,10 +130,12 @@ func (s *localArtifactStore) Put(
 	if err := s.root.MkdirAll(filepath.Dir(name), 0o750); err != nil {
 		return fmt.Errorf("creating artifact directory: %w", err)
 	}
-	// Written under a temporary name and renamed, so a concurrent reader
-	// never serves a partial object.
-	tmp := name + ".partial"
-	f, err := s.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	// Each writer owns its temporary file. Sharing one name lets a concurrent
+	// writer truncate or rename another writer's in-progress object.
+	tmp := name + ".partial-" + rand.Text()
+	f, err := s.root.OpenFile(
+		tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640,
+	)
 	if err != nil {
 		return fmt.Errorf("creating artifact %s: %w", key, err)
 	}

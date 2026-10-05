@@ -120,6 +120,7 @@ func CreateSnapshot(
 	if err != nil {
 		return nil, err
 	}
+	defer ancillary.close()
 
 	lastNum := uint64(trios - 1) // #nosec G115 -- len is non-negative
 	digests, digestByName, immutableBytes, err := digestImmutables(
@@ -475,9 +476,13 @@ func checkArchived(entries []tarEntry, want map[string]string) error {
 
 // ancillaryState is the ledger state selected for the ancillary archive.
 type ancillaryState struct {
-	files []tarEntry
-	size  int64
+	files   []tarEntry
+	digests map[string]string
+	handles *ledgerstate.SnapshotFiles
+	size    int64
 }
+
+func (a *ancillaryState) close() { a.handles.Close() }
 
 // readAncillary selects the newest ledger state under root and returns it with
 // the epoch it was taken in. Only the state file and the UTxO table the
@@ -487,21 +492,53 @@ func readAncillary(root *os.Root) (*ancillaryState, uint64, error) {
 	if err != nil {
 		return nil, 0, fmt.Errorf("selecting ledger state: %w", err)
 	}
-	defer files.Close()
-	state, err := ledgerstate.ParseSnapshotFile(files.State)
+	stateData, err := io.ReadAll(files.State)
 	if err != nil {
+		files.Close()
+		return nil, 0, fmt.Errorf("reading ledger state: %w", err)
+	}
+	state, err := ledgerstate.ParseSnapshotBytes(stateData)
+	if err != nil {
+		files.Close()
 		return nil, 0, fmt.Errorf("parsing ledger state: %w", err)
 	}
-	paths := []string{files.StatePath}
-	if files.Table != nil {
-		paths = append(paths, files.TablePath)
+	stateSum := sha256.Sum256(stateData)
+	out := &ancillaryState{
+		digests: map[string]string{
+			files.StatePath: hex.EncodeToString(stateSum[:]),
+		},
+		handles: files,
 	}
-	slices.Sort(paths)
-	out := &ancillaryState{}
-	for _, rel := range paths {
-		entry, err := rootEntry(root, rel)
+	type namedFile struct {
+		name string
+		file *os.File
+	}
+	opened := []namedFile{{files.StatePath, files.State}}
+	if files.Table != nil {
+		opened = append(opened, namedFile{files.TablePath, files.Table})
+	}
+	slices.SortFunc(opened, func(a, b namedFile) int {
+		return strings.Compare(a.name, b.name)
+	})
+	for _, item := range opened {
+		entry, err := openFileEntry(item.name, item.file)
 		if err != nil {
-			return nil, 0, fmt.Errorf("reading ledger file %s: %w", rel, err)
+			files.Close()
+			return nil, 0, fmt.Errorf("reading ledger file %s: %w", item.name, err)
+		}
+		if _, ok := out.digests[item.name]; !ok {
+			r, err := entry.open()
+			if err != nil {
+				files.Close()
+				return nil, 0, err
+			}
+			sum, _, err := sha256Reader(r, item.name)
+			_ = r.Close()
+			if err != nil {
+				files.Close()
+				return nil, 0, err
+			}
+			out.digests[item.name] = sum
 		}
 		out.files = append(out.files, entry)
 		out.size += entry.size
@@ -509,26 +546,30 @@ func readAncillary(root *os.Root) (*ancillaryState, uint64, error) {
 	return out, state.Epoch, nil
 }
 
-// entries returns the ancillary archive entries: the ledger files followed by
-// the manifest signed over their digests. The files are hashed here, in a
-// separate pass, because the manifest has to precede the archive upload no
-// differently from any other file's digest.
+func openFileEntry(name string, file *os.File) (tarEntry, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return tarEntry{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return tarEntry{}, fmt.Errorf("%s is not a regular file", name)
+	}
+	return tarEntry{
+		name: name,
+		size: info.Size(),
+		open: func() (io.ReadCloser, error) {
+			return io.NopCloser(io.NewSectionReader(file, 0, info.Size())), nil
+		},
+		sum: sha256.New(),
+	}, nil
+}
+
+// entries returns the open ledger files followed by the manifest signed over
+// the digests captured when those files were selected.
 func (a *ancillaryState) entries(
 	key ed25519.PrivateKey,
 ) ([]tarEntry, map[string]string, error) {
-	manifest := ancillaryManifest{Data: map[string]string{}}
-	for _, entry := range a.files {
-		f, err := entry.open()
-		if err != nil {
-			return nil, nil, err
-		}
-		sum, _, err := sha256Reader(f, entry.name)
-		_ = f.Close()
-		if err != nil {
-			return nil, nil, err
-		}
-		manifest.Data[entry.name] = sum
-	}
+	manifest := ancillaryManifest{Data: a.digests}
 	manifest.Signature = hex.EncodeToString(
 		ed25519.Sign(key, manifest.computeHash()),
 	)

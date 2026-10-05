@@ -396,6 +396,11 @@ func (a *Aggregator) registerSigner(req registerSignerRequest) error {
 	if a.sealed != nil {
 		return conflict("registration is closed")
 	}
+	if current, ok := a.regs[req.PartyID]; ok &&
+		(!bytes.Equal(current.VerificationKey, vk) ||
+			!bytes.Equal(current.ProofOfPossession, pop)) {
+		return conflict("party_id is already bound to another verification key")
+	}
 	var others uint64
 	for id, r := range a.regs {
 		if id != req.PartyID {

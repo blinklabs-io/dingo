@@ -71,10 +71,11 @@ func remoteDir(prefix, key string) string {
 // deleteKey is the object key a DeletePrefix call names, refusing the store
 // root however the store's own prefix is configured.
 func deleteKey(storePrefix, prefix string) (string, error) {
-	if strings.Trim(prefix, "/") == "" {
+	prefix = strings.TrimSuffix(prefix, "/")
+	if !validKey(prefix) {
 		return "", errors.New("refusing to delete the artifact store root")
 	}
-	return remoteKey(storePrefix, strings.TrimSuffix(prefix, "/")), nil
+	return remoteKey(storePrefix, prefix), nil
 }
 
 // objectReader adapts a ranged object read to io.ReadSeekCloser. The object is
