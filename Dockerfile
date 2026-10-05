@@ -34,7 +34,7 @@ RUN make CGO_ENABLED=1 build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.2.3.1-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20260915-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/nview:0.15.1 AS nview
+FROM ghcr.io/blinklabs-io/nview:0.15.2 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.16.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo
