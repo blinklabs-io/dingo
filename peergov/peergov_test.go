@@ -7991,6 +7991,25 @@ func TestResolveInboundIdentity(t *testing.T) {
 			wantIdx:     -1,
 		},
 		{
+			name: "ambiguous topology host reuses disconnected inbound record",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+				{
+					addr: "44.0.0.1:3002", normalized: "44.0.0.1:3002",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-1",
+				},
+				{
+					addr: "44.0.0.1:51000", normalized: "44.0.0.1:51000",
+					source: PeerSourceInboundConn,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     2,
+		},
+		{
 			name: "gossip peer sharing host does not widen identity",
 			seeds: []seed{
 				{

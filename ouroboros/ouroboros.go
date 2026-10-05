@@ -206,8 +206,6 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
-	// Per-connection mutex to serialize chainsync restarts
-	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -1049,8 +1047,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
-	// Clean up per-connection restart mutex
-	o.restartMu.Delete(connId)
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
