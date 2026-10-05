@@ -1268,8 +1268,15 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// no delegations, or zero stake) and regardless of whether the pool was
 	// explicitly requested (cardano-ledger behavior). Below PV11 an
 	// explicitly requested pool is always returned, even with zero stake.
+	//
+	// The protocol version is the frozen epoch's, so a QueryView that spans
+	// a PV11 boundary keeps one pool filter for the whole session.
 	omitZeroPools := false
-	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+	pparams, err := ls.snapshotProtocolParameters(consensus, row, txn)
+	if err != nil {
+		return nil, err
+	}
+	if pv, err := GetProtocolVersion(pparams); err == nil {
 		omitZeroPools = pv.Major >= 11
 	}
 

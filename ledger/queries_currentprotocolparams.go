@@ -19,7 +19,9 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
@@ -195,4 +197,39 @@ func (ls *LedgerState) historicalProtocolParameters(
 		synthetic,
 		ls.config.Logger,
 	)}, nil
+}
+
+// snapshotProtocolParameters returns the protocol parameters a QueryView's
+// frozen epoch ran under. row is the epoch record covering the snapshot tip
+// (nil on the direct path); when it names an epoch the live snapshot has
+// moved past, the persisted row for that epoch answers. An epoch with no
+// persisted row falls back to the live value, as GetCurrentPParams does, and
+// any other historical-state error is returned.
+func (ls *LedgerState) snapshotProtocolParameters(
+	snapshot *consensusSnapshot,
+	row *models.Epoch,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if row == nil || row.EpochId == snapshot.currentEpoch.EpochId {
+		return snapshot.currentPParams, nil
+	}
+	result, err := ls.historicalProtocolParameters(
+		snapshot, row.EpochId, QueryPoint{}, txn,
+	)
+	if err != nil {
+		if errors.Is(err, errPParamsRowMissing) {
+			return snapshot.currentPParams, nil
+		}
+		return nil, err
+	}
+	if values, ok := result.([]any); ok && len(values) == 1 {
+		if pparams, ok := values[0].(lcommon.ProtocolParameters); ok {
+			return pparams, nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"unexpected protocol parameters result %T for epoch %d",
+		result,
+		row.EpochId,
+	)
 }

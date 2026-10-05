@@ -1646,7 +1646,9 @@ Phase 1: Stop accepting new work
 
 Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
-  (concurrent with ConnectionManager), ConnectionManager
+  (concurrent with ConnectionManager), ConnectionManager,
+  Ouroboros (`Ouroboros.Close`: releases acquired LocalStateQuery snapshots;
+  bounded by the shutdown deadline and skipped once a phase-2 wait was abandoned)
 
 Phase 3: Flush state and close database
   LedgerState, Database

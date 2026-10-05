@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -536,4 +537,146 @@ func TestQueryViewLeavesAReadConnectionForOtherReaders(t *testing.T) {
 	defer txn.Release()
 	_, err = db.GetTip(txn)
 	require.NoError(t, err, "a reader outside the views must still get a connection")
+}
+
+func seedPendingRatification(
+	t *testing.T,
+	db *database.Database,
+	rec pendingRatificationRecord,
+) {
+	t.Helper()
+	raw, err := json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		pendingRatificationSyncKey, string(raw), nil,
+	))
+}
+
+// TestAcquireQueryViewRetriesPastPendingBoundary proves a snapshot that
+// froze a boundary whose deferred work had not finished is dropped and
+// reopened once the pending record is consumed.
+func TestAcquireQueryViewRetriesPastPendingBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	seedPendingRatification(t, db, pendingRatificationRecord{
+		Epoch: 4, BoundarySlot: 400, ID: 1,
+	})
+
+	type acquired struct {
+		view *QueryView
+		err  error
+	}
+	done := make(chan acquired, 1)
+	go func() {
+		view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+		done <- acquired{view, err}
+	}()
+
+	select {
+	case res := <-done:
+		if res.view != nil {
+			res.view.Close()
+		}
+		t.Fatalf("acquire returned with a boundary pending: %v", res.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	require.NoError(t, db.DeleteSyncState(pendingRatificationSyncKey, nil))
+	select {
+	case res := <-done:
+		require.NoError(t, res.err)
+		require.NotNil(t, res.view)
+		res.view.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("acquire did not retry after the pending record cleared")
+	}
+}
+
+// TestAcquireQueryViewPendingBoundaryHonorsDeadline proves the retry wait is
+// inside the caller's context and releases the snapshot it dropped.
+func TestAcquireQueryViewPendingBoundaryHonorsDeadline(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	seedPendingRatification(t, db, pendingRatificationRecord{
+		Epoch: 4, BoundarySlot: 400, ID: 1,
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	view, err := ls.AcquireQueryView(ctx, QueryPoint{})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Nil(t, view)
+
+	// The dropped snapshots must not leak admission slots.
+	require.NoError(t, db.DeleteSyncState(pendingRatificationSyncKey, nil))
+	view, err = ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	view.Close()
+}
+
+// TestQueryViewQueryRecoversPanic proves a panic in a query handler fails
+// that query instead of reaching the connection's handler goroutine, and
+// leaves the view usable and releasable.
+func TestQueryViewQueryRecoversPanic(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newDiskTestLedger(t)
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+
+	var nilQuery *olocalstatequery.ShelleyStakeSnapshotsQuery
+	require.NotPanics(t, func() {
+		_, err = view.Query(shelleyBlockQuery(nilQuery), 0)
+	})
+	require.Error(t, err)
+	require.ErrorIs(t, err, database.ErrTxnPanic)
+
+	_, err = view.Query(&olocalstatequery.ChainPointQuery{}, 0)
+	require.NoError(t, err)
+}
+
+// TestQueryViewStakeSnapshotsOmitZeroPoolsUsesFrozenProtocolVersion proves a
+// view that froze a pre-PV11 epoch keeps returning an explicitly requested
+// zero-stake pool after the live epoch moves to PV11.
+func TestQueryViewStakeSnapshotsOmitZeroPoolsUsesFrozenProtocolVersion(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	pool := repeatedBytes(28, 0x22)
+	frozen := conwayPParamsWithCostModels(nil)
+	frozen.ProtocolVersion.Major = 10
+	live := conwayPParamsWithCostModels(nil)
+	live.ProtocolVersion.Major = 11
+	frozenCbor, err := cbor.Encode(frozen)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(
+		frozenCbor, 300, 3, eras.ConwayEraDesc.Id, nil,
+	))
+	view := freezeEpochThenCrossBoundary(
+		t, ls, db, eras.ConwayEraDesc, eras.ConwayEraDesc,
+	)
+	ls.currentPParams = live
+	ls.publishSnapshotsLocked()
+
+	poolID := lcommon.NewBlake2b224(pool)
+	query := shelleyBlockQuery(&olocalstatequery.ShelleyStakeSnapshotsQuery{
+		Pools: []cbor.SetType[ledger.PoolId]{
+			cbor.NewSetType([]ledger.PoolId{ledger.PoolId(poolID)}, true),
+		},
+	})
+	liveResult, err := ls.Query(query, QueryPoint{})
+	require.NoError(t, err)
+	require.Empty(t, liveResult.([]any)[0].(olocalstatequery.StakeSnapshotsResult).PoolSnapshots)
+
+	viewed, err := view.Query(query, 0)
+	require.NoError(t, err)
+	require.Contains(t,
+		viewed.([]any)[0].(olocalstatequery.StakeSnapshotsResult).PoolSnapshots,
+		poolID,
+	)
 }
