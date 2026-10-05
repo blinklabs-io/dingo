@@ -206,15 +206,15 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				o.InvalidateBlockDecodeCache(blockType, raw)
 			}
 		},
-		PeersWithBlockFunc: func(
+		SelectBlockfetchPeerFunc: func(
 			origin ouroboros.ConnectionId,
-			point ocommon.Point,
-		) []ouroboros.ConnectionId {
-			var peers []ouroboros.ConnectionId
+			rangeEnd ocommon.Point,
+		) ouroboros.ConnectionId {
+			selected := origin
 			n.withLiveChainsyncState(func(state *chainsync.State) {
-				peers = state.PeersWithBlock(origin, point)
+				selected = state.SelectBlockfetchPeer(origin, rangeEnd)
 			})
-			return peers
+			return selected
 		},
 		RecordBlockfetchLatencyFunc: func(
 			connId ouroboros.ConnectionId,
@@ -227,27 +227,14 @@ func (n *Node) ledgerStateConfig() ledger.LedgerStateConfig {
 				)
 			})
 		},
-		BlockfetchLatencyFunc: func(
+		RecordBlockfetchThroughputFunc: func(
 			connId ouroboros.ConnectionId,
-		) (time.Duration, bool) {
-			var (
-				latency time.Duration
-				ok      bool
-			)
+			bytes uint64,
+			elapsed time.Duration,
+		) {
 			n.withLiveChainsyncState(func(state *chainsync.State) {
-				latency, ok = state.BlockfetchLatency(connId)
+				state.RecordBlockfetchThroughput(connId, bytes, elapsed)
 			})
-			return latency, ok
-		},
-		BlockfetchLatencyMedianFunc: func() (time.Duration, int) {
-			var (
-				latency time.Duration
-				count   int
-			)
-			n.withLiveChainsyncState(func(state *chainsync.State) {
-				latency, count = state.BlockfetchLatencyMedian()
-			})
-			return latency, count
 		},
 		DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
 		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {

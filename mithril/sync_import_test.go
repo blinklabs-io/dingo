@@ -66,6 +66,14 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 		Point: ocommon.NewPoint(30, ledgerStateHash),
 	}, nil))
 	require.NoError(t, db.SetSyncState("sync_status", "bootstrap", nil))
+	require.NoError(
+		t,
+		db.SetSyncState(
+			metadata.PlannerStatsBackfillSyncKey,
+			"v1:30:30:checkpoint",
+			nil,
+		),
+	)
 
 	require.NoError(t, updateMithrilReadyState(
 		db,
@@ -87,6 +95,12 @@ func TestUpdateMithrilReadyStateKeepsDeferredIndexPendingMarker(t *testing.T) {
 	marker, err := db.GetSyncState(deferred.SyncStateKey, nil)
 	require.NoError(t, err)
 	require.Equal(t, deferred.SyncStateValue, marker)
+	statsMarker, err := db.GetSyncState(
+		metadata.PlannerStatsBackfillSyncKey,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, "v1:30:30:checkpoint", statsMarker)
 
 	// The clear still does its job for everything else.
 	status, err := db.GetSyncState("sync_status", nil)

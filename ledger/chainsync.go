@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"cmp"
 	"container/heap"
 	"context"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 	"math"
 	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,6 +147,11 @@ const (
 
 	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
 	deferredHeaderValidationSyncStateValue  = "true"
+	// deferredHeaderValidationFloorSyncStateKey must not start with
+	// deferredHeaderValidationSyncStatePrefix, which marker scans match.
+	deferredHeaderValidationFloorSyncStateKey = "deferred_header_validation_floor"
+	defaultMaxDeferredHeaderMarkers           = 100_000
+	defaultMaxAdmissionVerified               = 100_000
 
 	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
 	// used to gate shadow blockfetch dispatch when no peer-population
@@ -188,6 +195,11 @@ const (
 	// Rollback loop detection thresholds
 	rollbackLoopThreshold = 2               // number of rollbacks to same slot before breaking loop
 	rollbackLoopWindow    = 5 * time.Minute // time window for rollback loop detection
+	maxRollbackHistory    = 64              // cap on retained rollback records
+
+	// chainsyncResyncCoalesceWindow is how long repeated resync requests for
+	// one connection are treated as the same divergence episode.
+	chainsyncResyncCoalesceWindow = 10 * time.Second
 
 	// Number of consecutive header mismatches before triggering
 	// a chainsync re-sync to recover from persistent forks.
@@ -509,13 +521,162 @@ func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
 	)
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
+	ls.markDeferredHeaderValidationFrom(point, ouroboros.ConnectionId{})
+}
+
+// boundDeferredHeaderValidation keeps the deferred-header set, and its
+// persisted markers, within maxDeferredHeaderMarkers. The applied-tip eviction
+// cannot do this: when the header chain runs far ahead of a stalled applied
+// tip, every new entry sits above that cutoff.
+//
+// Once over the cap it evicts the lowest-slot entries down to three quarters of
+// it, so the work is amortised across admissions. A marker is the only thing
+// that makes apply run header verification for a block whose admission was
+// deferred, so eviction first raises deferredHeaderValidationFloor past every
+// evicted slot and persists it: a block below the floor is verified in full at
+// apply whether or not it has a marker. The floor is stored before any marker
+// is deleted, so a failure leaves the set unbounded rather than unverified.
+//
+// The caller must not hold deferredHeaderValidationMu, and must not hold the
+// blockfetch mutex across the database writes (see deletePersistedDeferredMarkers).
+func (ls *LedgerState) boundDeferredHeaderValidation() error {
+	// Serialize the snapshot, durable floor write, and marker deletion. The
+	// in-memory mutex must be released for the database write to avoid lock
+	// inversion with block apply, so it cannot also serialize concurrent bounds.
+	ls.deferredHeaderValidationBoundMu.Lock()
+	defer ls.deferredHeaderValidationBoundMu.Unlock()
+
+	limit := ls.maxDeferredHeaderMarkers
+	if limit <= 0 {
+		limit = defaultMaxDeferredHeaderMarkers
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	if len(ls.deferredHeaderValidation) <= limit {
+		ls.deferredHeaderValidationMu.Unlock()
+		return nil
+	}
+	type markedPoint struct {
+		key  string
+		slot uint64
+	}
+	marked := make([]markedPoint, 0, len(ls.deferredHeaderValidation))
+	for key := range ls.deferredHeaderValidation {
+		// An unparseable key can never be verified; evicting it at slot 0
+		// raises nothing.
+		slot, _ := slotFromHeaderValidationKey(key)
+		marked = append(marked, markedPoint{key: key, slot: slot})
+	}
+	floor := ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+
+	slices.SortFunc(marked, func(a, b markedPoint) int {
+		return cmp.Compare(a.slot, b.slot)
+	})
+	evictCount := len(marked) - limit*3/4
+	evictedKeys := make([]string, 0, evictCount)
+	for _, m := range marked[:evictCount] {
+		evictedKeys = append(evictedKeys, m.key)
+		floor = max(floor, m.slot+1)
+	}
+	if ls.db != nil && ls.db.Metadata() != nil {
+		if err := ls.db.SetSyncState(
+			deferredHeaderValidationFloorSyncStateKey,
+			strconv.FormatUint(floor, 10),
+			nil,
+		); err != nil {
+			return fmt.Errorf("persist deferred header floor: %w", err)
+		}
+	}
+	ls.deferredHeaderValidationMu.Lock()
+	ls.deferredHeaderValidationFloor = max(
+		ls.deferredHeaderValidationFloor,
+		floor,
+	)
+	for _, key := range evictedKeys {
+		delete(ls.deferredHeaderValidation, key)
+	}
+	ls.deferredHeaderValidationMu.Unlock()
+	return ls.deletePersistedDeferredMarkers(evictedKeys)
+}
+
+// markAdmissionVerified records that point's header passed full verification
+// at blockfetch admission, so block-pipeline replay need not verify it again.
+// The record is only an optimisation: a block without one is verified in full,
+// so when the set is at its cap, after dropping records at or below the
+// applied tip (replayed or abandoned), a new record is simply not kept.
+func (ls *LedgerState) markAdmissionVerified(point ocommon.Point) {
+	limit := ls.maxAdmissionVerified
+	if limit <= 0 {
+		limit = defaultMaxAdmissionVerified
+	}
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	if len(ls.admissionVerified) >= limit {
+		for slot := range ls.admissionVerified {
+			if slot <= tipSlot {
+				delete(ls.admissionVerified, slot)
+			}
+		}
+		if len(ls.admissionVerified) >= limit {
+			return
+		}
+	}
+	if ls.admissionVerified == nil {
+		ls.admissionVerified = make(map[uint64]string)
+	}
+	ls.admissionVerified[point.Slot] = headerValidationPointKey(point)
+}
+
+// admissionVerifiedSlot reports whether a block at slot has an admission
+// record. It does not consume it.
+func (ls *LedgerState) admissionVerifiedSlot(slot uint64) bool {
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	_, ok := ls.admissionVerified[slot]
+	return ok
+}
+
+// consumeAdmissionVerified removes any record for point's slot and reports
+// whether it was for exactly this point. A record for another hash at the same
+// slot is dropped without vouching for point.
+func (ls *LedgerState) consumeAdmissionVerified(point ocommon.Point) bool {
+	ls.admissionVerifiedMu.Lock()
+	defer ls.admissionVerifiedMu.Unlock()
+	key, ok := ls.admissionVerified[point.Slot]
+	if !ok {
+		return false
+	}
+	delete(ls.admissionVerified, point.Slot)
+	return key == headerValidationPointKey(point)
+}
+
+// markDeferredHeaderValidationFrom records point as awaiting apply-time header
+// validation, attributed to the connection that supplied its block.
+func (ls *LedgerState) markDeferredHeaderValidationFrom(
+	point ocommon.Point,
+	source ouroboros.ConnectionId,
+) {
 	ls.deferredHeaderValidationMu.Lock()
 	defer ls.deferredHeaderValidationMu.Unlock()
 	if ls.deferredHeaderValidation == nil {
-		ls.deferredHeaderValidation = make(map[string]struct{})
+		ls.deferredHeaderValidation = make(
+			map[string]ouroboros.ConnectionId,
+		)
 	}
-	ls.deferredHeaderValidation[headerValidationPointKey(point)] = struct{}{}
+	ls.deferredHeaderValidation[headerValidationPointKey(point)] = source
+}
+
+// deferredHeaderSource returns the connection that supplied the deferred
+// block at point, or the zero value if it is unknown or not deferred.
+func (ls *LedgerState) deferredHeaderSource(
+	point ocommon.Point,
+) ouroboros.ConnectionId {
+	ls.deferredHeaderValidationMu.Lock()
+	defer ls.deferredHeaderValidationMu.Unlock()
+	return ls.deferredHeaderValidation[headerValidationPointKey(point)]
 }
 
 func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
@@ -524,17 +685,28 @@ func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
 	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
 }
 
+//nolint:unused // retained as a test helper
 func (ls *LedgerState) consumeDeferredHeaderValidation(
 	point ocommon.Point,
 ) bool {
+	_, ok := ls.takeDeferredHeaderValidation(point)
+	return ok
+}
+
+// takeDeferredHeaderValidation removes point's deferred marker and returns the
+// connection that supplied its block.
+func (ls *LedgerState) takeDeferredHeaderValidation(
+	point ocommon.Point,
+) (ouroboros.ConnectionId, bool) {
 	ls.deferredHeaderValidationMu.Lock()
 	defer ls.deferredHeaderValidationMu.Unlock()
 	key := headerValidationPointKey(point)
-	if _, ok := ls.deferredHeaderValidation[key]; !ok {
-		return false
+	source, ok := ls.deferredHeaderValidation[key]
+	if !ok {
+		return ouroboros.ConnectionId{}, false
 	}
 	delete(ls.deferredHeaderValidation, key)
-	return true
+	return source, true
 }
 
 // evictStaleDeferredHeadersLocked drops deferred-header entries that are
@@ -779,12 +951,30 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			err,
 		)
 	}
-	if len(keys) == 0 {
-		return nil
+	floorValue, err := ls.db.GetSyncState(
+		deferredHeaderValidationFloorSyncStateKey,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("read deferred header floor: %w", err)
+	}
+	if floorValue != "" {
+		floor, err := strconv.ParseUint(floorValue, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse deferred header floor: %w", err)
+		}
+		ls.deferredHeaderValidationMu.Lock()
+		ls.deferredHeaderValidationFloor = max(
+			ls.deferredHeaderValidationFloor,
+			floor,
+		)
+		ls.deferredHeaderValidationMu.Unlock()
 	}
 	ls.deferredHeaderValidationMu.Lock()
-	if ls.deferredHeaderValidation == nil {
-		ls.deferredHeaderValidation = make(map[string]struct{}, len(keys))
+	if len(keys) > 0 && ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(
+			map[string]ouroboros.ConnectionId, len(keys),
+		)
 	}
 	restored := 0
 	for _, syncKey := range keys {
@@ -795,7 +985,9 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 		if mapKey == "" || mapKey == syncKey {
 			continue
 		}
-		ls.deferredHeaderValidation[mapKey] = struct{}{}
+		// A restored marker has no known source: connection identifiers do
+		// not survive a restart.
+		ls.deferredHeaderValidation[mapKey] = ouroboros.ConnectionId{}
 		restored++
 	}
 	ls.deferredHeaderValidationMu.Unlock()
@@ -806,7 +998,7 @@ func (ls *LedgerState) repopulateDeferredHeaderValidation() error {
 			"component", "ledger",
 		)
 	}
-	return nil
+	return ls.boundDeferredHeaderValidation()
 }
 
 func (ls *LedgerState) persistDeferredHeaderValidation(
@@ -845,22 +1037,30 @@ func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
 func (ls *LedgerState) deferredHeaderValidationRequired(
 	point ocommon.Point,
 	txn *database.Txn,
-) (bool, error) {
-	required := ls.consumeDeferredHeaderValidation(point)
+) (bool, ouroboros.ConnectionId, error) {
+	source, required := ls.takeDeferredHeaderValidation(point)
+	ls.deferredHeaderValidationMu.Lock()
+	belowFloor := point.Slot < ls.deferredHeaderValidationFloor
+	ls.deferredHeaderValidationMu.Unlock()
+	// Below the floor the marker may have been evicted. Mithril-covered slots
+	// were never verified at admission and have no nonce to verify against.
+	required = required || (belowFloor && !ls.slotCoveredByMithril(point.Slot))
 	if ls.db == nil || ls.db.Metadata() == nil {
-		return required, nil
+		return required, source, nil
 	}
 	value, err := ls.db.GetSyncState(
 		deferredHeaderValidationSyncStateKey(point),
 		txn,
 	)
 	if err != nil {
-		return false, fmt.Errorf(
+		return false, source, fmt.Errorf(
 			"read deferred header validation marker: %w",
 			err,
 		)
 	}
-	return required || value == deferredHeaderValidationSyncStateValue, nil
+	return required || value == deferredHeaderValidationSyncStateValue,
+		source,
+		nil
 }
 
 func (ls *LedgerState) verifyDeferredBlockHeaderState(
@@ -868,14 +1068,17 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 	point ocommon.Point,
 	block gledger.Block,
 ) error {
-	required, err := ls.deferredHeaderValidationRequired(point, txn)
+	required, source, err := ls.deferredHeaderValidationRequired(point, txn)
 	if err != nil {
 		return err
 	}
 	if !required {
 		return nil
 	}
-	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
+	// Admission deferred this header, so its VRF, KES and operational
+	// certificate signatures were never checked; run the full path before
+	// any block mutation. A nonce that is still unavailable fails closed.
+	if err := ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false); err != nil {
 		// Typed so the pipeline can rewind past this block instead of
 		// restarting onto it forever: the block is already persisted, so
 		// this failure is deterministic rather than transient. The block is
@@ -887,6 +1090,7 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 				point.Slot,
 				err,
 			),
+			Source: source,
 		}
 	}
 	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
@@ -1146,6 +1350,7 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if !ok {
 		return
 	}
+	ls.clearChainsyncResyncCoalesce(e.ConnectionId)
 	// This handler discards the header queue when the dead connection owned
 	// the header pipeline, which queues a chain.header invalidation on the
 	// chain-level sequencer. Register the drain before the mutexes are taken
@@ -2202,10 +2407,13 @@ func (ls *LedgerState) requestChainsyncResync(
 	pending *pendingPublishes,
 ) {
 	ls.headerMismatchCount = 0
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.bufferedHeaderMutex.Unlock()
+	if ls.coalesceChainsyncResync(connId, reason) {
+		return
+	}
 	pending.add(
 		ls.config.EventBus,
 		event.ChainsyncResyncEventType,
@@ -2217,6 +2425,68 @@ func (ls *LedgerState) requestChainsyncResync(
 			},
 		),
 	)
+}
+
+// coalesceChainsyncResync reports whether a resync request for connId repeats
+// one already published within chainsyncResyncCoalesceWindow. A single
+// divergence delivers many headers that each fail the same way, and the
+// subscriber closes the connection and denies the peer once per request, so
+// only the first request of an episode is published.
+func (ls *LedgerState) coalesceChainsyncResync(
+	connId ouroboros.ConnectionId,
+	reason string,
+) bool {
+	key := connIdKey(connId)
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	ls.resyncCoalesceMutex.Lock()
+	defer ls.resyncCoalesceMutex.Unlock()
+	if rec, ok := ls.resyncCoalesce[key]; ok &&
+		now.Sub(rec.at) < chainsyncResyncCoalesceWindow {
+		rec.suppressed++
+		if rec.suppressed == 1 {
+			ls.config.Logger.Info(
+				"coalescing repeated chainsync resync requests",
+				"component", "ledger",
+				"connection_id", key,
+				"reason", reason,
+			)
+		}
+		return true
+	}
+	for k, rec := range ls.resyncCoalesce {
+		if now.Sub(rec.at) < chainsyncResyncCoalesceWindow {
+			continue
+		}
+		if rec.suppressed > 0 {
+			ls.config.Logger.Info(
+				"coalesced repeated chainsync resync requests",
+				"component", "ledger",
+				"connection_id", k,
+				"coalesced", rec.suppressed,
+			)
+		}
+		delete(ls.resyncCoalesce, k)
+	}
+	if ls.resyncCoalesce == nil {
+		ls.resyncCoalesce = make(map[string]*resyncCoalesceRecord)
+	}
+	ls.resyncCoalesce[key] = &resyncCoalesceRecord{at: now}
+	return false
+}
+
+func (ls *LedgerState) clearChainsyncResyncCoalesce(
+	connId ouroboros.ConnectionId,
+) {
+	key := connIdKey(connId)
+	if key == "" {
+		return
+	}
+	ls.resyncCoalesceMutex.Lock()
+	delete(ls.resyncCoalesce, key)
+	ls.resyncCoalesceMutex.Unlock()
 }
 
 func (ls *LedgerState) staleSelectedOwnerWouldBufferHeader(
@@ -2557,6 +2827,99 @@ func (ls *LedgerState) handleMithrilBoundaryRollback(
 	return nil
 }
 
+// recordRollback appends a rollback to the loop-detection history, prunes
+// entries older than rollbackLoopWindow, and returns how many records in the
+// window name this exact point from connKey. Different peers can legitimately
+// converge on the same rollback point during chain selection, so only repeats
+// from the same connection count.
+func (ls *LedgerState) recordRollback(
+	connKey string,
+	point ocommon.Point,
+	now time.Time,
+) int {
+	if ls.rollbackCounts == nil && len(ls.rollbackHistory) > 0 {
+		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
+		for _, r := range ls.rollbackHistory {
+			key := rollbackCountKey{
+				connKey: r.connKey,
+				slot:    r.point.Slot,
+				hash:    string(r.point.Hash),
+			}
+			ls.rollbackCounts[key] = addRollbackOccurrence(
+				ls.rollbackCounts[key],
+				r.timestamp,
+			)
+		}
+	}
+	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
+		point: ocommon.Point{
+			Slot: point.Slot,
+			Hash: append([]byte(nil), point.Hash...),
+		},
+		connKey:   connKey,
+		timestamp: now,
+	})
+	cutoff := now.Add(-rollbackLoopWindow)
+	pruned := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if !r.timestamp.Before(cutoff) {
+			pruned = append(pruned, r)
+		}
+	}
+	if len(pruned) > maxRollbackHistory {
+		pruned = pruned[len(pruned)-maxRollbackHistory:]
+	}
+	ls.rollbackHistory = pruned
+	for key, record := range ls.rollbackCounts {
+		if !record.second.IsZero() && record.second.Before(cutoff) {
+			record = rollbackCountRecord{}
+		} else if !record.first.IsZero() && record.first.Before(cutoff) {
+			record.first = record.second
+			record.second = time.Time{}
+		}
+		if record.first.IsZero() {
+			delete(ls.rollbackCounts, key)
+		} else {
+			ls.rollbackCounts[key] = record
+		}
+	}
+	if ls.rollbackCounts == nil {
+		ls.rollbackCounts = make(map[rollbackCountKey]rollbackCountRecord)
+	}
+	key := rollbackCountKey{
+		connKey: connKey,
+		slot:    point.Slot,
+		hash:    string(point.Hash),
+	}
+	record := addRollbackOccurrence(ls.rollbackCounts[key], now)
+	ls.rollbackCounts[key] = record
+	if record.second.IsZero() {
+		return 1
+	}
+	return 2
+}
+
+func addRollbackOccurrence(
+	record rollbackCountRecord,
+	now time.Time,
+) rollbackCountRecord {
+	switch {
+	case record.first.IsZero():
+		record.first = now
+	case record.second.IsZero():
+		record.second = now
+	default:
+		record.first = record.second
+		record.second = now
+	}
+	return record
+}
+
+func (ls *LedgerState) clearRollbackHistory() {
+	ls.rollbackHistory = nil
+	ls.rollbackCounts = nil
+}
+
 func (ls *LedgerState) handleEventChainsyncRollback(
 	e ChainsyncEvent,
 	pending *pendingPublishes,
@@ -2601,38 +2964,30 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 		}
 	}
 
+	// A rollback to the current tip is a no-op — the peer's
+	// FindIntersect resolved to the same point we already sit at.
+	// Skip the rollback entirely to avoid publishing a spurious
+	// "local ledger rollback" resync event that would close all
+	// connections and create a reconnect loop. This runs before the
+	// loop-detection history is touched so a peer repeating it costs
+	// constant work and leaves no record behind.
+	localTip := ls.chain.HeaderTip()
+	if e.Point.Slot == localTip.Point.Slot &&
+		bytes.Equal(e.Point.Hash, localTip.Point.Hash) {
+		ls.config.Logger.Debug(
+			"rollback to current tip is no-op, skipping",
+			"component", "ledger",
+			"slot", e.Point.Slot,
+			"connection_id", e.ConnectionId.String(),
+		)
+		return nil
+	}
+
 	// Rollback loop detection: track recent rollbacks and skip if
 	// the same peer repeats the same rollback point too frequently
 	// within the detection window.
-	now := time.Now()
 	connKey := connIdKey(e.ConnectionId)
-	ls.rollbackHistory = append(ls.rollbackHistory, rollbackRecord{
-		point: ocommon.Point{
-			Slot: e.Point.Slot,
-			Hash: append([]byte(nil), e.Point.Hash...),
-		},
-		connKey:   connKey,
-		timestamp: now,
-	})
-	// Prune entries older than the detection window
-	cutoff := now.Add(-rollbackLoopWindow)
-	pruned := ls.rollbackHistory[:0]
-	for _, r := range ls.rollbackHistory {
-		if !r.timestamp.Before(cutoff) {
-			pruned = append(pruned, r)
-		}
-	}
-	ls.rollbackHistory = pruned
-	// Count repeated rollbacks to this exact point from the same
-	// connection. Different peers can legitimately converge on the
-	// same rollback point during chain selection, and those rollbacks
-	// must not be suppressed.
-	var slotCount int
-	for _, r := range ls.rollbackHistory {
-		if r.connKey == connKey && pointMatches(r.point, e.Point) {
-			slotCount++
-		}
-	}
+	slotCount := ls.recordRollback(connKey, e.Point, time.Now())
 	if slotCount >= rollbackLoopThreshold {
 		// Exempt rollbacks to slots where we forged a block — fork
 		// resolution on our own block is normal Ouroboros behavior
@@ -2704,23 +3059,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(
 			)
 			return ErrRollbackLoopDetected
 		}
-	}
-
-	// A rollback to the current tip is a no-op — the peer's
-	// FindIntersect resolved to the same point we already sit at.
-	// Skip the rollback entirely to avoid publishing a spurious
-	// "local ledger rollback" resync event that would close all
-	// connections and create a reconnect loop.
-	localTip := ls.chain.HeaderTip()
-	if e.Point.Slot == localTip.Point.Slot &&
-		bytes.Equal(e.Point.Hash, localTip.Point.Hash) {
-		ls.config.Logger.Debug(
-			"rollback to current tip is no-op, skipping",
-			"component", "ledger",
-			"slot", e.Point.Slot,
-			"connection_id", e.ConnectionId.String(),
-		)
-		return nil
 	}
 
 	// A rollback point ahead of our local tip is invalid for the
@@ -3015,9 +3353,6 @@ func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
 //
 // Callers must hold chainsyncMutex.
 func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
-	if len(ls.rollbackHistory) == 0 {
-		return
-	}
 	filtered := ls.rollbackHistory[:0]
 	for _, r := range ls.rollbackHistory {
 		if pointMatches(r.point, point) {
@@ -3026,6 +3361,11 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 		filtered = append(filtered, r)
 	}
 	ls.rollbackHistory = filtered
+	for key := range ls.rollbackCounts {
+		if key.slot == point.Slot && key.hash == string(point.Hash) {
+			delete(ls.rollbackCounts, key)
+		}
+	}
 }
 
 // resetChainsyncResyncState clears chainsync-local recovery state before a
@@ -3035,7 +3375,7 @@ func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
 // Callers must hold chainsyncMutex before invoking this method to avoid races
 // with other chainsync operations.
 func (ls *LedgerState) resetChainsyncResyncState() {
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	ls.headerMismatchCount = 0
 	ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -4291,7 +4631,7 @@ func (ls *LedgerState) tryResolveFork(
 			}
 		}
 		ls.headerMismatchCount = 0
-		ls.rollbackHistory = nil
+		ls.clearRollbackHistory()
 		if ls.config.BlockfetchRequestRangeFunc != nil &&
 			ls.chain.HeaderCount() > 0 {
 			ls.chainsyncBlockfetchMutex.Lock()
@@ -4339,7 +4679,7 @@ func (ls *LedgerState) tryResolveFork(
 				e.ConnectionId.String(),
 			)
 			ls.headerMismatchCount = 0
-			ls.rollbackHistory = nil
+			ls.clearRollbackHistory()
 			ls.requestChainsyncResync(
 				e.ConnectionId,
 				event.ChainsyncResyncReasonRollbackNotFound,
@@ -4393,7 +4733,7 @@ func (ls *LedgerState) tryResolveFork(
 			// Reset mismatch state so the fallback path in the
 			// caller does not fire a duplicate resync event.
 			ls.headerMismatchCount = 0
-			ls.rollbackHistory = nil
+			ls.clearRollbackHistory()
 			pending.add(
 				ls.config.EventBus,
 				event.ChainsyncResyncEventType,
@@ -4460,7 +4800,7 @@ func (ls *LedgerState) tryResolveFork(
 		}
 	}
 	ls.headerMismatchCount = 0
-	ls.rollbackHistory = nil
+	ls.clearRollbackHistory()
 	if ls.config.BlockfetchRequestRangeFunc != nil &&
 		ls.chain.HeaderCount() > 0 {
 		ls.chainsyncBlockfetchMutex.Lock()
@@ -4475,6 +4815,54 @@ func (ls *LedgerState) tryResolveFork(
 		ls.chainsyncBlockfetchMutex.Unlock()
 	}
 	return true, nil
+}
+
+// resetBatchDeliveryLocked clears the per-batch delivery measurements for a
+// new batch.
+func (ls *LedgerState) resetBatchDeliveryLocked() {
+	ls.batchBlocksReceived = 0
+	ls.batchFirstBlockAt = time.Time{}
+	ls.batchLastBlockAt = time.Time{}
+	ls.batchStreamBytes = 0
+	ls.batchDeliveryConnId = ouroboros.ConnectionId{}
+	ls.batchDeliveryMixed = false
+}
+
+// noteBatchBlockArrivalLocked counts an accepted block of the given size
+// toward the current batch. The first block only starts the clock: its
+// arrival time is the batch's latency, not its transfer rate.
+func (ls *LedgerState) noteBatchBlockArrivalLocked(
+	connId ouroboros.ConnectionId,
+	size int,
+) {
+	now := time.Now()
+	if ls.batchBlocksReceived == 0 {
+		ls.batchFirstBlockAt = now
+		ls.batchDeliveryConnId = connId
+	} else {
+		if !sameConnectionId(ls.batchDeliveryConnId, connId) {
+			ls.batchDeliveryMixed = true
+		}
+		ls.batchStreamBytes += uint64(size) //nolint:gosec // len is non-negative
+		ls.batchLastBlockAt = now
+	}
+	ls.batchBlocksReceived++
+}
+
+// recordBatchDeliveryLocked reports the finished batch's delivery rate for
+// peer selection. A batch of one block has no stream to measure.
+func (ls *LedgerState) recordBatchDeliveryLocked(connId ouroboros.ConnectionId) {
+	if ls.config.RecordBlockfetchThroughputFunc == nil ||
+		ls.batchBlocksReceived < 2 ||
+		ls.batchDeliveryMixed ||
+		!sameConnectionId(ls.batchDeliveryConnId, connId) {
+		return
+	}
+	ls.config.RecordBlockfetchThroughputFunc(
+		connId,
+		ls.batchStreamBytes,
+		ls.batchLastBlockAt.Sub(ls.batchFirstBlockAt),
+	)
 }
 
 func (ls *LedgerState) handleEventBlockfetchBlockDeferredWhileLocked(
@@ -4558,11 +4946,28 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 			blockStageHeaderVerify,
 			time.Since(headerVerifyStart),
 		)
+		if verifyErr == nil && ls.config.BlockPipelineValidateEnabled {
+			ls.markAdmissionVerified(e.Point)
+		}
 		if verifyErr != nil {
 			if IsHeaderVerificationDeferred(verifyErr) {
-				ls.markDeferredHeaderValidation(e.Point)
+				ls.markDeferredHeaderValidationFrom(e.Point, e.ConnectionId)
 				persist := func() error {
-					return ls.persistDeferredHeaderValidation(e.Point, nil)
+					if err := ls.persistDeferredHeaderValidation(
+						e.Point, nil,
+					); err != nil {
+						return err
+					}
+					// Bounding is housekeeping: a failure leaves the set
+					// larger than the cap, never a block unverified.
+					if err := ls.boundDeferredHeaderValidation(); err != nil {
+						ls.config.Logger.Warn(
+							"failed to bound deferred header markers",
+							"component", "ledger",
+							"error", err,
+						)
+					}
+					return nil
 				}
 				var persistErr error
 				if blockfetchMutexHeld {
@@ -4609,7 +5014,7 @@ func (ls *LedgerState) handleEventBlockfetchBlockDeferredInternal(
 		}
 	}
 	ls.pendingBlockfetchEvents = append(ls.pendingBlockfetchEvents, e)
-	ls.batchBlocksReceived++
+	ls.noteBatchBlockArrivalLocked(e.ConnectionId, len(e.RawBlock))
 	// Range progress is noted where the block actually extends the chain,
 	// not here. Arrival alone is not progress: a block from a batch a
 	// rollback has superseded is discarded unapplied, and one that no
@@ -5112,10 +5517,10 @@ func (ls *LedgerState) noteBlockAcceptedFromConn(
 //
 // Callers that already own the selection (handoffPipelineOnSwitchLocked,
 // handleEventChainsyncBlockHeaderWithPending, and the recovery replay, each of
-// which assigns it first) may call startQueuedBlockfetchLocked directly. Note
-// that selectInitialBlockfetchConn is the identity function today, so that path
-// starts on the connection it just selected; if it ever returns a different
-// connection it needs this helper too.
+// which assigns it first) may call startQueuedBlockfetchLocked directly. The
+// header-driven start may begin on a connection other than the selected one;
+// the selection is deliberately left on the header peer there, because the
+// next batch asks selectInitialBlockfetchConn again.
 //
 // One current caller gains nothing from it: the timeout handler's alternate
 // connection comes from nextBlockfetchConnIdExcept, which can only return a
@@ -5208,7 +5613,7 @@ func (ls *LedgerState) startQueuedBlockfetchLockedWithWaitSignal(
 	ls.shadowBlockfetchRequestDone = nil
 	ls.shadowBlockfetchConnId = ouroboros.ConnectionId{}
 	ls.shadowBlockReceivedHashes = nil
-	ls.batchBlocksReceived = 0
+	ls.resetBatchDeliveryLocked()
 	ls.batchBlocksApplied = 0
 	ls.blockfetchBatchChainGeneration = ls.chainRollbackGeneration.Load()
 	ls.activeBlockfetchStart = time.Now()
@@ -7308,6 +7713,16 @@ func (ls *LedgerState) processEpochRollover(
 	if ls.config.CardanoNodeConfig != nil {
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
+	// applyEpochDonations credits these after governance; RATIFY still
+	// counts them, as Conway's EPOCH rule does before seeding RATIFY.
+	pendingDonations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		currentEpoch.EpochId, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"sum donations for epoch %d: %w", currentEpoch.EpochId, err,
+		)
+	}
 	var govOut *governance.EpochOutput
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "governance", func() error {
@@ -7327,6 +7742,7 @@ func (ls *LedgerState) processEpochRollover(
 				CurrentBoundarySPOState:  currentBoundarySPOState,
 				DeferRatification:        true,
 				BoundarySPOStateDeferred: snapDeferred,
+				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
 		},
@@ -7385,9 +7801,9 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
-	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
-	// withdrawal is checked against the pre-donation treasury and the donation
-	// is reflected for subsequent epochs' accounting.
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
+	// enacted withdrawal is checked against the pre-donation treasury, while
+	// the RATIFY pass already counted them through PendingTreasuryDonations.
 	if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "donations", func() error {
 			return ls.applyEpochDonations(
@@ -7940,13 +8356,40 @@ func (ls *LedgerState) checkSlotBattle(
 	}
 }
 
-// selectInitialBlockfetchConn starts blockfetch on the same connection that
-// delivered the header. This keeps header and block ingress aligned and leaves
-// room for future selection logic if a different connection becomes preferable.
+// selectInitialBlockfetchConn picks the connection to fetch the queued range
+// from. The connection that delivered the header says only where the peer sits
+// in the diffusion graph, so the selection policy, when wired, chooses among
+// the peers that announced the range by measured delivery. Without a policy,
+// or when none of those peers has anything to recommend, the header peer is
+// used. It runs for every batch, so a better peer takes over at the next batch
+// boundary while the batch in flight finishes where it started.
 func (ls *LedgerState) selectInitialBlockfetchConn(
 	headerConnId ouroboros.ConnectionId,
 ) ouroboros.ConnectionId {
-	return headerConnId
+	return ls.selectBlockfetchConnForWindow(headerConnId, 0)
+}
+
+// selectBlockfetchConnForWindow asks the selection policy for the queued
+// window that starts skip headers past the queue head, cut exactly as a
+// dispatch cuts it. The policy is asked about the window's last header, since
+// a peer that announced it holds every block before it on the same chain while
+// a peer that announced only the first may have forked away after it.
+func (ls *LedgerState) selectBlockfetchConnForWindow(
+	current ouroboros.ConnectionId,
+	skip int,
+) ouroboros.ConnectionId {
+	if ls.config.SelectBlockfetchPeerFunc == nil {
+		return current
+	}
+	_, end, available := ls.chain.HeaderRangeAfterBytes(
+		skip,
+		BlockfetchBatchSize,
+		BlockfetchMaxRangeBytes,
+	)
+	if available == 0 || len(end.Hash) == 0 {
+		return current
+	}
+	return ls.config.SelectBlockfetchPeerFunc(current, end)
 }
 
 func (ls *LedgerState) selectRetryBlockfetchConn(
@@ -8578,6 +9021,9 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 			"shadow_connection_id", e.ConnectionId.String(),
 		)
 	}
+	if e.RangeErr == nil {
+		ls.recordBatchDeliveryLocked(e.ConnectionId)
+	}
 	// Stop the blockfetch timeout timer and invalidate any pending callbacks
 	if ls.chainsyncBlockfetchTimeoutTimer != nil {
 		ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -8736,7 +9182,7 @@ func (ls *LedgerState) handleEventBlockfetchBatchDone(
 	// subscriber remains available for the next batch's block and BatchDone
 	// events.
 	ls.startQueuedBlockfetchFromEventLocked(
-		nextConnId,
+		ls.selectInitialBlockfetchConn(nextConnId),
 		nextConnId,
 		"blockfetch continuation failed",
 	)
