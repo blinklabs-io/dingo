@@ -141,10 +141,10 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	if o.leiosDatabase() == nil {
 		return
 	}
-	o.leiosPersistLifecycleMu.Lock()
+	o.leiosPersistLifecycleMu.RLock()
+	defer o.leiosPersistLifecycleMu.RUnlock()
 	o.leiosPersistOnce.Do(o.startLeiosPersistWriter)
 	signal := o.leiosPersistSignal
-	o.leiosPersistLifecycleMu.Unlock()
 	// The caller's transaction slices, not a copy: they are only measured
 	// here, and are cloned below if and only if the job is admitted.
 	var txsRaw []cbor.RawMessage
@@ -444,18 +444,20 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 // PauseLeiosPersistWriterForLiveLifecycleOp -- can react instead of assuming
 // a timeout means the writer is gone.
 func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
-	// The lock covers only the snapshot and the close, never the wait, so
-	// enqueues are not held up behind a slow drain.
 	o.leiosPersistLifecycleMu.Lock()
+	defer o.leiosPersistLifecycleMu.Unlock()
+	return o.stopLeiosPersistWriterLocked(drainTimeout)
+}
+
+// The caller holds leiosPersistLifecycleMu until drain and any reset complete.
+func (o *Ouroboros) stopLeiosPersistWriterLocked(drainTimeout time.Duration) bool {
 	if !o.leiosPersistStarted.Load() {
-		o.leiosPersistLifecycleMu.Unlock()
 		return true
 	}
 	// Always close the stop channel so the writer observes the stop and exits,
 	// even if we stop waiting for it below.
 	o.leiosPersistStopOnce.Do(func() { close(o.leiosPersistStop) })
 	done := o.leiosPersistDone
-	o.leiosPersistLifecycleMu.Unlock()
 	timer := time.NewTimer(drainTimeout)
 	defer timer.Stop()
 	select {
@@ -493,22 +495,11 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // eventual drain would silently write pre-operation data into the freshly
 // restored/truncated store.
 //
-// Must be called late in the quiesce sequence, after inbound network
-// traffic has actually stopped (connManager.Stop). leiosPersistLifecycleMu
-// makes the reset memory-safe against a concurrent enqueue, but an enqueue
-// whose byte reservation spans the pause and a lazy restart would still be
-// accounted against the restarted writer's freshly zeroed counters, so the
-// reset relies on no enqueue being in flight. This is not merely a
-// documented call-order convention:
-// node_lifecycle.go's quiesceForLiveLifecycleOp escalates a connManager.Stop
-// failure to errStorageDrainUnconfirmed (the same as this method's own
-// unconfirmed-drain error below), specifically because connManager.Stop
-// returning an error means it could not confirm every connection/listener
-// goroutine actually exited -- i.e. this method's precondition may not
-// hold. That escalation makes the caller take the full-supervised-restart
-// path (n.cancel()) instead of ever reaching reinitializeAndResume, so a
-// straggling connection's Leios fetch can no longer race this reset in
-// practice, not just "shouldn't" by convention.
+// Call after inbound traffic stops so subsequent enqueues cannot restart the
+// writer while storage is replaced. The lifecycle lock waits for complete
+// enqueues and excludes new reservations throughout drain and reset. If
+// connection shutdown is unconfirmed, the caller must use a supervised restart
+// rather than replacing storage while traffic may still access it.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
 // the drain wait timed out: the old writer goroutine may still be running
@@ -522,11 +513,11 @@ func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) bool {
 // reinitializeAndResume in that case; it must escalate to a supervised
 // restart instead, the same as errStorageDrainUnconfirmed.
 func (o *Ouroboros) PauseLeiosPersistWriterForLiveLifecycleOp() error {
-	if !o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout) {
-		return ErrLeiosPersistDrainUnconfirmed
-	}
 	o.leiosPersistLifecycleMu.Lock()
 	defer o.leiosPersistLifecycleMu.Unlock()
+	if !o.stopLeiosPersistWriterLocked(leiosPersistShutdownDrainTimeout) {
+		return ErrLeiosPersistDrainUnconfirmed
+	}
 	o.leiosPersistOnce = sync.Once{}
 	o.leiosPersistStopOnce = sync.Once{}
 	o.leiosPersistStarted.Store(false)

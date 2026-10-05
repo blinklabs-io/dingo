@@ -296,10 +296,9 @@ type Ouroboros struct {
 	// elides the backfiller's duplicate manifest write, while two live
 	// occurrences of the same hash at different slots persist independently.
 	// Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
-	// leiosPersistLifecycleMu serializes starting, stopping and resetting
-	// the writer with the enqueues that start it lazily: it guards the three
-	// fields below and the channel fields assigned alongside them.
-	leiosPersistLifecycleMu sync.Mutex
+	// leiosPersistLifecycleMu keeps each enqueue reservation, copy and signal
+	// in one writer generation while stop and reset hold the exclusive lock.
+	leiosPersistLifecycleMu sync.RWMutex
 	leiosPersistOnce        sync.Once
 	leiosPersistStopOnce    sync.Once
 	leiosPersistStarted     atomic.Bool

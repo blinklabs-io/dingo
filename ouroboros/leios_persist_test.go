@@ -446,6 +446,64 @@ func TestLeiosPersistWriterRestartResetsQueueAccounting(t *testing.T) {
 	require.Equal(t, []byte(nextRaw), manifest)
 }
 
+func TestLeiosPersistPauseWaitsForReservedEnqueue(t *testing.T) {
+	t.Parallel()
+	o := newTestOuroborosWithLeiosDB(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	o.leiosPersistAfterReserve = func() {
+		close(entered)
+		<-release
+	}
+	point, raw, data, _ := leiosPersistTestEntry(t, 71, 4, 512)
+	enqueued := make(chan struct{})
+	go func() {
+		o.enqueueLeiosPersist(point, raw, data)
+		close(enqueued)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue did not reserve")
+	}
+	locked := o.leiosPersistLifecycleMu.TryLock()
+	if locked {
+		o.leiosPersistLifecycleMu.Unlock()
+	}
+	require.False(t, locked, "a reserved enqueue must prevent lifecycle reset")
+	paused := make(chan error, 1)
+	go func() { paused <- o.PauseLeiosPersistWriterForLiveLifecycleOp() }()
+	unblock()
+	select {
+	case <-enqueued:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enqueue did not finish")
+	}
+	select {
+	case err := <-paused:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("pause did not finish")
+	}
+	queued, bytes, reserved := leiosPersistQueueState(o)
+	require.Zero(t, queued)
+	require.Zero(t, bytes)
+	require.Zero(t, reserved)
+	manifest, err := o.leiosDatabase().GetLeiosEBManifest(point.Hash, point.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(raw), manifest)
+	o.leiosPersistAfterReserve = nil
+	nextPoint, nextRaw, nextData, _ := leiosPersistTestEntry(t, 72, 4, 512)
+	o.enqueueLeiosPersist(nextPoint, nextRaw, nextData)
+	o.StopLeiosPersistWriter()
+	manifest, err = o.leiosDatabase().GetLeiosEBManifest(nextPoint.Hash, nextPoint.Slot)
+	require.NoError(t, err)
+	require.Equal(t, []byte(nextRaw), manifest)
+}
+
 // A panic between the reservation and the payload copy (the allocation-failure
 // window) must give the reservation back. A leaked one is permanent queue
 // capacity lost to nothing.
