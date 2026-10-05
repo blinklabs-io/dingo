@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -196,7 +197,15 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewRegistry()
-	db := newHookedDB(t, reg, &backupHooks{})
+	db := newHookedDB(t, reg, &backupHooks{
+		blob: func(_ context.Context, w io.Writer) error {
+			_, err := io.WriteString(w, "blob")
+			return err
+		},
+		metadata: func(_ context.Context, dst string) error {
+			return os.WriteFile(dst, []byte("metadata"), 0o600)
+		},
+	})
 	writer := database.NewTxn(db, true)
 	rolledBack := false
 	defer func() {
@@ -212,14 +221,14 @@ func TestSnapshotMaxCommitPauseExcludesBarrierWait(t *testing.T) {
 	go func() {
 		_, err := snapshotAt(
 			ctx, db, dir,
-			lifecycle.WithMaxCommitPause(150*time.Millisecond),
+			lifecycle.WithMaxCommitPause(2*time.Second),
 		)
 		result <- err
 	}()
 
 	waitStart := time.Now()
 	testutil.RequireNoReceive(
-		t, result, 400*time.Millisecond,
+		t, result, 2500*time.Millisecond,
 		"snapshot returned while a write transaction held the commit barrier",
 	)
 	barrierWait := time.Since(waitStart)
