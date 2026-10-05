@@ -7449,3 +7449,35 @@ func TestIsFirstOnHeaderChain(t *testing.T) {
 		}
 	})
 }
+
+// SetLedger can run again while the node is serving, so readiness checks
+// must synchronize with it.
+func TestSecurityParamConfiguredConcurrentWithSetLedger(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= 200; i++ {
+			if err := cm.SetLedger(
+				&mockLedgerState{securityParam: i},
+			); err != nil {
+				t.Errorf("SetLedger(%d): %v", i, err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range 200 {
+			_ = cm.SecurityParamConfigured()
+		}
+	}()
+	wg.Wait()
+	if !cm.SecurityParamConfigured() {
+		t.Fatal("expected security parameter to be configured")
+	}
+}
