@@ -444,12 +444,14 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 
 func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
 	release := make(chan struct{})
 	finished := make(chan struct{})
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
+	// The deadline starts after setup: opening the database under a loaded
+	// -race run can outlast it, leaving the read hook never entered.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	hooks.read = func() error {
 		select {
 		case <-release:
