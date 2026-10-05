@@ -2604,7 +2604,10 @@ redirect that changes scheme or host so a redirect cannot forward the
 credential, including after a custom redirect callback. Header names reserved
 for transport or sync bookkeeping (`Host`, `Content-Length`, `User-Agent`,
 `Accept`, `If-None-Match`) are rejected. Configuration snapshots copy the
-credential map. A public registry needs none.
+credential map. `DINGO_TOKEN_REGISTRY_HEADER_SECRETS` is parsed by
+`internal/config` rather than envconfig, whose parse errors quote the raw
+value; a malformed item is reported by position only. A public registry needs
+none.
 
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup

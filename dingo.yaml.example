@@ -360,7 +360,7 @@
   # logged configuration and are not sent to another origin after a redirect.
   # There is no CLI flag, since arguments are visible in the process list.
   # Can be overridden with DINGO_TOKEN_REGISTRY_HEADER_SECRETS
-  # (comma-separated name:value pairs)
+  # (comma-separated name:value pairs, split at the first colon)
   # headerSecrets:
   #   Authorization: "Bearer <token>"
   # Cap on the compressed registry download. 0 uses the default (768MB).

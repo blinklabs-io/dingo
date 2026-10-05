@@ -1438,3 +1438,39 @@ func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
 		cfg.TokenRegistry.HeaderSecrets,
 	)
 }
+
+func TestTokenRegistryHeaderSecretsEnvironmentKeepsValuesOutOfErrors(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte("{}\n"), 0o600))
+
+	// A value may itself contain colons; only the first separates the name.
+	t.Setenv(
+		"DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		"Authorization:Basic user:pass,X-Api-Key:k:v",
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		map[string]string{
+			"Authorization": "Basic user:pass",
+			"X-Api-Key":     "k:v",
+		},
+		cfg.TokenRegistry.HeaderSecrets,
+	)
+
+	for _, value := range []string{
+		"Authorization:Basic s3cr3t,s3cr3t-without-name",
+		":s3cr3t",
+	} {
+		t.Setenv("DINGO_TOKEN_REGISTRY_HEADER_SECRETS", value)
+		_, err = LoadConfig(configFile)
+		require.Error(t, err)
+		require.Contains(
+			t, err.Error(), "DINGO_TOKEN_REGISTRY_HEADER_SECRETS",
+		)
+		require.NotContains(t, err.Error(), "s3cr3t")
+	}
+}

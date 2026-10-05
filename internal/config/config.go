@@ -459,8 +459,9 @@ type TokenRegistryConfig struct {
 	// credentials: they are redacted from rendered configuration, dropped from
 	// a redirect to another origin, and have no CLI flag, which would expose
 	// them in the process list. The environment form is comma-separated
-	// name:value pairs.
-	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS"`
+	// name:value pairs split at the first colon, so a value may contain
+	// colons but not commas.
+	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS" ignored:"true"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
 	// MaxDecompressedBytes bounds all expanded tar content.
@@ -1551,6 +1552,9 @@ func LoadConfig(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
+	if err := applyTokenRegistryHeaderSecretsEnvironment(cfg); err != nil {
+		return nil, err
+	}
 	pluginEnviron := os.Environ()
 	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
 	if err := applyAPIPortCompatibilityEnvironment(
@@ -1939,6 +1943,32 @@ func embeddedTopologyFileMissing(file string) bool {
 
 func GetTopologyConfig() *topology.TopologyConfig {
 	return globalTopologyConfig
+}
+
+// applyTokenRegistryHeaderSecretsEnvironment parses the registry header
+// secrets itself because envconfig quotes the whole raw value into its parse
+// errors, which would put the credentials in the startup error. Errors here
+// name only the variable and the item position.
+func applyTokenRegistryHeaderSecretsEnvironment(cfg *Config) error {
+	const name = "DINGO_TOKEN_REGISTRY_HEADER_SECRETS"
+	value, ok := os.LookupEnv(name)
+	if !ok {
+		return nil
+	}
+	headers := make(map[string]string)
+	if value != "" {
+		for i, item := range strings.Split(value, ",") {
+			header, secret, found := strings.Cut(item, ":")
+			if !found || header == "" {
+				return fmt.Errorf(
+					"%s item %d is not a name:value pair", name, i+1,
+				)
+			}
+			headers[header] = secret
+		}
+	}
+	cfg.TokenRegistry.HeaderSecrets = headers
+	return nil
 }
 
 func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
