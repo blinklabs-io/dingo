@@ -278,9 +278,11 @@ func babbageFeeProdBlock(
 	t.Helper()
 	const slot = uint64(10)
 	block := &babbage.BabbageBlock{
-		BlockHeader:            &babbage.BabbageBlockHeader{},
-		TransactionBodies:      []babbage.BabbageTransactionBody{tx.Body},
-		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{tx.WitnessSet},
+		BlockHeader:       &babbage.BabbageBlockHeader{},
+		TransactionBodies: []babbage.BabbageTransactionBody{tx.Body},
+		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{
+			tx.WitnessSet,
+		},
 	}
 	block.BlockHeader.Body.BlockNumber = 1
 	block.BlockHeader.Body.Slot = slot
@@ -478,7 +480,13 @@ func requireOneBatchFeePersisted(t *testing.T, c feeProdCase) {
 		if level.Hash() == c.tx.Hash() {
 			want = c.tx.Fee().Uint64()
 		}
-		require.Equal(t, types.Uint64(want), stored.Fee, "level %s", level.Hash())
+		require.Equal(
+			t,
+			types.Uint64(want),
+			stored.Fee,
+			"level %s",
+			level.Hash(),
+		)
 	}
 }
 
@@ -501,17 +509,23 @@ func TestBabbageFeeIncludesExecutionUnitsOnProductionPaths(t *testing.T) {
 		0: blockV3MachineCostModel(t, lang.LanguageVersionV1),
 	}
 	pparams := &babbage.BabbageProtocolParameters{
-		MinFeeA:              feeProdMinFeeA,
-		MinFeeB:              feeProdMinFeeB,
-		MaxBlockBodySize:     100_000,
-		MaxTxSize:            16_384,
-		MaxBlockHeaderSize:   100_000,
-		ProtocolMajor:        8,
-		AdaPerUtxoByte:       4_310,
-		CostModels:           costModels,
-		ExecutionCosts:       feeProdPrices(),
-		MaxTxExUnits:         lcommon.ExUnits{Memory: 10_000_000, Steps: 10_000_000_000},
-		MaxBlockExUnits:      lcommon.ExUnits{Memory: 50_000_000, Steps: 50_000_000_000},
+		MinFeeA:            feeProdMinFeeA,
+		MinFeeB:            feeProdMinFeeB,
+		MaxBlockBodySize:   100_000,
+		MaxTxSize:          16_384,
+		MaxBlockHeaderSize: 100_000,
+		ProtocolMajor:      8,
+		AdaPerUtxoByte:     4_310,
+		CostModels:         costModels,
+		ExecutionCosts:     feeProdPrices(),
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10_000_000,
+			Steps:  10_000_000_000,
+		},
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 50_000_000,
+			Steps:  50_000_000_000,
+		},
 		MaxValueSize:         5_000,
 		CollateralPercentage: 150,
 		MaxCollateralInputs:  3,
@@ -522,13 +536,22 @@ func TestBabbageFeeIncludesExecutionUnitsOnProductionPaths(t *testing.T) {
 		fee func(sizeFee uint64) uint64,
 	) feeProdCase {
 		fx := newFeeProdFixture(t)
-		spend := feeProdSpend{fee: 1 << 20, isValid: true, costModels: costModels}
+		spend := feeProdSpend{
+			fee:        1 << 20,
+			isValid:    true,
+			costModels: costModels,
+		}
 		if scripted {
 			script := alwaysSucceedsV1(t)
 			datum := decodeRequiredDatum(t)
 			spend.input = fx.seed(
-				t, 0xb1,
-				feeProdAddress(t, lcommon.AddressTypeScriptNone, script.Hash().Bytes()),
+				t,
+				0xb1,
+				feeProdAddress(
+					t,
+					lcommon.AddressTypeScriptNone,
+					script.Hash().Bytes(),
+				),
 				datum.Hash().Bytes(),
 			)
 			spend.collateral = fx.seed(t, 0xb2, fx.keyAddr, nil)
@@ -536,7 +559,9 @@ func TestBabbageFeeIncludesExecutionUnitsOnProductionPaths(t *testing.T) {
 		} else {
 			spend.input = fx.seed(t, 0xb1, fx.keyAddr, nil)
 		}
-		probe, err := babbage.NewBabbageTransactionFromCbor(fx.spendCbor(t, spend))
+		probe, err := babbage.NewBabbageTransactionFromCbor(
+			fx.spendCbor(t, spend),
+		)
 		require.NoError(t, err)
 		spend.fee = fee(feeProdSizeFee(t, probe))
 		txCbor := fx.spendCbor(t, spend)
@@ -648,7 +673,9 @@ func dijkstraFeeProdBatch(
 	}
 	require.Greater(t, topValue, fee)
 	tx.Body.TxInputs = conway.NewConwayTransactionInputSet(topInputs)
-	tx.Body.TxOutputs = []gdijkstra.DijkstraTransactionOutput{output(topValue - fee)}
+	tx.Body.TxOutputs = []gdijkstra.DijkstraTransactionOutput{
+		output(topValue - fee),
+	}
 	tx.Body.TxFee = fee
 	tx.Body.TxCollateral = cbor.NewSetType(
 		[]shelley.ShelleyTransactionInput{
@@ -718,8 +745,14 @@ func TestDijkstraBatchFeeOnProductionPaths(t *testing.T) {
 	pparams.CostModels = map[uint][]int64{
 		3: blockV3MachineCostModel(t, lang.LanguageVersionV4),
 	}
-	pparams.MaxTxExUnits = lcommon.ExUnits{Memory: 10_000_000, Steps: 10_000_000_000}
-	pparams.MaxBlockExUnits = lcommon.ExUnits{Memory: 50_000_000, Steps: 50_000_000_000}
+	pparams.MaxTxExUnits = lcommon.ExUnits{
+		Memory: 10_000_000,
+		Steps:  10_000_000_000,
+	}
+	pparams.MaxBlockExUnits = lcommon.ExUnits{
+		Memory: 50_000_000,
+		Steps:  50_000_000_000,
+	}
 	pparams.MinFeeRefScriptCostPerByte = &cbor.Rat{Rat: big.NewRat(15, 1)}
 	pparams.MaxRefScriptSizePerTx = 200 * 1024
 	pparams.MaxRefScriptSizePerBlock = 1024 * 1024
@@ -778,11 +811,14 @@ func TestDijkstraBatchFeeOnProductionPaths(t *testing.T) {
 			{"exact minimum", 0, true},
 		} {
 			for _, path := range feeProdAllPaths {
-				t.Run(shape.name+"/"+fee.name+"/"+path.name, func(t *testing.T) {
-					t.Parallel()
-					c := build(t, fee.offset)
-					requireFeeProdOutcome(t, path.run(t, c), fee.accept)
-				})
+				t.Run(
+					shape.name+"/"+fee.name+"/"+path.name,
+					func(t *testing.T) {
+						t.Parallel()
+						c := build(t, fee.offset)
+						requireFeeProdOutcome(t, path.run(t, c), fee.accept)
+					},
+				)
 			}
 		}
 	}
@@ -835,11 +871,17 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
 			Major: lcommon.ProtocolVersionPlomin,
 		},
-		AdaPerUtxoByte:             4_310,
-		CostModels:                 costModels,
-		ExecutionCosts:             feeProdPrices(),
-		MaxTxExUnits:               lcommon.ExUnits{Memory: 10_000_000, Steps: 10_000_000_000},
-		MaxBlockExUnits:            lcommon.ExUnits{Memory: 50_000_000, Steps: 50_000_000_000},
+		AdaPerUtxoByte: 4_310,
+		CostModels:     costModels,
+		ExecutionCosts: feeProdPrices(),
+		MaxTxExUnits: lcommon.ExUnits{
+			Memory: 10_000_000,
+			Steps:  10_000_000_000,
+		},
+		MaxBlockExUnits: lcommon.ExUnits{
+			Memory: 50_000_000,
+			Steps:  50_000_000_000,
+		},
 		MaxValueSize:               5_000,
 		CollateralPercentage:       150,
 		MaxCollateralInputs:        3,
@@ -850,7 +892,10 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 		MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(15, 1)},
 	}
 	keyCred := func(fx *feeProdFixture) []any {
-		return []any{uint(lcommon.CredentialTypeAddrKeyHash), fx.keyHash.Bytes()}
+		return []any{
+			uint(lcommon.CredentialTypeAddrKeyHash),
+			fx.keyHash.Bytes(),
+		}
 	}
 	variants := []conwayDepositProdVariant{
 		{
@@ -860,7 +905,9 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 			wrong:     understated,
 			extra: func(fx *feeProdFixture, amount uint64) map[uint]any {
 				return map[uint]any{4: []any{[]any{
-					uint(lcommon.CertificateTypeRegistration), keyCred(fx), amount,
+					uint(
+						lcommon.CertificateTypeRegistration,
+					), keyCred(fx), amount,
 				}}}
 			},
 		},
@@ -924,7 +971,10 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 					amount,
 					rewardAccount,
 					[]any{uint(lcommon.GovActionTypeInfo)},
-					[]any{"https://example.com", bytes.Repeat([]byte{0xab}, 32)},
+					[]any{
+						"https://example.com",
+						bytes.Repeat([]byte{0xab}, 32),
+					},
 				}}}
 			},
 			setup: func(t *testing.T, fx *feeProdFixture) {
@@ -955,8 +1005,13 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 		}
 		txCbor := fx.spendCbor(t, feeProdSpend{
 			input: fx.seed(
-				t, 0xc1,
-				feeProdAddress(t, lcommon.AddressTypeScriptNone, script.Hash().Bytes()),
+				t,
+				0xc1,
+				feeProdAddress(
+					t,
+					lcommon.AddressTypeScriptNone,
+					script.Hash().Bytes(),
+				),
 				nil,
 			),
 			collateral: fx.seed(t, 0xc2, fx.keyAddr, nil),
@@ -986,59 +1041,77 @@ func TestConwayPhase2InvalidDepositAccountingOnBlockPaths(t *testing.T) {
 	}
 	for _, v := range variants {
 		for _, path := range feeProdBlockPaths {
-			t.Run(v.name+"/isValid=false/stated amount/"+path.name, func(t *testing.T) {
-				t.Parallel()
-				err := path.run(t, build(t, v, v.wrong, false, true))
-				var notConserved shelley.ValueNotConservedUtxoError
-				require.ErrorAs(t, err, &notConserved)
-				imbalance := new(big.Int).Sub(
-					notConserved.Produced, notConserved.Consumed,
-				)
-				imbalance.Abs(imbalance)
-				// #nosec G115 -- small test amounts
-				want := big.NewInt(int64(v.wrong) - int64(v.required))
-				want.Abs(want)
-				require.Zero(t, want.Cmp(imbalance),
-					"imbalance %s, want %s", imbalance, want)
-			})
-			t.Run(v.name+"/isValid=false/required amount/"+path.name, func(t *testing.T) {
-				t.Parallel()
-				c := build(t, v, v.required, false, true)
-				require.NoError(t, path.run(t, c))
-				if path.name == feeProdForgedRevalidation.name {
-					return
-				}
-				// Only the collateral is consumed.
-				_, err := c.fx.db.UtxoByRef(
-					c.tx.Collateral()[0].Id().Bytes(), 0, nil,
-				)
-				require.ErrorIs(t, err, types.ErrUtxoNotFound)
-				_, err = c.fx.db.UtxoByRef(
-					c.tx.Inputs()[0].Id().Bytes(), 0, nil,
-				)
-				require.NoError(t, err)
-			})
-			t.Run(v.name+"/isValid=true/required amount/"+path.name, func(t *testing.T) {
-				t.Parallel()
-				require.NoError(t, path.run(t, build(t, v, v.required, true, false)))
-			})
-			t.Run(v.name+"/isValid=true/stated amount/"+path.name, func(t *testing.T) {
-				t.Parallel()
-				err := path.run(t, build(t, v, v.wrong, true, false))
-				require.ErrorAs(t, err, v.incorrect())
-			})
+			t.Run(
+				v.name+"/isValid=false/stated amount/"+path.name,
+				func(t *testing.T) {
+					t.Parallel()
+					err := path.run(t, build(t, v, v.wrong, false, true))
+					var notConserved shelley.ValueNotConservedUtxoError
+					require.ErrorAs(t, err, &notConserved)
+					imbalance := new(big.Int).Sub(
+						notConserved.Produced, notConserved.Consumed,
+					)
+					imbalance.Abs(imbalance)
+					// #nosec G115 -- small test amounts
+					want := big.NewInt(int64(v.wrong) - int64(v.required))
+					want.Abs(want)
+					require.Zero(t, want.Cmp(imbalance),
+						"imbalance %s, want %s", imbalance, want)
+				},
+			)
+			t.Run(
+				v.name+"/isValid=false/required amount/"+path.name,
+				func(t *testing.T) {
+					t.Parallel()
+					c := build(t, v, v.required, false, true)
+					require.NoError(t, path.run(t, c))
+					if path.name == feeProdForgedRevalidation.name {
+						return
+					}
+					// Only the collateral is consumed.
+					_, err := c.fx.db.UtxoByRef(
+						c.tx.Collateral()[0].Id().Bytes(), 0, nil,
+					)
+					require.ErrorIs(t, err, types.ErrUtxoNotFound)
+					_, err = c.fx.db.UtxoByRef(
+						c.tx.Inputs()[0].Id().Bytes(), 0, nil,
+					)
+					require.NoError(t, err)
+				},
+			)
+			t.Run(
+				v.name+"/isValid=true/required amount/"+path.name,
+				func(t *testing.T) {
+					t.Parallel()
+					require.NoError(
+						t,
+						path.run(t, build(t, v, v.required, true, false)),
+					)
+				},
+			)
+			t.Run(
+				v.name+"/isValid=true/stated amount/"+path.name,
+				func(t *testing.T) {
+					t.Parallel()
+					err := path.run(t, build(t, v, v.wrong, true, false))
+					require.ErrorAs(t, err, v.incorrect())
+				},
+			)
 			// The fixture script fails when evaluated, so the isValid=false
 			// cases above agree with phase 2 rather than skip it. Replay
 			// reports the mismatch as a local state recovery instead.
-			t.Run(v.name+"/isValid=true/failing script/"+path.name, func(t *testing.T) {
-				t.Parallel()
-				err := path.run(t, build(t, v, v.required, true, true))
-				require.Error(t, err)
-				if path.name != feeProdReplay.name {
-					var failed conway.PlutusScriptFailedError
-					require.ErrorAs(t, err, &failed)
-				}
-			})
+			t.Run(
+				v.name+"/isValid=true/failing script/"+path.name,
+				func(t *testing.T) {
+					t.Parallel()
+					err := path.run(t, build(t, v, v.required, true, true))
+					require.Error(t, err)
+					if path.name != feeProdReplay.name {
+						var failed conway.PlutusScriptFailedError
+						require.ErrorAs(t, err, &failed)
+					}
+				},
+			)
 		}
 	}
 }
