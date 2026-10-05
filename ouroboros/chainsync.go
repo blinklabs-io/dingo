@@ -23,7 +23,6 @@ import (
 	"io"
 	"math"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -66,18 +65,11 @@ const (
 	// a single in-bounds request is never rejected by the budget alone.
 	chainsyncFindIntersectBudgetBurst = float64(chainsyncMaxFindIntersectPoints)
 
-	// chainsyncRestartTimeout bounds how long the restart of a
-	// chainsync client can take before we give up and close the
-	// connection. Increase this for slow or congested networks.
-	chainsyncRestartTimeout = 30 * time.Second
-
 	// chainsyncDivergentPeerCooldown slows peers that repeatedly offer a
 	// rollback we cannot safely follow. This prevents full-duplex reconnects
 	// from immediately re-entering the same rollback loop.
 	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
-
-var chainsyncRestartAfter = time.After
 
 type chainsyncHeaderAdmissionFunc func(
 	context.Context,
@@ -223,12 +215,6 @@ func (o *Ouroboros) futureHeaderResyncPending(
 	o.futureHeaderResyncMu.Lock()
 	defer o.futureHeaderResyncMu.Unlock()
 	return o.futureHeaderResyncs[connId] != nil
-}
-
-func (o *Ouroboros) completeFutureHeaderResync(
-	connId ouroboros.ConnectionId,
-) {
-	o.cancelFutureHeaderResync(connId)
 }
 
 func (o *Ouroboros) cancelFutureHeaderResync(
@@ -475,29 +461,6 @@ func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 	)
 }
 
-func chainsyncResyncRequiresFreshConnection(reason string) bool {
-	switch reason {
-	case event.ChainsyncResyncReasonLocalTipPlateau,
-		event.ChainsyncResyncReasonPostPlateauRealign,
-		event.ChainsyncResyncReasonRollbackNotFound,
-		event.ChainsyncResyncReasonPersistentFork,
-		event.ChainsyncResyncReasonLiveTxValidationRecovery,
-		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
-		event.ChainsyncResyncReasonChainSwitchCursorAhead,
-		event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonPeerTipBehindMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-		event.ChainsyncResyncReasonForkResolutionExceedsK,
-		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
-		event.ChainsyncResyncReasonRollbackLoop:
-		return true
-	default:
-		return false
-	}
-}
-
 // chainsyncResyncDeniesPeer lists the re-sync reasons that also put the peer
 // in peer governance's deny list for chainsyncDivergentPeerCooldown.
 //
@@ -653,91 +616,6 @@ func (o *Ouroboros) syncChainsyncClient(
 		o.peerGov.SetPeerHotByConnId(connId)
 	}
 	return conn.ChainSync().Client.Sync(intersectPoints)
-}
-
-// RestartChainsyncClient restarts the chainsync client on an existing
-// connection without closing the TCP connection. This avoids disrupting
-// other mini-protocols (blockfetch, txsubmission, keepalive) and
-// prevents the relay's muxer from seeing unexpected bearer closures.
-//
-// The caller must stop the chainsync client first (which sends MsgDone).
-// This function then performs: Start (re-register with muxer) → Sync
-// (FindIntersect + RequestNext). The server will send RollBackward if
-// the intersection point is behind the client's current position, which
-// triggers the normal rollback handler.
-func (o *Ouroboros) RestartChainsyncClient(
-	connId ouroboros.ConnectionId,
-) error {
-	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
-	if err != nil {
-		return fmt.Errorf(
-			"build default chainsync intersect points: %w",
-			err,
-		)
-	}
-	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
-}
-
-// RestartChainsyncClientWithPoints restarts the chainsync client on an
-// existing connection and begins syncing from the specified intersect point(s).
-func (o *Ouroboros) RestartChainsyncClientWithPoints(
-	connId ouroboros.ConnectionId,
-	intersectPoints []ocommon.Point,
-) error {
-	conn := o.connManager.GetConnectionById(connId)
-	if conn == nil {
-		return fmt.Errorf("connection not found: %s", connId.String())
-	}
-	cs := conn.ChainSync()
-	if cs == nil || cs.Client == nil {
-		return fmt.Errorf(
-			"chainsync client not available: %s",
-			connId.String(),
-		)
-	}
-	// Start re-registers the protocol with the muxer (handles
-	// stopped→starting→running transition internally).
-	cs.Client.Start()
-	if err := o.syncChainsyncClient(connId, intersectPoints); err != nil {
-		return fmt.Errorf(
-			"chainsync restart failed for conn %v: %w",
-			connId, err,
-		)
-	}
-	return nil
-}
-
-func (o *Ouroboros) resyncChainsyncClientWithPointsAfterStop(
-	connId ouroboros.ConnectionId,
-	intersectPoints []ocommon.Point,
-	afterStop func(),
-) error {
-	conn := o.connManager.GetConnectionById(connId)
-	if conn == nil {
-		return fmt.Errorf("connection not found: %s", connId.String())
-	}
-	cs := conn.ChainSync()
-	if cs == nil || cs.Client == nil {
-		return fmt.Errorf(
-			"chainsync client not available: %s",
-			connId.String(),
-		)
-	}
-	if o.chainsyncState != nil {
-		// The peer is not responsible for the restart round trip.
-		o.chainsyncState.PatiencePause(connId)
-	}
-	if err := cs.Client.Stop(); err != nil {
-		return fmt.Errorf(
-			"stop chainsync client for conn %s: %w",
-			connId.String(),
-			err,
-		)
-	}
-	if afterStop != nil {
-		afterStop()
-	}
-	return o.RestartChainsyncClientWithPoints(connId, intersectPoints)
 }
 
 func (o *Ouroboros) chainsyncClientStart(connId ouroboros.ConnectionId) error {
@@ -1681,7 +1559,13 @@ func (o *Ouroboros) registerTrackedChainsyncClient(
 			}
 			return true
 		}
-		return false
+		// Every slot is taken. Track the peer as an observer rather than
+		// leaving it without a client: the next admission reconcile promotes
+		// it as soon as a slot frees, with no reconnect.
+		return o.chainsyncState.TryAddObservedClientConnIdWithDirection(
+			connId,
+			startedAsOutbound,
+		)
 	}
 	if o.chainsyncState.TryAddObservedClientConnIdWithDirection(
 		connId,
@@ -1793,76 +1677,13 @@ func (o *Ouroboros) updateChainsyncMetrics(
 	o.peerGov.UpdatePeerChainSyncObservation(connId, headerRate, tipDelta)
 }
 
-func (o *Ouroboros) restartChainsyncClientAsync(
-	ctx context.Context,
-	connId ouroboros.ConnectionId,
-	reason string,
-	restartFn func() error,
-) {
-	conn := o.connManager.GetConnectionById(connId)
-	if conn == nil {
-		return
-	}
-	go func() {
-		// Serialize restarts for the same connection to prevent
-		// overlapping stop/restart goroutines.
-		muVal, _ := o.restartMu.LoadOrStore(
-			connId, &sync.Mutex{},
-		)
-		mu := muVal.(*sync.Mutex)
-		mu.Lock()
-
-		o.config.Logger.Info(
-			"restarting chainsync client",
-			"connection_id", connId.String(),
-			"reason", reason,
-		)
-		var closeOnce sync.Once
-		closeConn := func() {
-			closeOnce.Do(func() { conn.Close() })
-		}
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			if err := restartFn(); err != nil {
-				o.config.Logger.Warn(
-					"chainsync restart failed, closing connection",
-					"error", err,
-					"connection_id", connId.String(),
-					"reason", reason,
-				)
-				closeConn()
-			}
-		}()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			o.config.Logger.Info(
-				"node shutting down, aborting chainsync restart",
-				"connection_id", connId.String(),
-				"reason", reason,
-			)
-			closeConn()
-			<-done
-		case <-chainsyncRestartAfter(chainsyncRestartTimeout):
-			o.config.Logger.Warn(
-				"chainsync restart timed out, closing connection",
-				"connection_id", connId.String(),
-				"reason", reason,
-			)
-			closeConn()
-			<-done
-		}
-		mu.Unlock()
-	}()
-}
-
 // SubscribeChainsyncResync registers an EventBus subscriber that
-// handles chainsync re-sync events. Ordinary resyncs restart the
-// ChainSync mini-protocol on the existing bearer after resetting
-// local dedup state. Local authoritative rollbacks additionally
-// rewind tracked client cursors and attempt ledger-side recovery
-// before recycling affected connections as a fallback.
+// handles chainsync re-sync events. Resyncs close the affected
+// connections after resetting local dedup state so peer governance
+// reconnects with fresh intersect points. Local authoritative
+// rollbacks additionally rewind tracked client cursors and attempt
+// ledger-side recovery before recycling affected connections as a
+// fallback.
 func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 	if o.eventBus == nil {
 		return
@@ -1964,69 +1785,30 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Events that require a fresh ChainSync bearer close the
-			// connection immediately rather than attempting an in-place
-			// Stop→Start→Sync restart. Stop() blocks for up to 30s
-			// when the protocol is in MustReply state, during which
-			// no recovery can happen. Closing lets peer governance
-			// reconnect with a fresh bearer and updated intersect
-			// points.
-			if chainsyncResyncRequiresFreshConnection(e.Reason) {
-				for _, connId := range connIds {
-					o.denyDivergentChainsyncPeer(connId, e.Reason)
-					if o.chainsyncState != nil {
-						o.chainsyncState.ClearObservedHeaderHistory(connId)
-					}
-					if o.connManager == nil {
-						continue
-					}
-					conn := o.connManager.GetConnectionById(connId)
-					if conn == nil {
-						continue
-					}
-					o.config.Logger.Info(
-						"closing connection for fresh chainsync",
-						"connection_id", connId.String(),
-						"reason", e.Reason,
-					)
-					conn.Close()
-				}
-				return
-			}
+			// Close the connection rather than re-intersecting in place.
+			// A live client always has RequestNext replies in flight, and
+			// MsgFindIntersect sent over them leaves the protocol in
+			// Intersect when those replies arrive, which tears the
+			// connection down anyway. Closing lets peer governance
+			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
+				o.denyDivergentChainsyncPeer(connId, e.Reason)
 				if o.chainsyncState != nil {
 					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}
 				if o.connManager == nil {
 					continue
 				}
-				o.restartChainsyncClientAsync(
-					ctx,
-					connId,
-					e.Reason,
-					func() error {
-						intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(
-							connId,
-						)
-						if err != nil {
-							return fmt.Errorf(
-								"build default chainsync intersect points: %w",
-								err,
-							)
-						}
-						var afterStop func()
-						if e.Reason == event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery {
-							afterStop = func() {
-								o.completeFutureHeaderResync(connId)
-							}
-						}
-						return o.resyncChainsyncClientWithPointsAfterStop(
-							connId,
-							intersectPoints,
-							afterStop,
-						)
-					},
+				conn := o.connManager.GetConnectionById(connId)
+				if conn == nil {
+					continue
+				}
+				o.config.Logger.Info(
+					"closing connection for fresh chainsync",
+					"connection_id", connId.String(),
+					"reason", e.Reason,
 				)
+				conn.Close()
 			}
 		},
 	)
