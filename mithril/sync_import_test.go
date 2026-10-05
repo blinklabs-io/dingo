@@ -262,12 +262,6 @@ func (m fenceUntouchedMetadata) DeleteSyncState(
 	return m.MetadataStore.DeleteSyncState(key, txn)
 }
 
-func (m fenceUntouchedMetadata) ClearSyncState(dbtypes.Txn) error {
-	return errors.New(
-		"import must not clear concurrently changing forge fences",
-	)
-}
-
 func TestUpdateMithrilReadyStateLeavesForgeFenceUntouched(t *testing.T) {
 	t.Parallel()
 	base := newMithrilTestDB(t)
