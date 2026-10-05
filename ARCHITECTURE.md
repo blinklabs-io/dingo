@@ -8450,6 +8450,11 @@ to that base URL plus the object key. Path segments reaching the store are
 matched against a 64-hex-digit hash and a fixed archive-name pattern first.
 With the aggregator mounted, the list omits snapshots that carry no certificate
 yet, since a verifying client bootstraps from the newest listed one.
+All public artifact reads, including pending-certificate and stake-distribution
+reads, share a 16-request admission bound and return `503 Service Unavailable`
+when it is full. Each response write refreshes a 15-second progress deadline,
+so an active large snapshot transfer has no absolute duration limit while
+a stalled reader cannot retain its request slot indefinitely.
 
 **Aggregator** (`mithril.Aggregator`, enabled by `mithril.server.aggregator`)
 is mounted on the same handler and certifies the stored snapshots of the

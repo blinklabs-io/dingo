@@ -26,9 +26,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -263,6 +265,181 @@ func TestServerServesStoredCertificates(t *testing.T) {
 	resp := get(t, f.srv.URL+"/certificate/"+certHash)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.JSONEq(t, body, string(getBody(t, resp)))
+}
+
+type blockingListStore struct {
+	ArtifactStore
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (s *blockingListStore) Subdirs(
+	ctx context.Context,
+	_ string,
+) ([]string, error) {
+	if s.calls.Add(1) > 1 {
+		return nil, nil
+	}
+	s.entered <- struct{}{}
+	select {
+	case <-s.release:
+		return nil, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func TestServerRejectsArtifactWorkBeyondAdmissionLimit(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingListStore{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+	})
+	handler := newServerHandler(
+		ServerConfig{Store: store, Aggregator: &Aggregator{}}, 1, time.Minute,
+	)
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		handler.ServeHTTP(
+			httptest.NewRecorder(),
+			httptest.NewRequest(
+				http.MethodGet, "/artifact/cardano-database", nil,
+			),
+		)
+	}()
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "first artifact request",
+	)
+
+	for _, target := range []string{
+		"/artifact/cardano-database",
+		"/certificate-pending",
+		"/artifact/mithril-stake-distributions",
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(
+			rec,
+			httptest.NewRequest(http.MethodGet, target, nil),
+		)
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, target)
+		assert.Equal(t, "1", rec.Header().Get("Retry-After"), target)
+	}
+
+	close(store.release)
+	testutil.RequireReceive(
+		t, firstDone, testutil.AsyncWait, "admitted artifact request",
+	)
+}
+
+type deadlineResponseWriter struct {
+	header      http.Header
+	deadlines   []time.Time
+	written     int
+	deadlineSet chan time.Time
+}
+
+func (w *deadlineResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (*deadlineResponseWriter) WriteHeader(int) {}
+
+func (w *deadlineResponseWriter) Write(p []byte) (int, error) {
+	w.written += len(p)
+	return len(p), nil
+}
+
+func (w *deadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	if w.deadlineSet != nil {
+		w.deadlineSet <- deadline
+	}
+	return nil
+}
+
+func TestServerArmsWriteDeadlineOnlyWhenWriting(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingListStore{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+	})
+	handler := newServerHandler(
+		ServerConfig{Store: store}, 1, time.Minute,
+	)
+	w := &deadlineResponseWriter{
+		header: make(http.Header), deadlineSet: make(chan time.Time, 1),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(
+			w,
+			httptest.NewRequest(
+				http.MethodGet, "/artifact/cardano-database", nil,
+			),
+		)
+	}()
+	testutil.RequireReceive(
+		t, store.entered, testutil.AsyncWait, "artifact store read",
+	)
+	select {
+	case <-w.deadlineSet:
+		t.Fatal("write deadline armed before the response write")
+	default:
+	}
+
+	close(store.release)
+	testutil.RequireReceive(t, done, testutil.AsyncWait, "artifact response")
+	deadline := testutil.RequireReceive(
+		t, w.deadlineSet, testutil.AsyncWait, "response write deadline",
+	)
+	assert.False(t, deadline.IsZero())
+}
+
+func TestServerRefreshesWriteDeadlineDuringLargeTransfer(t *testing.T) {
+	t.Parallel()
+
+	store, _ := newLocalStore(t)
+	hash := strings.Repeat("d", 64)
+	body := strings.Repeat("x", 128<<10)
+	require.NoError(t, store.Put(
+		t.Context(), hash+"/digests.tar.zst", strings.NewReader(body),
+	))
+	handler := newServerHandler(
+		ServerConfig{Store: store}, 1, time.Minute,
+	)
+	w := &deadlineResponseWriter{header: make(http.Header)}
+	handler.ServeHTTP(
+		w,
+		httptest.NewRequest(
+			http.MethodGet,
+			"/download/"+hash+"/digests.tar.zst",
+			nil,
+		),
+	)
+
+	assert.Equal(t, len(body), w.written)
+	require.GreaterOrEqual(t, len(w.deadlines), 2)
+	assert.False(t, w.deadlines[0].IsZero())
+	assert.False(t, w.deadlines[len(w.deadlines)-1].IsZero())
 }
 
 // TestServerSnapshotBootstrapsThroughClient runs the production download path

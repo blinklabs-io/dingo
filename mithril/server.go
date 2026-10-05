@@ -39,7 +39,11 @@ var (
 	)
 )
 
-const certificatesPrefix = "certificates"
+const (
+	certificatesPrefix           = "certificates"
+	artifactRequestLimit         = 16
+	artifactResponseWriteTimeout = 15 * time.Second
+)
 
 // ServerConfig configures the snapshot artifact HTTP handler.
 type ServerConfig struct {
@@ -123,26 +127,111 @@ func readSnapshot(
 }
 
 type snapshotServer struct {
-	cfg ServerConfig
+	cfg                  ServerConfig
+	artifactRequests     chan struct{}
+	responseWriteTimeout time.Duration
 }
 
 // NewServerHandler returns the handler serving the Mithril aggregator
 // Cardano database artifact API over cfg.Store, plus the archive downloads
 // the artifact locations point at.
 func NewServerHandler(cfg ServerConfig) http.Handler {
+	return newServerHandler(
+		cfg,
+		artifactRequestLimit,
+		artifactResponseWriteTimeout,
+	)
+}
+
+func newServerHandler(
+	cfg ServerConfig,
+	requestLimit int,
+	responseWriteTimeout time.Duration,
+) http.Handler {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.DiscardHandler)
 	}
-	s := &snapshotServer{cfg: cfg}
+	s := &snapshotServer{
+		cfg:                  cfg,
+		artifactRequests:     make(chan struct{}, requestLimit),
+		responseWriteTimeout: responseWriteTimeout,
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /artifact/cardano-database", s.handleList)
-	mux.HandleFunc("GET /artifact/cardano-database/{hash}", s.handleDetail)
-	mux.HandleFunc("GET /download/{hash}/{name}", s.handleDownload)
-	mux.HandleFunc("GET /certificate/{hash}", s.handleCertificate)
+	mux.HandleFunc(
+		"GET /artifact/cardano-database",
+		s.withArtifactRequest(s.handleList),
+	)
+	mux.HandleFunc(
+		"GET /artifact/cardano-database/{hash}",
+		s.withArtifactRequest(s.handleDetail),
+	)
+	mux.HandleFunc(
+		"GET /download/{hash}/{name}",
+		s.withArtifactRequest(s.handleDownload),
+	)
+	mux.HandleFunc(
+		"GET /certificate/{hash}",
+		s.withArtifactRequest(s.handleCertificate),
+	)
 	if cfg.Aggregator != nil {
-		cfg.Aggregator.registerRoutes(mux)
+		cfg.Aggregator.registerRoutes(mux, s.withArtifactRequest)
 	}
 	return mux
+}
+
+func (s *snapshotServer) withArtifactRequest(
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.artifactRequests <- struct{}{}:
+			defer func() { <-s.artifactRequests }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "server busy", http.StatusServiceUnavailable)
+			return
+		}
+
+		bounded := &progressResponseWriter{
+			ResponseWriter: w,
+			controller:     http.NewResponseController(w),
+			timeout:        s.responseWriteTimeout,
+			logger:         s.cfg.Logger,
+		}
+		next(bounded, r)
+	}
+}
+
+// progressResponseWriter refreshes the connection write deadline before each
+// body write. It deliberately does not expose io.ReaderFrom: ServeContent must
+// pass each copied chunk through Write so steady large transfers keep making
+// progress without receiving an absolute response deadline. The last deadline
+// remains armed while net/http flushes its response buffer after the handler
+// returns; net/http clears it before reusing the connection.
+type progressResponseWriter struct {
+	http.ResponseWriter
+	controller *http.ResponseController
+	timeout    time.Duration
+	logger     *slog.Logger
+}
+
+func (w *progressResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *progressResponseWriter) Write(p []byte) (int, error) {
+	w.setDeadline(time.Now().Add(w.timeout))
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *progressResponseWriter) setDeadline(deadline time.Time) {
+	if err := w.controller.SetWriteDeadline(deadline); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		w.logger.Debug(
+			"could not bound snapshot response write",
+			"error", err,
+		)
+	}
 }
 
 func (s *snapshotServer) fail(
