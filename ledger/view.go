@@ -306,9 +306,15 @@ func (lv *LedgerView) MIRDelegState(
 			if reward.Amount == nil {
 				continue
 			}
+			credential, err := lcommon.NewBlake2b224Checked(
+				reward.Credential,
+			)
+			if err != nil {
+				return ret, fmt.Errorf("MIR reward credential: %w", err)
+			}
 			key := eras.MIRCredentialKey{
 				Tag:        reward.CredentialTag,
-				Credential: lcommon.NewBlake2b224(reward.Credential),
+				Credential: credential,
 				Pot:        effect.Pot,
 			}
 			if existing, ok := ret.Pending[key]; ok && additive {
@@ -325,6 +331,11 @@ func (lv *LedgerView) MIRDelegState(
 // drift in the MIRDelegStateProvider method signature a compile error instead
 // of a silent runtime no-op for every MIR DELEG predicate that reads it.
 var _ eras.MIRDelegStateProvider = (*LedgerView)(nil)
+
+// The genesis key delegation predicates discover this capability with a
+// runtime type assertion and skip when it misses, so signature drift would
+// silently disable them rather than fail to build.
+var _ eras.GenesisDelegStateProvider = (*LedgerView)(nil)
 
 // The Conway committee certificate and voter rules discover this capability
 // with a runtime type assertion and fail closed when it misses, so signature
@@ -653,27 +664,46 @@ func (lv *LedgerView) PoolCurrentState(
 		}
 		hasReg = true
 		reg := pool.Registration[latestIdx]
+		operator, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("pool current state operator: %w", err)
+		}
+		vrfKeyHash, err := lcommon.NewBlake2b256Checked(pool.VrfKeyHash)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"pool current state VRF key hash: %w",
+				err,
+			)
+		}
+		rewardAccount, err := lcommon.NewBlake2b224Checked(pool.RewardAccount)
+		if err != nil {
+			return nil, nil, fmt.Errorf(
+				"pool current state reward account: %w",
+				err,
+			)
+		}
 		tmp := lcommon.PoolRegistrationCertificate{
-			CertType: uint(lcommon.CertificateTypePoolRegistration),
-			Operator: lcommon.PoolKeyHash(
-				lcommon.NewBlake2b224(pool.PoolKeyHash),
-			),
-			VrfKeyHash: lcommon.VrfKeyHash(
-				lcommon.NewBlake2b256(pool.VrfKeyHash),
-			),
-			Pledge: uint64(pool.Pledge),
-			Cost:   uint64(pool.Cost),
+			CertType:   uint(lcommon.CertificateTypePoolRegistration),
+			Operator:   lcommon.PoolKeyHash(operator),
+			VrfKeyHash: lcommon.VrfKeyHash(vrfKeyHash),
+			Pledge:     uint64(pool.Pledge),
+			Cost:       uint64(pool.Cost),
 		}
 		if pool.Margin != nil {
 			tmp.Margin = cbor.Rat{Rat: pool.Margin.Rat}
 		}
-		tmp.RewardAccount = lcommon.AddrKeyHash(
-			lcommon.NewBlake2b224(pool.RewardAccount),
-		)
+		tmp.RewardAccount = lcommon.AddrKeyHash(rewardAccount)
 		for _, owner := range reg.Owners {
+			ownerKeyHash, err := lcommon.NewBlake2b224Checked(owner.KeyHash)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"pool current state owner key hash: %w",
+					err,
+				)
+			}
 			tmp.PoolOwners = append(
 				tmp.PoolOwners,
-				lcommon.AddrKeyHash(lcommon.NewBlake2b224(owner.KeyHash)),
+				lcommon.AddrKeyHash(ownerKeyHash),
 			)
 		}
 		for _, relay := range reg.Relays {
@@ -761,6 +791,13 @@ func (lv *LedgerView) GenesisDelegateKeyHashes(
 	return lv.ls.genesisDelegateKeyHashes(slot, lv.metadataTxn())
 }
 
+// GenesisDelegState implements eras.GenesisDelegStateProvider.
+func (lv *LedgerView) GenesisDelegState(
+	slot uint64,
+) (eras.GenesisDelegState, error) {
+	return lv.ls.genesisDelegState(slot, lv.metadataTxn())
+}
+
 func (lv *LedgerView) GenesisDelegateForGenesisKey(
 	genesisKeyHash lcommon.Blake2b224,
 	slot uint64,
@@ -835,9 +872,14 @@ func (lv *LedgerView) IsVrfKeyInUse(
 	if pool == nil {
 		return false, lcommon.PoolKeyHash{}, nil
 	}
-	return true, lcommon.PoolKeyHash(
-		lcommon.NewBlake2b224(pool.PoolKeyHash),
-	), nil
+	poolKeyHash, err := lcommon.NewBlake2b224Checked(pool.PoolKeyHash)
+	if err != nil {
+		return false, lcommon.PoolKeyHash{}, fmt.Errorf(
+			"VRF key owner pool key hash: %w",
+			err,
+		)
+	}
+	return true, lcommon.PoolKeyHash(poolKeyHash), nil
 }
 
 // SlotToTime returns the current time for a given slot based on known epochs.
@@ -1211,9 +1253,9 @@ func (lv *LedgerView) CommitteeStateAvailable() (bool, error) {
 	}
 	// Include-deleted rather than the seated set, so an authoritatively empty
 	// committee after a NoConfidence enactment still reports available.
-	// GetCommitteeActiveCount is not a substitute for either: it counts
-	// hot-key authorizations, so a seated committee that has authorized no hot
-	// keys would report zero.
+	// GetCommitteeAuthorizedCount is not a substitute for either: it counts
+	// only members with a hot key, so a seated committee that has authorized
+	// no hot keys would report zero.
 	members, err := lv.ls.db.GetCommitteeMembersIncludeDeleted(lv.txn)
 	if err != nil {
 		return false, fmt.Errorf("get committee members: %w", err)
@@ -1786,9 +1828,13 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 		if found == nil {
 			continue
 		}
+		coldHash, err := lcommon.NewBlake2b224Checked(found.ColdCredHash)
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		coldCredential := lcommon.Credential{
 			CredType:   uint(found.ColdCredentialTag),
-			Credential: lcommon.NewBlake2b224(found.ColdCredHash),
+			Credential: coldHash,
 		}
 		member := &lcommon.CommitteeMember{
 			ColdKey:     coldCredential.Credential,
@@ -1822,7 +1868,12 @@ func (lv *LedgerView) CommitteeMembers() ([]lcommon.CommitteeMember, error) {
 			return nil, fmt.Errorf("get committee hot credential: %w", err)
 		}
 		if authorization != nil {
-			hotKey := lcommon.NewBlake2b224(authorization.HotCredential)
+			hotKey, err := lcommon.NewBlake2b224Checked(
+				authorization.HotCredential,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("committee hot credential: %w", err)
+			}
 			member.HotKey = &hotKey
 		}
 		members = append(members, *member)
@@ -2011,6 +2062,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 	}
 	registrations := make([]lcommon.DRepRegistration, 0, len(dreps))
 	for _, drep := range dreps {
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("DRep registrations credential: %w", err)
+		}
 		deposit, ok := deposits[models.DrepDepositKey(
 			drep.CredentialTag,
 			drep.Credential,
@@ -2022,10 +2077,10 @@ func (lv *LedgerView) DRepRegistrations() ([]lcommon.DRepRegistration, error) {
 		reg := lcommon.DRepRegistration{
 			Credential: lcommon.Credential{
 				CredType:   uint(drep.CredentialTag),
-				Credential: lcommon.NewBlake2b224(drep.Credential),
+				Credential: lcommon.Blake2b224(credential),
 			},
 			Deposit: lv.drepRegistrationDeposit(
-				lcommon.NewBlake2b224(drep.Credential),
+				credential,
 				depositPtr,
 			),
 		}
@@ -2616,12 +2671,13 @@ func (lv *LedgerView) GetExpiredDReps(
 	return dreps, nil
 }
 
-// GetCommitteeActiveCount returns the number of active (non-resigned)
-// committee members.
-func (lv *LedgerView) GetCommitteeActiveCount() (int, error) {
-	count, err := lv.ls.db.GetCommitteeActiveCount(lv.txn)
+// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+// committee members that hold a current hot-key authorization. Members
+// without a hot key are not counted and term expiry is not applied.
+func (lv *LedgerView) GetCommitteeAuthorizedCount() (int, error) {
+	count, err := lv.ls.db.GetCommitteeAuthorizedCount(lv.txn)
 	if err != nil {
-		return 0, fmt.Errorf("get committee active count: %w", err)
+		return 0, fmt.Errorf("get committee authorized count: %w", err)
 	}
 	return count, nil
 }

@@ -67,6 +67,8 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -189,6 +191,16 @@ var schemaVersions = []struct {
 		Version: 31,
 		Name:    rewardCreditRoundTableSchemaRelease,
 		Dir:     "v31",
+	},
+	{
+		Version: 32,
+		Name:    rewardLeaderDeficitSchemaRelease,
+		Dir:     "v32",
+	},
+	{
+		Version: 33,
+		Name:    governanceProposalOrderSchemaRelease,
+		Dir:     "v33",
 	},
 }
 
@@ -342,6 +354,9 @@ func rewardCreditRoundBackfill(
 	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+	}
+	if rounds == nil {
+		rounds = make([]models.RewardCreditRound, 0)
 	}
 	start := 0
 	if batch.Cursor != "" {
