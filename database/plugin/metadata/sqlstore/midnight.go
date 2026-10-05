@@ -19,6 +19,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -689,8 +691,18 @@ func (s *Store) FindMidnightCandidateRemovalsByBlock(
 	}
 	ret := make([]models.MidnightCandidateRemoval, 0, len(rows))
 	for _, row := range rows {
+		storedBlock, err := checkedUint64(row.BlockNumber)
+		if err != nil {
+			return nil, err
+		}
+		if row.OutputIndex < 0 || row.OutputIndex > math.MaxUint32 {
+			return nil, fmt.Errorf(
+				"invalid Midnight candidate output index: %d",
+				row.OutputIndex,
+			)
+		}
 		ret = append(ret, models.MidnightCandidateRemoval{
-			BlockNumber: uint64(row.BlockNumber),
+			BlockNumber: storedBlock,
 			TxHash:      row.TxHash,
 			OutputIndex: uint32(row.OutputIndex), //nolint:gosec
 			Datum:       row.Datum,
@@ -740,11 +752,16 @@ func (s *Store) UpsertMidnightEpochTransition(
 	if err != nil {
 		return err
 	}
+	previousExists := int64(0)
+	if transition.PreviousExists {
+		previousExists = 1
+	}
 	return s.operationalQueries(db).UpsertMidnightEpochTransition(
 		ctx,
 		sqlitequery.UpsertMidnightEpochTransitionParams{
-			BlockNumber:   blockNumber,
-			PreviousEpoch: previousEpoch,
+			BlockNumber:    blockNumber,
+			PreviousEpoch:  previousEpoch,
+			PreviousExists: previousExists,
 		},
 	)
 }
@@ -771,9 +788,24 @@ func (s *Store) GetMidnightEpochTransitionByBlock(
 	if err != nil {
 		return nil, err
 	}
+	storedBlock, err := checkedUint64(row.BlockNumber)
+	if err != nil {
+		return nil, err
+	}
+	previousEpoch, err := checkedUint64(row.PreviousEpoch)
+	if err != nil {
+		return nil, err
+	}
+	if row.PreviousExists != 0 && row.PreviousExists != 1 {
+		return nil, fmt.Errorf(
+			"invalid Midnight previous epoch presence: %d",
+			row.PreviousExists,
+		)
+	}
 	return &models.MidnightEpochTransition{
-		BlockNumber:   uint64(row.BlockNumber),
-		PreviousEpoch: uint64(row.PreviousEpoch),
+		BlockNumber:    storedBlock,
+		PreviousEpoch:  previousEpoch,
+		PreviousExists: row.PreviousExists != 0,
 	}, nil
 }
 

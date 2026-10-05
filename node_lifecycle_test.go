@@ -139,7 +139,11 @@ func newLiveLifecycleTestNodeWithStorageMode(
 		context.Background(),
 		pluginHost,
 		storageSelections,
-		internalplugins.StorageDependencies{DataDir: tmpDir, Logger: logger},
+		internalplugins.StorageDependencies{
+			DataDir:     tmpDir,
+			Logger:      logger,
+			StorageMode: string(storageMode),
+		},
 	)
 	require.NoError(t, err)
 	db, err := database.New(&database.Config{

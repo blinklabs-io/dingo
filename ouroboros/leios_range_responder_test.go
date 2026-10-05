@@ -149,6 +149,7 @@ func TestLeiosFetchBlockRangeRequestTearsDownConnection(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
 
 	timeout := time.After(5 * time.Second)
 	select {

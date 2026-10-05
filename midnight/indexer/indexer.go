@@ -809,7 +809,10 @@ func (idx *Indexer) rollbackBlock(block models.Block) error {
 	}
 
 	if idx.config.MappingValidatorAddress != "" {
-		deregs, err := md.DeleteMidnightDeregistrationsByBlock(txn, block.Number)
+		deregs, err := md.DeleteMidnightDeregistrationsByBlock(
+			txn,
+			block.Number,
+		)
 		if err != nil {
 			return fail("deregistrations", err)
 		}
@@ -869,7 +872,9 @@ func (idx *Indexer) rollbackBlock(block models.Block) error {
 			// tx_inputs/slot_number/tx_index/block_number.
 			incomplete = fmt.Errorf(
 				"%w: block=%d: decode block, created candidates not removed: %w",
-				errIncompleteRollback, block.Number, err,
+				errIncompleteRollback,
+				block.Number,
+				err,
 			)
 		} else {
 			txs := decoded.Transactions()
@@ -951,7 +956,11 @@ func (idx *Indexer) rollbackAriadne(
 			err = md.DeleteMidnightAriadneParamsByEpoch(txn, entry.Epoch)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("restore ariadne epoch %d: %w", entry.Epoch, err)
+			return nil, fmt.Errorf(
+				"restore ariadne epoch %d: %w",
+				entry.Epoch,
+				err,
+			)
 		}
 	}
 	if err := md.DeleteMidnightAriadneRollbacksByBlock(txn, blockNumber); err != nil {
@@ -1022,7 +1031,7 @@ func (idx *Indexer) rollbackEpochTransition(
 	}
 	return func() {
 		idx.currentEpoch = transition.PreviousEpoch
-		idx.hasCurrentEpoch = true
+		idx.hasCurrentEpoch = transition.PreviousExists
 	}, nil
 }
 
@@ -1384,7 +1393,11 @@ func (idx *Indexer) processTx(
 		// Always attempt to remove from candidate set (no-op if not tracked).
 		if len(idx.candidateAddrBytes) > 0 {
 			idx.mu.Lock()
-			candidateKey, datum, removed := idx.removeCandidate(journal, inpHashBytes, inpIdx)
+			candidateKey, datum, removed := idx.removeCandidate(
+				journal,
+				inpHashBytes,
+				inpIdx,
+			)
 			idx.mu.Unlock()
 			if removed {
 				if err := idx.config.Metadata.CreateMidnightCandidateRemoval(
@@ -1398,7 +1411,12 @@ func (idx *Indexer) processTx(
 				); err != nil {
 					return fmt.Errorf(
 						"write candidate spend journal tx=%s input=%s#%d: %w",
-						hex.EncodeToString(txHashBytes), inpHashHex, inpIdx, err,
+						hex.EncodeToString(
+							txHashBytes,
+						),
+						inpHashHex,
+						inpIdx,
+						err,
 					)
 				}
 			}
@@ -1791,19 +1809,15 @@ func (idx *Indexer) advanceEpochLocked(
 	blockNumber uint64,
 	txn types.Txn,
 ) error {
-	if !idx.hasCurrentEpoch {
-		idx.currentEpoch = epoch
-		idx.hasCurrentEpoch = true
-		return nil
-	}
-	if epoch <= idx.currentEpoch {
+	if idx.hasCurrentEpoch && epoch <= idx.currentEpoch {
 		return nil
 	}
 	if err := idx.config.Metadata.UpsertMidnightEpochTransition(
 		txn,
 		&models.MidnightEpochTransition{
-			BlockNumber:   blockNumber,
-			PreviousEpoch: idx.currentEpoch,
+			BlockNumber:    blockNumber,
+			PreviousEpoch:  idx.currentEpoch,
+			PreviousExists: idx.hasCurrentEpoch,
 		},
 	); err != nil {
 		return fmt.Errorf(
@@ -1811,6 +1825,11 @@ func (idx *Indexer) advanceEpochLocked(
 			blockNumber,
 			err,
 		)
+	}
+	if !idx.hasCurrentEpoch {
+		idx.currentEpoch = epoch
+		idx.hasCurrentEpoch = true
+		return nil
 	}
 	for e := idx.currentEpoch; e < epoch; e++ {
 		idx.snapshotEpochLocked(e, blockNumber, txn)

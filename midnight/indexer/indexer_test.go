@@ -2439,8 +2439,10 @@ func TestRollbackBlockIsAtomicAndRetryable(t *testing.T) {
 	t.Parallel()
 	store := &failingEpochJournalStore{testStore: setupTestStore(t)}
 	idx, err := New(Config{
-		Metadata:                    store,
-		Logger:                      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Metadata: store,
+		Logger: slog.New(
+			slog.NewTextHandler(os.Stderr, nil),
+		),
 		TechnicalCommitteeAddress:   testMappingAddr,
 		TechnicalCommitteePolicyID:  testGovPolicyID,
 		CouncilAddress:              testCouncilAddr,
@@ -2468,10 +2470,16 @@ func TestRollbackBlockIsAtomicAndRetryable(t *testing.T) {
 	idx.mu.RUnlock()
 	require.False(t, restored, "a failed rollback must not restore memory")
 	require.Equal(t, uint64(2), epoch)
-	removals, err := store.FindMidnightCandidateRemovalsByBlock(nil, block2.Number)
+	removals, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
 	require.NoError(t, err)
 	require.Len(t, removals, 1, "a failed rollback must keep the spend journal")
-	transition, err := store.GetMidnightEpochTransitionByBlock(nil, block2.Number)
+	transition, err := store.GetMidnightEpochTransitionByBlock(
+		nil,
+		block2.Number,
+	)
 	require.NoError(t, err)
 	require.NotNil(t, transition)
 
@@ -2481,10 +2489,16 @@ func TestRollbackBlockIsAtomicAndRetryable(t *testing.T) {
 	require.Equal(t, datum, idx.candidates[key])
 	require.Equal(t, uint64(1), idx.currentEpoch)
 	idx.mu.RUnlock()
-	removals, err = store.FindMidnightCandidateRemovalsByBlock(nil, block2.Number)
+	removals, err = store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
 	require.NoError(t, err)
 	require.Empty(t, removals)
-	transition, err = store.GetMidnightEpochTransitionByBlock(nil, block2.Number)
+	transition, err = store.GetMidnightEpochTransitionByBlock(
+		nil,
+		block2.Number,
+	)
 	require.NoError(t, err)
 	require.Nil(t, transition)
 }
@@ -2501,7 +2515,10 @@ func TestProcessBlockPrunesRollbackJournalsBeyondDepth(t *testing.T) {
 	far := testBlock(block2.Number+candidateRollbackDepth+1, 300, 0xE3)
 	require.NoError(t, idx.processBlock(far, nil, 3_000))
 
-	removals, err := store.FindMidnightCandidateRemovalsByBlock(nil, block2.Number)
+	removals, err := store.FindMidnightCandidateRemovalsByBlock(
+		nil,
+		block2.Number,
+	)
 	require.NoError(t, err)
 	require.Empty(t, removals, "journal rows beyond the depth must be pruned")
 	old, err := store.GetMidnightEpochTransitionByBlock(nil, block2.Number)
@@ -2510,4 +2527,37 @@ func TestProcessBlockPrunesRollbackJournalsBeyondDepth(t *testing.T) {
 	current, err := store.GetMidnightEpochTransitionByBlock(nil, far.Number)
 	require.NoError(t, err)
 	require.NotNil(t, current, "the block's own transition must be kept")
+}
+
+func TestRollbackColdStartEpochAfterRestart(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	block := models.Block{Number: 1, Slot: 2_000}
+	require.NoError(t, idx.processBlock(block, nil, 2_000))
+	require.True(t, idx.hasCurrentEpoch)
+	restarted := setupGovIndexer(t, store)
+	next := models.Block{Number: 2, Slot: 2_100}
+	require.NoError(t, restarted.processBlock(next, nil, 2_100))
+	require.ErrorIs(t, restarted.rollbackBlock(next), errIncompleteRollback)
+	require.ErrorIs(t, restarted.rollbackBlock(block), errIncompleteRollback)
+	require.False(
+		t,
+		restarted.hasCurrentEpoch,
+		"rolling back the first block must restore the uninitialized epoch",
+	)
+	require.NoError(
+		t,
+		restarted.processBlock(
+			models.Block{Number: 1, Slot: 1_000},
+			nil,
+			1_000,
+		),
+	)
+	require.Equal(t, uint64(10), restarted.currentEpoch)
+	require.Empty(
+		t,
+		epochCandidateSnapshots(t, store),
+		"a replacement first block must not snapshot a removed branch's epoch",
+	)
 }

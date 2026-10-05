@@ -921,11 +921,9 @@ func TestLeiosPersistPauseForLiveLifecycleOpFailsClosedOnUnconfirmedDrain(
 	)
 }
 
-// TestLeiosPersistPauseIsSafeAgainstConcurrentEnqueue runs lifecycle pauses
-// while enqueuers are active. A pause resets the writer's start guard and
-// queue state, so it must be synchronized with enqueues that start the writer
-// lazily; run under -race, an unsynchronized reset is a data race.
-func TestLeiosPersistPauseIsSafeAgainstConcurrentEnqueue(t *testing.T) {
+// TestLeiosPersistPauseAfterConcurrentEnqueue follows the live lifecycle
+// precondition: all enqueues finish before the writer is drained and reset.
+func TestLeiosPersistPauseAfterConcurrentEnqueue(t *testing.T) {
 	t.Parallel()
 
 	o := newTestOuroborosWithLeiosDB(t)
@@ -948,27 +946,19 @@ func TestLeiosPersistPauseIsSafeAgainstConcurrentEnqueue(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for e := range enqueuers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for _, en := range entries[e] {
 				o.enqueueLeiosPersist(en.point, en.raw, nil)
 			}
-		}()
+		})
 	}
-	pauses := make(chan struct{})
-	go func() {
-		defer close(pauses)
-		for range 20 {
-			// A pause may report an unconfirmed drain only on timeout, which
-			// an in-memory store never reaches.
-			if err := o.PauseLeiosPersistWriterForLiveLifecycleOp(); err != nil {
-				t.Errorf("pause: %v", err)
-				return
-			}
-		}
-	}()
 	wg.Wait()
-	<-pauses
-	o.StopLeiosPersistWriter()
+	require.NoError(t, o.PauseLeiosPersistWriterForLiveLifecycleOp())
+	o.leiosPersistMu.Lock()
+	require.Zero(t, o.leiosPersistBytes)
+	require.Zero(t, o.leiosPersistReserved)
+	require.Empty(t, o.leiosPersistPending)
+	o.leiosPersistMu.Unlock()
+	o.enqueueLeiosPersist(entries[0][0].point, entries[0][0].raw, nil)
+	require.True(t, o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout))
 }

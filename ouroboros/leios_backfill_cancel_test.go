@@ -111,16 +111,16 @@ func TestFetchEndorserBlockByPointCancelledInFlightReturnsPromptly(
 
 	t.Run("manifest request", func(t *testing.T) {
 		t.Parallel()
-		o, cm, _ := newBackfillCancelOuroboros(
+		o, cm, received := newBackfillCancelOuroboros(
 			t, leiosfetch.MessageTypeBlockRequest,
 		)
-		cancelBackfillInFlight(t, o, cm, ocommon.NewPoint(
+		cancelBackfillInFlight(t, o, cm, received, ocommon.NewPoint(
 			3412, make([]byte, lcommon.Blake2b256Size),
 		))
 	})
 	t.Run("transaction request", func(t *testing.T) {
 		t.Parallel()
-		o, cm, _ := newBackfillCancelOuroboros(
+		o, cm, received := newBackfillCancelOuroboros(
 			t, leiosfetch.MessageTypeBlockTxsRequest,
 		)
 		_, ref := testLeiosManifestTx(t, 0x34)
@@ -134,7 +134,7 @@ func TestFetchEndorserBlockByPointCancelledInFlightReturnsPromptly(
 		require.NoError(t, o.storeLeiosEndorserBlock(
 			point, manifestRaw, nil, leiosStoreAuthoritative,
 		))
-		cancelBackfillInFlight(t, o, cm, point)
+		cancelBackfillInFlight(t, o, cm, received, point)
 	})
 }
 
@@ -142,18 +142,20 @@ func cancelBackfillInFlight(
 	t *testing.T,
 	o *Ouroboros,
 	cm *connmanager.ConnectionManager,
+	received <-chan error,
 	point ocommon.Point,
 ) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timer := time.AfterFunc(100*time.Millisecond, cancel)
-	defer timer.Stop()
 
 	result := make(chan error, 1)
 	go func() {
 		result <- o.FetchEndorserBlockByPoint(ctx, point.Slot, point.Hash)
 	}()
+	// The conversation ends only after the peer has received the request.
+	requireLeiosFetchConversationDone(t, received)
+	cancel()
 	select {
 	case err := <-result:
 		require.ErrorIs(t, err, context.Canceled)

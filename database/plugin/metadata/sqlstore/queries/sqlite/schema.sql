@@ -375,7 +375,8 @@ CREATE TABLE midnight_candidate_removals (
 
 CREATE TABLE midnight_epoch_transitions (
     block_number INTEGER PRIMARY KEY,
-    previous_epoch INTEGER NOT NULL
+    previous_epoch INTEGER NOT NULL,
+    previous_exists INTEGER NOT NULL
 );
 
 CREATE TABLE midnight_epoch_candidates (

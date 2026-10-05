@@ -7245,6 +7245,11 @@ attempt) deadlocks `Close` behind the very read only it can unblock.
 
 ### Leios Announcement Admission (`ouroboros/`)
 
+Deferred Leios announcements retain the source connection's done channel.
+Insertion rejects a closed source and releases closed entries under the
+deferral mutex; a delayed close event removes only closed lifetimes, preserving
+announcements from a replacement connection with the same address pair.
+
 After header validation, at most two distinct ranking-block announcements are
 retained for each slot/issuer election within the announcement retention window.
 The election budget is shared across relay sources and reconnects; a connection
@@ -11511,9 +11516,11 @@ cold start (`hasCurrentEpoch = false`), the first block's epoch is recorded
 without snapshotting so no spurious empty snapshot is written before any
 candidates are observed.
 
-The epoch that preceded an advance is journaled in `midnight_epoch_transitions`
-in the same transaction, before `currentEpoch` changes, so a rollback restores
-it (and marks the epoch initialized) even after a restart. Both rollback
+The epoch and its initialization state before an advance or cold start are
+journaled in `midnight_epoch_transitions` in the same transaction, before
+`currentEpoch` changes. A rollback restores both even after a restart, so
+undoing the first indexed block permits a replacement branch to initialize
+its own epoch without snapshotting the removed branch. Both rollback
 journals are pruned past `candidateRollbackDepth` in the block's transaction.
 
 **Rollback atomicity**: `rollbackBlock` deletes the block's rows, restores its

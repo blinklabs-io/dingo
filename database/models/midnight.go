@@ -130,8 +130,9 @@ type MidnightCandidateRemoval struct {
 // MidnightEpochTransition records the epoch that was current before a block
 // advanced it, so a later rollback can restore it even after process restart.
 type MidnightEpochTransition struct {
-	BlockNumber   uint64
-	PreviousEpoch uint64
+	BlockNumber    uint64
+	PreviousEpoch  uint64
+	PreviousExists bool
 }
 
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.

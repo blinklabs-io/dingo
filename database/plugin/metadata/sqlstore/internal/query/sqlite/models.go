@@ -243,8 +243,9 @@ type MidnightEpochCandidate struct {
 }
 
 type MidnightEpochTransition struct {
-	BlockNumber   int64
-	PreviousEpoch int64
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
 }
 
 type MidnightGovernanceDatum struct {

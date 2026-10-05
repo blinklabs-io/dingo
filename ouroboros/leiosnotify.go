@@ -94,6 +94,7 @@ type leiosAnnouncement struct {
 type leiosDeferredAnnouncement struct {
 	raw    []byte
 	source string
+	done   <-chan any
 }
 
 const leiosMaxDeferredAnnouncements = 128
@@ -145,7 +146,11 @@ func (o *Ouroboros) recordInvalidLeiosAnnouncement(
 		return err
 	}
 	if count >= leiosInvalidAnnouncementLimit {
-		return fmt.Errorf("repeated invalid announcements from connection %s: %w", connectionID, err)
+		return fmt.Errorf(
+			"repeated invalid announcements from connection %s: %w",
+			connectionID,
+			err,
+		)
 	}
 	return nil
 }
@@ -183,7 +188,9 @@ func (o *Ouroboros) reserveLeiosAnnouncementValidation(
 		o.leiosAnnouncementsMu.Unlock()
 		return true, nil, nil
 	}
-	if len(o.leiosAnnouncementInFlight) >= leiosMaxAnnouncementValidationInFlight {
+	if len(
+		o.leiosAnnouncementInFlight,
+	) >= leiosMaxAnnouncementValidationInFlight {
 		o.leiosAnnouncementsMu.Unlock()
 		return false, nil, errLeiosAnnouncementValidationBudget
 	}
@@ -735,10 +742,14 @@ func (o *Ouroboros) handleInvalidLeiosAnnouncement(
 		errors.Is(err, errLeiosAnnouncementClockSkew) {
 		o.config.Logger.Debug(
 			"dropping leios announcement while local validation state is unavailable",
-			"component", "network",
-			"protocol", "leios-notify",
-			"connection_id", connectionID,
-			"error", err,
+			"component",
+			"network",
+			"protocol",
+			"leios-notify",
+			"connection_id",
+			connectionID,
+			"error",
+			err,
 		)
 		return nil
 	}
@@ -769,7 +780,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// w31 carries the full ranking-block header. Suppress isolated invalid
 		// announcements, but disconnect a peer that repeats them within a
 		// bounded window.
-		if err := o.acceptLeiosAnnouncement(m.BlockHeaderRaw, connId); err != nil {
+		if err := o.acceptLeiosAnnouncementInternal(m.BlockHeaderRaw, connId, true, ctx.ConnectionDoneChan); err != nil {
 			return o.handleInvalidLeiosAnnouncement(connId, err)
 		}
 		return nil
@@ -1703,13 +1714,14 @@ func leiosForgedEBOffer(entry *leiosForgedEBEntry) protocol.Message {
 // the w31 relay-age bound. The raw header is retained so the relay preserves
 // the producer's signed bytes.
 func (o *Ouroboros) acceptLeiosAnnouncement(raw []byte, source string) error {
-	return o.acceptLeiosAnnouncementInternal(raw, source, true)
+	return o.acceptLeiosAnnouncementInternal(raw, source, true, nil)
 }
 
 func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	raw []byte,
 	source string,
 	deferVerification bool,
+	done <-chan any,
 ) error {
 	if isNilInterface(o.leiosAnnouncementLedger) {
 		return fmt.Errorf(
@@ -1804,7 +1816,7 @@ func (o *Ouroboros) acceptLeiosAnnouncementInternal(
 	)
 	if err != nil {
 		if ledger.IsHeaderVerificationDeferred(err) && deferVerification {
-			o.deferLeiosAnnouncement(header, raw, source)
+			o.deferLeiosAnnouncement(header, raw, source, done)
 		}
 		return fmt.Errorf("validate ranking-block header: %w", err)
 	}
@@ -1850,10 +1862,20 @@ func (o *Ouroboros) deferLeiosAnnouncement(
 	header *gdijkstra.DijkstraBlockHeader,
 	raw []byte,
 	source string,
+	done <-chan any,
 ) {
 	key := fmt.Sprintf("%s:%x", source, header.Hash().Bytes())
 	o.leiosDeferredMu.Lock()
 	defer o.leiosDeferredMu.Unlock()
+	if leiosAnnouncementSourceClosed(done) {
+		return
+	}
+	maps.DeleteFunc(
+		o.leiosDeferredAnnouncements,
+		func(_ string, entry leiosDeferredAnnouncement) bool {
+			return leiosAnnouncementSourceClosed(entry.done)
+		},
+	)
 	if _, exists := o.leiosDeferredAnnouncements[key]; exists {
 		return
 	}
@@ -1870,7 +1892,16 @@ func (o *Ouroboros) deferLeiosAnnouncement(
 		return
 	}
 	o.leiosDeferredAnnouncements[key] = leiosDeferredAnnouncement{
-		raw: append([]byte(nil), raw...), source: source,
+		raw: append([]byte(nil), raw...), source: source, done: done,
+	}
+}
+
+func leiosAnnouncementSourceClosed(done <-chan any) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1883,7 +1914,8 @@ func (o *Ouroboros) dropDeferredLeiosAnnouncements(source string) {
 	maps.DeleteFunc(
 		o.leiosDeferredAnnouncements,
 		func(_ string, announcement leiosDeferredAnnouncement) bool {
-			return announcement.source == source
+			return announcement.source == source &&
+				(announcement.done == nil || leiosAnnouncementSourceClosed(announcement.done))
 		},
 	)
 }
@@ -1900,14 +1932,22 @@ func (o *Ouroboros) retryDeferredLeiosAnnouncements() {
 	maps.Copy(pending, o.leiosDeferredAnnouncements)
 	o.leiosDeferredMu.Unlock()
 	for key, announcement := range pending {
+		if leiosAnnouncementSourceClosed(announcement.done) {
+			o.dropDeferredLeiosAnnouncements(announcement.source)
+			continue
+		}
 		err := o.acceptLeiosAnnouncementInternal(
 			announcement.raw,
 			announcement.source,
 			false,
+			announcement.done,
 		)
 		if err == nil || !ledger.IsHeaderVerificationDeferred(err) {
 			o.leiosDeferredMu.Lock()
-			delete(o.leiosDeferredAnnouncements, key)
+			if current, ok := o.leiosDeferredAnnouncements[key]; ok &&
+				current.done == announcement.done {
+				delete(o.leiosDeferredAnnouncements, key)
+			}
 			o.leiosDeferredMu.Unlock()
 		}
 	}

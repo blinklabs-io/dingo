@@ -86,10 +86,10 @@ func TestDeferredLeiosAnnouncementsOneSourceCannotFillTheCap(t *testing.T) {
 	for slot := uint64(1); slot <= leiosMaxDeferredAnnouncements+10; slot++ {
 		require.Error(t, o.acceptLeiosAnnouncement(headerFor(slot), "peer-a"))
 	}
-	require.Less(
+	require.Equal(
 		t,
+		leiosMaxDeferredAnnouncementsPerSource,
 		deferredLeiosAnnouncementsFrom(o, "peer-a"),
-		leiosMaxDeferredAnnouncements,
 		"one source must not hold every deferral slot",
 	)
 
@@ -109,7 +109,10 @@ func TestDeferredLeiosAnnouncementsStayBoundedAndDrain(t *testing.T) {
 	for slot := uint64(1); slot <= sources; slot++ {
 		require.Error(
 			t,
-			o.acceptLeiosAnnouncement(headerFor(slot), fmt.Sprintf("peer-%d", slot)),
+			o.acceptLeiosAnnouncement(
+				headerFor(slot),
+				fmt.Sprintf("peer-%d", slot),
+			),
 		)
 	}
 	o.leiosDeferredMu.Lock()
@@ -163,4 +166,52 @@ func TestHandleConnClosedEventDropsDeferredLeiosAnnouncements(t *testing.T) {
 
 	require.Zero(t, deferredLeiosAnnouncementsFrom(o, closingKey))
 	require.Equal(t, 1, deferredLeiosAnnouncementsFrom(o, survivingKey))
+}
+
+func TestDeferredLeiosAnnouncementsConnectionLifetime(t *testing.T) {
+	t.Parallel()
+	o, _, headerFor := newDeferringLeiosOuroboros(t)
+	connID := testConnIdWithPort(4001)
+	source := leiosConnectionIdString(connID)
+	oldDone := make(chan any)
+	newDone := make(chan any)
+	require.Error(
+		t,
+		o.acceptLeiosAnnouncementInternal(headerFor(1), source, true, oldDone),
+	)
+	close(oldDone)
+	o.HandleConnClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{ConnectionId: connID},
+	))
+	require.Zero(t, deferredLeiosAnnouncementsFrom(o, source))
+	require.Error(
+		t,
+		o.acceptLeiosAnnouncementInternal(headerFor(2), source, true, oldDone),
+	)
+	require.Equal(
+		t,
+		0,
+		deferredLeiosAnnouncementsFrom(o, source),
+		"a post-close insertion must be rejected",
+	)
+	require.Error(
+		t,
+		o.acceptLeiosAnnouncementInternal(headerFor(1), source, true, newDone),
+	)
+	o.HandleConnClosedEvent(
+		event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{ConnectionId: connID},
+		),
+	)
+	require.Equal(
+		t,
+		1,
+		deferredLeiosAnnouncementsFrom(o, source),
+		"a delayed close must preserve the replacement connection",
+	)
+	close(newDone)
+	o.retryDeferredLeiosAnnouncements()
+	require.Zero(t, deferredLeiosAnnouncementsFrom(o, source))
 }

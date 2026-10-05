@@ -2797,7 +2797,7 @@ func (q *Queries) GetMidnightEpochCandidatesByEpoch(ctx context.Context, epoch i
 }
 
 const getMidnightEpochTransitionByBlock = `-- name: GetMidnightEpochTransitionByBlock :one
-SELECT block_number, previous_epoch
+SELECT block_number, previous_epoch, previous_exists
 FROM midnight_epoch_transitions
 WHERE block_number = ?
 `
@@ -2805,7 +2805,7 @@ WHERE block_number = ?
 func (q *Queries) GetMidnightEpochTransitionByBlock(ctx context.Context, blockNumber int64) (MidnightEpochTransition, error) {
 	row := q.db.QueryRowContext(ctx, getMidnightEpochTransitionByBlock, blockNumber)
 	var i MidnightEpochTransition
-	err := row.Scan(&i.BlockNumber, &i.PreviousEpoch)
+	err := row.Scan(&i.BlockNumber, &i.PreviousEpoch, &i.PreviousExists)
 	return i, err
 }
 
@@ -5429,18 +5429,19 @@ func (q *Queries) UpsertMidnightEpochCandidates(ctx context.Context, arg UpsertM
 }
 
 const upsertMidnightEpochTransition = `-- name: UpsertMidnightEpochTransition :exec
-INSERT INTO midnight_epoch_transitions (block_number, previous_epoch)
-VALUES (?, ?)
-ON CONFLICT (block_number) DO UPDATE SET previous_epoch = excluded.previous_epoch
+INSERT INTO midnight_epoch_transitions (block_number, previous_epoch, previous_exists)
+VALUES (?, ?, ?)
+ON CONFLICT (block_number) DO UPDATE SET previous_epoch = excluded.previous_epoch, previous_exists = excluded.previous_exists
 `
 
 type UpsertMidnightEpochTransitionParams struct {
-	BlockNumber   int64
-	PreviousEpoch int64
+	BlockNumber    int64
+	PreviousEpoch  int64
+	PreviousExists int64
 }
 
 func (q *Queries) UpsertMidnightEpochTransition(ctx context.Context, arg UpsertMidnightEpochTransitionParams) error {
-	_, err := q.db.ExecContext(ctx, upsertMidnightEpochTransition, arg.BlockNumber, arg.PreviousEpoch)
+	_, err := q.db.ExecContext(ctx, upsertMidnightEpochTransition, arg.BlockNumber, arg.PreviousEpoch, arg.PreviousExists)
 	return err
 }
 
