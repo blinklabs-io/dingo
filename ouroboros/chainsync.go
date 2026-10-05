@@ -461,29 +461,6 @@ func (o *Ouroboros) warnOriginOnlyIntersectRescued(
 	)
 }
 
-func chainsyncResyncRequiresFreshConnection(reason string) bool {
-	switch reason {
-	case event.ChainsyncResyncReasonLocalTipPlateau,
-		event.ChainsyncResyncReasonPostPlateauRealign,
-		event.ChainsyncResyncReasonRollbackNotFound,
-		event.ChainsyncResyncReasonPersistentFork,
-		event.ChainsyncResyncReasonLiveTxValidationRecovery,
-		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
-		event.ChainsyncResyncReasonChainSwitchCursorAhead,
-		event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonRollbackExceedsMithril,
-		event.ChainsyncResyncReasonPeerTipBehindMithril,
-		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
-		event.ChainsyncResyncReasonForkResolutionExceedsK,
-		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
-		event.ChainsyncResyncReasonRollbackLoop:
-		return true
-	default:
-		return false
-	}
-}
-
 // chainsyncResyncDeniesPeer lists the re-sync reasons that also put the peer
 // in peer governance's deny list for chainsyncDivergentPeerCooldown.
 //

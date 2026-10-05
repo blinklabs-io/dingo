@@ -5475,9 +5475,6 @@ func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
 ) {
 	t.Parallel()
 
-	require.True(t, chainsyncResyncRequiresFreshConnection(
-		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
-	))
 	require.True(t, chainsyncResyncDeniesPeer(
 		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
 	))
