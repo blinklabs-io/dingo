@@ -1859,7 +1859,7 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByAddress(nil)
+	result, err := ls.queryShelleyUtxoByAddress(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -1921,7 +1921,11 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	seedAddressUtxo(addr2, txId2, 2_000_000)
 
 	ls := &LedgerState{db: db}
-	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr1, addr2})
+	result, err := ls.queryShelleyUtxoByAddress(
+		[]ledger.Address{addr1, addr2},
+		QueryPoint{},
+		nil,
+	)
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)
@@ -2232,7 +2236,7 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
-	result, err := ls.queryShelleyAccountState()
+	result, err := ls.queryShelleyAccountState(QueryPoint{}, nil)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok, "expected []any wrapper")

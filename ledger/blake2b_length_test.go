@@ -61,6 +61,8 @@ func TestQueryStakeSnapshotsRejectsWrongLengthPoolKeyHash(t *testing.T) {
 	// result keys from the stored pool key hashes.
 	result, err := ls.queryShelleyStakeSnapshots(
 		&olocalstatequery.ShelleyStakeSnapshotsQuery{},
+		QueryPoint{},
+		nil,
 	)
 	require.Error(
 		t,

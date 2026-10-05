@@ -273,7 +273,11 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr})
+	result, err := ls.queryShelleyUtxoByAddress(
+		[]ledger.Address{addr},
+		QueryPoint{},
+		nil,
+	)
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)
 }

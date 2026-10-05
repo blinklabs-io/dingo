@@ -3137,7 +3137,7 @@ by the API adapter, which compares each candidate output's decoded
 address bytes, because the pointer payload is not represented in the
 `utxo` table.
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
+### `GetUtxosByAddress`, `GetUtxosByAddressAsOf`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 `GetUtxosByAddress` accepts multiple address patterns and OR-joins their coarse
 SQL branches into a single query, mirroring `GetUtxosByAddressWithOrdering`.
@@ -3174,6 +3174,17 @@ the dialect's parameter limit, not just counted against it afterward: a
 chunk that filled to exactly that limit on WHERE-clause args alone would
 otherwise produce a statement with one more bound parameter than the
 dialect allows once the `LIMIT ?` placeholder is appended.
+
+`GetUtxosByAddressAsOf` is the point-pinned form, used by `GetUTxOByAddress`
+when the LocalStateQuery session has an acquired point. It shares
+`GetUtxosByAddress`'s chunking and `maxResults` bound but replaces
+`deleted_slot = 0` with `GetUtxosByRefsAsOf`'s as-of predicate,
+`added_slot <= ? AND (deleted_slot = 0 OR deleted_slot > ?)`. Its two slot
+parameters are reserved in every chunk's parameter budget alongside the
+`LIMIT` placeholder. It inherits `GetUtxosByRefsAsOf`'s ambiguity for an old
+slot, so the caller rejects a point below `checkUtxoRetentionWindow`'s floor
+before calling it. The existing `payment_key` and `staking_key` indexes serve
+it; no index is added.
 
 Live UTxOs for a payment key with assets:
 

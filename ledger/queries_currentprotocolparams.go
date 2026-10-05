@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
@@ -89,6 +90,54 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 			ls.config.Logger,
 		)}, nil
 	}
+	pparams, err := ls.persistedProtocolParameters(
+		liveEpoch, targetEpoch, at, txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	// pparams is a persisted, historical value -- never ls.currentPParams --
+	// so the live case's tracked ls.syntheticV2CostModel flag (which
+	// describes only the CURRENT era's object) does not apply to it. Its own
+	// CBOR may still carry HardForkBabbage's fabricated PlutusV2 cost model
+	// (transitionToEraFrom persists newPParams verbatim, synthetic or not).
+	//
+	// Prefer the durable cleared-epoch provenance (confirmed: real data
+	// landed at or before that epoch) over re-deriving synthetic-ness from
+	// the value alone -- the value-based heuristic
+	// (resolveSyntheticV2CostModel) cannot tell a real update that happens
+	// to re-affirm the exact fabricated default from an actually-synthetic
+	// one, while the cleared-epoch marker knows which epoch really
+	// confirmed real data. Only fall back to the heuristic for the
+	// genuinely ambiguous case: no confirmation recorded at all, or
+	// targetEpoch predates the one that confirmed it.
+	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
+		ls.db, txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	synthetic := resolveSyntheticV2CostModel("", pparams)
+	if cleared && targetEpoch >= clearedEpoch {
+		synthetic = false
+	}
+	return []any{withoutSyntheticV2CostModel(
+		pparams,
+		synthetic,
+		ls.config.Logger,
+	)}, nil
+}
+
+// persistedProtocolParameters loads targetEpoch's persisted protocol
+// parameters, rejecting with ErrHistoricalStateUnavailable when the epoch,
+// its era, or its parameter row is missing. liveEpoch is used only in the
+// error text.
+func (ls *LedgerState) persistedProtocolParameters(
+	liveEpoch uint64,
+	targetEpoch uint64,
+	at QueryPoint,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
 	epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
 	if err != nil {
 		return nil, err
@@ -131,34 +180,5 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(
 			targetEpoch,
 		)
 	}
-	// pparams is a persisted, historical value -- never ls.currentPParams --
-	// so the live case's tracked ls.syntheticV2CostModel flag (which
-	// describes only the CURRENT era's object) does not apply to it. Its own
-	// CBOR may still carry HardForkBabbage's fabricated PlutusV2 cost model
-	// (transitionToEraFrom persists newPParams verbatim, synthetic or not).
-	//
-	// Prefer the durable cleared-epoch provenance (confirmed: real data
-	// landed at or before that epoch) over re-deriving synthetic-ness from
-	// the value alone -- the value-based heuristic
-	// (resolveSyntheticV2CostModel) cannot tell a real update that happens
-	// to re-affirm the exact fabricated default from an actually-synthetic
-	// one, while the cleared-epoch marker knows which epoch really
-	// confirmed real data. Only fall back to the heuristic for the
-	// genuinely ambiguous case: no confirmation recorded at all, or
-	// targetEpoch predates the one that confirmed it.
-	clearedEpoch, cleared, err := database.SyntheticV2CostModelClearedEpoch(
-		ls.db, txn,
-	)
-	if err != nil {
-		return nil, err
-	}
-	synthetic := resolveSyntheticV2CostModel("", pparams)
-	if cleared && targetEpoch >= clearedEpoch {
-		synthetic = false
-	}
-	return []any{withoutSyntheticV2CostModel(
-		pparams,
-		synthetic,
-		ls.config.Logger,
-	)}, nil
+	return pparams, nil
 }

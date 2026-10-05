@@ -11303,14 +11303,23 @@ periodic full checks reported as "diverged" on essentially every run that
 took long enough for the live tip to move during the walk -- confirmed
 live against a real Preview cardano-node: every flagged row's own
 `AddedSlot` was strictly after the pinned slot. The live path's
-reply is still fully materialized rather than streamed. Every other query type
-still ignores the acquired point and answers from live state --
-`ShelleyUtxoByAddressQuery` shares the same utxo table and columns as
-`GetUTxOByTxIn` and could extend the same way, but no current caller needs
-it; `queryShelleyStakeSnapshots` in particular looks like a cheap addition
-(the same epoch-snapshot shape as stake distribution) but its
-zero-pool-omission rule depends on the *live* protocol version, so pinning
-it would need the same not-yet-built historical-pparams machinery.
+reply is still fully materialized rather than streamed.
+`GetUTxOByAddress` (`queryShelleyUtxoByAddress`) applies the same predicate
+and `checkUtxoRetentionWindow` floor to the requested addresses
+(`database.UtxosByAddressAsOf`). `GetAccountState`
+(`queryShelleyAccountState`) reads the `network_state` row in effect at the
+pinned slot (`GetNetworkStateAsOfSlot`); those rows are removed only by
+rollback, so no retention floor applies, and a slot older than every row is
+rejected rather than answered with zeros. `GetStakeSnapshots`
+(`queryShelleyStakeSnapshots`) reads the mark, set and go snapshots of the
+pinned point's epoch and the two before it, rejects the point once the go
+snapshot leaves the pool-snapshot retention window, and takes the protocol
+version for its PV11 zero-pool rule from that epoch's persisted protocol
+parameters. The per-credential, per-pool and per-proposal queries
+(`GetFilteredDelegationsAndRewardAccounts`, `GetStakeDelegDeposits`,
+`GetDRepState`, `GetFilteredVoteDelegatees`, `GetStakePools`,
+`GetProposals`) and `DebugChainDepState` still ignore the acquired point:
+Dingo keeps no history for that state.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the

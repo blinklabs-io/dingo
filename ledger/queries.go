@@ -973,7 +973,13 @@ func (ls *LedgerState) queryShelley(
 // "divergence" on essentially every run that took long enough for the live tip
 // to move during the walk before this closed the gap -- confirmed live against
 // a real Preview cardano-node, every flagged row's own AddedSlot was strictly
-// after the pinned slot).
+// after the pinned slot), ShelleyUtxoByAddressQuery
+// (queryShelleyUtxoByAddress, the same predicate and retention floor through
+// GetUtxosByAddressAsOf), ShelleyAccountStateQuery (queryShelleyAccountState,
+// the network_state row in effect at at.Slot), and ShelleyStakeSnapshotsQuery
+// (queryShelleyStakeSnapshots, the mark/set/go rows of at's epoch, rejected
+// once the go snapshot leaves the pool-snapshot retention window, with the
+// PV11 zero-pool rule taken from that epoch's persisted protocol parameters).
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -984,12 +990,6 @@ func (ls *LedgerState) queryShelley(
 // case answers unconditionally from live state regardless of at, because
 // making it historically correct needs storage or reconstruction logic
 // that does not exist yet --
-//   - ShelleyUtxoByAddressQuery: same underlying utxo table and
-//     AddedSlot/DeletedSlot columns as ShelleyUtxoByTxinQuery, so the same
-//     historical predicate could extend here, filtered instead of
-//     cursor-paginated -- no current caller needs it (only GetUTxOByTxIn
-//     and the whole-set query are used for cross-node comparison), so not
-//     built.
 //   - ShelleyFilteredDelegationAndRewardAccountsQuery,
 //     ShelleyStakeDelegDepositsQuery, ShelleyDRepStateQuery,
 //     ShelleyFilteredVoteDelegateesQuery, ShelleyStakePoolsQuery,
@@ -997,19 +997,6 @@ func (ls *LedgerState) queryShelley(
 //     per-proposal state with no historical-by-point record; would need new
 //     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
 //     slot columns, not attempted.
-//   - ShelleyAccountStateQuery: chain-wide treasury/reserves totals, same
-//     class of gap as protocol parameters (no historical-by-epoch record).
-//   - ShelleyStakeSnapshotsQuery: its per-epoch mark/set/go reads are
-//     structurally identical to PoolStakeDistribution's and could resolve
-//     at the same way, but its zero-pool-omission rule
-//     (omitZeroPools, protocol-version-gated) reads
-//     GetProtocolVersion(consensus.currentPParams) -- the *live* protocol
-//     version. Pinning the snapshot epoch without also resolving the
-//     protocol version that was active at that epoch would answer with
-//     the right stake but a version-dependent inclusion rule from the
-//     wrong point, so this has the same missing-historical-storage
-//     dependency as ShelleyCurrentProtocolParamsQuery and was left alone
-//     for the same reason.
 //   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
 //     computeCandidateNonceAsOf already takes an arbitrary end-slot
 //     internally (a possible future entry point), but OpCertCounters
@@ -1035,7 +1022,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig(protocolVersion)
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
-		return ls.queryShelleyUtxoByAddress(q.Addrs)
+		return ls.queryShelleyUtxoByAddress(q.Addrs, at, txn)
 	case *olocalstatequery.ShelleyUtxoByTxinQuery:
 		return ls.queryShelleyUtxoByTxIn(q.TxIns, at, txn)
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
@@ -1051,9 +1038,9 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyDRepStateQuery:
 		return ls.queryShelleyDRepState(q.Credentials.Items())
 	case *olocalstatequery.ShelleyAccountStateQuery:
-		return ls.queryShelleyAccountState()
+		return ls.queryShelleyAccountState(at, txn)
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
-		return ls.queryShelleyStakeSnapshots(q)
+		return ls.queryShelleyStakeSnapshots(q, at, txn)
 	case *olocalstatequery.ShelleyFilteredVoteDelegateesQuery:
 		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
 	case *olocalstatequery.ShelleyGetProposalsQuery:
@@ -1164,10 +1151,29 @@ func (ls *LedgerState) queryShelleyCbor(
 // from the mark snapshots at epoch-1 and epoch-2.
 func (ls *LedgerState) queryShelleyStakeSnapshots(
 	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	pools, all := q.PoolFilter()
 	consensus := ls.loadConsensusSnapshot()
 	epoch := consensus.currentEpoch.EpochId
+	pparams := consensus.currentPParams
+
+	// Read the mark/set/go snapshots under a single read transaction so all
+	// three epochs come from one consistent view even if an epoch boundary
+	// fires mid-query.
+	if txn == nil {
+		txn = ls.db.Transaction(false)
+		defer txn.Release()
+	}
+	metaTxn := txn.Metadata()
+	if at.pinned() {
+		var err error
+		epoch, pparams, err = ls.stakeSnapshotsAsOf(consensus, at, txn)
+		if err != nil {
+			return nil, err
+		}
+	}
 	setEpoch, hasSet := priorEpoch(epoch, 1)
 	goEpoch, hasGo := priorEpoch(epoch, 2)
 
@@ -1177,16 +1183,9 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 	// explicitly requested (cardano-ledger behavior). Below PV11 an
 	// explicitly requested pool is always returned, even with zero stake.
 	omitZeroPools := false
-	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+	if pv, err := GetProtocolVersion(pparams); err == nil {
 		omitZeroPools = pv.Major >= 11
 	}
-
-	// Read the mark/set/go snapshots under a single read transaction so all
-	// three epochs come from one consistent view even if an epoch boundary
-	// fires mid-query.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
-	metaTxn := txn.Metadata()
 
 	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
 	if all {
@@ -1291,6 +1290,61 @@ func (ls *LedgerState) queryShelleyStakeSnapshots(
 		TotalStakeGo:   goTotal,
 	}
 	return []any{result}, nil
+}
+
+// stakeSnapshotsAsOf resolves the epoch a pinned GetStakeSnapshots answers
+// for and the protocol parameters in force in it, which decide the PV11
+// zero-pool rule. The query reads the mark rows of that epoch and the two
+// before it, so the oldest of the three must still be inside the pool-snapshot
+// retention window; checkAsOfEpochRecency only guarantees the one before.
+func (ls *LedgerState) stakeSnapshotsAsOf(
+	consensus *consensusSnapshot,
+	at QueryPoint,
+	txn *database.Txn,
+) (uint64, lcommon.ProtocolParameters, error) {
+	epoch, found, err := ls.resolveAsOfEpoch(txn, at)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !found {
+		return 0, nil, errEpochNotResolved(at)
+	}
+	liveEpoch, _, err := ls.resolveAsOfEpoch(txn, QueryPoint{})
+	if err != nil {
+		return 0, nil, err
+	}
+	apiMode := ls.db.StorageMode() == types.StorageModeAPI
+	if err := checkAsOfEpochRecency(epoch, liveEpoch, apiMode); err != nil {
+		return 0, nil, err
+	}
+	oldest := epoch
+	if goEpoch, ok := priorEpoch(epoch, 2); ok {
+		oldest = goEpoch
+	} else if setEpoch, ok := priorEpoch(epoch, 1); ok {
+		oldest = setEpoch
+	}
+	if !apiMode && liveEpoch >= stakeSnapshotRetentionEpochs &&
+		oldest < liveEpoch-stakeSnapshotRetentionEpochs {
+		return 0, nil, fmt.Errorf(
+			"%w: GetStakeSnapshots as of epoch %d needs the snapshot of "+
+				"epoch %d, below the retained pool-snapshot window "+
+				"(rows below epoch %d have been pruned)",
+			ErrHistoricalStateUnavailable,
+			epoch,
+			oldest,
+			liveEpoch-stakeSnapshotRetentionEpochs,
+		)
+	}
+	if epoch == consensus.currentEpoch.EpochId {
+		return epoch, consensus.currentPParams, nil
+	}
+	pparams, err := ls.persistedProtocolParameters(
+		consensus.currentEpoch.EpochId, epoch, at, txn,
+	)
+	if err != nil {
+		return 0, nil, err
+	}
+	return epoch, pparams, nil
 }
 
 // snapshotTypeMark is the physical snapshot type dingo persists at each
@@ -1878,8 +1932,36 @@ func (ls *LedgerState) allDRepDelegators() (
 // in the single-element result array, so the wire shape is
 // [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
 // reserves negative).
-func (ls *LedgerState) queryShelleyAccountState() (any, error) {
-	state, err := ls.db.Metadata().GetNetworkState(nil)
+//
+// A pinned at reads the network_state row in effect at at.Slot. Those rows
+// are removed only by rollback, never by retention cleanup, so any point with
+// a row at or before it is answerable. A pinned point older than every row is
+// rejected rather than answered with the live path's zeros.
+func (ls *LedgerState) queryShelleyAccountState(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	var state *models.NetworkState
+	var err error
+	if at.pinned() {
+		if txn == nil {
+			txn = ls.db.Transaction(false)
+			defer txn.Release()
+		}
+		state, err = ls.db.Metadata().
+			GetNetworkStateAsOfSlot(at.Slot, txn.Metadata())
+		if err == nil && state == nil {
+			return nil, fmt.Errorf(
+				"%w: treasury and reserves as of slot %d cannot be "+
+					"reconstructed -- no network_state row exists at or "+
+					"before that slot",
+				ErrHistoricalStateUnavailable,
+				at.Slot,
+			)
+		}
+	} else {
+		state, err = ls.db.Metadata().GetNetworkState(nil)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1987,16 +2069,36 @@ func stakePoolsResult(keyHashes [][]byte) ([]any, error) {
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(
 	addrs []ledger.Address,
+	at QueryPoint,
+	txn *database.Txn,
 ) (any, error) {
 	ret := make(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	if len(addrs) == 0 {
 		return []any{ret}, nil
 	}
-	utxos, err := ls.db.UtxosByAddress(
-		addrs,
-		database.MaxUtxosByAddressResults,
-		nil,
-	)
+	var utxos []models.Utxo
+	var err error
+	if at.pinned() {
+		if txn == nil {
+			txn = ls.db.Transaction(false)
+			defer txn.Release()
+		}
+		if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
+			return nil, err
+		}
+		utxos, err = ls.db.UtxosByAddressAsOf(
+			addrs,
+			at.Slot,
+			database.MaxUtxosByAddressResults,
+			txn,
+		)
+	} else {
+		utxos, err = ls.db.UtxosByAddress(
+			addrs,
+			database.MaxUtxosByAddressResults,
+			txn,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2553,7 +2655,7 @@ func (ls *LedgerState) checkUtxoRetentionWindow(
 	}
 	if at.Slot < retentionFloor {
 		return fmt.Errorf(
-			"%w: GetUTxOByTxIn pinned to slot %d is older than this "+
+			"%w: UTxO query pinned to slot %d is older than this "+
 				"node's spent-UTxO retention floor (slot %d, tip %d) -- "+
 				"a UTxO spent and pruned before that floor cannot be "+
 				"reliably reconstructed as of the pinned point",
