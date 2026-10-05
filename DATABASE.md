@@ -826,6 +826,35 @@ connection indefinitely; later timer or epoch-boundary runs reclaim the
 remaining rows once the node is near the upstream tip.
 API mode retains spent UTxO metadata for historical transaction queries.
 
+**Acquired-point pins.** Consumed-UTxO cleanup also defers to LocalStateQuery
+points that clients currently hold. A node-to-client Acquire of a specific
+point pins its slot (`LedgerState.PinAcquiredPoint`,
+`ledger/acquired_point_pins.go`) *before* `VerifyPointQueryable` checks it, and
+`cleanupConsumedUtxos` takes its delete floor from `capUtxoPruneFloor`, which
+lowers `tip - stabilityWindow` to the oldest pinned slot. The capped floor is
+announced in memory, under the pin registry's own lock, before
+`consumed_utxo_prune_floor` is persisted and before any row is deleted, and
+Acquire's verify also refuses a point below an announced floor. So a concurrent
+Acquire is either retained, because its pin landed first, or refused at
+Acquire, where the protocol has a clean `AcquireFailure`; it is never approved
+and then left pointing at rows a prune is deleting. No I/O runs under that
+lock.
+
+A pin holds the floor back by at most `acquiredPointMaxUtxoHoldWindows` (4)
+stability windows behind its normal value; a pin older than that stops being
+protected, so a client that acquires and never releases cannot stop spent-UTxO
+pruning, and its later queries fall back to the ordinary retention rejection.
+A pin only holds back *future* advances: `consumed_utxo_prune_floor` still only
+ever rises, so rows already below a persisted floor are not recovered, and an
+Acquire of a point below that floor is refused as before.
+
+A pin is released on Release, on an Acquire of the volatile or immutable tip,
+on a re-Acquire (only once the new point has verified, since a rejected
+re-Acquire leaves the client on its previous point), and on connection close
+-- including a close that lands while the Acquire is still verifying, when the
+pin is held as pending and close releases it. API storage mode is unaffected:
+it never prunes spent rows, so no cap or announced floor applies.
+
 ## ER Diagrams
 
 ### Transactions and UTxO
@@ -1683,8 +1712,9 @@ Every epoch transition runs `cleanupOldSnapshots`, which prunes to the four
 epochs the Shelley rotation and delayed reward model need: current, current-1,
 current-2 for Go, and current-3 so reward calculation can be replayed after a
 rollback across the boundary where those rewards were applied. It only ever
-deletes rows below that window (but see the deferred-header retention pin
-below, which can hold `pool_stake_snapshot` rows longer).
+deletes rows below that window (but see the deferred-header and
+acquired-point retention pins below, which can hold `pool_stake_snapshot` rows
+longer).
 
 `reward_account_output` and `pool_stake_snapshot` are the two tables whose
 retention depends on node configuration. `reward_account_output` is retained
@@ -1798,6 +1828,30 @@ its in-memory entry but loses its durable marker, so after a restart
 is skipped for a header that is still outstanding. The earlier claim that this lock "does no I/O, so it cannot deadlock" was
 wrong: the hazard is never the mutex holder's own I/O, it is the *caller on the
 other path* holding the single write connection while it waits for this mutex.
+
+**Acquired-point retention pin.** `pool_stake_snapshot` is also held for
+LocalStateQuery points that clients currently hold, since a pinned
+`GetStakeDistribution`/`GetPoolDistr2` reads the mark snapshot of the point's
+epoch (`StakeSnapshotEpoch(epochOf(slot))`). After the deferred-header lock is
+released and before `prune` runs, `PrunePoolSnapshotsWithRetentionFloor` passes
+the boundary through `capPoolSnapshotPruneBefore`, which lowers it to the
+oldest acquired point's mark-snapshot epoch and announces the result under the
+pin registry's lock (`ledger/acquired_point_pins.go`); slots are mapped against
+one epoch-cache snapshot, which takes no lock. The same
+`current - poolSnapshotRetentionMaxDepth` (24) depth cap clamps it, so an
+acquired point holds pool snapshots back no further than a deferred header
+can, and a slot that cannot be mapped retains down to that cap rather than
+everything. Reward-table retention is unaffected.
+
+Unlike a deferred header, an acquired point cannot recover from a snapshot
+pruned in the narrow window around the floor read: a deferred header is
+re-checked on a later pass, but a pinned query against a missing snapshot
+simply fails, and the LocalStateQuery protocol has no failure reply mid-query,
+so the connection drops. That is why the floor is announced before the delete
+and Acquire's verify also refuses a point below an announced floor. The pin is
+the same one the consumed-UTxO cleanup reads, released on the same lifecycle
+(see the consumed-UTxO cleanup notes under SQL Conventions). API storage mode
+never calls the guard, since it retains `pool_stake_snapshot` without bound.
 
 Releasing the lock before `prune` means a header admitted after the release is
 not pinned by the pass in flight. This is safe because the retention floor is a

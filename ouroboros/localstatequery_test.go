@@ -483,15 +483,18 @@ func acquireSpecific(
 // spent-UTxO and pool-snapshot pruning back until the backstop. Each exit is
 // checked separately, because each is a separate code path.
 func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
+	t.Parallel()
 	connID := ouroboros.ConnectionId{}
 
 	t.Run("successful acquire holds exactly one pin", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		require.Equal(t, 1, o.ledgerState.AcquiredPointPinCountForTesting())
 	})
 
 	t.Run("Release drops the pin", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		require.NoError(t, o.localstatequeryServerRelease(
@@ -501,6 +504,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 	})
 
 	t.Run("connection close drops the pin", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		o.ReleaseLocalStateQueryAcquiredPointOwner(connID, nil)
@@ -508,6 +512,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 	})
 
 	t.Run("acquiring the volatile tip drops the pin", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		require.NoError(t, o.localstatequeryServerAcquire(
@@ -519,6 +524,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 	})
 
 	t.Run("re-acquire replaces rather than accumulates", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		require.NoError(t, acquireSpecific(t, o, connID, point, true))
@@ -527,6 +533,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 	})
 
 	t.Run("a rejected acquire leaves no pin", func(t *testing.T) {
+		t.Parallel()
 		o, _ := newPinTestOuroboros(t)
 		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
 		require.Error(t, acquireSpecific(t, o, connID, ahead, false))
@@ -535,6 +542,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 	})
 
 	t.Run("a rejected re-acquire keeps the previous pin", func(t *testing.T) {
+		t.Parallel()
 		o, point := newPinTestOuroboros(t)
 		require.NoError(t, acquireSpecific(t, o, connID, point, false))
 		ahead := ocommon.NewPoint(99, bytes.Repeat([]byte{9}, 32))
@@ -552,6 +560,7 @@ func TestLocalstatequeryAcquire_PinLifecycle(t *testing.T) {
 // Acquire handler pinned after verifying. The hook runs at the moment verify
 // starts, and the pin must already be there.
 func TestLocalstatequeryAcquire_PinHeldWhileVerifying(t *testing.T) {
+	t.Parallel()
 	o, point := newPinTestOuroboros(t)
 	pinsAtVerify := -1
 	o.localstatequeryVerifyHook = func() {
@@ -573,6 +582,7 @@ func TestLocalstatequeryAcquire_PinHeldWhileVerifying(t *testing.T) {
 // so it held pruning back until the backstop. The hook closes the connection
 // at exactly that moment.
 func TestLocalstatequeryAcquire_CloseDuringVerifyLeavesNoPin(t *testing.T) {
+	t.Parallel()
 	o, point := newPinTestOuroboros(t)
 	connID := ouroboros.ConnectionId{}
 	o.localstatequeryVerifyHook = func() {
