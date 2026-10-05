@@ -1578,7 +1578,12 @@ transactions not yet in any block and ignore the report. It
 tracks no UTxOs: spent and created outputs come from the UTxO overlay, which covers every
 pending transaction. The pool records a state-changing transaction as its own
 retained CBOR slice, shared with the pool entry and counted once by the pool's
-byte counter; the transaction is decoded only while it is folded. The overlay
+byte counter; the transaction is decoded only while it is folded. The byte
+counter charges each pending transaction its CBOR plus the CBOR carried by the
+decoded outputs the UTxO overlay keeps for it, which decoding copies out of the
+transaction. Capacity, both watermarks, eviction and admission headroom use
+that figure, and TxSubmission intake that loses a headroom race waits for it
+rather than for the advertised size, which it can exceed. The overlay
 cannot drop a transaction, so a removal rebuilds it from the survivors, except
 that removing transactions with no state effects keeps the folded state. A
 UTxO-only transaction is not recorded.

@@ -298,7 +298,7 @@ func TestDAGTracksAdmittedTransactionDependencies(t *testing.T) {
 func TestDAGDoesNotWatermarkEvict(t *testing.T) {
 	parentBytes, childBytes, _, _ := getDependentTestTxBytes(t)
 	const originalInputHash = "0c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8"
-	totalSize := int64(len(parentBytes) + len(childBytes))
+	totalSize := retainedSize(t, parentBytes) + retainedSize(t, childBytes)
 	capacity := totalSize
 	for totalSize > int64(float64(capacity)*DefaultRejectionWatermark) ||
 		totalSize <= int64(float64(capacity)*DefaultEvictionWatermark) {

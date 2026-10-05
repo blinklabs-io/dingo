@@ -310,9 +310,12 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 	return d
 }
 
+// retryTxsubmissionAdmission retries add while the mempool reports it full.
+// waitForHeadroom receives the bytes the rejected admission needed, which the
+// pool measures after decoding and which can exceed the advertised size.
 func retryTxsubmissionAdmission(
 	add func() error,
-	waitForHeadroom func() bool,
+	waitForHeadroom func(need int64) bool,
 	recordRetry func(int),
 ) error {
 	for retryStreak := 0; ; {
@@ -320,7 +323,8 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		if _, ok := errors.AsType[*mempool.MempoolFullError](err); !ok {
+		full, ok := errors.AsType[*mempool.MempoolFullError](err)
+		if !ok {
 			return err
 		}
 		retryStreak++
@@ -333,7 +337,7 @@ func retryTxsubmissionAdmission(
 				err,
 			)
 		}
-		if !waitForHeadroom() {
+		if !waitForHeadroom(int64(full.TxSize)) {
 			return errTxsubmissionAdmissionStopped
 		}
 	}
@@ -723,9 +727,13 @@ func (o *Ouroboros) txsubmissionServerInit(
 									txBody.TxBody,
 								)
 							},
-							func() bool {
+							func(need int64) bool {
+								// A transaction that cannot fit even an empty
+								// pool waits for the whole budget and is then
+								// dropped by the retry bound; asking for more
+								// would end intake for this peer.
 								return headroom.WaitForAdmissionHeadroom(
-									int64(len(txBody.TxBody)),
+									min(need, headroom.MaxAdmissionHeadroomBytes()),
 									connDone,
 								)
 							},

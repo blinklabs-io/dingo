@@ -20,6 +20,7 @@ import (
 	"reflect"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/dingo/utxoref"
@@ -154,7 +155,7 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 1)
 	pool, err := NewFIFO(MempoolConfig{
 		Validator:       newMockValidator(),
-		MempoolCapacity: int64(len(first)),
+		MempoolCapacity: retainedSize(t, first),
 		PromRegistry:    prometheus.NewRegistry(),
 	})
 	require.NoError(t, err)
@@ -169,7 +170,7 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 		pool.AddTransaction(uint(conway.EraIdConway), first),
 		"a duplicate is accepted without a new entry even when the pool is full",
 	)
-	require.Equal(t, int64(len(first)), pool.currentSizeBytes)
+	require.Equal(t, retainedSize(t, first), pool.currentSizeBytes)
 	require.Len(t, pool.Transactions(), 1)
 	require.Len(t, pool.overlay.applied, 1)
 
@@ -182,12 +183,55 @@ func TestMempoolDuplicateAtCapacityRetainsNothingNew(t *testing.T) {
 	)
 }
 
+// retainedTxBytes measures what the pool retains for its transactions: each
+// entry's CBOR plus the CBOR of every decoded output the UTxO overlay keeps
+// for it.
+// TestMempoolDuplicateOfExpiredTransactionIsChargedAgain resubmits a
+// transaction after expiry removed it. Expiry must leave nothing a duplicate
+// could refresh, so the resubmission is a new admission held to capacity.
+func TestMempoolDuplicateOfExpiredTransactionIsChargedAgain(t *testing.T) {
+	t.Parallel()
+	first := withdrawalTxCbor(t, 0x01, withdrawalStakeKey, 1)
+	second := withdrawalTxCbor(t, 0x02, withdrawalStakeKey, 1)
+	pool, err := NewFIFO(MempoolConfig{
+		Validator:       newMockValidator(),
+		MempoolCapacity: retainedSize(t, first),
+		TransactionTTL:  time.Minute,
+		PromRegistry:    prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pool.Stop(context.Background()) })
+	txType := uint(conway.EraIdConway)
+	require.NoError(t, pool.AddTransaction(txType, first))
+	pool.Lock()
+	for _, tx := range pool.transactions {
+		tx.LastSeen = time.Now().Add(-2 * time.Minute)
+	}
+	pool.Unlock()
+	pool.removeExpiredTransactions()
+	require.Empty(t, pool.Transactions())
+	require.Zero(t, pool.currentSizeBytes)
+
+	require.NoError(t, pool.AddTransaction(txType, second))
+	var full *MempoolFullError
+	require.ErrorAs(
+		t,
+		pool.AddTransaction(txType, first),
+		&full,
+		"an expired transaction is admitted afresh, not refreshed",
+	)
+	require.Len(t, pool.Transactions(), 1)
+}
+
 func retainedTxBytes(pool *Mempool) (int64, int) {
 	pool.RLock()
 	defer pool.RUnlock()
 	var total int64
 	for _, tx := range pool.transactions {
 		total += int64(len(tx.Cbor))
+	}
+	for _, utxo := range pool.overlay.created {
+		total += int64(len(utxo.Output.Cbor()))
 	}
 	return total, len(pool.overlay.applied)
 }
@@ -263,6 +307,15 @@ func TestMempoolSizeCounterMatchesRetainedTransactionBytes(t *testing.T) {
 			"stateCbor must share the pool entry's bytes",
 		)
 	}
+}
+
+// retainedSize is what the pool charges for admitting txBytes: the CBOR and
+// the decoded outputs its UTxO overlay keeps.
+func retainedSize(t *testing.T, txBytes []byte) int64 {
+	t.Helper()
+	tx, err := gledger.NewTransactionFromCbor(uint(conway.EraIdConway), txBytes)
+	require.NoError(t, err)
+	return int64(len(txBytes)) + producedOutputBytes(tx.Produced())
 }
 
 // confirmingSessionValidator models a block confirming parentHash while the

@@ -82,6 +82,27 @@ type MempoolTransaction struct {
 	Hash     string
 	Cbor     []byte
 	Type     uint
+	// outputBytes is the CBOR the UTxO overlay retains with the decoded
+	// outputs of this transaction, which decoding copies out of Cbor.
+	outputBytes int64
+}
+
+// retainedBytes is what the pool charges this transaction against its
+// capacity: its own CBOR and the decoded outputs the UTxO overlay keeps.
+func (tx *MempoolTransaction) retainedBytes() int64 {
+	return int64(len(tx.Cbor)) + tx.outputBytes
+}
+
+// producedOutputBytes measures the CBOR carried by the outputs the UTxO
+// overlay retains for a transaction producing produced.
+func producedOutputBytes(produced []lcommon.Utxo) int64 {
+	var total int64
+	for _, utxo := range produced {
+		if utxo.Output != nil {
+			total += int64(len(utxo.Output.Cbor()))
+		}
+	}
+	return total
 }
 
 // Consumer is the neutral per-connection transaction cursor used by
@@ -267,7 +288,7 @@ func (c *revalidationCandidate) remove(hashes map[string]struct{}) {
 		if _, remove := hashes[tx.Hash]; remove {
 			delete(c.txByHash, tx.Hash)
 			delete(c.invalid, tx.Hash)
-			c.sizeBytes -= int64(len(tx.Cbor))
+			c.sizeBytes -= tx.retainedBytes()
 			continue
 		}
 		remaining = append(remaining, tx)
@@ -286,13 +307,13 @@ func (c *revalidationCandidate) add(
 	c.overlay.applyTx(at.hash, at.txType, decoded, tx.Cbor)
 	c.transactions = append(c.transactions, tx)
 	c.txByHash[at.hash] = tx
-	c.sizeBytes += int64(len(tx.Cbor))
+	c.sizeBytes += tx.retainedBytes()
 	delete(c.invalid, at.hash)
 }
 
 // appliedTx records a pending transaction and its UTxO effects for overlay
-// rebuild. It holds no copy of the transaction bytes: the pool entry's Cbor is
-// the only retained representation, and currentSizeBytes counts exactly it.
+// rebuild. It holds no copy of the transaction bytes; currentSizeBytes counts
+// the pool entry's Cbor and the decoded outputs in created.
 type appliedTx struct {
 	hash     string
 	txType   uint
@@ -553,6 +574,9 @@ var ErrNilValidator = errors.New("mempool: validator is nil")
 // ErrMempoolStopped is returned when admission is attempted after shutdown.
 var ErrMempoolStopped = errors.New("mempool: stopped")
 
+// MempoolFullError reports an admission refused for capacity. CurrentSize and
+// TxSize are in the units capacity is charged in: a transaction's CBOR plus
+// the CBOR of the decoded outputs the pool keeps for it.
 type MempoolFullError struct {
 	CurrentSize int
 	TxSize      int
@@ -1653,7 +1677,8 @@ func (m *Mempool) addTransactionAttempt(
 			)
 			return nil
 		}
-		txSize := int64(len(txBytes))
+		outputBytes := producedOutputBytes(tmpTx.Produced())
+		txSize := int64(len(txBytes)) + outputBytes
 		newSize := m.currentSizeBytes + txSize
 		rejectionThreshold := m.admissionLimitBytes()
 		if newSize > rejectionThreshold {
@@ -1683,7 +1708,7 @@ func (m *Mempool) addTransactionAttempt(
 			var evictedBytes int64
 			for i := 0; i < len(m.transactions) &&
 				m.currentSizeBytes-evictedBytes > targetBytes; i++ {
-				evictedBytes += int64(len(m.transactions[i].Cbor))
+				evictedBytes += m.transactions[i].retainedBytes()
 				evictedHashes[m.transactions[i].Hash] = struct{}{}
 			}
 			validConsumed, validCreated, validAccounts = m.overlay.simulateRemoveBatch(
@@ -1726,10 +1751,11 @@ func (m *Mempool) addTransactionAttempt(
 			m.dag.add(applied)
 		}
 		tx := &MempoolTransaction{
-			Hash:     txHash,
-			Type:     txType,
-			Cbor:     txCbor,
-			LastSeen: time.Now(),
+			Hash:        txHash,
+			Type:        txType,
+			Cbor:        txCbor,
+			LastSeen:    time.Now(),
+			outputBytes: outputBytes,
 		}
 		m.transactions = append(m.transactions, tx)
 		m.txByHash[txHash] = tx
@@ -2038,7 +2064,7 @@ func (m *Mempool) removeTransactionByIndexLocked(
 		return nil
 	}
 	tx := m.transactions[txIdx]
-	txSize := int64(len(tx.Cbor))
+	txSize := tx.retainedBytes()
 	m.transactions = slices.Delete(
 		m.transactions,
 		txIdx,
@@ -2085,7 +2111,7 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 	var evictedBytes int64
 	for evicted < len(m.transactions) &&
 		m.currentSizeBytes-evictedBytes > targetBytes {
-		evictedBytes += int64(len(m.transactions[evicted].Cbor))
+		evictedBytes += m.transactions[evicted].retainedBytes()
 		evicted++
 	}
 	if evicted == 0 {
@@ -2105,7 +2131,7 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 	var events []event.Event
 	for i := range evicted {
 		tx := m.transactions[i]
-		txSize := int64(len(tx.Cbor))
+		txSize := tx.retainedBytes()
 		delete(m.txByHash, tx.Hash)
 		m.metrics.txsInMempool.Dec()
 		m.metrics.mempoolBytes.Sub(float64(txSize))

@@ -3641,7 +3641,7 @@ func TestMempool_EvictionIsReconciledDuringRevalidation(t *testing.T) {
 	firstTx := getTestTxBytes(t)
 	secondTx, err := hex.DecodeString(testTxWithValidityStartHex)
 	require.NoError(t, err)
-	totalSize := len(firstTx) + len(secondTx)
+	totalSize := retainedSize(t, firstTx) + retainedSize(t, secondTx)
 	capacity := int64(float64(totalSize)/0.925) + 1
 	m, err := NewMempool(MempoolConfig{
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
