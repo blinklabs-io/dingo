@@ -883,7 +883,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
           git add Formula/dingo.rb
-          git commit -m "dingo ${RELEASE_TAG}"
+          git commit -m "chore(dingo): release ${RELEASE_TAG}"
           # A retried tag run may find the tap branch already on the remote. The
           # tap was checked out on its default branch, so there is no
           # origin/$branch tracking ref for --force-with-lease to compare
