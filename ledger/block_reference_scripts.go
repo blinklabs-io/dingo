@@ -44,18 +44,19 @@ func (s pv10ReferenceScriptState) UtxoById(
 }
 
 // referenceScriptParams selects the parameters for the aggregate check of a
-// block. A block of the era immediately before the ledger's current era is
-// judged under the previous era's parameters, the same predecessor rule
-// resolveValidationEra applies to its transactions, so the aggregate and
-// per-transaction checks cannot pick different parameters for one block. The
-// ledger's own era transition has already fixed currentEra; the block
-// contributes only its wire era, and a block further behind is unreachable.
+// block. A block of the era listed immediately before the ledger's current era
+// in eraList is judged under the previous era's parameters, the predecessor
+// rule resolveValidationEra applies to its transactions, so the aggregate and
+// per-transaction checks cannot pick different parameters for one block.
 func referenceScriptParams(
 	block ledger.Block,
 	currentEra eras.EraDesc,
+	eraList []eras.EraDesc,
 	pparams, prevEraPParams lcommon.ProtocolParameters,
 ) lcommon.ProtocolParameters {
-	if uint(block.Era().Id)+1 == currentEra.Id && prevEraPParams != nil {
+	blockEraId := uint(block.Era().Id)
+	if blockEraId != currentEra.Id && prevEraPParams != nil &&
+		eras.IsCompatibleEraIn(eraList, blockEraId, currentEra.Id) {
 		return prevEraPParams
 	}
 	return pparams

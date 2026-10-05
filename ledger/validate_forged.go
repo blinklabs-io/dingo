@@ -166,6 +166,7 @@ func (ls *LedgerState) ValidateBlockReferenceScripts(block ledger.Block) error {
 	pp := referenceScriptParams(
 		block,
 		snapshot.currentEra,
+		ls.eraList(),
 		snapshot.currentPParams,
 		snapshot.prevEraPParams,
 	)

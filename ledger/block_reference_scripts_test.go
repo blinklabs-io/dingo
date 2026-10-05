@@ -466,6 +466,7 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 				},
 			}
 			if tc.previous {
+				ls.activeEras = eras.ErasWithDijkstra
 				ls.currentEra = eras.DijkstraEraDesc
 				ls.currentPParams = &dijkstra.DijkstraProtocolParameters{
 					ConwayProtocolParameters: *pp,
@@ -493,8 +494,8 @@ func TestValidateBlockReferenceScriptsEntryControls(t *testing.T) {
 
 // TestBlockReferenceScriptAggregateReusesPrefetchedUtxos checks that the
 // aggregate reference-script rule and the per-transaction validators resolve a
-// block's inputs once between them: the rule reads from the block's UTxO
-// prefetch instead of querying every reference input itself.
+// block's reference inputs once between them: both read from the block's UTxO
+// prefetch instead of querying each input themselves.
 func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 	t.Parallel()
 
@@ -505,23 +506,32 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			id := bytes.Repeat([]byte{byte(i + 1)}, 32)
 			encoded, err := cbor.Encode(additionalReferenceOutput(t, 10))
 			require.NoError(t, err)
-			require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
-				if err := db.CreateUtxo(txn, &models.Utxo{TxId: id}); err != nil {
-					return err
-				}
-				return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
-			}))
-			inputs = append(inputs, shelley.NewShelleyTransactionInput(hex.EncodeToString(id), 0))
+			require.NoError(
+				t,
+				db.Transaction(true).Do(func(txn *database.Txn) error {
+					if err := db.CreateUtxo(txn, &models.Utxo{TxId: id}); err != nil {
+						return err
+					}
+					return db.Blob().SetUtxo(txn.Blob(), id, 0, encoded)
+				}),
+			)
+			inputs = append(
+				inputs,
+				shelley.NewShelleyTransactionInput(hex.EncodeToString(id), 0),
+			)
 		}
 		return inputs
 	}
-	refInputs := func(input lcommon.TransactionInput) cbor.SetType[shelley.ShelleyTransactionInput] {
-		return cbor.NewSetType(
-			[]shelley.ShelleyTransactionInput{
-				{TxId: input.Id(), OutputIndex: input.Index()},
-			},
-			false,
-		)
+	// One transaction references every input: a transaction is recorded as
+	// soon as it validates, so only the first validator can run here.
+	refInputs := func(inputs []lcommon.TransactionInput) cbor.SetType[shelley.ShelleyTransactionInput] {
+		var refs []shelley.ShelleyTransactionInput
+		for _, input := range inputs {
+			refs = append(refs, shelley.ShelleyTransactionInput{
+				TxId: input.Id(), OutputIndex: input.Index(),
+			})
+		}
+		return cbor.NewSetType(refs, false)
 	}
 	for _, tc := range []struct {
 		name  string
@@ -541,12 +551,10 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 				block.BlockHeader.Body.BlockNumber = 1
 				block.BlockHeader.Body.Slot = 1
 				block.BlockHeader.Body.ProtoVersion.Major = 11
-				for _, input := range inputs {
-					block.TransactionBodies = append(block.TransactionBodies,
-						conway.ConwayTransactionBody{TxReferenceInputs: refInputs(input)})
-					block.TransactionWitnessSets = append(block.TransactionWitnessSets,
-						conway.ConwayTransactionWitnessSet{})
+				block.TransactionBodies = []conway.ConwayTransactionBody{
+					{TxReferenceInputs: refInputs(inputs)},
 				}
+				block.TransactionWitnessSets = []conway.ConwayTransactionWitnessSet{{}}
 				return block
 			},
 		},
@@ -566,13 +574,10 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 				block.BlockHeader.Body.BlockNumber = 1
 				block.BlockHeader.Body.Slot = 1
 				block.BlockHeader.Body.ProtoVersion.Major = 12
-				for _, input := range inputs {
-					block.BlockBody.Transactions = append(block.BlockBody.Transactions,
-						dijkstra.DijkstraTransaction{
-							TxIsValid: true,
-							Body:      dijkstra.DijkstraTransactionBody{TxReferenceInputs: refInputs(input)},
-						})
-				}
+				block.BlockBody.Transactions = []dijkstra.DijkstraTransaction{{
+					TxIsValid: true,
+					Body:      dijkstra.DijkstraTransactionBody{TxReferenceInputs: refInputs(inputs)},
+				}}
 				return block
 			},
 		},
@@ -582,7 +587,31 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 			db := newTestDB(t)
 			inputs := seed(t, db)
 			block := tc.block(inputs)
-			ls, sentinel := additionalReferenceLedger(t, db, block, tc.desc, tc.pp)
+			ls, sentinel := additionalReferenceLedger(
+				t,
+				db,
+				block,
+				tc.desc,
+				tc.pp,
+			)
+			// The transaction validator resolves its reference inputs through
+			// the state it is handed, so the read count covers both checks.
+			resolved := 0
+			ls.currentEra.ValidateTxFunc = func(
+				tx lcommon.Transaction,
+				_ uint64,
+				state lcommon.LedgerState,
+				_ lcommon.ProtocolParameters,
+			) error {
+				for _, input := range tx.ReferenceInputs() {
+					if _, err := state.UtxoById(input); err != nil {
+						return err
+					}
+					resolved++
+				}
+				return sentinel
+			}
+			ls.activeEras = []eras.EraDesc{ls.currentEra}
 
 			err := db.Transaction(true).Do(func(txn *database.Txn) error {
 				_, err := ls.ledgerProcessBlock(
@@ -593,6 +622,7 @@ func TestBlockReferenceScriptAggregateReusesPrefetchedUtxos(t *testing.T) {
 				return err
 			})
 			require.ErrorIs(t, err, sentinel)
+			require.Equal(t, len(inputs), resolved)
 			require.Equal(t, uint64(len(inputs)), ls.utxoByRefReads.Load(),
 				"each reference input must be read from the database once")
 			require.Equal(t, uint64(1), ls.utxoBatchLookups.Load())
@@ -655,7 +685,14 @@ func TestBlockReferenceScriptsUsePreviousEraParametersOnImport(t *testing.T) {
 		ConwayProtocolParameters: *conwayPParams,
 		MaxRefScriptSizePerBlock: 120,
 	}
-	ls, _ := additionalReferenceLedger(t, db, block, eras.DijkstraEraDesc, dijkstraPParams)
+	ls, _ := additionalReferenceLedger(
+		t,
+		db,
+		block,
+		eras.DijkstraEraDesc,
+		dijkstraPParams,
+	)
+	ls.activeEras = []eras.EraDesc{eras.ConwayEraDesc, ls.currentEra}
 
 	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
 		_, err := ls.ledgerProcessBlock(
@@ -708,4 +745,43 @@ func TestDijkstraBlockReferenceScriptsWithConwayParameters(t *testing.T) {
 		validateBlockReferenceScripts(dijkstraBlock, pp, state),
 		"resolve consumed reference-script input",
 	)
+}
+
+// TestReferenceScriptParamsFollowEraListPredecessor checks that the aggregate
+// check picks the previous era's parameters by the same rule
+// resolveValidationEra applies to the block's transactions: the block's era is
+// the one listed immediately before the ledger's era, whatever its numeric ID.
+func TestReferenceScriptParamsFollowEraListPredecessor(t *testing.T) {
+	t.Parallel()
+
+	block := &conway.ConwayBlock{BlockHeader: &conway.ConwayBlockHeader{}}
+	current := &dijkstra.DijkstraProtocolParameters{}
+	previous := &conway.ConwayProtocolParameters{}
+	ledgerEra := eras.EraDesc{Id: uint(conway.EraIdConway) + 2}
+	for _, tc := range []struct {
+		name    string
+		eraList []eras.EraDesc
+		want    lcommon.ProtocolParameters
+	}{
+		{
+			name:    "listed predecessor with a non-adjacent ID",
+			eraList: []eras.EraDesc{eras.ConwayEraDesc, ledgerEra},
+			want:    previous,
+		},
+		{
+			name: "two eras behind",
+			eraList: []eras.EraDesc{
+				eras.ConwayEraDesc, {Id: uint(conway.EraIdConway) + 1}, ledgerEra,
+			},
+			want: current,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := referenceScriptParams(
+				block, ledgerEra, tc.eraList, current, previous,
+			)
+			require.Same(t, tc.want, got)
+		})
+	}
 }
