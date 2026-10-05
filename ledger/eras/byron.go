@@ -291,7 +291,7 @@ func byronProtocolParameters(
 	if params, ok := pp.(*ByronProtocolParameters); ok && params != nil {
 		return params, nil
 	}
-	provider, ok := ls.(ByronProtocolParametersProvider)
+	provider, ok := stateCapability[ByronProtocolParametersProvider](ls)
 	if !ok {
 		// Lightweight ledger-state implementations used by structural
 		// callers do not necessarily expose chain configuration. The
@@ -593,7 +593,7 @@ func byronValidateOutputNetwork(
 	ls lcommon.LedgerState,
 	_ lcommon.ProtocolParameters,
 ) error {
-	provider, ok := ls.(ByronProtocolMagicProvider)
+	provider, ok := stateCapability[ByronProtocolMagicProvider](ls)
 	if !ok {
 		// Lightweight ledger-state implementations used by structural callers
 		// do not necessarily expose chain configuration. The production
@@ -734,7 +734,7 @@ func byronValidateWitnesses(
 	if len(witnesses) == 0 {
 		return nil
 	}
-	protocolMagicProvider, ok := ls.(ByronProtocolMagicProvider)
+	protocolMagicProvider, ok := stateCapability[ByronProtocolMagicProvider](ls)
 	if !ok {
 		return errors.New(
 			"ledger state does not provide Byron protocol magic",

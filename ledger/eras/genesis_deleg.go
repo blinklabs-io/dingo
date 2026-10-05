@@ -109,7 +109,7 @@ func newGenesisDeleg(
 	slot uint64,
 	ls lcommon.LedgerState,
 ) (*genesisDeleg, error) {
-	provider, ok := ls.(GenesisDelegStateProvider)
+	provider, ok := stateCapability[GenesisDelegStateProvider](ls)
 	if !ok {
 		return nil, nil
 	}

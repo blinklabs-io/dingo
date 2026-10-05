@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/utxoref"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -86,6 +87,32 @@ func TestValidateTxDijkstraRejectsBelowFloorPoolMarginThroughLedgerView(
 
 	tx := dijkstraPoolCertTx(1, 1000) // 0.1%, below the 1.5% floor
 	err := eras.ValidateTxDijkstra(tx, 0, lv, dijkstraTestProtocolParameters())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "below minimum pool margin")
+}
+
+// TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState runs the
+// same rule against the state a validation sees while earlier pending
+// transactions are layered over the view. The layered state must still
+// expose the view's minimum pool margin, or the floor reads as disabled.
+func TestValidateTxDijkstraRejectsBelowFloorPoolMarginWithPendingState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _ := newRewardCalculationTestLedger(t)
+	ls.config.MinPoolMargin = 150 // 1.5%
+	pending := utxoref.NewStateOverlay()
+	pending.Apply(dijkstraPoolCertTx(2, 100))
+	require.Equal(t, 1, pending.Len())
+	pp := dijkstraTestProtocolParameters()
+	lv := &LedgerView{ls: ls, pendingState: pending}
+	state, err := lv.validationState(pp, 1)
+	require.NoError(t, err)
+	_, layered := state.(*LedgerView)
+	require.False(t, layered, "the pending transaction must be layered over the view")
+
+	err = eras.ValidateTxDijkstra(dijkstraPoolCertTx(1, 1000), 0, state, pp)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "below minimum pool margin")
 }
