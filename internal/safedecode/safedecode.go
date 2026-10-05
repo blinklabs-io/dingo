@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 )
 
@@ -85,14 +84,13 @@ var ErrTrailingData = errors.New("trailing data after transaction")
 // bytes a caller hashes, validates and relays must be the bytes that decoded.
 func Transaction(txType uint, txCbor []byte) (ledger.Transaction, error) {
 	return Guard(func() (ledger.Transaction, error) {
-		var item cbor.RawMessage
-		consumed, err := cbor.Decode(txCbor, &item)
+		tx, err := ledger.NewTransactionFromCbor(txType, txCbor)
 		if err != nil {
 			return nil, err
 		}
-		if consumed != len(txCbor) {
+		if len(tx.Cbor()) != len(txCbor) {
 			return nil, ErrTrailingData
 		}
-		return ledger.NewTransactionFromCbor(txType, txCbor)
+		return tx, nil
 	})
 }
