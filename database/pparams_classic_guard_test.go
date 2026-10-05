@@ -96,6 +96,21 @@ func runBabbageGuardEnactment(
 	current *babbage.BabbageProtocolParameters,
 ) []babbageGuardOutcome {
 	t.Helper()
+	return runBabbageGuardProposals(t, []classicTestProposal{{
+		genesis: 1,
+		slot:    classicTestEpochStart,
+		epoch:   classicTestSubmissionEpoch,
+		cbor:    proposal,
+	}}, 1, current)
+}
+
+func runBabbageGuardProposals(
+	t *testing.T,
+	proposals []classicTestProposal,
+	quorum int,
+	current *babbage.BabbageProtocolParameters,
+) []babbageGuardOutcome {
+	t.Helper()
 	var outcomes []babbageGuardOutcome
 	for _, mode := range []string{"compute", "forecast", "apply"} {
 		db, err := newTestDatabase(t, &Config{DataDir: ""})
@@ -109,26 +124,28 @@ func runBabbageGuardEnactment(
 				start, epoch, nil, nil, nil, nil, 1, 1, 100, txn,
 			))
 		}
-		require.NoError(t, db.SetPParamUpdate(
-			[]byte{1}, proposal, classicTestEpochStart, classicTestSubmissionEpoch, txn,
-		))
+		for _, p := range proposals {
+			require.NoError(t, db.SetPParamUpdate(
+				[]byte{p.genesis}, p.cbor, p.slot, p.epoch, txn,
+			))
+		}
 		input := cloneBabbageGuardPParams(current)
 		var result lcommon.ProtocolParameters
 		switch mode {
 		case "compute":
 			result, _, err = db.ComputeAndApplyPParamUpdates(
-				classicTestEpochStart+100, classicTestEnactEpoch, 1, 1,
+				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
 				input, babbageGuardDecode, babbageGuardApply, nil, txn,
 			)
 		case "forecast":
 			result, err = db.ForecastPParamUpdates(
-				classicTestEnactEpoch, 1, input,
+				classicTestEnactEpoch, quorum, input,
 				babbageGuardDecode, babbageGuardApply, babbageGuardClone, txn,
 			)
 		case "apply":
 			result = input
 			err = db.ApplyPParamUpdates(
-				classicTestEpochStart+100, classicTestEnactEpoch, 1, 1,
+				classicTestEpochStart+100, classicTestEnactEpoch, 1, quorum,
 				&result, babbageGuardDecode, babbageGuardApply, txn,
 			)
 		}
@@ -145,11 +162,6 @@ func runBabbageGuardEnactment(
 	return outcomes
 }
 
-func rawCbor(t *testing.T, hexBytes ...byte) cbor.RawMessage {
-	t.Helper()
-	return cbor.RawMessage(hexBytes)
-}
-
 func requireGuardRefused(
 	t *testing.T,
 	proposal []byte,
@@ -157,7 +169,12 @@ func requireGuardRefused(
 ) {
 	t.Helper()
 	for _, o := range runBabbageGuardEnactment(t, proposal, current) {
-		require.Equal(t, current, o.result, o.mode+": parameters in effect changed")
+		require.Equal(
+			t,
+			current,
+			o.result,
+			o.mode+": parameters in effect changed",
+		)
 		require.Equal(t, current, o.input, o.mode+": input parameters mutated")
 	}
 }
@@ -170,7 +187,9 @@ func TestClassicPParamEnactmentRefusesOutOfDomainUpdate(t *testing.T) {
 	// cbor rational tag 30 followed by a two-element array.
 	tag := []byte{0xd8, 0x1e, 0x82}
 	rat := func(num []byte, den byte) cbor.RawMessage {
-		return cbor.RawMessage(append(append(append([]byte{}, tag...), num...), den))
+		return cbor.RawMessage(
+			append(append(append([]byte{}, tag...), num...), den),
+		)
 	}
 	price := func(mem cbor.RawMessage) cbor.RawMessage {
 		step := rat([]byte{0x01}, 0x01)
@@ -190,7 +209,7 @@ func TestClassicPParamEnactmentRefusesOutOfDomainUpdate(t *testing.T) {
 		},
 		{
 			"negative execution-unit limit",
-			map[uint64]any{20: rawCbor(t, 0x82, 0x20, 0x05)},
+			map[uint64]any{20: cbor.RawMessage{0x82, 0x20, 0x05}},
 		},
 		{
 			"integer beyond its width",
@@ -282,7 +301,12 @@ func TestClassicPParamEnactmentRefusesMalformedCostModel(t *testing.T) {
 			18: map[uint][]int64{0: cost(166, 7)},
 		}), current) {
 			require.Equal(t, cost(166, 7), o.result.CostModels[0], o.mode)
-			require.Equal(t, current.CostModels[1], o.result.CostModels[1], o.mode)
+			require.Equal(
+				t,
+				current.CostModels[1],
+				o.result.CostModels[1],
+				o.mode,
+			)
 		}
 	})
 
@@ -296,5 +320,56 @@ func TestClassicPParamEnactmentRefusesMalformedCostModel(t *testing.T) {
 			want[0] = cost(165, 7)
 			require.Equal(t, want, o.result.CostModels, o.mode)
 		}
+	})
+}
+
+// A refused row is a proposal the reference ledger would have rejected with
+// its transaction, so it must not displace its genesis key's earlier
+// proposal as that key's vote.
+func TestClassicPParamRefusedRowKeepsEarlierVote(t *testing.T) {
+	t.Parallel()
+	outOfDomain := map[uint64]any{
+		10: cbor.RawMessage{0xd8, 0x1e, 0x82, 0x03, 0x02},
+	}
+
+	t.Run("out of domain", func(t *testing.T) {
+		t.Parallel()
+		fee := map[uint64]any{0: 200}
+		got := runClassicEnactment(t, []classicTestProposal{
+			classicProposal(t, 1, 310, fee),
+			classicProposal(t, 1, 320, outOfDomain),
+			classicProposal(t, 2, 311, fee),
+		}, 2, classicTestPParams(2, 0))
+		require.Equal(t, uint(200), got.MinFeeA)
+	})
+
+	t.Run("malformed cost model", func(t *testing.T) {
+		t.Parallel()
+		valid := map[uint64]any{18: map[uint][]int64{0: cost(166, 7)}}
+		current := babbageGuardPParams(8)
+		for _, o := range runBabbageGuardProposals(t, []classicTestProposal{
+			classicProposal(t, 1, 310, valid),
+			classicProposal(t, 1, 320, map[uint64]any{
+				18: map[uint][]int64{9: cost(10, 1)},
+			}),
+			classicProposal(t, 2, 311, valid),
+		}, 2, current) {
+			require.Equal(t, cost(166, 7), o.result.CostModels[0], o.mode)
+		}
+	})
+
+	// The carried-over check reads each key's latest carried-over proposal
+	// too: a refused row there must not hide an earlier version that cannot
+	// follow, which discards every carried-over proposal.
+	t.Run("carried over", func(t *testing.T) {
+		t.Parallel()
+		fee := map[uint64]any{0: 200}
+		got := runClassicEnactment(t, []classicTestProposal{
+			classicProposal(t, 1, 250, map[uint64]any{14: []uint64{5, 0}}),
+			classicProposal(t, 1, 260, outOfDomain),
+			classicProposal(t, 2, 251, fee),
+			classicProposal(t, 3, 252, fee),
+		}, 2, classicTestPParams(2, 0))
+		require.Equal(t, uint(44), got.MinFeeA)
 	})
 }

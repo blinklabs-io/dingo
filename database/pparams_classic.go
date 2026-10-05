@@ -71,6 +71,10 @@ type classicPParamVote struct {
 //     the boundary into enactEpoch are those targeting enactEpoch-1;
 //   - each genesis key has one vote, its latest proposal for that epoch, in
 //     chain order (slot, then insertion order within a slot);
+//   - a proposal outside the reference domain, or carrying a malformed cost
+//     model before protocol version 9, is refused: the reference would have
+//     rejected its transaction, so it neither votes nor displaces the key's
+//     earlier proposal;
 //   - proposals made during the previous epoch, after its slot of no return,
 //     carry over into the submission epoch only if every one of them has a
 //     protocol version that can follow the submission epoch's parameters;
@@ -78,8 +82,6 @@ type classicPParamVote struct {
 //   - votes are grouped by update value, not by encoding, and exactly one
 //     value must reach quorum: none, or two values that both reach it, enact
 //     nothing;
-//   - an agreed update outside the reference domain, or carrying a malformed
-//     cost model before protocol version 9, enacts nothing;
 //   - the agreed update is enacted only if the resulting parameters keep
 //     maxTxSize + maxBlockHeaderSize below maxBlockBodySize.
 //
@@ -135,8 +137,11 @@ func selectClassicPParamUpdate(
 		if _, ok := voted[genesis]; ok {
 			continue
 		}
-		voted[genesis] = struct{}{}
 		update, decodeErr := decodeFunc(proposals[i].Cbor)
+		if classicProposalRefused(currentPParams, update, decodeErr) {
+			continue
+		}
+		voted[genesis] = struct{}{}
 		identity := "raw:" + string(proposals[i].Cbor)
 		if decodeErr == nil {
 			if encoded, encodeErr := classicPParamUpdateIdentity(
@@ -167,17 +172,7 @@ func selectClassicPParamUpdate(
 		return nil, nil
 	}
 	if agreed.decodeErr != nil {
-		// A stored row outside the reference domain cannot enact. Refuse it
-		// rather than halt the epoch boundary on a row validation should
-		// never have admitted.
-		var domainErr lcommon.ProtocolParameterUpdateDomainError
-		if errors.As(agreed.decodeErr, &domainErr) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("decode pparam update: %w", agreed.decodeErr)
-	}
-	if !classicUpdateCostModelsValid(currentPParams, agreed.update) {
-		return nil, nil
 	}
 	if !classicUpdateKeepsBlockSizes(currentPParams, agreed.update) {
 		return nil, nil
@@ -207,15 +202,12 @@ func classicCarriedOverProposalsFollow(
 		if _, ok := seen[genesis]; ok {
 			continue
 		}
-		seen[genesis] = struct{}{}
 		update, err := decodeFunc(newestFirst[i].Cbor)
+		if classicProposalRefused(currentPParams, update, err) {
+			continue
+		}
+		seen[genesis] = struct{}{}
 		if err != nil {
-			// An out-of-domain row proposes no version to check, and its
-			// vote is refused at enactment.
-			var domainErr lcommon.ProtocolParameterUpdateDomainError
-			if errors.As(err, &domainErr) {
-				continue
-			}
 			return false, fmt.Errorf(
 				"decode carried-over pparam update: %w",
 				err,
@@ -311,24 +303,31 @@ func classicUpdateKeepsBlockSizes(
 	return sum >= uint64(txSize) && sum < uint64(bodySize)
 }
 
-// classicUpdateCostModelsValid applies the cost-model rule the PPUP
-// validation rule applies to a proposal, against the protocol version of the
-// submission epoch's parameters. A stored row can predate that rule.
-func classicUpdateCostModelsValid(
+// classicProposalRefused reports whether a stored proposal is one the PPUP
+// validation rule refuses: outside the reference domain, or carrying a cost
+// model the submission epoch's protocol version rejects. A stored row can
+// predate either check. Other decode errors are not refusals; the caller
+// decides whether they halt the boundary.
+func classicProposalRefused(
 	currentPParams lcommon.ProtocolParameters,
 	update any,
+	decodeErr error,
 ) bool {
+	if decodeErr != nil {
+		var domainErr lcommon.ProtocolParameterUpdateDomainError
+		return errors.As(decodeErr, &domainErr)
+	}
 	validator, ok := update.(lcommon.ProtocolParameterUpdateVersionValidator)
 	if !ok {
-		return true
+		return false
 	}
 	provider, ok := currentPParams.(lcommon.ProtocolParametersProtocolVersionProvider)
 	if !ok {
-		return true
+		return false
 	}
 	return validator.ValidateProtocolParameterUpdateVersion(
 		provider.ProtocolParametersProtocolVersion(),
-	) == nil
+	) != nil
 }
 
 func classicPParamBlockSizes(
