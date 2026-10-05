@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1180,12 +1181,12 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 		t.savepointOrder = append(t.savepointOrder, name)
 	case "ROLLBACK TO SAVEPOINT":
 		t.restoreBatches(t.batchSavepoints[name])
-		for i := len(t.savepointOrder) - 1; i >= 0; i-- {
-			if t.savepointOrder[i] == name {
+		for i, savepointName := range slices.Backward(t.savepointOrder) {
+			if savepointName == name {
 				t.savepointOrder = t.savepointOrder[:i+1]
 				break
 			}
-			delete(t.batchSavepoints, t.savepointOrder[i])
+			delete(t.batchSavepoints, savepointName)
 		}
 	}
 	return nil
