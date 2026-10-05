@@ -1227,6 +1227,11 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
+	// automatic) may hold the commit barrier once acquired. A snapshot still
+	// running at the bound is cancelled and removed, and commits resume.
+	// Zero means no bound.
+	SnapshotMaxCommitPause time.Duration `yaml:"snapshotMaxCommitPause"         envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE"`
 }
 
 var configMu sync.RWMutex
