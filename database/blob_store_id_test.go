@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newTestDatabaseAt mirrors newTestDatabase (test_database_test.go) but
+// newTestDatabaseAt mirrors newTestDatabase (tests_test.go) but
 // resolves the blob and metadata stores from independently supplied
 // directories, so a test can pair a metadata store with a blob store it was
 // never initialised with -- something a single shared config.DataDir cannot

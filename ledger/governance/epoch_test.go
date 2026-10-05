@@ -185,7 +185,7 @@ WHERE credential_tag = ? AND staking_key = ? AND added_slot = ?`,
 }
 
 // TestProcessEpochExpiresProposalWithoutRefundingDeposit pins the first half
-// of the expire/drop split (dingo#4411): marking a proposal expired must not
+// of the expire/drop split: marking a proposal expired must not
 // itself refund its deposit. cardano-ledger does not return an expired
 // governance action's deposit until one full epoch after it is marked
 // expired -- refunding it immediately inflated the very next mark snapshot's
@@ -269,9 +269,9 @@ func TestProcessEpochExpiresProposalWithoutRefundingDeposit(t *testing.T) {
 }
 
 // TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch is the
-// regression test for dingo#4411: a proposal marked expired at epoch E must
-// have its deposit refunded only when ProcessEpoch runs for epoch E+1, not
-// immediately.
+// regression test for the early proposal-deposit refund: a proposal marked
+// expired at epoch E must have its deposit refunded only when ProcessEpoch runs
+// for epoch E+1, not immediately.
 func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 	t *testing.T,
 ) {
@@ -360,9 +360,9 @@ func TestProcessEpochDropsExpiredProposalAndRefundsDepositNextEpoch(
 }
 
 // TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch covers the
-// crash-replay half of dingo#4411. A boundary that is reprocessed reruns
-// against the expiry the first pass already wrote, so the drop step's own
-// `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
+// crash-replay half of the early-refund fix. A boundary that is reprocessed
+// reruns against the expiry the first pass already wrote, so the drop step's
+// own `expired_epoch < NewEpoch` bound -- not merely its position ahead of the
 // expiry step -- is what keeps the refund out of the epoch that expired it.
 func TestProcessEpochReplayedExpireBoundaryDoesNotDropInSameEpoch(
 	t *testing.T,
@@ -702,6 +702,355 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	assert.Equal(t, uint64(6), *proposal.DroppedEpoch)
 }
 
+func TestGovActionPriorityMatchesConwayRATIFYOrder(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		actionType lcommon.GovActionType
+		want       int
+	}{
+		{"no confidence", lcommon.GovActionTypeNoConfidence, 0},
+		{"update committee", lcommon.GovActionTypeUpdateCommittee, 1},
+		{"new constitution", lcommon.GovActionTypeNewConstitution, 2},
+		{"hard fork initiation", lcommon.GovActionTypeHardForkInitiation, 3},
+		{"parameter change", lcommon.GovActionTypeParameterChange, 4},
+		{"treasury withdrawal", lcommon.GovActionTypeTreasuryWithdrawal, 5},
+		{"info", lcommon.GovActionTypeInfo, 6},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			proposal := &models.GovernanceProposal{
+				ActionType: uint8(test.actionType),
+			}
+			assert.Equal(t, test.want, govActionPriority(proposal))
+		})
+	}
+}
+
+func TestProcessEpochRatifiesChainedParameterChangesAgainstStagedState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	pparams := conwayPParamsFixture(10)
+	pparams.MinCommitteeSize = 1
+	pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+	pparams.DRepVotingThresholds.PpEconomicGroup = newRat(1, 1)
+	pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
+	updatedThresholds := pparams.DRepVotingThresholds
+	updatedThresholds.PpEconomicGroup = newRat(0, 1)
+	childThresholds := pparams.DRepVotingThresholds
+	childThresholds.TreasuryWithdrawal = newRat(0, 1)
+
+	// Give the child a lexically earlier hash and the same anchor slot so
+	// ancestry, rather than the SQL tie-breaker, determines candidate order.
+	parentHash := testBytes(32, 0x72)
+	childHash := testBytes(32, 0x71)
+	parentActionIndex := uint32(0)
+	parentAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			DRepVotingThresholds: &updatedThresholds,
+		},
+	})
+	require.NoError(t, err)
+	poolDeposit := uint(2_000_000)
+	childAction, err := cbor.Encode(&conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			DRepVotingThresholds: &childThresholds,
+			PoolDeposit:          &poolDeposit,
+		},
+	})
+	require.NoError(t, err)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		testBytes(28, 0x77),
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+	treasuryAction, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type: uint(lcommon.GovActionTypeTreasuryWithdrawal),
+		Withdrawals: map[*lcommon.Address]uint64{
+			&rewardAddr: 1,
+		},
+	})
+	require.NoError(t, err)
+	parent := &models.GovernanceProposal{
+		TxHash:        parentHash,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/parent",
+		AnchorHash:    testBytes(32, 0x73),
+		ReturnAddress: testBytes(29, 0x74),
+		GovActionCbor: parentAction,
+		AddedSlot:     400,
+	}
+	child := &models.GovernanceProposal{
+		TxHash:          childHash,
+		ActionType:      uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch:   stabilityTestEpoch - 1,
+		ExpiresEpoch:    stabilityTestEpoch + 10,
+		ParentTxHash:    parentHash,
+		ParentActionIdx: &parentActionIndex,
+		AnchorURL:       "https://example.invalid/child",
+		AnchorHash:      testBytes(32, 0x75),
+		ReturnAddress:   testBytes(29, 0x76),
+		GovActionCbor:   childAction,
+		AddedSlot:       400,
+	}
+	treasury := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0x93),
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: stabilityTestEpoch - 1,
+		ExpiresEpoch:  stabilityTestEpoch + 10,
+		AnchorURL:     "https://example.invalid/treasury",
+		AnchorHash:    testBytes(32, 0x78),
+		ReturnAddress: rewardAddrBytes,
+		GovActionCbor: treasuryAction,
+		AddedSlot:     400,
+	}
+	// Persist the child first to make row-ID order disagree with the
+	// governance ancestry order when both actions enact at the same boundary.
+	require.NoError(t, db.SetGovernanceProposal(child, nil))
+	require.NoError(t, db.SetGovernanceProposal(parent, nil))
+	require.NoError(t, db.SetGovernanceProposal(treasury, nil))
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	require.NoError(t, err)
+	drepCred := seedDRepWithStake(t, db, 100)
+	seedDRepYesVote(t, db, parent.ID, drepCred)
+	require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+	seedHardForkCommitteeAndSPOVotes(t, db, store, parent, child, treasury)
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    stabilityTestEpoch - 1,
+		NewEpoch:     stabilityTestEpoch,
+		BoundarySlot: stabilityTestEpoch * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+	assert.Equal(t, 3, out.RatifiedCount)
+
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.RatifiedEpoch)
+	require.NotNil(t, child.RatifiedEpoch)
+	treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, treasury.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *parent.RatifiedEpoch)
+	assert.Equal(t, stabilityTestEpoch, *child.RatifiedEpoch)
+	assert.Equal(t, newRat(1, 1), pparams.DRepVotingThresholds.PpEconomicGroup)
+
+	enactTxn := db.MetadataTxn(true)
+	defer enactTxn.Release()
+	enactOut, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          enactTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, enactTxn.Commit())
+	assert.Equal(t, 3, enactOut.EnactedCount)
+	require.True(t, enactOut.PParamsChanged)
+	updatedPParams, ok := enactOut.UpdatedPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(1, 1),
+		updatedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		updatedPParams.DRepVotingThresholds.TreasuryWithdrawal,
+	)
+	assert.Equal(t, poolDeposit, updatedPParams.PoolDeposit)
+
+	parent, err = db.GetGovernanceProposal(parentHash, 0, nil)
+	require.NoError(t, err)
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, parent.EnactedEpoch)
+	require.NotNil(t, child.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *parent.EnactedEpoch)
+	assert.Equal(t, stabilityTestEpoch+1, *child.EnactedEpoch)
+	root, err := db.GetLastEnactedGovernanceProposal(
+		[]uint8{uint8(lcommon.GovActionTypeParameterChange)}, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	assert.Equal(t, childHash, root.TxHash)
+
+	// Replaying the committed boundary must reconstruct the same ordered
+	// parameter result from the persisted enacted proposals.
+	replayTxn := db.MetadataTxn(true)
+	defer replayTxn.Release()
+	replayOut, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          replayTxn,
+		PrevEpoch:    stabilityTestEpoch,
+		NewEpoch:     stabilityTestEpoch + 1,
+		BoundarySlot: (stabilityTestEpoch + 1) * 100,
+		PParams:      pparams,
+		UpdateFn:     eras.PParamsUpdateConway,
+	})
+	require.NoError(t, err)
+	require.NoError(t, replayTxn.Commit())
+	assert.Zero(t, replayOut.EnactedCount)
+	require.True(t, replayOut.PParamsChanged)
+	replayPParams := replayOut.UpdatedPParams
+	replayedPParams, ok := replayPParams.(*conway.ConwayProtocolParameters)
+	require.True(t, ok)
+	assert.Equal(
+		t,
+		newRat(1, 1),
+		replayedPParams.DRepVotingThresholds.PpEconomicGroup,
+	)
+	assert.Equal(
+		t,
+		newRat(0, 1),
+		replayedPParams.DRepVotingThresholds.TreasuryWithdrawal,
+	)
+	assert.Equal(t, poolDeposit, replayedPParams.PoolDeposit)
+}
+
+func TestProcessEpochOrdersParameterChangesBeforeTreasuryWithdrawals(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		insertTreasury bool
+	}{
+		{name: "treasury inserted first", insertTreasury: true},
+		{name: "parameter change inserted first", insertTreasury: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			db, store := newTallyTestDB(t)
+			pparams := conwayPParamsFixture(10)
+			pparams.MinCommitteeSize = 1
+			pparams.DRepVotingThresholds.PpGovGroup = newRat(0, 1)
+			pparams.DRepVotingThresholds.TreasuryWithdrawal = newRat(1, 1)
+			updatedThresholds := pparams.DRepVotingThresholds
+			updatedThresholds.TreasuryWithdrawal = newRat(0, 1)
+			parentAction, err := cbor.Encode(
+				&conway.ConwayParameterChangeGovAction{
+					Type: uint(lcommon.GovActionTypeParameterChange),
+					ParamUpdate: conway.ConwayProtocolParameterUpdate{
+						DRepVotingThresholds: &updatedThresholds,
+					},
+				},
+			)
+			require.NoError(t, err)
+			stakeCred := testBytes(28, 0x82)
+			rewardAddr, err := lcommon.NewAddressFromParts(
+				lcommon.AddressTypeNoneKey,
+				lcommon.AddressNetworkTestnet,
+				nil,
+				stakeCred,
+			)
+			require.NoError(t, err)
+			rewardAddrBytes, err := rewardAddr.Bytes()
+			require.NoError(t, err)
+			treasuryAction, err := cbor.Encode(
+				&lcommon.TreasuryWithdrawalGovAction{
+					Type:        uint(lcommon.GovActionTypeTreasuryWithdrawal),
+					Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 1},
+				},
+			)
+			require.NoError(t, err)
+			require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+
+			parentSlot, treasurySlot := uint64(200), uint64(100)
+			if !test.insertTreasury {
+				parentSlot, treasurySlot = treasurySlot, parentSlot
+			}
+			parent := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x83),
+				ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-parent",
+				AnchorHash:    testBytes(32, 0x84),
+				ReturnAddress: testBytes(29, 0x85),
+				GovActionCbor: parentAction,
+				AddedSlot:     parentSlot,
+			}
+			treasury := &models.GovernanceProposal{
+				TxHash:        testBytes(32, 0x86),
+				ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+				ProposedEpoch: stabilityTestEpoch - 1,
+				ExpiresEpoch:  stabilityTestEpoch + 10,
+				AnchorURL:     "https://example.invalid/priority-withdrawal",
+				AnchorHash:    testBytes(32, 0x87),
+				ReturnAddress: rewardAddrBytes,
+				GovActionCbor: treasuryAction,
+				AddedSlot:     treasurySlot,
+			}
+			ordered := []*models.GovernanceProposal{parent, treasury}
+			if test.insertTreasury {
+				ordered[0], ordered[1] = treasury, parent
+			}
+			for _, proposal := range ordered {
+				require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+			}
+			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			seedHardForkCommitteeAndSPOVotes(t, db, store, parent, treasury)
+
+			txn := db.MetadataTxn(true)
+			defer txn.Release()
+			out, err := ProcessEpoch(&EpochInput{
+				DB:           db,
+				Txn:          txn,
+				PrevEpoch:    stabilityTestEpoch - 1,
+				NewEpoch:     stabilityTestEpoch,
+				BoundarySlot: stabilityTestEpoch * 100,
+				PParams:      pparams,
+				UpdateFn:     eras.PParamsUpdateConway,
+			})
+			require.NoError(t, err)
+			require.NoError(t, txn.Commit())
+			assert.Equal(t, 2, out.RatifiedCount)
+			parent, err = db.GetGovernanceProposal(parent.TxHash, 0, nil)
+			require.NoError(t, err)
+			treasury, err = db.GetGovernanceProposal(treasury.TxHash, 0, nil)
+			require.NoError(t, err)
+			require.NotNil(t, parent.RatifiedEpoch)
+			require.NotNil(t, treasury.RatifiedEpoch)
+		})
+	}
+}
+
 // TestProcessEpochBootstrapParameterChangeWithoutCommitteeDoesNotRatify
 // verifies that the epoch-boundary caller does not treat PV9's committee
 // minimum-size exception as approval from an absent committee.
@@ -1014,7 +1363,7 @@ func TestProcessEpochRatifiesAndEnactsDijkstraOnlyParameterChanges(
 }
 
 // TestProcessEpochEnactsConwayParameterChangeReportsPlutusV2CostModelWritten
-// covers blinklabs-io/dingo#3825's PR review (wolf31o2): a real ratify+enact
+// pins: a real ratify+enact
 // cycle through ProcessEpoch, not EnactProposal called in isolation, must
 // still surface PlutusV2CostModelWritten on the resulting EpochOutput --
 // proving applyEnactmentResult's OR into EpochOutput actually connects to
@@ -1638,6 +1987,13 @@ func TestProcessEpochCommitteeTermLimit(t *testing.T) {
 				NewEpoch:     currentEpoch,
 				BoundarySlot: 500,
 				PParams:      pparams,
+				ConwayGenesis: &conway.ConwayGenesis{
+					Committee: conway.ConwayGenesisCommittee{
+						Members: map[string]int{
+							"keyHash-genesis-committee-member": 20,
+						},
+					},
+				},
 				UpdateFn: func(
 					pparams lcommon.ProtocolParameters,
 					_ any,
@@ -2273,4 +2629,123 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))
+}
+
+// The RATIFY and EXPIRY verdicts must be computable from a read-only view of
+// the boundary state, so they can be taken from a snapshot after the boundary
+// commits, and must equal what the boundary itself applies.
+func TestDecideRatificationOnReadOnlySnapshotMatchesBoundary(t *testing.T) {
+	t.Parallel()
+
+	const currentEpoch = uint64(741)
+	const newEpoch = currentEpoch + 1
+
+	db, store := newTallyTestDB(t)
+	hardFork := seedHardForkInitiationProposal(
+		t, db, currentEpoch, 11, 1, 0x90,
+	)
+	hardFork.ReturnAddress = append([]byte{0xE0}, testBytes(28, 0x97)...)
+	// Its final RATIFY chance: EXPIRY must not also classify it expired.
+	hardFork.ExpiresEpoch = currentEpoch
+	require.NoError(t, db.SetGovernanceProposal(hardFork, nil))
+	coldCred := testBytes(28, 0x91)
+	hotCred := testBytes(28, 0x92)
+	require.NoError(t, db.SetCommitteeMembers([]*models.CommitteeMember{
+		{ColdCredHash: coldCred, ExpiresEpoch: newEpoch + 10},
+	}, nil))
+	seedTallyCommitteeAuth(t, store, models.AuthCommitteeHot{
+		ColdCredential: coldCred,
+		HotCredential:  hotCred,
+		CertificateID:  1,
+		AddedSlot:      1,
+	})
+	yesPool := testBytes(28, 0x93)
+	seedPoolWithStake(
+		t, store, yesPool, testBytes(29, 0x95), 6_283, newEpoch,
+	)
+	seedPoolWithStake(
+		t, store, testBytes(28, 0x94), testBytes(29, 0x96), 3_717, newEpoch,
+	)
+	for _, vote := range []*models.GovernanceVote{
+		{VoterType: models.VoterTypeCC, VoterCredential: hotCred},
+		{VoterType: models.VoterTypeSPO, VoterCredential: yesPool},
+	} {
+		vote.ProposalID = hardFork.ID
+		vote.Vote = models.VoteYes
+		vote.AddedSlot = 2
+		require.NoError(t, db.SetGovernanceVote(vote, nil))
+	}
+	returnAddr := buildRewardAddr(t, testBytes(28, 0x98))
+	expiringHash := testBytes(32, 0x99)
+	childHash := testBytes(32, 0x9a)
+	expiringIdx := uint32(0)
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, expiringHash, 0, currentEpoch-1, 3,
+			returnAddr, 10, nil, nil, nil, nil),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, newEpoch+5, 3,
+			returnAddr, 11, expiringHash, &expiringIdx, nil, nil),
+		nil,
+	))
+
+	input := func(txn *EpochInput) *EpochInput {
+		txn.DB = db
+		txn.PrevEpoch = currentEpoch
+		txn.NewEpoch = newEpoch
+		txn.BoundarySlot = newEpoch * 100
+		txn.PParams = stabilityConwayPParams(9)
+		txn.UpdateFn = func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		}
+		return txn
+	}
+
+	readTxn := db.MetadataTxn(false)
+	in := input(&EpochInput{Txn: readTxn})
+	conwayPParams, err := conwayGovernanceProtocolParameters(in.PParams)
+	require.NoError(t, err)
+	decision, err := decideRatification(
+		in, &EpochOutput{UpdatedPParams: in.PParams}, conwayPParams, 0,
+	)
+	readTxn.Release()
+	require.NoError(t, err)
+	identities := func(proposals []*models.GovernanceProposal) []string {
+		ret := make([]string, 0, len(proposals))
+		for _, p := range proposals {
+			ret = append(ret, proposalIdentityKey(p))
+		}
+		return ret
+	}
+	require.Equal(t, []string{proposalIdentityKey(hardFork)},
+		identities(decision.Ratified))
+	require.Equal(t,
+		[]string{proposalIdentityKey(&models.GovernanceProposal{
+			TxHash: expiringHash,
+		})},
+		identities(decision.Expired))
+
+	stored, err := db.GetGovernanceProposal(hardFork.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.Nil(t, stored.RatifiedEpoch, "deciding wrote a ratified mark")
+
+	writeTxn := db.MetadataTxn(true)
+	defer writeTxn.Release()
+	out, err := ProcessEpoch(input(&EpochInput{Txn: writeTxn}))
+	require.NoError(t, err)
+	require.NoError(t, writeTxn.Commit())
+	require.Equal(t, 1, out.RatifiedCount)
+	require.Equal(t, 1, out.ExpiredCount)
+	require.Equal(t, 1, out.OrphanedCount)
+	stored, err = db.GetGovernanceProposal(hardFork.TxHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stored.RatifiedEpoch)
+	require.Equal(t, newEpoch, *stored.RatifiedEpoch)
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
 }

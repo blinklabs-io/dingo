@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
@@ -395,12 +395,12 @@ func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
 
 // validateParameterChangeExcludesProtocolVersion rejects a Conway or
 // Dijkstra ParameterChange governance action that carries protocol-version
-// key 14 (dingo#4439). The reference excludes protocol version from
-// PParamsUpdate: a protocol change must go through HardForkInitiation
-// instead, which carries separate SPO/DRep threshold semantics and, at PV9,
-// bootstrap restrictions that a same-purpose ParameterChange would
-// otherwise bypass. Rejecting here, before ProcessProposals, keeps a
-// malformed proposal from ever being persisted or reaching enactment.
+// key 14. The reference excludes protocol version from PParamsUpdate: a
+// protocol change must go through HardForkInitiation instead, which carries
+// separate SPO/DRep threshold semantics and, at PV9, bootstrap restrictions
+// that a same-purpose ParameterChange would otherwise bypass. Rejecting here,
+// before ProcessProposals, keeps a malformed proposal from ever being persisted
+// or reaching enactment.
 func validateParameterChangeExcludesProtocolVersion(
 	tx lcommon.Transaction,
 	_ uint64,

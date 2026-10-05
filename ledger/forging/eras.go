@@ -285,8 +285,9 @@ func decodeBlockFromCbor(era eraKind, blockCbor []byte) (ledger.Block, error) {
 // transaction_bodies, transaction_witnesses, auxiliary_data_set,
 // invalid_transactions — and shows its CBOR shape, so a structural
 // encoder/decoder mismatch (e.g. a field serialized as a map where the
-// decoder expects an array, the failure mode in issue #2063) is visible
-// at a glance instead of hidden behind a generic unmarshal error.
+// decoder expects an array, the failure mode of a forged block that does not
+// round-trip) is visible at a glance instead of hidden behind a generic
+// unmarshal error.
 //
 // Array fan-out and nesting depth are capped to keep the dump bounded;
 // this runs only on the (expected-never) decode-failure path. Any error

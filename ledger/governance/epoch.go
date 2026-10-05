@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"sort"
 	"time"
 
@@ -117,6 +118,22 @@ type EpochInput struct {
 	// snapshot, because the one this field carries does not exist until the
 	// boundary runs. See predictedBoundaryStakeEpochFor.
 	CurrentBoundarySPOState *SPOVotingState
+	// DeferRatification returns the RATIFY step as EpochOutput.Ratification
+	// instead of running it in Txn. It needs CurrentBoundarySPOState: the
+	// fallback reads mark[NewEpoch], which the boundary writes later in the
+	// same transaction, so a later read would see rows RATIFY must not.
+	DeferRatification bool
+	// BoundarySPOStateDeferred lets DeferRatification defer without
+	// CurrentBoundarySPOState: the caller computes mark[NewEpoch] after the
+	// boundary and sets it with RatificationPlan.SetBoundarySPOState before
+	// Decide.
+	BoundarySPOStateDeferred bool
+	// PendingTreasuryDonations is PrevEpoch's treasury donation total, which
+	// the caller moves into the treasury after ProcessEpoch returns. The
+	// RATIFY pass counts it, because Conway's EPOCH rule adds donations to
+	// the treasury before it seeds the next RATIFY state; this boundary's
+	// ENACT does not.
+	PendingTreasuryDonations uint64
 }
 
 // EpochOutput reports what happened during the tick so the
@@ -136,6 +153,9 @@ type EpochOutput struct {
 	// comment for why this must come from the enacted update itself rather
 	// than from comparing UpdatedPParams's value before and after.
 	PlutusV2CostModelWritten bool
+	// Ratification is set when EpochInput.DeferRatification was: RATIFY has
+	// not run, and RatifiedCount and ExpiredCount are zero.
+	Ratification *RatificationPlan
 }
 
 // ProcessEpoch runs the ordered governance tick at an epoch
@@ -215,6 +235,12 @@ func ProcessEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get ratified proposals: %w", err)
 	}
+	// The SQL tie-breaker orders proposals by transaction hash when they
+	// share a ratification slot. Parameter-change descendants must enact
+	// after their ancestors so later updates are applied over earlier ones,
+	// matching the order used to ratify the chain.
+	replayedEnacted = orderParameterChangeChains(replayedEnacted)
+	ratified = orderParameterChangeChains(ratified)
 	applyEnactmentResult := func(
 		proposal *models.GovernanceProposal,
 		res *EnactmentResult,
@@ -354,7 +380,7 @@ func ProcessEpoch(
 	// enforces the delay, not this step's position ahead of EXPIRY: a
 	// boundary reprocessed after a commit crash reruns EXPIRY's writes from
 	// the first pass, so ordering alone would let the rerun drop them in the
-	// epoch that expired them (dingo#4411: refunding an epoch early inflated
+	// epoch that expired them (refunding an epoch early inflated
 	// the very next mark snapshot's total active stake by the deposit amount
 	// for any refund landing on a delegated, still-registered account).
 	replayedDropped, err := in.DB.GetDroppedGovernanceProposalsAt(
@@ -409,17 +435,19 @@ func ProcessEpoch(
 			return nil, err
 		}
 	}
-	// --- ENACTMENT-DRIVEN SUBTREE REMOVAL ---------------------------------
+	// --- ENACTMENT- AND DROP-DRIVEN SUBTREE REMOVAL -----------------------
 	// Enactment advances a purpose chain: descendants of the enacted action
 	// remain valid, while competing siblings and their descendants are
-	// removed before RATIFY considers the remaining proposals. Expiry-driven
-	// removal is deferred until the proposal's deposit is returned one epoch
-	// later.
+	// removed before RATIFY considers the remaining proposals. A dropped
+	// action leaves the proposals set with its whole subtree (Conway
+	// Rules/Epoch.hs proposalsApplyEnactment), including children proposed
+	// while it was expired but still a member, and every one is refunded now.
 	orphanCount, err := removeOrphanedProposals(
 		in.DB,
 		in.Txn,
 		successfullyEnacted,
 		nil,
+		droppable,
 		in.PrevEpoch,
 		in.NewEpoch,
 		in.BoundarySlot,
@@ -430,6 +458,127 @@ func ProcessEpoch(
 	}
 	out.OrphanedCount = orphanCount
 
+	// Conway seeds RATIFY from the treasury the whole EPOCH rule leaves
+	// (setFreshDRepPulsingState: `ensTreasuryL .~ epochState ^. treasuryL`).
+	// By then applyEnactedWithdrawals has paid registered destinations only,
+	// and EPOCH has added the epoch's donations and unclaimed deposit refunds
+	// (`casTreasuryL <>~ (utxosDonation <> fold unclaimed)`). The pot row
+	// already reflects this boundary's ENACT, DROP and removal refunds; the
+	// caller adds the donations after ProcessEpoch returns. The seed is read
+	// here, in the boundary transaction, because a deferred Decide reads a
+	// snapshot that also holds the boundary's later pot writes.
+	ratifyState, err := in.DB.Metadata().GetNetworkState(in.Txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get ratification network state: %w", err)
+	}
+	var ratificationTreasury uint64
+	if ratifyState != nil {
+		ratificationTreasury = uint64(ratifyState.Treasury)
+	}
+	if ratificationTreasury > ^uint64(0)-in.PendingTreasuryDonations {
+		return nil, errors.New(
+			"ratification treasury with pending donations overflows",
+		)
+	}
+	ratificationTreasury += in.PendingTreasuryDonations
+
+	plan := &RatificationPlan{
+		in:                *in,
+		out:               *out,
+		conwayPParams:     conwayPParams,
+		treasuryRemaining: ratificationTreasury,
+	}
+	plan.in.Txn = nil
+	if in.DeferRatification &&
+		(in.CurrentBoundarySPOState != nil || in.BoundarySPOStateDeferred) {
+		out.Ratification = plan
+		return out, nil
+	}
+	decision, err := plan.Decide(in.Txn)
+	if err != nil {
+		return nil, err
+	}
+	expiredOrphanCount, err := plan.Apply(decision, in.Txn)
+	if err != nil {
+		return nil, err
+	}
+	out.RatifiedCount = len(decision.Ratified)
+	out.ExpiredCount = len(decision.Expired)
+	out.OrphanedCount += expiredOrphanCount
+	return out, nil
+}
+
+// RatificationPlan is what RATIFY at one boundary takes from the boundary
+// itself: the epoch input, the post-enactment protocol parameters and the
+// RATIFY treasury seed. Every other RATIFY input is read
+// through the transaction handed to Decide.
+type RatificationPlan struct {
+	in            EpochInput
+	out           EpochOutput
+	conwayPParams *conway.ConwayProtocolParameters
+	// treasuryRemaining is read in the boundary transaction. A deferred
+	// Decide reads a snapshot that already holds the boundary's later pot
+	// writes, such as the epoch's donations, so a RATIFY seed derived from
+	// the pots belongs here, not in Decide.
+	treasuryRemaining uint64
+}
+
+// Epoch returns the epoch whose opening boundary the plan ratifies at.
+func (p *RatificationPlan) Epoch() uint64 { return p.in.NewEpoch }
+
+// SetBoundarySPOState supplies mark[Epoch()] when the boundary deferred it.
+func (p *RatificationPlan) SetBoundarySPOState(state *SPOVotingState) {
+	p.in.CurrentBoundarySPOState = state
+}
+
+// BoundarySlot returns the slot of the boundary the plan ratifies at.
+func (p *RatificationPlan) BoundarySlot() uint64 { return p.in.BoundarySlot }
+
+// Decide computes the plan's RATIFY and EXPIRY verdicts without writing.
+// txn must observe the ledger state the boundary transaction committed and
+// nothing later, which a read transaction pinned before the next write
+// commits provides.
+func (p *RatificationPlan) Decide(
+	txn *database.Txn,
+) (*RatificationDecision, error) {
+	in := p.in
+	if in.BoundarySPOStateDeferred && in.CurrentBoundarySPOState == nil {
+		return nil, errors.New("ratification plan has no boundary SPO state")
+	}
+	in.Txn = txn
+	out := p.out
+	return decideRatification(&in, &out, p.conwayPParams, p.treasuryRemaining)
+}
+
+// Apply writes a decision's ratified and expired marks at the plan's boundary
+// slot, and marks the expired actions' descendants, through txn. It returns
+// the number of descendants marked.
+func (p *RatificationPlan) Apply(
+	decision *RatificationDecision,
+	txn *database.Txn,
+) (int, error) {
+	in := p.in
+	in.Txn = txn
+	return applyRatification(&in, decision)
+}
+
+// RatificationDecision is one boundary's RATIFY and EXPIRY verdicts: which
+// pending actions are accepted and which are classified expired.
+type RatificationDecision struct {
+	Ratified []*models.GovernanceProposal
+	Expired  []*models.GovernanceProposal
+}
+
+// decideRatification computes the RATIFY and EXPIRY verdicts for the boundary
+// into in.NewEpoch without writing: every read goes through in.Txn, so the
+// decision depends only on the state that transaction observes.
+func decideRatification(
+	in *EpochInput,
+	out *EpochOutput,
+	conwayPParams *conway.ConwayProtocolParameters,
+	treasuryRemaining uint64,
+) (*RatificationDecision, error) {
+	verdicts := &RatificationDecision{}
 	// RATIFY uses the preceding epoch's pulser state, which includes actions
 	// expiring at this boundary. Querying at PrevEpoch preserves the database's
 	// canonical proposal order for both current and final-boundary candidates.
@@ -455,6 +604,7 @@ func ProcessEpoch(
 		Txn:                   in.Txn,
 		StakeEpoch:            stakeEpochFor(in.NewEpoch),
 		CurrentEpoch:          in.NewEpoch,
+		ActiveProposalEpoch:   &in.PrevEpoch,
 		DelegatorInactivityOn: in.DelegatorInactivityOn,
 	}
 
@@ -464,10 +614,10 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("count active dreps: %w", err)
 	}
 
-	// Pre-fetch the current chain root for each chained purpose. The
-	// root cannot change during the RATIFY loop (ratifications are
-	// marks, not enactments), so one read per purpose replaces the
-	// old per-proposal call to GetLastEnactedGovernanceProposal.
+	// Pre-fetch the enacted chain root for each chained purpose. Parameter
+	// changes are non-delaying: RATIFY stages each accepted action's enact
+	// state and advances that purpose root so an eligible child can be
+	// evaluated later in this pass.
 	// Querying by purpose (not bare action type) lets NoConfidence
 	// and UpdateCommittee share the same committee-purpose root.
 	rootsByPurpose := make(
@@ -515,8 +665,9 @@ func ProcessEpoch(
 	drepState := &DRepVotingState{}
 	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
-		drepState, err = LoadDRepVotingState(
-			in.DB, in.Txn, in.NewEpoch, in.DelegatorInactivityOn,
+		drepState, err = loadDRepVotingState(
+			in.DB, in.Txn, in.NewEpoch, in.PrevEpoch,
+			in.DelegatorInactivityOn,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("load drep voting state: %w", err)
@@ -595,6 +746,9 @@ func ProcessEpoch(
 		}
 		conwayPParams = updatedConwayPParams
 	}
+	// Keep RATIFY's staged protocol parameters local; only the later ENACT
+	// boundary may publish them as the ledger's active parameters.
+	ratificationPParams := out.UpdatedPParams
 
 	majorVersion := conwayPParams.ProtocolVersion.Major
 	// RATIFY uses the post-ENACT protocol version for both threshold
@@ -609,16 +763,11 @@ func ProcessEpoch(
 		return nil, fmt.Errorf("get committee quorum: %w", err)
 	}
 
-	// Track ratifications per purpose (not per action type) so
-	// NoConfidence and UpdateCommittee in the same tick don't both
-	// fire — the spec allows at most one ratification per purpose.
-	ratifiedThisTickByPurpose := make(map[govActionPurpose]bool)
-	// RATIFY carries the post-ENACT treasury in its enactment state. Accepted
-	// withdrawals consume this budget immediately, even though they are not
-	// enacted until a later boundary and even when an unregistered destination
-	// would leave the corresponding lovelace in Dingo's physical treasury pot.
-	ratificationTreasuryRemaining := enactCtx.TreasuryWithdrawalRemaining
+	// Accepted withdrawals consume this budget immediately, even though they
+	// are not enacted until a later boundary.
+	ratificationTreasuryRemaining := treasuryRemaining
 
+	stillActive = orderParameterChangeChains(stillActive)
 	sort.SliceStable(stillActive, func(i, j int) bool {
 		return govActionPriority(stillActive[i]) <
 			govActionPriority(stillActive[j])
@@ -643,11 +792,6 @@ func ProcessEpoch(
 	for _, proposal := range stillActive {
 		actionType := lcommon.GovActionType(proposal.ActionType)
 		purpose := govActionPurposeOf(actionType)
-		if purpose != purposeNone && ratifiedThisTickByPurpose[purpose] {
-			// The spec ratifies at most one action per purpose per
-			// epoch tick. Skip to avoid double-enacting next tick.
-			continue
-		}
 
 		// Parent chain check: look up the root by purpose so that,
 		// e.g., an UpdateCommittee validates against the most recent
@@ -660,13 +804,11 @@ func ProcessEpoch(
 		if !validateParentChain(proposal, root) {
 			// A chained proposal that references a parent we
 			// don't have an enacted root for is the silent
-			// failure mode behind issue #2195: on a Mithril-
-			// bootstrapped node missing per-purpose seeded
-			// roots, every chained proposal hits this branch and
-			// silently expires. Log a warning so the next
-			// occurrence shows up in operator logs instead of
-			// only as a block-producer divergence at the next
-			// enactment boundary.
+			// failure mode on a Mithril- bootstrapped node missing per-purpose
+			// seeded roots, every chained proposal hits this branch and
+			// silently expires. Log a warning so the next occurrence shows up
+			// in operator logs instead of only as a block-producer divergence
+			// at the next enactment boundary.
 			if in.Logger != nil &&
 				root == nil &&
 				proposal.ParentTxHash != nil &&
@@ -702,7 +844,7 @@ func ProcessEpoch(
 		action, decodeErr := decodeGovActionForPParams(
 			proposal.GovActionCbor,
 			proposal.ActionType,
-			out.UpdatedPParams,
+			ratificationPParams,
 		)
 		if decodeErr != nil {
 			if in.Logger != nil {
@@ -764,7 +906,7 @@ func ProcessEpoch(
 			continue
 		}
 		nextTreasuryRemaining, enactabilityErr := ratificationEnactmentPrecondition(
-			out.UpdatedPParams,
+			ratificationPParams,
 			in.UpdateFn,
 			proposal,
 			ratificationTreasuryRemaining,
@@ -790,16 +932,45 @@ func ProcessEpoch(
 		ratifiedSlot := in.BoundarySlot
 		proposal.RatifiedEpoch = &ratifiedEpoch
 		proposal.RatifiedSlot = &ratifiedSlot
-		if err := in.DB.SetGovernanceProposal(
-			proposal, in.Txn,
-		); err != nil {
-			return nil, fmt.Errorf("mark ratified: %w", err)
-		}
-		if purpose != purposeNone {
-			ratifiedThisTickByPurpose[purpose] = true
+		verdicts.Ratified = append(verdicts.Ratified, proposal)
+		if purpose == purposeParameterChange {
+			ratificationPParams, err = stageRatifiedParameterChange(
+				ratificationPParams,
+				in.UpdateFn,
+				action,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"stage ratified parameter change %s#%d: %w",
+					shortHash(proposal.TxHash),
+					proposal.ActionIndex,
+					err,
+				)
+			}
+			updatedConwayPParams, err := conwayGovernanceProtocolParameters(
+				ratificationPParams,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"resolve staged governance pparams: %w",
+					err,
+				)
+			}
+			if updatedConwayPParams == nil {
+				return nil, fmt.Errorf(
+					"staged governance pparams have pre-Conway type %T",
+					ratificationPParams,
+				)
+			}
+			conwayPParams = updatedConwayPParams
+			majorVersion = conwayPParams.ProtocolVersion.Major
+			tallyCtx.MajorVersion = majorVersion
+			rootsByPurpose[purpose] = proposal
 		}
 		ratificationTreasuryRemaining = nextTreasuryRemaining
-		out.RatifiedCount++
+		// Conway RATIFY accepts nothing after a delaying action (NoConfidence,
+		// UpdateCommittee, NewConstitution, HardForkInitiation) in the same
+		// pass; only non-delaying actions keep the pass going.
 		if isDelayingActionPurpose(purpose) {
 			break
 		}
@@ -809,51 +980,23 @@ func ProcessEpoch(
 	// RATIFY has now had its final chance to accept each expiring action.
 	// Mark only proposals that remain unratified; accepted actions move to
 	// ENACT on the next boundary.
-	expired, err := in.DB.GetExpiringGovernanceProposals(
+	expiring, err := in.DB.GetExpiringGovernanceProposals(
 		in.NewEpoch, in.Txn,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get expiring proposals: %w", err)
 	}
-	for _, p := range expired {
-		expiredEpoch := in.NewEpoch
-		expiredSlot := in.BoundarySlot
-		p.ExpiredEpoch = &expiredEpoch
-		p.ExpiredSlot = &expiredSlot
-		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
-			return nil, fmt.Errorf("mark expired: %w", err)
+	// The query predates this tick's ratified marks, which apply writes.
+	ratifiedNow := make(map[string]struct{}, len(verdicts.Ratified))
+	for _, p := range verdicts.Ratified {
+		ratifiedNow[proposalIdentityKey(p)] = struct{}{}
+	}
+	for _, p := range expiring {
+		if _, ok := ratifiedNow[proposalIdentityKey(p)]; ok {
+			continue
 		}
-		out.ExpiredCount++
+		verdicts.Expired = append(verdicts.Expired, p)
 	}
-	// Remove descendants only for actions that failed RATIFY. Accepted
-	// actions remain pending enactment and retain their successor tree.
-	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Txn,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
-	}
-	expiredSeeds := append(
-		append(make([]*models.GovernanceProposal, 0,
-			len(replayedExpired)+len(expired)), replayedExpired...),
-		expired...,
-	)
-	expiredOrphanCount, err := removeOrphanedProposals(
-		in.DB,
-		in.Txn,
-		nil,
-		expiredSeeds,
-		in.NewEpoch,
-		in.NewEpoch,
-		in.BoundarySlot,
-		in.Logger,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("remove expired proposal descendants: %w", err)
-	}
-	out.OrphanedCount += expiredOrphanCount
 
 	if in.Logger != nil && len(stillActive) > 0 {
 		elapsed := time.Since(tallyStart)
@@ -877,7 +1020,119 @@ func ProcessEpoch(
 		}
 	}
 
-	return out, nil
+	return verdicts, nil
+}
+
+// applyRatification writes a decision's ratified and expired marks at the
+// boundary slot and marks the expired actions' descendants.
+func applyRatification(
+	in *EpochInput,
+	decision *RatificationDecision,
+) (int, error) {
+	for _, proposal := range decision.Ratified {
+		if err := in.DB.SetGovernanceProposal(
+			proposal, in.Txn,
+		); err != nil {
+			return 0, fmt.Errorf("mark ratified: %w", err)
+		}
+	}
+	for _, p := range decision.Expired {
+		expiredEpoch := in.NewEpoch
+		expiredSlot := in.BoundarySlot
+		p.ExpiredEpoch = &expiredEpoch
+		p.ExpiredSlot = &expiredSlot
+		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
+			return 0, fmt.Errorf("mark expired: %w", err)
+		}
+	}
+	// Remove descendants only for actions that failed RATIFY. Accepted
+	// actions remain pending enactment and retain their successor tree.
+	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("get boundary-expired proposals: %w", err)
+	}
+	expiredSeeds := append(
+		append(make([]*models.GovernanceProposal, 0,
+			len(replayedExpired)+len(decision.Expired)), replayedExpired...),
+		decision.Expired...,
+	)
+	expiredOrphanCount, err := removeOrphanedProposals(
+		in.DB,
+		in.Txn,
+		nil,
+		expiredSeeds,
+		nil,
+		in.NewEpoch,
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Logger,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("remove expired proposal descendants: %w", err)
+	}
+	return expiredOrphanCount, nil
+}
+
+// orderParameterChangeChains keeps the candidate order, except that a
+// parameter change listed before its own parent is moved to immediately after
+// that parent. SQL breaks same-slot ties by transaction hash, which is not a
+// ledger rule, and imported proposals share their epoch's anchor slot. A child
+// is always submitted after its parent and before anything from a later slot,
+// so it must not be pushed behind later-slot proposals either: that would let
+// a later competing sibling take the purpose root first.
+func orderParameterChangeChains(
+	proposals []*models.GovernanceProposal,
+) []*models.GovernanceProposal {
+	parameterChanges := make(map[string]bool)
+	for _, proposal := range proposals {
+		if lcommon.GovActionType(proposal.ActionType) ==
+			lcommon.GovActionTypeParameterChange {
+			parameterChanges[proposalIdentityKey(proposal)] = true
+		}
+	}
+	if len(parameterChanges) < 2 {
+		return proposals
+	}
+
+	ordered := make([]*models.GovernanceProposal, 0, len(proposals))
+	emitted := make(map[string]bool, len(proposals))
+	waiting := make(map[string][]*models.GovernanceProposal)
+	emit := func(proposal *models.GovernanceProposal) {
+		stack := []*models.GovernanceProposal{proposal}
+		for len(stack) > 0 {
+			next := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			ordered = append(ordered, next)
+			key := proposalIdentityKey(next)
+			emitted[key] = true
+			children := waiting[key]
+			delete(waiting, key)
+			for _, child := range slices.Backward(children) {
+				stack = append(stack, child)
+			}
+		}
+	}
+	for _, proposal := range proposals {
+		parentKey := proposalParentKey(proposal)
+		if parameterChanges[proposalIdentityKey(proposal)] &&
+			parameterChanges[parentKey] && !emitted[parentKey] {
+			waiting[parentKey] = append(waiting[parentKey], proposal)
+			continue
+		}
+		emit(proposal)
+	}
+	// Only an ancestry cycle, which the chain cannot produce, leaves a
+	// proposal waiting here.
+	for _, proposal := range proposals {
+		if !emitted[proposalIdentityKey(proposal)] {
+			ordered = append(ordered, proposal)
+		}
+	}
+	return ordered
 }
 
 func cloneGovernanceProtocolParameters(
@@ -1027,7 +1282,7 @@ func ratificationEnactmentPrecondition(
 // tick's ratify decision, taken at the boundary into newEpoch, must use
 // mark[newEpoch].
 //
-// Confirmed against the Preview Plomin hard fork (dingo#4441): mark[742]'s
+// Confirmed against the Preview Plomin hard fork: mark[742]'s
 // SPO yes ratio was 0.6283 (>= the 0.51 pvtHardForkInitiation threshold),
 // matching the real network's ratified_epoch=742/enacted_epoch=743; mark[740]
 // (0.4779) and mark[741] (0.4757) do not clear the threshold and reproduce
@@ -1059,7 +1314,7 @@ func stakeEpochFor(newEpoch uint64) uint64 {
 // votes do freeze at the voting deadline, but the SPO denominator does not,
 // and stake moving across the boundary can carry an action over or under its
 // threshold after this answer was computed. Preview's Plomin hard fork
-// (dingo#4441) straddled the 0.51 SPO threshold exactly that way --
+// straddled the 0.51 SPO threshold exactly that way --
 // mark[741] 0.4757 against mark[742] 0.6283 -- so the mid-epoch check
 // published nothing through epoch 741 and the boundary into 742 ratified.
 // The boundary decision is the authoritative one; this one only surfaces it
@@ -1126,24 +1381,52 @@ func committeeAbsent(
 
 func govActionPriority(proposal *models.GovernanceProposal) int {
 	if proposal == nil {
-		return 5
+		return 7
 	}
 	actionType := lcommon.GovActionType(proposal.ActionType)
-	if actionType == lcommon.GovActionTypeNoConfidence {
+	switch actionType {
+	case lcommon.GovActionTypeNoConfidence:
 		return 0
-	}
-	switch govActionPurposeOf(actionType) {
-	case purposeCommittee:
+	case lcommon.GovActionTypeUpdateCommittee:
 		return 1
-	case purposeConstitution:
+	case lcommon.GovActionTypeNewConstitution:
 		return 2
-	case purposeHardFork:
+	case lcommon.GovActionTypeHardForkInitiation:
 		return 3
-	case purposeNone, purposeParameterChange:
+	case lcommon.GovActionTypeParameterChange:
 		return 4
-	default:
+	case lcommon.GovActionTypeTreasuryWithdrawal:
 		return 5
+	case lcommon.GovActionTypeInfo:
+		return 6
+	default:
+		return 7
 	}
+}
+
+func stageRatifiedParameterChange(
+	pparams lcommon.ProtocolParameters,
+	updateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error),
+	action lcommon.GovAction,
+) (lcommon.ProtocolParameters, error) {
+	var update any
+	switch parameterChange := action.(type) {
+	case *conway.ConwayParameterChangeGovAction:
+		update = parameterChange.ParamUpdate
+	case *gdijkstra.DijkstraParameterChangeGovAction:
+		update = parameterChange.ParamUpdate
+	default:
+		return nil, fmt.Errorf("unexpected parameter-change action %T", action)
+	}
+	stagedPParams, err := cloneGovernanceProtocolParameters(pparams)
+	if err != nil {
+		return nil, fmt.Errorf("clone staged protocol parameters: %w", err)
+	}
+	stagedPParams, err = updateFn(stagedPParams, update)
+	if err != nil {
+		return nil, fmt.Errorf("apply staged parameter update: %w", err)
+	}
+	return stagedPParams, nil
 }
 
 func isDelayingActionPurpose(purpose govActionPurpose) bool {
@@ -1165,6 +1448,18 @@ func refundProposalDeposit(
 	txn *database.Txn,
 	proposal *models.GovernanceProposal,
 	slot uint64,
+) error {
+	return refundProposalDepositFromSource(
+		db, txn, proposal, slot, proposalRewardSourceHash(proposal),
+	)
+}
+
+func refundProposalDepositFromSource(
+	db *database.Database,
+	txn *database.Txn,
+	proposal *models.GovernanceProposal,
+	slot uint64,
+	sourceHash []byte,
 ) error {
 	if proposal == nil || proposal.Deposit == 0 {
 		return nil
@@ -1189,7 +1484,7 @@ func refundProposalDeposit(
 		// discriminator: it keeps two refunds to the same return account in
 		// one epoch as distinct journal rows and makes a crash-replayed
 		// boundary refund idempotent.
-		proposalRewardSourceHash(proposal),
+		sourceHash,
 	)
 	if err != nil {
 		return err
@@ -1220,6 +1515,7 @@ func removeOrphanedProposals(
 	txn *database.Txn,
 	enacted []*models.GovernanceProposal,
 	expired []*models.GovernanceProposal,
+	dropped []*models.GovernanceProposal,
 	activeEpoch uint64,
 	epoch uint64,
 	slot uint64,
@@ -1256,6 +1552,12 @@ func removeOrphanedProposals(
 	for _, proposal := range expired {
 		expirySeeds = append(
 			expirySeeds, children[proposalIdentityKey(proposal)]...,
+		)
+	}
+	dropSeeds := make([]*models.GovernanceProposal, 0)
+	for _, proposal := range dropped {
+		dropSeeds = append(
+			dropSeeds, children[proposalIdentityKey(proposal)]...,
 		)
 	}
 
@@ -1334,6 +1636,9 @@ func removeOrphanedProposals(
 		return count, err
 	}
 	if err := sweep(expirySeeds, false); err != nil {
+		return count, err
+	}
+	if err := sweep(dropSeeds, true); err != nil {
 		return count, err
 	}
 	return count, nil

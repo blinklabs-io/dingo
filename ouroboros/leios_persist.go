@@ -176,6 +176,9 @@ func (o *Ouroboros) enqueueLeiosPersist(
 			o.releaseLeiosPersistReservation(size)
 		}
 	}()
+	if hook := o.leiosPersistAfterReserve; hook != nil {
+		hook()
+	}
 	job := &leiosPersistJob{
 		slot:        point.Slot,
 		hash:        slices.Clone(point.Hash),

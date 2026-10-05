@@ -55,13 +55,12 @@ func (s *Store) DeleteCertificatesAfterSlot(
 	// runs: a rollback's legal target is bounded by securityParam blocks
 	// from whatever the tip was *at rollback time*, which a prior cached
 	// value -- resolved against an earlier, since-superseded tip -- does not
-	// necessarily bound (see committee_prune.go's "Suspension" section, and
-	// issue #4353). committeeAuthHorizon treats the resulting
-	// known-but-unset state as "suspend pruning" rather than fall back to
-	// the slot-window assumption, until the next sync resolves a fresh value
-	// against the post-rollback chain. Always safe to call even when no
-	// live syncer is wired (a no-op store field write) and even if the
-	// delete below fails.
+	// necessarily bound (see committee_prune.go's "Suspension" section).
+	// committeeAuthHorizon treats the resulting known-but-unset state as
+	// "suspend pruning" rather than fall back to the slot-window assumption,
+	// until the next sync resolves a fresh value against the post-rollback
+	// chain. Always safe to call even when no live syncer is wired (a no-op
+	// store field write) and even if the delete below fails.
 	s.committeeAuthImmutableSlotKnown.Store(false)
 	return s.withWriteTransaction(
 		txn,
@@ -200,8 +199,14 @@ ORDER BY id`,
 func (s *Store) GetGenesisDelegationForSlot(
 	genesisHash []byte,
 	blockSlot uint64,
+	stabilityWindow uint64,
 	txn types.Txn,
 ) (*models.GenesisDelegation, error) {
+	// A certificate takes effect at its slot plus the stability window, so
+	// nothing has taken effect before the window has elapsed.
+	if blockSlot < stabilityWindow {
+		return nil, nil
+	}
 	db, ctx, err := s.readDBFromTxn(txn)
 	if err != nil {
 		return nil, err
@@ -211,11 +216,11 @@ func (s *Store) GetGenesisDelegationForSlot(
 SELECT id, genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
        block_index, cert_index, certificate_id
 FROM genesis_delegation
-WHERE genesis_hash = ? AND added_slot < ?
+WHERE genesis_hash = ? AND added_slot <= ?
 ORDER BY added_slot DESC, block_index DESC, cert_index DESC, id DESC
 LIMIT 1`,
 		genesisHash,
-		blockSlot,
+		blockSlot-stabilityWindow,
 	).Scan(
 		&ret.ID,
 		&ret.GenesisHash,
@@ -230,4 +235,49 @@ LIMIT 1`,
 		return nil, nil
 	}
 	return &ret, err
+}
+
+func (s *Store) GetGenesisDelegationsInSlotRange(
+	fromSlot uint64,
+	uptoSlot uint64,
+	txn types.Txn,
+) ([]models.GenesisDelegation, error) {
+	if uptoSlot < fromSlot {
+		return nil, nil
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := db.QueryContext(ctx, `
+SELECT id, genesis_hash, genesis_delegate_hash, vrf_key_hash, added_slot,
+       block_index, cert_index, certificate_id
+FROM genesis_delegation
+WHERE added_slot >= ? AND added_slot <= ?
+ORDER BY added_slot, block_index, cert_index, id`,
+		fromSlot,
+		uptoSlot,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ret []models.GenesisDelegation
+	for rows.Next() {
+		var row models.GenesisDelegation
+		if err := rows.Scan(
+			&row.ID,
+			&row.GenesisHash,
+			&row.GenesisDelegateHash,
+			&row.VrfKeyHash,
+			&row.AddedSlot,
+			&row.BlockIndex,
+			&row.CertIndex,
+			&row.CertificateID,
+		); err != nil {
+			return nil, err
+		}
+		ret = append(ret, row)
+	}
+	return ret, rows.Err()
 }

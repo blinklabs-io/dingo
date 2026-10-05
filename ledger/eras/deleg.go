@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package eras
 
@@ -81,8 +81,9 @@ func (e StakeKeyNonZeroAccountBalanceError) Error() string {
 // predecessors left.
 //
 // It covers stake registration and deregistration, delegation from a
-// credential deregistered earlier in the transaction, and the move
+// credential deregistered earlier in the transaction, the move
 // instantaneous rewards cutoff, protocol-version, sign and pot-capacity
+// predicates, and the genesis key delegation root and duplicate-key
 // predicates.
 //
 // Value conservation credits a key deposit refund for every deregistration and
@@ -113,6 +114,7 @@ func validateShelleyDelegCerts(
 		return err
 	}
 	var mir *mirDeleg
+	var genesis *genesisDeleg
 	for _, cert := range certs {
 		switch c := cert.(type) {
 		case *lcommon.StakeRegistrationCertificate:
@@ -147,6 +149,21 @@ func validateShelleyDelegCerts(
 				}
 			}
 			err = mir.apply(c)
+		case *lcommon.GenesisKeyDelegationCertificate:
+			if c == nil {
+				continue
+			}
+			if genesis == nil {
+				genesis, err = newGenesisDeleg(slot, ls)
+				if err != nil {
+					return err
+				}
+			}
+			// A ledger state without the provider skips the stateful
+			// predicates, as it does for MIR.
+			if genesis != nil {
+				err = genesis.apply(c)
+			}
 		}
 		if err != nil {
 			return err

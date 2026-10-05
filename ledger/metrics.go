@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
@@ -113,9 +114,9 @@ type stateMetrics struct {
 	//
 	// A histogram quantile is only an estimate bounded by its bucket edges,
 	// however wide they are; this is the exact worst-ever-seen value, so an
-	// epoch-boundary stall like blinklabs-io/dingo#4364 (block application
-	// blocked for 25s to over 300s) shows up exactly on the epoch_rollover
-	// stage instead of "somewhere past the last bucket boundary".
+	// epoch-boundary stall (block application blocked for 25s to over 300s)
+	// shows up exactly on the epoch_rollover stage instead of "somewhere past
+	// the last bucket boundary".
 	//
 	// Deliberately monotonic non-resetting ("worst ever seen"), not a
 	// windowed maximum: a windowed maximum needs a periodic-reset custom
@@ -126,13 +127,67 @@ type stateMetrics struct {
 	blockStageValidateMax      atomic.Uint64
 	blockStageApplyMax         atomic.Uint64
 	blockStageEpochRolloverMax atomic.Uint64
+	// Wall-clock time from the start of applying one committed
+	// DB-transaction chunk of blocks (ledger/state.go's batch loop, which
+	// commits at most batchSize=50 blocks per transaction) to the moment
+	// updateTipMetrics reflects that chunk's new tip in
+	// cardano_node_metrics_blockNum_int -- the same gauge the "Block apply
+	// rate" Grafana panel (internal/test/devnet/koios-parity/grafana/dashboards/dingo-sync-progress.json,
+	// panel id 3) derives deriv() from.
+	//
+	// Up to batchSize blocks commit and advance blockNum_int together in
+	// one DB transaction, so there is no narrower point at which an
+	// individual block's own application is separately reflected in the
+	// tip: the DB write batches deltas from every block in the chunk into
+	// one deltaBatch.apply call, and the in-memory tip only advances after
+	// that transaction commits. This is a genuine per-batch measurement,
+	// not an approximation of a per-block one -- see
+	// dingo_ledger_block_apply_batch_size below, which records how many
+	// blocks each observation actually covered, so a reader can relate
+	// this metric to the rate panel without assuming false per-block
+	// precision.
+	//
+	// Deliberately not derived from a rate over
+	// cardano_node_metrics_blockNum_int (e.g. a dashboard-side
+	// "1 / clamp_min(deriv(...), 0.001)"): that only derives a rate from a
+	// gauge's slope, cannot give a true percentile, and is not a real
+	// per-observation duration -- unlike this histogram.
+	blockApplyBatchLatency prometheus.Histogram
+	// Exact maximum wall-clock duration blockApplyBatchLatency has ever
+	// observed since process start, advanced by updateMaxDuration's
+	// compare-and-swap loop at the same observeBlockApplyBatch call site
+	// that records blockApplyBatchLatency, so the two cannot drift out of
+	// sync. Exported by a GaugeFunc that reads this atomic at scrape time
+	// (see registerBlockApplyBatchMaxLatency) rather than by a Gauge that
+	// observeBlockApplyBatch pushes into: with a pushed Gauge, two
+	// goroutines can each win the compare-and-swap and land their Set
+	// calls in the other order, leaving the exported value durably behind
+	// the true maximum until some later observation happens to beat the
+	// record again. Reading the atomic directly at scrape time cannot
+	// exhibit that failure.
+	blockApplyBatchMaxLatency atomic.Uint64
+	// Distribution of blocksProcessed for each blockApplyBatchLatency
+	// observation: how many blocks the committed DB-transaction chunk that
+	// observation timed actually contained. Observed at the same call site
+	// as blockApplyBatchLatency, so "latency / batch size" can approximate
+	// a per-block rate comparable to the "Block apply rate" panel without
+	// this metric itself claiming per-block precision it does not have.
+	//
+	// Not a duplicate of commitBatchBlocks below, which observes
+	// len(nextBatch) where ledgerReadChainIterator submits a gathered
+	// batch. That is the read loop's gather size before the apply loop
+	// chunks it; this is the number of blocks a chunk actually applied and
+	// committed, which is lower whenever the chunk skipped blocks (a
+	// Mithril-gap closure, say). Only this one is paired one-to-one with a
+	// latency observation, which is what makes the ratio meaningful.
+	blockApplyBatchSize prometheus.Histogram
 	// Incremented when a stored governance proposal's CBOR fails to
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
 	governanceProposalDecodeFailures prometheus.Counter
 	// Incremented when a peer repeatedly asks us to roll back to a point
 	// we cannot cross to (local chain diverged), so a stuck node surfaces
-	// as a metric instead of only a WARN loop. See issue #2728.
+	// as a metric instead of only a WARN loop.
 	unrecoverableRollbacks prometheus.Counter
 	// Incremented when a chainsync peer asks for a rollback we refuse, but
 	// its own advertised tip is a strict ancestor of ours on our primary
@@ -146,35 +201,33 @@ type stateMetrics struct {
 	// connection is the signal noteNonExtendingBlockRejection uses to
 	// recycle it (see nonExtendingBlockFloodRecycles) -- this counter makes
 	// that pattern visible before it crosses the recycle threshold, and
-	// across all connections even when none individually crosses it. See
-	// issue #4272.
+	// across all connections even when none individually crosses it.
 	nonExtendingBlockRejections prometheus.Counter
 	// Incremented each time noteNonExtendingBlockRejection actually recycles
 	// a connection for flooding non-extending blocks (as opposed to every
-	// individual rejection, counted above). See issue #4272.
+	// individual rejection, counted above).
 	nonExtendingBlockFloodRecycles prometheus.Counter
 	// Incremented when at-tip validation recovery detects a non-converging,
 	// descending series of distinct failures and holds at the ledger tip
 	// instead of rewinding the primary chain ever deeper. A rising value
 	// means local ledger validation is diverging from the network (e.g. a
-	// false-positive validation rejection), not a peer/fork problem. See
-	// issue #2939.
+	// false-positive validation rejection), not a peer/fork problem.
 	atTipRecoveryNonConverging prometheus.Counter
 	// Incremented when an at-tip recovery rewind target falls below the
 	// consumed-UTxO prune floor and is clamped to the ledger tip. The sweep
 	// hard-deletes spent rows, and rollback restores them with an UPDATE, so
 	// a rewind past the floor cannot rebuild the live UTxO set it implies. A
 	// rising value means recovery is asking for rewinds deeper than local
-	// history can support. See issue #3766.
+	// history can support.
 	atTipRecoveryPruneFloorClamped prometheus.Counter
 	// Incremented when unresolved-producer replay recovery repeatedly fails
 	// to move the applied ledger tip forward and holds at that tip instead of
-	// pruning another security-parameter window. See issue #3005.
+	// pruning another security-parameter window.
 	replayRecoveryNonConverging prometheus.Counter
 	// Incremented when the cross-fork continuation audit finds a freshly
 	// fetched body spending an input whose producing transaction is not on
 	// the local applied chain. A rising value means a peer is feeding the
-	// node a continuation from a fork it never applied. See issue #3005.
+	// node a continuation from a fork it never applied.
 	continuationInputUnresolved prometheus.Counter
 	// Incremented when the primary-chain/ledger divergence reconciler
 	// cannot resolve one of the ledger's own applied block_nonce points to
@@ -183,8 +236,7 @@ type stateMetrics struct {
 	// manager's block cache no longer retains it either. The reconciler
 	// still rolls the ledger back correctly; only the undo notification for
 	// that block is missing, so a rising value means ledger.tx subscribers
-	// may be carrying stale derived state for an abandoned branch. See
-	// issue #3516.
+	// may be carrying stale derived state for an abandoned branch.
 	reconciliationUndoUnresolved prometheus.Counter
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
@@ -194,7 +246,7 @@ type stateMetrics struct {
 	// block_nonce-keyed search. A rising value means an applied block's
 	// ledger.tx undo event could not even be attempted for lack of a
 	// durable per-block record, not merely because the content was no
-	// longer reachable. See issue #3778.
+	// longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -234,14 +286,14 @@ type stateMetrics struct {
 	// made no tip progress, and to 1 while that count is past the point
 	// where the pipeline is treated as stuck. A deterministic failure (a
 	// rejected canonical block, say) repeats forever, so without this a
-	// wedged node is visible only as a repeating WARN. See issue #3165.
+	// wedged node is visible only as a repeating WARN.
 	pipelineNoProgressRestarts prometheus.Gauge
 	pipelineStuck              prometheus.Gauge
 	// Set to 1 once the ledger pipeline has stopped retrying altogether.
 	// Unlike pipelineStuck this is terminal: the pipeline goroutine has
 	// returned and nothing will clear it short of a restart, so it is the
 	// signal to alert on for a node that has permanently stopped following
-	// the chain. See issue #3261.
+	// the chain.
 	pipelineHalted prometheus.Gauge
 	// Incremented when validation recovery declares a failure unrepairable
 	// because every rewind target it may legally reach lies inside the
@@ -262,14 +314,13 @@ type stateMetrics struct {
 	// (see poolStakeDistribution's own comment), not a failure, so it
 	// does not abort the query -- but a sustained nonzero value means a
 	// real cross-node comparison tool would see dingo's reply as short by
-	// that many pools, the exact condition blinklabs-io/dingo#4152 found
-	// via cmd/node-parity against a real cardano-node without any other
-	// visible symptom. Making this a metric rather than only the existing
-	// WARN log lets that be caught by an alert instead of requiring a
-	// manual diff to notice again.
+	// that many pools, the exact condition found via cmd/node-parity against a
+	// real cardano-node without any other visible symptom. Making this a metric
+	// rather than only the existing WARN log lets that be caught by an alert
+	// instead of requiring a manual diff to notice again.
 	poolStakeDistributionOmittedPools prometheus.Counter
 	// Snapshot of gouroboros/pipeline.PipelineMetrics.Stats() for the
-	// block-processing pipeline (issue #1894), refreshed after every batch
+	// block-processing pipeline, refreshed after every batch
 	// decodeReadChainBatch submits to it. These are gauges rather than
 	// counters because the pipeline itself owns the cumulative totals
 	// (they can only be Set from a periodic snapshot, not incremented
@@ -281,7 +332,7 @@ type stateMetrics struct {
 	blockPipelineQueueDepth       prometheus.Gauge
 	// blockPipelineExpectedEta0Errors/blockPipelineDeferredEpochCacheErrors/
 	// blockPipelineUnexpectedErrors count errors drained from
-	// blockPipeline.Errors() by drainBlockPipelineErrors (issue #1894
+	// blockPipeline.Errors() by drainBlockPipelineErrors (the pipeline
 	// deadlock fix): the eta0 counter tracks errBlockPipelineEta0Unavailable
 	// (no cached Praos nonce yet -- normal on every from-genesis sync, since
 	// it is how Byron-era slots always fail this lookup, but the same
@@ -303,7 +354,7 @@ type stateMetrics struct {
 	blockPipelineDeferredEpochCacheErrors prometheus.Counter
 	blockPipelineShutdownErrors           prometheus.Counter
 	blockPipelineUnexpectedErrors         prometheus.Counter
-	// Per-block composition metrics (issue #4367), all labelled by era
+	// Per-block composition metrics, all labelled by era
 	// (block.Era().Name, e.g. "Babbage", "Conway"). Recorded once per
 	// applied block, right where blocksProcessed is incremented in
 	// ledgerProcessBlocksFromSource, so a spike in
@@ -335,7 +386,7 @@ type stateMetrics struct {
 	// commitBatchBlocks observes len(nextBatch) each time
 	// ledgerReadChainIterator submits a gathered batch of blocks downstream
 	// for a single DB transaction (batchSize caps it at 50). Added
-	// alongside the dingo#4464 premature-flush fix so a future run can
+	// alongside the premature-flush fix so a future run can
 	// confirm the batch-size distribution actually shifted upward, rather
 	// than relying on re-measuring physical disk I/O.
 	commitBatchBlocks prometheus.Histogram
@@ -487,7 +538,8 @@ func (m *stateMetrics) blockfetchEventInProgressSeconds() float64 {
 // allocation.
 //
 // record is the metric's only state; the exported gauge reads it at scrape
-// time (see registerBlockStageMaxDuration). That is what makes the exported
+// time (see registerBlockStageMaxDuration and
+// registerBlockApplyBatchMaxLatency). That is what makes the exported
 // value exactly equal to the record at all times, and it is the reason this
 // does not also push the new value into a Gauge. Pushing would introduce a
 // second copy that can fall behind and stay behind: two goroutines can each
@@ -548,11 +600,49 @@ func (m *stateMetrics) registerBlockStageMaxDuration(
 	}
 }
 
+// observeBlockApplyBatch records one committed DB-transaction chunk's ledger
+// apply latency (see blockApplyBatchLatency's doc comment) and how many
+// blocks that chunk contained (blockApplyBatchSize). The ledger/state.go
+// call site only calls this once a chunk with blockCount > 0 has committed
+// and updateTipMetrics has advanced the tip for it; a chunk that applied no
+// blocks (e.g. one that immediately hit an epoch boundary) is not observed
+// at all. Safe to call before init (or when metrics are disabled), matching
+// the other observe helpers in this file.
+func (m *stateMetrics) observeBlockApplyBatch(blockCount int, d time.Duration) {
+	if m == nil || m.blockApplyBatchLatency == nil {
+		return
+	}
+	seconds := d.Seconds()
+	m.blockApplyBatchLatency.Observe(seconds)
+	updateMaxDuration(&m.blockApplyBatchMaxLatency, seconds)
+	if m.blockApplyBatchSize != nil {
+		m.blockApplyBatchSize.Observe(float64(blockCount))
+	}
+}
+
+// registerBlockApplyBatchMaxLatency exports blockApplyBatchMaxLatency as
+// dingo_ledger_block_apply_batch_max_latency_seconds via a GaugeFunc, so the
+// exported value is read directly from the atomic at scrape time rather than
+// through a second, independently-updated copy. See
+// blockApplyBatchMaxLatency's doc comment and updateMaxDuration for why.
+func (m *stateMetrics) registerBlockApplyBatchMaxLatency(
+	factory promauto.Factory,
+) {
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_ledger_block_apply_batch_max_latency_seconds",
+			Help: "maximum wall-clock duration ever observed for dingo_ledger_block_apply_batch_latency_seconds, since process start; monotonically non-decreasing and exact rather than bucket-bounded",
+		},
+		func() float64 {
+			return math.Float64frombits(m.blockApplyBatchMaxLatency.Load())
+		},
+	)
+}
+
 // blockComposition summarizes the shape of one applied block: era,
 // transaction count, Plutus script/redeemer presence, UTxO churn, and
 // certificate count. computeBlockComposition derives it once per block so
-// observeBlockComposition never has to walk the block's transactions itself
-// (issue #4367).
+// observeBlockComposition never has to walk the block's transactions itself.
 type blockComposition struct {
 	era          string
 	transactions int
@@ -561,6 +651,21 @@ type blockComposition struct {
 	utxoCreated  int
 	utxoConsumed int
 	certificates int
+}
+
+// createdUtxoCount returns how many UTxOs tx adds. This runs inside the
+// block-apply DB transaction for every applied block, so for a valid
+// Shelley-era or later transaction the count is taken without building the
+// UTxOs: Produced() allocates an lcommon.Utxo per output, and those eras
+// produce exactly one UTxO per output. A Byron transaction is the exception,
+// since only outputs 0 through 65535 become UTxOs, and the phase-2-failed rule
+// differs by era (Alonzo produces nothing, Babbage onward at most a collateral
+// return), so both cases are read from Produced() rather than restated here.
+func createdUtxoCount(tx lcommon.Transaction) int {
+	if _, isByron := tx.(*byron.ByronTransaction); isByron || !tx.IsValid() {
+		return len(tx.Produced())
+	}
+	return len(tx.Outputs())
 }
 
 // computeBlockComposition derives a blockComposition from one applied block.
@@ -576,20 +681,7 @@ func computeBlockComposition(block lcommon.Block) blockComposition {
 	txs := block.Transactions()
 	c.transactions = len(txs)
 	for _, tx := range txs {
-		// This runs inside the block-apply DB transaction for every applied
-		// block, so the created-UTxO count is taken without building the
-		// UTxOs. Produced() allocates an lcommon.Utxo per output and
-		// round-trips the transaction hash through hex to construct each
-		// one's input reference; only its length is wanted here, and every
-		// era defines Produced() for a valid transaction as exactly one UTxO
-		// per output. The phase-2-failed rule differs by era (Alonzo produces
-		// nothing, Babbage onward at most a collateral return), so that case
-		// is still read from Produced() rather than restated here.
-		if tx.IsValid() {
-			c.utxoCreated += len(tx.Outputs())
-		} else {
-			c.utxoCreated += len(tx.Produced())
-		}
+		c.utxoCreated += createdUtxoCount(tx)
 		c.utxoConsumed += len(tx.Consumed())
 		c.certificates += len(tx.Certificates())
 		witnesses := tx.Witnesses()
@@ -951,7 +1043,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			// cheap signature check, one transaction's validation, one
 			// delta-batch flush), which is why resolution stays fine down
 			// there. The upper end has to resolve epoch_rollover:
-			// blinklabs-io/dingo#4364 measured block application blocked
+			// epoch-boundary stalls measured block application blocked
 			// for 25s to 318s across preview boundaries, all of which the
 			// old ~3.3s ceiling put in +Inf.
 			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
@@ -971,6 +1063,36 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		blockStageEpochRollover,
 	)
 	m.registerBlockStageMaxDuration(promautoFactory)
+	m.blockApplyBatchLatency = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_latency_seconds",
+			Help: "wall-clock time from the start of applying one committed DB-transaction chunk of blocks to the moment its new tip is reflected in cardano_node_metrics_blockNum_int (the gauge the \"Block apply rate\" panel's deriv() reads), including any Leios endorser-block wait ahead of the DB transaction. Per-batch, not per-block: see dingo_ledger_block_apply_batch_size for how many blocks each observation covers.",
+			// 100us to ~419s. The window contains each block's validate
+			// stage and the chunk's apply stage, plus the Leios
+			// endorser-block wait, the DB commit and the tip lock, so its
+			// range must not be narrower than
+			// dingo_ledger_block_stage_duration_seconds' (see
+			// TestBlockApplyBatchLatencyBucketsCoverBlockStageRange).
+			Buckets: prometheus.ExponentialBuckets(0.0001, 2, 23),
+		},
+	)
+	m.registerBlockApplyBatchMaxLatency(promautoFactory)
+	m.blockApplyBatchSize = promautoFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_ledger_block_apply_batch_size",
+			Help: "number of blocks committed in the DB transaction each dingo_ledger_block_apply_batch_latency_seconds observation timed (ledger/state.go caps this at batchSize=50 blocks per transaction). Distinct from dingo_ledger_commit_batch_blocks, which counts blocks the chain-read loop gathered before submitting them: this counts the blocks the chunk actually applied and committed",
+			// Explicit buckets across the full possible range (1 to
+			// batchSize=50): batch size is a small bounded integer, not a
+			// value that benefits from exponential spacing. Literal
+			// boundaries rather than the batchSize constant, matching
+			// dingo_ledger_commit_batch_blocks: prometheus.NewHistogram
+			// panics on out-of-order boundaries, so interpolating a
+			// constant that a later retune could drop below 40 would turn
+			// a tuning change into a startup panic. A retune leaves these
+			// boundaries stale instead, which is recoverable.
+			Buckets: []float64{1, 2, 5, 10, 20, 30, 40, 50},
+		},
+	)
 	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_governance_proposal_decode_failures_total",
