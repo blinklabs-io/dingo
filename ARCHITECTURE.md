@@ -1854,8 +1854,10 @@ Repeated rolled-back hashes are retained only once. Both the rollback history
 and recently reported pair set are bounded to 2160 entries. On
 rollback, every rolled-back block is decoded to read its issuer. For later
 added blocks, the detector first scans stored slot and block-number fields and
-decodes only when a possible match exists, so a normal sync pays one scan of
-the bounded, usually empty history. A competing block this node never applied,
+decodes only when a possible match exists, so each added block pays one scan
+of the rollback history. Entries leave it only by eviction at the 2160-entry
+cap, so on a long-running node the history fills to the cap and each added
+block scans up to 2160 entries. A competing block this node never applied,
 because it never became the chain, is not seen.
 
 The six topics the ChainSelector publishes itself —

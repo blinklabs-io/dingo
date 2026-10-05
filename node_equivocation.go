@@ -55,8 +55,10 @@ type equivocationPair [2]string
 // A competitor can only be seen once the chain has switched to or away from
 // it: the losing block is read from the rollback that removes it and compared
 // with each block added afterwards. Blocks are decoded only when a candidate
-// pair shares a slot or number, so the per-block cost on a normal sync is one
-// scan of a normally empty list.
+// pair shares a slot or number, so the per-block cost is one scan of the
+// retained rollback history. Entries leave that history only through the
+// maxEquivocationRolledBack eviction, so on a long-running node it fills to
+// the cap and each added block scans up to 2160 entries.
 type equivocationDetector struct {
 	logger        *slog.Logger
 	counter       *prometheus.CounterVec
