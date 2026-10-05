@@ -133,7 +133,7 @@ func TestBackupToRestoreFromIntegration(t *testing.T) {
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
 
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(4242), restoredTimestamp)
 
@@ -232,7 +232,7 @@ func TestResetThenRestoreIntegration(t *testing.T) {
 
 	require.NoError(t, dstStore.RestoreFrom(context.Background(), dumpPath))
 	require.NoError(t, dstStore.Start(context.Background()))
-	restoredTimestamp, err := dstStore.GetCommitTimestamp()
+	restoredTimestamp, err := dstStore.GetCommitTimestamp(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, int64(777), restoredTimestamp)
 }
