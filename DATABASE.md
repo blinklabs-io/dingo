@@ -2047,6 +2047,14 @@ skipped. A reader at the WAL tip can still make TRUNCATE return `busy` even
 after PASSIVE drains the frames. In either case the file stays at its current
 size until a WAL reset or later TRUNCATE succeeds.
 
+Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
+checkpoint callback. Entering bulk mode first drains an in-flight callback, so
+the dedicated checkpoint connection cannot overlap the import's metadata
+writes; restoring normal pragmas re-enables the ticker. Writer-owned
+`wal_autocheckpoint` remains active at 10000 pages throughout the import, so
+WAL frames are still backfilled while only the independent TRUNCATE attempts
+are postponed until the bulk phase completes.
+
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
 earlier version issued it against `writeDB` on the theory that

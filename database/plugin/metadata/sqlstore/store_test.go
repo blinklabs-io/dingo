@@ -127,6 +127,51 @@ func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
 	require.NoError(t, store.RestoreNormalPragmas())
 }
 
+func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
+	store := newTestStore(t)
+	checkpointStarted := make(chan struct{})
+	checkpointRelease := make(chan struct{})
+	var checkpointCalls atomic.Uint32
+	checkpointErr := errors.New("checkpoint called")
+	store.checkpoint = func(context.Context) error {
+		if checkpointCalls.Add(1) == 1 {
+			close(checkpointStarted)
+			<-checkpointRelease
+		}
+		return checkpointErr
+	}
+
+	checkpointDone := make(chan error, 1)
+	go func() {
+		checkpointDone <- store.runCheckpoint(t.Context())
+	}()
+	select {
+	case <-checkpointStarted:
+	case <-time.After(time.Second):
+		t.Fatal("checkpoint did not start")
+	}
+
+	bulkDone := make(chan error, 1)
+	go func() {
+		bulkDone <- store.SetBulkLoadPragmas()
+	}()
+	select {
+	case err := <-bulkDone:
+		t.Fatalf("bulk mode started before the active checkpoint drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(checkpointRelease)
+	require.ErrorIs(t, <-checkpointDone, checkpointErr)
+	require.NoError(t, <-bulkDone)
+	require.NoError(t, store.runCheckpoint(t.Context()))
+	require.Equal(t, uint32(1), checkpointCalls.Load())
+
+	require.NoError(t, store.RestoreNormalPragmas())
+	require.ErrorIs(t, store.runCheckpoint(t.Context()), checkpointErr)
+	require.Equal(t, uint32(2), checkpointCalls.Load())
+}
+
 func TestSumUint64RowsPreservesFullRange(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)

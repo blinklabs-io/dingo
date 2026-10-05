@@ -199,6 +199,13 @@ type Store struct {
 	bulkMu           sync.RWMutex
 	bulkConnMu       sync.Mutex
 	bulkConn         *sql.Conn
+	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
+	// transition. bulkMode is protected by it. A Mithril import can keep bulk
+	// mode active for hours; checkpointing the same SQLite database during that
+	// interval adds lock traffic without improving recovery, because the import
+	// is explicitly incomplete until its final ready-state transaction commits.
+	scheduledWorkMu sync.RWMutex
+	bulkMode        bool
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -785,7 +792,7 @@ func (s *Store) startCheckpointTicker() {
 					return
 				}
 				started := time.Now()
-				err := s.checkpoint(ctx)
+				err := s.runCheckpoint(ctx)
 				s.checkpointState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -808,6 +815,15 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+func (s *Store) runCheckpoint(ctx context.Context) error {
+	s.scheduledWorkMu.RLock()
+	defer s.scheduledWorkMu.RUnlock()
+	if s.bulkMode {
+		return nil
+	}
+	return s.checkpoint(ctx)
 }
 
 func (s *Store) closeCheckpointAdmission() {
@@ -1157,6 +1173,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
+	// Take this gate before startMu. CloseContext needs startMu to cancel an
+	// in-flight checkpoint, which lets that callback release this gate instead
+	// of deadlocking a concurrent bulk-mode transition.
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 	if s.closed.Load() {
@@ -1165,10 +1186,15 @@ func (s *Store) SetBulkLoadPragmas() error {
 	s.bulkMu.Lock()
 	defer s.bulkMu.Unlock()
 	if s.bulkConn != nil {
+		s.bulkMode = true
 		return nil
 	}
 	if s.dialect.Name() == "sqlite" {
-		return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+		if err := s.dialect.SetBulkMode(context.Background(), s.writeDB); err != nil {
+			return err
+		}
+		s.bulkMode = true
+		return nil
 	}
 	conn, err := s.writeDB.Conn(context.Background())
 	if err != nil {
@@ -1183,14 +1209,21 @@ func (s *Store) SetBulkLoadPragmas() error {
 		return errors.Join(err, restoreErr, closeErr)
 	}
 	s.bulkConn = conn
+	s.bulkMode = true
 	return nil
 }
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
-	return s.restoreNormalPragmas(context.Background())
+	err := s.restoreNormalPragmas(context.Background())
+	if err == nil {
+		s.bulkMode = false
+	}
+	return err
 }
 
 func (s *Store) restoreNormalPragmas(ctx context.Context) error {
