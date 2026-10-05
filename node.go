@@ -2112,6 +2112,14 @@ func (n *Node) peerDiversityGroupByConnId(
 	return n.peerGov.DiversityGroupByConnId(connId)
 }
 
+func (n *Node) isConfiguredRootConnection(
+	connId ouroboros.ConnectionId,
+) bool {
+	n.peerGovMu.RLock()
+	defer n.peerGovMu.RUnlock()
+	return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
+}
+
 func (n *Node) touchPeerByConnId(connId ouroboros.ConnectionId) {
 	n.peerGovMu.RLock()
 	defer n.peerGovMu.RUnlock()
@@ -2521,9 +2529,7 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		active, _ := n.chainSelector.GenesisSelectionState()
 		return active
 	}
-	chainsyncCfg.IsRoot = func(connId ouroboros.ConnectionId) bool {
-		return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
-	}
+	chainsyncCfg.IsRoot = n.isConfiguredRootConnection
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {
 			return 0
