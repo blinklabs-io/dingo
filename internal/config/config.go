@@ -461,7 +461,7 @@ type TokenRegistryConfig struct {
 	// them in the process list. The environment form is comma-separated
 	// name:value pairs split at the first colon, so a value may contain
 	// colons but not commas.
-	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS" ignored:"true"`
+	HeaderSecrets map[string]string `yaml:"headerSecrets"         envconfig:"DINGO_TOKEN_REGISTRY_HEADER_SECRETS"          ignored:"true"`
 	// MaxBytes bounds the compressed registry download.
 	MaxBytes int64 `yaml:"maxBytes"              envconfig:"DINGO_TOKEN_REGISTRY_MAX_BYTES"`
 	// MaxDecompressedBytes bounds all expanded tar content.

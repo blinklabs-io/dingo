@@ -1439,7 +1439,7 @@ func TestTokenRegistryHeadersLoadFromYAMLAndEnvironment(t *testing.T) {
 	)
 }
 
-func TestTokenRegistryHeaderSecretsEnvironmentKeepsValuesOutOfErrors(t *testing.T) {
+func TestHeaderSecretsEnvErrorsOmitValues(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
