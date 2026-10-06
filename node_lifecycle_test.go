@@ -189,6 +189,9 @@ func newLiveLifecycleTestNodeWithStorageMode(
 		),
 		WithDatabaseWorkerPoolConfig(workerPoolCfg),
 		WithStorageMode(storageMode),
+		WithBlockfrostPort(0),
+		WithMeshPort(0),
+		WithUtxorpcPort(0),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
