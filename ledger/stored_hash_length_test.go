@@ -214,6 +214,31 @@ func TestCommitteeMembersRejectsMalformedStoredColdCredential(t *testing.T) {
 	require.Nil(t, members)
 }
 
+// A malformed hash seated under both credential tags is omitted from the list
+// as ambiguous, so it must be validated before that filter or it is dropped
+// silently.
+func TestCommitteeMembersRejectsMalformedColdCredentialUnderBothTags(
+	t *testing.T,
+) {
+	t.Parallel()
+	hash := shortStoredHash(lcommon.Blake2b224Size, 0x32)
+	db, _ := newStoredHashDB(t, func(s *storedHashStore) {
+		s.committeeMembers = []*models.CommitteeMember{
+			{ID: 1, ColdCredHash: hash, ExpiresEpoch: 10},
+			{
+				ID:                2,
+				ColdCredentialTag: 1,
+				ColdCredHash:      hash,
+				ExpiresEpoch:      10,
+			},
+		}
+	})
+	members, err := storedHashView(t, db).CommitteeMembers()
+	require.ErrorContains(t, err, "committee cold credential")
+	require.ErrorContains(t, err, "invalid blake2b-224 hash")
+	require.Nil(t, members)
+}
+
 func TestCommitteeHotCredentialRejectsMalformedStoredHash(t *testing.T) {
 	t.Parallel()
 	cold := bytes.Repeat([]byte{0x41}, lcommon.Blake2b224Size)
