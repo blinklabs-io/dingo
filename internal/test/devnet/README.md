@@ -20,8 +20,7 @@ Two networks are available, selected by a Docker Compose profile:
 
 The Go test harness lives alongside this directory: `internal/test/devnet/`
 (helpers and config loader at the top level, runnable scenarios under
-`internal/test/devnet/scenarios/`). The layout mirrors
-`internal/test/antithesis/`. Every Go file in the tree has a `linux` build
+`internal/test/devnet/scenarios/`). Every Go file in the tree has a `linux` build
 constraint because the harness requires a native Linux Docker engine, Bash,
 Linux container networking, and Unix ownership semantics. Code that talks to
 a running network additionally requires the `devnet` build tag, and
@@ -85,9 +84,11 @@ within the scenario budget. This delay reduces immediate dependency reuse;
 txpump does not verify on-chain confirmation or recover outputs lost to a
 rollback, so expiry alone does not prove an output is spendable. It exists
 to keep the mempool exercised while the consensus tests run, so block bodies
-are non-empty and tx-submission / mempool paths are continuously hit. The image
-is built from
-`internal/test/antithesis/` (`Dockerfile.txpump`, `cmd/txpump/`).
+are non-empty and tx-submission / mempool paths are continuously hit. Compose
+pulls `ghcr.io/blinklabs-io/cardano-txpump:main` by default; set
+`TXPUMP_IMAGE` to select another image tag. Its source and container build
+live in the [`cardano-txpump`](https://github.com/blinklabs-io/cardano-txpump)
+repository.
 
 The dedicated `--leios` runner uses the all-Dingo topology with
 `testnet-dingo-leios.yaml`: Dijkstra is active from genesis, test-only Leios
@@ -156,8 +157,8 @@ someone quietly speeds them up.
   image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it
   automatically on `up` / `run-tests.sh`.
-- Local build of `txpump` from `../antithesis/` — also built automatically
-  by Compose.
+- Pull of `ghcr.io/blinklabs-io/cardano-txpump:main` for the transaction
+  generator; set `TXPUMP_IMAGE` to select a different tag.
 
 ## Building Dingo
 
@@ -787,7 +788,7 @@ harness and the compose port mappings always agree.
 | `compose-project.sh`         | Derives a stable, worktree-specific Compose project name, a collision-checked bridge subnet and host port block, and a rendered topology directory; wraps `docker compose up` with a retry on subnet collision |
 | `start.sh` / `stop.sh`       | Convenience wrappers around `docker compose up -d` / `down -v`; accept `--conformance` |
 | `run-tests.sh`               | Full native-Linux bring-up → test → tear-down runner; accepts `--conformance`, `--keep-up`, and forwards other flags to `go test` |
-| `../antithesis/Dockerfile.txpump`, `../antithesis/cmd/txpump/` | Source for the `txpump` load generator image |
+| `TXPUMP_IMAGE` (default `ghcr.io/blinklabs-io/cardano-txpump:main`) | Transaction generator container image |
 | `harness.go`                 | Go test harness: Ouroboros NtN client, tip queries, consensus checks, the `WaitForChainStart` genesis gate, and per-scenario failure capture (build tag `devnet`) |
 | `config.go`                  | `testnet*.yaml` loader, derived timings, and spec validation (`linux`) |
 | `chainstate.go`              | Observed-chain state machine: applies RollForward/RollBackward, tracks tip and retained headers, and exposes cross-node agreement helpers and bounded-context conditions (`linux`) |

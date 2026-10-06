@@ -241,13 +241,16 @@ func (n *Node) shutdown() error {
 	// timeout is a single absolute deadline shared by every phase, and once
 	// it has passed phase 3 cannot confirm the ledger-state close anyway, so
 	// waiting longer here would only delay the return.
-	phase1DrainConfirmed := true
+	// storageDrainConfirmed turns false when any stop or close that may leave
+	// a goroutine using ledger state or the database failed to finish; phase 3
+	// then skips closing both.
+	storageDrainConfirmed := true
 	for _, cs := range componentStopsForShutdownPhase1(n) {
 		if stopErr := stopWithDeadline(
 			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {
 			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
-				phase1DrainConfirmed = false
+				storageDrainConfirmed = false
 			}
 			err = errors.Join(err, stopErr)
 		}
@@ -371,9 +374,25 @@ func (n *Node) shutdown() error {
 		}()
 	}
 
+	// Waiting for in-flight handlers is intended, but only until the shutdown
+	// deadline: a handler blocked on something other than the network is not
+	// released by the connection manager stopping. An abandoned close leaves
+	// a handler that may still be using ledger state and the database, so it
+	// withholds those closes exactly as an unconfirmed phase-1 stop does.
 	if n.eventBus != nil {
 		n.config.logger.Info("closing event bus while draining connections")
-		n.eventBus.Close()
+		if closeErr := n.eventBus.CloseContext(ctx); closeErr != nil {
+			n.config.logger.Error(
+				"event bus did not close before the shutdown deadline",
+				"error", closeErr,
+			)
+			storageDrainConfirmed = false
+			err = errors.Join(
+				err,
+				errStorageDrainUnconfirmed,
+				fmt.Errorf("event bus shutdown: %w", closeErr),
+			)
+		}
 	}
 
 	if connManagerDone != nil {
@@ -390,29 +409,41 @@ func (n *Node) shutdown() error {
 		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
 	)
 
+	// Acquired LocalStateQuery snapshots are read transactions on the
+	// database phase 3 closes; release them first. Close waits on Leios
+	// validation and EventBus handlers with no deadline of its own, so it is
+	// bounded like a phase-1 stop and skipped when phase 2 already abandoned
+	// a handler: phase 3 then leaves the database open and the snapshots with
+	// it. Close is idempotent, so Run's deferred call is then a no-op.
+	if ouro := n.ouroboros(); ouro != nil && storageDrainConfirmed {
+		if stopErr := stopWithDeadline(
+			max(time.Until(deadline), 0), "ouroboros", ouro.Close,
+		); stopErr != nil {
+			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+				storageDrainConfirmed = false
+			}
+			err = errors.Join(err, stopErr)
+		}
+	}
+
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()
-	// Starts from phase1DrainConfirmed: a phase-1 component that never
-	// confirmed stopping may still be using n.db, exactly the same danger an
-	// unconfirmed ledgerState close guards against below, so either failure
-	// must skip the database close and plugin host shutdown that follow.
-	ledgerStateDrainConfirmed := phase1DrainConfirmed
-
 	if n.ledgerState != nil {
-		if !phase1DrainConfirmed {
-			// The block forger, leader election, and both Leios managers call
-			// into n.ledgerState from their own goroutines, so a phase-1 stop
-			// that outlived the deadline may still be using it. Leave it open,
-			// as Restore/Truncate skip closeStorageForLiveLifecycleOp when
-			// quiesce reports errStorageDrainUnconfirmed.
+		if !storageDrainConfirmed {
+			// The block forger, leader election, both Leios managers, and
+			// event handlers call into n.ledgerState from their own
+			// goroutines, so a stop or handler that outlived the deadline may
+			// still be using it. Leave it open, as Restore/Truncate skip
+			// closeStorageForLiveLifecycleOp when quiesce reports
+			// errStorageDrainUnconfirmed.
 			n.config.logger.Error(
-				"skipping ledger state close because phase 1 drain was not confirmed",
+				"skipping ledger state close because shutdown drain was not confirmed",
 			)
 			err = errors.Join(
 				err,
 				errors.New(
-					"ledger state close skipped: phase 1 drain unconfirmed",
+					"ledger state close skipped: shutdown drain unconfirmed",
 				),
 			)
 		} else {
@@ -423,7 +454,7 @@ func (n *Node) shutdown() error {
 				shutdownTimeout,
 				n.ledgerState.Close,
 			); closeErr != nil {
-				ledgerStateDrainConfirmed = false
+				storageDrainConfirmed = false
 				err = errors.Join(
 					err,
 					fmt.Errorf("ledger state close: %w", closeErr),
@@ -456,7 +487,7 @@ func (n *Node) shutdown() error {
 	}
 
 	if n.db != nil {
-		if !ledgerStateDrainConfirmed {
+		if !storageDrainConfirmed {
 			n.config.logger.Error(
 				"skipping database close because ledger state drain was not confirmed",
 			)
@@ -482,7 +513,7 @@ func (n *Node) shutdown() error {
 		}
 	}
 	if n.pluginHost != nil {
-		if !ledgerStateDrainConfirmed {
+		if !storageDrainConfirmed {
 			n.config.logger.Error(
 				"skipping plugin host shutdown because ledger state drain was not confirmed",
 			)
