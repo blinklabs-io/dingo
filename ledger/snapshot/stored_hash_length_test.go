@@ -57,7 +57,8 @@ type activePoolKeysStore struct {
 	keys [][]byte
 }
 
-func (s activePoolKeysStore) GetActivePoolKeyHashesAtSlot(
+func (s activePoolKeysStore) GetEpochBoundaryActivePoolKeyHashes(
+	uint64,
 	uint64,
 	types.Txn,
 ) ([][]byte, error) {
@@ -70,7 +71,7 @@ func (s activePoolKeysStore) GetActivePoolKeyHashesAtSlot(
 func TestGetActivePoolsAtSlotRejectsMalformedPoolKey(t *testing.T) {
 	t.Parallel()
 	calc := &Calculator{}
-	pools, err := calc.getActivePoolsAtSlot(
+	pools, err := calc.getActivePoolsAtBoundary(
 		context.Background(),
 		activePoolKeysStore{keys: [][]byte{
 			bytes.Repeat([]byte{0x04}, 28),
@@ -78,6 +79,7 @@ func TestGetActivePoolsAtSlotRejectsMalformedPoolKey(t *testing.T) {
 		}},
 		nil,
 		100,
+		0,
 	)
 	require.ErrorContains(t, err, "active pool key at slot 100")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
