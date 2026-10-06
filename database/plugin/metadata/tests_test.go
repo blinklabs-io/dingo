@@ -97,6 +97,7 @@ var governanceStoreMethods = []string{
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
 	"UpdateDRepActivity",
+	"RecordDRepActivityEpoch",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 
@@ -128,6 +129,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosBySlot",
 	"GetUtxosDeletedBeforeSlot",
 	"GetUtxosByAddress",
+	"GetUtxosByAddressAsOf",
 	"GetUtxosByAddressWithOrdering",
 	"GetUtxosWithHistory",
 	"CountUtxosByAddressWithOrdering",
@@ -172,6 +174,7 @@ var transactionStoreMethods = []string{
 	"FlushBatch",
 	"SetTransactionBatched",
 	"SetTransactionLeiosClosure",
+	"SetTransactionLeiosClosureInContext",
 	"SetTransaction",
 	"SetGapBlockTransaction",
 	"RecomputeGapCollateralFee",

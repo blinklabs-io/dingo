@@ -94,12 +94,14 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
-// handleNotFound handles any request that doesn't match a
-// registered route, including unimplemented endpoints.
+// handleNotFound distinguishes documented unsupported operations from unknown paths.
 func (b *Blockfrost) handleNotFound(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	if b.writeUnsupportedOperation(w, r) {
+		return
+	}
 	writeError(
 		w,
 		http.StatusNotFound,
@@ -190,8 +192,12 @@ func (b *Blockfrost) handleBlock(
 // hashes from the latest block.
 func (b *Blockfrost) handleLatestBlockTxs(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
 	hashes, err := b.node.LatestBlockTxHashes()
 	if err != nil {
 		b.logger.Error(
@@ -206,10 +212,21 @@ func (b *Blockfrost) handleLatestBlockTxs(
 		)
 		return
 	}
-	if hashes == nil {
-		hashes = []string{}
+	SetPaginationHeaders(w, len(hashes), params)
+	page := make([]string, 0)
+	offset, ok := paginationOffset(params)
+	if ok && offset < len(hashes) {
+		count := min(params.Count, len(hashes)-offset)
+		page = make([]string, count)
+		for i := range count {
+			index := offset + i
+			if params.Order == PaginationOrderDesc {
+				index = len(hashes) - 1 - index
+			}
+			page[i] = hashes[index]
+		}
 	}
-	writeJSON(w, http.StatusOK, hashes)
+	writeJSON(w, http.StatusOK, page)
 }
 
 // handleLatestEpoch handles GET /api/v0/epochs/latest and

@@ -33,6 +33,7 @@ import (
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
 	cfg := &Config{
+		DatabasePath:         ".dingo",
 		Plugins:              defaultPluginsConfig(),
 		Network:              "preview",
 		RunMode:              RunModeServe,
@@ -636,6 +637,20 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid ledgerCatchupTimeout",
 		},
 		{
+			name: "unparseable local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "a while"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime",
+		},
+		{
+			name: "non-positive local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "0s"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime \"0s\": must be positive",
+		},
+		{
 			name:    "unparseable chainsync stall timeout",
 			modify:  func(c *Config) { c.Chainsync.StallTimeout = "soon" },
 			wantErr: "invalid chainsync.stallTimeout",
@@ -1069,6 +1084,18 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = -time.Second
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshotMaxCommitPause")
+
+	cfg = validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 // TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
 // filesystem permission error surfacing deep inside a snapshot attempt
 // instead of a clean, actionable one at startup -- the failure mode for a
@@ -1448,4 +1475,14 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateRejectsEmptyDatabasePathForSQLite(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.DatabasePath = ""
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.ErrorContains(t, err, "databasePath must be set")
+	cfg.Plugins.Storage.Metadata.Provider = "postgres"
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }

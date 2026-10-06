@@ -15,11 +15,18 @@
 package ouroboros
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"time"
 
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
+)
+
+// errLocalTxMonitorUnavailable is returned by the LocalTxMonitor callback when
+// this Ouroboros was built without a ledger state or a mempool.
+var errLocalTxMonitorUnavailable = errors.New(
+	"local-tx-monitor: ledger state or mempool unavailable",
 )
 
 func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
@@ -46,6 +53,9 @@ func (o *Ouroboros) instrumentLocaltxmonitorGetMempool(
 func (o *Ouroboros) localtxmonitorServerGetMempool(
 	ctx olocaltxmonitor.CallbackContext,
 ) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
+	if o.ledgerState == nil || o.mempool == nil {
+		return 0, 0, nil, errLocalTxMonitorUnavailable
+	}
 	tip := o.ledgerState.Tip()
 	capacity := o.mempool.CapacityBytes()
 	if capacity < 0 || capacity > math.MaxUint32 {
