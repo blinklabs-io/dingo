@@ -343,13 +343,13 @@ func (s *Store) committeeAuthMaintenanceCandidates(
 			err,
 		)
 	}
+	defer rows.Close()
 	identities := make(
 		[]committeeAuthIdentity, 0, committeeAuthMaintenanceBatchSize,
 	)
 	for rows.Next() {
 		var identity committeeAuthIdentity
 		if err := rows.Scan(&identity.tag, &identity.credential); err != nil {
-			_ = rows.Close()
 			return nil, fmt.Errorf(
 				"scan committee hot authorization maintenance candidate: %w",
 				err,
@@ -359,17 +359,10 @@ func (s *Store) committeeAuthMaintenanceCandidates(
 		identities = append(identities, identity)
 	}
 	rowsErr := rows.Err()
-	closeErr := rows.Close()
 	if rowsErr != nil {
 		return nil, fmt.Errorf(
 			"read committee hot authorization maintenance candidates: %w",
 			rowsErr,
-		)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf(
-			"close committee hot authorization maintenance candidates: %w",
-			closeErr,
 		)
 	}
 	return identities, nil
