@@ -203,9 +203,8 @@ func dijkstraWireBlock(
 	return liveErr
 }
 
-// conwayWireBlock replaces the transactions of a real Conway block with tx and
-// decodes the result through the live block entry point and the stored-block
-// decoder replay and backfill read blocks with, which must reach one decision.
+// conwayWireBlock replaces the transactions of a real Conway block and compares
+// the live and stored block decoder decisions.
 func conwayWireBlock(
 	t *testing.T,
 	tx *conway.ConwayTransaction,
@@ -289,8 +288,8 @@ func conwayWireBlock(
 }
 
 // TestProposalReturnAddressWireDecisionIsIdenticalAcrossPaths feeds the same
-// proposal bytes to the transaction decoder mempool admission and the
-// submission APIs use (safedecode.Transaction) and to the block decoders. A
+// proposal bytes to safedecode.Transaction and to the live and stored block
+// decoders. A
 // base address as return address is refused whether the transaction claims
 // phase-2 validity or not, at top level and in a child, and a valid account
 // address is accepted by each, so no entry point decides differently from
