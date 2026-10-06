@@ -865,6 +865,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			}
 		}
 	}
+	if c.Mithril.DownloadMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.downloadMaxBytes %d: must not be negative",
+			c.Mithril.DownloadMaxBytes,
+		))
+	}
 
 	if c.DelegatorInactivityEnabled &&
 		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {

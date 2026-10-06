@@ -1191,6 +1191,7 @@ dingo/
 │   ├── peer_tip.go      # Peer tip tracking
 │   └── vrf.go           # VRF verification
 ├── consensus/praos/     # Praos comparison, snapshots, and ledger views
+├── consensus/peras/     # Peras (CIP-0140) package scaffold, no logic yet
 ├── chainsync/           # Block synchronization protocol state
 │   ├── chainsync.go     # Multi-client sync state, stall detection
 │   └── strategy.go      # Configurable multi-active header-sync strategy
@@ -3150,6 +3151,11 @@ Validated Conway and Dijkstra block admission checks the aggregate consumed
 reference-script size before validating the block's individual transactions.
 Imported blocks use the same database transaction as application, after any
 applicable endorser transactions and before the ranking block's own mutations.
+The check resolves UTxOs from the block's single prefetch, which the
+per-transaction validators then reuse, so each input the prefetch returns is
+read from the database once; an input it does not return is read by each check
+that needs it. A block of the era listed before the ledger's era is judged under
+the previous era's parameters, the same rule applied to its transactions.
 Forged blocks check a read view of the pre-block state even when full
 self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
 era parameters with an error before the upstream rule dereferences them.
@@ -4555,7 +4561,11 @@ comparison, and behind-peer filtering use the delivered frontier. A
 `ChainSwitchEvent` preserves the advertised tips in `NewTip`/`PreviousTip` for
 protocol compatibility and carries the decision frontiers separately in
 `NewObservedTip`/`PreviousObservedTip`; ledger resync decisions use the observed
-field (falling back to `NewTip` for legacy/direct event producers). Before the
+field (falling back to `NewTip` for legacy/direct event producers). When the
+best peer changes, including on disconnect and stale cleanup, `RollbackPoint`
+carries the highest point the previous and new peers' candidate fragments
+share. It is not intersected with the local chain and can lie above the local
+tip; it is nil when the fragments share no retained point. Before the
 node has applied any local block, new peers' advertisements remain bounded
 against the first bootstrap peer; after a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
@@ -7495,12 +7505,14 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit of 1 TiB by default, matching
-the existing extracted-archive total limit. Library callers can set
-`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
-`DownloadConfig.MaxBytes`; zero selects the default and negatives fail
-validation. The setting reaches both v1 archives and all v2 digest,
-immutable, and ancillary archives. `ExpectedSize`, when positive, remains
+Compressed downloads have a per-object limit: 512 GiB for a v1 archive, and
+for v2 objects 1 GiB per immutable archive, 256 MiB for the digest list and
+64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
+(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
+callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
+or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
+fail validation. A positive value replaces the limit of every v1 and v2
+object. `ExpectedSize`, when positive, remains
 an exact-size requirement and cannot exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
@@ -7520,6 +7532,23 @@ download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`.
+
+Extraction also bounds the archive's shape while it is read: an entry-count
+cap (directories and empty files count), per-member and aggregate expanded-byte
+caps, and an expansion bound of 256 times the compressed bytes read plus a
+64 MiB floor. Each archive type except the v1 full snapshot admits only the
+members its consumer reads, and a refused member is never created. An
+immutable archive admits its own certified trio (plus a `ledger/` tree, where
+v1-layout archives keep the ledger state). Its expanded-byte limits allow
+8 GiB per member and 1 TiB in total so ledger tables retain the same limits
+as full snapshots; each trio file is
+SHA-256-checked against the certified digest list as it is written, so a
+mismatching file is removed before the pool moves on. The digest list archive
+admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
+archives admit the signed manifest, the `ledger/` tree and the next immutable
+trio. The immutable pool charges each in-flight download at its size limit
+against a 16 GiB budget. Raising the limit lowers concurrency; an override
+above 16 GiB allows only one download, with capacity equal to that override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
@@ -8349,7 +8378,16 @@ path. Blocks beyond the ImmutableDB tip are not imported from ancillary
 volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
 validates them normally. API-mode historical metadata backfill is capped at the
 anchor so it cannot pre-apply and thereby bypass the ledger path for either
-suffix.
+suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
+resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
+without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
+snapshot-imported account's registration and delegation from its import
+baseline before rebuilding the live-stake aggregate. Replayed DRep activity
+(backfill and gap blocks) records only the activity epoch and keeps the
+snapshot's DRep expiry, and a replayed governance proposal the snapshot does
+not hold is stored as already expired and dropped. Protocol parameters are
+resolved per epoch as replay reaches it, enacting the boundary's classic updates
+before any hard-fork translation, as the live rollover does.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
@@ -8866,6 +8904,11 @@ whose reverse iterators list the complete key prefix before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
+The latest-block transaction list validates `count`, `page`, and `order`
+with the shared pagination rules. It pages transaction hashes in block-index
+order, reverses that order for descending requests, and reports pagination
+totals for the whole block. Empty or out-of-range pages return an empty array.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or
@@ -9147,6 +9190,23 @@ second, in-process mode — an epoch-boundary observer the node itself can
 register from its own `Run()` composition — described in its own subsection
 below; both modes share the same `internal/koiosparity` comparison logic
 (`compare.go`/`check.go`) so a mismatch means the same thing either way.
+
+The observer separately selects its ERROR epochs for startup retries even when
+reference data has not changed; CLI freshness selection keeps its existing
+contract. Each observer queue retries its own ERROR outcomes after at least
+`ObserverConfig.ErrorRetryDelay` (five minutes by default), without needing a
+new epoch transition. A completed non-ERROR check removes that pending retry.
+Fetch and check failures persist the affected queue's ERROR status before
+scheduling the in-memory retry, so restart recovery also selects an epoch
+whose previous comparison passed and whose Koios reference remains fresh.
+The aggregate and account timers are independent, and cancellation stops both.
+Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
+DB failures and validation disagreements still stop strict validation.
+
+Status reports retain total mismatch counts and separately report significant
+counts using the comparison's severity classification. Aggregate and account
+phase writes retain the other phase's counts, so concurrent observer queues
+cannot erase each other's evidence.
 
 **Architecture:**
 

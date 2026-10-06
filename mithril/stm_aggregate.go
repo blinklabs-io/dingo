@@ -125,7 +125,13 @@ type stmMerkleTree struct {
 
 func newSTMMerkleTree(entries []stmClosedRegistrationEntry) *stmMerkleTree {
 	n := len(entries)
-	numNodes := n + stmNextPowerOfTwo(n) - 1
+	// Leaves are padded to a power of two, as stmMerkleTreeDimensions lays
+	// out the tree the verifier walks.
+	nextPow2 := 1
+	for nextPow2 < n {
+		nextPow2 <<= 1
+	}
+	numNodes := n + nextPow2 - 1
 	nodes := make([][]byte, numNodes)
 	leafOffset := numNodes - n
 	for i, e := range entries {

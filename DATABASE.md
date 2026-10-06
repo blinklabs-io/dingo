@@ -1447,6 +1447,46 @@ missing one is not:
   established and hide the real defect, so the run fails closed and the
   checkpoint stays before the block that failed.
 
+Historical backfill ends at the Mithril ledger anchor. `mithril sync` passes
+the anchor explicitly, and a backfill resumed by `dingo serve` reads the
+recorded `mithril_ledger_slot` instead. Blocks after the anchor are left to
+ledger replay: a historical pass over them would journal their withdrawals
+without the debit, and replay would then find the journal row and skip the
+debit as already applied.
+
+Replay applies certificates but not the rules that clear a delegation
+outside a certificate: POOLREAP (delegations to a reaped pool) and the PV10
+HARDFORK rule (delegations to an unregistered DRep). A replayed historical
+delegation can therefore name a pool or DRep the snapshot no longer holds.
+When replay reaches the anchor, `RestoreImportedAccountStates` sets `active`,
+`pool`, `drep`, `drep_type`, and `added_slot` of every account whose
+`account_import_baseline` row was recorded at or after the anchor back to
+that baseline, before the `reward_live_stake` rebuild reads `account.pool`.
+`reward` is not touched. Accounts with no such baseline (a genesis baseline,
+or a row certificate replay created) keep their replayed state.
+
+DRep votes and registration or update certificates replayed below the anchor
+record each DRep's `last_activity_epoch`, which the snapshot does not carry,
+and leave the imported `expiry_epoch` unchanged. The snapshot's expiry already
+reflects the dormant epochs and proposal-driven bumps that replay never sees.
+
+A governance proposal replayed below the anchor keeps the imported row when the
+snapshot holds it. Any other replayed proposal was settled before the anchor
+(enacted, expired, or dropped, with its deposit refunded or its action paid),
+so it is stored as expired and dropped at its own epoch and slot and no later
+boundary selects it for ratification, expiry, or refund.
+
+Backfill resolves each epoch's protocol parameters when replay reaches it,
+after the proposals of the epoch before have been stored, and follows the live
+rollover: the classic updates agreed for the boundary are enacted under the era
+they were proposed in (`ComputeAndApplyPParamUpdates`), and at an era boundary
+the hard fork then translates the updated parameters. The epoch before the
+Mithril anchor's and the anchor's own keep the row the import recorded, which
+carries governance-enacted changes derivation cannot reproduce; `GetPParams`
+prefers the newest row for an epoch, so a derived row would replace it. A row
+for an older epoch can only be one backfill derived, possibly before the
+proposals it depends on were stored, and is derived again.
+
 ### Pools
 
 | Table | Columns | Keys / indexes | Relationships and notes |
@@ -1466,11 +1506,11 @@ updates preserve the previous activity and expiry epochs.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. Historical replay at or below the Mithril anchor records activity while preserving the imported expiry, which already includes dormant epochs and proposal-driven bumps. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
-| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. |
+| `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment and transaction validation; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. `expires_epoch` is inclusive; validation derives its final slot from the proposal epoch's start and epoch length. The ledger view exposes rows without `enacted_epoch` or a `governance_proposal_drop` row as members of the Conway proposals set -- an expired action stays a member, and may still be named as a parent or refused a vote by its expiry epoch, until the boundary that drops it -- while the latest enacted rows for the four CIP-1694 purposes are exposed separately as purpose roots. Same-boundary epoch replay reads proposals whose `enacted_epoch/enacted_slot` or `expired_epoch/expired_slot` already match the boundary to restore treasury/reward side effects after stake reward pot reset. `expired_epoch`/`expired_slot` mark a proposal ineligible; they do not by themselves refund its deposit -- see `governance_proposal_drop`. Historical replay at or below a Mithril anchor stores a proposal the snapshot did not import as expired and dropped at its own epoch and slot, so later boundaries do not select it again for ratification, expiry, or refund. |
 | `governance_proposal_order` | `proposal_id`, `tx_index` | PK `proposal_id` | Companion table recording a proposal's position in Conway submission order within its `added_slot`: the transaction's index in its block, or for a proposal imported from a ledger-state snapshot, its position in the snapshot's proposal sequence (all proposals of one epoch share that epoch's anchor slot). RATIFY and ENACT reads order equal-slot proposals by it, then by `action_index`. A companion table for the same reason as `governance_proposal_drop`. FK `proposal_id` references `governance_proposal.id` with cascade deletion, and `DeleteGovernanceProposalsAfterSlot` also deletes the rows of the proposals it removes explicitly. `SetGovernanceProposal` writes the row only when the caller supplies a position, so rewriting a loaded proposal without one keeps the stored position. The v33 migration backfills rows from each proposal's stored `transaction.block_index`; a proposal without a stored transaction (one imported before v33) has no row and keeps the pre-v33 `tx_hash` order until it leaves the proposal set, or until the database is rebuilt from a fresh import. |
 | `governance_proposal_drop` | `proposal_id`, `dropped_epoch`, `dropped_slot` | PK `proposal_id`; indexes `dropped_epoch`, `dropped_slot` | Companion table recording when an expired proposal's deposit was actually returned and the proposal reached final consideration. cardano-ledger does not refund an expired action's deposit in the same epoch it is marked expired -- that happens one full epoch later, the same one-epoch delay ratification has before enactment. A separate table rather than columns on `governance_proposal` avoids widening a table v16 (`governance-proposal-optional-anchor`) already rebuilds via rename-and-recreate with an unqualified `SELECT *`, which cannot tolerate columns added after it. FK `proposal_id` references `governance_proposal.id` with cascade deletion. A row's absence means the proposal, if expired, is still awaiting its drop. The v17 backfill stamps every proposal an upgraded database had already expired, because the pre-v17 tick refunded at expiry; without it the new drop step would return each of those deposits a second time at the first boundary after the upgrade. |
 | `governance_proposal_ratification_history` | `id`, `proposal_id`, `transition_slot`, `ratified_epoch`, `ratified_slot` | PK `id`; indexes `transition_slot`, `(proposal_id, transition_slot, id)` | Rollback journal for proposal ratification lifecycle. A paired epoch/slot records ratification; NULL marker values record an explicit return to pending. FK `proposal_id` references `governance_proposal.id` with cascade deletion. Rollback deletes transitions above the target and restores the latest remaining state, with `id` breaking ties between transitions at the same slot. |
@@ -4752,6 +4792,27 @@ against the current durable tip when a failed block may have left spent UTxOs
 or other speculative rows above it. The first repair restores those rows;
 retries of the same failure reuse the repaired state instead of repeating the
 full sweep. Ordinary same-tip rollback remains a no-op.
+
+# Koios parity cache significant counts
+
+The observer and standalone parity tool share a separate SQLite reference cache.
+Its `check_epoch_status` table stores `significant_mismatch_count` alongside
+`mismatch_count`, plus `aggregate_significant_mismatch_count` and
+`account_significant_mismatch_count`. Significant counts exclude informational
+categories using the same classifier as the epoch verdict. An aggregate-only
+upsert retains the stored account count and recomputes the merged count.
+
+Opening an older cache adds and backfills these columns in one transaction from
+stored `check_mismatches` categories and scopes. Total counts and mismatch rows
+are preserved. Reopening an upgraded cache does not rerun the backfill. Observer retry selection uses the ERROR status of its own phase even when
+Koios reference timestamps have not changed, allowing a later check to observe
+newly committed Dingo state. CLI freshness selection is unchanged.
+Fetch/check errors update only the failed queue's persisted status. The other
+queue's verdict, check timestamp, comparison counts, pool metadata,
+mismatch evidence, and Koios reference rows remain intact. This makes retries
+survive reopening the cache even when a previous PASS reference is still fresh.
+An error before any comparison creates an unchecked row, keeping the initial
+aggregate comparison eligible for freshness-based startup selection.
 
 Flattened Conway certificate snapshots classify nonempty stake-account and
 DRep maps by their value encodings. Empty DState maps do not claim a DRep
