@@ -74,6 +74,17 @@ func newReplayTestLedger(
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	setReplayTestLedgerOrigin(ls, era, pparams)
+	require.NoError(t, cm.SetLedger(ls))
+	return ls
+}
+
+// setReplayTestLedgerOrigin places ls at an empty tip in epoch 0 of era.
+func setReplayTestLedgerOrigin(
+	ls *LedgerState,
+	era eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+) {
 	ls.currentEra = era
 	ls.currentPParams = pparams
 	ls.currentEpoch = models.Epoch{
@@ -86,8 +97,6 @@ func newReplayTestLedger(
 	// The rolling nonce of a block that applies is derived from its parent's.
 	ls.currentTipBlockNonce = make([]byte, 32)
 	ls.publishSnapshotsLocked()
-	require.NoError(t, cm.SetLedger(ls))
-	return ls
 }
 
 func replayTestBlock(ls *LedgerState, block gledger.Block) error {
