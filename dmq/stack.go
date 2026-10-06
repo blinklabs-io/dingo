@@ -387,9 +387,17 @@ func (s *Stack) feed(
 			pending = nil
 		}
 		if pending == nil {
+			timer := time.NewTimer(feedRetryInterval)
 			select {
 			case <-added:
+				if !timer.Stop() {
+					<-timer.C
+				}
+			case <-timer.C:
 			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
 				return
 			}
 			continue
