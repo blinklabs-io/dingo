@@ -3793,6 +3793,14 @@ func importGovState(
 				"count", seeded,
 			)
 		}
+		if err := verifyPrevGovActionIdsSeeded(
+			cfg, store, govState.PrevGovActionIds,
+		); err != nil {
+			return fmt.Errorf(
+				"verifying per-purpose governance roots: %w",
+				err,
+			)
+		}
 	}
 
 	progress(ImportProgress{
@@ -4072,6 +4080,56 @@ func seedPrevGovActionIds(
 		)
 	}
 	return count, nil
+}
+
+// verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
+// root in the snapshot resolves to an enacted governance_proposal row.
+// Without it a skipped or partial seed is only visible later as chained
+// proposals that never ratify.
+func verifyPrevGovActionIdsSeeded(
+	cfg ImportConfig,
+	store metadata.MetadataStore,
+	prev *ParsedPrevGovActionIds,
+) error {
+	roots := []struct {
+		purpose string
+		id      *ParsedGovActionId
+	}{
+		{"parameter-change", prev.PParamUpdate},
+		{"hard-fork", prev.HardFork},
+		{"committee", prev.Committee},
+		{"constitution", prev.Constitution},
+	}
+	txn := cfg.Database.MetadataTxn(false)
+	defer txn.Release()
+	for _, r := range roots {
+		if r.id == nil {
+			continue
+		}
+		row, err := store.GetGovernanceProposal(
+			r.id.TxHash, r.id.ActionIndex, txn.Metadata(),
+		)
+		if err != nil && !errors.Is(
+			err, models.ErrGovernanceProposalNotFound,
+		) {
+			return fmt.Errorf(
+				"looking up %s root %s#%d: %w",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+				err,
+			)
+		}
+		if row == nil || row.EnactedEpoch == nil {
+			return fmt.Errorf(
+				"%s root %s#%d is not an enacted governance proposal",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+	}
+	return nil
 }
 
 // findRatifiedHFICandidate returns the unique active HFI proposal whose

@@ -802,32 +802,26 @@ func decideRatification(
 			root = rootsByPurpose[purpose]
 		}
 		if !validateParentChain(proposal, root) {
-			// A chained proposal that references a parent we
-			// don't have an enacted root for is the silent
-			// failure mode on a Mithril- bootstrapped node missing per-purpose
-			// seeded roots, every chained proposal hits this branch and
-			// silently expires. Log a warning so the next occurrence shows up
-			// in operator logs instead of only as a block-producer divergence
-			// at the next enactment boundary.
-			if in.Logger != nil &&
-				root == nil &&
-				proposal.ParentTxHash != nil &&
+			// A chained proposal whose parent is neither the purpose
+			// root nor an active or stored proposal means the snapshot
+			// root was never seeded. Genesis-synced nodes derive roots
+			// from their own enactments and keep the skip.
+			if root == nil && proposal.ParentTxHash != nil &&
 				purpose != purposeNone {
-				in.Logger.Warn(
-					"skipping chained proposal: no enacted root for purpose; possible mithril bootstrap gap (#2195)",
-					"component",
-					"governance",
-					"tx_hash",
-					shortHash(proposal.TxHash),
-					"action_index",
-					proposal.ActionIndex,
-					"action_type",
-					proposal.ActionType,
-					"parent_tx_hash",
-					hex.EncodeToString(proposal.ParentTxHash),
-					"epoch",
-					in.NewEpoch,
-				)
+				bootstrapped, err := isMithrilBootstrapped(in.DB, in.Txn)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"read Mithril trust boundary: %w", err,
+					)
+				}
+				if bootstrapped {
+					if err := checkMissingEnactedRoot(
+						in.DB, in.Txn, proposal, root,
+						activeProposalKeys(stillActive),
+					); err != nil {
+						return nil, err
+					}
+				}
 			}
 			continue
 		}
