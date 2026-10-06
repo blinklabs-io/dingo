@@ -84,7 +84,11 @@ connection (never the write pool) — see `checkpointWAL` and
 the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
 on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
 WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
-reader can prevent either operation from reclaiming space. The tagged
+reader can prevent either operation from reclaiming space. Bulk metadata
+imports drain and pause the scheduled TRUNCATE callback until normal pragmas
+are restored, while commit-triggered auto-checkpoints remain enabled. If the
+final restore fails, the next scheduled callback retries it before checkpointing.
+The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in
@@ -227,6 +231,20 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Stake Snapshots](#stake-snapshots)
 
 ## Overview
+
+The NPM distribution is a wrapper around the release binary. Its postinstall
+script selects only targets present in the release matrix, downloads the
+version-matched HTTPS archive, verifies it against the six-target checksum
+manifest embedded by the NPM release job, and streams its `dingo` member into
+a size-bounded temporary file before atomically installing the executable.
+Downloads have a size bound and retry only transient transport and server
+failures. Archive paths are never extracted as filesystem paths. The
+JavaScript command inherits standard I/O
+and forwards arguments and termination signals to the native process; it
+preserves the process exit result. The package contains only this installer,
+command wrapper and package documentation. For stable release tags, the
+release workflow stamps its version, verifies the finalized release asset and
+publishes it only after release finalization.
 
 Dingo's architecture is built on several key principles:
 
@@ -1298,6 +1316,7 @@ dingo/
 │   ├── quotas.go        # Per-source quotas
 │   ├── score.go         # Peer scoring
 │   ├── ledger.go        # Ledger-based peer discovery
+│   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
@@ -6218,6 +6237,28 @@ Live ledger peer discovery is adapted at the node composition boundary:
 ledger/database types, while `internal/node/ledgerpeers` converts that data to
 the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
 
+`ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
+batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
+stake at zero rather than failing discovery) and flags MultiHostName relays
+(hostname, no port). Discovery draws pools without replacement weighted by
+their stake (`weightedSample` in `peergov/weighted_selection.go`, zero stake
+carrying a floor weight so such pools stay discoverable), chooses one relay
+from each drawn pool per round, and walks the resulting relay order until the
+ledger-peer deficit is filled. A MultiHostName relay is
+carried as `host:0`; resolution looks up its SRV record for target and port,
+falls back to A/AAAA on the default port, and never leaves port 0 as the
+dial target. MultiHost reconnects preserve SRV-selected ports and absolute
+SRV target names; resolution is bounded by the caller's context. Ledger SRV
+selection tries later targets and the hostname fallback when an earlier target
+has no supported routable address. Discovery offers one address per relay before
+alternates and resolves each distinct address once per round. Sampling keeps
+exact stake weights when their total fits, and scales them together on overflow.
+A discovered peer keeps its pool's stake in `StakeLovelace` and carries
+`StakeKnown` through the ledger adapter, so known zero stake scores below unknown
+stake. `UpdatePeerScore` folds stake in as a log-scaled sixth component (weight
+0.10, neutral 0.5 when unknown). Rediscovery refreshes retained peers' stake as
+well as newly admitted peers.
+
 Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
 be triggered by enough connected ledger peers, or by the configured slot/progress
 thresholds once at least one non-bootstrap client-capable successor is
@@ -7491,6 +7532,13 @@ The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
 future network blocks.
 
+The post-download ImmutableDB copy completes before ledger-state import starts.
+The copy persists block and transaction metadata as well as block blobs, so it
+is a metadata writer even though its bulk payload belongs to the blob store.
+Ordering the two resumable phases keeps their SQLite write transactions from
+contending during bootstrap. A later import failure resumes against the already
+copied immutable data.
+
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
 the later `serve` command run as one tracked direct child: the handler forwards
@@ -8670,7 +8718,9 @@ it. Negative or non-finite rate limits fail construction. Stopping MCP prevents
 new starts and closes its owned pool after listener shutdown; a timed-out start
 is awaited by deferred cleanup before closing that pool.
 
-SQLite-backed tools and resources enforce the configured query timeout.
+SQLite-backed tools and resources enforce the configured query timeout. Table
+schema discovery runs once during construction with a five-second minimum so a
+short request timeout cannot omit resources from the server for its lifetime.
 Tip responses report synchronization as unknown without a measured current
 slot, and database lookup failures remain errors rather than missing records.
 
@@ -8917,10 +8967,9 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836).
-The root document is served only at the literal `/` path (`GET /{$}`); any
-other unregistered path falls through to a catch-all `404` handler instead
-of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+The root document is served only at the literal `/` path (`GET /{$}`).
+Documented operations without a handler return `501`; unknown paths fall
+through to a catch-all `404` handler instead of the root document.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -9153,6 +9202,19 @@ persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
 returned as a stream error.
+
+### Blockfrost unsupported operations
+
+The Blockfrost server distinguishes documented, unimplemented operations from
+unknown paths. Unsupported Blockfrost OpenAPI 0.1.93 operations return HTTP 501
+with the usual JSON error fields; an unsupported method on these paths returns
+HTTP 405 with an `Allow` header. Unknown paths retain HTTP 404. Implemented
+operations retain their handlers, while reserved literals such as `pools/retired`
+take precedence over generic parameter routes. Ambiguous upstream wildcard
+patterns are recognized by the bounded catch-all operation list rather than
+registered as conflicting Go `ServeMux` patterns. The IPFS path parameter
+matches the remaining path segments, so an object inside an IPFS directory is
+recognized as the same operation.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
@@ -12759,9 +12821,15 @@ exhaustiveness test decides what a configuration log contains, so a nested
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR, and before POOLREAP and governance enactment — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Set distribution — stake at the end of epoch E-2 — to determine if it is the slot leader. The authoritative rollover capture reads the transactionally maintained `reward_live_stake` aggregate at the exact SNAP point — after the delayed reward update and MIR; Conway and earlier eras run SNAP before POOLREAP and governance enactment, while Dijkstra runs it after those rules and HARDFORK — and before any new-epoch block is applied. A delayed fallback whose transaction tip has already passed the snapshot slot reconstructs slot-aware delegation and UTxO liveness historically. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 Live stake and persisted consensus snapshots carry a shared calculation version. At startup the node compares every live aggregate row with canonical account and unspent-UTxO state and atomically rebuilds it if necessary. If a Mark/Set/Go snapshot or authoritative Mark metadata has an older version, startup stops with a rebootstrap error: after consumed-UTxO tombstones have been pruned, regenerating a historical SNAP from current state would be unsafe.
+
+Calculation version 3 includes Dijkstra boundary credits in its Mark snapshot.
+It also preserves genesis pool deposits and pays rewards earned by nonempty
+genesis staking during the initial reward rounds. Existing snapshots from an
+older calculation version require replay from genesis or a trusted ledger-state
+import; the prior sigma-denominator migration only certifies version 2.
 
 ### Ouroboros Praos Snapshot Model
 
@@ -13520,8 +13588,8 @@ write belong at different places in the sequence:
 
 - `Manager.ComputeEpochBoundarySnapshot`, installed via
   `LedgerState.SetEpochBoundarySnapshotStakeHook`, reads the stake distribution at
-  the SNAP point — immediately after `applyStakeRewards` and `applyMIRCerts`, and
-  before POOLREAP and governance enactment. It writes nothing and holds the distribution in the
+  the era-specific SNAP point: before POOLREAP and enactment through Conway,
+  after POOLREAP, enactment and HARDFORK in Dijkstra. It writes nothing and holds the distribution in the
   manager, keyed to the exact boundary (new epoch, boundary slot, snapshot slot,
   CIP-0163 gate argument).
 - `Manager.CaptureEpochBoundarySnapshot`, installed via
@@ -13592,6 +13660,18 @@ the Shelley-era MIR rule — and their credits belong in the mark snapshot.
 Aligning with that required swapping dingo's POOLREAP and MIR, which had run in
 the opposite order; MIR is now also pre-POOLREAP, matching the reference, so its
 pot movements are visible to the deposit refunds.
+
+The Musashi Leios prototype folds a certified endorser closure onto the parent's
+unticked ledger before this sequence (`applyLeiosClosure`, then `tickThenApply`
+in ouroboros-consensus). `ledgerProcessBlocksFromSource` resolves and checks a
+boundary closure before entering the rollover transaction, then applies it
+before `processEpochRollover`. Its deposits, withdrawals, governance effects,
+donations, fees, and stake are therefore evaluated in the parent epoch. The
+certifying ranking block's own body follows the transition. Closure transactions
+keep the certifier's point for rollback and record the parent ledger slot in
+`leios_transaction_context` for historical epoch accounting. Apply notifications
+remain pending until the certifying block commits; replay suppresses duplicate
+ledger effects while publishing those pending notifications once.
 
 A failed SNAP-point read is isolated with a savepoint (so a read error cannot
 poison the rollover transaction on a backend that aborts on SQL error). The
@@ -14154,6 +14234,18 @@ randomness-stabilisation window (`4k/f`); Babbage and later forgo that filter.
 Rewards omitted by the filter return to reserves. Calculated rewards that fail
 the application-time account-registration check are unspendable and go to
 treasury. Spendable rewards are credited through `account_reward_delta`.
+
+`ValidateTxDijkstra` builds its rule list from the upstream Dijkstra descriptors
+and rule functions, whose phase-2-valid-only rules (governance, certificate and
+entity semantics) are already no-ops for an `is_valid=false` transaction; the
+always-run rules (collateral, redeemer, witness, value and structural rules)
+still apply. Dingo's own replacements for the committee-certificate and
+unknown-voter rules, and the pool-margin floor, carry the same phase as the rule
+they replace: each returns before any upstream call or state query when the
+transaction is declared invalid. Declared-invalid transactions reach no other
+path with governance effects: the mempool wire form has no `is_valid` field, and
+block application records only the collateral input and collateral return for
+them.
 
 CIP-23 minimum pool margin is an optional, consensus-affecting operator setting
 that defaults off (0) and takes effect only in Dijkstra and later. When

@@ -30,6 +30,24 @@ func (s *Store) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
 	keyDeposit uint64,
+	blockHash []byte,
+	txn types.Txn,
+) error {
+	return s.SetGenesisStakingWithDeposits(
+		pools,
+		stakeDelegations,
+		keyDeposit,
+		0,
+		blockHash,
+		txn,
+	)
+}
+
+func (s *Store) SetGenesisStakingWithDeposits(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	keyDeposit uint64,
+	poolDeposit uint64,
 	_ []byte,
 	txn types.Txn,
 ) error {
@@ -56,6 +74,7 @@ func (s *Store) SetGenesisStaking(
 			Cost:                       types.Uint64(certificate.Cost),
 			Margin:                     &types.Rat{Rat: certificate.Margin.Rat},
 			AddedSlot:                  0,
+			DepositAmount:              types.Uint64(poolDeposit),
 		}
 		if certificate.PoolMetadata != nil {
 			registration.MetadataUrl = certificate.PoolMetadata.Url

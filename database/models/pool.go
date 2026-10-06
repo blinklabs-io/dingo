@@ -125,9 +125,12 @@ type PoolRegistrationRelay struct {
 	Ipv4 *net.IP
 	Ipv6 *net.IP
 	// Type preserves the on-chain relay constructor. It is nil for rows
-	// written before schema v34, where callers use legacy field inference.
-	Type               *int
-	Hostname           string
+	// written before schema v35, where callers use legacy field inference.
+	Type     *int
+	Hostname string
+	// PoolKeyHash is the owning pool's key hash. It is filled by
+	// GetActivePoolRelays and is not stored on the relay row.
+	PoolKeyHash        []byte `gorm:"-"`
 	ID                 uint
 	PoolRegistrationID uint
 	PoolID             uint

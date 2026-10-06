@@ -400,10 +400,11 @@ func treasuryWithdrawalTotal(
 
 // CreditRegisteredRewardAccountAfterSnapshot credits a reward account for an
 // epoch-boundary rule that cardano-ledger runs AFTER the boundary stake snapshot
-// (SNAP): POOLREAP deposit refunds, enacted treasury withdrawals and
+// (SNAP) through Conway: POOLREAP deposit refunds, enacted treasury withdrawals and
 // proposal-deposit refunds. The credit is journaled as post-snapshot so an
 // epoch-boundary stake reconstruction excludes it and still reproduces the
-// authoritative SNAP-point capture.
+// authoritative SNAP-point capture. Dijkstra moves SNAP after these rules,
+// so its reconstruction includes these marked credits.
 //
 // See CreditRegisteredRewardAccountBeforeSnapshot for the pre-SNAP counterpart.
 // There is deliberately no snapshot-agnostic spelling of this helper: which side
