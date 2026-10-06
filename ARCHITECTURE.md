@@ -6572,6 +6572,12 @@ lookup that does not finish escalates to a supervised restart rather than
 letting storage close beneath it. Submissions in between are rejected as
 `invalid`.
 
+Before authentication, admission also compares the message's claimed KES
+period with the wall-clock slot derived from confirmed era history. A future
+period, unavailable ledger state, or a wall clock beyond the confirmed forecast
+horizon fails closed, so an otherwise valid signature cannot extend an old
+operational certificate into the future.
+
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus
 stake-distribution authorization, the operational certificate's cold-key

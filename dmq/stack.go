@@ -65,6 +65,9 @@ type StackConfig struct {
 	// Authenticator verifies every submitted message before it is admitted.
 	// Required.
 	Authenticator *ocommon.MessageAuthenticator
+	// CurrentKESPeriod returns the KES period for the confirmed wall-clock
+	// slot. When set, messages claiming a future period are rejected.
+	CurrentKESPeriod func() (uint64, error)
 }
 
 // Stack is one DMQ topic instance: its own message pool, connection manager
@@ -187,9 +190,10 @@ func (s *Stack) Start(ctx context.Context) error {
 		s.handleInbound,
 	)
 	if err := s.connMgr.Start(ctx); err != nil {
-		s.shutdownLocal()
+		localErr := s.shutdownLocal(ctx)
 		return errors.Join(
 			fmt.Errorf("dmq: start connection manager: %w", err),
+			localErr,
 			s.pool.Stop(ctx),
 		)
 	}
@@ -202,7 +206,7 @@ func (s *Stack) Start(ctx context.Context) error {
 func (s *Stack) Stop(ctx context.Context) error {
 	s.stopOnce.Do(func() {
 		s.stopErr = s.connMgr.Stop(ctx)
-		s.shutdownLocal()
+		s.stopErr = errors.Join(s.stopErr, s.shutdownLocal(ctx))
 		if poolErr := s.pool.Stop(ctx); poolErr != nil {
 			s.stopErr = errors.Join(s.stopErr, poolErr)
 		}
@@ -210,14 +214,25 @@ func (s *Stack) Stop(ctx context.Context) error {
 	return s.stopErr
 }
 
-func (s *Stack) shutdownLocal() {
-	s.bus.UnsubscribeAndWait(
+func (s *Stack) shutdownLocal(ctx context.Context) error {
+	err := s.bus.UnsubscribeAndWaitContext(
+		ctx,
 		connmanager.InboundConnectionEventType,
 		s.inboundSub,
 	)
 	s.cancel()
-	s.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		err = errors.Join(err, ctx.Err())
+	}
 	s.bus.Stop()
+	return err
 }
 
 // submissionConfig serves protocol 14. Validation happens in submit, not in
@@ -257,6 +272,15 @@ func (s *Stack) submit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 	if !msg.IsValid() {
 		return ocommon.ExpiredReason{}
+	}
+	if s.cfg.CurrentKESPeriod != nil {
+		current, err := s.cfg.CurrentKESPeriod()
+		if err != nil {
+			return ocommon.OtherReason{Message: err.Error()}
+		}
+		if msg.Payload.KESPeriod > current {
+			return ocommon.InvalidReason{Message: "message claims a future KES period"}
+		}
 	}
 	if err := s.ttl.ValidateMessageTTL(msg); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}

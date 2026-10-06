@@ -301,6 +301,15 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 			label: reasonInvalid,
 		},
 		{
+			name: "future KES period",
+			cfg: StackConfig{CurrentKESPeriod: func() (uint64, error) {
+				return 0, nil
+			}},
+			msg:   newTestMessage([]byte("future"), soon),
+			want:  ocommon.InvalidReason{},
+			label: reasonInvalid,
+		},
+		{
 			name:  "pool full",
 			cfg:   StackConfig{MaxMempoolBytes: 1},
 			msg:   newTestMessage([]byte("big"), soon),

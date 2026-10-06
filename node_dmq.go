@@ -89,6 +89,26 @@ func (a *dmqStakeAuthority) PoolActiveStake(
 	return stake, err
 }
 
+func (a *dmqStakeAuthority) CurrentKESPeriod() (uint64, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.ledgerState == nil {
+		return 0, errors.New("ledger state unavailable")
+	}
+	slot, ok, err := a.ledgerState.WallClockSlotFromConfirmedHistory()
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, errors.New("confirmed era history does not cover wall clock")
+	}
+	slotsPerKESPeriod := a.ledgerState.SlotsPerKESPeriod()
+	if slotsPerKESPeriod == 0 {
+		return 0, errors.New("slots per KES period is zero")
+	}
+	return slot / slotsPerKESPeriod, nil
+}
+
 // startDMQ starts the DMQ stack when it is enabled. Its collectors register
 // against the retained registry because the stack is not rebuilt by a live
 // restore, which unregisters everything the rebuildable wrapper holds.
@@ -117,8 +137,9 @@ func (n *Node) startDMQ() error {
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
 		MessageTTL: time.Duration(cfg.MessageTTL) * time.Second,
 		// #nosec G115 -- validation bounds both to fit int64 once scaled
-		MaxMempoolBytes: int64(cfg.MaxMempoolSize) << 20,
-		Authenticator:   authenticator,
+		MaxMempoolBytes:  int64(cfg.MaxMempoolSize) << 20,
+		Authenticator:    authenticator,
+		CurrentKESPeriod: n.dmqStake.CurrentKESPeriod,
 	})
 	if err != nil {
 		return fmt.Errorf("creating dmq stack: %w", err)
