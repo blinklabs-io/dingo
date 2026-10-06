@@ -583,3 +583,51 @@ func TestCreateGenesisBlockBackfillsMissingEpochZeroRewardAdaPots(
 	)
 	require.Equal(t, uint64(0), uint64(pots.Fees))
 }
+
+// Genesis relay addresses remain canonical in storage for peer discovery and
+// APIs; LocalStateQuery performs the ledger wire conversion when encoding.
+func TestCreateGenesisBlockStoresCanonicalRelayAddress(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	pools := cfg.ShelleyGenesis().ExtraConfig.StakePools.Data
+	require.Len(t, pools, 1)
+	for id, pool := range pools {
+		pool.Relays = []byte(
+			`[{"type":0,"port":3001,"ipv4":"192.168.1.1"}]`,
+		)
+		pools[id] = pool
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Database:          db,
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+
+	var poolKeyHash []byte
+	for id := range pools {
+		poolKeyHash, err = hex.DecodeString(id)
+		require.NoError(t, err)
+	}
+	pool, err := db.GetPool(lcommon.PoolKeyHash(poolKeyHash), false, nil)
+	require.NoError(t, err)
+	require.Len(t, pool.Registration, 1)
+	require.Len(t, pool.Registration[0].Relays, 1)
+	require.Equal(
+		t,
+		"192.168.1.1",
+		pool.Registration[0].Relays[0].Ipv4.String(),
+	)
+}

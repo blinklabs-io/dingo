@@ -174,7 +174,7 @@ func TestQueryStakePoolParams_WireEncoding(t *testing.T) {
 		"581c"+strings.Repeat("33", 28),
 		"581c"+strings.Repeat("44", 28),
 		"82", // relays
-		"8400190bb944c0a80101f6",
+		"8400190bb9440101a8c0f6",
 		"8301190bb96d72656c61792e6578616d706c65",
 		"82", "6e68747470733a2f2f612e696f2f70", // metadata url
 		"5820"+strings.Repeat("55", 32),
