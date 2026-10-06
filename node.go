@@ -495,8 +495,9 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 const defaultMaxTxSubmissionsPerSecond = 100
 
 // newOuroborosConfig builds the ouroboros configuration from the node's
-// dependencies and settings. Run and the live restore path both use it, so the
-// settings cannot differ between the two.
+// dependencies and settings. Run stores the result in n.ouroborosConfig, and
+// the live restore path rebuilds from that copy, so the settings cannot differ
+// between the two.
 func (n *Node) newOuroborosConfig(
 	enableLeiosNetworking bool,
 	leiosTxFetchTailBudget time.Duration,

@@ -508,9 +508,10 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 
 // blockfetchRejectSaturated answers a range request that exceeded the
 // per-connection or global admission bound. Per-connection saturation feeds
-// the stuck-peer valve, since only a misbehaving peer pipelines past its own
-// bound. Global saturation does not: it is not the peer's fault, so repeating
-// the request must not get an honest peer disconnected.
+// the stuck-peer valve: gouroboros dispatches a connection's requests one at a
+// time, so an honest client never holds more than the current range and the
+// previous sender's exit. Global saturation does not: it is not the peer's
+// fault, so repeating the request must not get an honest peer disconnected.
 func (o *Ouroboros) blockfetchRejectSaturated(
 	ctx blockfetch.CallbackContext,
 	start ocommon.Point,

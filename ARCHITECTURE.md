@@ -824,14 +824,17 @@ to do real work should hand off to their own goroutine, which
 `event/doc.go` already requires of every subscriber callback.
 
 The BlockFetch server path mirrors the retrieval flow for downstream peers.
-Because the range sender is asynchronous, a peer can pipeline requests and
-each would otherwise own an iterator and a goroutine. `blockfetchRangeAdmission`
-(`ouroboros/blockfetch_admission.go`) therefore reserves a slot per connection
-(`blockfetchMaxRangesPerConnDefault`) and process-wide
+Each admitted range owns a chain iterator and a sender goroutine.
+`blockfetchRangeAdmission` (`ouroboros/blockfetch_admission.go`) reserves a
+slot per connection (`blockfetchMaxRangesPerConnDefault`) and process-wide
 (`blockfetchMaxRangesGlobalDefault`) before any iterator is opened, and a
-saturated request is answered with `NoBlocks`. Per-connection saturation feeds
-the stuck-peer valve; global saturation does not, so an honest peer is not
-disconnected for the server's load. The sender goroutine releases its slot on
+saturated request is answered with `NoBlocks`. gouroboros holds a pipelined
+`RequestRange` until the previous range's `BatchDone`, so one connection holds
+at most the current range plus the previous sender's exit; the per-connection
+bound does not limit an honest pipelining client and fires only if that
+dispatch guarantee is lost. Per-connection saturation feeds the stuck-peer
+valve; global saturation does not, so an honest peer is not disconnected for
+the server's load. The sender goroutine releases its slot on
 completion or error, and `HandleConnClosedEvent` releases every slot the
 connection still holds, so a lagging sender cannot keep capacity occupied or
 release it twice.
