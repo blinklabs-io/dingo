@@ -97,6 +97,7 @@ var governanceStoreMethods = []string{
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
 	"UpdateDRepActivity",
+	"RecordDRepActivityEpoch",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 
@@ -172,6 +173,7 @@ var transactionStoreMethods = []string{
 	"FlushBatch",
 	"SetTransactionBatched",
 	"SetTransactionLeiosClosure",
+	"SetTransactionLeiosClosureInContext",
 	"SetTransaction",
 	"SetGapBlockTransaction",
 	"RecomputeGapCollateralFee",

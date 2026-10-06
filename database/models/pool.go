@@ -122,9 +122,12 @@ type PoolRegistrationOwner struct {
 }
 
 type PoolRegistrationRelay struct {
-	Ipv4               *net.IP
-	Ipv6               *net.IP
-	Hostname           string
+	Ipv4     *net.IP
+	Ipv6     *net.IP
+	Hostname string
+	// PoolKeyHash is the owning pool's key hash. It is filled by
+	// GetActivePoolRelays and is not stored on the relay row.
+	PoolKeyHash        []byte `gorm:"-"`
 	ID                 uint
 	PoolRegistrationID uint
 	PoolID             uint
