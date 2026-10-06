@@ -3539,14 +3539,14 @@ func importGovState(
 	if err != nil {
 		return err
 	}
+	if govState.EnactedActionTypesUnknown {
+		return errors.New(
+			"imported governance state has incomplete rsEnacted action types",
+		)
+	}
 	committee := govState.Committee
 	committeeQuorum := govState.CommitteeQuorum
 	if len(enactedUpdateCommitteeIds) > 0 {
-		if govState.EnactedActionTypesUnknown {
-			return errors.New(
-				"imported expired UpdateCommittee has incomplete rsEnacted action types",
-			)
-		}
 		if !govState.EnactCommitteeSet || govState.EnactCommitteeQuorum == nil {
 			return errors.New(
 				"imported expired UpdateCommittee has incomplete enact-state committee",
