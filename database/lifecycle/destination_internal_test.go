@@ -220,7 +220,7 @@ func TestFetchLocalPayloadsUsesIndependentBoundedCopies(t *testing.T) {
 	for _, name := range []string{BlobBackupFileName, MetadataBackupFileName} {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("original"), 0o600))
 	}
-	copied, cleanup, err := fetchPayloads(context.Background(), nil, dir, Manifest{BlobBytes: 8, MetadataBytes: 8})
+	copied, cleanup, err := fetchPayloads(context.Background(), nil, dir, t.TempDir(), Manifest{BlobBytes: 8, MetadataBytes: 8})
 	require.NoError(t, err)
 	t.Cleanup(cleanup)
 	require.NotEqual(t, dir, copied)

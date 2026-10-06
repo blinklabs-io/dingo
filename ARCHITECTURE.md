@@ -2799,7 +2799,7 @@ Interfaces:
 
 ### Database Lifecycle (Snapshot, Restore, Truncate)
 
-`database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `snapshotTrustKeyFile` is required and `lifecycle.SnapshotToCloud` additionally mirrors the authenticated snapshot there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation. `lifecycle.Restore` accepts that same URI as its source, authenticates the manifest before downloading its bounded payloads into a temp directory, and rejects cloud sources when no trust key is supplied. This is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
+`database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `snapshotTrustKeyFile` is required and `lifecycle.SnapshotToCloud` additionally mirrors the authenticated snapshot there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation. `lifecycle.Restore` accepts that same URI as its source, authenticates the manifest before downloading its bounded payloads into a temporary directory beside the restore target, and rejects cloud sources when no trust key is supplied. This is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
 
 #### Recoverable remote live restore
 
@@ -11739,7 +11739,9 @@ doesn't implement `SnapshotLister`, this degrades to exactly
 `/`, no `..`) before joining it under `SnapshotDir` — a path-traversal guard
 that also covers `Restore`, which takes the same untrusted `snapshot_id`
 input over the network. `VerifySnapshot` reuses `lifecycle.Restore` itself,
-restoring into a throwaway temp directory and deleting it afterward, rather
+restoring into a throwaway directory under `SnapshotDir` (never the system
+temp directory, since the restore is as large as the snapshot) and deleting
+it afterward, rather
 than duplicating the manifest-checksum/consistency validation `Restore`
 already does.
 

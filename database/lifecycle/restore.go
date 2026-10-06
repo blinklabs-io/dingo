@@ -316,7 +316,18 @@ func restoreValidated(
 	retainRecovery **RestoreRecovery,
 	opts ...ManifestOption,
 ) (m Manifest, err error) {
-	manifest, err := resolveManifest(ctx, registry, snapshotDir, opts...)
+	// Downloads and private payload copies are as large as the snapshot, so
+	// they are made beside the target, on the volume sized for the restored
+	// data, never in the system temp directory.
+	workParent := filepath.Dir(targetDataDir)
+	if err := os.MkdirAll(workParent, 0o755); err != nil {
+		return Manifest{}, fmt.Errorf(
+			"create parent directory for %q: %w", targetDataDir, err,
+		)
+	}
+	manifest, err := resolveManifest(
+		ctx, registry, snapshotDir, workParent, opts...,
+	)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -326,7 +337,7 @@ func restoreValidated(
 		}
 	}
 	snapshotDir, cleanup, err := fetchPayloads(
-		ctx, registry, snapshotDir, manifest,
+		ctx, registry, snapshotDir, workParent, manifest,
 	)
 	if cleanup != nil {
 		defer cleanup()
@@ -360,11 +371,6 @@ func restoreValidated(
 	if err := os.RemoveAll(stagingDir); err != nil {
 		return Manifest{}, fmt.Errorf(
 			"clear restore staging directory %q: %w", stagingDir, err,
-		)
-	}
-	if err := os.MkdirAll(filepath.Dir(targetDataDir), 0o755); err != nil {
-		return Manifest{}, fmt.Errorf(
-			"create parent directory for %q: %w", targetDataDir, err,
 		)
 	}
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
@@ -562,17 +568,19 @@ func PeekManifest(
 	if m, ok, err := FetchCloudManifest(ctx, registry, snapshotDir, opts...); ok {
 		return m, err
 	}
-	return resolveManifest(ctx, registry, snapshotDir, opts...)
+	return resolveManifest(ctx, registry, snapshotDir, "", opts...)
 }
 
 // resolveManifest reads the manifest of the snapshot at snapshotDir, a local
 // directory or a cloud destination URI, authenticating it with opts. A cloud
-// snapshot's manifest.json is fetched on its own, bounded by the manifest size
-// limit, and nothing else under the prefix is read.
+// snapshot's manifest.json is fetched on its own into a temporary directory
+// under workParent (the system temp directory when empty), bounded by the
+// manifest size limit, and nothing else under the prefix is read.
 func resolveManifest(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	opts ...ManifestOption,
 ) (Manifest, error) {
 	limit, err := manifestByteLimit(opts)
@@ -592,7 +600,7 @@ func resolveManifest(
 		downloadLimit++
 	}
 	dir, cleanup, err := downloadCloudFiles(
-		ctx, registry, snapshotDir,
+		ctx, registry, snapshotDir, workParent,
 		[]DownloadFile{{Name: ManifestFileName, MaxBytes: downloadLimit}},
 	)
 	if err != nil {
@@ -602,21 +610,22 @@ func resolveManifest(
 	return ReadManifest(dir, opts...)
 }
 
-// fetchPayloads returns a local directory holding the backup files manifest
-// declares. A cloud snapshot downloads only those files, each bounded by its
-// declared size. It returns a cleanup func for any downloaded temp directory —
+// fetchPayloads returns a local directory, created under workParent, holding
+// the backup files manifest declares. A cloud snapshot downloads only those
+// files, each bounded by its declared size. It returns a cleanup func for any downloaded temp directory —
 // nil when nothing was downloaded, so callers must nil-check before deferring
 // it. The files are not yet verified; see Manifest.verifyPayloads.
 func fetchPayloads(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	manifest Manifest,
 ) (resolvedDir string, cleanup func(), err error) {
 	if !recognizedCloudScheme(registry, snapshotDir) {
 		// Consume private copies: reopening the operator's path after digest
 		// verification permits a replacement file to bypass authentication.
-		dir, err := os.MkdirTemp("", "dingo-restore-payloads-")
+		dir, err := os.MkdirTemp(workParent, ".dingo-restore-payloads-")
 		if err != nil {
 			return "", nil, err
 		}
@@ -642,7 +651,7 @@ func fetchPayloads(
 		return dir, cleanup, nil
 	}
 	return downloadCloudFiles(
-		ctx, registry, snapshotDir, manifest.payloadDownloads(),
+		ctx, registry, snapshotDir, workParent, manifest.payloadDownloads(),
 	)
 }
 

@@ -341,12 +341,14 @@ func ParseCloudDestination(
 }
 
 // downloadCloudFiles downloads the named objects of the snapshot at the given
-// cloud URI into a fresh local temp directory and returns its path plus a
-// cleanup func that removes it. The caller must call cleanup once done.
+// cloud URI into a fresh temporary directory under parentDir (the system temp
+// directory when empty) and returns its path plus a cleanup func that removes
+// it. The caller must call cleanup once done.
 func downloadCloudFiles(
 	ctx context.Context,
 	registry *DestinationRegistry,
 	uri string,
+	parentDir string,
 	files []DownloadFile,
 ) (localDir string, cleanup func(), err error) {
 	dest, err := ParseCloudDestination(registry, uri)
@@ -354,7 +356,7 @@ func downloadCloudFiles(
 		return "", nil, err
 	}
 	defer closeCloudDestination(dest)
-	tempDir, err := os.MkdirTemp("", "dingo-cloud-snapshot-*")
+	tempDir, err := os.MkdirTemp(parentDir, ".dingo-cloud-snapshot-*")
 	if err != nil {
 		return "", nil, fmt.Errorf(
 			"create temp directory for cloud snapshot download: %w", err,

@@ -964,20 +964,30 @@ func (h *databaseServiceHandler) DeleteSnapshot(
 }
 
 // verifySnapshotIntegrity performs a full restore of the snapshot at
-// snapshotDir into a throwaway temporary directory, reusing
+// snapshotDir into a throwaway directory under workParent, reusing
 // lifecycle.Restore's existing validation (manifest checksum, both
 // stores' restore, database.New's startup consistency checks, and a tip
 // comparison) as the actual integrity check, rather than duplicating any
-// of that logic. The temporary directory is always removed before
+// of that logic. The throwaway directory is always removed before
 // returning.
+//
+// A verification restore is as large as the snapshot, so workParent is the
+// snapshot directory rather than the system temp directory. The restore
+// target is a child of the throwaway directory so that its staging, payload
+// and rollback siblings are removed with it; the throwaway directory holds
+// no manifest, so lifecycle.ListSnapshots never reports it.
 func verifySnapshotIntegrity(
 	ctx context.Context,
 	registry *lifecycle.DestinationRegistry,
 	snapshotDir string,
+	workParent string,
 	storageConfig lifecycle.RestoreStorageConfig,
 	manifestOpts []lifecycle.ManifestOption,
 ) error {
-	tempDir, err := os.MkdirTemp("", "dingo-verify-snapshot-*")
+	if err := os.MkdirAll(workParent, 0o755); err != nil {
+		return fmt.Errorf("create verification parent directory: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(workParent, ".dingo-verify-snapshot-*")
 	if err != nil {
 		return fmt.Errorf("create verification directory: %w", err)
 	}
@@ -991,8 +1001,8 @@ func verifySnapshotIntegrity(
 	}
 	defer host.Stop(context.WithoutCancel(ctx)) //nolint:errcheck
 	if _, err := lifecycle.Restore(
-		ctx, host, registry, snapshotDir, tempDir, storageConfig,
-		manifestOpts...,
+		ctx, host, registry, snapshotDir, filepath.Join(tempDir, "data"),
+		storageConfig, manifestOpts...,
 	); err != nil {
 		return fmt.Errorf("verify snapshot: %w", err)
 	}
@@ -1038,6 +1048,7 @@ func (h *databaseServiceHandler) VerifySnapshot(
 				opCtx,
 				h.bark.config.DestinationRegistry,
 				source,
+				h.bark.config.SnapshotDir,
 				h.bark.config.Lifecycle.RestoreStorageConfig(),
 				manifestOpts,
 			)
