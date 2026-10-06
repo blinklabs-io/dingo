@@ -15,9 +15,9 @@
 package koiosparity
 
 import (
-	"errors"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -116,16 +116,12 @@ func registerCollector[C prometheus.Collector](
 	promRegistry prometheus.Registerer,
 	c C,
 ) C {
-	err := promRegistry.Register(c)
-	if err == nil {
-		return c
+	r := promutil.NewRegistration(promRegistry)
+	registered := promutil.Register(r, c)
+	if err := r.Err(); err != nil {
+		panic(err)
 	}
-	if are, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
-		if existing, ok := are.ExistingCollector.(C); ok {
-			return existing
-		}
-	}
-	panic(err)
+	return registered
 }
 
 // resultQueue names the observer queue that produced result: only the account

@@ -221,6 +221,12 @@ var flagSpecs = []flagSpec{
 		"",
 		"Mesh API provider",
 	),
+	stringFlag(
+		"Plugins.API.Mcp.Provider",
+		"mcp-provider",
+		"",
+		"MCP API provider",
+	),
 	stringSliceFlag(
 		"CORSAllowedOrigins",
 		"cors-allowed-origins",
@@ -886,6 +892,11 @@ var flagSpecs = []flagSpec{
 		"Mithril.DownloadMaxIdleRetries",
 		"mithril-download-max-idle-retries",
 		"Mithril snapshot download idle retries without progress",
+	),
+	int64Flag(
+		"Mithril.DownloadMaxBytes",
+		"mithril-download-max-bytes",
+		"Mithril per-object compressed download limit in bytes (0 uses built-in limits)",
 	),
 	boolFlag(
 		"Mithril.CleanupAfterLoad",

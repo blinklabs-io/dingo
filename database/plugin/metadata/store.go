@@ -350,9 +350,10 @@ type GovernanceStore interface {
 		types.Txn,
 	) (map[string]bool, error)
 
-	// GetCommitteeActiveCount returns the number of active (non-resigned)
-	// committee members.
-	GetCommitteeActiveCount(types.Txn) (int, error)
+	// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+	// committee members that hold a current hot-key authorization. Members
+	// without a hot key are not counted and term expiry is not applied.
+	GetCommitteeAuthorizedCount(types.Txn) (int, error)
 
 	// Snapshot-imported committee member methods
 
@@ -491,6 +492,16 @@ type GovernanceStore interface {
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
+		types.Txn,
+	) error
+
+	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
+	// for historical replay below a snapshot anchor whose recorded expiry
+	// must stand.
+	RecordDRepActivityEpoch(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
 		types.Txn,
 	) error
 
@@ -1395,12 +1406,23 @@ type CertificateStore interface {
 	) ([]lcommon.StakeRegistrationCertificate, error)
 
 	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
-	// certificate for genesisHash before the supplied block slot.
+	// certificate for genesisHash that has taken effect by blockSlot: one
+	// whose certificate slot plus stabilityWindow is at or below it.
 	GetGenesisDelegationForSlot(
 		[]byte, // genesisHash
 		uint64, // blockSlot
+		uint64, // stabilityWindow
 		types.Txn,
 	) (*models.GenesisDelegation, error)
+
+	// GetGenesisDelegationsInSlotRange returns the genesis-key delegation
+	// certificates with a certificate slot from fromSlot through uptoSlot
+	// inclusive, oldest first.
+	GetGenesisDelegationsInSlotRange(
+		uint64, // fromSlot
+		uint64, // uptoSlot
+		types.Txn,
+	) ([]models.GenesisDelegation, error)
 
 	// GetAccountDelegationHistoryByCredential retrieves delegation history
 	// rows for a stake credential tag/hash pair.
@@ -2254,6 +2276,13 @@ type MetadataStore interface {
 	// the sqlstore implementation for why the import baseline is left alone.
 	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
 
+	// RestoreImportedAccountStates sets active, pool and DRep delegation back
+	// to each account's import baseline recorded at or after the given slot,
+	// leaving reward untouched, and returns the number of rows changed.
+	// Historical API backfill calls it at the Mithril anchor, because replay
+	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
+	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
+
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
@@ -2941,7 +2970,17 @@ type BulkLoadOptimizer interface {
 }
 
 // PlannerStatsUpdater is an optional interface for metadata stores that can
-// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+// collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
+// refreshes statistics through deferred-index maintenance instead.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
 }
+
+// ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
+type ContextPlannerStatsUpdater interface {
+	UpdatePlannerStatsContext(context.Context) error
+}
+
+// PlannerStatsBackfillSyncKey records the completed backfill whose planner
+// statistics were refreshed after rebuilding critical indexes.
+const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

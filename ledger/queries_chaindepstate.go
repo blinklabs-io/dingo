@@ -399,7 +399,10 @@ func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 		// A stored issuer key that is not a pool key hash fails the query.
 		// Padding or truncating it would report a counter against a cold key
 		// the row did not mean, and dropping it would report "no certificate
-		// accepted yet" for a key the chain enforces a counter against.
+		// accepted yet" for a key the chain enforces a counter against. The
+		// cost is availability: the error aborts GetChainDepState and drops
+		// the client's LocalStateQuery connection, which is accepted because
+		// a degraded answer here would be a wrong one.
 		issuer, err := lcommon.NewBlake2b224Checked([]byte(keyHash))
 		if err != nil {
 			return nil, fmt.Errorf("op-cert counter issuer key: %w", err)
