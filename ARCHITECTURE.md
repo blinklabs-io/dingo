@@ -4495,6 +4495,33 @@ passes Acquire is answered from the snapshot Acquire opened, so a rollback or
 retention-floor pruning committed afterwards does not reach the session. Only a
 snapshot closed by the lifetime bound above reproduces this connection-teardown
 behavior.
+
+A specific acquired point is also pinned against pruning
+(`ledger/acquired_point_pins.go`). Acquire calls `LedgerState.PinAcquiredPoint`
+*before* `AcquireQueryView` verifies the point, and the consumed-UTxO cleanup
+and the pool-snapshot retention guard each cap their prune floor at the oldest
+pinned slot. Each pruning path reads the pins, caps its floor, and announces
+that floor in memory under the registry's lock, then releases the lock and only
+afterwards deletes; `VerifyPointQueryable` refuses any point below an announced
+floor. So either the pin lands first and the prune retains the point, or the
+prune announces first and the point is refused at Acquire, where the protocol
+has a clean reply. No I/O runs under that lock: holding a lock across the
+delete is what deadlocked an earlier design of the pool-snapshot guard on
+SQLite's single write connection. The snapshot keeps the session's own reads
+consistent; the pin keeps the rows themselves from being deleted while a
+session needs them.
+
+The pin lives in the connection's `localstatequerySession` and is released
+wherever the session's view is closed: Release, a re-Acquire (which closes the
+previous session first, so a rejected re-Acquire leaves no pin), connection
+close, `Ouroboros.Close`, and lifetime expiry. A failed Acquire releases its pin
+before replying. A connection that closes while its Acquire is still verifying
+cancels that acquisition, and the Acquire closes the view it opened and releases
+its pin. A pin cannot hold pruning back without limit in any case: the UTxO
+floor is held back by at most `acquiredPointMaxUtxoHoldWindows` stability
+windows, and pool snapshots by the existing `poolSnapshotRetentionMaxDepth`.
+Protocol-parameter rows need no pin; they are only ever deleted on rollback.
+
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
