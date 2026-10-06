@@ -72,6 +72,10 @@ type leiosForgedEBEntry struct {
 	announcement []byte
 }
 
+func (e leiosForgedEBEntry) isEndorserBlockOffer() bool {
+	return e.point != nil || e.txOffer != nil
+}
+
 // prototype-2026w31 accepts announcements for up to ten minutes, and only
 // relays them while they are at most five minutes old. The reference node
 // measures these bounds from the announced slot's wall-clock onset. Dingo
@@ -244,6 +248,12 @@ func newLeiosForgedEBLog() *leiosForgedEBLog {
 // signals all server goroutines waiting for new entries to wake and retry.
 func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.mu.Lock()
+	l.pruneLocked()
+	if !entry.isEndorserBlockOffer() &&
+		l.transientEntriesLocked() >= leiosEBLogMaxTransientEntries {
+		l.mu.Unlock()
+		return
+	}
 	l.items = append(l.items, entry)
 	// A caught-up origin already has the entry, so do not retain it waiting
 	// for that connection to issue another RequestNext. Origins that are
@@ -257,6 +267,20 @@ func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.wakeCh = make(chan struct{})
 	l.mu.Unlock()
 	close(wake)
+}
+
+// transientEntriesLocked counts vote and ranking-block announcements that
+// have not yet left the bounded delivery log. Endorser-block offers are
+// recoverable only while their separately bounded cache entry remains, so
+// transient traffic must not consume their retention budget.
+func (l *leiosForgedEBLog) transientEntriesLocked() int {
+	count := 0
+	for _, entry := range l.items {
+		if !entry.isEndorserBlockOffer() {
+			count++
+		}
+	}
+	return count
 }
 
 // nextWhileConnected reserves the next unserved entry and returns the wake
@@ -487,17 +511,23 @@ func (l *leiosForgedEBLog) registerConn(
 	close(wake)
 }
 
-// leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
-// retains. When the log grows beyond this limit, the oldest entries are
-// evicted and any lagging cursors are advanced to the new base. This
-// bounds memory even when a pre-registered or slow peer never calls next.
-const leiosEBLogMaxEntries = 64
+const (
+	// leiosEBLogMaxTransientEntries bounds votes and ranking-block
+	// announcements retained for a slow peer.
+	leiosEBLogMaxTransientEntries = 64
+	// Each cached endorser block can produce a manifest and transaction offer.
+	// Keeping that complete bounded horizon prevents transient traffic from
+	// displacing a historical offer while its bodies remain serveable.
+	leiosEBLogMaxEntries = 2*leiosEndorserBlockCacheMaxEntries +
+		leiosEBLogMaxTransientEntries
+)
 
 // pruneLocked drops head entries whose logical index falls below every
 // registered connection's cursor and every failed-delivery retry. When no
 // connections or retries remain, the entire log is pruned. If the log still
-// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest entries
-// are evicted and lagging cursors are advanced to the new base.
+// exceeds leiosEBLogMaxEntries after cursor-based pruning, entries older than
+// the endorser-block cache's complete offer horizon are evicted and lagging
+// cursors are advanced to the new base.
 // Callers must hold l.mu.
 func (l *leiosForgedEBLog) pruneLocked() {
 	if len(l.items) == 0 {
