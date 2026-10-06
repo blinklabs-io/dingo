@@ -63,6 +63,10 @@ type BatchedTxIngestOpts struct {
 	// transitions. Zero means the caller has no version context.
 	ProtocolMajor uint64
 
+	// LedgerContextSlot is the unticked parent slot for a prototype closure.
+	// Point still identifies its certifying block for rollback.
+	LedgerContextSlot *uint64
+
 	// SkipProducedUtxoOffsetWrites elides blob.SetUtxo calls for produced
 	// outputs. Use when the produced-UTxO offset references for this block
 	// have already been written (e.g. by the Mithril immutable-copy phase
@@ -181,6 +185,9 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	txn *Txn,
 	opts BatchedTxIngestOpts,
 ) (retErr error) {
+	if opts.LedgerContextSlot != nil {
+		return errors.New("prototype closure context requires unbatched ingestion")
+	}
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
 	}

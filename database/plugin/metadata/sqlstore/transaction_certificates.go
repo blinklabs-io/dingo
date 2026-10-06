@@ -909,7 +909,15 @@ RETURNING id`,
 	// and no history, so the held amount is derived from the registration and
 	// retirement rows strictly before this certificate's position rather than
 	// from live pool state.
-	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	executionSlot := at.slot
+	var closureSlot sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction_id = lc.transaction_id WHERE certs.id = ?`, certificateID).Scan(&closureSlot); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if closureSlot.Valid {
+		executionSlot = uint64(closureSlot.Int64)
+	}
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit, executionSlot)
 	if err != nil {
 		return 0, err
 	}

@@ -27,7 +27,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 36)
+	require.Len(t, registry, 37)
 	require.Equal(t, 1, registry[0].Version)
 	require.Equal(t, "v1alpha1", registry[0].Name)
 	require.GreaterOrEqual(t, len(registry[0].SQL["sqlite"].Expand), 303)
@@ -251,13 +251,13 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[32].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `governance_proposal_order`",
 	)
-	require.Equal(t, 34, registry[33].Version)
-	require.Equal(t, drepExpiryHistorySchemaRelease, registry[33].Name)
-	require.Contains(t, strings.Join(registry[33].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
 	require.Equal(t, 35, registry[34].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[34].Name)
+	require.Equal(t, drepExpiryHistorySchemaRelease, registry[34].Name)
+	require.Contains(t, strings.Join(registry[34].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
 	require.Equal(t, 36, registry[35].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[35].Name)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[35].Name)
+	require.Equal(t, 37, registry[36].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[36].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -275,8 +275,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 36)
-			migration := registry[34]
+			require.Len(t, registry, 37)
+			migration := registry[35]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")
@@ -408,7 +408,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 36)
+	require.Len(t, registry, 37)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

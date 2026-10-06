@@ -1,15 +1,9 @@
-CREATE TABLE IF NOT EXISTS `drep_expiry_history` (
-    `credential_tag` INTEGER NOT NULL,
-    `credential` BLOB NOT NULL,
-    `added_slot` INTEGER NOT NULL,
-    `previous_expiry_epoch` INTEGER NOT NULL,
-    `previous_last_activity_epoch` INTEGER NOT NULL,
-    PRIMARY KEY (`credential_tag`, `credential`, `added_slot`)
+-- Closure effects belong to the certifying RB for rollback, but execute on
+-- its parent's unticked ledger state for epoch snapshots and fee accounting.
+CREATE TABLE IF NOT EXISTS `leios_transaction_context` (
+    `transaction_id` integer PRIMARY KEY NOT NULL,
+    `slot` integer NOT NULL,
+    FOREIGN KEY (`transaction_id`) REFERENCES `transaction`(`id`) ON DELETE CASCADE
 );
-
-CREATE INDEX IF NOT EXISTS `idx_drep_expiry_history_slot`
-    ON `drep_expiry_history` (`added_slot`);
-
-CREATE TABLE IF NOT EXISTS `drep_expiry_epoch_event` (
-    `added_slot` INTEGER PRIMARY KEY
-);
+CREATE INDEX IF NOT EXISTS `idx_leios_transaction_context_slot`
+    ON `leios_transaction_context`(`slot`);

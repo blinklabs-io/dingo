@@ -479,19 +479,19 @@ Migration `v33` (`governance-proposal-order`, integer version 33) adds the
 `governance_proposal_order` companion table and backfills it from each
 proposal's stored transaction.
 
-Migration `v33` (`drep-expiry-history`) adds `drep_expiry_history` and
+Migration `v35` (`drep-expiry-history`) adds `drep_expiry_history` and
 `drep_expiry_epoch_event`. The history stores pre-write expiry and activity
 state once per DRep and slot, allowing activity updates and dormant-epoch
 expiry extensions to roll back together. The event table makes each
 empty-governance boundary idempotent on replay.
 
-Migration `v34` (`drep-dormancy-state`) adds a singleton counter and history
+Migration `v36` (`drep-dormancy-state`) adds a singleton counter and history
 for consecutive no-proposal epochs. Boundary increments and proposal-driven
 resets are journaled for rollback; proposal-driven resets run before
 certificate processing, and snapshot import initializes the counter from
 parsed ledger state.
 
-Migration `v35` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+Migration `v37` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
 reverse index of stake credentials recorded in each active DRep's ledger
 delegator set. Its backfill and PV10 transition follow the ledger's active
 account delegation rules, and the schema preserves reverse delegators imported
@@ -1149,6 +1149,7 @@ post-Mithril-boundary strictness (see below).
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `collateral_fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per applied transaction body. A Dijkstra batch therefore has one row for each sub-transaction body followed by one for the enclosing body; each row uses that body's hash and a consecutive block index in ledger application order. Produced child UTxOs are keyed by the child body's hash. `block_hash` and `slot` point to the blob block. `fee` is the declared body fee; `collateral_fee` is the collateral consumed into the fee pot by a phase-2-invalid transaction (collateral inputs minus collateral return) and zero for valid transactions. The epoch fee pot sums `fee` for valid rows plus `collateral_fee` for invalid rows. `metadata` is populated only in API mode. Mithril gap-closure writes the same body-level transaction row shape while deliberately skipping input consumption. |
+| `leios_transaction_context` | `transaction_id`, `slot` | PK and FK `transaction_id -> transaction.id` `ON DELETE CASCADE`; index `idx_leios_transaction_context_slot` on `slot` | Records the parent-ledger execution slot for Musashi closure transactions whose physical transaction slot remains the certifying ranking block's slot. The cascade removes context during rollback with its transaction. |
 | `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes `transaction_id`, `payment_key`, `staking_key`, spend/reference/collateral tx hashes, and `added_slot`; composites `idx_utxo_deleted_staking_amount` (`deleted_slot`, `credential_tag`, `staking_key`, `amount`), `idx_utxo_staking_deleted_amount` (`credential_tag`, `staking_key`, `deleted_slot`, `amount`), and `idx_utxo_deleted_payment_script` (`deleted_slot`, `payment_script`, `amount`) | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `deleted_slot = 0` is the live-output sentinel; a nonzero value and `spent_at_tx_id` identify a spent output and back Kupo's spent-output history. The `(credential_tag, staking_key, deleted_slot, amount)` composite backs stake-credential live UTxO sums such as DRep voting-power tallying. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `utxo_collateral_input` | `utxo_id`, `transaction_hash` | PK `(utxo_id, transaction_hash)`; index `transaction_hash` | Authoritative many-to-many collateral relationship. Migration `v14` backfills one edge from each non-NULL legacy `utxo.collateral_by_tx_id`; apply and rollback maintain edges independently. |
 | `utxo_pointer` | `utxo_id`, `ptr_slot`, `ptr_tx_index`, `ptr_cert_index` | PK `utxo_id`; FK `utxo_id -> utxo.id` `ON DELETE CASCADE`; index `idx_utxo_pointer_target` (`ptr_slot`, `ptr_tx_index`, `ptr_cert_index`) | One row per output at a pointer address (address types 4 and 5). Such an address names the position of a stake registration certificate -- `(slot, transaction index in block, certificate index in transaction)` -- instead of carrying a stake credential, so the `utxo` row has no `staking_key` and the position is recorded here. The credential is resolved when stake is computed, not at write time, because it is a function of the certificate history at the slot being evaluated: a pointer may name a position no certificate occupies yet, de-registration removes the reference permanently, and Conway stops counting pointer stake altogether. The cascade is how rollback reaches these rows. Nothing validates an address's pointer payload, so a component above `int64` is dropped rather than stored or raised: no certificate can occupy such a position, and failing the write would stall ingestion of a block the network accepted. |
@@ -1608,21 +1609,12 @@ startup if any are found, naming the affected epochs: such a snapshot cannot be
 safely reconstructed from a pruned database, since recomputing it correctly
 would require replaying that epoch's historical stake distribution.
 
-A version bump does not necessarily mean every existing database is affected,
-though. Migration `v15` (`reward-stake-calculation-version-restamp`,
-`database/plugin/metadata/sqlstore/migrations/registry.go`) runs a two-phase
-backfill on upgrade: every stale `pool_stake_snapshot` row is re-stamped to the
-current version unconditionally, because its stored totals have never depended
-on calculation version (see `TotalActiveStake`'s comment in
-`ledger/snapshot/rotation.go`). A stale Mark `reward_snapshot` row is re-stamped
-only when its `total_active_stake` already agrees with the same epoch's
-`epoch_summary.total_active_stake` -- a value that also never depended on
-calculation version -- which is exactly the condition identifying an epoch the
-version bump did not actually change. A row that disagrees names an epoch the
-bump did change and is deliberately left at its old version for the startup
-gate above to keep failing closed on; only that database, and only from that
-epoch, genuinely requires a rebootstrap from immutable blocks or a trusted
-snapshot.
+Migration `v15` (`reward-stake-calculation-version-restamp`) upgrades stale
+pre-v2 pool snapshots unconditionally, and Mark reward snapshots only when
+their sigma-denominator inputs can be verified. It cannot certify version 3: Dijkstra moves SNAP after POOLREAP and
+governance enactment, and nonempty genesis staking changes the initial reward
+inputs. Older persisted snapshots require replay or a trusted ledger-state
+import rather than a version stamp.
 
 #### Incremental live-UTxO stake maintenance
 
@@ -2635,9 +2627,31 @@ transactions and the leader-election stake snapshot treat inputs the endorser
 block should have produced as missing (the `utxo not found` repair loop and the
 `pool has no stake in epoch snapshot` header rejection). Positive
 donations from valid endorser transactions are accumulated in `network_donation`
-under the ranking block's slot/epoch so the treasury update at the epoch boundary
-matches the CIP path. Replayed endorser transactions (hashes already present) are
+under the ranking block's slot, using the epoch in which the closure executes.
+Replayed endorser transactions (hashes already present) are
 skipped so certificate, governance, and UTxO effects are not applied twice.
+
+Earlier ranking-block deltas are applied before processing the next Leios
+closure, including during unvalidated historical sync. This preserves input
+availability and stake accounting independently of read-batch boundaries.
+
+On the Musashi prototype path, a certified closure executes on the parent's
+unticked ledger before the certifying ranking block's epoch transition. A closure
+crossing that boundary therefore contributes to the ended epoch's fees and the
+new mark snapshot. `leios_transaction_context` records its transactions' parent
+ledger slot separately from the certifying block's physical slot. Fee sums,
+historical stake and reward reconstruction, pool lifecycle cuts, and key-age
+snapshot reads use that execution context; transaction and effect rows retain
+their physical slots so rollback removes them with the certifier. The context
+rows cascade with their owning transactions. The ordinary ranking body and the
+CIP path have no context override.
+
+Closure effects and the epoch rollover commit together. Transaction Apply events
+wait for the certifying block's commit, survive a failed body retry, and are
+discarded when rollback removes the unpublished closure. Even a rollback to the
+unchanged parent tip must remove those pending effects. The migration does not
+reconstruct contexts or reward rounds previously computed with the old ordering;
+affected historical state requires replay from before its first affected boundary.
 On the forward/CIP path, decode/build failures are ignored before storage is
 touched; once the blob or transaction rows start writing, the caller aborts the
 enclosing block transaction rather than committing a partial endorser-block
@@ -3533,6 +3547,13 @@ only later local witnesses exist, `account.created_slot` supplies the historical
 floor instead, so a later renewal cannot revive stake in an older snapshot.
 Credentials without an account row remain active. The final predicate keeps
 only `expiration_epoch = 0 OR expiration_epoch >= expiryEpoch`.
+
+Dijkstra evaluates SNAP after POOLREAP, enacted treasury withdrawals, proposal
+refunds and HARDFORK. Boundary reward reconstruction therefore includes credits
+marked `post_snapshot` by those shared writers, and resolves pool retirements at
+the incoming epoch. Transaction, delegation-certificate and UTxO cutoffs still
+exclude the incoming ranking block. Conway and earlier boundaries retain their
+pre-enactment snapshot rules.
 
 `GetLiveStakeInputsForPools` reads every registered credential for the requested
 pools from `reward_live_stake`, retaining zero-stake rows so an exact delegator

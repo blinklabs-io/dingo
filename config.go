@@ -215,6 +215,9 @@ type Config struct {
 	tokenRegistry TokenRegistryConfig
 	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
+	// Parsed duration for the LocalStateQuery snapshot lifetime; zero selects
+	// the ouroboros package default.
+	localStateQueryViewMaxLifetime time.Duration
 	// Compatibility mirrors used by the composition layer. cfg remains the
 	// canonical loaded configuration; these are refreshed by syncCompatFields.
 	dataDir                         string
@@ -1913,6 +1916,18 @@ func WithChainsyncMaxClients(
 	}
 }
 
+// WithLocalStateQueryViewMaxLifetime specifies how long a node-to-client
+// LocalStateQuery session may hold one acquired ledger snapshot before the
+// node closes it. Default is 5 minutes.
+func WithLocalStateQueryViewMaxLifetime(
+	lifetime time.Duration,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.cfg.LocalStateQueryViewMaxLifetime = lifetime.String()
+		c.localStateQueryViewMaxLifetime = lifetime
+	}
+}
+
 // WithChainsyncStallTimeout specifies the duration after
 // which a chainsync client with no activity is considered
 // stalled. Default is 2 minutes.
@@ -2376,6 +2391,20 @@ func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
 		}
 	}
 	return 2 * time.Minute
+}
+
+// LocalStateQueryViewMaxLifetimeDuration returns the parsed LocalStateQuery
+// snapshot lifetime, or zero when it is unset or unparsable so the consumer
+// applies its own default.
+func (c *Config) LocalStateQueryViewMaxLifetimeDuration() time.Duration {
+	if c.localStateQueryViewMaxLifetime != 0 {
+		return c.localStateQueryViewMaxLifetime
+	}
+	d, err := time.ParseDuration(c.cfg.LocalStateQueryViewMaxLifetime)
+	if err != nil {
+		return 0
+	}
+	return d
 }
 
 // GenesisBootstrap returns the Genesis bootstrap configuration.
