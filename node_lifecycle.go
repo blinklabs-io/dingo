@@ -1542,6 +1542,9 @@ func (n *Node) Snapshot(
 		n.config.databaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		lifecycle.WithMaxCommitPause(
+			n.config.databaseLifecycle.SnapshotMaxCommitPause,
+		),
 	)
 }
 
