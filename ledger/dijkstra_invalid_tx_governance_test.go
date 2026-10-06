@@ -348,10 +348,7 @@ func TestDijkstraBlockApplicationScopesGovernanceToDeclaredValidity(
 		require.ErrorAs(t, valid.ls.validateForgedTxs(valid.block), &badVersion)
 
 		invalid := newDijkstraHardForkFixture(t, false)
-		err := invalid.ls.validateForgedTxs(invalid.block)
-		if err != nil {
-			require.NotErrorAs(t, err, &badVersion)
-		}
+		require.NoError(t, invalid.ls.validateForgedTxs(invalid.block))
 	})
 
 	t.Run("mempool validation", func(t *testing.T) {
