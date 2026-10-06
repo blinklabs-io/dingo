@@ -1333,6 +1333,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"peer_tip_slot",
 			effectiveObservedTip.Point.Slot,
 		)
+		ls.markFreshCursorRequestedLocked(effectiveConnId)
 		ls.requestChainsyncResync(
 			effectiveConnId,
 			event.ChainsyncResyncReasonChainSwitchCursorAhead,
@@ -1755,11 +1756,174 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 		return false
 	}
 	localTip := ls.PrimaryChainTip()
-	if newObservedTip.BlockNumber > localTip.BlockNumber {
-		return true
+	ahead := newObservedTip.BlockNumber > localTip.BlockNumber ||
+		(newObservedTip.BlockNumber == localTip.BlockNumber &&
+			newObservedTip.Point.Slot > localTip.Point.Slot)
+	if !ahead {
+		return false
 	}
-	return newObservedTip.BlockNumber == localTip.BlockNumber &&
-		newObservedTip.Point.Slot > localTip.Point.Slot
+	if ls.chainSwitchPeerStillStreamingLocked(e, connId, newObservedTip) {
+		ls.config.Logger.Debug(
+			"chain switch selected peer is still streaming headers, leaving cursor recovery to the header path",
+			"component",
+			"ledger",
+			"connection_id",
+			connId.String(),
+			"local_tip_slot",
+			localTip.Point.Slot,
+			"peer_observed_tip_slot",
+			newObservedTip.Point.Slot,
+		)
+		return false
+	}
+	if ls.freshCursorAwaitingHeadersLocked(connId) {
+		ls.logFreshCursorNotRepeatedLocked(connId, localTip, newObservedTip)
+		return false
+	}
+	return true
+}
+
+// chainSwitchPeerStillStreamingLocked reports whether connId's peer has at
+// least headerMismatchResyncThreshold blocks left to deliver before its
+// advertised tip. Such a peer keeps sending headers, so a cursor that has
+// moved past the local tip shows up in the header handler as consecutive
+// mismatches, which request a resync from received headers. Closing it
+// speculatively instead is what, far behind the network, closes every
+// reconnected peer before it delivers anything. A peer at its tip may send
+// nothing for many slots, so only there is the speculative close needed.
+//
+// The advertised tip is untrusted, but it is used only to withhold a close:
+// overstating it routes the peer through the evidence-based path and cannot
+// force one.
+func (ls *LedgerState) chainSwitchPeerStillStreamingLocked(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+	observedTip ochainsync.Tip,
+) bool {
+	var advertisedTip ochainsync.Tip
+	switch {
+	case sameConnectionId(connId, e.NewConnectionId):
+		advertisedTip = e.NewTip
+	case ls.config.GetPeerSyncTargetFunc != nil:
+		var ok bool
+		advertisedTip, ok = ls.config.GetPeerSyncTargetFunc(connId)
+		if !ok {
+			return false
+		}
+	default:
+		return false
+	}
+	return advertisedTip.BlockNumber > observedTip.BlockNumber &&
+		advertisedTip.BlockNumber-observedTip.BlockNumber >=
+			headerMismatchResyncThreshold
+}
+
+const (
+	// freshCursorPeerRetention bounds how long a peer stays in
+	// freshCursorPeers without delivering a header, so a peer that never
+	// reconnects does not stay there for the life of the process.
+	freshCursorPeerRetention = 30 * time.Minute
+	// freshCursorStallWarnRequests is how many chain-switch fresh-cursor
+	// requests may pass without the local tip advancing before the ledger
+	// warns. Each request closes a connection, so a run of them with no
+	// progress is a stall that no other component reports.
+	freshCursorStallWarnRequests = 3
+)
+
+// freshCursorRequest records a chain-switch fresh-cursor request for a peer.
+type freshCursorRequest struct {
+	at time.Time
+	// repeatLogged is set once a later switch to the same peer has been
+	// logged as not repeating the request, so it is reported once per
+	// request rather than on every switch.
+	repeatLogged bool
+}
+
+// freshCursorAwaitingHeadersLocked reports whether a chain switch already
+// closed connId's peer for a fresh cursor and no header from that peer has
+// reached the ledger since. Requesting another would only close the
+// reconnected cursor before it can deliver anything, which while far behind
+// cycles through every peer without fetching a block.
+func (ls *LedgerState) freshCursorAwaitingHeadersLocked(
+	connId ouroboros.ConnectionId,
+) bool {
+	req, ok := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
+	return ok && time.Since(req.at) < freshCursorPeerRetention
+}
+
+func (ls *LedgerState) logFreshCursorNotRepeatedLocked(
+	connId ouroboros.ConnectionId,
+	localTip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+) {
+	req := ls.freshCursorPeers[netAddrString(connId.RemoteAddr)]
+	if req == nil || req.repeatLogged {
+		return
+	}
+	req.repeatLogged = true
+	ls.config.Logger.Info(
+		"chain switch selected peer has delivered no header since its fresh chainsync cursor, not requesting another",
+		"component",
+		"ledger",
+		"connection_id",
+		connId.String(),
+		"local_tip_slot",
+		localTip.Point.Slot,
+		"peer_observed_tip_slot",
+		observedTip.Point.Slot,
+	)
+}
+
+func (ls *LedgerState) markFreshCursorRequestedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	ls.noteFreshCursorProgressLocked()
+	key := netAddrString(connId.RemoteAddr)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	for k, req := range ls.freshCursorPeers {
+		if now.Sub(req.at) >= freshCursorPeerRetention {
+			delete(ls.freshCursorPeers, k)
+		}
+	}
+	if ls.freshCursorPeers == nil {
+		ls.freshCursorPeers = make(map[string]*freshCursorRequest)
+	}
+	ls.freshCursorPeers[key] = &freshCursorRequest{at: now}
+}
+
+// noteFreshCursorProgressLocked counts fresh-cursor requests made since the
+// local tip last advanced and warns when they reach
+// freshCursorStallWarnRequests.
+func (ls *LedgerState) noteFreshCursorProgressLocked() {
+	localTip := ls.PrimaryChainTip()
+	if localTip.BlockNumber != ls.freshCursorStallTip.BlockNumber ||
+		localTip.Point.Slot != ls.freshCursorStallTip.Point.Slot {
+		ls.freshCursorStallTip = localTip
+		ls.freshCursorStallRequests = 0
+	}
+	ls.freshCursorStallRequests++
+	if ls.freshCursorStallRequests == freshCursorStallWarnRequests {
+		ls.config.Logger.Warn(
+			"chain switch fresh chainsync cursor requests are not advancing the local tip",
+			"component",
+			"ledger",
+			"requests",
+			ls.freshCursorStallRequests,
+			"local_tip_slot",
+			localTip.Point.Slot,
+			"local_tip_block",
+			localTip.BlockNumber,
+		)
+	}
+}
+
+func (ls *LedgerState) clearFreshCursorRequestedLocked(
+	connId ouroboros.ConnectionId,
+) {
+	delete(ls.freshCursorPeers, netAddrString(connId.RemoteAddr))
 }
 
 func (ls *LedgerState) chainSwitchObservedTipForConnection(
@@ -3965,6 +4129,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeaderWithPending(
 	// released. Idempotent per chain. See
 	// chain.Chain.PublishPendingChainUpdates.
 	pending.drainChain(ls.chain)
+	ls.clearFreshCursorRequestedLocked(e.ConnectionId)
 	// Detect connection switch so pipeline ownership is handed off
 	// even when the first post-switch event is a header rather than
 	// a rollback. Without this, headers from a newly-selected active

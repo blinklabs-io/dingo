@@ -11518,6 +11518,305 @@ func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
 	)
 }
 
+// The fresh-cursor close reconnects the peer under a new connection ID, so
+// the per-connection resync coalescing never matches the next request. A
+// peer that delivers no header in between must not be closed again, or a
+// node far behind cycles through its peers without ever fetching a block.
+func TestHandleChainSwitchEventDoesNotRepeatFreshCursorBeforeHeaders(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	reconnectedConnId := testChainsyncConnId(6001, 3002)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	switchEvent := func(
+		connId ouroboros.ConnectionId,
+	) chainselection.ChainSwitchEvent {
+		return chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      connId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		}
+	}
+	needsFreshCursor := func(connId ouroboros.ConnectionId) bool {
+		ls.chainsyncMutex.Lock()
+		defer ls.chainsyncMutex.Unlock()
+		return ls.chainSwitchNeedsFreshCursorLocked(switchEvent(connId), connId)
+	}
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		switchEvent(peerConnId),
+	))
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"first switch must request a fresh cursor",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	require.Equal(t, peerConnId, resync.ConnectionId)
+	require.Equal(
+		t,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		resync.Reason,
+	)
+
+	assert.False(
+		t,
+		needsFreshCursor(reconnectedConnId),
+		"a reconnected peer that delivered no header must not be closed again",
+	)
+	assert.True(
+		t,
+		needsFreshCursor(previousConnId),
+		"another peer is unaffected by this peer's pending fresh cursor",
+	)
+
+	// Any header reaching the ledger from the peer shows its new cursor is
+	// live. The fixture cannot fetch blocks, so the header's own outcome is
+	// irrelevant; only the queue it may leave behind is cleared.
+	_ = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: reconnectedConnId,
+		BlockHeader:  mockHeader{slot: 150, blockNumber: 5},
+		Point:        ocommon.Point{Slot: 150},
+	})
+	ls.chainsyncMutex.Lock()
+	ls.chainsyncBlockfetchMutex.Lock()
+	ls.clearQueuedHeaders()
+	ls.blockfetchRequestRangeCleanup()
+	ls.chainsyncBlockfetchMutex.Unlock()
+	ls.chainsyncMutex.Unlock()
+	assert.True(
+		t,
+		needsFreshCursor(reconnectedConnId),
+		"a peer that delivered a header may be given a fresh cursor again",
+	)
+}
+
+// Far behind the network, the selected peer still has many headers to
+// deliver, and a cursor that has moved past the local tip is caught by the
+// header handler's mismatch resync from those headers. Only a peer near its
+// advertised tip, which may stay silent, is closed speculatively.
+func TestChainSwitchNeedsFreshCursorLeavesStreamingPeerToHeaderPath(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	chainManager, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := chainManager.PrimaryChain()
+	require.NoError(t, testChain.AddLocalBlock(&mockBabbageBlock{slot: 100}))
+	localTip := testChain.Tip()
+
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	fallbackConnId := testChainsyncConnId(6000, 3003)
+	observed := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			localTip.Point.Slot+100,
+			[]byte("peer-frontier"),
+		),
+		BlockNumber: localTip.BlockNumber + 5,
+	}
+	var fallbackSyncTarget ochainsync.Tip
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetPeerObservedTipFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return observed, sameConnectionId(connId, fallbackConnId)
+			},
+			GetPeerSyncTargetFunc: func(
+				connId ouroboros.ConnectionId,
+			) (ochainsync.Tip, bool) {
+				return fallbackSyncTarget,
+					sameConnectionId(connId, fallbackConnId)
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name        string
+		blocksAhead uint64
+		want        bool
+	}{
+		{
+			name:        "at the mismatch resync threshold",
+			blocksAhead: headerMismatchResyncThreshold,
+			want:        false,
+		},
+		{
+			name:        "one block short of the threshold",
+			blocksAhead: headerMismatchResyncThreshold - 1,
+			want:        true,
+		},
+		{name: "at its advertised tip", blocksAhead: 0, want: true},
+	} {
+		advertised := ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				observed.Point.Slot+tc.blocksAhead*20,
+				[]byte("peer-advertised"),
+			),
+			BlockNumber: observed.BlockNumber + tc.blocksAhead,
+		}
+		fallbackSyncTarget = advertised
+		assert.Equal(
+			t,
+			tc.want,
+			ls.chainSwitchNeedsFreshCursorLocked(
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: previousConnId,
+					NewConnectionId:      peerConnId,
+					NewTip:               advertised,
+					NewObservedTip:       observed,
+					NewObservedTipSet:    true,
+				},
+				peerConnId,
+			),
+			"selected peer %s",
+			tc.name,
+		)
+		assert.Equal(
+			t,
+			tc.want,
+			ls.chainSwitchNeedsFreshCursorLocked(
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: previousConnId,
+					NewConnectionId:      peerConnId,
+				},
+				fallbackConnId,
+			),
+			"fallback peer %s",
+			tc.name,
+		)
+	}
+}
+
+// The loop reported against v0.73.2: each fresh-cursor close disconnects the
+// best peer, the selector moves to the next one, and every peer reconnects
+// under a new connection ID. However many rounds that runs, each peer must
+// be closed once, and the stall must be logged.
+func TestHandleChainSwitchEventCyclingPeersRequestsOneFreshCursorEach(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	logs := &syncSafeBuffer{}
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(logs, nil)),
+		},
+	}
+
+	remotePorts := []int{3001, 3002, 3003}
+	const rounds = 4
+	for round := range rounds {
+		for i, port := range remotePorts {
+			previousPort := remotePorts[(i+len(remotePorts)-1)%len(remotePorts)]
+			ls.handleChainSwitchEvent(event.NewEvent(
+				chainselection.ChainSwitchEventType,
+				chainselection.ChainSwitchEvent{
+					PreviousConnectionId: testChainsyncConnId(
+						6000+round,
+						previousPort,
+					),
+					NewConnectionId: testChainsyncConnId(6000+round, port),
+					NewTip: ochainsync.Tip{
+						Point: ocommon.NewPoint(
+							200,
+							[]byte("peer-tip"),
+						),
+						BlockNumber: 10,
+					},
+				},
+			))
+		}
+	}
+
+	// The subscription delivers in publish order, so every request made
+	// above is received before this barrier.
+	const barrierReason = "test barrier"
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{Reason: barrierReason},
+		),
+	)
+	var requestedPeers []string
+	for {
+		evt := testutil.RequireReceive(
+			t,
+			resyncCh,
+			testutil.AsyncWait,
+			"resync barrier",
+		)
+		resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		if resync.Reason == barrierReason {
+			break
+		}
+		require.Equal(
+			t,
+			event.ChainsyncResyncReasonChainSwitchCursorAhead,
+			resync.Reason,
+		)
+		requestedPeers = append(
+			requestedPeers,
+			netAddrString(resync.ConnectionId.RemoteAddr),
+		)
+	}
+	assert.ElementsMatch(
+		t,
+		[]string{"127.0.0.1:3001", "127.0.0.1:3002", "127.0.0.1:3003"},
+		requestedPeers,
+		"each peer is closed for a fresh cursor once, however often it is reselected",
+	)
+
+	out := logs.String()
+	assert.Equal(
+		t,
+		1,
+		strings.Count(
+			out,
+			"fresh chainsync cursor requests are not advancing the local tip",
+		),
+		"the stall is warned once per episode",
+	)
+	assert.Equal(
+		t,
+		len(remotePorts),
+		strings.Count(
+			out,
+			"has delivered no header since its fresh chainsync cursor",
+		),
+		"a suppressed repeat is reported once per peer, not on every switch",
+	)
+}
+
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {
