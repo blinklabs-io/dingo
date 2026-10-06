@@ -2425,7 +2425,13 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
-	if cleanupErr := ls.cleanupOrphanedBlobs(currentTip.Point.Slot); cleanupErr != nil {
+	if !ls.rewindPrimaryChainForOrphanCleanup(currentTip.Point) {
+		ls.config.Logger.Warn(
+			"skipping orphaned blob cleanup: primary chain could not be rewound to the metadata tip",
+			"tip_slot",
+			currentTip.Point.Slot,
+		)
+	} else if cleanupErr := ls.cleanupOrphanedBlobs(currentTip.Point.Slot); cleanupErr != nil {
 		// Log but don't fail - partial cleanup is acceptable
 		ls.config.Logger.Warn(
 			"failed to clean up orphaned blobs",
@@ -2439,6 +2445,53 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 		))
 	}
 	return committedRollbackErr
+}
+
+// rewindPrimaryChainForOrphanCleanup rewinds the primary chain to the
+// metadata tip before cleanupOrphanedBlobs deletes the blocks above it. The
+// chain manager loads its tip from the newest stored block before recovery
+// runs, so deleting those blocks underneath it leaves the chain naming a block
+// that no longer exists, and every later add or iteration fails. Rewinding
+// through the manager deletes the same blocks and moves its tip with them.
+//
+// It reports false when the chain is ahead but could not be rewound (for
+// example a gap beyond the security parameter). The caller then skips the blob
+// trim: a chain ahead of the ledger is a forward extension the ledger replays
+// (see reconcilePrimaryChainTipWithLedgerTip), while a trimmed chain is not.
+func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
+	tip ocommon.Point,
+) bool {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return true
+	}
+	tipBeforeRewind := ls.chain.Tip().Point
+	if tipBeforeRewind.Slot <= tip.Slot {
+		return true
+	}
+	// Same K selection as reconcilePrimaryChainTipWithLedgerTip: recovery
+	// can run before or after node startup has called SetLedger.
+	var rewindErr error
+	if ls.config.ChainManager.SecurityParamConfigured() {
+		rewindErr = ls.config.ChainManager.RewindPrimaryChainToPoint(tip)
+	} else {
+		rewindErr = ls.config.ChainManager.RewindPrimaryChainAtStartup(tip)
+	}
+	// A truncation outside the rollback paths must disarm the continuation
+	// audit itself; see settleAuditAfterRewind.
+	if rewindErr == nil ||
+		primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
+		ls.disarmContinuationAudit()
+	}
+	if rewindErr != nil {
+		ls.config.Logger.Warn(
+			"failed to rewind primary chain to metadata tip during recovery",
+			"error", rewindErr,
+			"chain_tip_slot", tipBeforeRewind.Slot,
+			"metadata_tip_slot", tip.Slot,
+		)
+		return false
+	}
+	return true
 }
 
 // orphanedBlock holds information needed to delete an orphaned block from blob store.

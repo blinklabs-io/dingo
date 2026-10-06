@@ -2143,7 +2143,12 @@ only ever ahead.
 
 That asymmetry is deliberate, because only one direction is recoverable.
 A blob store ahead of the metadata tip holds orphaned blocks that startup
-trims (`LedgerState.cleanupOrphanedBlobs`). A blob store behind the metadata tip
+trims (`LedgerState.cleanupOrphanedBlobs`). The chain manager has already
+loaded its tip from the newest stored block by then, so recovery first rewinds
+the primary chain to the metadata tip through the chain manager
+(`rewindPrimaryChainForOrphanCleanup`); when that rewind is refused, for example
+deeper than K, the trim is skipped and the chain stays a forward extension the
+ledger replays. A blob store behind the metadata tip
 is missing blocks the ledger has already applied, and nothing local can rebuild
 them, so `reconcilePrimaryChainTipWithLedgerTip` rolls the ledger back to the
 blob tip — a rollback whose depth is set by however far the two stores drifted,
