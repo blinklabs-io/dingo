@@ -47,7 +47,8 @@ type headerValidationError struct {
 	BlockPoint ocommon.Point
 	Cause      error
 	// Source is the connection that supplied the block, or the zero value when
-	// it is not known (a marker restored after restart carries none).
+	// it is not known. A persisted marker restores only RemoteAddr, not the
+	// original connection lifetime or its LocalAddr.
 	Source ouroboros.ConnectionId
 }
 
