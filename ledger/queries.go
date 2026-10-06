@@ -35,6 +35,7 @@ import (
 	gshelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
 	protocol "github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -532,9 +533,9 @@ func (ls *LedgerState) queryInTxn(
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart()
 	case *olocalstatequery.ChainBlockNoQuery:
-		return ls.queryChainBlockNo(txn)
+		return ls.queryChainBlockNo(at, txn)
 	case *olocalstatequery.ChainPointQuery:
-		return ls.queryChainPoint(txn)
+		return ls.queryChainPoint(at, txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
@@ -580,8 +581,11 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 	return ret, nil
 }
 
-func (ls *LedgerState) queryChainBlockNo(txn *database.Txn) (any, error) {
-	tip, err := ls.queryTip(txn)
+func (ls *LedgerState) queryChainBlockNo(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	tip, err := ls.queryTip(at, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -592,18 +596,37 @@ func (ls *LedgerState) queryChainBlockNo(txn *database.Txn) (any, error) {
 	return []any{1, tip.BlockNumber}, nil
 }
 
-func (ls *LedgerState) queryChainPoint(txn *database.Txn) (any, error) {
-	tip, err := ls.queryTip(txn)
+func (ls *LedgerState) queryChainPoint(
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	tip, err := ls.queryTip(at, txn)
 	if err != nil {
 		return nil, err
 	}
 	return tip.Point, nil
 }
 
-// queryTip returns the tip a chain-tip query answers for: the held
-// transaction's own tip when there is one, so a QueryView reports the tip it
-// was acquired at, and the live in-memory tip otherwise.
-func (ls *LedgerState) queryTip(txn *database.Txn) (ochainsync.Tip, error) {
+// queryTip returns the point a chain-tip query answers for. A pinned view
+// reports its requested point; an unpinned view reports its snapshot tip; a
+// direct unpinned query reports the live in-memory tip.
+func (ls *LedgerState) queryTip(
+	at QueryPoint,
+	txn *database.Txn,
+) (ochainsync.Tip, error) {
+	if at.pinned() {
+		metadata, err := database.BlockMetadataByPointLocalTxn(
+			txn,
+			ocommon.NewPoint(at.Slot, at.Hash),
+		)
+		if err != nil {
+			return ochainsync.Tip{}, err
+		}
+		return ochainsync.Tip{
+			Point:       ocommon.NewPoint(at.Slot, at.Hash),
+			BlockNumber: metadata.Height,
+		}, nil
+	}
 	if txn == nil {
 		return cloneTip(ls.loadTipSnapshot().currentTip), nil
 	}

@@ -3825,7 +3825,7 @@ func TestQueryChainBlockNoAtGenesis(t *testing.T) {
 
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo(nil)
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// WithOrigin at genesis: [0]
 	assert.Equal(t, []any{0}, result)
@@ -3843,7 +3843,7 @@ func TestQueryChainBlockNoAtBlock(t *testing.T) {
 		BlockNumber: 12345,
 	}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo(nil)
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// WithOrigin at block: [1, blockNo]
 	assert.Equal(t, []any{1, uint64(12345)}, result)
@@ -3861,7 +3861,7 @@ func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
 		BlockNumber: 0,
 	}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo(nil)
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// Cardano block numbers are 0-indexed, so block 0 is not origin.
 	assert.Equal(t, []any{1, uint64(0)}, result)

@@ -4213,9 +4213,13 @@ buffer entry -- and a purely slot-keyed lookup has no notion of "applied"
 at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
 (rolled back after acquisition, or never on this node's chain at all).
 
-**Acquired ledger snapshots.** Every `Acquire` -- specific point, volatile tip
-or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits (inside the
-caller's deadline) for any epoch-boundary job, opens a coordinated read
+**Acquired ledger snapshots.** A specific-point Acquire pins the requested
+point, a volatile-tip Acquire pins the coordinated snapshot's tip, and an
+immutable-tip Acquire resolves and pins the primary-chain point `k` blocks
+behind the applied ledger tip. The applied tip and its era are captured
+together, and the chain lookup stays anchored to that exact point while the
+header chain can advance. Each calls `LedgerState.AcquireQueryView`, which waits (inside
+the caller's deadline) for any epoch-boundary job and opens a coordinated read
 snapshot
 (`database.NewReadSnapshotContext`, whose blob and metadata views are fixed at
 one commit boundary), and validates the point against it with
@@ -4228,7 +4232,8 @@ is answered by `QueryView.Query`, which runs the ordinary query handlers
 through that held transaction: a block applied, a rollback or a retention
 prune committed after `Acquire` is invisible to the session, and the point
 validated at `Acquire` stays answerable. Chain-tip queries
-(`GetChainPoint`, `GetChainBlockNo`) read the snapshot's own tip. Queries the
+(`GetChainPoint`, `GetChainBlockNo`) report a pinned specific or immutable
+point when present and otherwise read the snapshot's own tip. Queries the
 ledger otherwise answers from its in-memory consensus snapshot for an unpinned
 acquire -- current epoch number, era, current protocol parameters, the epoch
 `GetStakeSnapshots` reports, and the tip and current era of `GetEraHistory` (pinned or not) --
@@ -4250,10 +4255,12 @@ one metadata read connection free for the rest of the node; once the cap is
 reached an `Acquire` waits up to five seconds for a snapshot to close and then
 fails. It is closed on `Release`,
 on re-`Acquire` (before the replacement opens, so a connection never needs a
-second admission slot; a failed `Acquire` leaves the session registered with a
-closed view), on the connection closing, and on
+second admission slot; a failed `Acquire` returns the protocol to idle with no
+session), on the connection closing, and on
 `Ouroboros.Close`, which shutdown calls after connections drain and before the
-ledger and database close. A snapshot still held after
+ledger and database close. Connection close also cancels an Acquire waiting
+for snapshot admission, and the Acquire must still own its in-flight token
+before it can install the opened view. A snapshot still held after
 `localStateQueryViewMaxLifetime` (default `5m`, env
 `DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
 and logged with its age and idle time; the session stays recorded so its next
