@@ -512,6 +512,9 @@ func TestRunnerAddColumnReplayVerifiesDefinition(t *testing.T) {
 		{"identical", "integer NOT NULL DEFAULT 0", "integer NOT NULL DEFAULT 0", false},
 		{"boolean spelling", "boolean NOT NULL DEFAULT false", "boolean NOT NULL DEFAULT FALSE", false},
 		{"nullable no default", "text", "text", false},
+		{"quoted whitespace default", "text NOT NULL DEFAULT 'needs review'", "text NOT NULL DEFAULT 'needs review'", false},
+		{"escaped quoted whitespace default", "text NOT NULL DEFAULT 'it''s under review'", "text NOT NULL DEFAULT 'it''s under review'", false},
+		{"quoted literal case", "text NOT NULL DEFAULT 'abc'", "text NOT NULL DEFAULT 'ABC'", true},
 		{"declared not null, existing nullable", "integer DEFAULT 0", "integer NOT NULL DEFAULT 0", true},
 		{"declared nullable, existing not null", "integer NOT NULL DEFAULT 0", "integer DEFAULT 0", true},
 		{"declared default, existing none", "integer NOT NULL", "integer NOT NULL DEFAULT 0", true},
@@ -544,6 +547,16 @@ func TestRunnerAddColumnReplayVerifiesDefinition(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestNormalizeColumnDefaultPreservesPostgresStringLiteral(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "A::B", normalizeColumnDefault("('A::B'::text)"))
+	require.NotEqual(
+		t,
+		normalizeColumnDefault("'ABC'::text"),
+		normalizeColumnDefault("'abc'::text"),
+	)
 }
 
 // Every ALTER TABLE ADD COLUMN the shipped registries produce has to be

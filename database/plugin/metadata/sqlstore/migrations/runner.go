@@ -746,8 +746,12 @@ var columnTypeAliases = map[string]string{
 
 var columnTypeArgsPattern = regexp.MustCompile(`\s*\([^)]*\)`)
 
+var sqlFieldPattern = regexp.MustCompile(
+	`[^\s'"]*(?:'(?:''|[^'])*'|"(?:""|[^"])*")[^\s'"]*|[^\s]+`,
+)
+
 func splitColumnDefinition(definition string) (string, []string) {
-	fields := strings.Fields(definition)
+	fields := splitSQLFields(definition)
 	end := len(fields)
 	for index, field := range fields {
 		name, _, _ := strings.Cut(field, "(")
@@ -757,6 +761,17 @@ func splitColumnDefinition(definition string) (string, []string) {
 		}
 	}
 	return strings.Join(fields[:end], " "), fields[end:]
+}
+
+// splitSQLFields splits a column definition on whitespace outside quoted SQL
+// literals. The replay guard only needs individual constraint tokens, but a
+// DEFAULT string remains one value even when it contains spaces.
+func splitSQLFields(value string) []string {
+	fields := sqlFieldPattern.FindAllString(value, -1)
+	if fields == nil {
+		return []string{}
+	}
+	return fields
 }
 
 func declaredColumnType(definition string) string {
@@ -785,13 +800,10 @@ func declaredColumnConstraints(
 			if i+1 >= len(tokens) {
 				return false, "", false, false
 			}
-			value := tokens[i+1]
-			// A quoted literal containing whitespace was split by Fields.
-			if strings.HasPrefix(value, "'") &&
-				(len(value) < 2 || !strings.HasSuffix(value, "'")) {
+			if !sqlQuotesBalanced(tokens[i+1]) {
 				return false, "", false, false
 			}
-			dflt, hasDefault = value, true
+			dflt, hasDefault = tokens[i+1], true
 			i++
 		default:
 			return false, "", false, false
@@ -800,17 +812,56 @@ func declaredColumnConstraints(
 	return notNull, dflt, hasDefault, true
 }
 
+func findOutsideSQLQuotes(value, target string) (int, bool) {
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		current := value[index]
+		if quote != 0 {
+			if current == quote {
+				if index+1 < len(value) && value[index+1] == quote {
+					index++
+				} else {
+					quote = 0
+				}
+			}
+			continue
+		}
+		if current == '\'' || current == '"' {
+			quote = current
+			continue
+		}
+		if strings.HasPrefix(value[index:], target) {
+			return index, true
+		}
+	}
+	return -1, quote == 0
+}
+
+func sqlQuotesBalanced(value string) bool {
+	_, balanced := findOutsideSQLQuotes(value, "\x00")
+	return balanced
+}
+
 // normalizeColumnDefault reduces the spellings the three catalogs report for
 // one default ('x'::text, "false", 0) to a comparable form.
 func normalizeColumnDefault(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	value, _, _ = strings.Cut(value, "::")
-	value = strings.Trim(value, "'\"()")
-	switch value {
+	value = strings.TrimSpace(value)
+	if cast, _ := findOutsideSQLQuotes(value, "::"); cast >= 0 {
+		value = value[:cast]
+	}
+	value = strings.Trim(value, "()")
+	if len(value) >= 2 &&
+		((value[0] == '\'' && value[len(value)-1] == '\'') ||
+			(value[0] == '"' && value[len(value)-1] == '"')) {
+		return value[1 : len(value)-1]
+	}
+	switch strings.ToLower(value) {
 	case "true":
 		return "1"
 	case "false":
 		return "0"
+	case "null", "current_date", "current_time", "current_timestamp":
+		return strings.ToLower(value)
 	}
 	return value
 }
