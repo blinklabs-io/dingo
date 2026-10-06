@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/safedecode"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/stretchr/testify/require"
 )
@@ -131,4 +132,47 @@ func TestTransaction(t *testing.T) {
 		require.ErrorIs(t, err, safedecode.ErrTrailingData)
 		require.Nil(t, tx)
 	})
+}
+
+// Era constructors differ in whether the decoded value keeps the consumed
+// prefix or the caller's whole slice, so trailing data must be rejected in
+// every era rather than inferred from the stored CBOR length.
+func TestTransactionRejectsTrailingDataInEveryEra(t *testing.T) {
+	t.Parallel()
+
+	body := map[uint]any{
+		0: []any{[]any{make([]byte, 32), uint64(0)}},
+		1: []any{[]any{append([]byte{0x61}, make([]byte, 28)...), uint64(1_000_000)}},
+		2: uint64(200_000),
+		3: uint64(100),
+	}
+	shelleyStyle, err := cbor.Encode([]any{body, map[uint]any{}, nil})
+	require.NoError(t, err)
+	alonzoStyle, err := cbor.Encode([]any{body, map[uint]any{}, true, nil})
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name   string
+		txType uint
+		valid  []byte
+	}{
+		{"shelley", ledger.TxTypeShelley, shelleyStyle},
+		{"allegra", ledger.TxTypeAllegra, shelleyStyle},
+		{"mary", ledger.TxTypeMary, shelleyStyle},
+		{"alonzo", ledger.TxTypeAlonzo, alonzoStyle},
+		{"babbage", ledger.TxTypeBabbage, alonzoStyle},
+		{"conway", ledger.TxTypeConway, alonzoStyle},
+		{"dijkstra", ledger.TxTypeDijkstra, alonzoStyle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx, err := safedecode.Transaction(tc.txType, tc.valid)
+			require.NoError(t, err)
+			require.NotNil(t, tx)
+			padded := append(append([]byte{}, tc.valid...), 0)
+			tx, err = safedecode.Transaction(tc.txType, padded)
+			require.ErrorIs(t, err, safedecode.ErrTrailingData)
+			require.Nil(t, tx)
+		})
+	}
 }
