@@ -1018,6 +1018,27 @@ func (s *State) UpdateClientTipWithoutDedup(
 	return s.updateTrackedClientTip(connId, point, tip)
 }
 
+// RecordClientDelivery counts a header delivered by a tracked client and
+// refreshes its stall clock without moving its cursor or tip. The ingress path
+// calls it for headers that never reach ledger admission (cross-peer
+// duplicates, non-driver peers, apply-withheld peers), so a peer that is
+// delivering but suppressed is not recycled as stalled. It reports whether the
+// client was tracked.
+func (s *State) RecordClientDelivery(connId ouroboros.ConnectionId) bool {
+	s.clientConnIdMutex.Lock()
+	defer s.clientConnIdMutex.Unlock()
+	tc, exists := s.trackedClients[connId]
+	if !exists {
+		return false
+	}
+	tc.LastActivity = s.now()
+	tc.HeadersRecv++
+	if tc.Status == ClientStatusStalled {
+		tc.Status = ClientStatusSyncing
+	}
+	return true
+}
+
 // UpdateClientRollback updates an existing client's cursor, advertised tip,
 // activity, and syncing status atomically. Rollbacks do not count as delivered
 // headers or enter the header deduplication cache.

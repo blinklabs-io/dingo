@@ -309,6 +309,38 @@ func TestAddClientConnId_DuplicatePreservesState(
 	)
 }
 
+func TestRecordClientDeliveryRefreshesStallClockWithoutMovingCursor(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   5,
+		StallTimeout: 200 * time.Millisecond,
+	})
+	conn := newTestConnId(1)
+	s.AddClientConnId(conn)
+	require.False(t, s.RecordClientDelivery(newTestConnId(99)))
+	point := ocommon.NewPoint(100, []byte("ha"))
+	require.True(t, s.UpdateClientTipWithoutDedup(
+		conn, point, ochainsync.Tip{Point: point},
+	))
+
+	deadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		require.True(t, s.RecordClientDelivery(conn))
+		require.Empty(t, s.CheckStalledClients())
+		time.Sleep(20 * time.Millisecond)
+	}
+	tc := s.GetTrackedClient(conn)
+	require.NotNil(t, tc)
+	require.Equal(t, uint64(100), tc.Cursor.Slot)
+	require.Greater(t, tc.HeadersRecv, uint64(1))
+
+	require.Eventually(t, func() bool {
+		return len(s.CheckStalledClients()) == 1
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
 func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {
 	bus := newTestEventBus(t)
 	cfg := chainsync.Config{
