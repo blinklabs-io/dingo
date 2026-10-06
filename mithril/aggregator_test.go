@@ -372,7 +372,7 @@ func TestAggregatorDoesNotCertifyBelowQuorum(t *testing.T) {
 	t.Parallel()
 	// Needing more indices than one signer can ever win keeps a lone signer
 	// below quorum.
-	f := newAggregatorFixture(t, ProtocolParameters{K: 100, M: 40, PhiF: 1})
+	f := newAggregatorFixture(t, ProtocolParameters{K: 40, M: 40, PhiF: 0.5})
 	signers := testSigners(3, 100)
 	snap := f.newSnapshot(2)
 	f.registerAll(signers)
@@ -601,7 +601,7 @@ func postCode(f *aggregatorFixture, req registerSignatureRequest) int {
 
 func TestAggregatorSignatureValidation(t *testing.T) {
 	t.Parallel()
-	f := newAggregatorFixture(t, ProtocolParameters{K: 100, M: 40, PhiF: 1})
+	f := newAggregatorFixture(t, ProtocolParameters{K: 40, M: 40, PhiF: 0.5})
 	signers := testSigners(2, 100)
 	outsider := newTestSTMSigner(9, 100)
 	snap := f.newSnapshot(2)
@@ -782,8 +782,11 @@ func TestNewAggregatorValidatesConfig(t *testing.T) {
 		"bad network": func(c *AggregatorConfig) { c.Network = "../x" },
 		"zero k":      func(c *AggregatorConfig) { c.Parameters.K = 0 },
 		"zero m":      func(c *AggregatorConfig) { c.Parameters.M = 0 },
-		"bad phi":     func(c *AggregatorConfig) { c.Parameters.PhiF = 1.5 },
-		"no store":    func(c *AggregatorConfig) { c.Store = nil },
+		"k greater than m": func(c *AggregatorConfig) {
+			c.Parameters.K = c.Parameters.M + 1
+		},
+		"bad phi":  func(c *AggregatorConfig) { c.Parameters.PhiF = 1.5 },
+		"no store": func(c *AggregatorConfig) { c.Store = nil },
 		"short operator token": func(c *AggregatorConfig) {
 			c.OperatorToken = "short"
 		},

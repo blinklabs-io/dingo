@@ -135,8 +135,11 @@ func NewAggregator(
 		return nil, errors.New("aggregator epoch must be at least 1")
 	case len(cfg.GenesisSigningKey) != ed25519.PrivateKeySize:
 		return nil, errors.New("aggregator requires a genesis signing key")
-	case cfg.Parameters.K == 0 || cfg.Parameters.M == 0:
-		return nil, errors.New("aggregator parameters k and m must be positive")
+	case cfg.Parameters.K == 0 || cfg.Parameters.M == 0 ||
+		cfg.Parameters.K > cfg.Parameters.M:
+		return nil, errors.New(
+			"aggregator parameters k and m must be positive and k must not exceed m",
+		)
 	case !(cfg.Parameters.PhiF > 0 && cfg.Parameters.PhiF <= 1):
 		return nil, fmt.Errorf(
 			"aggregator parameter phi_f=%v must be in (0, 1]",
