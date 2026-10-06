@@ -1069,7 +1069,6 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
 	o.releaseBlockfetchForwardOverflow(connId)
-	o.blockfetchRangeAdmission.releaseConn(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)

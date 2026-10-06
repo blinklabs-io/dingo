@@ -38,6 +38,12 @@ const (
 // connection and across the process. A reservation is taken before the range's
 // iterator and sender goroutine exist, so a saturated server rejects a request
 // without allocating either.
+//
+// A reservation is released only by the range that holds it, never by a
+// connection-closed event: the sender's iterator stays live until the sender
+// exits, and the event carries only a ConnectionId, which a replacement
+// connection may already reuse. The sender checks connection shutdown between
+// blocks, so a closed connection's reservations drain promptly.
 type blockfetchRangeAdmission struct {
 	mu         sync.Mutex
 	maxPerConn int
@@ -46,12 +52,9 @@ type blockfetchRangeAdmission struct {
 	conns      map[string]*blockfetchConnRanges
 }
 
-// blockfetchConnRanges is the in-flight range count of one connection. closed
-// is set when the connection is torn down so that reservations still held by
-// a lagging sender goroutine cannot be counted a second time.
+// blockfetchConnRanges is the in-flight range count of one connection.
 type blockfetchConnRanges struct {
 	active int
-	closed bool
 }
 
 type blockfetchRangeAdmitResult int
@@ -106,9 +109,6 @@ func (a *blockfetchRangeAdmission) reserve(
 		once.Do(func() {
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			if cr.closed {
-				return
-			}
 			cr.active--
 			a.total--
 			if cr.active == 0 && a.conns[key] == cr {
@@ -116,23 +116,4 @@ func (a *blockfetchRangeAdmission) reserve(
 			}
 		})
 	}, blockfetchRangeAdmitted
-}
-
-// releaseConn drops every reservation held by connId immediately. It is called
-// when the connection closes, so capacity does not stay occupied for as long
-// as a sender goroutine takes to notice.
-func (a *blockfetchRangeAdmission) releaseConn(
-	connId ouroboros.ConnectionId,
-) {
-	key := connIdKey(connId)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	cr := a.conns[key]
-	if cr == nil {
-		return
-	}
-	a.total -= cr.active
-	cr.active = 0
-	cr.closed = true
-	delete(a.conns, key)
 }

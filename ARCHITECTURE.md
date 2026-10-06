@@ -834,10 +834,11 @@ at most the current range plus the previous sender's exit; the per-connection
 bound does not limit an honest pipelining client and fires only if that
 dispatch guarantee is lost. Per-connection saturation feeds the stuck-peer
 valve; global saturation does not, so an honest peer is not disconnected for
-the server's load. The sender goroutine releases its slot on
-completion or error, and `HandleConnClosedEvent` releases every slot the
-connection still holds, so a lagging sender cannot keep capacity occupied or
-release it twice.
+the server's load. Only the sender goroutine releases its slot, on
+completion, error, or connection shutdown, which it checks between blocks. A
+connection-closed event does not release slots: the sender's iterator is live
+until it exits, and the event's `ConnectionId` may already belong to a
+replacement connection.
 
 When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the

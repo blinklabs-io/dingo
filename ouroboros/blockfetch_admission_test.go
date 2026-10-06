@@ -56,30 +56,14 @@ func TestBlockfetchRangeAdmission_PerConnAndGlobalBounds(t *testing.T) {
 	assert.Equal(t, blockfetchRangeAdmitted, res)
 }
 
-func TestBlockfetchRangeAdmission_ReleaseConnDropsReservations(t *testing.T) {
-	t.Parallel()
-
-	a := newBlockfetchRangeAdmission(4, 4)
-	c1, c2 := testConnIdWithPort(4001), testConnIdWithPort(4002)
-	late, _ := a.reserve(c1)
-	_, _ = a.reserve(c1)
-	other, _ := a.reserve(c2)
-
-	a.releaseConn(c1)
-	total, conn := a.counts(c1)
-	assert.Equal(t, 1, total, "only the other connection's range remains")
-	assert.Zero(t, conn)
-
-	// A sender goroutine that lags the close must not release again.
-	late()
-	total, _ = a.counts(c1)
-	assert.Equal(t, 1, total)
-	other()
-	total, _ = a.counts(c2)
-	assert.Zero(t, total)
-}
-
-func TestBlockfetchRangeAdmission_ConnClosedEventReleases(t *testing.T) {
+// A connection-closed event must not free reservations still held by sender
+// goroutines: their iterators are live until each sender exits, so freeing the
+// slot early lets repeated disconnects exceed the global bound. The event is
+// also keyed only by ConnectionId, so a delayed one must not clear the
+// reservations of a replacement connection that reuses the same ID.
+func TestBlockfetchRangeAdmission_ConnClosedEventKeepsLiveSendersCharged(
+	t *testing.T,
+) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -88,7 +72,9 @@ func TestBlockfetchRangeAdmission_ConnClosedEventReleases(t *testing.T) {
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	peer := testConnIdWithPort(4001)
-	_, res := o.blockfetchRangeAdmission.reserve(peer)
+	oldSender, res := o.blockfetchRangeAdmission.reserve(peer)
+	require.Equal(t, blockfetchRangeAdmitted, res)
+	replacement, res := o.blockfetchRangeAdmission.reserve(peer)
 	require.Equal(t, blockfetchRangeAdmitted, res)
 
 	o.HandleConnClosedEvent(event.NewEvent(
@@ -97,8 +83,18 @@ func TestBlockfetchRangeAdmission_ConnClosedEventReleases(t *testing.T) {
 	))
 
 	total, conn := o.blockfetchRangeAdmission.counts(peer)
-	assert.Zero(t, total, "global count after disconnect")
-	assert.Zero(t, conn, "per-connection count after disconnect")
+	assert.Equal(t, 2, total, "global count while senders are live")
+	assert.Equal(t, 2, conn, "per-connection count while senders are live")
+
+	oldSender()
+	total, conn = o.blockfetchRangeAdmission.counts(peer)
+	assert.Equal(t, 1, total, "replacement still charged globally")
+	assert.Equal(t, 1, conn, "replacement still charged per connection")
+
+	replacement()
+	total, conn = o.blockfetchRangeAdmission.counts(peer)
+	assert.Zero(t, total)
+	assert.Zero(t, conn)
 }
 
 func TestNewOuroboros_BlockfetchAdmissionDefaultsAndOverrides(t *testing.T) {
