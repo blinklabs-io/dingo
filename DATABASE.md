@@ -804,8 +804,9 @@ flowchart LR
     Blob --> KV
 ```
 
-`dingo load` from an `http://` or `https://` ImmutableDB root keeps a download
-cache under `<databasePath>/immutable-download`. `staging/` holds chunk triads
+`dingo load` from an HTTPS ImmutableDB root, or HTTP on loopback for local
+development, keeps a download cache under `<databasePath>/immutable-download`.
+Non-loopback HTTP is rejected. `staging/` holds chunk triads
 in flight, each file written as `<name>.part` and renamed when complete;
 `ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
 `ready/` once a later chunk holding a block is copied, so the cache keeps the
