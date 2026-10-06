@@ -87,6 +87,8 @@ type LedgerDelta struct {
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
 	strictConsumedInputs bool
+	closureContextSlot   *uint64
+	stageApplyEvents     func([]TransactionEvent)
 }
 
 func NewLedgerDelta(
@@ -103,6 +105,8 @@ func NewLedgerDelta(
 	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
+	delta.closureContextSlot = nil
+	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -124,6 +128,8 @@ func (d *LedgerDelta) Release() {
 	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
+	d.closureContextSlot = nil
+	d.stageApplyEvents = nil
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -237,6 +243,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				txn,
 				database.BatchedTxIngestOpts{
 					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+					LedgerContextSlot:              d.closureContextSlot,
 					StrictAppliedInputConservation: d.strictConsumedInputs,
 					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 				},
@@ -338,7 +345,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			Rollback:    false,
 		})
 	}
-	if len(applyEvents) > 0 {
+	if len(applyEvents) > 0 && d.stageApplyEvents != nil {
+		d.stageApplyEvents(applyEvents)
+	} else if len(applyEvents) > 0 {
 		txn.AfterCommit(func() {
 			if ls.beforeTransactionApplyPublish != nil {
 				ls.beforeTransactionApplyPublish()

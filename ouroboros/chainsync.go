@@ -1807,7 +1807,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			// connection down anyway. Closing lets peer governance
 			// reconnect with a fresh bearer and updated intersect points.
 			for _, connId := range connIds {
-				o.denyDivergentChainsyncPeer(connId, e.Reason)
+				o.denyDivergentChainsyncPeer(connId, e.Reason) //nolint:contextcheck // address normalization bounds its own DNS lookup
 				if o.chainsyncState != nil {
 					o.chainsyncState.ClearObservedHeaderHistory(connId)
 				}

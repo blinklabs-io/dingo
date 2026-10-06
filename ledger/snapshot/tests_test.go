@@ -1773,3 +1773,121 @@ func TestSaveSnapshotKeepsDegradedPoolStakeInPoolAndEpochRows(t *testing.T) {
 	require.NotNil(t, reloaded.ExcludedActiveStake)
 	require.Equal(t, degradedStake, uint64(*reloaded.ExcludedActiveStake))
 }
+
+func TestDijkstraBoundarySnapshotIncludesEnactmentCredits(t *testing.T) {
+	for _, compute := range []bool{false, true} {
+		t.Run(strconv.FormatBool(compute), func(t *testing.T) {
+			db := setupTestDB(t)
+			seedEpochs(t, db, []models.Epoch{
+				{
+					EpochId:       0,
+					StartSlot:     0,
+					LengthInSlots: 432000,
+					EraId:         eras.ConwayEraDesc.Id,
+				},
+				{
+					EpochId:       1,
+					StartSlot:     432000,
+					LengthInSlots: 432000,
+					EraId:         eras.DijkstraEraDesc.Id,
+				},
+			})
+			require.NoError(
+				t,
+				db.SetEpoch(
+					0,
+					0,
+					nil,
+					nil,
+					nil,
+					nil,
+					eras.ConwayEraDesc.Id,
+					1,
+					432000,
+					nil,
+				),
+			)
+			require.NoError(
+				t,
+				db.SetEpoch(
+					432000,
+					1,
+					nil,
+					nil,
+					nil,
+					nil,
+					eras.DijkstraEraDesc.Id,
+					1,
+					432000,
+					nil,
+				),
+			)
+
+			poolHash := bytes.Repeat([]byte{0x91}, 28)
+			stakingKey := bytes.Repeat([]byte{0x92}, 28)
+			seedPoolAndDelegations(t, db, poolHash, []struct {
+				stakingKey  []byte
+				utxoAmounts []types.Uint64
+			}{
+				{
+					stakingKey:  stakingKey,
+					utxoAmounts: []types.Uint64{40_000_000},
+				},
+			}, 500)
+			mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+			evt := event.EpochTransitionEvent{
+				PreviousEpoch:   0,
+				NewEpoch:        1,
+				BoundarySlot:    432000,
+				SnapshotSlot:    431999,
+				ProtocolVersion: lcommon.ProtocolVersionDijkstra,
+			}
+			txn := db.Transaction(t.Context(), true)
+			// An obsolete Conway-point capture must not survive the era boundary.
+			if compute {
+				preEnactment := evt
+				preEnactment.ProtocolVersion = lcommon.ProtocolVersionConway
+				require.NoError(
+					t,
+					mgr.ComputeEpochBoundarySnapshot(
+						context.Background(),
+						txn,
+						preEnactment,
+					),
+				)
+			}
+			require.NoError(
+				t,
+				db.AddPostSnapshotAccountRewardByCredential(
+					t.Context(),
+					0,
+					stakingKey,
+					1_000_000,
+					evt.BoundarySlot,
+					bytes.Repeat([]byte{0x93}, 32),
+					txn,
+				),
+			)
+			require.NoError(
+				t,
+				mgr.CaptureEpochBoundarySnapshot(
+					context.Background(),
+					txn,
+					evt,
+				),
+			)
+			require.NoError(t, txn.Commit())
+			snapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+			require.NoError(t, err)
+			require.Equal(
+				t,
+				uint64(41_000_000),
+				uint64(snapshot.TotalActiveStake),
+			)
+			inputs, err := db.Metadata().GetRewardStakeInputs(1, nil)
+			require.NoError(t, err)
+			require.Len(t, inputs, 1)
+			require.Equal(t, uint64(41_000_000), uint64(inputs[0].Stake))
+		})
+	}
+}

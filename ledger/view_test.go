@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -7867,6 +7868,86 @@ func repeatByte(length int, b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
+	for _, era := range []eras.EraDesc{eras.ConwayEraDesc, eras.DijkstraEraDesc} {
+		t.Run(era.Name, func(t *testing.T) {
+			f := newTreasuryRolloverFixture(t, 100)
+			address, returnAddress, credential := f.rewardAddress(t, 0xa7)
+			f.addProposal(
+				t,
+				0xa8,
+				501,
+				map[*lcommon.Address]uint64{address: 40},
+				returnAddress,
+				0,
+				true,
+			)
+			var params lcommon.ProtocolParameters = f.currentPParams
+			if era.Id == eras.DijkstraEraDesc.Id {
+				var err error
+				params, err = eras.HardForkDijkstra(nil, f.currentPParams)
+				require.NoError(t, err)
+				f.ls.config.EnableDijkstra = true
+				f.ls.activeEras = eras.ErasWithDijkstra
+			}
+			f.currentEpoch.EraId = era.Id
+			f.ls.currentEra = era
+			f.ls.currentEpoch = f.currentEpoch
+			f.ls.currentPParams = params
+			require.NoError(
+				t,
+				f.db.SetEpoch(
+					500,
+					5,
+					f.currentEpoch.Nonce,
+					f.currentEpoch.EvolvingNonce,
+					f.currentEpoch.CandidateNonce,
+					f.currentEpoch.LastEpochBlockNonce,
+					era.Id,
+					1,
+					100,
+					nil,
+				),
+			)
+			var observed []uint64
+			f.ls.SetEpochBoundarySnapshotStakeHook(
+				func(txn *database.Txn, _ event.EpochTransitionEvent) error {
+					account, err := f.db.GetAccountByCredential(
+						t.Context(),
+						0,
+						credential,
+						false,
+						txn,
+					)
+					if err != nil {
+						return err
+					}
+					observed = append(observed, uint64(account.Reward))
+					return nil
+				},
+			)
+			txn := f.db.Transaction(t.Context(), true)
+			require.NoError(t, txn.Do(func(txn *database.Txn) error {
+				_, err := f.ls.processEpochRollover(
+					t.Context(),
+					txn,
+					f.currentEpoch,
+					era,
+					params,
+					false,
+				)
+				return err
+			}))
+			expected := uint64(0)
+			if era.Id == eras.DijkstraEraDesc.Id {
+				expected = 40
+			}
+			require.Equal(t, []uint64{expected}, observed)
+			require.Equal(t, uint64(40), f.accountReward(t, credential))
+		})
+	}
 }
 
 // A genesis key delegation certificate is checked against the delegations in

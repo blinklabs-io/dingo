@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -109,11 +110,12 @@ type pendingBoundarySnapshot struct {
 	// before CaptureEpochBoundarySnapshot; allowing a later retry with the same
 	// boundary identity to consume that stale distribution would persist state
 	// from the abandoned transaction instead of recomputing SNAP.
-	txn          *database.Txn
-	newEpoch     uint64
-	boundarySlot uint64
-	snapshotSlot uint64
-	expiryEpoch  uint64
+	txn            *database.Txn
+	newEpoch       uint64
+	boundarySlot   uint64
+	snapshotSlot   uint64
+	expiryEpoch    uint64
+	afterEnactment bool
 }
 
 func (m *Manager) stashBoundaryDistribution(
@@ -137,7 +139,8 @@ func (m *Manager) takeBoundaryDistribution(
 	pending := m.pendingBoundary
 	m.pendingBoundary = nil
 	m.mu.Unlock()
-	if pending == nil || pending.txn != txn {
+	if pending == nil || pending.txn != txn ||
+		(evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra && !pending.afterEnactment) {
 		return nil
 	}
 	if pending.newEpoch != evt.NewEpoch ||
@@ -162,7 +165,8 @@ func (m *Manager) peekBoundaryDistribution(
 	m.mu.Lock()
 	pending := m.pendingBoundary
 	m.mu.Unlock()
-	if pending == nil || pending.txn != txn {
+	if pending == nil || pending.txn != txn ||
+		(evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra && !pending.afterEnactment) {
 		return nil
 	}
 	if pending.newEpoch != evt.NewEpoch ||
@@ -763,12 +767,13 @@ func (m *Manager) ComputeEpochBoundarySnapshot(
 		return fmt.Errorf("calculate snap-point stake distribution: %w", err)
 	}
 	m.stashBoundaryDistribution(&pendingBoundarySnapshot{
-		distribution: distribution,
-		txn:          txn,
-		newEpoch:     evt.NewEpoch,
-		boundarySlot: evt.BoundarySlot,
-		snapshotSlot: evt.SnapshotSlot,
-		expiryEpoch:  expiryEpoch,
+		distribution:   distribution,
+		txn:            txn,
+		newEpoch:       evt.NewEpoch,
+		boundarySlot:   evt.BoundarySlot,
+		snapshotSlot:   evt.SnapshotSlot,
+		expiryEpoch:    expiryEpoch,
+		afterEnactment: evt.ProtocolVersion >= lcommon.ProtocolVersionDijkstra,
 	})
 	m.logger.Debug(
 		"computed snap-point stake distribution",

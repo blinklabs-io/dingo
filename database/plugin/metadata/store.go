@@ -1076,6 +1076,10 @@ type TransactionStore interface {
 		types.Txn,
 	) error
 
+	// SetTransactionLeiosClosureInContext applies a closure using the parent's
+	// unticked slot while retaining point as its rollback owner.
+	SetTransactionLeiosClosureInContext(lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool, uint64, types.Txn) error
+
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
 	NewBatchAccumulator() types.MetadataBatchAccumulator
@@ -2017,6 +2021,14 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetEpochBoundaryActivePoolKeyHashes excludes boundary retirements in
+	// Dijkstra, while retaining the pre-boundary transaction certificate cut.
+	GetEpochBoundaryActivePoolKeyHashes(
+		slot uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([][]byte, error)
+
 	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had
 	// registered as of a slot, using the same latest-certificate-wins
 	// ordering as GetActivePoolKeyHashesAtSlot. The bool reports whether any
@@ -2445,6 +2457,16 @@ type MetadataStore interface {
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
 		keyDeposit uint64,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
+	// SetGenesisStakingWithDeposits also records the genesis pool deposit.
+	SetGenesisStakingWithDeposits(
+		pools map[string]lcommon.PoolRegistrationCertificate,
+		stakeDelegations map[string]string,
+		keyDeposit uint64,
+		poolDeposit uint64,
 		blockHash []byte,
 		txn types.Txn,
 	) error

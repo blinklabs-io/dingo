@@ -754,7 +754,14 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			rewardSnapshotEpoch, err,
 		)
 	}
-	if epochs.bootstrap {
+
+	// Prototype test networks warm Set/Go from genesis staking. Standard
+	// cardano-node leaves Go empty until the snapshot pipeline advances.
+	genesisConfig := ls.config.CardanoNodeConfig
+	warmGenesis := ls.config.EnableDijkstra && genesisConfig != nil &&
+		genesisConfig.TestShelleyHardForkAtEpoch != nil &&
+		*genesisConfig.TestShelleyHardForkAtEpoch == 0
+	if epochs.bootstrap && !warmGenesis {
 		suppressBootstrapStakeRewards(result)
 	}
 
@@ -3113,7 +3120,7 @@ type stakeRewardEpochs struct {
 func stakeRewardEpochsForApplication(
 	newEpoch uint64,
 ) (stakeRewardEpochs, bool) {
-	// The first two RUPD calculations have empty Go distributions. Epoch 0
+	// Initial RUPD calculations use the genesis Go distribution. Epoch 0
 	// reads genesis pots and empty previous block counts; epoch 1 reads the
 	// epoch-1 pots and epoch 0's blocks. Both updates must be applied, even
 	// though empty counts yield no expansion when d < 0.8. Preview's d=1
@@ -3731,19 +3738,6 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 		performance: newEpoch - 2,
 		pots:        newEpoch - 1,
 	}, true
-}
-
-func suppressBootstrapStakeRewards(result *rewards.Result) {
-	if result == nil {
-		return
-	}
-	result.PoolRewards = nil
-	result.AccountRewards = nil
-	result.NegativeLeaderRewards = nil
-	result.EffectiveRewards = 0
-	result.Unspendable = 0
-	result.UnspendableDeficit = 0
-	result.Undistributed = result.AvailableRewards
 }
 
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
@@ -5050,4 +5044,17 @@ func rewardRat(r *big.Rat) *types.Rat {
 		return nil
 	}
 	return &types.Rat{Rat: new(big.Rat).Set(r)}
+}
+
+func suppressBootstrapStakeRewards(result *rewards.Result) {
+	if result == nil {
+		return
+	}
+	result.PoolRewards = nil
+	result.AccountRewards = nil
+	result.NegativeLeaderRewards = nil
+	result.EffectiveRewards = 0
+	result.Unspendable = 0
+	result.UnspendableDeficit = 0
+	result.Undistributed = result.AvailableRewards
 }

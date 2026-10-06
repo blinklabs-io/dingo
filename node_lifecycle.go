@@ -1092,14 +1092,14 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		if usePeerSnapshot {
 			topologyConfig = topologyConfig.WithoutBootstrapPeers()
 		}
-		n.peerGov.LoadTopologyConfig(topologyConfig)
+		n.peerGov.LoadTopologyConfig(topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
 				ctx,
 				n.config.topologyConfig.PeerSnapshot,
 			)
 			if added == 0 {
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+				n.peerGov.LoadTopologyConfig(n.config.topologyConfig) //nolint:contextcheck // address normalization bounds its own DNS lookup
 			}
 		}
 	}

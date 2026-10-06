@@ -552,3 +552,16 @@ func TestImportPoolRejectsTransactionWithoutMetadataWriteHandle(t *testing.T) {
 		require.ErrorIs(t, err, types.ErrTxnWrongType)
 	})
 }
+
+func TestDatabaseGetStakeByPoolsWrapper(t *testing.T) {
+	t.Parallel()
+	db, err := newTestDatabase(t, &Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	pool := bytes.Repeat([]byte{0x31}, 28)
+	stakes, delegators, err := db.GetStakeByPools(t.Context(), [][]byte{pool}, nil)
+	require.NoError(t, err)
+	require.Contains(t, stakes, string(pool))
+	require.Zero(t, stakes[string(pool)])
+	require.Contains(t, delegators, string(pool))
+	require.Zero(t, delegators[string(pool)])
+}

@@ -1521,6 +1521,9 @@ type LedgerState struct {
 	// reached the ordered lane, publishing Undo before Apply. See
 	// submitBlockApplyDBTxn and rollbackChainAndStateDeferred.
 	transactionEventMutex sync.Mutex
+	// untickedClosure holds unpublished Apply events until its certifying RB
+	// commits. Guarded by the LedgerState lock.
+	untickedClosure *pendingLeiosClosure
 
 	// publishCtx is cancelled at the top of Close so a ledger.tx publish
 	// parked on a full ordered lane cannot outlive shutdown. Only the
@@ -3981,10 +3984,11 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 	ls.RLock()
 	currentTip := ls.currentTip
 	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	hasUntickedClosure := ls.untickedClosure != nil && ls.untickedClosure.point.Slot > point.Slot
 	ls.RUnlock()
 	sameTip := currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash)
-	if sameTip && !repairSameTip {
+	if sameTip && !repairSameTip && !hasUntickedClosure {
 		if err := ls.enforceDurableTipFloor(ctx); err != nil {
 			return err
 		}
@@ -3998,6 +4002,19 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		return fmt.Errorf("read durable ledger tip: %w", err)
 	}
 	if point.Slot > durableTip.Point.Slot {
+		if hasUntickedClosure {
+			// The certifier's effects are persisted, but its parent remains
+			// the durable tip. Discard them without advancing that tip.
+			if err := ls.rollbackWithBlocksAndIntent(
+				ctx, durableTip.Point, nil, true, publishResync, true,
+			); err != nil {
+				return err
+			}
+			if retainIntent {
+				return nil
+			}
+			return ls.finishRollbackIntentForPoint(ctx, point)
+		}
 		ls.config.Logger.Debug(
 			"rollback point ahead of ledger tip, skipping metadata rollback",
 			"component", "ledger",
@@ -4496,6 +4513,9 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		Hash: append([]byte(nil), point.Hash...),
 	}
 	ls.currentTip = newTip
+	if ls.untickedClosure != nil && ls.untickedClosure.point.Slot > point.Slot {
+		ls.untickedClosure = nil
+	}
 	// A rollback invalidates any pending TransitionKnown because the
 	// epoch-rollover block that set it may no longer be on the chain.
 	// After the reset, re-derive what the rolled-back state implies:
@@ -7322,6 +7342,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			snapshotEra := ls.currentEra
 			snapshotEpoch := ls.currentEpoch
 			snapshotPParams := ls.currentPParams
+			snapshotTip := cloneTip(ls.currentTip)
 			ls.RUnlock()
 
 			var rolloverResult *EpochRolloverResult
@@ -7364,14 +7385,39 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 			}
 
+			var untickedClosure ledger.Block
+			if snapshotEra.Id == dijkstra.EraIdDijkstra && !ls.config.LeiosApplyEndorserBlockTxs && len(cachedNextBatch) > 0 {
+				boundary := cachedNextBatch[0]
+				if certifier, ok := boundary.Header().(leiosEndorserBlockCertifier); ok {
+					if certified, present := certifier.LeiosCertified(); present && certified {
+						if err := ls.ensureReferencedEndorserBlocks(ctx, []ledger.Block{boundary}); err != nil {
+							completeReadResult()
+							return err
+						}
+						untickedClosure = boundary
+					}
+				}
+			}
+
 			// Block application is blocked for this whole transaction,
 			// including reward application and the governance tally, so
 			// it is timed as its own stage whether it commits or fails.
 			rolloverStart := time.Now()
 			ls.fenceRewardPrecompute()
+			submitRollover := func(op func(*database.Txn) error) error {
+				if untickedClosure != nil {
+					return ls.submitBlockApplyDBTxn(ctx, snapshotTip, snapshotTip.Point, op)
+				}
+				return ls.SubmitAsyncDBTxn(ctx, op, true)
+			}
 			// Execute transaction WITHOUT holding ls.Lock()
 			//nolint:contextcheck // TranslateRatifiedGovActions reads only through txn, which carries ctx
-			err := ls.SubmitAsyncDBTxn(ctx, func(txn *database.Txn) error {
+			err := submitRollover(func(txn *database.Txn) error {
+				if untickedClosure != nil {
+					if err := ls.applyUntickedBoundaryClosure(ctx, txn, untickedClosure, snapshotTip.Point); err != nil {
+						return err
+					}
+				}
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id
 
@@ -7475,7 +7521,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					)
 				}
 				return nil
-			}, true)
+			})
 			rolloverElapsed := time.Since(rolloverStart)
 			ls.metrics.observeBlockStage(
 				blockStageEpochRollover,
@@ -8068,10 +8114,12 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						if reachedTipRegion {
 							wantEnableValidation = true
 						}
-						// Flush accumulated deltas before the first validated
-						// block so that UTxOs created by earlier non-validated
-						// blocks are visible during validation lookups.
-						if shouldValidateBlock && len(deltaBatch.deltas) > 0 {
+						// A certified closure applies inside ledgerProcessBlock,
+						// before its ranking-block delta. Earlier ranking effects
+						// must be visible to that closure even without validation.
+						flushBeforeClosure := dijkstraEraGate(snapshotEra) &&
+							ls.config.EndorserBlockProvider != nil
+						if (shouldValidateBlock || flushBeforeClosure) && len(deltaBatch.deltas) > 0 {
 							applyStart := time.Now()
 							err := deltaBatch.apply(ctx, ls, txn)
 							ls.metrics.observeBlockStage(
