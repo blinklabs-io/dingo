@@ -87,6 +87,12 @@ cleanup preserves this marker alongside the deferred-index marker. This avoids
 repeating a full analysis on every restart while replacing statistics captured
 before historical transaction rows were loaded.
 
+SQLite reward live stake rebuilds from running totals analyze the transaction
+table before joining delegation certificates to transactions. Batched rebuilds
+reload the statistics on each batch's transaction connection before preparing
+the join, so pooled connections with independent planner caches use the updated
+estimates.
+
 MCP's `dingo://node/status` reports critical index availability separately from
 background index maintenance and recorded post-backfill statistics. A pending
 background rebuild alone does not make critical index readiness fail. These

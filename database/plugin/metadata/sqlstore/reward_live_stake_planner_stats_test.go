@@ -15,9 +15,12 @@
 package sqlstore
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 	_ "modernc.org/sqlite"
@@ -25,12 +28,24 @@ import (
 
 func TestRewardLiveStakeRefreshesTransactionPlannerStats(t *testing.T) {
 	t.Parallel()
-	store := newMigratedSQLiteStore(t)
+	db, err := OpenDB("sqlite", filepath.Join(t.TempDir(), "metadata.sqlite"), "sqlite", false)
+	require.NoError(t, err)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         db,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	key := make([]byte, 28)
 	key[0] = 1
 	pool := make([]byte, 28)
 	pool[0] = 2
-	_, err := store.writeDB.Exec(
+	_, err = store.writeDB.Exec(
 		`INSERT INTO account (staking_key, credential_tag, pool, reward, active, added_slot, created_slot)
 VALUES (?, 0, ?, '0', TRUE, 1, 1)`,
 		key,
@@ -79,13 +94,13 @@ FROM (
 	}
 	staleStat := stat()
 	require.Equal(t, "1 1", staleStat)
-	plan := func() string {
+	plan := func(db queryer) string {
 		query, args := rewardLiveStakeCredentialQuery(true, stakeKeyRange{
 			hi: &stakeKeyBound{tag: 0, key: key},
 		})
 		query, err = sqliteRewardLiveStakeAccountFirstQuery(query)
 		require.NoError(t, err)
-		rows, err := store.writeDB.Query("EXPLAIN QUERY PLAN "+query, args...)
+		rows, err := db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query, args...)
 		require.NoError(t, err)
 		defer rows.Close()
 		var details []string
@@ -98,12 +113,31 @@ FROM (
 		require.NoError(t, rows.Err())
 		return strings.Join(details, "\n")
 	}
-	require.Equal(t, 4, strings.Count(plan(), "SCAN tx"))
+	ctx := context.Background()
+	batchConn, err := store.writeDB.Conn(ctx)
+	require.NoError(t, err)
+	defer batchConn.Close()
+	require.Equal(t, 4, strings.Count(plan(batchConn), "SCAN tx"))
 
+	var calls int
 	runTxn := func(runBatch func(types.Txn) error) error {
-		return runBatch(nil)
+		calls++
+		if calls == 1 {
+			return runBatch(nil)
+		}
+		tx, err := batchConn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		txn := &sqlTxn{owner: store, tx: tx, ctx: ctx}
+		defer txn.Rollback()
+		if err := runBatch(txn); err != nil {
+			return err
+		}
+		return txn.Commit()
 	}
 	require.NoError(t, store.RebuildRewardLiveStakeFromRunningTotalsInBatches(1, runTxn))
 	require.NotEqual(t, staleStat, stat())
-	require.Equal(t, 4, strings.Count(plan(), "SEARCH tx USING INTEGER PRIMARY KEY"))
+	require.Greater(t, calls, 1)
+	require.Equal(t, 4, strings.Count(plan(batchConn), "SEARCH tx USING INTEGER PRIMARY KEY"))
 }

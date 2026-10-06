@@ -933,6 +933,12 @@ func (s *Store) rebuildRewardLiveStakeInBatches(
 		}
 		var rows int
 		err = runWriteTxn(func(db queryer, ctx context.Context) error {
+			// A pooled connection may still cache statistics from before replay.
+			if s.dialect.Name() == "sqlite" {
+				if _, err := db.ExecContext(ctx, "ANALYZE sqlite_schema"); err != nil {
+					return fmt.Errorf("reload reward live stake planner stats: %w", err)
+				}
+			}
 			upserter := s.newRewardLiveStakeUpserter(db)
 			defer upserter.Close()
 			var err error
