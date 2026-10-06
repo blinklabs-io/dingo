@@ -1546,21 +1546,19 @@ func TestRouterRootServesRootDocument(t *testing.T) {
 	assert.Equal(t, "0.1.0", resp.Version)
 }
 
-func TestRouterUnimplementedRouteReturns404(t *testing.T) {
+func TestRouterUnknownRouteReturns404(t *testing.T) {
 	t.Parallel()
 
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)
 	handler := b.handler()
 
-	// "/api/v0/pools" used to belong here as an unimplemented route. It is
-	// now registered, so it no longer falls through to the
-	// catch-all. The remaining entries still cover that path.
 	paths := []string{
-		"/api/v0/",
-		"/api/v0/scripts",
 		"/does-not-exist",
+		"/api/v0/not-an-operation",
+		"/api/v0/scripts/hash/unknown",
 	}
+
 	for _, path := range paths {
 		t.Run(path, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, path, nil)

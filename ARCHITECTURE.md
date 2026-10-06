@@ -84,7 +84,11 @@ connection (never the write pool) — see `checkpointWAL` and
 the commit-triggered `wal_autocheckpoint` alone cannot shrink the WAL file's
 on-disk size even when it fully succeeds. `journal_size_limit` caps a reset
 WAL at 64 MiB, while the periodic TRUNCATE can reduce it to zero; an active
-reader can prevent either operation from reclaiming space. The tagged
+reader can prevent either operation from reclaiming space. Bulk metadata
+imports drain and pause the scheduled TRUNCATE callback until normal pragmas
+are restored, while commit-triggered auto-checkpoints remain enabled. If the
+final restore fails, the next scheduled callback retries it before checkpointing.
+The tagged
 PostgreSQL/MySQL factories configure their direct drivers, pools, advisory
 migration locks, and repeatable-read snapshots. All three return
 `*sqlstore.Store`; metadata business behavior is implemented once in
@@ -7504,6 +7508,13 @@ The latter is ancillary-key-signed data, not stake-certified data. Normal
 Ouroboros validation resumes at the imported point and covers the gap and all
 future network blocks.
 
+The post-download ImmutableDB copy completes before ledger-state import starts.
+The copy persists block and transaction metadata as well as block blobs, so it
+is a metadata writer even though its bulk payload belongs to the blob store.
+Ordering the two resumable phases keeps their SQLite write transactions from
+contending during bootstrap. A later import failure resumes against the already
+copied immutable data.
+
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
 the later `serve` command run as one tracked direct child: the handler forwards
@@ -8945,10 +8956,9 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836).
-The root document is served only at the literal `/` path (`GET /{$}`); any
-other unregistered path falls through to a catch-all `404` handler instead
-of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+The root document is served only at the literal `/` path (`GET /{$}`).
+Documented operations without a handler return `501`; unknown paths fall
+through to a catch-all `404` handler instead of the root document.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -9181,6 +9191,19 @@ persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
 returned as a stream error.
+
+### Blockfrost unsupported operations
+
+The Blockfrost server distinguishes documented, unimplemented operations from
+unknown paths. Unsupported Blockfrost OpenAPI 0.1.93 operations return HTTP 501
+with the usual JSON error fields; an unsupported method on these paths returns
+HTTP 405 with an `Allow` header. Unknown paths retain HTTP 404. Implemented
+operations retain their handlers, while reserved literals such as `pools/retired`
+take precedence over generic parameter routes. Ambiguous upstream wildcard
+patterns are recognized by the bounded catch-all operation list rather than
+registered as conflicting Go `ServeMux` patterns. The IPFS path parameter
+matches the remaining path segments, so an object inside an IPFS directory is
+recognized as the same operation.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
