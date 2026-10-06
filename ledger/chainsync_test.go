@@ -18242,6 +18242,37 @@ func TestDeferredHeaderSourceSurvivesRestart(t *testing.T) {
 	assert.Equal(t, connId.RemoteAddr.String(), source.RemoteAddr.String())
 }
 
+func TestDeferredHeaderMarkerDoesNotPersistUnparseableSource(t *testing.T) {
+	t.Parallel()
+
+	tb := createTestBlock(t, [32]byte{53}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	ls.markDeferredHeaderValidationFrom(point, ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{Port: 8080},
+	})
+	require.NoError(t, ls.persistDeferredHeaderValidation(point, nil))
+
+	value, err := db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point), nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
+
+	restarted := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, restarted.repopulateDeferredHeaderValidation())
+	assert.Equal(
+		t,
+		ouroboros.ConnectionId{},
+		restarted.deferredHeaderSource(point),
+	)
+}
+
 // A marker rewritten because its point was re-deferred during the stale delete
 // keeps the supplying peer's address.
 // Not t.Parallel: swaps the package-level afterDeferredMarkerDeleteHook seam.

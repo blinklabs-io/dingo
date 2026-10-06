@@ -79,9 +79,9 @@ func newPeerConnection(t *testing.T, remote string) *ouroboros.Connection {
 // while another peer is honest. Each failure runs through the ledger's
 // deferred verdict and recovery, the ouroboros resync handler, and the peer
 // governor: only the supplying peer is closed and denied, from any source
-// port, the rejected block is dropped from the primary chain, and the node
-// continues on the honest block.
-func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndFollowsHonestChain(
+// port, the rejected block is dropped from the primary chain, and the honest
+// peer stays eligible.
+func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndKeepsHonestPeerEligible(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -168,8 +168,8 @@ func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndFollowsHonestChain(
 		)
 	}
 
-	honestTip := fixture.AppendHonestBlock()
-	assert.Equal(t, honestTip, fixture.PrimaryTip())
+	replacementTip := fixture.AppendReplacementBlock()
+	assert.Equal(t, replacementTip, fixture.PrimaryTip())
 	assert.NotEqual(t, fixture.RejectedPoint(), fixture.PrimaryTip())
 	assert.False(t, peerGov.IsDenied(honest.RemoteAddr.String()))
 }

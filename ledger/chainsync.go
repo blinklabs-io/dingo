@@ -1098,9 +1098,13 @@ func deferredHeaderMarkerValue(source ouroboros.ConnectionId) string {
 	if source.RemoteAddr == nil {
 		return deferredHeaderValidationSyncStateValue
 	}
-	return deferredHeaderValidationSyncStateValue +
+	value := deferredHeaderValidationSyncStateValue +
 		deferredHeaderMarkerSourceSeparator +
 		source.RemoteAddr.String()
+	if _, err := deferredHeaderMarkerSource(value); err != nil {
+		return deferredHeaderValidationSyncStateValue
+	}
+	return value
 }
 
 // deferredHeaderMarkerSource decodes the peer address stored by

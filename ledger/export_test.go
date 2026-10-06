@@ -139,21 +139,21 @@ func (f *DeferredHeaderRecoveryFixture) RewindPoint() ocommon.Point {
 	return f.rewound
 }
 
-// AppendHonestBlock extends the rewound chain with a block that replaces the
-// rejected one and returns its point.
-func (f *DeferredHeaderRecoveryFixture) AppendHonestBlock() ocommon.Point {
+// AppendReplacementBlock extends the rewound chain with a block that replaces
+// the rejected one and returns its point.
+func (f *DeferredHeaderRecoveryFixture) AppendReplacementBlock() ocommon.Point {
 	f.t.Helper()
 	rejected := f.blocks[3]
-	honest := makeTestBlock(rejected.Slot+1, rejected.ID+1)
+	replacement := makeTestBlock(rejected.Slot+1, rejected.ID)
 	require.NoError(f.t, f.cm.PrimaryChain().AddRawBlocks(
 		[]chain.RawBlock{{
-			Slot:        honest.Slot,
-			Hash:        honest.Hash,
-			BlockNumber: honest.Number,
-			Type:        honest.Type,
+			Slot:        replacement.Slot,
+			Hash:        replacement.Hash,
+			BlockNumber: replacement.Number,
+			Type:        replacement.Type,
 			PrevHash:    f.rewound.Hash,
-			Cbor:        honest.Cbor,
+			Cbor:        replacement.Cbor,
 		}},
 	))
-	return makeTestPoint(honest)
+	return makeTestPoint(replacement)
 }
