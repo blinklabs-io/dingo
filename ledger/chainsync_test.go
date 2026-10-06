@@ -9919,6 +9919,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 
 	ancestorTip := ochainsync.Tip{
@@ -17580,6 +17581,7 @@ func newChainsyncRollbackFixtureWithBus(
 		},
 	)
 	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
 	ls.metrics.init(prometheus.NewRegistry())
 	// Attached after construction so NewLedgerState does not register the
 	// node-level subscribers this focused test does not want.
