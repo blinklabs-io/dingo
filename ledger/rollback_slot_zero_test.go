@@ -16,18 +16,24 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -233,4 +239,105 @@ func TestRecoverRollbackIntentSlotZeroBlockOnPrimaryChain(t *testing.T) {
 	require.False(t, pending)
 	require.Equal(t, tip0.Point, ls.currentTip.Point)
 	require.Equal(t, nonce0, ls.currentTipBlockNonce)
+}
+
+// Applying a slot-0 Conway block and its successor, rolling back to the
+// slot-0 block, and re-applying the successor must persist the successor's
+// nonce folded from the slot-0 block's nonce, not from the genesis hash.
+func TestRollbackToSlotZeroBlockReappliesFromItsNonce(t *testing.T) {
+	t.Parallel()
+
+	blocks, err := fixtures.GenerateConwayChain(
+		0, lcommon.Blake2b256{}, 0, 20, 2,
+	)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+	block0, block1 := blocks[0], blocks[1]
+	require.Zero(t, block0.SlotNumber())
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	rawBlocks := make([]chain.RawBlock, 0, len(blocks))
+	for _, blk := range blocks {
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        blk.SlotNumber(),
+			Hash:        blk.Hash().Bytes(),
+			BlockNumber: blk.BlockNumber(),
+			Type:        conway.BlockTypeConway,
+			PrevHash:    blk.PrevHash().Bytes(),
+			Cbor:        blk.Cbor(),
+		})
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+
+	pparams := epochBoundaryBenchPParams()
+	pparams.ProtocolVersion.Major = conway.MaxProtocolVersionConway
+	pparams.MaxBlockBodySize = 2_000_000
+	pparams.MaxBlockHeaderSize = 100_000
+	epoch0 := models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		SlotLength:    1_000,
+		LengthInSlots: 1_000,
+		EraId:         eras.ConwayEraDesc.Id,
+	}
+	require.NoError(t, db.SetEpoch(
+		epoch0.StartSlot, epoch0.EpochId, nil, nil, nil, nil,
+		epoch0.EraId, epoch0.SlotLength, epoch0.LengthInSlots, nil,
+	))
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesisHash = strings.Repeat("42", 32)
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:              db,
+		ChainManager:          cm,
+		CardanoNodeConfig:     nodeConfig,
+		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:          prometheus.NewRegistry(),
+		ManualBlockProcessing: true,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentEra = eras.ConwayEraDesc
+	ls.currentPParams = pparams
+	ls.currentEpoch = epoch0
+	ls.epochCache = []models.Epoch{epoch0}
+	ls.currentTip = ochainsync.Tip{}
+	ls.currentTipBlockNonce = nil
+	ls.publishSnapshotsLocked()
+	require.NoError(t, cm.SetLedger(ls))
+
+	apply := func(blks ...gledger.Block) {
+		t.Helper()
+		results := make(chan readChainResult, 1)
+		results <- readChainResult{blocks: blks}
+		close(results)
+		require.NoError(t, ls.ledgerProcessBlocksFromSource(
+			context.Background(),
+			results,
+		))
+	}
+	point0 := ocommon.NewPoint(block0.SlotNumber(), block0.Hash().Bytes())
+	point1 := ocommon.NewPoint(block1.SlotNumber(), block1.Hash().Bytes())
+
+	apply(block0, block1)
+	require.Equal(t, point1, ls.currentTip.Point)
+	nonce0, err := db.GetBlockNonce(point0, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, nonce0)
+
+	require.NoError(t, ls.rollback(point0))
+	require.Equal(t, point0, ls.currentTip.Point)
+
+	apply(block1)
+	require.Equal(t, point1, ls.currentTip.Point)
+
+	want, err := eras.CalculateEtaVConway(nodeConfig, nonce0, block1)
+	require.NoError(t, err)
+	fromGenesis, err := eras.CalculateEtaVConway(nodeConfig, nil, block1)
+	require.NoError(t, err)
+	require.NotEqual(t, fromGenesis, want)
+	got, err := db.GetBlockNonce(point1, nil)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
