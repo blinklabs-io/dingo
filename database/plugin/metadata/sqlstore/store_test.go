@@ -165,9 +165,16 @@ func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
 	}
 
 	bulkDone := make(chan error, 1)
+	bulkStarted := make(chan struct{})
 	go func() {
+		close(bulkStarted)
 		bulkDone <- store.SetBulkLoadPragmas()
 	}()
+	select {
+	case <-bulkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("bulk-mode transition did not start")
+	}
 
 	close(checkpointRelease)
 	require.ErrorIs(t, <-checkpointDone, checkpointErr)
