@@ -15,10 +15,16 @@
 package ledger
 
 import (
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -103,7 +109,7 @@ func TestMaxBlockSizeAdmitsByronHistory(t *testing.T) {
 
 func TestMaxBlockSizeRetainsPersistedHistoricalLimit(t *testing.T) {
 	t.Parallel()
-	db, err := dbtest.NewDatabase(t, nil)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
 	historical := mithrilRewardConwayPParams()
 	historical.MaxBlockBodySize = 4000000
@@ -113,5 +119,90 @@ func TestMaxBlockSizeRetainsPersistedHistoricalLimit(t *testing.T) {
 	require.NoError(t, db.SetPParams(encoded, 100, 1, gledger.EraIdConway, nil))
 	ls := &LedgerState{db: db, currentPParams: &conway.ConwayProtocolParameters{MaxBlockBodySize: 90112, MaxBlockHeaderSize: 1100}}
 	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(4000000+1100+blockFramingAllowance), ls.MaxBlockSize())
+}
+
+type pparamsListingStore struct {
+	metadata.MetadataStore
+	lists atomic.Int32
+	fail  atomic.Bool
+}
+
+func (s *pparamsListingStore) ListPParamsForEra(
+	eraId uint,
+	txn types.Txn,
+) ([]models.PParams, error) {
+	s.lists.Add(1)
+	if s.fail.Load() {
+		return nil, errors.New("metadata unavailable")
+	}
+	return s.MetadataStore.ListPParamsForEra(eraId, txn)
+}
+
+// MaxBlockSize runs on every archive download, so the persisted history is
+// read once rather than per call, and a later raise in the current limits
+// still widens the bound.
+func TestMaxBlockSizeReadsPersistedLimitsOnce(t *testing.T) {
+	t.Parallel()
+	store := &pparamsListingStore{}
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		func(inner metadata.MetadataStore) metadata.MetadataStore {
+			store.MetadataStore = inner
+			return store
+		},
+	)
+	require.NoError(t, err)
+	historical := mithrilRewardConwayPParams()
+	historical.MaxBlockBodySize = 4000000
+	historical.MaxBlockHeaderSize = 1100
+	encoded, err := cbor.Encode(historical)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(encoded, 100, 1, gledger.EraIdConway, nil))
+	ls := &LedgerState{db: db, currentPParams: &conway.ConwayProtocolParameters{MaxBlockBodySize: 90112, MaxBlockHeaderSize: 1100}}
+	ls.publishSnapshotsLocked()
+	want := uint64(4000000 + 1100 + blockFramingAllowance)
+	require.Equal(t, want, ls.MaxBlockSize())
+	lists := store.lists.Load()
+	require.Positive(t, lists)
+	for range 3 {
+		require.Equal(t, want, ls.MaxBlockSize())
+	}
+	require.Equal(t, lists, store.lists.Load())
+
+	ls.currentPParams = &conway.ConwayProtocolParameters{MaxBlockBodySize: 5000000, MaxBlockHeaderSize: 1100}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(5000000+1100+blockFramingAllowance), ls.MaxBlockSize())
+	require.Equal(t, lists, store.lists.Load())
+}
+
+// A metadata failure must not drop the bound to zero, which archive callers
+// read as unknown and replace with a default far below the current limits.
+func TestMaxBlockSizeKeepsCurrentLimitsWhenMetadataFails(t *testing.T) {
+	t.Parallel()
+	store := &pparamsListingStore{}
+	store.fail.Store(true)
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{Config: &database.Config{DataDir: ""}},
+		func(inner metadata.MetadataStore) metadata.MetadataStore {
+			store.MetadataStore = inner
+			return store
+		},
+	)
+	require.NoError(t, err)
+	ls := &LedgerState{db: db, currentPParams: &conway.ConwayProtocolParameters{MaxBlockBodySize: 180000, MaxBlockHeaderSize: 1100}}
+	ls.publishSnapshotsLocked()
+	require.Equal(t, uint64(180000+1100+blockFramingAllowance), ls.MaxBlockSize())
+
+	// The failed read is retried rather than remembered as an empty history.
+	historical := mithrilRewardConwayPParams()
+	historical.MaxBlockBodySize = 4000000
+	historical.MaxBlockHeaderSize = 1100
+	encoded, err := cbor.Encode(historical)
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParams(encoded, 100, 1, gledger.EraIdConway, nil))
+	store.fail.Store(false)
 	require.Equal(t, uint64(4000000+1100+blockFramingAllowance), ls.MaxBlockSize())
 }
