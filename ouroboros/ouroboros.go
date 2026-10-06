@@ -178,6 +178,11 @@ type Ouroboros struct {
 	// connection close can cancel it before it installs a session.
 	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
 	localstatequeryAcquisitions map[ouroboros.ConnectionId]*localstatequeryAcquisition
+	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
+	// run just before Acquire verifies its point and just after the
+	// verified view opens. Tests use them to act at those exact moments.
+	localstatequeryVerifyHook   func()
+	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
