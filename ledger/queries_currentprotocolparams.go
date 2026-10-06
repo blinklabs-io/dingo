@@ -16,10 +16,13 @@ package ledger
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // queryShelleyCurrentProtocolParams answers GetCurrentPParams.
@@ -64,6 +67,23 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at
 ) (any, error) {
 	snapshot := ls.loadConsensusSnapshot()
 	if !at.pinned() {
+		// A QueryView whose epoch ended after it was acquired still has to
+		// answer for the epoch it froze, not the one that replaced it. When
+		// that epoch has no persisted row the live value is the best answer
+		// left, so only that rejection is not surfaced here; any other
+		// historical-state error is propagated.
+		row, err := ls.snapshotEpoch(txn, at)
+		if err != nil {
+			return nil, err
+		}
+		if row != nil && row.EpochId != snapshot.currentEpoch.EpochId {
+			result, err := ls.historicalProtocolParameters(
+				snapshot, row.EpochId, at, txn,
+			)
+			if !errors.Is(err, errPParamsRowMissing) {
+				return result, err
+			}
+		}
 		return []any{withoutSyntheticV2CostModel(
 			snapshot.currentPParams,
 			snapshot.syntheticV2CostModelInEffect,
@@ -81,14 +101,29 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at
 	if !found {
 		return nil, errEpochNotResolved(at)
 	}
-	liveEpoch := snapshot.currentEpoch.EpochId
-	if targetEpoch == liveEpoch {
+	if targetEpoch == snapshot.currentEpoch.EpochId {
 		return []any{withoutSyntheticV2CostModel(
 			snapshot.currentPParams,
 			snapshot.syntheticV2CostModelInEffect,
 			ls.config.Logger,
 		)}, nil
 	}
+	return ls.historicalProtocolParameters(snapshot, targetEpoch, at, txn)
+}
+
+// errPParamsRowMissing marks a historical protocol-parameter lookup that found
+// no persisted row for the epoch, as opposed to an unresolvable epoch or era.
+var errPParamsRowMissing = errors.New("no persisted protocol-parameter row")
+
+// historicalProtocolParameters answers from targetEpoch's persisted pparams
+// row, for a targetEpoch other than the live snapshot's epoch.
+func (ls *LedgerState) historicalProtocolParameters(
+	snapshot *consensusSnapshot,
+	targetEpoch uint64,
+	at QueryPoint,
+	txn *database.Txn,
+) (any, error) {
+	liveEpoch := snapshot.currentEpoch.EpochId
 	epochRow, err := ls.db.GetEpoch(targetEpoch, txn)
 	if err != nil {
 		return nil, err
@@ -121,10 +156,11 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at
 	}
 	if pparams == nil {
 		return nil, fmt.Errorf(
-			"%w: protocol parameters at slot %d (epoch %d) cannot be "+
+			"%w: %w: protocol parameters at slot %d (epoch %d) cannot be "+
 				"reconstructed while the live tip is in epoch %d -- no "+
 				"persisted protocol-parameter row exists for epoch %d",
 			ErrHistoricalStateUnavailable,
+			errPParamsRowMissing,
 			at.Slot,
 			targetEpoch,
 			liveEpoch,
@@ -161,4 +197,39 @@ func (ls *LedgerState) queryShelleyCurrentProtocolParams(ctx context.Context, at
 		synthetic,
 		ls.config.Logger,
 	)}, nil
+}
+
+// snapshotProtocolParameters returns the protocol parameters a QueryView's
+// frozen epoch ran under. row is the epoch record covering the snapshot tip
+// (nil on the direct path); when it names an epoch the live snapshot has
+// moved past, the persisted row for that epoch answers. An epoch with no
+// persisted row falls back to the live value, as GetCurrentPParams does, and
+// any other historical-state error is returned.
+func (ls *LedgerState) snapshotProtocolParameters(
+	snapshot *consensusSnapshot,
+	row *models.Epoch,
+	txn *database.Txn,
+) (lcommon.ProtocolParameters, error) {
+	if row == nil || row.EpochId == snapshot.currentEpoch.EpochId {
+		return snapshot.currentPParams, nil
+	}
+	result, err := ls.historicalProtocolParameters(
+		snapshot, row.EpochId, QueryPoint{}, txn,
+	)
+	if err != nil {
+		if errors.Is(err, errPParamsRowMissing) {
+			return snapshot.currentPParams, nil
+		}
+		return nil, err
+	}
+	if values, ok := result.([]any); ok && len(values) == 1 {
+		if pparams, ok := values[0].(lcommon.ProtocolParameters); ok {
+			return pparams, nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"unexpected protocol parameters result %T for epoch %d",
+		result,
+		row.EpochId,
+	)
 }

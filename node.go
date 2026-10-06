@@ -1282,6 +1282,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		PromRegistry:            n.retainedComponentPromRegistry(),
 		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
 		EnableLeios:             enableLeiosNetworking,
+		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
+		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
 		// extension ahead of the IOG Leios prototype. The prototype relays do
 		// not run a protocol-20 responder and reset the connection if we

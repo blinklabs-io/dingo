@@ -102,9 +102,13 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 				var result any
 				var err error
 				if queryName == "GetFilteredVoteDelegatees" {
-					result, err = state.queryShelleyFilteredVoteDelegatees(t.Context(), credentials[:count])
+					result, err = state.queryShelleyFilteredVoteDelegatees(
+						context.Background(),
+						credentials[:count],
+						nil,
+					)
 				} else {
-					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(t.Context(), stakeCredentials[:count])
+					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(context.Background(), stakeCredentials[:count], nil)
 				}
 				if count > MaxLocalStateQueryItems {
 					require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
@@ -169,28 +173,32 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "filtered delegations and rewards",
 			query: "GetFilteredDelegationsAndRewardAccounts",
 			run: func() (any, error) {
-				return ls.queryShelleyFilteredDelegationAndRewardAccounts(t.Context(), stakeCredentials)
+				return ls.queryShelleyFilteredDelegationAndRewardAccounts(
+					context.Background(),
+					stakeCredentials,
+					nil,
+				)
 			},
 		},
 		{
 			name:  "filtered vote delegatees",
 			query: "GetFilteredVoteDelegatees",
 			run: func() (any, error) {
-				return ls.queryShelleyFilteredVoteDelegatees(t.Context(), credentials)
+				return ls.queryShelleyFilteredVoteDelegatees(context.Background(), credentials, nil)
 			},
 		},
 		{
 			name:  "DRep state",
 			query: "GetDRepState",
 			run: func() (any, error) {
-				return ls.queryShelleyDRepState(t.Context(), credentials)
+				return ls.queryShelleyDRepState(context.Background(), credentials, nil)
 			},
 		},
 		{
 			name:  "stake delegation deposits",
 			query: "GetStakeDelegDeposits",
 			run: func() (any, error) {
-				return ls.queryShelleyStakeDelegDeposits(t.Context(), stakeCredentials)
+				return ls.queryShelleyStakeDelegDeposits(context.Background(), stakeCredentials, nil)
 			},
 		},
 	}
@@ -240,7 +248,7 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(t.Context(), nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -302,7 +310,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(t.Context(), nil)
+	result, err := ls.queryShelleyDRepState(context.Background(), nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -315,7 +323,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dreps, numDreps)
 	for _, drep := range dreps {
-		want, err := ls.drepDelegators(t.Context(), drep)
+		want, err := ls.drepDelegators(context.Background(), drep, nil)
 		require.NoError(t, err)
 		require.Len(t, want, delegatorsPerDrep)
 		key := olocalstatequery.StakeCredential{
@@ -369,7 +377,7 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	delegators, err := ls.allDRepDelegators(t.Context())
+	delegators, err := ls.allDRepDelegators(context.Background(), nil)
 	require.NoError(t, err)
 	key := models.StakeCredentialRef{
 		Tag: uint8(models.DrepTypeAddrKeyHash),
@@ -424,7 +432,11 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 		)
 	}
 	result, err := (&LedgerState{db: db}).
-		queryShelleyFilteredVoteDelegatees(t.Context(), credentials)
+		queryShelleyFilteredVoteDelegatees(
+			context.Background(),
+			credentials,
+			nil,
+		)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -472,7 +484,7 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
-	result, err = ls.queryShelleyStakeSnapshots(t.Context(), query)
+	result, err = ls.queryShelleyStakeSnapshots(context.Background(), query, nil)
 	require.NoError(t, err)
 	outer, ok = result.([]any)
 	require.True(t, ok)

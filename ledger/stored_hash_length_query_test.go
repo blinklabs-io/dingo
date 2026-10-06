@@ -133,7 +133,7 @@ func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			},
 		}
 	})
-	delegators, err := ls.allDRepDelegators(t.Context())
+	delegators, err := ls.allDRepDelegators(context.Background(), nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -152,7 +152,7 @@ func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 	})
 	delegators, err := ls.drepDelegators(t.Context(), &models.Drep{
 		Credential: bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size),
-	})
+	}, nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -174,10 +174,13 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			},
 		}
 	})
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(t.Context(), []olocalstatequery.StakeCredential{{
-		Tag:   0,
-		Bytes: lcommon.NewBlake2b224(cred),
-	}},
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		context.Background(),
+		[]olocalstatequery.StakeCredential{{
+			Tag:   0,
+			Bytes: lcommon.NewBlake2b224(cred),
+		}},
+		nil,
 	)
 	require.ErrorContains(t, err, "delegation pool id")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -202,6 +205,7 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 		GovActionCbor: []byte{0x80},
 	},
 		lcommon.GovActionId{},
+		nil,
 	)
 	require.ErrorContains(t, err, "governance vote")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -271,7 +275,7 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByAddress(t.Context(), []ledger.Address{addr})
+	result, err := ls.queryShelleyUtxoByAddress(context.Background(), []ledger.Address{addr}, nil)
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)
 }

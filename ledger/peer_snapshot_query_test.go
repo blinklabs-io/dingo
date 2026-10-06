@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"net"
 	"testing"
 
@@ -107,7 +108,11 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 
 	ls := &LedgerState{db: newTestDB(t)}
 
-	result, err := ls.queryLedgerPeerSnapshot(t.Context(), olocalstatequery.LedgerPeerKindAll)
+	result, err := ls.queryLedgerPeerSnapshot(
+		context.Background(),
+		olocalstatequery.LedgerPeerKindAll,
+		nil,
+	)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)
@@ -126,7 +131,11 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 		nil,
 	))
 
-	result, err := ls.queryLedgerPeerSnapshot(t.Context(), olocalstatequery.LedgerPeerKindAll)
+	result, err := ls.queryLedgerPeerSnapshot(
+		context.Background(),
+		olocalstatequery.LedgerPeerKindAll,
+		nil,
+	)
 	require.NoError(t, err)
 
 	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)

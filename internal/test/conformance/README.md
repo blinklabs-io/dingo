@@ -425,6 +425,28 @@ access patterns. That needs **one** pass per dialect, not several.
 | `state_provider.go`   | State-query adapters used by the harness -- every read queries the real backend live (see its type doc comment for the one narrow, documented exception) |
 | `docker-compose.yml`  | Local PostgreSQL and MySQL for the SQL-backed tests |
 
+## Peras vectors
+
+`peras_vectors_test.go` discovers Peras (CIP-0140) conformance vectors in a
+`peras/` directory of the extracted `ouroboros-mock` corpus, beside `eras/`
+and `synthetic/`. The corpus does not ship that directory yet, and
+`TestPerasConformanceVectors` skips cleanly while it is absent or holds no
+vectors. Expected layout:
+
+```
+peras/
+├── <group>/              # optional, any depth
+│   └── <vector>          # one vector per file
+└── pparams-by-hash/      # skipped, as in eras/
+```
+
+Files are collected by `conformance.CollectVectorFiles`, the same rules the
+rest of the corpus uses: `pparams-by-hash/` and `scripts/` are skipped, as are
+`README` and `*.md` files, and the result is in lexical path order. Peras
+vectors arrive through an `ouroboros-mock` bump like every other vector. The
+loader performs no Peras validation yet; each discovered vector is only
+checked to be non-empty.
+
 ## Updating vectors
 
 The vectors themselves are **embedded in `ouroboros-mock`**, not in this repo.
