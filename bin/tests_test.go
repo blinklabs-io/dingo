@@ -76,8 +76,12 @@ func runEntrypointChild(kind string) int {
 	}
 	childDelay, _ := time.ParseDuration(os.Getenv(entrypointChildDelayEnv))
 	if os.Getenv(entrypointChildHangEnv) != "" {
-		// Started but never ready: wait to be killed by the harness.
-		select {}
+		// Started but never ready: wait to be killed by the harness. Not
+		// select{}: without cgo (the darwin default) the runtime reports that
+		// as a deadlock and exits 2, so the child dies instead of hanging.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if kind == bootstrapChild && os.Getenv("DINGO_TEST_BOOTSTRAP_WAIT") == "" {
 		if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
