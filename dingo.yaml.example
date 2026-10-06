@@ -18,6 +18,14 @@
 # CLI: --cardano-config
 # cardanoConfig: "./config/cardano/preview/config.json"
 
+# Longest a node-to-client LocalStateQuery session may hold one acquired
+# ledger snapshot. A snapshot past this age is closed and the session's next
+# query fails. Each held snapshot pins a database read transaction.
+# Default: "5m"
+# CLI: --local-state-query-view-max-lifetime
+# Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
+# localStateQueryViewMaxLifetime: "5m"
+
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
 # databasePath: ".dingo"
@@ -866,6 +874,11 @@
   # 0 uses the built-in default
   # CLI: --mithril-download-max-idle-retries
   # downloadMaxIdleRetries: 0
+  # Compressed size limit in bytes for each downloaded Mithril object
+  # 0 uses built-in limits sized per archive type. A positive value replaces
+  # them for every object; raising it lowers immutable download concurrency.
+  # CLI: --mithril-download-max-bytes  Env: DINGO_MITHRIL_DOWNLOAD_MAX_BYTES
+  # downloadMaxBytes: 0
   # Remove temporary files after loading completes
   # Default: true
   # cleanupAfterLoad: true

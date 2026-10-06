@@ -204,6 +204,7 @@ mithril:
   downloadDir: "/tmp/mithril"
   downloadIdleTimeout: "5m"
   downloadMaxIdleRetries: 9
+  downloadMaxBytes: 4294967296
   cleanupAfterLoad: false
   verifyCertificates: false
 `
@@ -300,6 +301,7 @@ mithril:
 			DownloadDir:            "/tmp/mithril",
 			DownloadIdleTimeout:    "5m",
 			DownloadMaxIdleRetries: 9,
+			DownloadMaxBytes:       4294967296,
 			CleanupAfterLoad:       false,
 			VerifyCertificates:     false,
 		},
