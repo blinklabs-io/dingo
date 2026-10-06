@@ -8687,10 +8687,13 @@ single supplied CBOR value. Credential presence follows address payload types,
 including all-zero hashes; raw Bech32 credentials require the expected prefix
 and an exact 28-byte payload.
 
-`evaluate_tx` admits at most one ledger evaluation per MCP server. Cancellation
-or the configured query timeout releases the request, but the non-interruptible
-ledger call retains that admission slot until it finishes. Further evaluations
-receive a busy error, preventing canceled requests from accumulating workers.
+`evaluate_tx` admits at most one ledger evaluation per MCP server and passes the
+request context, bounded by the configured query timeout, to
+`LedgerState.EvaluateTxContext`. Cancellation or the timeout releases the
+request at once; the ledger call stops at its next cancellation check, and only
+an already-running CEK invocation completes first. The admission slot is held
+until the ledger call returns, so further evaluations receive a busy error and
+canceled requests cannot accumulate workers.
 Arbitrary SQLite queries borrow one connection, enable `query_only`, and apply
 SQLite size limits before execution. The original settings are restored before
 the connection returns to an injected pool.
