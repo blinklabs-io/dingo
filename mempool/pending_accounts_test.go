@@ -529,7 +529,10 @@ func (v *overlappingRebuildValidator) WithTxValidationSession(
 		func() bool,
 	) error,
 ) error {
-	if v.rebuilds.Add(1) == 1 {
+	// The first validation session is the initial admission. The next session
+	// begins its reconciliation; hold that one until the competing admission
+	// has validated against the old overlay.
+	if v.admissions.Load() > 0 && v.rebuilds.CompareAndSwap(0, 1) {
 		select {
 		case <-v.overlapped:
 		case <-time.After(5 * time.Second):
@@ -584,8 +587,8 @@ func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {
 	require.Len(t, pool.Transactions(), 3)
 	require.Equal(
 		t,
-		int64(1),
+		int64(0),
 		validator.rebuilds.Load(),
-		"an admission rebuilt a pool another admission had already rebuilt",
+		"coherent admission sessions should avoid a stale-overlay rebuild",
 	)
 }

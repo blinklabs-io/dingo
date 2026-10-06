@@ -1654,7 +1654,15 @@ func (m *Mempool) addTransactionAttempt(
 	var addEvent *event.Event
 	var evictedEvents []event.Event
 	var seen *utxoOverlay
-	err := func() error {
+	err := m.withTxValidationSession(func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]lcommon.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+	) error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
 		// remains current until the transaction is committed.
@@ -1719,7 +1727,7 @@ func (m *Mempool) addTransactionAttempt(
 
 		// The mutation gate keeps this overlay snapshot stable while the
 		// potentially expensive ledger validation runs without the pool locks.
-		validateErr := m.validator.ValidateTxWithOverlay(
+		validateErr := validate(
 			tmpTx,
 			validConsumed,
 			validCreated,
@@ -1727,7 +1735,7 @@ func (m *Mempool) addTransactionAttempt(
 		)
 		// Checked before the verdict: a base that already contains some of
 		// the pending transactions yields a wrong verdict either way.
-		if validAccounts.Moved() {
+		if validAccounts.Moved() || !stillCurrent() {
 			return errPendingStateMoved
 		}
 		if validateErr != nil {
@@ -1782,7 +1790,7 @@ func (m *Mempool) addTransactionAttempt(
 			addEvent = &evt
 		}
 		return nil
-	}()
+	})
 	return addEvent, evictedEvents, seen, err
 }
 
