@@ -36,12 +36,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func shelleyBlockQuery(leaf any) *olocalstatequery.BlockQuery {
-	return &olocalstatequery.BlockQuery{
-		Query: &olocalstatequery.ShelleyQuery{Query: leaf},
-	}
-}
-
 func hexBytes(t *testing.T, parts ...string) []byte {
 	t.Helper()
 	out, err := hex.DecodeString(strings.Join(parts, ""))
