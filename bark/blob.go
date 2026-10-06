@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/netguard"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -50,86 +52,170 @@ const maxArchiveBlockSize = 128 * 1024
 
 // validateArchiveURL rejects download URLs that could enable SSRF, credential
 // leakage, or TLS-downgrade attacks.
-func validateArchiveURL(rawURL string, allowedHosts map[string]struct{}) error {
-	u, err := url.Parse(rawURL)
+func validateArchiveURL(rawURL string, allowedOrigins map[string]struct{}) error {
+	origin, err := archiveDownloadOrigin(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+		return err
 	}
-	if u.User != nil {
-		return errors.New("URL must not contain embedded credentials")
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("URL must use HTTPS, got scheme %q", u.Scheme)
-	}
-	host := u.Hostname()
-	if host == "" {
-		return errors.New("URL must include a host")
-	}
-	normalizedHost := strings.ToLower(host)
-	if _, ok := allowedHosts[normalizedHost]; !ok {
-		return fmt.Errorf("URL host %q is not allowed", host)
+	if _, ok := allowedOrigins[origin]; !ok {
+		return fmt.Errorf("URL origin %q is not allowed", origin)
 	}
 	return nil
 }
 
-func archiveDownloadHosts(
-	baseURL string,
-	allowlist []string,
-) map[string]struct{} {
-	hosts := map[string]struct{}{}
-	if u, err := url.Parse(baseURL); err == nil {
-		addArchiveDownloadHost(hosts, u.Hostname())
+func archiveDownloadOrigin(rawURL string) (string, error) {
+	origin, scheme, err := normalizeArchiveOrigin(rawURL)
+	if err != nil {
+		return "", err
 	}
-	for _, host := range allowlist {
-		addArchiveDownloadHost(hosts, host)
+	if scheme != "https" {
+		return "", fmt.Errorf("URL must use HTTPS, got scheme %q", scheme)
 	}
-	return hosts
+	return origin, nil
 }
 
-func addArchiveDownloadHost(hosts map[string]struct{}, host string) {
-	host = strings.TrimSpace(host)
+func normalizeArchiveOrigin(rawURL string) (string, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.User != nil {
+		return "", "", errors.New("URL must not contain embedded credentials")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return "", "", fmt.Errorf("URL must use HTTP or HTTPS, got scheme %q", u.Scheme)
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if host == "" {
-		return
+		return "", "", errors.New("URL must include a host")
 	}
-	if u, err := url.Parse(host); err == nil && u.Hostname() != "" {
-		host = u.Hostname()
-	} else if splitHost, _, err := net.SplitHostPort(host); err == nil {
-		host = splitHost
-	}
-	host = strings.Trim(host, "[]")
-	host = strings.ToLower(host)
-	if host != "" {
-		hosts[host] = struct{}{}
-	}
-}
-
-func archiveHTTPClient(client *http.Client) *http.Client {
-	if client == nil {
-		client = &http.Client{
-			Timeout: 30 * time.Second,
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
 		}
 	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return "", "", fmt.Errorf("URL has invalid port %q", port)
+	}
+	return u.Scheme + "://" + net.JoinHostPort(host, port), u.Scheme, nil
+}
+
+func archiveDownloadOrigins(
+	baseURL string,
+	allowlist []string,
+) (map[string]struct{}, error) {
+	origins := map[string]struct{}{}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, errors.New("invalid bark base URL")
+	}
+	base.User = nil
+	baseOrigin, _, err := normalizeArchiveOrigin(base.String())
+	if err != nil {
+		return nil, fmt.Errorf("invalid bark base URL: %w", err)
+	}
+	origins[baseOrigin] = struct{}{}
+	for _, value := range allowlist {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if !strings.Contains(value, "://") {
+			value = "https://" + value
+		}
+		origin, err := archiveDownloadOrigin(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid archive download origin %q: %w", value, err)
+		}
+		origins[origin] = struct{}{}
+	}
+	return origins, nil
+}
+
+type archiveDialer struct {
+	dial   netguard.DialContextFunc
+	lookup netguard.LookupIPAddrFunc
+}
+
+func (d archiveDialer) DialContext(
+	ctx context.Context,
+	network string,
+	address string,
+) (net.Conn, error) {
+	return netguard.DialContext(ctx, network, address, d.dial, d.lookup)
+}
+
+func archiveDownloadHTTPClient(
+	client *http.Client,
+	allowedOrigins map[string]struct{},
+	dial netguard.DialContextFunc,
+	lookup netguard.LookupIPAddrFunc,
+) (*http.Client, error) {
 	secured := *client
-	secured.CheckRedirect = func(*http.Request, []*http.Request) error {
-		return errors.New(
-			"bark: redirects are not permitted for archive downloads",
+	previousRedirectPolicy := client.CheckRedirect
+	secured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("bark: too many archive redirects")
+		}
+		if err := validateArchiveURL(req.URL.String(), allowedOrigins); err != nil {
+			return fmt.Errorf("bark: unsafe archive redirect: %w", err)
+		}
+		if previousRedirectPolicy != nil {
+			return previousRedirectPolicy(req, via)
+		}
+		return nil
+	}
+
+	baseTransport := client.Transport
+	if baseTransport == nil {
+		baseTransport = http.DefaultTransport
+	}
+	transport, ok := baseTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf(
+			"bark: HTTP transport %T cannot enforce archive destination policy",
+			baseTransport,
 		)
 	}
-	return &secured
+	securedTransport := transport.Clone()
+	if dial == nil {
+		dial = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+	}
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+	securedTransport.Proxy = nil
+	securedTransport.DialContext = archiveDialer{
+		dial: dial, lookup: lookup,
+	}.DialContext
+	securedTransport.Dial = nil    //nolint:staticcheck
+	securedTransport.DialTLS = nil //nolint:staticcheck
+	securedTransport.DialTLSContext = nil
+	secured.Transport = securedTransport
+	return &secured, nil
 }
 
 type BlobStoreBarkConfig struct {
 	BaseUrl                   string
 	HTTPClient                *http.Client
 	BlockDownloadAllowedHosts []string
+	dialContext               netguard.DialContextFunc
+	lookupIPAddr              netguard.LookupIPAddrFunc
 }
 
 type BlobStoreBark struct {
-	config                    BlobStoreBarkConfig
-	archiveClient             archiveconnect.ArchiveServiceClient
-	httpClient                *http.Client
-	blockDownloadAllowedHosts map[string]struct{}
-	upstream                  blob.BlobStore
+	config               BlobStoreBarkConfig
+	archiveClient        archiveconnect.ArchiveServiceClient
+	httpClient           *http.Client
+	blockDownloadOrigins map[string]struct{}
+	upstream             blob.BlobStore
 }
 
 func NewBarkBlobStore(
@@ -140,20 +226,36 @@ func NewBarkBlobStore(
 		return nil, errors.New("bark: upstream blob store is required")
 	}
 
-	httpClient := archiveHTTPClient(config.HTTPClient)
+	allowedOrigins, err := archiveDownloadOrigins(
+		config.BaseUrl,
+		config.BlockDownloadAllowedHosts,
+	)
+	if err != nil {
+		return nil, err
+	}
+	archiveServiceHTTPClient := config.HTTPClient
+	if archiveServiceHTTPClient == nil {
+		archiveServiceHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	downloadHTTPClient, err := archiveDownloadHTTPClient(
+		archiveServiceHTTPClient,
+		allowedOrigins,
+		config.dialContext,
+		config.lookupIPAddr,
+	)
+	if err != nil {
+		return nil, err
+	}
 
 	return &BlobStoreBark{
 		config: config,
 		archiveClient: archiveconnect.NewArchiveServiceClient(
-			httpClient,
+			archiveServiceHTTPClient,
 			config.BaseUrl,
 		),
-		httpClient: httpClient,
-		blockDownloadAllowedHosts: archiveDownloadHosts(
-			config.BaseUrl,
-			config.BlockDownloadAllowedHosts,
-		),
-		upstream: upstream,
+		httpClient:           downloadHTTPClient,
+		blockDownloadOrigins: allowedOrigins,
+		upstream:             upstream,
 	}, nil
 }
 
@@ -457,7 +559,7 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 
 	block := blocks[0]
 
-	if err := validateArchiveURL(block.GetUrl(), b.blockDownloadAllowedHosts); err != nil {
+	if err := validateArchiveURL(block.GetUrl(), b.blockDownloadOrigins); err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("bark: archive returned unsafe download URL: %w", err)
 	}

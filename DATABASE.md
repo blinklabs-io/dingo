@@ -2849,10 +2849,15 @@ older than the ledger stability window:
   with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
   preserving local block indexes and iteration semantics. Bark validates archive
   download URLs before fetching: they must be HTTPS, must not contain embedded
-  credentials, and must resolve to the `barkBaseUrl` hostname or a configured
-  `barkBlockDownloadHosts` entry; downloads are also size-limited to the archive
-  block response cap. Downloaded bytes are then verified locally before any
-  caller sees them: the block is decoded (with body-hash validation enabled) and
+  credentials, and must match the effective scheme, hostname, and port of
+  `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. The same check
+  applies after each redirect. Every resolved address must be public before
+  dialing, and the download transport ignores ambient proxy settings. The
+  operator-configured Bark RPC client remains separate so an explicitly chosen
+  internal service endpoint is still reachable. Downloads are also size-limited
+  to the archive block response cap. Downloaded bytes are then verified locally
+  before any caller sees them: the block is decoded (with body-hash validation
+  enabled) and
   its computed hash and slot must match the requested point. The returned
   `types.BlockMetadata` type, height, and previous hash come from the decoded
   block, and archive-reported height or previous hash that contradicts it is an
