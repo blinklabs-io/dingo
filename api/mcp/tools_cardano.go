@@ -1178,8 +1178,8 @@ func RegisterCardanoTools(
 		result, err := runBoundedEvaluation(
 			evalCtx,
 			evaluationGate,
-			func() (evaluationResult, error) {
-				fee, total, redeemers, err := ls.EvaluateTx(tx)
+			func(ctx context.Context) (evaluationResult, error) {
+				fee, total, redeemers, err := ls.EvaluateTxContext(ctx, tx)
 				return evaluationResult{fee, total, redeemers}, err
 			},
 		)
@@ -2315,12 +2315,14 @@ type evaluationResult struct {
 	redeemers map[lcommon.RedeemerKey]lcommon.ExUnits
 }
 
-// The evaluator cannot be interrupted. Retaining the gate until it exits
-// prevents canceled requests from accumulating background evaluations.
+// evaluate receives ctx so that a canceled request stops the evaluator at its
+// next cancellation check. The gate is retained until evaluate returns, so a
+// canceled request cannot accumulate background evaluations while the
+// evaluator finishes the script it is running.
 func runBoundedEvaluation(
 	ctx context.Context,
 	gate chan struct{},
-	evaluate func() (evaluationResult, error),
+	evaluate func(context.Context) (evaluationResult, error),
 ) (evaluationResult, error) {
 	if err := ctx.Err(); err != nil {
 		return evaluationResult{}, err
@@ -2353,7 +2355,7 @@ func runBoundedEvaluation(
 			res.err = err
 			return
 		}
-		res.result, res.err = evaluate()
+		res.result, res.err = evaluate(ctx)
 	}()
 	select {
 	case <-ctx.Done():

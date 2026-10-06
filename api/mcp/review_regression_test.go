@@ -295,7 +295,11 @@ func TestReviewEvaluationCancellationRetainsGate(t *testing.T) {
 		_, err := runBoundedEvaluation(
 			ctx,
 			gate,
-			func() (evaluationResult, error) { close(entered); <-finish; return evaluationResult{}, nil },
+			func(context.Context) (evaluationResult, error) {
+				close(entered)
+				<-finish
+				return evaluationResult{}, nil
+			},
 		)
 		done <- err
 	}()
@@ -309,7 +313,10 @@ func TestReviewEvaluationCancellationRetainsGate(t *testing.T) {
 	_, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { t.Error("second evaluation started"); return evaluationResult{}, nil },
+		func(context.Context) (evaluationResult, error) {
+			t.Error("second evaluation started")
+			return evaluationResult{}, nil
+		},
 	)
 	require.ErrorContains(t, err, "busy")
 	close(finish)
@@ -402,13 +409,13 @@ func TestReviewEvaluationPanicReleasesGate(t *testing.T) {
 	_, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { panic("bad transaction") },
+		func(context.Context) (evaluationResult, error) { panic("bad transaction") },
 	)
 	require.ErrorContains(t, err, "bad transaction")
 	result, err := runBoundedEvaluation(
 		t.Context(),
 		gate,
-		func() (evaluationResult, error) { return evaluationResult{fee: 42}, nil },
+		func(context.Context) (evaluationResult, error) { return evaluationResult{fee: 42}, nil },
 	)
 	require.NoError(t, err)
 	require.Equal(t, uint64(42), result.fee)
@@ -524,4 +531,49 @@ func TestReviewGovernanceQueryFailure(t *testing.T) {
 	result := callTool(t, cs, "get_governance_state", map[string]any{}, true)
 	require.Contains(t, result, "count active DReps")
 	require.NotContains(t, result, "**Active Registered DReps**: 0")
+}
+
+func TestReviewEvaluationReceivesRequestCancellation(t *testing.T) {
+	t.Parallel()
+	gate := make(chan struct{}, 1)
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := runBoundedEvaluation(
+			ctx,
+			gate,
+			func(evalCtx context.Context) (evaluationResult, error) {
+				close(entered)
+				select {
+				case <-evalCtx.Done():
+					observed <- evalCtx.Err()
+				case <-time.After(5 * time.Second):
+					observed <- nil
+				}
+				return evaluationResult{}, evalCtx.Err()
+			},
+		)
+		done <- err
+	}()
+	testutil.RequireReceive(t, entered, time.Second, "evaluation start")
+	cancel()
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, done, time.Second, "canceled evaluation"),
+		context.Canceled,
+	)
+	require.ErrorIs(
+		t,
+		testutil.RequireReceive(t, observed, 10*time.Second, "evaluator cancellation"),
+		context.Canceled,
+	)
+	testutil.WaitForCondition(
+		t,
+		func() bool { return len(gate) == 0 },
+		time.Second,
+		"evaluation gate release",
+	)
 }
