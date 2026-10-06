@@ -3681,6 +3681,7 @@ func importGovState(
 				cfg.State.Epoch,
 			)
 		}
+		ratifiedCommitteeActions := 0
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
@@ -3715,6 +3716,10 @@ func importGovState(
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
 					ratifiedSlot = &rs
+					if prop.ActionType == govActionTypeNoConfidence ||
+						prop.ActionType == govActionTypeUpdateCommittee {
+						ratifiedCommitteeActions++
+					}
 				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
@@ -3757,6 +3762,18 @@ func importGovState(
 		}(); err != nil {
 			return fmt.Errorf(
 				"saving governance proposals: %w", err,
+			)
+		}
+		if ratifiedCommitteeActions > 0 {
+			// The committee imported above is the one in force at the
+			// snapshot; the ratified action only takes effect at the next
+			// epoch boundary, so committee-dependent validation before then
+			// sees the pre-action committee.
+			cfg.Logger.Warn(
+				"snapshot holds ratified committee actions not yet enacted",
+				"component", "ledgerstate",
+				"count", ratifiedCommitteeActions,
+				"ratified_epoch", cfg.State.Epoch,
 			)
 		}
 		cfg.Logger.Info(
