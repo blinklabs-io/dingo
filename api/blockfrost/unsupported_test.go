@@ -107,10 +107,6 @@ func TestRouterUnsupportedOperationsReturnExplicitError(t *testing.T) {
 		{"POST", "/api/v0/ipfs/pin/remove/testvalue"},
 		{"GET", "/api/v0/metrics"},
 		{"GET", "/api/v0/metrics/endpoints"},
-		{"GET", "/api/v0/nutlink/testvalue"},
-		{"GET", "/api/v0/nutlink/testvalue/tickers"},
-		{"GET", "/api/v0/nutlink/testvalue/tickers/testvalue"},
-		{"GET", "/api/v0/nutlink/tickers/testvalue"},
 	}
 	for _, request := range requests {
 		t.Run(request.method+" "+request.path, func(t *testing.T) {
@@ -145,6 +141,10 @@ func TestRouterUnsupportedMethodAndUnknownPath(t *testing.T) {
 		{http.MethodGet, "/api/v0/ipfs/gateway/", "", http.StatusNotFound},
 		{http.MethodPost, "/api/v0/ipfs/add/extra", "", http.StatusNotFound},
 		{http.MethodGet, "/api/v0/scripts/", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/nutlink/addr", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/nutlink/addr/tickers", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/nutlink/addr/tickers/ticker", "", http.StatusNotFound},
+		{http.MethodGet, "/api/v0/nutlink/tickers/ticker", "", http.StatusNotFound},
 		{http.MethodGet, "/api/v0/%73cripts/datum/hash", "", http.StatusNotImplemented},
 		{http.MethodGet, "/api/v0/ipfs/gateway/hash%2Ffile", "", http.StatusNotImplemented},
 	} {

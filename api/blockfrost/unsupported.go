@@ -103,10 +103,6 @@ var unsupportedOperations = []string{
 	"POST /api/v0/ipfs/pin/remove/{IPFS_path...}",
 	"GET /api/v0/metrics",
 	"GET /api/v0/metrics/endpoints",
-	"GET /api/v0/nutlink/{address}",
-	"GET /api/v0/nutlink/{address}/tickers",
-	"GET /api/v0/nutlink/{address}/tickers/{ticker}",
-	"GET /api/v0/nutlink/tickers/{ticker}",
 }
 
 func (b *Blockfrost) registerUnsupportedLiterals(mux *http.ServeMux) {
