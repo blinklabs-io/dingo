@@ -122,8 +122,11 @@ type PoolRegistrationOwner struct {
 }
 
 type PoolRegistrationRelay struct {
-	Ipv4               *net.IP
-	Ipv6               *net.IP
+	Ipv4 *net.IP
+	Ipv6 *net.IP
+	// Type preserves the on-chain relay constructor. It is nil for rows
+	// written before schema v34, where callers use legacy field inference.
+	Type               *int
 	Hostname           string
 	ID                 uint
 	PoolRegistrationID uint

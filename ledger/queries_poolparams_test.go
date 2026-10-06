@@ -296,6 +296,42 @@ func TestQueryStakePoolParams_PortlessHostnameIsMultiHost(t *testing.T) {
 	)
 }
 
+func TestQueryStakePoolParams_PreservesPortlessSingleHostName(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	setStakePoolParamsLiveState(ls, 0, 0, 10)
+	pool := repeatedBytes(28, 0x11)
+	vrf := repeatedBytes(32, 0xAA)
+	reward := repeatedBytes(28, 0x22)
+	relayType := lcommon.PoolRelayTypeSingleHostName
+	require.NoError(t, ls.db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pool, VrfKeyHash: vrf, RewardAccount: reward,
+			Relays: []models.PoolRegistrationRelay{{
+				Type: &relayType, Hostname: "relay.example",
+			}},
+			AddedSlot: 1,
+		},
+		nil,
+	))
+
+	got, err := ls.Query(stakePoolParamsQuery(pool), QueryPoint{})
+	require.NoError(t, err)
+	gotCbor, err := cbor.Encode(got)
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		hex.EncodeToString(gotCbor),
+		"81"+"8301f66d72656c61792e6578616d706c65",
+	)
+}
+
 // TestQueryLedgerTip answers the live tip when unpinned and the acquired
 // point when pinned.
 func TestQueryLedgerTip(t *testing.T) {

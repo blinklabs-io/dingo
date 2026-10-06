@@ -757,17 +757,19 @@ func poolRegistrationCertificate(
 	}
 	for _, relay := range reg.Relays {
 		r := lcommon.PoolRelay{}
+		if relay.Type != nil {
+			r.Type = *relay.Type
+		}
 		if relay.Port != 0 {
 			port := uint32(relay.Port) // #nosec G115
 			r.Port = &port
 		}
 		if relay.Hostname != "" {
-			// The stored row keeps no relay type. A multi-host (SRV) name
-			// never carries a port, so a portless name is read as one, as
-			// the metadata store and the peer snapshot also read it.
-			r.Type = lcommon.PoolRelayTypeSingleHostName
-			if relay.Port == 0 {
-				r.Type = lcommon.PoolRelayTypeMultiHostName
+			if relay.Type == nil {
+				r.Type = lcommon.PoolRelayTypeSingleHostName
+				if relay.Port == 0 {
+					r.Type = lcommon.PoolRelayTypeMultiHostName
+				}
 			}
 			hostname := relay.Hostname
 			r.Hostname = &hostname

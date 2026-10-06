@@ -68,9 +68,11 @@ func (s *Store) SetGenesisStaking(
 			)
 		}
 		for _, relay := range certificate.Relays {
+			relayType := relay.Type
 			model := models.PoolRegistrationRelay{
 				Ipv4: relay.Ipv4,
 				Ipv6: relay.Ipv6,
+				Type: &relayType,
 			}
 			if relay.Port != nil {
 				model.Port = uint(*relay.Port)

@@ -69,6 +69,7 @@ const (
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
 	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
 	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
+	poolRelayTypeSchemaRelease                          = "pool-relay-type"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -202,6 +203,7 @@ var schemaVersions = []struct {
 		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
 	},
+	{Version: 34, Name: poolRelayTypeSchemaRelease, Dir: "v34"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.
