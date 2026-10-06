@@ -329,7 +329,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 		)
 	}
 	span.SetAttributes(blockSpanAttributes(block)...)
-	return o.handleBlockfetchBlock(ctx, blockType, block)
+	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
 // InvalidateBlockDecodeCache removes a decoded block when the ledger rejects it
@@ -888,23 +888,6 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 	return requestId, nil
 }
 
-func (o *Ouroboros) blockfetchClientBlock(
-	ctx blockfetch.CallbackContext,
-	blockType uint,
-	block gledger.Block,
-) error {
-	_, span := tracing.Start(
-		context.Background(),
-		"blockfetch.block",
-		append(
-			blockSpanAttributes(block),
-			attribute.String("connection.id", ctx.ConnectionId.String()),
-		)...,
-	)
-	defer span.End()
-	return o.handleBlockfetchBlock(ctx, blockType, block)
-}
-
 // blockSpanAttributes describes a decoded block on its blockfetch span.
 func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
 	return []attribute.KeyValue{
@@ -916,9 +899,9 @@ func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
 	}
 }
 
-// handleBlockfetchBlock updates metrics and peer scoring for a decoded block
-// and forwards it to the shared block handler. Callers own the span.
-func (o *Ouroboros) handleBlockfetchBlock(
+// blockfetchClientBlock updates metrics and peer scoring for a decoded block
+// and forwards it to the shared block handler. The caller owns the span.
+func (o *Ouroboros) blockfetchClientBlock(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	block gledger.Block,

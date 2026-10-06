@@ -115,20 +115,18 @@ func TestChainsyncClientRollBackwardRecordsSpan(t *testing.T) {
 
 // Not t.Parallel: installs a recording OpenTelemetry provider, which is a
 // process global.
-func TestBlockfetchClientBlockRecordsSpan(t *testing.T) {
+func TestBlockfetchClientBlockRawRecordsSpan(t *testing.T) {
 	recorder := testutil.RecordSpans(t)
 	o := newTracingTestOuroboros(t)
 	connID := testConnId()
-	block, err := gledger.NewBlockFromCbor(
-		gledger.BlockTypeConway,
-		testutil.BuildDecodableConwayBlockBytes(t, 42, 7),
-	)
+	raw := testutil.BuildDecodableConwayBlockBytes(t, 42, 7)
+	block, err := gledger.NewBlockFromCbor(gledger.BlockTypeConway, raw)
 	require.NoError(t, err)
 
-	require.NoError(t, o.blockfetchClientBlock(
+	require.NoError(t, o.blockfetchClientBlockRaw(
 		blockfetch.CallbackContext{ConnectionId: connID},
 		gledger.BlockTypeConway,
-		block,
+		raw,
 	))
 
 	attrs := onlySpan(t, recorder, "blockfetch.block")
