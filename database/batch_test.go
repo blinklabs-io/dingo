@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -484,4 +485,13 @@ func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
 		t, uint64(0), stats.SkippedInputRecovery,
 		"SkippedInputRecovery must be zero when skip is disabled",
 	)
+}
+
+func TestBatchedIngestionRejectsPrototypeClosureContext(t *testing.T) {
+	t.Parallel()
+	slot := uint64(99)
+	var db Database
+	err := db.SetTransactionBatchedWithOpts(nil, ocommon.Point{}, 0, 0,
+		nil, nil, nil, nil, nil, BatchedTxIngestOpts{LedgerContextSlot: &slot})
+	require.ErrorContains(t, err, "prototype closure context requires unbatched ingestion")
 }
