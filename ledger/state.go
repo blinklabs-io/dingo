@@ -6696,6 +6696,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	// completion).
 	expected := -1
 	var submitErr error
+	var drainTimeout <-chan time.Time
 	for read := 0; expected < 0 || read < expected; {
 		var (
 			item *pipeline.BlockItem
@@ -6705,8 +6706,20 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		case outcome := <-submitDone:
 			expected = outcome.submitted
 			submitErr = outcome.err
+			if submitErr != nil {
+				drainTimeout = time.After(CloseBlockPipelineDrainTimeout)
+			}
 			submitDone = nil
 			continue
+		case <-drainTimeout:
+			return nil, errors.Join(
+				retErr,
+				submitErr,
+				fmt.Errorf(
+					"drain submitted block pipeline results: timeout after %s",
+					CloseBlockPipelineDrainTimeout,
+				),
+			)
 		case item, chOk = <-results:
 		}
 		if !chOk {
@@ -6822,7 +6835,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 		decoded = append(decoded, block)
 	}
 	if submitErr != nil {
-		return nil, submitErr
+		return nil, errors.Join(retErr, submitErr)
 	}
 	if retErr != nil {
 		return nil, retErr

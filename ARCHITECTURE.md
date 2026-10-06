@@ -14295,7 +14295,9 @@ buffer is full the apply stage completes no further sequences until results
 are consumed, so a batch larger than that limit would otherwise stall in
 `Submit`. If a `Submit` fails, the results of the blocks already
 submitted are still drained before the error is returned, so none are left
-for a later batch to read. The submission context is not derived from the
+for a later batch to read. That drain is bounded by the pipeline shutdown
+timeout because a fatal apply-stage error can cancel the pipeline before every
+submitted block produces a result. The submission context is not derived from the
 reader attempt's context, so a per-attempt cancel cannot leave results
 misaligned with the batch; every return cancels it and joins the submitter.
 Decode work for multiple blocks can overlap while
