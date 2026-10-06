@@ -353,7 +353,7 @@ func rewardCreditRoundBackfill(
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
 	}
-	var rounds []models.RewardCreditRound
+	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
 	}
