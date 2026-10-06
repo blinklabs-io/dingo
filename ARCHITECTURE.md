@@ -3584,10 +3584,16 @@ carries a proposal the rule refuses, and no `governance_proposal` row is
 written for it. Ledger-state snapshot import is the exception: it stores the
 proposals the snapshot holds without running the rule.
 
-Governance persistence derives the processing epoch from the block's slot and
-uses one parameter set for that block's era. Proposal expiry and DRep activity
-therefore use the same era parameters as proposal validation when an era-1
-block is applied after the ledger has advanced.
+Live application and ordinary replay derive the governance epoch from the
+block's slot and select one parameter set for the block's era. Proposal expiry
+and live DRep activity therefore use that same selection as proposal validation
+when an era-1 block is applied after the ledger has advanced. Rollback restores
+the current- and previous-era parameter snapshots before blocks re-enter this
+same replay path. Historical backfill and Mithril gap indexing also keep the
+block-slot epoch, but use the selected block-era parameters only for proposal
+validation, proposal lifetime, and certificate deposits: their DRep processing
+records historical activity while preserving the expiry imported in the
+ledger-state snapshot.
 
 ### Checkpoint Enforcement
 
