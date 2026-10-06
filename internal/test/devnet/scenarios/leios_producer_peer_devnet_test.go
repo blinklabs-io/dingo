@@ -19,6 +19,7 @@ package scenarios
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -138,27 +139,26 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 				fmt.Sprintf("relay references announced EB %x at slot %d",
 					point.Hash, point.Slot),
 				func(snapshots []devnet.ChainSnapshot) bool {
-					for _, snapshot := range snapshots {
-						if snapshot.Node != relay.Name {
-							continue
-						}
-						for _, header := range snapshot.Headers {
-							if bytes.Equal(
-								header.LeiosAnnouncementHash,
-								point.Hash,
-							) {
-								referencingHeader = header
-								return true
-							}
-						}
-					}
-					return false
+					var found bool
+					referencingHeader, found = leiosReferencingHeader(
+						snapshots,
+						relay.Name,
+						point,
+					)
+					return found
 				})
 			require.NoError(t, err,
 				"relay never selected a ranking block referencing the offered EB")
 			require.Positive(t, referencingHeader.LeiosAnnouncementSize,
 				"ranking header must carry a sized Leios announcement")
 			t.Logf("relay selected ranking block %x at slot %d for EB %x", referencingHeader.Hash, referencingHeader.Slot, point.Hash)
+			referenceCurrent := func() bool {
+				return leiosReferenceOnCanonicalChain(
+					group.Snapshots(),
+					relay.Name,
+					referencingHeader,
+				)
+			}
 
 			txOfferCtx, cancelTxOffer := context.WithTimeout(ctx, 2*time.Minute)
 			err = awaitLeiosTransactionOffer(
@@ -166,8 +166,17 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 				transactions.TransactionOffers,
 				transactions.Errors,
 				point,
+				referenceCurrent,
 			)
 			cancelTxOffer()
+			if errors.Is(err, errLeiosReferenceRolledBack) {
+				t.Logf(
+					"relay ranking block %x at slot %d rolled back before its EB transaction offer was observed",
+					referencingHeader.Hash,
+					referencingHeader.Slot,
+				)
+				continue
+			}
 			require.NoError(t, err,
 				"relay did not offer the EB transactions before the fetch request")
 			t.Logf("relay offered transactions for EB %x", point.Hash)
@@ -190,8 +199,17 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 				relayNtcAddr,
 				cfg.NetworkMagic,
 				bodies,
+				referenceCurrent,
 			)
 			cancelApply()
+			if errors.Is(err, errLeiosReferenceRolledBack) {
+				t.Logf(
+					"relay ranking block %x at slot %d rolled back before its EB output was observed",
+					referencingHeader.Hash,
+					referencingHeader.Slot,
+				)
+				continue
+			}
 			require.NoError(t, err,
 				"relay did not apply any fetched EB transaction output")
 			t.Logf(
@@ -209,23 +227,90 @@ func TestLeiosEndorserBlockProducerToPeer(t *testing.T) {
 	}
 }
 
+var errLeiosReferenceRolledBack = errors.New(
+	"Leios referencing block rolled back",
+)
+
+func leiosReferencingHeader(
+	snapshots []devnet.ChainSnapshot,
+	node string,
+	point pcommon.Point,
+) (devnet.ObservedHeader, bool) {
+	// The ranking header carries the announced EB content hash and size, but
+	// not the slot from its LeiosNotify point. The slot lower bound rejects an
+	// older occurrence of repeated content. The subsequent exact-point
+	// transaction offer binds the selected occurrence; an eligible later
+	// header with the same hash names the same validated EB content.
+	for _, snapshot := range snapshots {
+		if snapshot.Node != node {
+			continue
+		}
+		for _, header := range snapshot.Headers {
+			if header.Slot >= point.Slot && bytes.Equal(
+				header.LeiosAnnouncementHash,
+				point.Hash,
+			) {
+				return header, true
+			}
+		}
+		return devnet.ObservedHeader{}, false
+	}
+	return devnet.ObservedHeader{}, false
+}
+
+func leiosReferenceOnCanonicalChain(
+	snapshots []devnet.ChainSnapshot,
+	node string,
+	reference devnet.ObservedHeader,
+) bool {
+	for _, snapshot := range snapshots {
+		if snapshot.Node != node {
+			continue
+		}
+		hash, ok := snapshot.HashAt(reference.Slot)
+		return ok && bytes.Equal(hash, reference.Hash)
+	}
+	return false
+}
+
 func awaitLeiosTransactionOutputsApplied(
 	ctx context.Context,
 	addr string,
 	magic uint32,
 	bodies [][]byte,
+	referenceCurrent func() bool,
+) error {
+	return awaitLeiosApplication(
+		ctx,
+		func(ctx context.Context) (bool, error) {
+			return devnet.LeiosTransactionOutputsApplied(
+				ctx,
+				addr,
+				magic,
+				bodies,
+			)
+		},
+		referenceCurrent,
+	)
+}
+
+func awaitLeiosApplication(
+	ctx context.Context,
+	appliedNow func(context.Context) (bool, error),
+	referenceCurrent func() bool,
 ) error {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		applied, err := devnet.LeiosTransactionOutputsApplied(
-			ctx,
-			addr,
-			magic,
-			bodies,
-		)
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
+		}
+		applied, err := appliedNow(ctx)
 		if err != nil {
 			return err
+		}
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
 		}
 		if applied {
 			return nil
@@ -243,11 +328,20 @@ func awaitLeiosTransactionOffer(
 	offers <-chan pcommon.Point,
 	errors <-chan error,
 	want pcommon.Point,
+	referenceCurrent func() bool,
 ) error {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
 	for {
+		if !referenceCurrent() {
+			return errLeiosReferenceRolledBack
+		}
 		select {
 		case point := <-offers:
 			if point.Slot == want.Slot && bytes.Equal(point.Hash, want.Hash) {
+				if !referenceCurrent() {
+					return errLeiosReferenceRolledBack
+				}
 				return nil
 			}
 		case err := <-errors:
@@ -256,6 +350,7 @@ func awaitLeiosTransactionOffer(
 			}
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }
