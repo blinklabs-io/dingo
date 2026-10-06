@@ -115,8 +115,9 @@ func HardForkDijkstra(
 		ConwayProtocolParameters: *conwayPParams,
 	}
 	ret.CostModels = cloneCostModels(ret.CostModels)
+	var dijkstraGenesis *gdijkstra.DijkstraGenesis
 	if nodeConfig != nil {
-		dijkstraGenesis := nodeConfig.DijkstraGenesis()
+		dijkstraGenesis = nodeConfig.DijkstraGenesis()
 		if !isEmptyDijkstraGenesis(dijkstraGenesis) {
 			if err := ret.UpdateFromGenesis(dijkstraGenesis); err != nil {
 				return nil, err
@@ -129,10 +130,106 @@ func HardForkDijkstra(
 		}
 	}
 	applyDijkstraRefScriptDefaults(&ret)
+	if err := validateDijkstraProtocolParameterDomains(&ret, dijkstraGenesis); err != nil {
+		return nil, fmt.Errorf("validate Dijkstra genesis parameters: %w", err)
+	}
 	if ret.ProtocolVersion.Major < gdijkstra.MinProtocolVersionDijkstra {
 		ret.ProtocolVersion.Major = gdijkstra.MinProtocolVersionDijkstra
 	}
 	return &ret, nil
+}
+
+func validateDijkstraProtocolParameterDomains(
+	p *gdijkstra.DijkstraProtocolParameters,
+	genesis *gdijkstra.DijkstraGenesis,
+) error {
+	if p == nil {
+		return errors.New("dijkstra protocol parameters are nil")
+	}
+	// ApplyUpdate owns the domain rules for Dijkstra ledger parameters. Apply
+	// every Dijkstra field and each inherited field supplied by genesis to a
+	// copy so genesis follows the same rules as a governance update without
+	// changing the parameters a second time.
+	check := *p
+	update := gdijkstra.DijkstraProtocolParameterUpdate{
+		MaxRefScriptSizePerBlock:         &p.MaxRefScriptSizePerBlock,
+		MaxRefScriptSizePerTx:            &p.MaxRefScriptSizePerTx,
+		RefScriptCostStride:              &p.RefScriptCostStride,
+		RefScriptCostMultiplier:          p.RefScriptCostMultiplier,
+		MaxPledgeLeverage:                p.MaxPledgeLeverage,
+		MaxPledgeLeverageSet:             p.MaxPledgeLeverage != nil,
+		MinPoolMargin:                    p.MinPoolMargin,
+		LeiosAnnouncementPeriodLength:    &p.LeiosAnnouncementPeriodLength,
+		LeiosVotePeriodLength:            &p.LeiosVotePeriodLength,
+		LeiosDiffusionPeriodLength:       &p.LeiosDiffusionPeriodLength,
+		LeiosCommitteeSize:               &p.LeiosCommitteeSize,
+		LeiosQuorumStakeThreshold:        p.LeiosQuorumStakeThreshold,
+		MaxEndorserBlockReferencesSize:   &p.MaxEndorserBlockReferencesSize,
+		MaxEndorserBlockTxsSize:          &p.MaxEndorserBlockTxsSize,
+		MaxEndorserBlockExUnits:          &p.MaxEndorserBlockExUnits,
+		MaxRefScriptSizePerEndorserBlock: &p.MaxRefScriptSizePerEndorserBlock,
+	}
+	if genesis == nil {
+		return check.ApplyUpdate(&update)
+	}
+	conwayGenesis := &genesis.ConwayGenesis
+	if conwayGenesis.MinCommitteeSize != 0 {
+		update.MinCommitteeSize = &p.MinCommitteeSize
+	}
+	if conwayGenesis.CommitteeTermLimit != 0 {
+		update.CommitteeTermLimit = &p.CommitteeTermLimit
+	}
+	if conwayGenesis.GovActionValidityPeriod != 0 {
+		update.GovActionValidityPeriod = &p.GovActionValidityPeriod
+	}
+	if conwayGenesis.GovActionDeposit != 0 {
+		update.GovActionDeposit = &p.GovActionDeposit
+	}
+	if conwayGenesis.DRepDeposit != 0 {
+		update.DRepDeposit = &p.DRepDeposit
+	}
+	if conwayGenesis.DRepInactivityPeriod != 0 {
+		update.DRepInactivityPeriod = &p.DRepInactivityPeriod
+	}
+	if conwayGenesis.MinFeeRefScriptCostPerByte != nil {
+		update.MinFeeRefScriptCostPerByte = p.MinFeeRefScriptCostPerByte
+	}
+	if len(conwayGenesis.PlutusV3CostModel) > 0 ||
+		len(genesis.PlutusV4CostModel) > 0 {
+		update.CostModels = p.CostModels
+	}
+	if dijkstraGenesisPoolThresholdsSet(&conwayGenesis.PoolVotingThresholds) {
+		update.PoolVotingThresholds = &p.PoolVotingThresholds
+	}
+	if dijkstraGenesisDRepThresholdsSet(&conwayGenesis.DRepVotingThresholds) {
+		update.DRepVotingThresholds = &p.DRepVotingThresholds
+	}
+	return check.ApplyUpdate(&update)
+}
+
+func dijkstraGenesisPoolThresholdsSet(
+	t *conway.ConwayGenesisPoolVotingThresholds,
+) bool {
+	return t.MotionNoConfidence != nil ||
+		t.CommitteeNormal != nil ||
+		t.CommitteeNoConfidence != nil ||
+		t.HardForkInitiation != nil ||
+		t.PpSecurityGroup != nil
+}
+
+func dijkstraGenesisDRepThresholdsSet(
+	t *conway.ConwayGenesisDRepVotingThresholds,
+) bool {
+	return t.MotionNoConfidence != nil ||
+		t.CommitteeNormal != nil ||
+		t.CommitteeNoConfidence != nil ||
+		t.UpdateToConstitution != nil ||
+		t.HardForkInitiation != nil ||
+		t.PpNetworkGroup != nil ||
+		t.PpEconomicGroup != nil ||
+		t.PpTechnicalGroup != nil ||
+		t.PpGovGroup != nil ||
+		t.TreasuryWithdrawal != nil
 }
 
 // keepConwayGovernanceParams restores the Conway governance parameters that

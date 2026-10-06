@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -240,4 +241,86 @@ func TestHardForkDijkstraAppliesConwayGovernanceParamsGenesisSets(
 	require.Equal(t, uint(3), p.MinCommitteeSize)
 	require.Equal(t, uint64(5), p.GovActionDeposit)
 	require.Equal(t, uint64(6), p.DRepDeposit)
+}
+
+func TestHardForkDijkstraValidatesGenesisParameterDomains(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		genesis string
+		wantErr string
+	}{
+		{
+			name:    "zero reference script multiplier",
+			genesis: `{"refScriptCostMultiplier":0}`,
+			wantErr: "refScriptCostMultiplier",
+		},
+		{
+			name: "inherited voting threshold above one",
+			genesis: `{"poolVotingThresholds":` +
+				`{"committeeNormal":2}}`,
+			wantErr: "poolVotingThresholds.committeeNormal",
+		},
+		{
+			name:    "quorum stake threshold above one",
+			genesis: `{"leiosQuorumStakeThreshold":2}`,
+			wantErr: "leiosQuorumStakeThreshold",
+		},
+		{
+			name: "negative endorser block execution units",
+			genesis: `{"maxEndorserBlockExecutionUnits":` +
+				`{"memory":-1,"steps":0}}`,
+			wantErr: "maxEndorserBlockExUnits",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &cardano.CardanoNodeConfig{}
+			require.NoError(
+				t,
+				cfg.LoadDijkstraGenesisFromReader(
+					strings.NewReader(tc.genesis),
+				),
+			)
+			unitRat := func() cbor.Rat {
+				return cbor.Rat{Rat: big.NewRat(1, 2)}
+			}
+			prev := &conway.ConwayProtocolParameters{
+				ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+					Major: 10,
+				},
+				PoolVotingThresholds: conway.PoolVotingThresholds{
+					MotionNoConfidence:    unitRat(),
+					CommitteeNormal:       unitRat(),
+					CommitteeNoConfidence: unitRat(),
+					HardForkInitiation:    unitRat(),
+					PpSecurityGroup:       unitRat(),
+				},
+			}
+			_, err := eras.HardForkDijkstra(cfg, prev)
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestHardForkDijkstraAcceptsValidGenesisParameterDomains(t *testing.T) {
+	t.Parallel()
+	const genesis = `{
+		"refScriptCostMultiplier":1.2,
+		"maxPledgeLeverage":5,
+		"minPoolMargin":0.1,
+		"leiosQuorumStakeThreshold":0.75,
+		"maxEndorserBlockExecutionUnits":{"memory":1,"steps":2}
+	}`
+	pparams := hardForkDijkstraFromGenesisJSON(t, genesis)
+	require.Zero(t, pparams.RefScriptCostMultiplier.Cmp(big.NewRat(6, 5)))
+	require.Zero(t, pparams.MaxPledgeLeverage.Cmp(big.NewRat(5, 1)))
+	require.Zero(t, pparams.MinPoolMargin.Cmp(big.NewRat(1, 10)))
+	require.Zero(t, pparams.LeiosQuorumStakeThreshold.Cmp(big.NewRat(3, 4)))
+	require.Equal(
+		t,
+		lcommon.ExUnits{Memory: 1, Steps: 2},
+		pparams.MaxEndorserBlockExUnits,
+	)
 }
