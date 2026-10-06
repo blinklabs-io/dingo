@@ -2068,13 +2068,13 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(
-		0,
-		0,
-		nil,
-	) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
-	idx.advanceEpochLocked(1, 1, nil) // advance to epoch 1, snapshots epoch 0
+	// cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	initErr := idx.advanceEpochLocked(0, 0, nil)
+	// advance to epoch 1, snapshots epoch 0
+	advanceErr := idx.advanceEpochLocked(1, 1, nil)
 	idx.mu.Unlock()
+	require.NoError(t, initErr)
+	require.NoError(t, advanceErr)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
@@ -2094,18 +2094,16 @@ func TestEpochTransitionIdempotent(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(
-		3,
-		0,
-		nil,
-	) // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
-	idx.advanceEpochLocked(4, 42, nil) // advance to epoch 4, snapshots epoch 3
-	idx.advanceEpochLocked(
-		4,
-		42,
-		nil,
-	) // no-op: same epoch, guard prevents a second snapshot
+	// cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	initErr := idx.advanceEpochLocked(3, 0, nil)
+	// advance to epoch 4, snapshots epoch 3
+	advanceErr := idx.advanceEpochLocked(4, 42, nil)
+	// no-op: same epoch, guard prevents a second snapshot
+	repeatErr := idx.advanceEpochLocked(4, 42, nil)
 	idx.mu.Unlock()
+	require.NoError(t, initErr)
+	require.NoError(t, advanceErr)
+	require.NoError(t, repeatErr)
 
 	snapshots := epochCandidateSnapshots(t, store)
 	require.Len(
