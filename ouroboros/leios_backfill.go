@@ -543,7 +543,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 			point,
 			blk.BlockRaw,
 			nil,
-			leiosStoreAuthoritative,
+			leiosStoreBackfill,
 		); err != nil {
 			return fmt.Errorf("store manifest: %w", err)
 		}
@@ -596,7 +596,7 @@ func (o *Ouroboros) fetchEndorserBlockOnConn(
 		point,
 		data.blockRaw,
 		txs,
-		leiosStoreAuthoritative,
+		leiosStoreBackfill,
 	); err != nil {
 		return fmt.Errorf("store txs: %w", err)
 	}

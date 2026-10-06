@@ -111,6 +111,48 @@ func TestLeiosRelayForwardsVerifiedManifestAndCompleteTransactionsOnce(t *testin
 	require.Nil(t, entry, "repeated peer offers must not be re-enqueued")
 }
 
+func TestLeiosRelayForwardsCompletedBackfillOnce(t *testing.T) {
+	t.Parallel()
+
+	txRaw, err := cbor.Encode([]cbor.RawMessage{mustCbor(t, "tx-body")})
+	require.NoError(t, err)
+	ebRaw, err := cbor.Encode(&lcommon.LeiosEndorserBlock{
+		TransactionReferences: []lcommon.LeiosTransactionReference{{
+			TransactionHash: lcommon.Blake2b256Hash(txRaw),
+			TransactionSize: uint16(len(txRaw)), //nolint:gosec // short test transaction
+		}},
+	})
+	require.NoError(t, err)
+	ebHash := lcommon.Blake2b256Hash(ebRaw)
+	point := ocommon.NewPoint(42, ebHash.Bytes())
+	txsRaw := []cbor.RawMessage{cbor.RawMessage(txRaw)}
+
+	o := newOuroboros(OuroborosConfig{EnableLeios: true})
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	o.leiosEBLog.registerConn("downstream", nil, nil)
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, ebRaw, txsRaw, leiosStoreBackfill,
+	))
+
+	manifest, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, manifest)
+	_, ok := leiosForgedEBOffer(manifest).(*oleiosnotify.MsgBlockOffer)
+	require.True(t, ok)
+	o.leiosEBLog.complete("downstream", nil, true)
+
+	transactions, _ := o.leiosEBLog.next("downstream")
+	require.NotNil(t, transactions)
+	_, ok = leiosForgedEBOffer(transactions).(*oleiosnotify.MsgBlockTxsOffer)
+	require.True(t, ok)
+	o.leiosEBLog.complete("downstream", nil, true)
+
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point, ebRaw, txsRaw, leiosStoreBackfill,
+	))
+	entry, _ := o.leiosEBLog.next("downstream")
+	require.Nil(t, entry, "repeated backfill must not duplicate offers")
+}
+
 func TestLeiosRelayOffersExistingCompleteCacheOnPeerOffer(t *testing.T) {
 	t.Parallel()
 

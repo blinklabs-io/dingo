@@ -321,9 +321,10 @@ type leiosEndorserBlockData struct {
 	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
-	// relayOfferRequested is set for content received through LeiosNotify.
-	// The cached EB is re-offered only after its slot is verified, and its
-	// transactions only after their complete set has been validated.
+	// relayOfferRequested is set for content received through LeiosNotify or
+	// historical by-point fetch. The cached EB is re-offered only after its slot
+	// is verified, and its transactions only after their complete set has been
+	// validated.
 	relayOfferRequested      bool
 	relayManifestOffered     bool
 	relayTransactionsOffered bool
@@ -359,9 +360,12 @@ const (
 	// anything keyed on its slot is published.
 	leiosStorePeerOffered leiosStoreOrigin = iota
 	// leiosStoreAuthoritative is a store whose slot dingo established itself:
-	// a locally forged endorser block, or a by-point backfill whose point came
-	// from the ranking block the ledger is applying.
+	// a locally forged endorser block.
 	leiosStoreAuthoritative
+	// leiosStoreBackfill is a store fetched from a peer for a point established
+	// by the ranking block the ledger is applying. It is authoritative and is
+	// relayed after validation so downstream peers can fetch the same closure.
+	leiosStoreBackfill
 )
 
 // leiosBlockKey returns the leiosEndorserBlocks cache identity for one
@@ -572,6 +576,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// always leiosAnnouncementsMu before leiosMu.
 	o.leiosAnnouncementsMu.Lock()
 	verified := origin == leiosStoreAuthoritative ||
+		origin == leiosStoreBackfill ||
 		o.leiosAnnouncementBindsSlotLocked(point.Hash, point.Slot)
 	// leiosAnnouncementsMu is released by explicit Unlock calls on this path,
 	// not by a defer, so this decode must fail by returning rather than by
@@ -583,6 +588,8 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	cacheKeys := []string{leiosBlockKey(point.Slot, point.Hash)}
+	relayOfferRequested := origin == leiosStorePeerOffered ||
+		origin == leiosStoreBackfill
 	data := &leiosEndorserBlockData{
 		point:                    point,
 		blockRaw:                 slices.Clone(blockRaw),
@@ -591,7 +598,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		txCount:                  len(block.TransactionReferences),
 		cacheKeys:                cacheKeys,
 		insertedAt:               time.Now(),
-		relayOfferRequested:      origin == leiosStorePeerOffered,
+		relayOfferRequested:      relayOfferRequested,
 		slotVerified:             verified,
 		semanticValidationStatus: leiosEBValidationUnknown,
 	}
