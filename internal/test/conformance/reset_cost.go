@@ -37,7 +37,7 @@ import (
 // the corpus. The corpus is 2,574 Blueprint vectors plus one synthetic
 // rollback fixture, and the rollback fixture resets a second time when it
 // rolls back, so a replay makes 2,576 Reset calls -- one per vector, not a
-// multiple of it. A vector dirties about 12 of the 89 managed tables.
+// multiple of it. A vector dirties about 12 of the 91 managed tables.
 //
 // Measured against the pre-change reset path, each external backend paid three
 // separate per-vector costs:
@@ -46,7 +46,7 @@ import (
 //     handshake per vector;
 //  2. an information_schema query per vector, re-deriving a table list that
 //     cannot change (migrations run once, at construction);
-//  3. a statement per table per vector, against all 89 rather than the ~12 a
+//  3. a statement per table per vector, against all 91 rather than the ~12 a
 //     vector wrote.
 //
 // backendResetter removes all three: it holds one admin connection for the
@@ -56,8 +56,12 @@ import (
 // What remained after that was the cost of the clearing statement itself, and
 // it differs by dialect:
 //
-//   - PostgreSQL takes every dirty table in one TRUNCATE, so its reset is one
-//     round trip whatever the table count.
+//   - PostgreSQL's TRUNCATE rewrites each table's relation file, so its cost
+//     is per table too. Measured on a postgres:16 container configured like
+//     the CI service, 12 dirty tables cost 501ms as one TRUNCATE ... CASCADE
+//     against 22ms as one statement of data-modifying CTE DELETEs.
+//     deletePostgresTables therefore issues that single statement, so its
+//     reset is one round trip whatever the table count.
 //   - MySQL has no multi-table TRUNCATE, and InnoDB implements TRUNCATE by
 //     dropping and recreating the table's tablespace, so the cost is per table
 //     and does not fall when the table holds a handful of rows. Measured on a
@@ -72,7 +76,7 @@ import (
 //
 // Dropping TRUNCATE on MySQL gives up the AUTO_INCREMENT restart TRUNCATE
 // performs and DELETE does not. Nothing in the suite needs it: the PostgreSQL
-// backend's TRUNCATE carries no RESTART IDENTITY, so its sequences have never
+// backend's former TRUNCATE carried no RESTART IDENTITY, so its sequences never
 // restarted between vectors either, and TestRulesConformanceVectorsPostgres
 // asserts that backend reproduces the SQLite baseline vector for vector.
 // SQLite keeps its AUTOINCREMENT reset because it costs one more DELETE inside
@@ -115,7 +119,7 @@ type backendResetter struct {
 // compiling it at most once per distinct query text.
 //
 // Preparing matters because the probe's text is one UNION ALL branch per
-// managed table -- 89 of them here -- and every Reset re-sent it. Almost all
+// managed table -- 91 of them here -- and every Reset re-sent it. Almost all
 // of its cost is compiling that text, not running it: measured over 200 calls
 // against a migrated conformance database, 1.33ms ad hoc against 0.07ms
 // prepared, and 31.78ms against 2.20ms under -race, where the compiler is

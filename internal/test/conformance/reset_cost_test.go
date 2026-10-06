@@ -303,9 +303,10 @@ func assertProbeFindsOnlyPopulated(
 // TestBackendResetterTruncatesExtraDirtyTables proves a table reported by
 // extraDirty is truncated even though it holds no rows.
 //
-// MySQL's TRUNCATE is what resets AUTO_INCREMENT, so a vector that inserts and
-// then deletes rows leaves the table empty with its counter advanced. Skipping
-// it because it is empty would carry that counter into the next vector.
+// SQLite's AUTOINCREMENT counter survives a DELETE, so a vector that inserts
+// and then deletes rows leaves the table empty with its counter advanced.
+// Skipping it because it is empty would carry that counter into the next
+// vector.
 func TestBackendResetterTruncatesExtraDirtyTables(t *testing.T) {
 	f := newFakeResetter(t, []string{"a", "b"})
 	f.dirty = nil
