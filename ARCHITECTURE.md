@@ -4615,11 +4615,12 @@ run from nothing. After a RollBackward to a point inside the retained `k+1`
 delivered-header history, where the block number is known, the next header must
 continue that point's block number by one. A rollback
 to any other point leaves the block number unknown (zero), and an unknown
-height continues nothing: the next delivery beyond the catch-up allowance,
-whatever it names, removes the peer, so a peer-chosen rollback point cannot
-carry an accepted frontier or a run to another height. A delivery within the
-allowance clears the `lone` mark instead: that height needs no chain, so the
-peer is bounded as a reconnected one would be. The boundary-block allowance is not restored by a
+height continues nothing: the next delivery, whatever it names and whether
+or not it is within the catch-up allowance, removes the peer, so a peer-chosen
+rollback point cannot carry an accepted frontier or a run to another height.
+The `lone` mark is cleared without removal only when the last delivered height
+is known and both it and the new delivery are within the allowance. The
+boundary-block allowance is not restored by a
 rollback: a rollback to a boundary block followed by a block sharing its slot
 also removes the peer. Removal also happens when the connection closes, which is
 what a header-verification failure at ledger apply ends in: the ledger recycles

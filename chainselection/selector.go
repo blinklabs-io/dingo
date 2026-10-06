@@ -993,7 +993,10 @@ func (cs *ChainSelector) blockWithinSlotDistanceLocked(
 // repeated header continues it. The caller then removes the peer, so a
 // frontier that stops being a connected chain loses its standing at once.
 // The mark is dropped once the frontier is back within the ordinary
-// catch-up ceiling, where the ordinary bound applies. Must be called with
+// catch-up ceiling, where the ordinary bound applies, but only from a known
+// height: after a rollback outside the retained history the previous height
+// reads zero, which is below any ceiling, so the next header is held to the
+// chain and, continuing nothing, removes the peer. Must be called with
 // cs.mutex held.
 func (cs *ChainSelector) loneFrontierBrokenLocked(
 	connId ouroboros.ConnectionId,
@@ -1013,7 +1016,8 @@ func (cs *ChainSelector) loneFrontierBrokenLocked(
 		cs.localTip.BlockNumber,
 		safeAddUint64(cs.securityParam, cs.securityParam),
 	)
-	if peerTip.ObservedTip.BlockNumber <= ceiling &&
+	if peerTip.ObservedTip.BlockNumber != 0 &&
+		peerTip.ObservedTip.BlockNumber <= ceiling &&
 		observedTip.BlockNumber <= ceiling {
 		delete(cs.farTipClaims, connId)
 		return false

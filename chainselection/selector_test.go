@@ -6009,23 +6009,23 @@ func TestLoneFarFrontierRollbackCannotMoveHeight(t *testing.T) {
 				assert.False(t, c.deliverHeader(cs, conn, again, observed.Point.Hash, false))
 			})
 		}
-		// Within the catch-up allowance a delivery needs no chain, so
-		// revoking would leave the peer exactly where a reconnect puts it.
-		within := name + " then a header within the allowance clears the mark"
+		// The unknown height says nothing about where the frontier went, so
+		// a header within the allowance does not continue it either: clearing
+		// the mark there would let the peer drop its far chain unchallenged.
+		within := name + " then a header within the allowance is revoked"
 		t.Run(within, func(t *testing.T) {
 			t.Parallel()
 			cs, conn := accepted(t)
 			point := mk()
 			rollback(cs, conn, point)
 			observed := child(point, c.localBlock+1)
-			require.True(t, c.deliverHeader(
+			assert.False(t, c.deliverHeader(
 				cs, conn, observed, point.Hash, false))
-			assert.Equal(t, observed.BlockNumber,
-				cs.GetPeerTip(conn).ObservedTip.BlockNumber)
+			assert.Nil(t, cs.GetPeerTip(conn))
 			cs.mutex.Lock()
 			_, marked := cs.farTipClaims[conn]
 			cs.mutex.Unlock()
-			assert.False(t, marked, "the frontier is no longer lone")
+			assert.False(t, marked, "removal drops the claim")
 		})
 	}
 
