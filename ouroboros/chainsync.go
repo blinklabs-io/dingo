@@ -1900,6 +1900,7 @@ func (o *Ouroboros) decodeChainsyncHeader(
 	}
 	header, err = gledger.NewBlockHeaderFromCbor(blockType, raw)
 	if err == nil || blockType != gledger.BlockTypeByronEbb {
+		// The caller wraps decode errors with the block type.
 		return header, err
 	}
 	// Some dingo peers have sent a complete Byron EBB in the NtN header
@@ -1910,6 +1911,7 @@ func (o *Ouroboros) decodeChainsyncHeader(
 	// headers.
 	block, blockErr := gledger.NewBlockFromCbor(blockType, raw)
 	if blockErr != nil {
+		// Report the header decode error; the EBB fallback is only a retry.
 		return nil, err
 	}
 	return block.Header(), nil

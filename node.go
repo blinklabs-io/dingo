@@ -286,6 +286,7 @@ func New(cfg Config) (*Node, error) {
 	eventBus, err := event.TryNewEventBus(n.config.promRegistry, n.config.logger)
 	if err != nil {
 		metricsRegistration.Rollback()
+		// TryNewEventBus names the failed registration in its error.
 		return nil, err
 	}
 	n.eventBus = eventBus
@@ -410,6 +411,7 @@ func (n *Node) apiPluginSelection(
 		var err error
 		selection, err = n.config.apiProviderConfig(capability, selection)
 		if err != nil {
+			// apiProviderConfig names the capability in its error.
 			return selection, 0, err
 		}
 	}
@@ -1533,6 +1535,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 						if errors.Is(err, models.ErrBlockNotFound) {
 							return 0, false, nil
 						}
+						// The Midnight server names the request step.
 						return 0, false, err
 					}
 					return block.Number, true, nil
@@ -1605,6 +1608,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityAPIKupo,
 	)
 	if err != nil {
+		// apiPluginSelection names the capability in its errors.
 		return err
 	}
 	if n.config.storageMode.IsAPI() && kupoPort > 0 {
@@ -1683,6 +1687,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		plugin.CapabilityAPIMcp,
 	)
 	if err != nil {
+		// apiPluginSelection names the capability in its errors.
 		return err
 	}
 	if mcpPort > 0 {

@@ -296,6 +296,7 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 					time.Since(decodeStart).Seconds(),
 				)
 			}
+			// Wrapped with the block type below.
 			return block, err
 		},
 		o.recordBlockDecodeCacheOutcome,
@@ -833,6 +834,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 ) (uint64, error) {
 	client, err := o.blockfetchConnClient(connId)
 	if err != nil {
+		// blockfetchConnClient names the missing manager or connection.
 		return 0, err
 	}
 	dispatchStart := time.Now()
@@ -860,6 +862,7 @@ func (o *Ouroboros) BlockfetchClientRequestRange(
 				false,
 			)
 		}
+		// Callers name the range request in their own wrap or log.
 		return 0, err
 	}
 	// RequestRange returns once the request is on the wire, so a peer that
