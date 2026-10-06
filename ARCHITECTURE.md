@@ -823,8 +823,20 @@ back into `LedgerState` methods that take `chainsyncMutex`** (in practice
 to do real work should hand off to their own goroutine, which
 `event/doc.go` already requires of every subscriber callback.
 
-The BlockFetch server path mirrors the retrieval flow for downstream peers:
-when a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
+The BlockFetch server path mirrors the retrieval flow for downstream peers.
+Because the range sender is asynchronous, a peer can pipeline requests and
+each would otherwise own an iterator and a goroutine. `blockfetchRangeAdmission`
+(`ouroboros/blockfetch_admission.go`) therefore reserves a slot per connection
+(`blockfetchMaxRangesPerConnDefault`) and process-wide
+(`blockfetchMaxRangesGlobalDefault`) before any iterator is opened, and a
+saturated request is answered with `NoBlocks`. Per-connection saturation feeds
+the stuck-peer valve; global saturation does not, so an honest peer is not
+disconnected for the server's load. The sender goroutine releases its slot on
+completion or error, and `HandleConnClosedEvent` releases every slot the
+connection still holds, so a lagging sender cannot keep capacity occupied or
+release it twice.
+
+When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the
 serving chain, then sends `StartBatch`. Checking only
 the end slot let a peer name an end point the server does not hold and receive
@@ -863,6 +875,11 @@ can return promptly, but it applies backpressure between messages by waiting
 for the underlying gouroboros protocol send queue to drain. This keeps large
 Leios catch-up ranges from filling the mux pending-message queue and turning a
 slow consumer into a connection-level protocol violation.
+
+The inbound TxSubmission server applies a per-peer token bucket to the
+transaction IDs a peer offers before requesting any bodies. `Node` sets it
+through `defaultMaxTxSubmissionsPerSecond` in `newOuroborosConfig`; the
+`ouroboros` package itself leaves the limiter off when the setting is zero.
 
 On the client path, BlockFetch events carry fully decoded blocks. The ledger
 subscriber therefore buffers one eight-block chain-store commit batch; when it

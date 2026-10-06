@@ -353,6 +353,19 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Reserve range capacity before the first allocation (the chain
+	// iterator below and the sender goroutine). Saturation is answered with
+	// NoBlocks, the only rejection BlockFetch defines for a request.
+	release, admitted := o.blockfetchRangeAdmission.reserve(ctx.ConnectionId)
+	if admitted != blockfetchRangeAdmitted {
+		return o.blockfetchRejectSaturated(ctx, start, admitted)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window.
@@ -460,8 +473,11 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
-	// Start async process to send requested block range
+	// Start async process to send requested block range. The goroutine owns
+	// the reservation from here on.
+	handedOff = true
 	go func() {
+		defer release()
 		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
 		if rawConn == nil {
 			chainIter.Cancel()
@@ -487,6 +503,36 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			)
 		}
 	}()
+	return nil
+}
+
+// blockfetchRejectSaturated answers a range request that exceeded the
+// per-connection or global admission bound. Per-connection saturation feeds
+// the stuck-peer valve, since only a misbehaving peer pipelines past its own
+// bound. Global saturation does not: it is not the peer's fault, so repeating
+// the request must not get an honest peer disconnected.
+func (o *Ouroboros) blockfetchRejectSaturated(
+	ctx blockfetch.CallbackContext,
+	start ocommon.Point,
+	result blockfetchRangeAdmitResult,
+) error {
+	o.config.Logger.Warn(
+		"blockfetch: range admission saturated, sending NoBlocks",
+		"connection_id", ctx.ConnectionId.String(),
+		"start_slot", start.Slot,
+		"per_connection", result == blockfetchRangeConnSaturated,
+	)
+	if err := ctx.Server.NoBlocks(); err != nil {
+		return fmt.Errorf("blockfetch NoBlocks after saturation: %w", err)
+	}
+	if result == blockfetchRangeConnSaturated {
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing peer that exceeds concurrent range bound",
+			"blockfetch: peer exceeded concurrent range bound",
+		)
+	}
 	return nil
 }
 

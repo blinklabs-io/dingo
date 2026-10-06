@@ -185,6 +185,7 @@ type Ouroboros struct {
 	localstatequeryVerifiedHook func()
 	localstatequeryAcquireMutex sync.Mutex
 	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	blockfetchRangeAdmission    *blockfetchRangeAdmission
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -381,6 +382,13 @@ type OuroborosConfig struct {
 	// already controls the request pace. A negative value also disables
 	// rate limiting.
 	MaxTxSubmissionsPerSecond int
+	// BlockfetchMaxRangesPerConn and BlockfetchMaxRangesGlobal bound the
+	// BlockFetch ranges the server streams at once, per connection and
+	// across all connections. A request beyond either bound is answered
+	// with NoBlocks before any iterator is created. Values <= 0 select the
+	// defaults.
+	BlockfetchMaxRangesPerConn int
+	BlockfetchMaxRangesGlobal  int
 	// ChainsyncIngressEligible reports whether a peer is allowed to
 	// feed chainsync events into the ledger pipeline. This lets us
 	// keep inbound/public noise out of ledger ingress while still
@@ -635,6 +643,10 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
 		leiosAnnouncementElections: make(map[string]map[string]struct{}),
 	}
+	o.blockfetchRangeAdmission = newBlockfetchRangeAdmission(
+		cfg.BlockfetchMaxRangesPerConn,
+		cfg.BlockfetchMaxRangesGlobal,
+	)
 	o.blockfetchConnClient = o.blockfetchConnClientLive
 	o.blockfetchRangeBytes = func(ocommon.Point, ocommon.Point) uint64 { return 0 }
 	if o.ledgerState != nil {
@@ -1057,6 +1069,7 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
 	o.releaseBlockfetchForwardOverflow(connId)
+	o.blockfetchRangeAdmission.releaseConn(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
