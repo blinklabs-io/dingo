@@ -58,25 +58,23 @@ func waitForSignalOrError(
 }
 
 // waitForStop is waitForSignalOrError plus the remote lifecycle request that
-// ended the run, if any. The request is queued before signalCtx is cancelled,
-// and Node.Run returns nil on that cancellation, which can reach errChan
-// before the cancellation is observed; so the request is checked whenever the
-// run ended without an error, not only on the signaled branch.
+// ended the run, if any. endRequests closes the node's request intake and
+// returns the accepted request, so a request is either returned here or
+// refused; Bark keeps serving into shutdown, and a request accepted after this
+// point would never be performed. It is called however the run ended: Node.Run
+// returns nil on the cancellation a request causes, which can reach errChan
+// before the cancellation is observed.
 func waitForStop(
 	signalCtx context.Context,
 	errChan <-chan error,
-	remoteRequest <-chan dingo.ShutdownRequest,
+	endRequests func() (dingo.ShutdownRequest, bool),
 ) (*dingo.ShutdownRequest, bool, error) {
 	err, signaled := waitForSignalOrError(signalCtx, errChan)
-	if err != nil {
+	req, ok := endRequests()
+	if err != nil || !ok {
 		return nil, signaled, err
 	}
-	select {
-	case req := <-remoteRequest:
-		return &req, signaled, nil
-	default:
-		return nil, signaled, nil
-	}
+	return &req, signaled, nil
 }
 
 // runRequestedShutdown performs a stop or restart accepted over the remote
@@ -566,20 +564,13 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			go serveAuxiliaryListenerOn("health", healthServer, listener, logger)
 		}
 	}
-	// A remote stop or restart ends the run exactly like a signal does; the
-	// request is recorded first so the shutdown below can tell them apart.
-	remoteRequest := make(chan dingo.ShutdownRequest, 1)
+	// A remote stop or restart ends the run exactly like a signal does;
+	// waitForStop then tells them apart.
 	go func() {
 		select {
-		case req := <-d.ShutdownRequests():
-			remoteRequest <- req
+		case <-d.ShutdownRequests():
 			signalCtxStop()
 		case <-signalCtx.Done():
-			select {
-			case req := <-d.ShutdownRequests():
-				remoteRequest <- req
-			default:
-			}
 		}
 	}()
 	go func() {
@@ -595,7 +586,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	}()
 
 	// Wait for signal, remote request or error
-	req, signaled, err := waitForStop(signalCtx, errChan, remoteRequest)
+	req, signaled, err := waitForStop(signalCtx, errChan, d.EndShutdownRequests)
 	shutdown := func() error {
 		return gracefulShutdown(
 			logger,

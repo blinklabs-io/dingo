@@ -11490,16 +11490,28 @@ certificate and `GetStatus` only a verified one. `Node.RequestShutdown` accepts
 exactly one request (a later one gets `FAILED_PRECONDITION`), resolves the
 timeout (zero, or anything longer than `shutdownTimeout`, selects
 `shutdownTimeout`, the bound `Node.Stop` enforces), publishes
-`event.NodeLifecycleEvent` on `node.lifecycle`, and queues a `ShutdownRequest`
-on `Node.ShutdownRequests`. `internal/node.Run` consumes that channel and ends
-the run as a signal would; `runRequestedShutdown` bounds the graceful shutdown
-by the request's timeout and abandons it past the deadline. A restart then
+`event.NodeLifecycleEvent` on `node.lifecycle`, and signals a `ShutdownRequest`
+on `Node.ShutdownRequests`. `internal/node.Run` ends the run on that signal as
+it would on a signal, then, however the run ended, calls
+`Node.EndShutdownRequests`, which returns the accepted request and closes the
+intake: Bark keeps serving until shutdown phase 1 stops it, so a Stop or
+Restart arriving after a signal or component error gets `FAILED_PRECONDITION`
+instead of being acknowledged and never performed. `runRequestedShutdown`
+bounds the graceful shutdown by the request's deadline and abandons it past
+that deadline. A restart then
 calls `dingo.ReExec`, which `exec`s the same binary and arguments in place
 (Unix only; elsewhere `Restart` is `UNIMPLEMENTED`) so a supervisor sees one
 continuous process, and it does so even after a forced deadline. `GetStatus`
 reports the accepted state and deadline, uptime, version, the health probe's
 readiness and tip gap as health and sync status, and the ledger tip (omitted
-while a live restore or truncate holds `liveLifecycleMu`).
+while a live restore or truncate holds `liveLifecycleMu`). Unlike the
+`lifecycle.proto` comment, `GetStatus` does not stay reachable while the
+shutdown drains: `Node.shutdown` stops Bark in phase 1, before phase 2 drains
+connections and phase 3 flushes and closes the database. Keeping it up longer
+would leave DatabaseService reachable while shutdown holds `liveLifecycleMu`,
+where a Restore or Truncate blocks on that gate and Bark's own stop waits for
+it until the shutdown deadline. A caller observes completion by the listener
+closing and, for a restart, by the re-executed process serving again.
 
 **Request bounds.** Every Bark Connect handler, including ArchiveService,
 DatabaseService, health, and reflection, uses per-message 1 MiB read and send

@@ -346,15 +346,16 @@ func (b *Bark) Start(ctx context.Context) error {
 		(b.config.TlsCertFilePath == "" || b.config.TlsKeyFilePath == "") {
 		return errors.New(
 			"bark: TlsCertFilePath and TlsKeyFilePath are required to start " +
-				"with lifecycle set — mTLS client-certificate verification has " +
-				"no meaning without the server's own TLS listener",
+				"the authenticated DatabaseService or LifecycleService — mTLS " +
+				"client-certificate verification has no meaning without the " +
+				"server's own TLS listener",
 		)
 	}
 	if authRequired && len(b.operatorFingerprints) == 0 {
 		return errors.New(
 			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start with lifecycle set — verified client identity alone does " +
-				"not authorize destructive RPCs",
+				"start the authenticated DatabaseService or LifecycleService — " +
+				"verified client identity alone does not authorize destructive RPCs",
 		)
 	}
 

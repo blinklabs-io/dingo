@@ -42,7 +42,10 @@ type remoteLifecycle struct {
 	mu       sync.Mutex
 	state    lifecyclev1alpha1.LifecycleState
 	deadline time.Time
-	// requests holds the accepted request until the process owner takes it.
+	// accepted is the request RequestShutdown accepted, kept so
+	// EndShutdownRequests returns it however the run ended.
+	accepted *ShutdownRequest
+	// requests signals the accepted request to the process owner.
 	requests chan ShutdownRequest
 }
 
@@ -95,13 +98,34 @@ func (n *Node) RequestShutdown(
 			},
 		),
 	)
-	// The buffer holds the one accepted request, so this never blocks. Publish
-	// the accepted state before making shutdown visible to the process owner.
-	r.requests <- ShutdownRequest{
+	req := ShutdownRequest{
 		Restart: restart, Timeout: timeout, Deadline: deadline,
 	}
+	r.accepted = &req
+	// The buffer holds the one accepted request, so this never blocks. Publish
+	// the accepted state before making shutdown visible to the process owner.
+	r.requests <- req
 	r.mu.Unlock()
 	return timeout, deadline, nil
+}
+
+// EndShutdownRequests closes the remote lifecycle intake and returns the
+// request RequestShutdown accepted, if any. The process owner calls it once
+// the run has ended, whatever ended it. Bark keeps serving until shutdown
+// stops it, so a stop or restart arriving after this call is refused with
+// ErrShutdownInProgress instead of being acknowledged and never performed.
+func (n *Node) EndShutdownRequests() (ShutdownRequest, bool) {
+	r := &n.remoteLifecycle
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.accepted != nil {
+		return *r.accepted, true
+	}
+	if r.state == lifecyclev1alpha1.LifecycleState_LIFECYCLE_STATE_UNSPECIFIED {
+		r.state = lifecyclev1alpha1.LifecycleState_LIFECYCLE_STATE_STOPPING
+		r.deadline = time.Now().Add(n.configuredShutdownTimeout())
+	}
+	return ShutdownRequest{}, false
 }
 
 // LifecycleStatus reports whether a stop or restart is underway, probe

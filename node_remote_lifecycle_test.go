@@ -195,3 +195,52 @@ func TestRequestShutdownNeverExceedsConfiguredShutdownTimeout(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, time.Minute, timeout)
 }
+
+// TestEndShutdownRequestsRefusesLaterRequests covers a stop or restart that
+// reaches Bark after the run ended without one, as after a signal: Bark is
+// still serving, so the request must be refused rather than acknowledged and
+// never performed.
+func TestEndShutdownRequestsRefusesLaterRequests(t *testing.T) {
+	t.Parallel()
+
+	n := newRemoteLifecycleTestNode(t)
+	_, ok := n.EndShutdownRequests()
+	require.False(t, ok)
+
+	_, _, err := n.RequestShutdown(false, time.Second)
+	require.ErrorIs(t, err, bark.ErrShutdownInProgress)
+	if restartSupported {
+		_, _, err = n.RequestShutdown(true, time.Second)
+		require.ErrorIs(t, err, bark.ErrShutdownInProgress)
+	}
+	testutil.RequireNoReceive(
+		t, n.ShutdownRequests(), 50*time.Millisecond, "late request",
+	)
+	status := n.LifecycleStatus()
+	assert.Equal(
+		t,
+		lifecyclev1alpha1.LifecycleState_LIFECYCLE_STATE_STOPPING,
+		status.GetState(),
+	)
+	assert.NotNil(t, status.GetDeadline())
+}
+
+// TestEndShutdownRequestsReturnsTheAcceptedRequest covers a request whose
+// signal was already consumed from ShutdownRequests: ending the run still
+// returns it, every time it is asked.
+func TestEndShutdownRequestsReturnsTheAcceptedRequest(t *testing.T) {
+	t.Parallel()
+
+	n := newRemoteLifecycleTestNode(t)
+	timeout, deadline, err := n.RequestShutdown(false, time.Second)
+	require.NoError(t, err)
+	testutil.RequireReceive(
+		t, n.ShutdownRequests(), 5*time.Second, "shutdown request",
+	)
+	want := ShutdownRequest{Timeout: timeout, Deadline: deadline}
+	for range 2 {
+		req, ok := n.EndShutdownRequests()
+		require.True(t, ok)
+		assert.Equal(t, want, req)
+	}
+}

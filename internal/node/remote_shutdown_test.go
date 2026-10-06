@@ -113,6 +113,13 @@ func TestRunRequestedShutdown(t *testing.T) {
 	}
 }
 
+// acceptedRequest is an endRequests that has accepted req.
+func acceptedRequest(
+	req dingo.ShutdownRequest,
+) func() (dingo.ShutdownRequest, bool) {
+	return func() (dingo.ShutdownRequest, bool) { return req, true }
+}
+
 // TestWaitForStopKeepsRemoteRequestWhenRunReturnsFirst covers the remote
 // request whose cancellation makes Node.Run return nil before waitForStop
 // observes the cancelled context: the request must still be returned, or a
@@ -124,11 +131,9 @@ func TestWaitForStopKeepsRemoteRequestWhenRunReturnsFirst(t *testing.T) {
 	cancel()
 	errChan := make(chan error, 1)
 	errChan <- nil
-	remoteRequest := make(chan dingo.ShutdownRequest, 1)
 	want := dingo.ShutdownRequest{Restart: true, Timeout: time.Second}
-	remoteRequest <- want
 
-	req, _, err := waitForStop(signalCtx, errChan, remoteRequest)
+	req, _, err := waitForStop(signalCtx, errChan, acceptedRequest(want))
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	assert.Equal(t, want, *req)
@@ -140,11 +145,53 @@ func TestWaitForStopPrefersComponentError(t *testing.T) {
 	errComponent := errors.New("component failed")
 	errChan := make(chan error, 1)
 	errChan <- errComponent
-	remoteRequest := make(chan dingo.ShutdownRequest, 1)
-	remoteRequest <- dingo.ShutdownRequest{Timeout: time.Second}
 
-	req, signaled, err := waitForStop(t.Context(), errChan, remoteRequest)
+	req, signaled, err := waitForStop(
+		t.Context(),
+		errChan,
+		acceptedRequest(dingo.ShutdownRequest{Timeout: time.Second}),
+	)
 	require.ErrorIs(t, err, errComponent)
 	assert.False(t, signaled)
 	assert.Nil(t, req)
+}
+
+// TestWaitForStopEndsRequestsOnEveryPath pins that the request intake is
+// closed however the run ended, so a request arriving during the shutdown
+// that follows a signal or an error is refused rather than dropped.
+func TestWaitForStopEndsRequestsOnEveryPath(t *testing.T) {
+	t.Parallel()
+
+	signaled, cancel := context.WithCancel(t.Context())
+	cancel()
+	tests := map[string]struct {
+		ctx context.Context
+		err error
+	}{
+		"signal":          {ctx: signaled},
+		"component error": {ctx: t.Context(), err: errors.New("failed")},
+		"run returned":    {ctx: t.Context()},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			errChan := make(chan error, 1)
+			if tc.ctx.Err() == nil {
+				errChan <- tc.err
+			}
+			ended := 0
+			req, _, err := waitForStop(
+				tc.ctx,
+				errChan,
+				func() (dingo.ShutdownRequest, bool) {
+					ended++
+					return dingo.ShutdownRequest{}, false
+				},
+			)
+			require.ErrorIs(t, err, tc.err)
+			assert.Nil(t, req)
+			assert.Equal(t, 1, ended)
+		})
+	}
 }
