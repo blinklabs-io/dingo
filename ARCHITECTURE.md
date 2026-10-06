@@ -3572,7 +3572,12 @@ imported state.
 Persisting a ParameterChange proposal re-applies the era's proposal rule to the
 whole enclosing transaction once, under the protocol parameters transaction
 validation used for it: the previous era's for a block of that era applied
-after the ledger advanced. Live application, replay with or without validation,
+after the ledger advanced. Historical backfill and Mithril gap indexing select
+parameters by epoch, and the epoch that starts an era is recorded with the
+successor era, so for a block of an earlier era than its epoch they take the
+parameters, and the era, of that block's era's last epoch
+(`ledger.PreviousEraEpoch`); its certificate deposits use them too. Live
+application, replay with or without validation,
 historical backfill and Mithril gap indexing therefore fail a block that
 carries a proposal the rule refuses, and no `governance_proposal` row is
 written for it. Ledger-state snapshot import is the exception: it stores the
