@@ -3433,6 +3433,10 @@ var serviceDurability = []struct {
 
 // serviceWorkflowJob includes the runnable startup and cleanup configuration.
 type serviceWorkflowJob struct {
+	Services map[string]struct {
+		Image   string `yaml:"image"`
+		Command string `yaml:"command"`
+	} `yaml:"services"`
 	Steps []struct {
 		Name string `yaml:"name"`
 		Run  string `yaml:"run"`
@@ -3456,6 +3460,26 @@ func TestServiceContainersRelaxDurability(t *testing.T) {
 		for jobName, job := range parsed.Jobs {
 			started := false
 			cleaned := false
+			for serviceName, service := range job.Services {
+				for _, want := range serviceDurability {
+					if !strings.HasPrefix(service.Image, want.imagePrefix) {
+						continue
+					}
+					seen[want.imagePrefix]++
+					arguments := " " + strings.Join(
+						strings.Fields(service.Command), " ",
+					) + " "
+					for _, option := range want.options {
+						if !strings.Contains(arguments, " "+option+" ") {
+							t.Errorf(
+								"%s: job %s service %s (%s) lacks %q",
+								workflow, jobName, serviceName,
+								service.Image, option,
+							)
+						}
+					}
+				}
+			}
 			for _, step := range job.Steps {
 				if step.Name == "stop-test-databases" {
 					cleaned = step.If == "always()" &&
