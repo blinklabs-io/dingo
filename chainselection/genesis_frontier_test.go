@@ -384,3 +384,33 @@ func (cs *ChainSelector) corroboratingPeers(conn ouroboros.ConnectionId) int {
 	defer cs.mutex.RUnlock()
 	return cs.corroboratingPeersLocked(conn, cs.peerTips[conn])
 }
+
+// A witness must agree with the candidate across the whole observed frontier,
+// not only its last k+1 delivered tips. One that diverged earlier in the window
+// and rejoined for the last few blocks is on a different chain.
+func TestGenesisWitnessDivergedEarlierInWindowDoesNotCorroborate(
+	t *testing.T,
+) {
+	t.Parallel()
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      2,
+		GenesisWindowSlots: 1000,
+	})
+	fast := corrConn(1)
+	diverged := corrConn(2)
+	honest := corrConn(3)
+	feedChain(cs, fast, "a", 1000000, 1000100, 10)
+	feedChain(cs, diverged, "a", 1000000, 1000040, 10)
+	feedChain(cs, diverged, "b", 1000050, 1000070, 10)
+	feedChain(cs, diverged, "a", 1000080, 1000100, 10)
+
+	assert.Zero(
+		t,
+		cs.corroboratingPeers(fast),
+		"a witness that diverged inside the window must not corroborate",
+	)
+
+	feedChain(cs, honest, "a", 1000000, 1000100, 10)
+	assert.Equal(t, 1, cs.corroboratingPeers(fast))
+}
