@@ -292,6 +292,121 @@ func TestRecoverCommitTimestampConflictSerializesTipDecisionWithCleanup(
 	require.Error(t, err)
 }
 
+func TestRecoverCommitTimestampConflictKeepsAppendAfterRewind(t *testing.T) {
+	t.Parallel()
+
+	raw, db := commitTimestampRecoveryFixture(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	next := chain.RawBlock{
+		Slot:        raw[2].Slot + 1,
+		Hash:        testHashBytes("commit-ts-recovery-post-rewind-add"),
+		BlockNumber: raw[2].BlockNumber + 1,
+		Type:        1,
+		PrevHash:    raw[2].Hash,
+		Cbor:        []byte{0x80},
+	}
+	addDone := make(chan error, 1)
+	addReachedBarrier := make(chan struct{})
+	releaseAdd := make(chan struct{})
+	ls.chain.SetBeforeRawBlockMutationBarrierForTesting(func() {
+		close(addReachedBarrier)
+		<-releaseAdd
+	})
+	t.Cleanup(func() {
+		ls.chain.SetBeforeRawBlockMutationBarrierForTesting(nil)
+	})
+	barrierErr := errors.New("orphan cleanup is outside the chain mutation barrier")
+	ls.beforeCommitRecoveryCleanup = func() error {
+		go func() {
+			addDone <- ls.chain.AddRawBlocks([]chain.RawBlock{next})
+		}()
+		<-addReachedBarrier
+		held := ls.chain.RawBlockMutationBarrierExcludesAddsForTesting()
+		close(releaseAdd)
+		if !held {
+			return barrierErr
+		}
+		return nil
+	}
+
+	require.NoError(t, ls.RecoverCommitTimestampConflict())
+	require.NoError(t, <-addDone)
+	require.Equal(t, rawBlockTip(next), ls.chain.Tip())
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(next.Slot, next.Hash),
+	)
+	require.NoError(t, err, "post-rewind block must survive orphan cleanup")
+}
+
+func TestRecoverCommitTimestampConflictFailsClosedOnUnindexedOrphanDeleteError(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	raw, db := commitTimestampRecoveryFixtureAtTip(t, 4)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	orphan := chain.RawBlock{
+		Slot:        raw[4].Slot + 10,
+		Hash:        testHashBytes("commit-ts-recovery-unindexed-orphan"),
+		BlockNumber: raw[4].BlockNumber + 1,
+		Type:        1,
+		PrevHash:    raw[4].Hash,
+		Cbor:        []byte{0x80},
+	}
+	blobStore := db.Blob()
+	txn := blobStore.NewTransaction(true)
+	defer txn.Rollback() //nolint:errcheck
+	require.NoError(t, blobStore.SetBlock(
+		txn,
+		orphan.Slot,
+		orphan.Hash,
+		orphan.Cbor,
+		orphan.BlockNumber,
+		orphan.Type,
+		orphan.BlockNumber,
+		orphan.PrevHash,
+	))
+	require.NoError(t, txn.Commit())
+	injectedErr := errors.New("injected orphan delete failure")
+	failing := &nthDeleteFailingBlobStore{
+		BlobStore: blobStore,
+		failAt:    1,
+		err:       injectedErr,
+	}
+	db.SetBlobStore(failing)
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.RecoverCommitTimestampConflict()
+
+	require.ErrorIs(t, err, injectedErr)
+	require.EqualValues(t, 1, failing.deletes.Load())
+	require.Equal(t, rawBlockTip(raw[4]), ls.chain.Tip())
+	readTxn := blobStore.NewTransaction(false)
+	defer readTxn.Rollback() //nolint:errcheck
+	_, _, err = blobStore.GetBlock(readTxn, orphan.Slot, orphan.Hash)
+	require.NoError(t, err, "failed orphan cleanup must leave its transaction uncommitted")
+}
+
 func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
 	t *testing.T,
 ) {

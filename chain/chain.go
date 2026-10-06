@@ -129,6 +129,9 @@ type Chain struct {
 	// this mutex's read side to exclude a record from appearing under a
 	// removal path that already holds it for write.
 	batchCommitMutex sync.RWMutex
+	// beforeRawBlockMutationBarrierForTesting is nil in production. Tests set
+	// it before concurrent use to observe an AddRawBlocks barrier attempt.
+	beforeRawBlockMutationBarrierForTesting func()
 
 	// pendingAdds keeps a removal path from resolving a block index whose
 	// store write is still held in an uncommitted caller-supplied
@@ -1400,6 +1403,22 @@ func (c *Chain) AddRawBlocks(blocks []RawBlock) error {
 	return c.addRawBlocks(blocks, nil)
 }
 
+// SetBeforeRawBlockMutationBarrierForTesting installs a hook immediately
+// before AddRawBlocks enters the chain mutation barrier.
+func (c *Chain) SetBeforeRawBlockMutationBarrierForTesting(hook func()) {
+	c.beforeRawBlockMutationBarrierForTesting = hook
+}
+
+// RawBlockMutationBarrierExcludesAddsForTesting reports whether a writer owns
+// or is waiting for the chain mutation barrier.
+func (c *Chain) RawBlockMutationBarrierExcludesAddsForTesting() bool {
+	if c.batchCommitMutex.TryRLock() {
+		c.batchCommitMutex.RUnlock()
+		return false
+	}
+	return true
+}
+
 // AddRawBlocksWithCallback adds a batch of pre-extracted blocks to the chain
 // and runs the callback in the same transaction after each block is persisted.
 // Callers can use this to atomically attach additional blob-side state, such as
@@ -1473,6 +1492,9 @@ func (c *Chain) addRawBlocks(
 		// concurrent rollback cannot resolve an index the store has yet to
 		// commit. See the batchCommitMutex field.
 		err := func() error {
+			if c.beforeRawBlockMutationBarrierForTesting != nil {
+				c.beforeRawBlockMutationBarrierForTesting()
+			}
 			c.batchCommitMutex.RLock()
 			defer c.batchCommitMutex.RUnlock()
 			txn := c.manager.db.BlobTxn(true)

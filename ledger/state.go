@@ -1533,6 +1533,9 @@ type LedgerState struct {
 	// in production. It runs after recovery samples the chain tip and before it
 	// enters the chain mutation barrier.
 	beforeCommitRecoveryMutationBarrier func()
+	// beforeCommitRecoveryCleanup is a test-only sequencing hook, nil in
+	// production. It runs after the chain rewind and before orphan cleanup.
+	beforeCommitRecoveryCleanup func() error
 
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
@@ -2494,6 +2497,11 @@ func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
 		)
 	}
 	cleanup := func() error {
+		if ls.beforeCommitRecoveryCleanup != nil {
+			if err := ls.beforeCommitRecoveryCleanup(); err != nil {
+				return err
+			}
+		}
 		return ls.cleanupOrphanedBlobs(tip.Slot)
 	}
 	var rewindErr error
