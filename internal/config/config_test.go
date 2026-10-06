@@ -147,6 +147,7 @@ func unsetForgeGateEnv(t *testing.T) {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
 	yamlContent := `
 plugins:
@@ -346,6 +347,7 @@ func TestLoad_DAGMempoolProvider(t *testing.T) {
 func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	resetGlobalConfig()
 	unsetDebugBindAddrEnv(t)
+	unsetMetricsBindAddrEnv(t)
 	unsetForgeGateEnv(t)
 
 	// Without Config file
