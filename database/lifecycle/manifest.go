@@ -65,6 +65,10 @@ type manifestConfig struct {
 	maxBytes int64
 	// maxPause is consumed only by Snapshot and SnapshotToCloud.
 	maxPause time.Duration
+	// pauseNow and beforePauseAcquire are per-call test seams consumed only by
+	// Snapshot. Production callers cannot construct options that set them.
+	pauseNow           func() time.Time
+	beforePauseAcquire func()
 }
 
 // WithManifestMaxBytes sets the maximum encoded manifest size. Zero uses

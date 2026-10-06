@@ -45,7 +45,9 @@ func WithMaxCommitPause(limit time.Duration) ManifestOption {
 	return func(cfg *manifestConfig) { cfg.maxPause = limit }
 }
 
-func commitPauseLimit(opts []ManifestOption) (time.Duration, error) {
+func commitPauseConfig(
+	opts []ManifestOption,
+) (time.Duration, func() time.Time, func(), error) {
 	cfg := manifestConfig{}
 	for _, opt := range opts {
 		if opt != nil {
@@ -53,9 +55,12 @@ func commitPauseLimit(opts []ManifestOption) (time.Duration, error) {
 		}
 	}
 	if cfg.maxPause < 0 {
-		return 0, errors.New("maximum commit pause must be >= 0")
+		return 0, nil, nil, errors.New("maximum commit pause must be >= 0")
 	}
-	return cfg.maxPause, nil
+	if cfg.pauseNow == nil {
+		cfg.pauseNow = time.Now
+	}
+	return cfg.maxPause, cfg.pauseNow, cfg.beforePauseAcquire, nil
 }
 
 // Snapshot outcomes recorded in the commit-pause histogram's result label.
