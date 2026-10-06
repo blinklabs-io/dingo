@@ -761,3 +761,32 @@ func TestQueryShelleyStakeDelegDeposits_ImportedBaseline(t *testing.T) {
 	check(QueryPoint{Slot: 600}, none, "after the deregistration")
 	check(QueryPoint{}, none, "tip, after the deregistration")
 }
+
+// TestQueryShelleyStakeDelegDeposits_SameSlotDeregistrationSupersedesBaseline
+// covers a deregistration certificate in the import baseline's own slot,
+// which DATABASE.md's account_import_baseline rule says supersedes it.
+func TestQueryShelleyStakeDelegDeposits_SameSlotDeregistrationSupersedesBaseline(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	key := repeatedBytes(28, 0x46)
+	deposit := dbtypes.Uint64(2_000_000)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    key,
+		CredentialTag: 0,
+		Active:        true,
+		AddedSlot:     200,
+		ImportDeposit: &deposit,
+	}, nil))
+	seedStakeCertAt(t, db, key, false, 200, 2_000_000)
+	creds := []olocalstatequery.StakeCredential{stakeQueryCred(key)}
+
+	for _, at := range []QueryPoint{{Slot: 200}, {Slot: 300}, {}} {
+		result, err := ls.queryShelleyStakeDelegDeposits(creds, at, nil)
+		require.NoError(t, err)
+		require.Empty(t, stakeDeposits(t, result), "slot %d", at.Slot)
+	}
+}

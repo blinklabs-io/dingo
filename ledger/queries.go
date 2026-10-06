@@ -2509,9 +2509,9 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 // stakeRegistrationAsOf reports whether a stake credential is registered,
 // and with what deposit, at the tip or at a pinned at. The newest
 // registration certificate decides, unless the credential's snapshot import
-// baseline is at least as new, as in LedgerView.StakeCredentialDeposit: an
-// imported credential has no certificate for the registration the snapshot
-// carried.
+// baseline is newer, or as new and the certificate is not a deregistration:
+// an imported credential has no certificate for the registration the
+// snapshot carried.
 func (ls *LedgerState) stakeRegistrationAsOf(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -2554,9 +2554,15 @@ func (ls *LedgerState) stakeRegistrationAsOf(
 	if err != nil {
 		return false, nil, err
 	}
+	// A certificate in the baseline's own slot supersedes it only when it is
+	// a deregistration: DATABASE.md's account_import_baseline rule, which
+	// LedgerView.StakeCredentialDeposit reaches through the live account
+	// row's active flag instead.
 	if imported != nil &&
 		(!at.pinned() || imported.AddedSlot <= at.Slot) &&
-		(latest == nil || imported.AddedSlot >= latest.AddedSlot) {
+		(latest == nil || imported.AddedSlot > latest.AddedSlot ||
+			(imported.AddedSlot == latest.AddedSlot &&
+				latest.Action == "registered")) {
 		return true, imported.Deposit, nil
 	}
 	if latest == nil || latest.Action != "registered" {
