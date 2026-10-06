@@ -176,6 +176,7 @@ type PeerGovernor struct {
 	ctx                     context.Context      // Context for cancellation
 	cancel                  context.CancelFunc   // Cancels the context owned by Start
 	denyList                map[string]time.Time // address -> expiry time
+	inboundFlapHistory      map[string]inboundFlapRecord
 	networkMismatchDenyList map[string]time.Time // address -> expiry time (network-magic mismatch)
 	peers                   []*Peer
 	config                  PeerGovernorConfig
@@ -493,6 +494,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		config:                  cfg,
 		peers:                   []*Peer{},
 		denyList:                make(map[string]time.Time),
+		inboundFlapHistory:      make(map[string]inboundFlapRecord),
 		networkMismatchDenyList: make(map[string]time.Time),
 		ledgerKnownAddrs:        make(map[string]string),
 		negativeDNS:             make(map[string]time.Time),

@@ -742,9 +742,10 @@ func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
 		connmanager.ConnectionClosedEventType,
 		connmanager.ConnectionClosedEvent{
 			ConnectionId: connId,
-			Error: errors.New(
-				"protocol error: chain-sync: timeout waiting on transition",
-			),
+			// A stable session that ends in an ordinary transport error.
+			// A ChainSync stall deliberately does not reset the backoff;
+			// see TestHandleConnectionClosedEvent_ChainsyncStall*.
+			Error: errors.New("read tcp: connection reset by peer"),
 		},
 	))
 

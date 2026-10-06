@@ -676,6 +676,11 @@ func buildDingoConfig(
 	chainsyncStallTimeout time.Duration,
 	chainsyncStrategy chainsync.HeaderSyncStrategy,
 ) dingo.Config {
+	// Validated by config.Validate before the node starts, so a parse
+	// failure here leaves the zero value and selects the default.
+	localStateQueryViewMaxLifetime, _ := time.ParseDuration(
+		cfg.LocalStateQueryViewMaxLifetime,
+	)
 	return dingo.NewConfig(
 		dingo.WithIntersectTip(cfg.IntersectTip),
 		dingo.WithLogger(logger),
@@ -814,6 +819,7 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
+		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
