@@ -17236,6 +17236,9 @@ func TestProcessEpochRolloverReplayEnactmentFailureRemainsFatal(
 	proposal.EnactedEpoch = &enactedEpoch
 	proposal.EnactedSlot = &enactedSlot
 	require.NoError(t, f.db.SetGovernanceProposal(proposal, nil))
+	seedEmptyRewardBasisForRollover(
+		t, f.db, f.currentEpoch, f.currentPParams,
+	)
 
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
