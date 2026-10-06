@@ -13021,7 +13021,8 @@ producer absent from a populated snapshot always hard-rejects. See the retention
 section in `DATABASE.md` for the per-table
 detail.
 
-A reward round requires this node's own `RewardSnapshot` for N-3 and
+At a boundary with a Shelley reward round, applying the round requires this
+node's own `RewardSnapshot` for N-3 and
 `RewardAdaPots` for N-1. When the authoritative boundary lacks either input,
 or lacks the retained stake inputs or performance block counts needed to
 consume them, it returns `errHaltLedgerPipeline` and stops before committing

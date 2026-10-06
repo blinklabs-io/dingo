@@ -145,6 +145,14 @@ func (ls *LedgerState) applyStakeRewardUpdate(
 		txn, newEpoch, boundarySlot,
 	)
 	if err != nil {
+		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
+			epochs, epochsOK := stakeRewardEpochsForApplication(newEpoch)
+			if epochsOK {
+				return ls.classifyRewardStakeInputReconstructionError(
+					true, newEpoch, epochs.snapshot, err,
+				)
+			}
+		}
 		return err
 	}
 	if !ok {
@@ -551,6 +559,11 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 		if errors.Is(err, errRewardStakeInputsNotReady) && !authoritative {
 			return nil, false, nil
 		}
+		if errors.Is(err, errRewardStakeInputsUnrecoverable) {
+			return nil, false, ls.classifyRewardStakeInputReconstructionError(
+				authoritative, newEpoch, rewardSnapshotEpoch, err,
+			)
+		}
 		return nil, false, err
 	}
 	meta := ls.db.Metadata()
@@ -654,6 +667,11 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			meta, metaTxn, rewardSnapshotEpoch, rewardSnapshot, poolInputs,
 		)
 		if rebuildErr != nil {
+			if errors.Is(rebuildErr, errRewardStakeInputsUnrecoverable) {
+				return nil, false, ls.classifyRewardStakeInputReconstructionError(
+					authoritative, newEpoch, rewardSnapshotEpoch, rebuildErr,
+				)
+			}
 			return nil, false, fmt.Errorf(
 				"rebuild pruned reward stake inputs for epoch %d: %w",
 				rewardSnapshotEpoch, rebuildErr,
@@ -3135,6 +3153,24 @@ func stakeRewardEpochsForApplication(
 	return stakeRewardEpochsForNewEpoch(newEpoch)
 }
 
+func (ls *LedgerState) classifyRewardStakeInputReconstructionError(
+	authoritative bool,
+	newEpoch uint64,
+	rewardSnapshotEpoch uint64,
+	err error,
+) error {
+	if !errors.Is(err, errRewardStakeInputsUnrecoverable) {
+		return err
+	}
+	return ls.requiredStakeRewardBasisUnavailable(
+		authoritative,
+		newEpoch,
+		err.Error(),
+		"reward_snapshot_epoch",
+		rewardSnapshotEpoch,
+	)
+}
+
 // requiredStakeRewardBasisUnavailable rejects an authoritative reward round
 // whose required persisted basis is absent. An opportunistic precompute can
 // observe the basis before the boundary transaction writes it, so that path
@@ -3310,7 +3346,8 @@ func (ls *LedgerState) rebuildPrunedRewardStakeInputs(
 			poolID, err := lcommon.NewBlake2b224Checked(hash)
 			if err != nil {
 				return nil, fmt.Errorf(
-					"reward pool input for epoch %d: %w",
+					"%w: reward pool input for epoch %d: %w",
+					errRewardStakeInputsUnrecoverable,
 					rewardSnapshotEpoch, err,
 				)
 			}
