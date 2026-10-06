@@ -5563,6 +5563,10 @@ across reconcile and emergency ticks: its generation remains claimed until the
 round completes, errors, is canceled, or panics, so a slow provider cannot
 overlap the next tick or leave an artificial retry delay behind.
 
+Initial hostname normalization during peer admission is bounded by the same
+DNS timeout used for dialing; a resolution error keeps the lowercased hostname
+so an unavailable resolver cannot block admission indefinitely.
+
 Each outbound dial attempt re-resolves a hostname-based peer's address fresh,
 narrows the records to the address families the local host can route to
 (detected once via `net.InterfaceAddrs` and cached, so a v4-only or v6-only

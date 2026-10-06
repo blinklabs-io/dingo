@@ -36,14 +36,10 @@ const defaultMinPeerListCap = 200
 // the peer list has reached its hard capacity limit.
 var ErrPeerListFull = errors.New("peer list at capacity")
 
-var lookupIP = net.LookupIP
-
 // lookupIPAddr resolves a hostname to its IP records while honoring the
 // provided context, so a hung or slow resolver cannot block the caller past
-// the context deadline or a governor shutdown. Unlike the bare net.LookupIP
-// used by resolveAddress, this path runs on the hot outbound-dial loop and
-// must never wedge the peer governor. It is a package var so tests can inject
-// a deterministic, host-independent resolver.
+// the context deadline or a governor shutdown. It is a package var so tests
+// can inject a deterministic, host-independent resolver.
 var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
@@ -443,8 +439,8 @@ func (p *PeerGovernor) normalizeAddress(address string) string {
 }
 
 // resolveAddress resolves a hostname in an address to its IP and returns
-// the normalized address. This function performs blocking DNS lookups and
-// must NOT be called while holding locks.
+// the normalized address. DNS lookups are bounded and this function must NOT
+// be called while holding locks.
 // If the address is already an IP, it returns the normalized IP address.
 // If DNS resolution fails, it returns the lowercased hostname address.
 func (p *PeerGovernor) resolveAddress(address string) string {
@@ -484,7 +480,12 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	}
 
 	// It's a hostname - try to resolve it
-	ips, err := lookupIP(host)
+	lookupCtx, cancel := context.WithTimeout(
+		context.Background(),
+		dialDNSResolveTimeout,
+	)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		p.config.Logger.Warn(
 			"failed to resolve peer hostname",

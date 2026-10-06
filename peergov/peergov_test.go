@@ -1686,11 +1686,11 @@ func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
 func TestPeerGovernor_DenyPeer_MatchesActiveConnectionRemoteAddress(
 	t *testing.T,
 ) {
-	oldLookupIP := lookupIP
-	lookupIP = func(string) ([]net.IP, error) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
 		return nil, errors.New("lookup failed")
 	}
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1775,11 +1775,11 @@ func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
 }
 
 func TestPeerGovernor_AddPeer_DedupesHostnameAfterDNSFailure(t *testing.T) {
-	oldLookupIP := lookupIP
-	lookupIP = func(string) ([]net.IP, error) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
 		return nil, errors.New("lookup failed")
 	}
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1798,20 +1798,20 @@ func TestPeerGovernor_AddPeer_DedupesHostnameAfterDNSFailure(t *testing.T) {
 }
 
 func TestPeerGovernor_DenyPeer_BlocksHostnameAfterDNSFailure(t *testing.T) {
-	oldLookupIP := lookupIP
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	oldLookupIPAddr := lookupIPAddr
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		DenyDuration: time.Hour,
 	})
 
-	lookupIP = func(string) ([]net.IP, error) {
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("44.0.0.1")}, nil
 	}
 	pg.DenyPeer("relay.example.com:3001", 0)
 
-	lookupIP = func(string) ([]net.IP, error) {
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
 		return nil, errors.New("lookup failed")
 	}
 	err := pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
@@ -1822,11 +1822,11 @@ func TestPeerGovernor_DenyPeer_BlocksHostnameAfterDNSFailure(t *testing.T) {
 }
 
 func TestPeerGovernor_ResolveAddress_LogsDNSFailure(t *testing.T) {
-	oldLookupIP := lookupIP
-	lookupIP = func(string) ([]net.IP, error) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(context.Context, string) ([]net.IP, error) {
 		return nil, errors.New("lookup failed")
 	}
-	t.Cleanup(func() { lookupIP = oldLookupIP })
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
 
 	var buf bytes.Buffer
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -1841,6 +1841,31 @@ func TestPeerGovernor_ResolveAddress_LogsDNSFailure(t *testing.T) {
 		strings.Contains(buf.String(), "failed to resolve peer hostname"),
 		"expected DNS resolution failure to be logged",
 	)
+}
+
+// Not t.Parallel: swaps the package-level resolver seams.
+func TestPeerGovernor_ResolveAddressBoundsDNSFailure(t *testing.T) {
+	oldLookupIPAddr := lookupIPAddr
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+	lookupCalled := false
+	lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
+		lookupCalled = true
+		assert.Equal(t, "Relay.Example.Com", host)
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok, "ordinary hostname lookup must carry a deadline")
+		remaining := time.Until(deadline)
+		require.Positive(t, remaining)
+		require.LessOrEqual(t, remaining, dialDNSResolveTimeout)
+		return nil, errors.New("lookup failed")
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+
+	normalized := pg.resolveAddress("Relay.Example.Com:3001")
+
+	require.True(t, lookupCalled)
+	assert.Equal(t, "relay.example.com:3001", normalized)
 }
 
 func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
