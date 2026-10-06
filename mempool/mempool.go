@@ -754,10 +754,22 @@ func (m *Mempool) Start(ctx context.Context) error {
 		return ErrMempoolStopped
 	}
 	m.startOnce.Do(func() {
+		var (
+			chainUpdateSubId event.EventSubscriberId
+			chainUpdateChan  <-chan event.Event
+		)
+		if m.eventBus != nil {
+			// Install the subscription before Start reports readiness so an
+			// immediate chain update cannot pass the worker before it listens.
+			chainUpdateSubId, chainUpdateChan = m.eventBus.SubscribeWithBuffer(
+				chain.ChainUpdateEventType,
+				event.EventQueueSize,
+			)
+		}
 		m.workerWG.Add(2)
 		go func() {
 			defer m.workerWG.Done()
-			m.processChainEvents()
+			m.processChainEvents(chainUpdateSubId, chainUpdateChan)
 		}()
 		go func() {
 			defer m.workerWG.Done()
@@ -1024,15 +1036,13 @@ func registerProvider(
 	)
 }
 
-func (m *Mempool) processChainEvents() {
+func (m *Mempool) processChainEvents(
+	chainUpdateSubId event.EventSubscriberId,
+	chainUpdateChan <-chan event.Event,
+) {
 	if m.eventBus == nil {
 		return
 	}
-	// Sized for catch-up bursts (one event per block).
-	chainUpdateSubId, chainUpdateChan := m.eventBus.SubscribeWithBuffer(
-		chain.ChainUpdateEventType,
-		event.EventQueueSize,
-	)
 	defer func() {
 		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
 	}()
