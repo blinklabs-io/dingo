@@ -203,10 +203,11 @@ var schemaVersions = []struct {
 		Name:    governanceProposalOrderSchemaRelease,
 		Dir:     "v33",
 	},
+	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
 	{
-		Version: 34,
+		Version: 35,
 		Name:    committeeHotAuthorizationPruneOrderSchemaRelease,
-		Dir:     "v34",
+		Dir:     "v35",
 	},
 }
 
@@ -360,7 +361,7 @@ func rewardCreditRoundBackfill(
 			err,
 		)
 	}
-	var rounds []models.RewardCreditRound
+	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf(
 			"decode legacy reward credit rounds: %w",
@@ -1136,6 +1137,9 @@ const (
 	restampCursorRewardPhase = "R"
 )
 
+// Version 2 changed sigma_a only; this migration cannot certify newer SNAP rules.
+const rewardSigmaCalculationVersion uint = 2
+
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
@@ -1227,8 +1231,8 @@ func restampPoolStakeSnapshotBatch(
 	lastID int64,
 ) (int64, int64, bool, error) {
 	rows, err := batch.Tx.QueryContext(ctx, batch.Rebind(
-		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version <> ? ORDER BY id LIMIT ?",
-	), lastID, models.RewardStakeCalculationVersion, batch.Limit)
+		"SELECT id FROM pool_stake_snapshot WHERE id > ? AND calculation_version < ? ORDER BY id LIMIT ?",
+	), lastID, rewardSigmaCalculationVersion, batch.Limit)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -1252,7 +1256,7 @@ func restampPoolStakeSnapshotBatch(
 			batch.Rebind(
 				"UPDATE pool_stake_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}
@@ -1278,9 +1282,9 @@ FROM reward_snapshot
 LEFT JOIN epoch_summary ON epoch_summary.epoch = reward_snapshot.epoch
 WHERE reward_snapshot.id > ?
   AND reward_snapshot.snapshot_type = 'mark'
-  AND reward_snapshot.calculation_version <> ?
+  AND reward_snapshot.calculation_version < ?
 ORDER BY reward_snapshot.id LIMIT ?`),
-		lastID, models.RewardStakeCalculationVersion, batch.Limit,
+		lastID, rewardSigmaCalculationVersion, batch.Limit,
 	)
 	if err != nil {
 		return 0, 0, false, err
@@ -1313,7 +1317,7 @@ ORDER BY reward_snapshot.id LIMIT ?`),
 			batch.Rebind(
 				"UPDATE reward_snapshot SET calculation_version = ? WHERE id = ?",
 			),
-			models.RewardStakeCalculationVersion, id,
+			rewardSigmaCalculationVersion, id,
 		); err != nil {
 			return 0, 0, false, err
 		}

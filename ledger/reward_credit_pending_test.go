@@ -113,7 +113,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 		}
 		return nil
 	}))
-	result, err := f.ls.queryShelleyFilteredDelegationAndRewardAccounts(creds)
+	result, err := f.ls.queryShelleyFilteredDelegationAndRewardAccounts(creds, nil)
 	require.NoError(t, err)
 	_, rewardsDuring := unwrapFilteredDelegationResult(t, result)
 	powerDuring := dumpDRepVotingPower(t, f)
@@ -123,7 +123,7 @@ func TestPendingRewardRoundReadsMatchCreditedBalances(t *testing.T) {
 	for key, credit := range credits {
 		require.Equal(t, stored[key]+credit, credited[key])
 	}
-	result, err = f.ls.queryShelleyFilteredDelegationAndRewardAccounts(creds)
+	result, err = f.ls.queryShelleyFilteredDelegationAndRewardAccounts(creds, nil)
 	require.NoError(t, err)
 	_, rewardsAfter := unwrapFilteredDelegationResult(t, result)
 	require.Equal(t, rewardsAfter, rewardsDuring)

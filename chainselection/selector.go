@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // safeAddUint64 returns a + b, clamped to math.MaxUint64 on overflow.
@@ -1031,6 +1032,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
+		removedTip := cs.peerTips[connId]
 		cs.deletePeerLocked(connId)
 
 		// Removing a witness can revoke the incumbent's corroboration even
@@ -1070,6 +1072,9 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
+							),
+							RollbackPoint: fragmentIntersection(
+								removedTip, newPeerTip,
 							),
 						},
 					)
@@ -2219,11 +2224,13 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			var previousTip ochainsync.Tip
 			var previousObservedTip ochainsync.Tip
 			var previousConnId ouroboros.ConnectionId
+			var rollbackPoint *ocommon.Point
 			if previousBest != nil {
 				previousConnId = *previousBest
 				if pt, ok := cs.peerTips[*previousBest]; ok {
 					previousTip = pt.Tip
 					previousObservedTip = pt.SelectionTip()
+					rollbackPoint = fragmentIntersection(pt, newPeerTip)
 				}
 			}
 			// Compute comparison result and block difference
@@ -2254,6 +2261,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 					PreviousObservedTip:  previousObservedTip,
 					ComparisonResult:     comparisonResult,
 					BlockDifference:      blockDiff,
+					RollbackPoint:        rollbackPoint,
 				},
 			)
 			switchEvent = &evt
@@ -2635,6 +2643,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 		defer cs.mutex.Unlock()
 
 		var previousBest *ouroboros.ConnectionId
+		var previousBestTip *PeerChainTip
 
 		for connId, peerTip := range cs.peerTips {
 			// Use 2x the stale threshold for "very stale" cleanup. Peers are
@@ -2652,6 +2661,7 @@ func (cs *ChainSelector) cleanupStalePeers() {
 				if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 					connIdCopy := connId
 					previousBest = &connIdCopy
+					previousBestTip = peerTip
 					cs.bestPeerConn = nil
 				}
 			}
@@ -2686,6 +2696,9 @@ func (cs *ChainSelector) cleanupStalePeers() {
 							ComparisonResult:     ChainComparisonUnknown,
 							BlockDifference: safeUint64ToInt64(
 								newPeerTip.Tip.BlockNumber,
+							),
+							RollbackPoint: fragmentIntersection(
+								previousBestTip, newPeerTip,
 							),
 						},
 					)

@@ -253,7 +253,7 @@ func (s *Store) setTransactionBatched(
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, accumulator, txn,
+		tolerateConsumedInputConflict, accumulator, nil, txn,
 	)
 }
 
@@ -280,6 +280,15 @@ func (s *Store) SetTransactionLeiosClosure(
 	)
 }
 
+// SetTransactionLeiosClosureInContext records the execution context before
+// certificates are applied, so epoch-dependent effects use the unticked state.
+func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn) error {
+	if slot >= point.Slot {
+		return errors.New("closure context must precede its certifying block")
+	}
+	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn)
+}
+
 func (s *Store) setTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
@@ -304,7 +313,7 @@ func (s *Store) setTransaction(
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, txn,
+		tolerateConsumedInputConflict, nil, nil, txn,
 	)
 }
 
@@ -317,6 +326,7 @@ func (s *Store) setTransactionWithAccumulator(
 	historicalBackfill bool,
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
+	ledgerContextSlot *uint64,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -396,6 +406,11 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
+			}
+			if ledgerContextSlot != nil {
+				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot); err != nil {
+					return err
+				}
 			}
 			s.applyTransactionMetadataLabels(
 				&staged,
@@ -1395,4 +1410,13 @@ ON CONFLICT (
 		}
 	}
 	return nil
+}
+
+func recordTransactionLedgerContext(ctx context.Context, db queryer, transactionID int64, slot uint64) error {
+	value, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
+	return err
 }
