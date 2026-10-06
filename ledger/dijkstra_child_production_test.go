@@ -343,6 +343,15 @@ type childProdRejection struct {
 	replayRecovers bool
 }
 
+// childProdErrorAs matches an error of type T. Each call declares its own
+// target because every case runs as parallel subtests that share the matcher.
+func childProdErrorAs[T error]() func(error) bool {
+	return func(err error) bool {
+		var target T
+		return errors.As(err, &target)
+	}
+}
+
 func childProdRejections(t *testing.T) []childProdRejection {
 	t.Helper()
 	childAux := []byte{0xa1, 0x00, 0x01}
@@ -382,9 +391,6 @@ func childProdRejections(t *testing.T) []childProdRejection {
 	const tooSmall = uint64(1)
 	const bigValue = uint64(4_999_999)
 
-	metadataErr := func(target any) func(error) bool {
-		return func(err error) bool { return errors.As(err, target) }
-	}
 	return []childProdRejection{
 		{
 			name: "child output below minimum UTxO",
@@ -541,18 +547,16 @@ func childProdRejections(t *testing.T) []childProdRejection {
 			},
 		},
 		{
-			name:  "child metadata without a hash",
-			batch: childProdBatch{aux: childAux},
-			matches: metadataErr(
-				&lcommon.MissingTransactionAuxiliaryDataHashError{},
-			),
+			name:    "child metadata without a hash",
+			batch:   childProdBatch{aux: childAux},
+			matches: childProdErrorAs[lcommon.MissingTransactionAuxiliaryDataHashError](),
 		},
 		{
 			name: "child hash without metadata",
 			batch: childProdBatch{body: func(childProdKeys) map[uint]any {
 				return map[uint]any{7: childHash.Bytes()}
 			}},
-			matches: metadataErr(&lcommon.MissingTransactionMetadataError{}),
+			matches: childProdErrorAs[lcommon.MissingTransactionMetadataError](),
 		},
 		{
 			name: "child hash mismatching its metadata",
@@ -562,7 +566,7 @@ func childProdRejections(t *testing.T) []childProdRejection {
 				},
 				aux: childAux,
 			},
-			matches: metadataErr(&lcommon.ConflictingMetadataHashError{}),
+			matches: childProdErrorAs[lcommon.ConflictingMetadataHashError](),
 		},
 		{
 			name: "top-level metadata does not satisfy the child hash",
@@ -572,7 +576,7 @@ func childProdRejections(t *testing.T) []childProdRejection {
 				},
 				topAux: childAux,
 			},
-			matches: metadataErr(&lcommon.MissingTransactionMetadataError{}),
+			matches: childProdErrorAs[lcommon.MissingTransactionMetadataError](),
 		},
 		{
 			name: "malformed child metadata",
