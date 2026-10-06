@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,4 +247,29 @@ func TestEndShutdownRequestsReturnsTheAcceptedRequest(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, want, req)
 	}
+}
+
+// TestLifecycleStatusReportsLedgerTip covers the chain tip in GetStatus, and
+// its omission while a live restore or truncate holds liveLifecycleMu.
+func TestLifecycleStatusReportsLedgerTip(t *testing.T) {
+	t.Parallel()
+
+	hash := []byte{0xde, 0xad, 0xbe, 0xef}
+	ls := &ledger.LedgerState{}
+	ls.SetTipForTesting(ochainsync.Tip{
+		Point:       ocommon.NewPoint(4242, hash),
+		BlockNumber: 17,
+	})
+	n := newRemoteLifecycleTestNode(t)
+	n.ledgerState = ls
+
+	tip := n.LifecycleStatus().GetSync().GetTip()
+	require.NotNil(t, tip)
+	assert.Equal(t, hex.EncodeToString(hash), tip.GetHash())
+	assert.Equal(t, uint64(4242), tip.GetSlot())
+	assert.Equal(t, uint64(17), tip.GetBlockNumber())
+
+	n.liveLifecycleMu.Lock()
+	defer n.liveLifecycleMu.Unlock()
+	assert.Nil(t, n.LifecycleStatus().GetSync().GetTip())
 }
