@@ -307,6 +307,25 @@ func TestValidateGenesisConsistencyRejectsInvalidSecurityParameters(
 			require.NoError(t, c.validateGenesisConsistency())
 		},
 	)
+
+	t.Run("system start mismatch precedes nonce window error", func(t *testing.T) {
+		t.Parallel()
+		shelleyGenesis := validShelleyGenesisForSecurityParamTests()
+		shelleyGenesis.SystemStart = time.Unix(1666656001, 0).UTC()
+		shelleyGenesis.EpochLength = 1
+		c := &CardanoNodeConfig{
+			byronGenesis: &byron.ByronGenesis{
+				StartTime: 1666656000,
+				ProtocolConsts: byron.ByronGenesisProtocolConsts{
+					K: validByronK,
+				},
+			},
+			shelleyGenesis: shelleyGenesis,
+		}
+		err := c.validateGenesisConsistency()
+		require.ErrorContains(t, err, "genesis system start mismatch")
+		require.NotContains(t, err.Error(), "randomness stabilisation window")
+	})
 }
 
 // TestNewCardanoNodeConfigFromFileRejectsInvalidSecurityParam proves the
