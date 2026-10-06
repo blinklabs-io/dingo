@@ -2900,6 +2900,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 		uint64(1),
 	})
 	require.NoError(t, err)
+	currentPParams, previousPParams := distinctConwayPParams(t)
 
 	tests := []struct {
 		name    string
@@ -2956,6 +2957,27 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.Fees = 0
 			},
 			wantErr: "less than the snapshot fee pot",
+		},
+		{
+			name: "previous parameters era unknown",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantErr: "previous protocol parameters for epoch 99: era cannot be determined",
+		},
+		{
+			name: "go snapshot without historical parameters",
+			mutate: func(s *RawLedgerState) {
+				s.SnapShotsData = fixture.SnapShotsData
+				s.Fees = fixture.Fees
+				s.PParamsData = currentPParams
+			},
+			wantErr: "historical protocol parameters for epoch 99 are unavailable",
 		},
 		{
 			name: "opcert counter key",

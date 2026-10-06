@@ -892,6 +892,42 @@ func validateImportState(cfg ImportConfig) error {
 			}
 		}
 	}
+	if state.SnapShotsData != nil {
+		if err := validateImportedRewardBases(cfg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateImportedRewardBases runs, before any phase persists, the
+// protocol-parameter check seedImportedRewardInputs makes for each Mark/Set/Go
+// epoch it would seed. That check depends only on the imported state and the
+// rows already stored, unlike the basis reconciliation, which needs the pool
+// registrations the cert-state phase writes.
+func validateImportedRewardBases(cfg ImportConfig) error {
+	store := cfg.Database.Metadata()
+	epoch := cfg.State.Epoch
+	for back := uint64(0); back <= 2 && back <= epoch; back++ {
+		rewardEpoch := epoch - back
+		existing, err := store.GetRewardSnapshot(rewardEpoch, "mark", nil)
+		if err != nil {
+			return fmt.Errorf(
+				"checking existing reward snapshot for epoch %d: %w",
+				rewardEpoch, err,
+			)
+		}
+		if existing != nil && existing.Authoritative {
+			continue
+		}
+		if err := validateImportedRewardPParams(
+			cfg, nil, rewardEpoch,
+		); err != nil {
+			return fmt.Errorf(
+				"imported reward basis for epoch %d: %w", rewardEpoch, err,
+			)
+		}
+	}
 	return nil
 }
 

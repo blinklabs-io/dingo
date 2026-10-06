@@ -8255,10 +8255,14 @@ accepted exactly at the limit and rejected one past it.
 parses the cert state, stake snapshots, active pool distribution and
 governance state, and checks the tip hash width, the epoch, evolving,
 candidate and last-epoch-block nonce widths, the certified opcert and
-block-count pool keys, and both current and previous protocol parameters,
-including historical era conversion. An existing valid historical parameter
-row can stand in for an incompatible previous payload during catch-up, so a
-malformed input fails the import before any phase persists. A parse warning
+block-count pool keys, UTxO-state fees against the snapshot fee pot, and both
+current and previous protocol parameters, including historical era
+conversion; a previous payload whose epoch has no resolvable era is refused.
+An existing valid historical parameter row can stand in for an incompatible
+previous payload during catch-up. With stake snapshots present it also runs
+the reward-basis protocol-parameter check for each Mark/Set/Go epoch without
+an authoritative basis. A malformed input therefore fails the import before
+any phase persists. A parse warning
 on the cert state or stake snapshots is a rejection rather than a log line.
 The phases parse again instead of reusing the result, which keeps those
 structures out of memory during the UTxO import.
