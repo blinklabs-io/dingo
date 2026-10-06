@@ -8927,10 +8927,9 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836).
-The root document is served only at the literal `/` path (`GET /{$}`); any
-other unregistered path falls through to a catch-all `404` handler instead
-of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+The root document is served only at the literal `/` path (`GET /{$}`).
+Documented operations without a handler return `501`; unknown paths fall
+through to a catch-all `404` handler instead of the root document.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the
@@ -9163,6 +9162,19 @@ persisted blocks. A deeper rollback walks persisted predecessors synchronously
 inside the stream handler, keeping cancellation and conversion errors in the
 request lifecycle; an unexpected persisted-block conversion failure is
 returned as a stream error.
+
+### Blockfrost unsupported operations
+
+The Blockfrost server distinguishes documented, unimplemented operations from
+unknown paths. Unsupported Blockfrost OpenAPI 0.1.93 operations return HTTP 501
+with the usual JSON error fields; an unsupported method on these paths returns
+HTTP 405 with an `Allow` header. Unknown paths retain HTTP 404. Implemented
+operations retain their handlers, while reserved literals such as `pools/retired`
+take precedence over generic parameter routes. Ambiguous upstream wildcard
+patterns are recognized by the bounded catch-all operation list rather than
+registered as conflicting Go `ServeMux` patterns. The IPFS path parameter
+matches the remaining path segments, so an object inside an IPFS directory is
+recognized as the same operation.
 
 ### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
 
