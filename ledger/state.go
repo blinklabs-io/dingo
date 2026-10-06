@@ -11813,6 +11813,35 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	return cloneTip(ls.loadTipSnapshot().currentTip)
 }
 
+// ImmutablePoint returns the primary-chain point k blocks behind the applied
+// ledger tip.
+// found is false while the retained chain is too short to have a non-origin
+// immutable point.
+func (ls *LedgerState) ImmutablePoint() (
+	ocommon.Point,
+	bool,
+	error,
+) {
+	ls.RLock()
+	primaryChain := ls.chain
+	eraID := ls.currentEra.Id
+	appliedTip := cloneTip(ls.currentTip)
+	ls.RUnlock()
+	if primaryChain == nil {
+		return ocommon.Point{}, false, errors.New("primary chain is nil")
+	}
+	securityParam, ok := ls.securityParamForEra(eraID)
+	if !ok {
+		return ocommon.Point{}, false, errors.New(
+			"security parameter is not configured",
+		)
+	}
+	if appliedTip.Point.Slot == 0 && len(appliedTip.Point.Hash) == 0 {
+		return ocommon.Point{}, false, nil
+	}
+	return primaryChain.PointAtDepthFrom(appliedTip.Point, securityParam)
+}
+
 // ForgeTipSnapshot returns the applied tip and its era's security parameter
 // from matching published ledger generations.
 func (ls *LedgerState) ForgeTipSnapshot() (ochainsync.Tip, int) {
