@@ -106,7 +106,7 @@ func TestRestoreRejectsNonEmptyStore(t *testing.T) {
 }
 
 // TestRestoreRecoversFromMalformedStreamPanic guards against a real crash
-// found via manual live testing (dingo#1651 follow-up): some malformed
+// found via manual live testing: some malformed
 // backup streams don't just fail Badger's Load() with a clean error, they
 // panic it outright (a corrupted length header producing a negative or
 // oversized slice length). Restore must recover that panic and return it

@@ -67,6 +67,8 @@ const (
 	leiosSnapshotRegistrationEpochBackfillSchemaRelease = "leios-snapshot-registration-epoch-backfill"
 	rewardOutputFoldedSchemaRelease                     = "reward-account-output-folded"
 	rewardCreditRoundTableSchemaRelease                 = "reward-credit-round-table"
+	rewardLeaderDeficitSchemaRelease                    = "reward-pool-leader-deficit"
+	governanceProposalOrderSchemaRelease                = "governance-proposal-order"
 )
 
 const mithrilRewardRepairPendingKey = "mithril_reward_repair_pending"
@@ -189,6 +191,16 @@ var schemaVersions = []struct {
 		Version: 31,
 		Name:    rewardCreditRoundTableSchemaRelease,
 		Dir:     "v31",
+	},
+	{
+		Version: 32,
+		Name:    rewardLeaderDeficitSchemaRelease,
+		Dir:     "v32",
+	},
+	{
+		Version: 33,
+		Name:    governanceProposalOrderSchemaRelease,
+		Dir:     "v33",
 	},
 }
 
@@ -339,9 +351,12 @@ func rewardCreditRoundBackfill(
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("read legacy reward credit rounds: %w", err)
 	}
-	var rounds []models.RewardCreditRound
+	rounds := make([]models.RewardCreditRound, 0)
 	if err := json.Unmarshal([]byte(raw), &rounds); err != nil {
 		return BatchResult{}, fmt.Errorf("decode legacy reward credit rounds: %w", err)
+	}
+	if rounds == nil {
+		rounds = make([]models.RewardCreditRound, 0)
 	}
 	start := 0
 	if batch.Cursor != "" {
@@ -1101,7 +1116,7 @@ const (
 // rewardStakeVersionRestampBackfill re-stamps snapshot rows a prior
 // RewardStakeCalculationVersion bump left behind, in two phases encoded in
 // the cursor ("P:<id>" then "R:<id>"), so upgrading in place only forces a
-// rebootstrap for the epochs the version bump actually changed (dingo #4026).
+// rebootstrap for the epochs the version bump actually changed.
 //
 // pool_stake_snapshot's stored values never depended on calculation version
 // -- see the TotalActiveStake comment in ledger/snapshot/rotation.go -- so

@@ -43,6 +43,7 @@ import (
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/chain"
@@ -1412,8 +1413,8 @@ func newHandleConnManagerClosedOwnerConn(
 	return peer.conn
 }
 
-// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces
-// issue #3508: NtC connections never received any close notification (the
+// TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState reproduces a
+// leak: NtC connections never received any close notification (the
 // EventBus's ConnectionClosedEventType is intentionally NtN-only), so
 // chainsync.State.RemoveClient -- which cancels the live chain iterator and
 // deletes the per-connection client state -- was never invoked for a closed
@@ -1443,6 +1444,24 @@ func TestHandleConnManagerClosedOwner_NtC_ReleasesChainsyncClientState(
 		ok,
 		"NtC close must release the chainsync server-side client state and its chain iterator",
 	)
+}
+
+func TestHandleConnManagerClosedOwnerLogsNtCCloseCause(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	n := &Node{config: Config{
+		logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}}
+	conn, err := ouroboros.NewConnection()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	cause := errors.New("local client reset")
+	n.handleConnManagerClosedOwner(conn, true, cause)
+
+	require.Contains(t, logs.String(), cause.Error())
+	require.Contains(t, logs.String(), conn.Id().String())
 }
 
 // TestHandleConnManagerClosedOwner_NtN_ReleasesState covers the owner-aware
@@ -1485,7 +1504,7 @@ func TestHandleConnManagerClosedOwner_NilChainsyncState(t *testing.T) {
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLeiosServeWaiters covers the node
-// half of the issue #3514 wiring. The connection manager's ConnClosedOwnerFunc is
+// half of the wiring. The connection manager's ConnClosedOwnerFunc is
 // the only close notification an NtC connection gets, and it is what wakes a
 // chainsync server callback parked waiting for a certified endorser closure --
 // the protocol's own done channel cannot close while that callback is running.
@@ -1585,7 +1604,7 @@ func testHandleConnManagerClosedReleasesLeiosServeWaiters(
 }
 
 // TestHandleConnManagerClosedOwner_NtC_ReleasesLocalStateQueryAcquiredPoint covers
-// the NtC-close half of blinklabs-io/dingo#382's point-pinning: a client
+// the NtC-close half of point-pinning: a client
 // that pins a point and then disconnects without a clean Release must not
 // leak its map entry, since NtC closes never reach
 // Ouroboros.HandleConnClosedEvent (the EventBus's ConnectionClosedEventType
@@ -1750,6 +1769,20 @@ func registerAPIProbe(
 				_ context.Context,
 				_ apiProbeConfig,
 				deps mesh.ProviderDependencies,
+			) (string, plugin.Instance, error) {
+				probe.host = deps.Host
+				return name, probe.instance(), nil
+			},
+		)
+	case plugin.CapabilityAPIMcp:
+		err = plugin.Register(
+			host,
+			descriptor,
+			func() apiProbeConfig { return apiProbeConfig{} },
+			func(
+				_ context.Context,
+				_ apiProbeConfig,
+				deps mcp.ProviderDependencies,
 			) (string, plugin.Instance, error) {
 				probe.host = deps.Host
 				return name, probe.instance(), nil
@@ -1921,6 +1954,7 @@ func TestAPIPluginSelectionDefaultPortPerCapability(t *testing.T) {
 		plugin.CapabilityAPIBlockfrost: 3000,
 		plugin.CapabilityAPIMesh:       8080,
 		plugin.CapabilityAPIUtxorpc:    9090,
+		plugin.CapabilityAPIMcp:        0,
 	}
 	for capability, wantPort := range want {
 		n := &Node{
@@ -1947,6 +1981,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 		plugin.CapabilityAPIUtxorpc:    {},
 		plugin.CapabilityAPIBlockfrost: {},
 		plugin.CapabilityAPIMesh:       {},
+		plugin.CapabilityAPIMcp:        {},
 	}
 	for capability, probe := range probes {
 		registerAPIProbe(t, n.pluginHost, capability, "probe", probe)
@@ -1954,7 +1989,7 @@ func TestNodeRunSkipsZeroPortAPIProviders(t *testing.T) {
 	}
 	// Force a deterministic failure after the API startup section so Run
 	// returns without requiring an external shutdown signal. Reaching block
-	// producer validation proves all three zero-port decisions were exercised.
+	// producer validation proves all four zero-port decisions were exercised.
 	n.config.blockProducer = true
 
 	require.ErrorIs(
@@ -2067,7 +2102,7 @@ func TestNodeRunPublicAPIsUseSharedBindAddress(t *testing.T) {
 // connection and then keeps its own "already asked" flag set -- the leios-fetch
 // backfill's markProtocolDead is the clearest case, where a dropped request
 // leaves a connection whose leios-fetch protocol can never answer again in the
-// pool for the rest of its life (dingo #3552). Detaching either subscriber
+// pool for the rest of its life. Detaching either subscriber
 // under backpressure would silently strip requests out of the stream, so both
 // stay attached until they drain.
 func TestConnectionRecycleSubscriptionsRemainLossless(t *testing.T) {
@@ -2327,7 +2362,7 @@ func nodeFuncBodyForSnapshotWiring(
 // package defaults instead of the operator's configuration -- which is
 // exactly what happened to SetDelegatorInactivity (see
 // TestLiveTruncateReinitializationPreservesSnapshotManagerDelegatorInactivityConfig)
-// and is the same gap dingo #4188's retention setter would leave.
+// and is the same gap retention setter would leave.
 func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	t.Parallel()
 
@@ -2365,7 +2400,7 @@ func TestReinitializeBackgroundManagersMirrorsRunSnapshotConfig(t *testing.T) {
 	}
 }
 
-// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins dingo #4188's
+// TestKoiosParityRetentionWiredFromConfigInBothStartupPaths pins
 // wiring itself: both node startup paths must widen reward_account_output
 // retention from the operator's koios-parity enablement. Without the call the
 // node keeps CORE mode's 4-epoch window, and the observer -- whose network
@@ -3299,7 +3334,7 @@ func TestLedgerStateConfigSkipsChainsyncReadDuringLiveLifecycleOp(
 }
 
 // TestLedgerStateConfigForwardsBlockPipelineFlags is the second half of the
-// dingo#4599 regression coverage: it proves that a Config built through the
+// pipeline-flag regression coverage: it proves that a Config built through the
 // public NewConfig/With... option API -- not a hand-built struct literal --
 // carries BlockPipelineEnabled and BlockPipelineValidateEnabled all the way
 // into the ledger.LedgerStateConfig that ledgerStateConfig() hands to
@@ -3336,8 +3371,9 @@ func TestLedgerStateConfigForwardsBlockPipelineFlags(t *testing.T) {
 // The ledger is started, and replays any stored blocks it has not applied,
 // before the node creates Ouroboros networking. ledgerStateConfig therefore
 // hands the ledger callbacks that run while n.ouroboros() is still nil, and
-// each of them must report "unavailable" instead of dereferencing it
-// (dingo#4805: a Musashi restart panicked in EndorserBlockTxsByHash).
+// each of them must report "unavailable" instead of dereferencing it. A
+// restart after a Musashi shutdown exposed this ordering when
+// EndorserBlockTxsByHash panicked before networking was initialized.
 func TestLedgerStateConfigCallbacksTolerateMissingOuroboros(t *testing.T) {
 	t.Parallel()
 

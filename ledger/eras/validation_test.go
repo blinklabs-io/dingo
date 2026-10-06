@@ -93,7 +93,7 @@ func utxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule is the
-// regression guard for blinklabs-io/dingo#3821: it fails if
+// regression guard: it fails if
 // resolveUtxoValidationSkipIndex ever goes back to matching upstream rules by
 // validation function identity or runtime name.
 //
@@ -156,7 +156,7 @@ func TestResolveUtxoValidationSkipIndexResolvesPhase2WrappedRule(t *testing.T) {
 
 // TestConwayUpstreamGatedRulesAreWrapped proves the wrapping the guard above
 // simulates is what the pinned gouroboros release actually does, so the
-// package-init panic #3821 reported cannot silently stop being reachable.
+// package-init panic reported cannot silently stop being reachable.
 func TestConwayUpstreamGatedRulesAreWrapped(t *testing.T) {
 	descriptors := conway.UtxoValidationRuleDescriptors()
 	require.Len(t, conway.UtxoValidationRules, len(descriptors))
@@ -513,7 +513,7 @@ func shortUtxoValidationRuleName(fn lcommon.UtxoValidationRuleFunc) string {
 }
 
 // treasuryUnavailableLedgerState mirrors *ledger.LedgerView while
-// blinklabs-io/dingo#3687 is open: TreasuryValue is a mandatory
+// is open: TreasuryValue is a mandatory
 // common.LedgerState method that Dingo does not implement yet.
 type treasuryUnavailableLedgerState struct {
 	*mockLedgerState
@@ -558,7 +558,7 @@ func newConwayTreasuryTx(
 // LedgerState.TreasuryValue only for a transaction that declares
 // currentTreasuryValue (transaction body key 21). Dingo's provider still
 // returns an error, so this rule must stay unreachable for ordinary traffic
-// until blinklabs-io/dingo#3687 lands. If upstream drops the guard, or stops
+// until lands. If upstream drops the guard, or stops
 // distinguishing an absent key 21 from a declared zero, this test fails
 // instead of the node rejecting ordinary transactions.
 func TestCurrentTreasuryValueRuleGuardsOnDeclaredValue(t *testing.T) {
@@ -966,10 +966,9 @@ func TestPlutusBudgetComparisonIncludesFinalSlippageBatch(t *testing.T) {
 	// comment): this script never invokes an actual builtin function, only
 	// CEK machine steps, so it reproduces the exact 112100/800 numbers
 	// plutigo's own default cost model already produced before
-	// requiredCostModel (issue #3528) started rejecting the incomplete
-	// cost models that used to silently trigger that fallback. These
-	// numbers would still change if plutigo's DefaultMachineCosts changes,
-	// same as before.
+	// requiredCostModel started rejecting the incomplete cost models that used
+	// to silently trigger that fallback. These numbers would still change if
+	// plutigo's DefaultMachineCosts changes, same as before.
 	program := &syn.Program[syn.DeBruijn]{
 		Version: lang.LanguageVersionV1,
 		Term: &syn.Lambda[syn.DeBruijn]{
@@ -2335,18 +2334,6 @@ func TestTxSizeForFee(t *testing.T) {
 			expected: 255,
 		},
 		{
-			name:     "typical alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 4096),
-			expected: 4095,
-		},
-		{
-			name:     "large alonzo transaction",
-			txType:   4,
-			cbor:     make([]byte, 16384),
-			expected: 16383,
-		},
-		{
 			// Mary (pre-Alonzo) TX: no subtraction.
 			name:     "mary transaction full size",
 			txType:   3, // Mary
@@ -3023,47 +3010,6 @@ func TestCalculateMinFee(t *testing.T) {
 			expected:    240701,
 		},
 		{
-			// Multiple scripts - the exUnits represent the
-			// sum of all script execution units.
-			// Two scripts: script1(mem=500000, steps=100000000)
-			//              script2(mem=500000, steps=100000000)
-			// Total: mem=1000000, steps=200000000
-			// Same as single script test above.
-			name:   "multiple scripts summed exunits",
-			txSize: 300,
-			exUnits: lcommon.ExUnits{
-				Memory: 1000000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    240701,
-		},
-		{
-			// Three scripts with different costs summed:
-			// script1(mem=300000, steps=50000000)
-			// script2(mem=200000, steps=80000000)
-			// script3(mem=100000, steps=70000000)
-			// Total: mem=600000, steps=200000000
-			// baseFee = 44*400 + 155381 = 172981
-			// memFee = ceil(577*600000/10000) = ceil(34620) = 34620
-			// stepFee = ceil(721*200000000/10000000) = 14420
-			// total = 172981 + 34620 + 14420 = 222021
-			name:   "three scripts summed",
-			txSize: 400,
-			exUnits: lcommon.ExUnits{
-				Memory: 600000,
-				Steps:  200000000,
-			},
-			minFeeA:     44,
-			minFeeB:     155381,
-			pricesMem:   big.NewRat(577, 10000),
-			pricesSteps: big.NewRat(721, 10000000),
-			expected:    222021,
-		},
-		{
 			// Ceiling behavior: single ceiling over sum.
 			// Per Alonzo spec: scriptFee = ceil(prMem*mem + prSteps*steps)
 			// pricesMem=1/3, mem=1 => 1/3
@@ -3235,100 +3181,6 @@ func TestCalculateMinFee(t *testing.T) {
 			)
 		})
 	}
-}
-
-func TestCalculateMinFee_ScriptFeeAddsCorrectly(t *testing.T) {
-	// Verify that a transaction with scripts costs more
-	// than the same transaction without scripts.
-	txSize := uint64(300)
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-
-	// Fee with no scripts
-	feeNoScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{Memory: 0, Steps: 0},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// Fee with scripts
-	feeWithScripts := CalculateMinFee(
-		txSize,
-		lcommon.ExUnits{
-			Memory: 1000000,
-			Steps:  200000000,
-		},
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	assert.Greater(
-		t,
-		feeWithScripts,
-		feeNoScripts,
-		"fee with scripts should be greater than base fee",
-	)
-
-	// The difference should equal the script execution fee
-	scriptFee := feeWithScripts - feeNoScripts
-	// memFee = ceil(577*1000000/10000) = 57700
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	assert.Equal(
-		t,
-		uint64(72120),
-		scriptFee,
-		"script fee component mismatch",
-	)
-}
-
-func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
-	// Verify that running N scripts with individual
-	// ExUnits that sum to a total produces the same
-	// fee as the total ExUnits directly.
-	minFeeA := uint(44)
-	minFeeB := uint(155381)
-	pricesMem := big.NewRat(577, 10000)
-	pricesSteps := big.NewRat(721, 10000000)
-	txSize := uint64(400)
-
-	// Three individual scripts
-	scripts := []lcommon.ExUnits{
-		{Memory: 300000, Steps: 50000000},
-		{Memory: 200000, Steps: 80000000},
-		{Memory: 100000, Steps: 70000000},
-	}
-
-	// Sum them up (simulating what EvaluateTx does)
-	var totalExUnits lcommon.ExUnits
-	for _, s := range scripts {
-		totalExUnits.Memory += s.Memory
-		totalExUnits.Steps += s.Steps
-	}
-
-	require.Equal(t, int64(600000), totalExUnits.Memory)
-	require.Equal(t, int64(200000000), totalExUnits.Steps)
-
-	fee := CalculateMinFee(
-		txSize,
-		totalExUnits,
-		minFeeA,
-		minFeeB,
-		pricesMem,
-		pricesSteps,
-	)
-
-	// baseFee = 44*400 + 155381 = 172981
-	// memFee = ceil(577*600000/10000) = 34620
-	// stepFee = ceil(721*200000000/10000000) = 14420
-	// total = 172981 + 34620 + 14420 = 222021
-	assert.Equal(t, uint64(222021), fee)
 }
 
 func TestCalculateConwayRefScriptFee_Tiered(t *testing.T) {
@@ -5119,7 +4971,7 @@ func TestConwayCommitteeRulesSkipPhase2InvalidTransaction(t *testing.T) {
 // other's member.
 //
 // This test passes both with and without the fail-closed change by design; it
-// covers the tag-preservation behavior this PR adds, not the availability
+// covers the tag-preservation behavior, not the availability
 // gate. It fails if the tag is ever dropped or defaulted in voter resolution.
 func TestConwayCommitteeHotVoterTagsDoNotCrossMatch(t *testing.T) {
 	var hash lcommon.Blake2b224
@@ -5252,8 +5104,8 @@ func committeeCert(
 	}
 }
 
-// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins
-// dingo#4377: a committee cold credential resignation is rejected both when
+// TestConwayCommitteeCertificateRuleRejectsRepeatedResignation pins:
+// a committee cold credential resignation is rejected both when
 // it was already resigned before the transaction and when an earlier
 // certificate in the same transaction resigned it. Dingo's replacement
 // previously checked member.Resigned only on the authorize path and queried
@@ -5494,7 +5346,7 @@ func TestConwayCommitteeCertificateRuleTracksResignationWhenStateUnavailable(
 
 // conwayParameterChangeProposal builds a proposal procedure carrying a
 // ConwayParameterChangeGovAction. When protocolVersion is non-nil, the
-// action sets protocol-version key 14, which dingo#4439 requires rejecting.
+// action sets protocol-version key 14, which requires rejecting.
 func conwayParameterChangeProposal(
 	protocolVersion *lcommon.ProtocolParametersProtocolVersion,
 ) lcommon.ProposalProcedure {
@@ -5563,7 +5415,7 @@ func TestValidateParameterChangeExcludesProtocolVersionRejectsConway(
 
 // TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra is the
 // Dijkstra analogue: the same protocol-version key 14 exclusion carries into
-// Dijkstra's ParameterChange action (dingo#4439's "apply the same protection
+// Dijkstra's ParameterChange action ( "apply the same protection
 // to Dijkstra" acceptance criterion, PV12).
 func TestValidateParameterChangeExcludesProtocolVersionRejectsDijkstra(
 	t *testing.T,

@@ -196,7 +196,7 @@ func (p *DingoStateProvider) IsStakeCredentialRegistered(
 // UtxoValidateValueNotConservedUtxo's optional type assertion misses and
 // every legacy stake deregistration in the corpus is refunded at the current
 // KeyDeposit. The corpus then cannot distinguish a correct recorded refund
-// from the fallback, which is the gap #3831 covers.
+// from the fallback, which is the gap the recorded-deposit test covers.
 //
 // This mirrors ledger.LedgerView.StakeCredentialDeposit: the account lookup
 // gates on the same live registration state as
@@ -788,6 +788,12 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 		order = append(order, key)
 	}
 	for _, key := range order {
+		// Validate before the ambiguity filter, or a malformed hash seated
+		// under both tags is dropped silently instead of failing.
+		coldHash, err := common.NewBlake2b224Checked([]byte(key.hash))
+		if err != nil {
+			return nil, fmt.Errorf("committee cold credential: %w", err)
+		}
 		// The legacy list shape cannot carry a credential tag, so a hash
 		// seated under both tags stays ambiguous and is omitted.
 		if len(tagsByHash[key.hash]) != 1 {
@@ -795,7 +801,7 @@ func (p *DingoStateProvider) CommitteeMembers() ([]common.CommitteeMember, error
 		}
 		member, err := p.CommitteeCredentialMember(common.Credential{
 			CredType:   uint(key.tag),
-			Credential: common.NewBlake2b224([]byte(key.hash)),
+			Credential: coldHash,
 		})
 		if err != nil {
 			return nil, err
@@ -1365,7 +1371,7 @@ var (
 )
 
 // Keep the conformance provider on the same plural committee-authorization
-// capability as the production LedgerView (gouroboros#2574); see
+// capability as the production LedgerView; see
 // LedgerView.CommitteeHotCredentialMembers.
 var _ common.CommitteeHotCredentialMembers = (*DingoStateProvider)(nil)
 

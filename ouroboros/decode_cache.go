@@ -50,7 +50,7 @@ const (
 // nominally "the same block" (corruption, tampering, a buggy peer) hash to
 // different keys and are decoded, cached, and reported on completely
 // independently. A bad delivery from one peer can therefore never poison the
-// answer another peer's good delivery produces. See dingo #489.
+// answer another peer's good delivery produces.
 type decodeCacheKey [sha256.Size]byte
 
 // hashDecodeInput computes the cache key for a decode input. blockType is
@@ -98,7 +98,7 @@ type decodeCacheResult[T any] struct {
 // hash, with a waiter mechanism so concurrent callers submitting identical
 // bytes at nearly the same instant share one decode instead of each doing the
 // work independently. One instance covers one decode "kind" (blocks or
-// headers); Ouroboros holds one of each. See dingo #489.
+// headers); Ouroboros holds one of each.
 //
 // Eviction is insertion-order FIFO via order, not a sort: entries are never
 // mutated or re-inserted once written (a given key's decode outcome is
@@ -149,7 +149,7 @@ func newDecodeCacheWithByteLimit[T any](maxRetainedBytes int) *decodeCache[T] {
 // re-raised panic. This makes the leader's own outcome symmetric with every
 // other caller for the same key -- an in-flight waiter, or a later lookup of
 // the now-cached failure -- which were already returned a clean error before
-// this fix. See dingo #3511: a decoder panic used to escape uncontained into
+// this fix. A decoder panic used to escape uncontained into
 // the leader's calling protocol worker even though the cache had already
 // recorded it as a normal decode failure. See finishDecode.
 func (c *decodeCache[T]) getOrDecodeSizedWithErrorRetention(

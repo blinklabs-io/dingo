@@ -199,8 +199,9 @@ func testDijkstraAnnouncementHeaderRaw(t *testing.T) []byte {
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
+	require.Len(t, headerBody, 12)
 	headerBody = append(
-		headerBody,
+		headerBody[:10],
 		mustCbor(t, false),
 		mustCbor(t, []any{ebHash.Bytes(), uint64(1234)}),
 	)
@@ -435,7 +436,9 @@ func TestLeiosNotifyBlockAnnouncementIsConsumedAndDeduplicated(t *testing.T) {
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
-	headerBody = append(headerBody,
+	require.Len(t, headerBody, 12)
+	headerBody = append(
+		headerBody[:10],
 		mustCbor(t, false),
 		mustCbor(t, []any{ebHash.Bytes(), uint64(1234)}),
 	)
@@ -2187,8 +2190,9 @@ func testDijkstraAnnouncingBlockRaw(
 	var headerBody []cbor.RawMessage
 	_, err = cbor.Decode(headerTop[0], &headerBody)
 	require.NoError(t, err)
+	require.Len(t, headerBody, 12)
 	headerBody = append(
-		headerBody,
+		headerBody[:10],
 		mustCbor(t, false),
 		mustCbor(t, []any{ebHash.Bytes(), ebSize}),
 	)
@@ -2202,7 +2206,7 @@ func testDijkstraAnnouncingBlockRaw(
 }
 
 // TestResolveCertifiedEndorserTxsWithholdsUnverifiedSlot is the third named
-// consumer from the second review round's comment 2: resolveCertifiedEndorserTxs
+// consumer of the slot-verification contract: resolveCertifiedEndorserTxs
 // backs the node-to-client CertRB merge path (mergedLeiosRankingBlockCbor),
 // so a complete-but-unbound endorser block must not resolve there either, the
 // same as the ledger-facing and forge-loop providers. This exercises the full

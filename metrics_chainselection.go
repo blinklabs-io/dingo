@@ -16,8 +16,8 @@ package dingo
 
 import (
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Reasons reported by dingo_chainselection_stalled_total.
@@ -48,26 +48,25 @@ type chainSelectionMetrics struct {
 // Every label value is materialized here so a scrape reports an explicit 0
 // instead of a missing series before the first occurrence -- a stall counter
 // that only appears once the node has stalled is useless for alerting.
-func (n *Node) registerChainSelectionMetrics() {
+func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	factory := promauto.With(n.config.promRegistry)
 	metrics := &chainSelectionMetrics{
-		stalls: factory.NewCounterVec(
+		stalls: promutil.Register(r, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_chainselection_stalled_total",
 				Help: "times chain selection transitioned to having no selectable peer",
 			},
 			[]string{"reason"},
-		),
-		rollbackRegistrations: factory.NewCounterVec(
+		)),
+		rollbackRegistrations: promutil.Register(r, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_chainselection_rollback_registrations_total",
 				Help: "attempts to register a peer into chain selection from a chainsync rollback on an untracked connection, by outcome",
 			},
 			[]string{"outcome"},
-		),
+		)),
 	}
 	for _, reason := range []string{
 		chainSelectionStallNoSelectablePeer,

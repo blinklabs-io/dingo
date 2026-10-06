@@ -53,7 +53,6 @@ func newOnDiskTestDB(t *testing.T) *Database {
 // that point fails, including the 8-byte commit timestamp Txn.Commit writes
 // into the same transaction -- which turns a tolerated partial blob cleanup
 // into a rollback that cannot be committed at all
-// (blinklabs-io/dingo#4657).
 const (
 	testBadgerMaxBatchSize  = 15 * testutil.TestBadgerMemTableSize / 100
 	testBadgerMaxBatchCount = testBadgerMaxBatchSize / 96
@@ -136,7 +135,7 @@ func countUtxoBlobs(t *testing.T, db *Database, utxos []models.Utxo) int {
 }
 
 // TestTruncateAfterSlotCommitsWithOverBudgetBlobDeletes is the startup
-// rollback of blinklabs-io/dingo#4657: TruncateAfterSlot runs inside a
+// During rollback, TruncateAfterSlot runs inside a
 // combined transaction the caller commits, and it stages every rolled-back
 // UTxO's blob delete into that one transaction. Past badger's per-
 // transaction budget every further staged write is rejected, and the last of
@@ -437,7 +436,7 @@ func TestTruncateAfterSlotAllowsTargetWithPrunedNonceWhenCheckpointSurvives(
 		"sanity check: the epoch's checkpoint row must survive retention pruning")
 
 	// Re-run the exact same truncate against the now-pruned target. Before
-	// PR #4343's fix, this silently returned (Tip, nil-nonce, nil-error) --
+	// fix, this silently returned (Tip, nil-nonce, nil-error) --
 	// the exact live-incident mechanism: a deep 'dingo database truncate'
 	// landing on a pruned slot silently corrupted the resumed nonce chain,
 	// causing every VRF verification in the following epoch to fail against

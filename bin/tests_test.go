@@ -30,7 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,6 +47,10 @@ const (
 	// entrypointChildDelayEnv makes the fake child stall before signalling
 	// ready and before exiting, standing in for a starved runner.
 	entrypointChildDelayEnv = "DINGO_TEST_ENTRYPOINT_CHILD_DELAY"
+
+	// entrypointChildHangEnv makes the fake child start and then never become
+	// ready, standing in for a child that is wedged after spawning.
+	entrypointChildHangEnv = "DINGO_TEST_ENTRYPOINT_CHILD_HANG"
 )
 
 // TestMain turns a re-executed copy of this test binary into the fake dingo
@@ -72,6 +75,10 @@ func runEntrypointChild(kind string) int {
 		return 125
 	}
 	childDelay, _ := time.ParseDuration(os.Getenv(entrypointChildDelayEnv))
+	if os.Getenv(entrypointChildHangEnv) != "" {
+		// Started but never ready: wait to be killed by the harness.
+		select {}
+	}
 	if kind == bootstrapChild && os.Getenv("DINGO_TEST_BOOTSTRAP_WAIT") == "" {
 		if err := os.WriteFile(readyFile, []byte("ready\n"), 0o600); err != nil {
 			return 125
@@ -152,14 +159,7 @@ func TestEntrypointForwardsSignalsDuringMithrilBootstrap(t *testing.T) {
 			)
 			_, process, output := harness.start(t)
 
-			requireEntrypointChildReady(
-				t,
-				process,
-				output,
-				harness.bootstrapStartedFile,
-				harness.bootstrapReadyFile,
-				"Mithril bootstrap",
-			)
+			harness.requireBootstrapReady(t, process, output)
 			require.NoError(t, process.cmd.Process.Signal(test.signal))
 
 			err := waitForEntrypoint(t, process.cmd, process, output)
@@ -200,17 +200,12 @@ func TestEntrypointForwardsSignalsToSlowChild(t *testing.T) {
 		"DINGO_TEST_BOOTSTRAP_EXIT_CODE=41",
 		entrypointChildDelayEnv+"=2500ms",
 	)
-	cmd, done, output := harness.start(t)
+	_, process, output := harness.start(t)
 
-	testutil.WaitForCondition(
-		t,
-		func() bool { return fileExists(harness.bootstrapReadyFile) },
-		entrypointStepTimeout,
-		"Mithril bootstrap child did not become ready",
-	)
-	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
+	harness.requireBootstrapReady(t, process, output)
+	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
 
-	err := waitForEntrypoint(t, cmd, done, output)
+	err := waitForEntrypoint(t, process.cmd, process, output)
 	require.Equal(t, 41, commandExitCode(t, err), output.String())
 	require.Equal(
 		t, "SIGTERM\n", readFile(t, harness.bootstrapSignalFile),
@@ -222,14 +217,7 @@ func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	harness.env = append(harness.env, "DINGO_TEST_SERVE_EXIT_CODE=39")
 	_, process, output := harness.start(t)
 
-	requireEntrypointChildReady(
-		t,
-		process,
-		output,
-		harness.serveStartedFile,
-		harness.serveReadyFile,
-		"serve",
-	)
+	harness.requireServeReady(t, process, output)
 	require.NoError(t, process.cmd.Process.Signal(syscall.SIGTERM))
 
 	err := waitForEntrypoint(t, process.cmd, process, output)
@@ -237,14 +225,74 @@ func TestEntrypointSignalHandlingSurvivesBootstrapToServeHandoff(t *testing.T) {
 	require.Equal(t, "SIGTERM\n", readFile(t, harness.serveSignalFile))
 }
 
+// A child that spawns and then wedges must fail the readiness wait, and the
+// failure must say it started, so the stage is not misread as a spawn stall.
+func TestEntrypointReadinessWaitFailsForChildThatNeverBecomesReady(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	harness := newEntrypointHarness(t, false)
+	harness.env = append(
+		harness.env,
+		"DINGO_TEST_BOOTSTRAP_WAIT=1",
+		entrypointChildHangEnv+"=1",
+	)
+	_, process, _ := harness.start(t)
+
+	err := waitForEntrypointChildReady(
+		process,
+		harness.bootstrapStartedFile,
+		harness.bootstrapReadyFile,
+		entrypointStepTimeout,
+		300*time.Millisecond,
+		"Mithril bootstrap",
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "started but did not become ready")
+	require.False(t, fileExists(harness.bootstrapReadyFile))
+}
+
 type entrypointHarness struct {
-	bootstrapStartedFile string
 	env                  []string
+	bootstrapStartedFile string
 	bootstrapReadyFile   string
 	bootstrapSignalFile  string
 	serveStartedFile     string
 	serveReadyFile       string
 	serveSignalFile      string
+}
+
+func (h *entrypointHarness) requireBootstrapReady(
+	t *testing.T, process *entrypointProcess, output *bytes.Buffer,
+) {
+	t.Helper()
+	requireEntrypointChildReady(
+		t,
+		process,
+		output,
+		h.bootstrapStartedFile,
+		h.bootstrapReadyFile,
+		entrypointStepTimeout,
+		entrypointStepTimeout,
+		"Mithril bootstrap",
+	)
+}
+
+func (h *entrypointHarness) requireServeReady(
+	t *testing.T, process *entrypointProcess, output *bytes.Buffer,
+) {
+	t.Helper()
+	requireEntrypointChildReady(
+		t,
+		process,
+		output,
+		h.serveStartedFile,
+		h.serveReadyFile,
+		entrypointStepTimeout,
+		entrypointStepTimeout,
+		"serve",
+	)
 }
 
 type entrypointProcess struct {
@@ -312,6 +360,7 @@ func TestWaitForEntrypointChildReady(t *testing.T) {
 				startedFile,
 				readyFile,
 				10*time.Millisecond,
+				10*time.Millisecond,
 				"bootstrap",
 			)
 			if test.wantErrorPart == "" {
@@ -323,21 +372,26 @@ func TestWaitForEntrypointChildReady(t *testing.T) {
 	}
 }
 
-// waitForEntrypointChildReady waits for the child's ready file. The file is
-// re-checked when the entrypoint exits or the deadline fires, because the child
-// can write it in the same window: a ready child must not be reported as one
-// that never became ready.
+// waitForEntrypointChildReady waits for the child to start and then to write
+// its ready file, each against its own budget, so a timeout names the stage
+// that stalled: spawn queueing on a loaded runner is charged to startBudget
+// only, and readyBudget begins once the child is observed running. The ready
+// file is re-checked when the entrypoint exits or a deadline fires, because
+// the child can write it in the same window: a ready child must not be
+// reported as one that never became ready.
 func waitForEntrypointChildReady(
 	process *entrypointProcess,
 	startedFile string,
 	readyFile string,
-	timeout time.Duration,
+	startBudget time.Duration,
+	readyBudget time.Duration,
 	name string,
 ) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
+	deadline := time.NewTimer(startBudget)
+	defer func() { deadline.Stop() }()
 	poll := time.NewTicker(10 * time.Millisecond)
 	defer poll.Stop()
+	running := false
 	for {
 		select {
 		case <-process.done:
@@ -352,13 +406,18 @@ func waitForEntrypointChildReady(
 			if fileExists(readyFile) {
 				return nil
 			}
-			if !fileExists(startedFile) {
-				return fmt.Errorf("%s child did not start within %s", name, timeout)
+			if !running && !fileExists(startedFile) {
+				return fmt.Errorf("%s child did not start within %s", name, startBudget)
 			}
-			return fmt.Errorf("%s child started but did not become ready within %s", name, timeout)
+			return fmt.Errorf("%s child started but did not become ready within %s", name, readyBudget)
 		case <-poll.C:
 			if fileExists(readyFile) {
 				return nil
+			}
+			if !running && fileExists(startedFile) {
+				running = true
+				deadline.Stop()
+				deadline = time.NewTimer(readyBudget)
 			}
 		}
 	}
@@ -373,6 +432,8 @@ func requireEntrypointChildReady(
 	output *bytes.Buffer,
 	startedFile string,
 	readyFile string,
+	startBudget time.Duration,
+	readyBudget time.Duration,
 	name string,
 ) {
 	t.Helper()
@@ -380,7 +441,8 @@ func requireEntrypointChildReady(
 		process,
 		startedFile,
 		readyFile,
-		testutil.AsyncWait,
+		startBudget,
+		readyBudget,
 		name,
 	)
 	if err == nil {

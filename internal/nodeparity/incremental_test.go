@@ -87,7 +87,7 @@ type fakeLSQState struct {
 	// it is closed, simulating a peer that accepts the connection and
 	// then stalls mid-query -- for exercising that establishBaseline's
 	// context.WithTimeout(ctx, cfg.FullCheckTimeout) wrapping actually
-	// bounds this instead of hanging indefinitely (blinklabs-io/dingo#4183
+	// bounds this instead of hanging indefinitely (
 	// review). nil means "never stall", the default.
 	stall <-chan struct{}
 	// stallQuery is stall's counterpart for the QueryFunc step instead of
@@ -774,7 +774,7 @@ func drainFullCheck(
 
 // TestRunIncremental_ReportsCleanMatch covers a case never once observed
 // live against a real network during this package's development
-// (blinklabs-io/dingo#3854 guarantees a stake-distribution mismatch on
+// ( guarantees a stake-distribution mismatch on
 // effectively every real block): when both nodes genuinely agree, the
 // per-block pipeline must report an empty Diff, not something that merely
 // looks empty by omission.
@@ -842,7 +842,7 @@ func TestRunIncremental_EpochTransitionFiresOnItsOwn(t *testing.T) {
 }
 
 // TestRunIncremental_MismatchFiresFullCheck covers the one trigger that IS
-// exercisable live (and was -- extensively, against blinklabs-io/dingo#3854's
+// exercisable live (and was -- extensively, against
 // live effect): included here too so the full trigger matrix has coverage
 // in one place, independent of any live network's current state.
 func TestRunIncremental_MismatchFiresFullCheck(t *testing.T) {
@@ -907,7 +907,7 @@ func TestRunIncremental_GenuineRollbackFiresFullCheck(t *testing.T) {
 }
 
 // TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence is a
-// regression test for blinklabs-io/dingo#1900's incremental-mode audit
+// regression test for incremental-mode audit
 // finding: querying/comparing stake distribution in the per-block check
 // permanently stalled a real incremental session, since Dingo's
 // GetStakeDistribution handler only answers when the pinned point equals
@@ -959,7 +959,7 @@ func TestRunIncremental_PerBlockCheckIgnoresStakeDistributionDivergence(
 }
 
 // TestEstablishBaseline_ResumesFromReachablePriorCursor is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding: a restart
+// for incremental-mode audit finding: a restart
 // used to always discard a saved cursor's own point in favor of wherever
 // the fresh baseline Check happened to land (the live tip at process
 // start), silently skipping every block that arrived during any downtime in
@@ -1145,7 +1145,7 @@ func TestEstablishBaseline_FallsBackWhenPriorEpochDiffersFromLiveTip(
 }
 
 // TestEstablishBaseline_DivergentBaselineLogsDisputed is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding (b): a
+// for incremental-mode audit finding (b): a
 // startup baseline whose own full Check found a real divergence (not just
 // Skipped) was accepted as the incremental cursor's starting point with no
 // distinct signal that the session begins life on a disputed point rather
@@ -1183,7 +1183,7 @@ func TestEstablishBaseline_DivergentBaselineLogsDisputed(t *testing.T) {
 }
 
 // TestEstablishBaseline_StalledPeerTimesOutAndRetries is the regression
-// test for a blinklabs-io/dingo#4183 review finding: establishBaseline
+// test for a review finding: establishBaseline
 // called Check with the raw, long-lived ctx RunIncremental receives (which
 // only ever cancels at process shutdown), not one bounded by
 // cfg.FullCheckTimeout the way every other full Check this package
@@ -1283,7 +1283,7 @@ func TestEstablishBaseline_StalledPeerTimesOutAndRetries(t *testing.T) {
 }
 
 // TestBuildStartupCursor_StalledEpochQueryIsBounded is the regression test
-// for a blinklabs-io/dingo#4183 review finding: establishBaseline's own
+// for a review finding: establishBaseline's own
 // Check call is bounded by cfg.FullCheckTimeout (see
 // TestEstablishBaseline_StalledPeerTimesOutAndRetries above), but
 // buildStartupCursor's separate queryEpochAt call right after it (this
@@ -1355,7 +1355,7 @@ func TestBuildStartupCursor_StalledEpochQueryIsBounded(t *testing.T) {
 }
 
 // TestIncrementalSession_NoProgressWhenFirstBlockAlwaysFails is the
-// regression test for a blinklabs-io/dingo#4183 review finding:
+// regression test for a review finding:
 // incrementalSession used to report progressed=true (established) the
 // instant cs.Client.Sync was accepted, regardless of whether any block
 // that followed actually validated. A session whose very first block
@@ -1645,7 +1645,7 @@ func TestDiffBlockUtxoDelta_ProducedMismatchIsReported(t *testing.T) {
 }
 
 // TestDiffBlockUtxoDelta_IntraBlockSpendIsNotReported is a regression test
-// for blinklabs-io/dingo#1900's incremental-mode audit finding: an output
+// for the incremental-mode audit finding: an output
 // created by one transaction and spent by a later transaction in the same
 // block correctly does not appear in either node's live UTxO query result --
 // that is the expected outcome of a real, valid intra-block spend, not a
@@ -1863,7 +1863,7 @@ func TestHandleIncrementalRollback_TriggersFullCheckWhenPointDiffers(
 // pending at a time, but -- unlike the drop-everything-unconditionally
 // behavior this replaced -- which one survives now depends on priority
 // (fullCheckReasonPriority), not simply which arrived first. This is the
-// blinklabs-io/dingo#4183 review fix: unconditionally dropping a second
+// rationale: unconditionally dropping a second
 // request meant a one-shot Mismatch/Rollback/EpochTransition trigger could
 // be silently lost behind an already-queued, merely-due Interval
 // checkpoint, even though the interval trigger costs nothing to drop
@@ -1935,7 +1935,7 @@ func TestFullCheckWorker_CoalescesByPriorityWhilePendingOneQueued(
 // request must still reach cfg.OnFullCheck with the request's own reason,
 // but BlocksSinceFullCheck must NOT be reset afterward, since no check
 // actually completed. This is a regression test for
-// blinklabs-io/dingo#1900's incremental-mode audit finding (a): resetting
+// the incremental-mode audit finding (a): resetting
 // the countdown on every attempt regardless of outcome (the prior behavior)
 // silently delayed the next legitimate interval checkpoint by up to a full
 // --full-check-interval's worth of blocks even though nothing was ever
@@ -2159,8 +2159,8 @@ func TestCursorState_AdvanceIncrementsAndPersists(t *testing.T) {
 	assert.Equal(t, got, *persisted)
 }
 
-// TestCursorState_ResetFullCheckCounterIsRelativeToAt covers a maintainer
-// review finding on blinklabs-io/dingo#4183: a full check runs
+// TestCursorState_ResetFullCheckCounterIsRelativeToAt covers a bug in
+// the full-check counter reset: a full check runs
 // asynchronously (fullCheckWorker's doc comment) precisely so the ChainSync
 // callback goroutine can keep validating and advancing the cursor for every
 // block that arrives while it's in flight -- a real full check commonly
@@ -2308,10 +2308,10 @@ func TestCursorState_ResetFullCheckCounterFloorsAtZero(t *testing.T) {
 
 // TestDecideFullCheckReason covers every trigger decideFullCheckReason
 // makes, including the interval and epoch-transition paths that no live
-// testnet run could exercise on its own (blinklabs-io/dingo#3854 makes a
+// testnet run could exercise on its own (a stake-distribution divergence made a
 // mismatch fire on effectively every block, always preempting the other
 // two before their own conditions are ever reached) -- this is that
-// coverage, independent of #3854 or any live network at all.
+// coverage, independent of that divergence or any live network at all.
 func TestDecideFullCheckReason(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -2418,7 +2418,7 @@ func testDiscardLogger() *slog.Logger {
 }
 
 // TestReportSessionEnd_RecordsErrorViaCallback is a regression test for
-// blinklabs-io/dingo#1900's incremental-mode audit finding: a per-block
+// the incremental-mode audit finding: a per-block
 // query failure that ends an incrementalSession previously reached only a
 // log line, never any metric-recording callback, so
 // node_parity_check_errors_total could never see this failure class (the
