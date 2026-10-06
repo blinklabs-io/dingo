@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -635,7 +636,17 @@ func compareCostModels(
 		return nil
 	}
 
-	languages := make([]string, 0, len(dingoModels)+len(koiosModels))
+	dingoLen := len(dingoModels)
+	koiosLen := len(koiosModels)
+	if dingoLen > math.MaxInt-koiosLen {
+		return []CheckMismatch{mismatch(
+			"pparams_cost_models",
+			costModelSummary(dingoModels),
+			"unparseable: cost model language count too large",
+			CategoryValueMismatch,
+		)}
+	}
+	var languages []string
 	for language := range dingoModels {
 		languages = append(languages, language)
 	}
