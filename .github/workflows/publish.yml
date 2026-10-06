@@ -153,6 +153,11 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
+        with:
+          node-version: '22.x'
+      - name: npm-test
+        run: npm test
       - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: sqlc-generation-drift
@@ -175,47 +180,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dingo_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          postgres
-          -c fsync=off
-          -c synchronous_commit=off
-          -c full_page_writes=off
-        ports:
-          - 5432:5432
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_USER: mysql
-          MYSQL_PASSWORD: mysql
-          MYSQL_DATABASE: dingo_test
-        options: >-
-          --health-cmd "sh -c 'mysqladmin ping -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          --innodb-file-per-table=OFF
-          --innodb-flush-log-at-trx-commit=0
-          --sync-binlog=0
-          --skip-log-bin
-        ports:
-          - 3306:3306
       minio:
         image: blinklabs/minio:main
         options: >-
@@ -227,6 +191,8 @@ jobs:
           - 9000:9000
           - 9001:9001
     env:
+      DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
+      DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: '5432'
       POSTGRES_USER: postgres
@@ -244,6 +210,46 @@ jobs:
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
+      - name: start-test-databases
+        run: |
+          set -euo pipefail
+          docker run --detach --name "$DINGO_CI_PG_CONTAINER" \
+            --publish 5432:5432 \
+            --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=dingo_test \
+            --health-cmd pg_isready --health-interval 10s \
+            --health-timeout 5s --health-retries 5 \
+            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+          docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
+            --publish 3306:3306 \
+            --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
+            --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
+            --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
+            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            --sync-binlog=0 --skip-log-bin
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            for attempt in {1..60}; do
+              if ! status="$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$container")"; then
+                echo "Cannot inspect database container $container" >&2
+                docker logs "$container"
+                exit 1
+              fi
+              case "$status" in
+                'running healthy') break ;;
+                'running starting')
+                  if (( attempt == 60 )); then
+                    echo "Database container $container did not become healthy" >&2
+                    docker logs "$container"
+                    exit 1
+                  fi
+                  sleep 1
+                  ;;
+                *) docker logs "$container"; exit 1 ;;
+              esac
+            done
+          done
       - name: setup-s3-bucket
         run: |
             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -289,6 +295,19 @@ jobs:
         run: make test-live-lifecycle
       - name: go-test
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 60m ./...
+      - name: stop-test-databases
+        if: always()
+        run: |
+          set -euo pipefail
+          names="$(docker ps --all --format '{{.Names}}')"
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            while IFS= read -r name; do
+              if [ "$name" = "$container" ]; then
+                docker rm --force "$container"
+              fi
+            done <<< "$names"
+          done
+
 
   # Stage 3. Optional service backends are deliberately unconfigured here, so
   # internal/test/conformance replays its vectors against SQLite only. Same
@@ -519,7 +538,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: Build binaries
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: .github/scripts/build-targets.sh
       - name: Upload release assets
@@ -779,6 +798,56 @@ jobs:
       #- name: Pull new module version
       #  if: startsWith(github.ref, 'refs/tags/')
       #  uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
+
+  npm-release:
+    runs-on: ubuntu-latest
+    needs: [finalize-release]
+    if: >-
+      github.ref_type == 'tag'
+      && !contains(github.ref_name, '-')
+      && !contains(github.ref_name, '+')
+      && needs.finalize-release.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
+        with:
+          node-version: '22.x'
+          registry-url: https://registry.npmjs.org
+      - name: Stamp package version
+        env:
+          PACKAGE_RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          npm version "${PACKAGE_RELEASE_TAG#v}" --no-git-tag-version
+          --ignore-scripts --allow-same-version
+      - name: Embed finalized release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/dingo-release-assets"
+          mkdir -p "$asset_dir"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir "$asset_dir" --pattern "dingo-${RELEASE_TAG}-*.tar.gz"
+          ASSET_DIR="$asset_dir" node npm/generate-checksums.js
+      - name: Validate package installation and invocation
+        run: npm test
+      - name: Validate finalized release asset
+        run: |
+          set -euo pipefail
+          archive="$(npm pack --silent)"
+          install_root="$(mktemp -d)"
+          trap 'rm -rf "$install_root" "$archive"' EXIT
+          npm install --prefix "$install_root" --no-audit --no-fund "./$archive"
+          "$install_root/node_modules/.bin/dingo" --help >/dev/null
+      - name: Publish to NPM
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # Bump the dingo formula in the blinklabs-io/homebrew-cardano tap.
   #

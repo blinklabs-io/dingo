@@ -204,6 +204,9 @@ func TestQueryViewPinnedPointSurvivesRollback(t *testing.T) {
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 1000, nil,
 	))
+	// GetAccountState needs a network_state row at or before the point;
+	// genesis sync writes this slot-0 baseline on a real node.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
 	point := QueryPoint{Slot: 300, Hash: pointHash}
 
 	_, err := ls.AcquireQueryView(

@@ -2227,3 +2227,105 @@ func TestExactAddressOrderingUsesPaymentIndex(t *testing.T) {
 	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
 	require.NotContains(t, plan, "SCAN utxo")
 }
+
+// TestGetUtxosByAddressAsOfSelectsRowsLiveAtSlot checks GetUtxosByAddressAsOf
+// against GetUtxosByRefsAsOf's predicate: a row counts when it was added at
+// or before atSlot and spent strictly after it, or never.
+func TestGetUtxosByAddressAsOfSelectsRowsLiveAtSlot(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	key := bytes.Repeat([]byte{0x5A}, lcommon.AddressHashSize)
+	for i, r := range []struct{ added, deleted uint64 }{
+		{100, 0},     // included
+		{100, 3_000}, // spent after atSlot: included
+		{100, 2_000}, // spent at atSlot: excluded
+		{3_000, 0},   // added after atSlot: excluded
+	} {
+		txId := make([]byte, 32)
+		txId[31] = byte(i + 1)
+		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+			TxId:        txId,
+			OutputIdx:   0,
+			PaymentKey:  key,
+			AddedSlot:   r.added,
+			DeletedSlot: r.deleted,
+			Amount:      types.Uint64(i + 1),
+		}))
+	}
+	patterns := []models.UtxoAddressPattern{{PaymentPart: key}}
+
+	got, err := store.GetUtxosByAddressAsOf(patterns, 2_000, 10, nil)
+	require.NoError(t, err)
+	amounts := make([]uint64, 0, len(got))
+	for _, u := range got {
+		amounts = append(amounts, uint64(u.Amount))
+	}
+	require.ElementsMatch(t, []uint64{1, 2}, amounts)
+
+	live, err := store.GetUtxosByAddress(patterns, 10, nil)
+	require.NoError(t, err)
+	liveAmounts := make([]uint64, 0, len(live))
+	for _, u := range live {
+		liveAmounts = append(liveAmounts, uint64(u.Amount))
+	}
+	require.ElementsMatch(
+		t, []uint64{1, 4}, liveAmounts,
+		"live: the never-spent row and the one added later",
+	)
+
+	_, err = store.GetUtxosByAddressAsOf(patterns, math.MaxUint64, 10, nil)
+	require.Error(t, err, "a slot above math.MaxInt64 must be rejected")
+}
+
+// TestGetUtxosByAddressAsOfCountsSlotArgsInChunkBudget fills a chunk to the
+// last bind parameter SQLite allows: 248 base-address branches of four
+// arguments and three enterprise branches of two reach 998 address arguments
+// unless the two slot arguments are reserved, which with the LIMIT argument
+// would exceed the 999-variable limit.
+func TestGetUtxosByAddressAsOfCountsSlotArgsInChunkBudget(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	limit := store.dialect.ParameterLimit()
+	require.Equal(t, 999, limit)
+	limitSQLiteVariableNumber(t, store.readDB, limit)
+
+	hash := func(prefix byte, i int) []byte {
+		h := make([]byte, lcommon.AddressHashSize)
+		h[0] = prefix
+		binary.BigEndian.PutUint32(h[1:], uint32(i))
+		return h
+	}
+	var patterns []models.UtxoAddressPattern
+	add := func(addr lcommon.Address) {
+		addrBytes, err := addr.Bytes()
+		require.NoError(t, err)
+		patterns = append(
+			patterns,
+			models.UtxoAddressPattern{ExactAddress: addrBytes},
+		)
+	}
+	for i := range 248 {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			lcommon.AddressNetworkTestnet,
+			hash(0x01, i),
+			hash(0x02, i),
+		)
+		require.NoError(t, err)
+		add(addr)
+	}
+	for i := range 3 {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			hash(0x03, i),
+			nil,
+		)
+		require.NoError(t, err)
+		add(addr)
+	}
+
+	_, err := store.GetUtxosByAddressAsOf(patterns, 1_000, 10, nil)
+	require.NoError(t, err)
+}
