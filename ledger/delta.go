@@ -22,7 +22,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -451,20 +450,31 @@ func (d *LedgerDelta) processGovernance(
 		return nil
 	}
 
-	// Determine current epoch and Conway protocol parameters.
+	// Determine the block epoch and Conway protocol parameters.
 	// These are needed for both proposals (govActionLifetime) and
 	// votes (dRepInactivityPeriod for activity tracking).
-	ls.RLock()
-	currentEpoch := ls.currentEpoch.EpochId
-	pparams := ls.currentPParams
-	// A block of the era before the current one is judged under that era's
-	// parameters, as transaction validation did when it admitted the block.
-	proposalPParams := pparams
-	if d.BlockEraId != ls.currentEra.Id && ls.prevEraPParams != nil &&
-		eras.IsCompatibleEraIn(ls.eraList(), d.BlockEraId, ls.currentEra.Id) {
-		proposalPParams = ls.prevEraPParams
+	snapshot := ls.loadConsensusSnapshot()
+	if snapshot == nil {
+		return errors.New("governance consensus snapshot not yet published")
 	}
-	ls.RUnlock()
+	blockEpoch, err := epochForSlotInCache(
+		snapshot.epochCache,
+		d.Point.Slot,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"resolve governance block epoch at slot %d: %w",
+			d.Point.Slot,
+			err,
+		)
+	}
+	pparams := protocolParametersForBlockEra(
+		d.BlockEraId,
+		snapshot.currentEra,
+		ls.eraList(),
+		snapshot.currentPParams,
+		snapshot.prevEraPParams,
+	)
 
 	conwayPParams := conwayProtocolParameters(pparams)
 	if conwayPParams == nil {
@@ -480,9 +490,9 @@ func (d *LedgerDelta) processGovernance(
 			tx,
 			d.Point,
 			txIndex,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.GovActionValidityPeriod,
-			proposalPParams,
+			pparams,
 			ls.db,
 			txn,
 			validated,
@@ -496,7 +506,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessVotes(
 			tx,
 			d.Point,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,
@@ -508,7 +518,7 @@ func (d *LedgerDelta) processGovernance(
 	if hasDRepActivityCerts {
 		if err := governance.ProcessDRepActivityCertificates(
 			tx,
-			currentEpoch,
+			blockEpoch.EpochId,
 			conwayPParams.DRepInactivityPeriod,
 			ls.db,
 			txn,

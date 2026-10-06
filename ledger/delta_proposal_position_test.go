@@ -21,8 +21,8 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/database/models"
 	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -47,12 +47,12 @@ func TestLedgerDeltaRecordsProposalBlockPosition(t *testing.T) {
 	pparams.DRepInactivityPeriod = 20
 	ls := &LedgerState{
 		db:             db,
-		currentEpoch:   models.Epoch{EpochId: 12},
 		currentPParams: &pparams,
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	publishGovernanceTestEpoch(ls, 12, eras.ConwayEraDesc)
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, bytes.Repeat([]byte{0xAB}, 28)...),
 	)

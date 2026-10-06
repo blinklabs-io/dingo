@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -199,6 +200,22 @@ func requireTransactionEvent(
 	return txEvt
 }
 
+func publishGovernanceTestEpoch(
+	ls *LedgerState,
+	epochID uint64,
+	era eras.EraDesc,
+) {
+	ls.currentEra = era
+	ls.currentEpoch = models.Epoch{
+		EpochId:       epochID,
+		StartSlot:     0,
+		LengthInSlots: 10_000,
+		EraId:         era.Id,
+	}
+	ls.epochCache = []models.Epoch{ls.currentEpoch}
+	ls.publishSnapshotsLocked()
+}
+
 func TestLedgerDeltaPublishesApplyEventsOnlyAfterCommit(t *testing.T) {
 	t.Parallel()
 
@@ -313,18 +330,39 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.GovActionValidityPeriod = 20
 	pparams.DRepInactivityPeriod = 20
+	previousPParams := pparams
+	previousPParams.GovActionValidityPeriod = 6
+	previousPParams.DRepInactivityPeriod = 7
+	nextEra := eras.EraDesc{Id: eras.DijkstraEraDesc.Id + 1}
+	blockEpoch := models.Epoch{
+		EpochId:       12,
+		StartSlot:     0,
+		LengthInSlots: 1_000,
+		EraId:         eras.DijkstraEraDesc.Id,
+	}
+	currentEpoch := models.Epoch{
+		EpochId:       13,
+		StartSlot:     1_000,
+		LengthInSlots: 1_000,
+		EraId:         nextEra.Id,
+	}
 	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 12,
-		},
+		db:           db,
+		activeEras:   []eras.EraDesc{eras.DijkstraEraDesc, nextEra},
+		currentEra:   nextEra,
+		currentEpoch: currentEpoch,
+		epochCache:   []models.Epoch{blockEpoch, currentEpoch},
 		currentPParams: &dijkstra.DijkstraProtocolParameters{
 			ConwayProtocolParameters: pparams,
+		},
+		prevEraPParams: &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: previousPParams,
 		},
 		config: LedgerStateConfig{
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	rewardAddress, err := lcommon.NewAddressFromBytes(
 		append([]byte{0xE1}, bytes.Repeat([]byte{0xAB}, 28)...),
@@ -367,7 +405,7 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	got, err := db.GetGovernanceProposal(tx.Hash().Bytes(), 0, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), got.ProposedEpoch)
-	require.Equal(t, uint64(32), got.ExpiresEpoch)
+	require.Equal(t, uint64(18), got.ExpiresEpoch)
 }
 
 func TestLedgerDeltaPersistsMultipleCertificateDepositsFromOneSnapshot(
@@ -495,13 +533,33 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 
 	pparams := mockledger.NewMockConwayProtocolParams()
 	pparams.DRepInactivityPeriod = 20
-	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 100,
-		},
-		currentPParams: &pparams,
+	previousPParams := pparams
+	previousPParams.DRepInactivityPeriod = 7
+	nextEra := eras.EraDesc{Id: eras.DijkstraEraDesc.Id + 1}
+	blockEpoch := models.Epoch{
+		EpochId:       12,
+		StartSlot:     0,
+		LengthInSlots: 1_000,
+		EraId:         eras.DijkstraEraDesc.Id,
 	}
+	currentEpoch := models.Epoch{
+		EpochId:       13,
+		StartSlot:     1_000,
+		LengthInSlots: 1_000,
+		EraId:         nextEra.Id,
+	}
+	ls := &LedgerState{
+		db:             db,
+		activeEras:     []eras.EraDesc{eras.DijkstraEraDesc, nextEra},
+		currentEra:     nextEra,
+		currentEpoch:   currentEpoch,
+		epochCache:     []models.Epoch{blockEpoch, currentEpoch},
+		currentPParams: &pparams,
+		prevEraPParams: &dijkstra.DijkstraProtocolParameters{
+			ConwayProtocolParameters: previousPParams,
+		},
+	}
+	ls.publishSnapshotsLocked()
 
 	credentialBytes := bytes.Repeat([]byte{0xAB}, 28)
 	var credentialHash lcommon.CredentialHash
@@ -516,6 +574,7 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	}))
 
 	tx := mockledger.NewTransactionBuilder()
+	tx.WithType(gledger.TxTypeDijkstra)
 	tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
 		CertType: uint(lcommon.CertificateTypeRegistrationDrep),
 		DrepCredential: lcommon.Credential{
@@ -526,14 +585,20 @@ func TestProcessGovernanceRenewsDRepFromCertificateOnly(t *testing.T) {
 	tx.WithValid(true)
 
 	txn := db.Transaction(true)
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(100, bytes.Repeat([]byte{0x22}, 32)),
+		uint(dijkstra.EraIdDijkstra),
+		1,
+	)
+	defer delta.Release()
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return (&LedgerDelta{}).processGovernance(ls, tx, 0, txn, nil)
+		return delta.processGovernance(ls, tx, 0, txn, nil)
 	}))
 
 	drep, err := db.GetDrepByCredential(0, credentialBytes, true, nil)
 	require.NoError(t, err)
-	require.Equal(t, uint64(100), drep.LastActivityEpoch)
-	require.Equal(t, uint64(120), drep.ExpiryEpoch)
+	require.Equal(t, uint64(12), drep.LastActivityEpoch)
+	require.Equal(t, uint64(19), drep.ExpiryEpoch)
 }
 
 func TestConwayProtocolParametersDijkstra(t *testing.T) {
@@ -577,14 +642,17 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 	tests := []struct {
 		name    string
 		pparams lcommon.ProtocolParameters
+		era     eras.EraDesc
 	}{
 		{
 			name:    "conway",
 			pparams: (*conway.ConwayProtocolParameters)(nil),
+			era:     eras.ConwayEraDesc,
 		},
 		{
 			name:    "dijkstra",
 			pparams: (*dijkstra.DijkstraProtocolParameters)(nil),
+			era:     eras.DijkstraEraDesc,
 		},
 	}
 
@@ -593,6 +661,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 			ls := &LedgerState{
 				currentPParams: tt.pparams,
 			}
+			publishGovernanceTestEpoch(ls, 0, tt.era)
 			tx := mockledger.NewTransactionBuilder().
 				WithProposalProcedures(nil)
 

@@ -43,6 +43,7 @@ func TestProcessGovernanceJudgesPreviousEraBlockByItsEraParameters(
 	fx.ls.activeEras = []eras.EraDesc{eras.DijkstraEraDesc, next}
 	fx.ls.currentEra = next
 	fx.ls.prevEraPParams = &prev
+	fx.ls.publishSnapshotsLocked()
 
 	delta := NewLedgerDelta(
 		ocommon.Point{
