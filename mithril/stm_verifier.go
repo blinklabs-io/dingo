@@ -32,6 +32,14 @@ import (
 // reference implementation's BLS hash-to-curve domain separation tag.
 var stmBLSDomainSeparationTag = []byte{}
 
+// stmMaxMerkleLeaves bounds a Merkle commitment's leaf count so the padded
+// tree's node count fits a 32-bit signed integer on every platform.
+const stmMaxMerkleLeaves = 1 << 30
+
+// errSTMUnsupportedTreeSize is returned for a Merkle commitment whose leaf
+// count is zero or beyond stmMaxMerkleLeaves.
+var errSTMUnsupportedTreeSize = errors.New("unsupported Merkle tree size")
+
 type stmAggregateVerificationKey struct {
 	MTCommitment stmMerkleTreeBatchCommitment `json:"mt_commitment"`
 	TotalStake   uint64                       `json:"total_stake"`
@@ -166,6 +174,11 @@ func parseSTMAggregateVerificationKey(
 		if ret.MTCommitment.NrLeaves <= 0 {
 			return nil, errors.New("nrLeaves must be positive")
 		}
+		if _, _, err := stmMerkleTreeDimensions(
+			ret.MTCommitment.NrLeaves,
+		); err != nil {
+			return nil, err
+		}
 		return &ret, nil
 	}
 	if len(raw) < 48 {
@@ -185,10 +198,10 @@ func parseSTMAggregateVerificationKey(
 	if nrLeaves == 0 {
 		return nil, errors.New("nrLeaves must be positive")
 	}
-	if nrLeaves > uint64(math.MaxInt) {
+	if nrLeaves > stmMaxMerkleLeaves {
 		return nil, fmt.Errorf(
-			"nrLeaves %d exceeds maximum int value",
-			nrLeaves,
+			"%w: nrLeaves %d exceeds %d",
+			errSTMUnsupportedTreeSize, nrLeaves, stmMaxMerkleLeaves,
 		)
 	}
 	return &stmAggregateVerificationKey{
@@ -196,7 +209,7 @@ func parseSTMAggregateVerificationKey(
 			Root: append([]byte(nil), raw[8:len(raw)-8]...),
 			NrLeaves: int(
 				nrLeaves,
-			), //nolint:gosec // validated against MaxInt above
+			), //nolint:gosec // validated against stmMaxMerkleLeaves above
 		},
 		TotalStake: totalStake,
 	}, nil
@@ -234,6 +247,19 @@ func parseSTMSignerVerificationKey(encoded string) ([]byte, error) {
 	)
 }
 
+// Minimum encoded sizes, mirroring the parsers below: a single signature
+// is nrIndexes (8) + sigma (48) + signer index (8); a signature with its
+// registered party adds the party length prefix (8), the party entry
+// (96-byte key + 8-byte stake) and the signature length prefix (8); each
+// aggregate entry is additionally preceded by its own length prefix (8).
+const (
+	stmMinSingleSignatureSize      = 8 + 48 + 8
+	stmClosedRegistrationEntrySize = 96 + 8
+	stmMinSigWithPartySize         = 8 + stmClosedRegistrationEntrySize +
+		8 + stmMinSingleSignatureSize
+	minSigSize = 8 + stmMinSigWithPartySize
+)
+
 func parseSTMAggregateSignatureBytes(
 	raw []byte,
 ) (*stmAggregateSignature, error) {
@@ -255,11 +281,9 @@ func parseSTMAggregateSignatureBytes(
 		return nil, err
 	}
 	offset += 8
-	// Each signature requires at least 8 bytes (size prefix), so cap the
-	// pre-allocation against the remaining payload length to prevent OOM
-	// from a malformed totalSigs value.
+	// Cap the pre-allocation against the remaining payload length to
+	// prevent OOM from a malformed totalSigs value.
 	remaining := len(raw) - offset
-	const minSigSize = 8
 	//nolint:gosec // remaining is non-negative.
 	maxSigs := uint64(remaining / minSigSize)
 	if totalSigs > maxSigs {
@@ -672,6 +696,17 @@ func stmVerifyLeavesMembershipFromBatchPath(
 	leaves []stmClosedRegistrationEntry,
 	proof *stmMerkleBatchPath,
 ) error {
+	// The leaf count comes from the commitment, so it is bounded before any
+	// arithmetic derived from it.
+	nextPow2, nrNodes, err := stmMerkleTreeDimensions(
+		avk.MTCommitment.NrLeaves,
+	)
+	if err != nil {
+		return err
+	}
+	if len(leaves) == 0 {
+		return errors.New("merkle batch proof has no leaves")
+	}
 	if len(leaves) != len(proof.Indices) {
 		return fmt.Errorf(
 			"leaf count %d does not match proof index count %d",
@@ -691,8 +726,6 @@ func stmVerifyLeavesMembershipFromBatchPath(
 			return errors.New("merkle batch proof indices are not sorted")
 		}
 	}
-	nextPow2 := stmNextPowerOfTwo(avk.MTCommitment.NrLeaves)
-	nrNodes := avk.MTCommitment.NrLeaves + nextPow2 - 1
 	for idx := range orderedIndices {
 		orderedIndices[idx] += nextPow2 - 1
 	}
@@ -774,6 +807,12 @@ func stmVerifyLeavesMembershipFromBatchPath(
 		}
 		hashedLeaves = newHashes
 		orderedIndices = newIndices
+	}
+	if valueOffset != len(values) {
+		return fmt.Errorf(
+			"merkle batch proof has %d unused sibling values",
+			len(values)-valueOffset,
+		)
 	}
 	if len(hashedLeaves) != 1 ||
 		!bytes.Equal(hashedLeaves[0], avk.MTCommitment.Root) {
@@ -868,11 +907,19 @@ func stmBigIntFromLittleEndian(raw []byte) *big.Int {
 	return new(big.Int).SetBytes(reversed)
 }
 
-func stmNextPowerOfTwo(v int) int {
-	if v <= 1 {
-		return 1
+// stmMerkleTreeDimensions returns the leaf count padded to a power of two and
+// the tree's node count. nrLeaves is bounded to [1, stmMaxMerkleLeaves] first,
+// so the unsigned arithmetic cannot overflow and narrowing to int is lossless.
+func stmMerkleTreeDimensions(nrLeaves int) (int, int, error) {
+	if nrLeaves <= 0 || nrLeaves > stmMaxMerkleLeaves {
+		return 0, 0, fmt.Errorf(
+			"%w: nrLeaves %d outside [1, %d]",
+			errSTMUnsupportedTreeSize, nrLeaves, stmMaxMerkleLeaves,
+		)
 	}
-	return 1 << bits.Len(uint(v-1))
+	leaves := uint64(nrLeaves)
+	nextPow2 := uint64(1) << bits.Len64(leaves-1)
+	return int(nextPow2), int(leaves + nextPow2 - 1), nil //nolint:gosec // bounded above
 }
 
 func stmParent(idx int) int {

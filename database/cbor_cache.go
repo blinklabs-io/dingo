@@ -15,6 +15,7 @@
 package database
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -199,6 +201,53 @@ func NewTieredCborCache(config CborCacheConfig, db *Database) *TieredCborCache {
 	}
 }
 
+func (c *TieredCborCache) cacheBlockCbor(
+	slot uint64,
+	hash [32]byte,
+	blockCbor []byte,
+) {
+	if c == nil || c.blockLRU == nil {
+		return
+	}
+	c.blockLRU.Put(slot, hash, newCachedBlock(append([]byte(nil), blockCbor...)))
+}
+
+// cacheResolvedUtxo populates the shared hot cache with a resolved UTxO unless
+// the value came from a write the open transaction has staged: a rollback
+// could otherwise leave it visible. A read-write transaction also reads rows
+// committed before it began, and those are cached; a fresh read snapshot that
+// returns the identical stored value shows the row is not staged here. The
+// snapshot is a separate transaction, so the check adds nothing to the caller's
+// read set.
+func (c *TieredCborCache) cacheResolvedUtxo(
+	blobStore blob.BlobStore,
+	txId []byte,
+	outputIdx uint32,
+	stored []byte,
+	cbor []byte,
+	callerTxn *Txn,
+) {
+	if callerTxn != nil && callerTxn.IsReadWrite() &&
+		!utxoCommittedAs(blobStore, txId, outputIdx, stored) {
+		return
+	}
+	c.hotUtxo.Put(makeUtxoKey(txId, outputIdx), cbor)
+}
+
+// utxoCommittedAs reports whether a fresh read snapshot holds exactly the
+// stored value for the UTxO.
+func utxoCommittedAs(
+	blobStore blob.BlobStore,
+	txId []byte,
+	outputIdx uint32,
+	stored []byte,
+) bool {
+	snapshot := blobStore.NewTransaction(false)
+	defer snapshot.Rollback() //nolint:errcheck
+	committed, err := blobStore.GetUtxo(snapshot, txId, outputIdx)
+	return err == nil && bytes.Equal(committed, stored)
+}
+
 // ResolveUtxoCbor resolves UTxO CBOR data by transaction ID and output index.
 // It checks caches in order: hot UTxO cache, block LRU cache, then blob store.
 // An optional database transaction can be provided to see uncommitted writes
@@ -267,7 +316,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	// Check if this is offset-based storage
 	if !IsUtxoOffsetStorage(utxoData) {
 		// Legacy format: raw CBOR data - populate hot cache and return
-		c.hotUtxo.Put(key, utxoData)
+		c.cacheResolvedUtxo(blob, txId, outputIdx, utxoData, utxoData, callerTxn)
 		return utxoData, nil
 	}
 
@@ -276,14 +325,13 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	if err != nil {
 		return nil, fmt.Errorf("decode utxo offset: %w", err)
 	}
-
 	// Tier 2: Check block LRU cache
 	if cachedBlock, ok := c.blockLRU.Get(offset.BlockSlot, offset.BlockHash); ok {
 		c.metrics.IncBlockLRUHit()
 		cbor := cachedBlock.Extract(offset.ByteOffset, offset.ByteLength)
 		if cbor != nil {
 			// Populate hot cache
-			c.hotUtxo.Put(key, cbor)
+			c.cacheResolvedUtxo(blob, txId, outputIdx, utxoData, cbor, callerTxn)
 			return cbor, nil
 		}
 	}
@@ -292,8 +340,18 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	c.metrics.IncBlockLRUMiss()
 
 	// Fetch block from blob store
+	blockTxn := txn
+	if callerTxn != nil && callerTxn.blockCborCommittedSeparately(
+		offset.BlockSlot,
+		offset.BlockHash,
+	) {
+		// The open batch transaction predates this block commit. A fresh read
+		// transaction sees the block without adding it to the batch read set.
+		blockTxn = blob.NewTransaction(false)
+		defer blockTxn.Rollback() //nolint:errcheck
+	}
 	blockCbor, _, err := blob.GetBlock(
-		txn,
+		blockTxn,
 		offset.BlockSlot,
 		offset.BlockHash[:],
 	)
@@ -319,7 +377,7 @@ func (c *TieredCborCache) ResolveUtxoCbor(
 	}
 
 	// Populate hot cache
-	c.hotUtxo.Put(key, cbor)
+	c.cacheResolvedUtxo(blob, txId, outputIdx, utxoData, cbor, callerTxn)
 	return cbor, nil
 }
 

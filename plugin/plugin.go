@@ -43,6 +43,7 @@ const (
 	CapabilityAPIKupo         Capability = "api.kupo"
 	CapabilityAPIMesh         Capability = "api.mesh"
 	CapabilityAPIUtxorpc      Capability = "api.utxorpc"
+	CapabilityAPIMcp          Capability = "api.mcp"
 )
 
 // allCapabilities is the single enumeration of the capabilities this platform
@@ -57,6 +58,7 @@ var allCapabilities = []Capability{
 	CapabilityAPIKupo,
 	CapabilityAPIMesh,
 	CapabilityAPIUtxorpc,
+	CapabilityAPIMcp,
 }
 
 // AllCapabilities returns every capability supported by this platform, in a
@@ -139,6 +141,11 @@ type Host struct {
 	// concurrent Resolve can detect that the capability it just started is
 	// being torn down and unwind its own instance instead of leaking it.
 	stopping map[Capability]int
+	// stopCapabilityWG tracks StopCapability teardown that has already removed
+	// its providers from started, so Stop can wait for it. Add happens under mu
+	// while stopped is false; Stop sets stopped under mu before it Waits.
+	stopCapabilityWG  sync.WaitGroup
+	capabilityStopErr error
 }
 
 // NewHost returns an empty plugin host.
@@ -422,7 +429,9 @@ func (h *Host) ValidateSelection(
 }
 
 // Stop stops all successfully started providers in reverse order. It is
-// idempotent; subsequent calls return the first call's result.
+// idempotent; if ctx expires before teardown completes, Stop returns ctx.Err
+// and the host continues teardown in the background. A later call waits for
+// that teardown and returns its accumulated result.
 func (h *Host) Stop(ctx context.Context) error {
 	if h == nil {
 		return nil
@@ -431,27 +440,59 @@ func (h *Host) Stop(ctx context.Context) error {
 	if h.stopped {
 		done := h.stopDone
 		h.mu.Unlock()
+		return h.waitForStop(ctx, done)
+	}
+	h.stopped = true
+	h.stopDone = make(chan struct{})
+	done := h.stopDone
+	if len(h.stopping) == 0 && len(h.started) == 0 {
+		h.stopErr = h.capabilityStopErr
+		close(done)
+		err := h.stopErr
+		h.mu.Unlock()
+		return err
+	}
+	h.mu.Unlock()
+	go h.finishStop(ctx)
+	return h.waitForStop(ctx, done)
+}
+
+func (h *Host) waitForStop(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		h.mu.Lock()
+		err := h.stopErr
+		h.mu.Unlock()
+		return err
+	case <-ctx.Done():
 		select {
 		case <-done:
 			h.mu.Lock()
 			err := h.stopErr
 			h.mu.Unlock()
 			return err
-		case <-ctx.Done():
+		default:
 			return ctx.Err()
 		}
 	}
-	h.stopped = true
-	h.stopDone = make(chan struct{})
+}
+
+func (h *Host) finishStop(ctx context.Context) {
+	// StopCapability removes its providers from started before stopping them.
+	// Wait for those consumers before taking the remaining dependencies out of
+	// the host, and retain their references here until their stops complete.
+	h.stopCapabilityWG.Wait()
+	h.mu.Lock()
 	started := h.started
 	h.started = nil
+	err := h.capabilityStopErr
 	h.mu.Unlock()
-	err := stopReverse(ctx, started)
+	err = errors.Join(err, stopReverse(ctx, started))
+	err = errors.Join(err, ctx.Err())
 	h.mu.Lock()
 	h.stopErr = err
 	close(h.stopDone)
 	h.mu.Unlock()
-	return err
 }
 
 // StopCapability stops successfully started providers for one capability in
@@ -473,6 +514,7 @@ func (h *Host) StopCapability(
 	// that completes while stopReverse runs unwinds its own instance instead
 	// of appending it behind our back.
 	h.stopping[capability]++
+	h.stopCapabilityWG.Add(1)
 	selected := make([]startedInstance, 0, 1)
 	remaining := make([]startedInstance, 0, len(h.started))
 	for _, item := range h.started {
@@ -486,10 +528,12 @@ func (h *Host) StopCapability(
 	h.mu.Unlock()
 	err := stopReverse(ctx, selected)
 	h.mu.Lock()
+	h.capabilityStopErr = errors.Join(h.capabilityStopErr, err)
 	h.stopping[capability]--
 	if h.stopping[capability] <= 0 {
 		delete(h.stopping, capability)
 	}
+	h.stopCapabilityWG.Done()
 	h.mu.Unlock()
 	return err
 }

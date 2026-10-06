@@ -1476,6 +1476,24 @@ func EvaluateTxConway(
 	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
+	return evaluateTxConway(
+		tx,
+		ls,
+		tmpPparams,
+		conwayRefScriptCostStride,
+		big.NewRat(6, 5),
+	)
+}
+
+// evaluateTxConway prices reference scripts at the given stride and
+// multiplier, which Conway fixes and Dijkstra takes from protocol parameters.
+func evaluateTxConway(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+	tmpPparams *conway.ConwayProtocolParameters,
+	refScriptCostStride uint64,
+	refScriptCostMultiplier *big.Rat,
+) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	scriptInputs, err := resolveConwayScriptInputs(tx, ls, true)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
@@ -1574,9 +1592,11 @@ func EvaluateTxConway(
 	}
 	fee = saturatedAddUint64(
 		fee,
-		CalculateConwayRefScriptFee(
+		calculateTieredRefScriptFee(
 			refScriptSize,
 			refScriptCostPerByte,
+			refScriptCostStride,
+			refScriptCostMultiplier,
 		),
 	)
 	return fee, retTotalExUnits, retRedeemerExUnits, nil

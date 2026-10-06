@@ -1224,7 +1224,7 @@ func TestBuildDingoConfigForwardsScalarConfigFields(t *testing.T) {
 		}
 	}
 
-	cfg, ok := cfgVal.Addr().Interface().(*config.Config)
+	cfg, ok := reflect.TypeAssert[*config.Config](cfgVal.Addr())
 	if !ok {
 		t.Fatal("cfgVal.Addr().Interface() did not assert to *config.Config")
 	}

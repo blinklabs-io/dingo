@@ -29,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/api/blockfrost"
 	"github.com/blinklabs-io/dingo/api/kupo"
+	"github.com/blinklabs-io/dingo/api/mcp"
 	"github.com/blinklabs-io/dingo/api/mesh"
 	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
@@ -53,6 +54,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/kesagent"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -269,14 +271,24 @@ func New(cfg Config) (*Node, error) {
 	// registered by subsystems carry the network name automatically.
 	// This must happen before any component registers metrics.
 	n.configWrapPromRegistry()
-	n.registerBuildInfo()
-	n.registerRTSMetrics()
-	n.registerChainSelectionMetrics()
+	metricsRegistration := promutil.NewRegistration(n.config.promRegistry)
+	n.registerBuildInfo(metricsRegistration)
+	n.registerRTSMetrics(metricsRegistration)
+	n.registerChainSelectionMetrics(metricsRegistration)
+	if err := metricsRegistration.Err(); err != nil {
+		metricsRegistration.Rollback()
+		return nil, fmt.Errorf("register metrics: %w", err)
+	}
 	// NewEventBus starts background async-worker goroutines, so create the bus
 	// only after configuration validates. If it were created earlier, a
 	// validation failure would return a nil Node while leaving those goroutines
 	// running, with no handle for the caller to Stop() them.
-	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
+	eventBus, err := event.TryNewEventBus(n.config.promRegistry, n.config.logger)
+	if err != nil {
+		metricsRegistration.Rollback()
+		return nil, err
+	}
+	n.eventBus = eventBus
 	// Everything registered above (build info, RTS gauges, the EventBus)
 	// lives for the node's entire lifetime and is never rebuilt, so it's
 	// registered directly against the pre-wrap registerer. Everything
@@ -352,6 +364,7 @@ var apiProviderConfigPath = map[plugin.Capability]string{
 	plugin.CapabilityAPIKupo:       "plugins.api.kupo.config",
 	plugin.CapabilityAPIMesh:       "plugins.api.mesh.config",
 	plugin.CapabilityAPIUtxorpc:    "plugins.api.utxorpc.config",
+	plugin.CapabilityAPIMcp:        "plugins.api.mcp.config",
 }
 
 // validateAPIProviderSecurityPolicy resolves and validates the merged
@@ -406,6 +419,7 @@ func (n *Node) apiPluginSelection(
 			plugin.CapabilityAPIKupo:       0,
 			plugin.CapabilityAPIMesh:       8080,
 			plugin.CapabilityAPIUtxorpc:    9090,
+			plugin.CapabilityAPIMcp:        0,
 		}
 		return selection, defaultPorts[capability], nil
 	}
@@ -1263,6 +1277,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		PromRegistry:            n.retainedComponentPromRegistry(),
 		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
 		EnableLeios:             enableLeiosNetworking,
+		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
+		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
 		// extension ahead of the IOG Leios prototype. The prototype relays do
 		// not run a protocol-20 responder and reset the connection if we
@@ -1658,6 +1674,35 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		)
 	}
 
+	mcpSelection, mcpPort, err := n.apiPluginSelection(
+		plugin.CapabilityAPIMcp,
+	)
+	if err != nil {
+		return err
+	}
+	if mcpPort > 0 {
+		err = plugin.ResolveProvider(
+			n.ctx, n.pluginHost, plugin.CapabilityAPIMcp,
+			mcpSelection.Provider, mcpSelection.Config,
+			mcp.ProviderDependencies{
+				Logger:             n.config.logger,
+				Database:           n.db,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Network:            n.config.network,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("resolve mcp API: %w", err)
+		}
+		started = append(
+			started,
+			stopPluginCapability(plugin.CapabilityAPIMcp),
+		)
+	}
+
 	if n.config.storageMode.IsAPI() {
 		fetcher, err := offchainmetadata.New(
 			offchainmetadata.Config{
@@ -1817,11 +1862,18 @@ func taintValue(relaxed bool) string {
 
 func (n *Node) handleConnManagerClosedOwner(
 	conn *ouroboros.Connection,
-	_ bool,
-	_ error,
+	isNtC bool,
+	err error,
 ) {
 	if conn == nil {
 		return
+	}
+	if isNtC && err != nil && n.config.logger != nil {
+		n.config.logger.Warn(
+			"node-to-client connection closed",
+			"connection_id", conn.Id().String(),
+			"error", err,
+		)
 	}
 	var chainsyncOwner *ochainsync.Server
 	if protocol := conn.ChainSync(); protocol != nil {
@@ -2433,6 +2485,9 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		}
 		active, _ := n.chainSelector.GenesisSelectionState()
 		return active
+	}
+	chainsyncCfg.IsRoot = func(connId ouroboros.ConnectionId) bool {
+		return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
 	}
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {

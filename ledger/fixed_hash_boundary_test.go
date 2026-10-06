@@ -196,7 +196,7 @@ func TestQueryLedgerPeerSnapshotRejectsMalformedActivePoolKey(t *testing.T) {
 	})
 	ls := &LedgerState{db: db}
 
-	_, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll)
+	_, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "active pool key")
 	require.Contains(t, err.Error(), "invalid blake2b-224 hash")
