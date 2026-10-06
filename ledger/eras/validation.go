@@ -324,15 +324,17 @@ func validateUnknownVoters(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply. This must precede the upstream Dijkstra
+	// call, which resolves protocol parameters and ledger-state levels before
+	// it reaches any validity check.
+	if !tx.IsValid() {
+		return nil
+	}
 	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
 			return err
 		}
-	}
-	// Votes belong to the GOV state transition, which a phase-2-invalid
-	// transaction does not apply.
-	if !tx.IsValid() {
-		return nil
 	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
