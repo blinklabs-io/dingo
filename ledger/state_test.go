@@ -13909,3 +13909,61 @@ func TestVerifyPointQueryable_UtxoFloorOnly_Rejected(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
+
+func TestUtxosByAddressAtSlotBoundedRejectsUnverifiableHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	payment := bytes.Repeat([]byte{0x4c}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+
+	t.Run("below consumed UTxO prune floor", func(t *testing.T) {
+		db := newTestDB(t)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "400", nil,
+		))
+
+		_, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+	})
+
+	t.Run("unreadable consumed UTxO prune floor", func(t *testing.T) {
+		db := newTestDB(t)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "not-a-slot", nil,
+		))
+
+		_, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.Error(t, err)
+		require.ErrorContains(
+			t, err, "parse consumed UTxO prune floor marker",
+		)
+	})
+
+	t.Run("API storage ignores stale floor", func(t *testing.T) {
+		db := newTestDBForCleanup(t, types.StorageModeAPI)
+		ls := &LedgerState{db: db}
+		require.NoError(t, db.SetSyncState(
+			database.ConsumedUtxoPruneFloorSyncKey, "400", nil,
+		))
+
+		utxos, err := ls.UtxosByAddressAtSlotBounded(
+			t.Context(), addr, 399, 10, 1<<20,
+		)
+		require.NoError(t, err)
+		require.Empty(t, utxos)
+	})
+}

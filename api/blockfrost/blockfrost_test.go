@@ -2001,7 +2001,9 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 	}
 	outputCbor, err := cbor.Encode(&output)
 	require.NoError(t, err)
-	holders, err := assetHoldersFromUtxos(
+	quantities := make(map[string]uint64)
+	_, err = addAssetHolderQuantities(
+		quantities,
 		policyID,
 		assetName,
 		[]models.Utxo{{
@@ -2014,9 +2016,12 @@ func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
 				Amount:   types.Uint64(7),
 			}},
 		}},
-		PaginationParams{Count: 100, Page: 1, Order: "asc"},
 	)
 	require.NoError(t, err)
+	holders := assetHoldersFromQuantities(
+		quantities,
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
 	require.Len(t, holders, 1)
 	assert.Equal(t, addr.String(), holders[0].Address)
 	assert.Equal(t, "7", holders[0].Quantity)

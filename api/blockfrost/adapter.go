@@ -1141,51 +1141,71 @@ func (a *NodeAdapter) AssetAddresses(
 	db := a.ledgerState.Database()
 	txn := database.NewTxnContext(ctx, db, false)
 	defer txn.Release()
-	ordered, err := db.UtxosByAddressWithOrdering(
-		&models.UtxoWithOrderingQuery{
-			MatchAllAddresses: true,
-			Limit:             database.DefaultPublicUtxoResultLimit + 1,
-			FilterByAsset:     true,
-			OnlyFilteredAsset: true,
-			AssetPolicyID:     policyIDBytes,
-			AssetName:         assetName,
-		},
-		txn,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"get asset UTxOs for %s%x: %w",
-			policyID,
-			assetName,
-			err,
-		)
+	query := &models.UtxoWithOrderingQuery{
+		MatchAllAddresses: true,
+		FilterByAsset:     true,
+		OnlyFilteredAsset: true,
+		AssetPolicyID:     policyIDBytes,
+		AssetName:         assetName,
 	}
-	if len(ordered) > database.DefaultPublicUtxoResultLimit {
-		return nil, 0, models.ErrTooManyUtxoResults
-	}
-	utxos := make([]models.Utxo, len(ordered))
+	quantities := make(map[string]uint64)
+	utxosScanned := 0
 	cborBytes := 0
-	for i := range ordered {
-		utxos[i] = ordered[i].Utxo
-		cborBytes += len(utxos[i].Cbor)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		query.Limit = min(
+			128,
+			database.ExactAddressCandidateScanLimit-utxosScanned+1,
+		)
+		ordered, err := db.UtxosByAddressWithOrdering(query, txn)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get asset UTxOs for %s%x: %w",
+				policyID,
+				assetName,
+				err,
+			)
+		}
+		if len(ordered) == 0 {
+			break
+		}
+		utxosScanned += len(ordered)
+		if utxosScanned > database.ExactAddressCandidateScanLimit {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		utxos := make([]models.Utxo, len(ordered))
+		for i := range ordered {
+			utxos[i] = ordered[i].Utxo
+		}
+		batchCborBytes, err := addAssetHolderQuantities(
+			quantities,
+			policyIDBytes,
+			assetName,
+			utxos,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"build asset holders for %s%x: %w",
+				policyID,
+				assetName,
+				err,
+			)
+		}
+		cborBytes += batchCborBytes
 		if cborBytes > database.DefaultPublicUtxoCborBudget {
 			return nil, 0, models.ErrUtxoQueryBudgetExceeded
 		}
+		last := ordered[len(ordered)-1]
+		query.After = &models.UtxoOrderingCursor{
+			Slot:       last.TxSlot,
+			BlockIndex: last.TxBlockIndex,
+			OutputIdx:  last.OutputIdx,
+			TxId:       last.TxId,
+		}
 	}
-	holders, err := assetHoldersFromUtxos(
-		policyIDBytes,
-		assetName,
-		utxos,
-		params,
-	)
-	if err != nil {
-		return nil, 0, fmt.Errorf(
-			"build asset holders for %s%x: %w",
-			policyID,
-			assetName,
-			err,
-		)
-	}
+	holders := assetHoldersFromQuantities(quantities, params)
 	if len(holders) == 0 {
 		return nil, 0, fmt.Errorf(
 			"asset %s%x: %w",
@@ -1203,14 +1223,15 @@ type assetHolderQuantity struct {
 	quantity uint64
 }
 
-func assetHoldersFromUtxos(
+func addAssetHolderQuantities(
+	quantities map[string]uint64,
 	policyID []byte,
 	assetName []byte,
 	utxos []models.Utxo,
-	params PaginationParams,
-) ([]AssetHolderInfo, error) {
-	quantities := make(map[string]uint64)
+) (int, error) {
+	cborBytes := 0
 	for _, utxo := range utxos {
+		cborBytes += len(utxo.Cbor)
 		var quantity uint64
 		for _, asset := range utxo.Assets {
 			if bytes.Equal(asset.PolicyId, policyID) &&
@@ -1223,7 +1244,7 @@ func assetHoldersFromUtxos(
 		}
 		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return 0, fmt.Errorf(
 				"decode UTxO %x#%d: %w",
 				utxo.TxId,
 				utxo.OutputIdx,
@@ -1232,7 +1253,13 @@ func assetHoldersFromUtxos(
 		}
 		quantities[output.Address().String()] += quantity
 	}
+	return cborBytes, nil
+}
 
+func assetHoldersFromQuantities(
+	quantities map[string]uint64,
+	params PaginationParams,
+) []AssetHolderInfo {
 	rows := make([]assetHolderQuantity, 0, len(quantities))
 	for address, quantity := range quantities {
 		rows = append(rows, assetHolderQuantity{
@@ -1260,7 +1287,7 @@ func assetHoldersFromUtxos(
 			Quantity: strconv.FormatUint(row.quantity, 10),
 		})
 	}
-	return holders, nil
+	return holders
 }
 
 func paginateAssetHolders(

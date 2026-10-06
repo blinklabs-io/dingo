@@ -1974,6 +1974,11 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 			models.ErrNilUtxoWithOrderingQuery,
 		)
 	}
+	if query.OnlyFilteredAsset && !query.FilterByAsset {
+		return nil, errors.New(
+			"OnlyFilteredAsset requires FilterByAsset",
+		)
+	}
 	if query.After != nil && query.Descending {
 		return nil, fmt.Errorf(
 			"GetUtxosByAddressWithOrdering: %w",
@@ -2079,11 +2084,6 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 		pointers = append(pointers, &ret[i].Utxo)
 	}
 	if query.OnlyFilteredAsset {
-		if !query.FilterByAsset {
-			return nil, errors.New(
-				"OnlyFilteredAsset requires FilterByAsset",
-			)
-		}
 		if err := s.loadUtxoAssetsPointersFiltered(
 			ctx,
 			db,

@@ -1879,6 +1879,24 @@ func TestGetUtxosByAddressWithOrderingSkipAssets(t *testing.T) {
 	require.Equal(t, withAssets[0].TxId, skipped[0].TxId)
 }
 
+func TestGetUtxosByAddressWithOrderingRejectsFilteredAssetWithoutQuery(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	require.NoError(t, store.readDB.Close())
+	_, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			MatchAllAddresses: true,
+			OnlyFilteredAsset: true,
+			Limit:             1,
+		},
+		nil,
+	)
+	require.EqualError(t, err, "OnlyFilteredAsset requires FilterByAsset")
+}
+
 // utxoForInsertCacheTest builds a minimal, valid models.Utxo for exercising
 // insertUtxoModel directly: distinct txSeed/outputIdx pairs target distinct
 // rows, and the same pair can be reused deliberately to exercise the ON

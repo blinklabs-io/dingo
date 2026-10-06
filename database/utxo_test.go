@@ -1142,6 +1142,24 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Greater(t, ctx.checks, 128*2)
 	})
+
+	t.Run("historical cancellation between CBOR loads", func(t *testing.T) {
+		txn := NewTxnContext(t.Context(), db, false)
+		defer txn.Release()
+		ctx := &cancelAfterContext{
+			cancelAfter: 2,
+			done:        make(chan struct{}),
+		}
+		_, err := db.UtxosByAddressAsOfContext(
+			ctx,
+			[]lcommon.Address{addr},
+			total,
+			total+1,
+			txn,
+		)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, 2, ctx.checks)
+	})
 }
 
 // TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit

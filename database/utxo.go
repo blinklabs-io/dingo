@@ -859,6 +859,33 @@ func (d *Database) UtxosByAddressAsOf(
 	maxResults int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
+	return d.utxosByAddressAsOf(
+		context.Background(), addrs, atSlot, maxResults, txn,
+	)
+}
+
+// UtxosByAddressAsOfContext is UtxosByAddressAsOf with cancellation checks
+// between blob reads. A blob operation already in progress cannot be canceled.
+func (d *Database) UtxosByAddressAsOfContext(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.utxosByAddressAsOf(ctx, addrs, atSlot, maxResults, txn)
+}
+
+func (d *Database) utxosByAddressAsOf(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	txn *Txn,
+) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
 		return nil, nil
 	}
@@ -884,6 +911,9 @@ func (d *Database) UtxosByAddressAsOf(
 		return nil, err
 	}
 	for i := range utxos {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if err := loadCbor(&utxos[i], txn); err != nil {
 			return nil, err
 		}

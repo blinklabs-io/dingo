@@ -21,6 +21,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dledger "github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -421,6 +422,44 @@ func TestAccountBalanceHistoricalLedgerError(t *testing.T) {
 	require.Equal(
 		t, "historical read failed", got.Details["error"],
 	)
+}
+
+func TestAccountBalanceHistoricalBudgetErrorIsInvalidRequest(t *testing.T) {
+	t.Parallel()
+
+	for _, queryErr := range []error{
+		models.ErrUtxoQueryBudgetExceeded,
+		models.ErrTooManyUtxoResults,
+		dledger.ErrHistoricalStateUnavailable,
+	} {
+		t.Run(queryErr.Error(), func(t *testing.T) {
+			deps := newTestDeps()
+			addr := testAddress(
+				t, lcommon.AddressTypeKeyNone, testKeyHash(0x3c), nil,
+			)
+			deps.database.blockByIndex = func(
+				uint64,
+			) (models.Block, error) {
+				return models.Block{
+					Hash: testHash(0x3d), Number: 4, Slot: 40,
+				}, nil
+			}
+			deps.ledger.utxosAtSlot = func(
+				lcommon.Address, uint64,
+			) ([]models.Utxo, error) {
+				return nil, queryErr
+			}
+			h := newTestHandler(t, deps)
+
+			req := balanceRequest(addr)
+			req.BlockIdentifier = byIndex(4)
+			rec := postJSON(t, h, "/account/balance", req)
+
+			requireMeshError(
+				t, rec, ErrInvalidRequest, http.StatusBadRequest,
+			)
+		})
+	}
 }
 
 func TestAccountBalanceInvalidAccount(t *testing.T) {

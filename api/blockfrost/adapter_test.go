@@ -428,6 +428,69 @@ func TestNodeAdapterAssetAddressesHydratesFilteredAssets(t *testing.T) {
 	assert.Equal(t, "9", holders[0].Quantity)
 }
 
+func TestNodeAdapterAssetAddressesStreamsWidelyHeldAsset(t *testing.T) {
+	t.Parallel()
+
+	adapter, store, db := newDBBackedAdapter(t)
+	payment := bytes.Repeat([]byte{0x36}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	policyID := bytes.Repeat([]byte{0x47}, lcommon.AddressHashSize)
+	assetName := []byte("POPULAR")
+	txHash := fill32(0x56)
+	outputs := make([]models.Utxo, database.DefaultPublicUtxoResultLimit+1)
+	for i := range outputs {
+		outputs[i] = models.Utxo{
+			TxId:       txHash,
+			OutputIdx:  uint32(i), //nolint:gosec // bounded test fixture
+			PaymentKey: payment,
+			AddedSlot:  1,
+			Amount:     types.Uint64(1_000_000),
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(1),
+			}},
+		}
+	}
+	insertAdapterTransaction(t, store, &models.Transaction{
+		Hash:    txHash,
+		Slot:    1,
+		Outputs: outputs,
+	})
+	for i := range outputs {
+		storePointerOutputCbor(
+			t,
+			db,
+			txHash,
+			uint32(i), //nolint:gosec // bounded test fixture
+			addr,
+			1_000_000,
+		)
+	}
+
+	holders, total, err := adapter.AssetAddresses(
+		context.Background(),
+		hex.EncodeToString(policyID),
+		assetName,
+		PaginationParams{Count: 1, Page: 1, Order: PaginationOrderAsc},
+	)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, 1, total)
+	assert.Equal(t, addr.String(), holders[0].Address)
+	assert.Equal(
+		t,
+		strconv.Itoa(database.DefaultPublicUtxoResultLimit+1),
+		holders[0].Quantity,
+	)
+}
+
 // TestNodeAdapterAddressUTXOsAssetsSurviveRefFetch proves native assets
 // still attach to the returned page: AddressUTXOs now resolves its total
 // via a reference-only scan (no assets loaded) and fetches full rows for

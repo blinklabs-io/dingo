@@ -12822,7 +12822,22 @@ func (ls *LedgerState) UtxosByAddressAtSlotBounded(
 ) ([]models.Utxo, error) {
 	txn := database.NewTxnContext(ctx, ls.db, false)
 	defer txn.Release()
-	utxos, err := ls.db.UtxosByAddressAsOf(
+	if ls.db.StorageMode() != types.StorageModeAPI {
+		pruneFloor, err := ls.readConsumedUtxoPruneFloor(txn)
+		if err != nil {
+			return nil, err
+		}
+		if pruneFloor > 0 && slot < pruneFloor {
+			return nil, fmt.Errorf(
+				"%w: requested slot %d is below consumed UTxO prune floor %d",
+				ErrHistoricalStateUnavailable,
+				slot,
+				pruneFloor,
+			)
+		}
+	}
+	utxos, err := ls.db.UtxosByAddressAsOfContext(
+		ctx,
 		[]lcommon.Address{addr},
 		slot,
 		maxResults,
