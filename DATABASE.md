@@ -2050,11 +2050,9 @@ size until a WAL reset or later TRUNCATE succeeds.
 Mithril bootstrap completes its final ImmutableDB copy before ledger-state
 import. The copy writes block and transaction metadata in addition to blob
 data, so running it beside the ledger import would create two independent
-SQLite metadata writers. Copy runs first because ledger import advances the
-metadata tip to the snapshot point, which would otherwise make copy treat the
-certified immutable range as already present. Both phases retain idempotent
-resume behavior; an interruption retries incomplete work without
-requiring their metadata transactions to overlap.
+SQLite metadata writers. Both phases retain idempotent resume behavior; an
+interruption retries incomplete work without requiring their metadata
+transactions to overlap.
 
 Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
 checkpoint callback. Entering bulk mode first drains an in-flight callback, so

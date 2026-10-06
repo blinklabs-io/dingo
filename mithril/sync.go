@@ -1259,10 +1259,7 @@ func Sync(
 	// block copy advances the chain and records its transaction metadata, while
 	// the ledger import writes the snapshot state. Keeping the phases ordered
 	// prevents independent SQLite write transactions from contending during a
-	// bootstrap. The copy must run first because the ledger import advances the
-	// metadata tip to the snapshot point, which would make block copy treat the
-	// certified immutable range as already present. Each phase is resumable if
-	// the later phase fails.
+	// bootstrap. Each phase is resumable if the later phase fails.
 	var loadResult *node.LoadBlobsResult
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte

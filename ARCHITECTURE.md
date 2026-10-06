@@ -7421,10 +7421,8 @@ The post-download ImmutableDB copy completes before ledger-state import starts.
 The copy persists block and transaction metadata as well as block blobs, so it
 is a metadata writer even though its bulk payload belongs to the blob store.
 Ordering the two resumable phases keeps their SQLite write transactions from
-contending during bootstrap. Copy runs first because ledger import advances the
-metadata tip to the snapshot point; doing that first would make copy treat the
-certified immutable range as already present. A later import failure resumes
-against the already copied immutable data.
+contending during bootstrap. A later import failure resumes against the already
+copied immutable data.
 
 The container entrypoint installs its SIGINT/SIGTERM handlers before deciding
 whether to run a first or resumed Mithril sync. Both that bootstrap command and
