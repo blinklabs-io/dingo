@@ -72,7 +72,8 @@ When Prometheus metrics are configured, inspect:
   `..._reclaimed_bytes`, read from the `.sst` and `.vlog` file sizes on disk
   around each rewrite, because Badger's own size counters refresh only once a
   minute;
-- `database_blob_gc_consecutive_successes` and
+- `database_blob_gc_consecutive_successes` (the number of rewrites in the
+  most recently completed GC cycle) and
   `database_blob_gc_last_success_timestamp_seconds`.
 
 ## Shutdown behavior

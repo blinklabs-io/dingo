@@ -102,6 +102,7 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	store.gcWg.Wait()
 
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
+	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.reclaimedBytes))
 	_, vlog, err := store.onDiskSize()
 	require.NoError(t, err)

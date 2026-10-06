@@ -506,6 +506,9 @@ func (d *BlobStoreBadger) blobGc(
 				return
 			default:
 			}
+			if d.gcMetrics != nil {
+				d.gcMetrics.consecutive.Set(0)
+			}
 			for {
 				var beforeSize int64
 				sizeKnown := false
@@ -528,7 +531,6 @@ func (d *BlobStoreBadger) blobGc(
 						} else {
 							d.gcMetrics.errors.Inc()
 						}
-						d.gcMetrics.consecutive.Set(0)
 					}
 					// Log any actual errors
 					if !errors.Is(err, badger.ErrNoRewrite) {

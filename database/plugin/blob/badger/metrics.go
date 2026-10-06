@@ -160,7 +160,7 @@ func (d *BlobStoreBadger) registerBlobMetrics() {
 			labels,
 		)
 		gcCollectors.consecutive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the current GC cycle.",
+			Name: badgerMetricNamePrefix + "gc_consecutive_successes", Help: "Successful value-log GC rewrites in the most recent GC cycle.",
 		}, labels)
 		gcCollectors.lastSuccess = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: badgerMetricNamePrefix + "gc_last_success_timestamp_seconds", Help: "Unix timestamp of the last successful value-log GC rewrite.",
