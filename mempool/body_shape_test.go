@@ -15,6 +15,7 @@
 package mempool
 
 import (
+	"context"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
@@ -36,6 +37,7 @@ func requireTxShapeAdmission(
 	t.Helper()
 	validator := &countingValidator{}
 	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
 	err := m.AddTransaction(txType, txBytes)
 	if wantErr == "" {
 		require.NoError(t, err)
