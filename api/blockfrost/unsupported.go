@@ -20,8 +20,11 @@ import (
 	"strings"
 )
 
-// These operations are defined by Blockfrost OpenAPI 0.1.91. Implemented
-// operations are registered separately and take precedence over this list.
+// These are the operations defined by Blockfrost OpenAPI 0.1.93 (openapi.yaml
+// in blockfrost/openapi) that have no handler; the list is maintained by hand
+// against that file. Implemented operations are registered separately and
+// take precedence over this list. A final {name...} parameter matches the
+// remaining path, as an IPFS path may name an object inside a directory.
 var unsupportedOperations = []string{
 	"GET /api/v0/",
 	"GET /api/v0/health",
@@ -82,6 +85,7 @@ var unsupportedOperations = []string{
 	"GET /api/v0/assets/{asset}/history",
 	"GET /api/v0/assets/{asset}/txs",
 	"GET /api/v0/assets/{asset}/transactions",
+	"GET /api/v0/assets/{asset}/utxos",
 	"GET /api/v0/assets/policy/{policy_id}",
 	"GET /api/v0/scripts",
 	"GET /api/v0/scripts/{script_hash}",
@@ -93,11 +97,11 @@ var unsupportedOperations = []string{
 	"GET /api/v0/scripts/datum/{datum_hash}/cbor",
 	"GET /api/v0/utils/addresses/xpub/{xpub}/{role}/{index}",
 	"POST /api/v0/ipfs/add",
-	"GET /api/v0/ipfs/gateway/{IPFS_path}",
-	"POST /api/v0/ipfs/pin/add/{IPFS_path}",
+	"GET /api/v0/ipfs/gateway/{IPFS_path...}",
+	"POST /api/v0/ipfs/pin/add/{IPFS_path...}",
 	"GET /api/v0/ipfs/pin/list",
-	"GET /api/v0/ipfs/pin/list/{IPFS_path}",
-	"POST /api/v0/ipfs/pin/remove/{IPFS_path}",
+	"GET /api/v0/ipfs/pin/list/{IPFS_path...}",
+	"POST /api/v0/ipfs/pin/remove/{IPFS_path...}",
 	"GET /api/v0/metrics",
 	"GET /api/v0/metrics/endpoints",
 	"GET /api/v0/nutlink/{address}",
@@ -148,6 +152,9 @@ func matchesOperationPath(pattern, path string) bool {
 	for {
 		expected, nextPattern, morePattern := strings.Cut(pattern, "/")
 		actual, nextPath, morePath := strings.Cut(path, "/")
+		if strings.HasPrefix(expected, "{") && strings.HasSuffix(expected, "...}") {
+			return !morePattern && actual != ""
+		}
 		if morePattern != morePath {
 			return false
 		}
