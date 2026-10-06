@@ -6608,9 +6608,11 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // apply stage reorders results by one global sequence number. For that reason
 // the Submit calls use a context independent of ctx, which is only checked up
 // front, before anything has been submitted. That context is cancelled, and
-// the submitting goroutine joined, on every return; the only thing that can
-// interrupt the drain is pipeline shutdown (Stop(), which closes the Results
-// channel).
+// the submitting goroutine joined, on every return. The drain is interrupted
+// only by pipeline shutdown (Stop(), which closes the Results channel) or,
+// after a Submit error, by CloseBlockPipelineDrainTimeout: a fatal
+// apply-stage error cancels the pipeline without closing Results(), so the
+// submitted prefix's results may never arrive.
 // decodeReadChainBatchWithError is the error-preserving form used by the
 // ledger reader. Keeping the cause lets a validation failure on an already
 // persisted block enter header-validation recovery instead of silently

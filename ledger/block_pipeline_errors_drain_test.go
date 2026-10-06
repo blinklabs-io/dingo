@@ -178,31 +178,8 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 	// confirmed to reproduce the pre-fix hang deterministically.
 	const numBlocks = 4000
 
-	errLog := &capturedErrorLog{}
-	ls := &LedgerState{
-		epochCache: []models.Epoch{
-			{
-				EpochId:       0,
-				StartSlot:     0,
-				LengthInSlots: 432000,
-				Nonce:         nil, // no Praos nonce -- every eta0 lookup fails
-			},
-		},
-		config: LedgerStateConfig{
-			CardanoNodeConfig:            newTestShelleyGenesisCfg(t),
-			Logger:                       errLog.logger(),
-			BlockPipelineValidateEnabled: true,
-		},
-	}
-	ls.metrics.init(prometheus.NewRegistry())
-	ls.publishSnapshotsLocked()
-
-	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
-		pipeline.WithSlotsPerKesPeriod(129600),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+	ls, errLog, stopAndDrain := newNoNonceValidatePipelineLedger(
+		t,
 		// Submit waits once MaxPendingBlocks sequences are outstanding past
 		// the last completed one, and completion stalls while nothing reads
 		// Results(), so the default 2160 would block Submit before errorsChan
@@ -210,10 +187,6 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 		// can stop this batch.
 		pipeline.WithMaxPendingBlocks(0),
 	)
-	require.NoError(t, ls.blockPipeline.Start(t.Context()))
-	ls.blockPipelineErrorsDone = make(chan struct{})
-	go ls.drainBlockPipelineErrors()
-	stopAndDrain := stopAndDrainBlockPipeline(t, ls)
 	defer stopAndDrain()
 
 	rawBatch := buildNoNonceValidateBatch(t, numBlocks)
@@ -272,13 +245,15 @@ func TestDecodeReadChainBatchDoesNotDeadlockOnManyValidationErrors(
 }
 
 // newNoNonceValidatePipelineLedger returns a LedgerState whose started block
-// pipeline validates blocks against an epoch with no cached Praos nonce, and
-// an idempotent function that stops the pipeline and waits for its error
-// drain. The function is also registered as a deferred-style cleanup by the
-// caller; see stopAndDrainBlockPipeline.
+// pipeline, built with opts appended to the defaults, validates blocks
+// against an epoch with no cached Praos nonce, so every eta0 lookup fails.
+// It also returns the captured error log and an idempotent function that
+// stops the pipeline and waits for its error drain; see
+// stopAndDrainBlockPipeline.
 func newNoNonceValidatePipelineLedger(
 	t *testing.T,
-) (*LedgerState, func()) {
+	opts ...pipeline.PipelineOption,
+) (*LedgerState, *capturedErrorLog, func()) {
 	t.Helper()
 	errLog := &capturedErrorLog{}
 	ls := &LedgerState{
@@ -300,16 +275,18 @@ func newNoNonceValidatePipelineLedger(
 	ls.publishSnapshotsLocked()
 
 	ls.blockPipeline = pipeline.NewBlockPipeline(
-		pipeline.WithDecodeWorkers(2),
-		pipeline.WithValidateWorkers(2),
-		pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
-		pipeline.WithSlotsPerKesPeriod(129600),
-		pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		append([]pipeline.PipelineOption{
+			pipeline.WithDecodeWorkers(2),
+			pipeline.WithValidateWorkers(2),
+			pipeline.WithEta0Provider(ls.blockPipelineEta0Provider),
+			pipeline.WithSlotsPerKesPeriod(129600),
+			pipeline.WithVerifyConfig(productionValidateVerifyConfig),
+		}, opts...)...,
 	)
 	require.NoError(t, ls.blockPipeline.Start(t.Context()))
 	ls.blockPipelineErrorsDone = make(chan struct{})
 	go ls.drainBlockPipelineErrors()
-	return ls, stopAndDrainBlockPipeline(t, ls)
+	return ls, errLog, stopAndDrainBlockPipeline(t, ls)
 }
 
 type decodeBatchResult struct {
@@ -345,7 +322,7 @@ func TestDecodeReadChainBatchBatchLargerThanMaxPendingBlocks(
 
 	const numBlocks = pipeline.DefaultMaxPendingBlocks * 2
 
-	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
 	defer stopAndDrain()
 
 	res := testutil.RequireReceive(
@@ -374,7 +351,7 @@ func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
 	const submitOK = 5
 	errSubmit := errors.New("injected submit failure")
 
-	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
 	defer stopAndDrain()
 
 	calls := 0
@@ -422,6 +399,52 @@ func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
 	require.Equal(t, probe.Slot, item.Block().SlotNumber())
 }
 
+// TestDecodeReadChainBatchSubmitErrorDrainTimesOut fails Submit after a
+// prefix whose results never arrive, as when a fatal apply-stage error
+// cancels the pipeline without closing Results(). The drain of that prefix
+// must give up after CloseBlockPipelineDrainTimeout instead of blocking.
+//
+// Not t.Parallel: shrinks the package-level CloseBlockPipelineDrainTimeout.
+func TestDecodeReadChainBatchSubmitErrorDrainTimesOut(t *testing.T) {
+	orig := CloseBlockPipelineDrainTimeout
+	CloseBlockPipelineDrainTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { CloseBlockPipelineDrainTimeout = orig })
+
+	errSubmit := errors.New("injected submit failure")
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	defer stopAndDrain()
+
+	calls := 0
+	ls.blockPipelineSubmit = func(
+		context.Context,
+		uint,
+		[]byte,
+		ocommon.Tip,
+	) error {
+		calls++
+		if calls > 1 {
+			return errSubmit
+		}
+		// Reported as submitted, but nothing reaches the pipeline, so its
+		// result never arrives.
+		return nil
+	}
+
+	res := testutil.RequireReceive(
+		t,
+		goDecodeBatch(t, ls, buildNoNonceValidateBatch(t, 3)),
+		testutil.AsyncWait,
+		"drain after a Submit error did not time out",
+	)
+	require.ErrorIs(t, res.err, errSubmit)
+	require.ErrorContains(
+		t,
+		res.err,
+		"drain submitted block pipeline results: timeout",
+	)
+	require.Nil(t, res.decoded)
+}
+
 // TestDecodeReadChainBatchJoinsSubmitterOnReturn returns from the batch call
 // while its submitting goroutine is blocked inside Submit, by stopping the
 // pipeline (which closes Results()). The call must cancel the submit context
@@ -429,7 +452,7 @@ func TestDecodeReadChainBatchSubmitErrorDrainsSubmittedResults(
 func TestDecodeReadChainBatchJoinsSubmitterOnReturn(t *testing.T) {
 	t.Parallel()
 
-	ls, stopAndDrain := newNoNonceValidatePipelineLedger(t)
+	ls, _, stopAndDrain := newNoNonceValidatePipelineLedger(t)
 	defer stopAndDrain()
 
 	entered := make(chan struct{})
