@@ -8556,7 +8556,8 @@ pruned, so a run that fails or is interrupted before writing it deletes the
 objects under the hash, unless a concurrent run has published the snapshot
 with every archive. The store has no transactions, so every writer of
 `artifact.json` (a producer run or the aggregator) reads each archive back
-after writing it and removes it again when one is missing, and every removal
+after writing it and removes it again when one is missing or cannot be
+confirmed, and every removal
 reads `artifact.json` back after deleting the archives and removes it again
 unless every archive has been rewritten. Whichever side of a race reads last
 sees the other's write, so no interleaving of producers, retention and the

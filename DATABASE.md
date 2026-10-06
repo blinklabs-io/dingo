@@ -804,7 +804,7 @@ with missing archives, then reads `artifact.json` back after deleting the
 archives and deletes it again unless every archive has been rewritten. Every
 write of `artifact.json`, by a producer or by the aggregator when it records a
 certificate, opens each archive afterwards and deletes `artifact.json` again
-when one is missing.
+when one is missing or cannot be confirmed.
 
 ## Store Topology
 

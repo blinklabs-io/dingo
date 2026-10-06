@@ -16,6 +16,7 @@ package mithril
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"path"
@@ -26,6 +27,61 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type cancelAfterMetadataStore struct {
+	ArtifactStore
+	cancel context.CancelFunc
+}
+
+func (s *cancelAfterMetadataStore) Put(
+	ctx context.Context,
+	key string,
+	r io.Reader,
+) error {
+	if err := s.ArtifactStore.Put(ctx, key, r); err != nil {
+		return err
+	}
+	if path.Base(key) == artifactMetadataName {
+		s.cancel()
+	}
+	return nil
+}
+
+func (s *cancelAfterMetadataStore) Open(
+	ctx context.Context,
+	key string,
+) (io.ReadSeekCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return s.ArtifactStore.Open(ctx, key)
+}
+
+func (s *cancelAfterMetadataStore) DeletePrefix(
+	ctx context.Context,
+	prefix string,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.ArtifactStore.DeletePrefix(ctx, prefix)
+}
+
+type selectiveOpenErrorStore struct {
+	ArtifactStore
+	fail func(string) bool
+	err  error
+}
+
+func (s *selectiveOpenErrorStore) Open(
+	ctx context.Context,
+	key string,
+) (io.ReadSeekCloser, error) {
+	if s.fail(key) {
+		return nil, s.err
+	}
+	return s.ArtifactStore.Open(ctx, key)
+}
 
 // hookStore runs a hook once, on the first Put or DeletePrefix whose key
 // matches, to model another process acting on the store at that moment.
@@ -217,4 +273,86 @@ func TestRemoveIncompleteSnapshotRespectsCompletedSnapshot(t *testing.T) {
 	))
 	removeIncompleteSnapshot(context.Background(), store, hashes[0], nil)
 	assert.Empty(t, snapshotHashes(t, store))
+}
+
+func TestPublishSnapshotUnlistsMetadataAfterContextCancellation(t *testing.T) {
+	t.Parallel()
+	inner, _ := newLocalStore(t)
+	hash := createSnapshots(t, inner, 1)[0]
+	snapshot, err := readSnapshot(t.Context(), inner, hash)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	store := &cancelAfterMetadataStore{
+		ArtifactStore: inner,
+		cancel:        cancel,
+	}
+
+	err = publishSnapshot(ctx, store, snapshot)
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = readSnapshot(t.Context(), inner, hash)
+	require.ErrorIs(t, err, ErrArtifactNotFound)
+}
+
+func TestRemoveSnapshotUnlistsMetadataAfterArchiveCheckError(t *testing.T) {
+	t.Parallel()
+	inner, _ := newLocalStore(t)
+	hash := createSnapshots(t, inner, 1)[0]
+	snapshot, err := readSnapshot(t.Context(), inner, hash)
+	require.NoError(t, err)
+	hooked := &hookStore{ArtifactStore: inner}
+	hooked.afterDelete = func(prefix string) bool {
+		if prefix != hash {
+			return false
+		}
+		require.NoError(t, putJSON(
+			t.Context(), inner,
+			path.Join(hash, artifactMetadataName), snapshot,
+		))
+		return true
+	}
+	checkErr := errors.New("archive check failed")
+	store := &selectiveOpenErrorStore{
+		ArtifactStore: hooked,
+		fail: func(key string) bool {
+			return path.Base(key) != artifactMetadataName
+		},
+		err: checkErr,
+	}
+
+	err = removeSnapshot(t.Context(), store, hash)
+	require.ErrorIs(t, err, checkErr)
+	_, err = readSnapshot(t.Context(), inner, hash)
+	require.ErrorIs(t, err, ErrArtifactNotFound)
+}
+
+func TestRemoveSnapshotPreservesMetadataReadErrorAfterUnlisting(t *testing.T) {
+	t.Parallel()
+	inner, _ := newLocalStore(t)
+	hash := createSnapshots(t, inner, 1)[0]
+	snapshot, err := readSnapshot(t.Context(), inner, hash)
+	require.NoError(t, err)
+	hooked := &hookStore{ArtifactStore: inner}
+	hooked.afterDelete = func(prefix string) bool {
+		if prefix != hash {
+			return false
+		}
+		require.NoError(t, putJSON(
+			t.Context(), inner,
+			path.Join(hash, artifactMetadataName), snapshot,
+		))
+		return true
+	}
+	readErr := errors.New("metadata read failed")
+	store := &selectiveOpenErrorStore{
+		ArtifactStore: hooked,
+		fail: func(key string) bool {
+			return path.Base(key) == artifactMetadataName
+		},
+		err: readErr,
+	}
+
+	err = removeSnapshot(t.Context(), store, hash)
+	require.ErrorIs(t, err, readErr)
+	_, err = readSnapshot(t.Context(), inner, hash)
+	require.ErrorIs(t, err, ErrArtifactNotFound)
 }

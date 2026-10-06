@@ -301,6 +301,20 @@ func snapshotArchivesPresent(
 	return true, nil
 }
 
+func unlistSnapshot(
+	ctx context.Context,
+	store ArtifactStore,
+	hash string,
+) error {
+	cleanupCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), time.Minute,
+	)
+	defer cancel()
+	return store.DeletePrefix(
+		cleanupCtx, path.Join(hash, artifactMetadataName),
+	)
+}
+
 // publishSnapshot writes the metadata that lists snapshot and then confirms
 // its archives, unlisting it again and returning ErrSnapshotArchivesMissing
 // when any is gone.
@@ -321,24 +335,31 @@ func publishSnapshot(
 		return fmt.Errorf("writing artifact metadata: %w", err)
 	}
 	present, err := snapshotArchivesPresent(ctx, store, snapshot)
-	if err != nil {
-		return fmt.Errorf("confirming snapshot archives: %w", err)
-	}
 	if present {
 		return nil
 	}
-	missing := fmt.Errorf("%w: %s", ErrSnapshotArchivesMissing, snapshot.Hash)
-	if err := store.DeletePrefix(ctx, key); err != nil {
-		return errors.Join(missing, fmt.Errorf("unlisting snapshot: %w", err))
+	publishErr := err
+	if publishErr != nil {
+		publishErr = fmt.Errorf("confirming snapshot archives: %w", publishErr)
+	} else {
+		publishErr = fmt.Errorf(
+			"%w: %s", ErrSnapshotArchivesMissing, snapshot.Hash,
+		)
 	}
-	return missing
+	if err := unlistSnapshot(ctx, store, snapshot.Hash); err != nil {
+		return errors.Join(
+			publishErr, fmt.Errorf("unlisting snapshot: %w", err),
+		)
+	}
+	return publishErr
 }
 
 // removeSnapshot deletes the snapshot under hash. The metadata goes first, so
 // a removal interrupted part way leaves an unlisted remainder rather than a
 // listed snapshot with missing archives. A publish racing the removal can
 // write the metadata back, so it is read again once the archives are gone and
-// removed unless every archive has since been written again.
+// removed unless every archive can be read and has since been written again.
+// A failed metadata read is also unlisted while preserving its error.
 func removeSnapshot(
 	ctx context.Context,
 	store ArtifactStore,
@@ -355,16 +376,25 @@ func removeSnapshot(
 	if errors.Is(err, ErrArtifactNotFound) {
 		return nil
 	}
+	var confirmErr error
 	if err == nil {
 		present, err := snapshotArchivesPresent(ctx, store, snapshot)
-		if err != nil {
-			return err
-		}
 		if present {
 			return nil
 		}
+		if err != nil {
+			confirmErr = fmt.Errorf(
+				"confirming replacement snapshot archives: %w", err,
+			)
+		}
+	} else {
+		confirmErr = fmt.Errorf("reading replacement snapshot: %w", err)
 	}
-	return store.DeletePrefix(ctx, key)
+	cleanupErr := unlistSnapshot(ctx, store, hash)
+	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("unlisting snapshot: %w", cleanupErr)
+	}
+	return errors.Join(confirmErr, cleanupErr)
 }
 
 // removeIncompleteSnapshot deletes the objects of a run that failed before
