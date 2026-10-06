@@ -338,10 +338,8 @@ func (b *Bark) Start(ctx context.Context) error {
 	authRequired := b.config.Lifecycle != nil || b.config.Node != nil
 	if authRequired && b.config.TlsClientCAFilePath == "" {
 		return errors.New(
-			"bark: TlsClientCAFilePath is required to start with lifecycle set — " +
-				"the DatabaseService's destructive RPCs (CreateSnapshot/" +
-				"DeleteSnapshot/VerifySnapshot/Restore/Truncate/CancelOperation) " +
-				"must not be mounted without a way to authenticate callers",
+			"bark: TlsClientCAFilePath is required to start the authenticated " +
+				"DatabaseService or LifecycleService",
 		)
 	}
 	if authRequired &&

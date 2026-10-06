@@ -17,6 +17,7 @@
 package dingo
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -34,8 +35,11 @@ func ReExec() error {
 		return fmt.Errorf("locate executable: %w", err)
 	}
 	// Linux appends this suffix to the path of an executable that has been
-	// replaced on disk, which is exactly the upgrade case a restart is for.
-	exe = strings.TrimSuffix(exe, " (deleted)")
+	// replaced on disk. Preserve a real executable whose name happens to end
+	// with the same text.
+	if _, statErr := os.Stat(exe); errors.Is(statErr, os.ErrNotExist) {
+		exe = strings.TrimSuffix(exe, " (deleted)")
+	}
 	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil { //nolint:gosec // re-executing our own binary with our own arguments
 		return fmt.Errorf("re-execute %s: %w", exe, err)
 	}

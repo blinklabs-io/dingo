@@ -57,7 +57,9 @@ func TestRequestShutdownAcceptsOnlyTheFirstRequest(t *testing.T) {
 	req := testutil.RequireReceive(
 		t, n.ShutdownRequests(), 5*time.Second, "shutdown request",
 	)
-	assert.Equal(t, ShutdownRequest{Timeout: 5 * time.Second}, req)
+	assert.Equal(t, ShutdownRequest{
+		Timeout: 5 * time.Second, Deadline: deadline,
+	}, req)
 
 	evt := testutil.RequireReceive(t, sub, 5*time.Second, "lifecycle event")
 	payload, ok := evt.Data.(event.NodeLifecycleEvent)

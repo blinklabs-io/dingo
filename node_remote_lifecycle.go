@@ -32,8 +32,9 @@ import (
 // ShutdownRequest is a stop or restart accepted over the remote lifecycle
 // service. Timeout is the graceful timeout already resolved and capped.
 type ShutdownRequest struct {
-	Restart bool
-	Timeout time.Duration
+	Restart  bool
+	Timeout  time.Duration
+	Deadline time.Time
 }
 
 // remoteLifecycle holds the single stop or restart a node accepts.
@@ -83,10 +84,6 @@ func (n *Node) RequestShutdown(
 	}
 	r.state = state
 	r.deadline = deadline
-	// The buffer holds the one accepted request, so this never blocks.
-	r.requests <- ShutdownRequest{Restart: restart, Timeout: timeout}
-	r.mu.Unlock()
-
 	n.eventBus.Publish(
 		event.NodeLifecycleEventType,
 		event.NewEvent(
@@ -98,6 +95,12 @@ func (n *Node) RequestShutdown(
 			},
 		),
 	)
+	// The buffer holds the one accepted request, so this never blocks. Publish
+	// the accepted state before making shutdown visible to the process owner.
+	r.requests <- ShutdownRequest{
+		Restart: restart, Timeout: timeout, Deadline: deadline,
+	}
+	r.mu.Unlock()
 	return timeout, deadline, nil
 }
 

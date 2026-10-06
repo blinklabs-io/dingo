@@ -90,10 +90,14 @@ func runRequestedShutdown(
 ) error {
 	done := make(chan error, 1)
 	go func() { done <- shutdown() }()
+	remaining := req.Timeout
+	if !req.Deadline.IsZero() {
+		remaining = max(time.Until(req.Deadline), 0)
+	}
 	var err error
 	select {
 	case err = <-done:
-	case <-time.After(req.Timeout):
+	case <-time.After(remaining):
 		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
 	}
 	if !req.Restart {
@@ -571,6 +575,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			remoteRequest <- req
 			signalCtxStop()
 		case <-signalCtx.Done():
+			select {
+			case req := <-d.ShutdownRequests():
+				remoteRequest <- req
+			default:
+			}
 		}
 	}()
 	go func() {
