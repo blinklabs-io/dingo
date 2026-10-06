@@ -94,12 +94,14 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
-// handleNotFound handles any request that doesn't match a
-// registered route, including unimplemented endpoints.
+// handleNotFound distinguishes documented unsupported operations from unknown paths.
 func (b *Blockfrost) handleNotFound(
 	w http.ResponseWriter,
-	_ *http.Request,
+	r *http.Request,
 ) {
+	if b.writeUnsupportedOperation(w, r) {
+		return
+	}
 	writeError(
 		w,
 		http.StatusNotFound,

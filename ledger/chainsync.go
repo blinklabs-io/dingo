@@ -6488,10 +6488,11 @@ func (ls *LedgerState) createGenesisBlock() error {
 				),
 				"component", "ledger",
 			)
-			if err := ls.db.SetGenesisStaking(
+			if err := ls.db.SetGenesisStakingWithDeposits(
 				genesisPools,
 				genesisStake,
 				uint64(shelleyGenesis.ProtocolParameters.KeyDeposit),
+				uint64(shelleyGenesis.ProtocolParameters.PoolDeposit),
 				genesisHash[:],
 				txn,
 			); err != nil {
@@ -7481,7 +7482,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The reward prefix mirrors cardano-ledger's NEWEPOCH sequence: the delayed
 	// reward update is applied first so reward-driven reserves/treasury movement
 	// is visible to governance withdrawals and to the end-of-boundary ADA-pot
-	// capture. The remainder mirrors cardano-ledger's Conway/Rules/Epoch.hs:
+	// capture. Through Conway, the remainder mirrors Conway/Rules/Epoch.hs:
 	// 374-379 (EPOCH STS), which dispatches HARDFORK only after enactment +
 	// pparams write. The relative order matters because the HARDFORK rule branch
 	// is selected from the new pparams' major version — a HARDFORK rule that ran
@@ -7490,7 +7491,7 @@ func (ls *LedgerState) processEpochRollover(
 	// The order, asserted by TestProcessEpochRollover_OrderingInvariant,
 	// TestProcessEpochRollover_RewardOrdering and
 	// TestProcessEpochRollover_SnapStakeReadOrdering in
-	// chainsync_test.go and chainsync_test.go, is:
+	// chainsync_test.go, is (Dijkstra moves step 3 after step 10):
 	//
 	//   1. applyStakeRewards             — apply the delayed reward update
 	//      (rewards from the snapshot three epochs back): credit spendable
@@ -7571,12 +7572,13 @@ func (ls *LedgerState) processEpochRollover(
 		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
-	// SNAP read point. Everything below this line is a rule cardano-ledger runs
+	// Conway SNAP read point. Everything below this line is a rule Conway runs
 	// after SNAP, and several of them credit reward accounts at epochStartSlot
 	// (POOLREAP deposit refunds, enacted treasury withdrawals,
 	// proposal-deposit refunds). The mark snapshot's stake is therefore read
 	// here — after the delayed reward update and MIR, which precede SNAP, and
-	// before any of them — while the snapshot row is written at the end of the
+	// before any of them. Dijkstra takes its stake read after enactment below.
+	// The snapshot row is written at the end of the
 	// rollover where the new epoch record and the post-enactment protocol
 	// version exist.
 	// A Conway boundary with the deferred-snapshot hooks leaves mark[new
@@ -7591,7 +7593,9 @@ func (ls *LedgerState) processEpochRollover(
 		!ls.ratifyAtBoundary && !deferBoundarySnapshot &&
 		currentEra.Id == eras.ConwayEraDesc.Id &&
 		!ls.config.DelegatorInactivityEnabled
-	if snapDeferred {
+	if currentEra.Id >= eras.DijkstraEraDesc.Id {
+		// Dijkstra captures SNAP after enactment below.
+	} else if snapDeferred {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "snap_capture", func() error {
 				return ls.captureDeferredBoundarySnapshot(
@@ -7604,7 +7608,7 @@ func (ls *LedgerState) processEpochRollover(
 	} else if err := ls.timeRolloverPhase(
 		currentEpoch.EpochId+1, "snap", func() error {
 			return ls.captureEpochBoundarySnapshotStake(
-				txn, currentEpoch, epochStartSlot,
+				txn, currentEpoch, epochStartSlot, 0,
 			)
 		},
 	); err != nil {
@@ -7624,7 +7628,7 @@ func (ls *LedgerState) processEpochRollover(
 	// governance silently fall back to reading the not-yet-written row and
 	// see zero SPO stake for every gated action at every boundary.
 	var currentBoundarySPOState *governance.SPOVotingState
-	if !snapDeferred {
+	if !snapDeferred && currentEra.Id < eras.DijkstraEraDesc.Id {
 		if err := ls.timeRolloverPhase(
 			currentEpoch.EpochId+1, "spo_state_resolve", func() error {
 				var err error
@@ -7749,7 +7753,7 @@ func (ls *LedgerState) processEpochRollover(
 				DelegatorInactivityOn:    ls.config.DelegatorInactivityEnabled,
 				CurrentBoundarySPOState:  currentBoundarySPOState,
 				DeferRatification:        true,
-				BoundarySPOStateDeferred: snapDeferred,
+				BoundarySPOStateDeferred: snapDeferred || currentEra.Id >= eras.DijkstraEraDesc.Id,
 				PendingTreasuryDonations: pendingDonations,
 			})
 			return err
@@ -7773,40 +7777,51 @@ func (ls *LedgerState) processEpochRollover(
 		snapDeferred = false
 	}
 	var deferredPlan *governance.RatificationPlan
-	if plan := govOut.Ratification; plan != nil {
-		if err := ls.timeRolloverPhase(
-			currentEpoch.EpochId+1, "ratify", func() error {
-				// A major-version change runs HARDFORK and an era
-				// transition rewrites state later in this transaction;
-				// RATIFY reads the state before either.
-				if ls.ratifyAtBoundary || deferBoundarySnapshot ||
-					hardForkHere {
-					if currentBoundarySPOState == nil {
-						state, err := ls.currentBoundarySPOStakeState(
-							txn, currentEpoch, epochStartSlot,
-						)
-						if err != nil {
-							return fmt.Errorf(
-								"resolve current-boundary SPO stake: %w",
-								err,
+	applyRatification := func() error {
+		if plan := govOut.Ratification; plan != nil {
+			if err := ls.timeRolloverPhase(
+				currentEpoch.EpochId+1, "ratify", func() error {
+					if ls.ratifyAtBoundary || deferBoundarySnapshot ||
+						hardForkHere {
+						if currentBoundarySPOState == nil {
+							state, err := ls.currentBoundarySPOStakeState(
+								txn, currentEpoch, epochStartSlot,
 							)
+							if err != nil {
+								return fmt.Errorf(
+									"resolve current-boundary SPO stake: %w",
+									err,
+								)
+							}
+							plan.SetBoundarySPOState(state)
 						}
-						plan.SetBoundarySPOState(state)
-					}
-					decision, err := plan.Decide(txn)
-					if err != nil {
+						decision, err := plan.Decide(txn)
+						if err != nil {
+							return err
+						}
+						_, err = plan.Apply(decision, txn)
 						return err
 					}
-					_, err = plan.Apply(decision, txn)
-					return err
-				}
-				deferredPlan = plan
-				return nil
-			},
-		); err != nil {
-			return nil, fmt.Errorf("ratify governance: %w", err)
+					deferredPlan = plan
+					return nil
+				},
+			); err != nil {
+				return fmt.Errorf("ratify governance: %w", err)
+			}
+		}
+		return nil
+	}
+	snapshotAfterEnactment := currentEra.Id >= eras.DijkstraEraDesc.Id
+	if version, err := GetProtocolVersion(govOut.UpdatedPParams); err == nil &&
+		version.Major >= lcommon.ProtocolVersionDijkstra {
+		snapshotAfterEnactment = true
+	}
+	if !snapshotAfterEnactment {
+		if err := applyRatification(); err != nil {
+			return nil, err
 		}
 	}
+
 	// Move the ending epoch's accumulated treasury donations into the
 	// treasury. Per the Conway EPOCH rule, donations are added after enacted
 	// treasury withdrawals (handled in governance.ProcessEpoch above), so an
@@ -8020,6 +8035,30 @@ func (ls *LedgerState) processEpochRollover(
 		nil,
 	)
 
+	if snapshotAfterEnactment {
+		// Dijkstra EPOCH moves SNAP after POOLREAP, enactment and HARDFORK.
+		// RATIFY must use this same mark distribution for its next pulser.
+		if err := ls.captureEpochBoundarySnapshotStake(
+			txn, currentEpoch, epochStartSlot, lcommon.ProtocolVersionDijkstra,
+		); err != nil {
+			return nil, err
+		}
+		currentBoundarySPOState, err = ls.currentBoundarySPOStakeState(
+			txn,
+			currentEpoch,
+			epochStartSlot,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("resolve post-enactment SPO stake: %w", err)
+		}
+		if plan := govOut.Ratification; plan != nil {
+			plan.SetBoundarySPOState(currentBoundarySPOState)
+		}
+		if err := applyRatification(); err != nil {
+			return nil, err
+		}
+	}
+
 	// SNAP point: capture the authoritative mark snapshot inside this rollover
 	// transaction, now that the new epoch record (and its nonce/boundary slot)
 	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
@@ -8090,8 +8129,9 @@ func epochBoundarySnapshotSlot(boundarySlot uint64) uint64 {
 // captureEpochBoundarySnapshotStake invokes the optional SNAP-point stake hook
 // at the correct place in the boundary sequence: after the two boundary rules
 // cardano-ledger applies before SNAP (the delayed reward update and MIR) and
-// before POOLREAP and governance enactment, which credit reward accounts at the
-// boundary slot after it.
+// before POOLREAP and governance enactment through Conway. Dijkstra calls it
+// after those rules and HARDFORK, passing its protocol version to prevent an
+// earlier Conway-point capture from being reused at the era transition.
 //
 // It only reads, so it needs nothing from the not-yet-written new epoch record;
 // the boundary identity is fully determined here (the new epoch is
@@ -8106,6 +8146,7 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 	txn *database.Txn,
 	prevEpoch models.Epoch,
 	boundarySlot uint64,
+	protocolVersion uint,
 ) error {
 	hook := ls.epochBoundarySnapshotStakeHook()
 	if hook == nil {
@@ -8117,6 +8158,8 @@ func (ls *LedgerState) captureEpochBoundarySnapshotStake(
 		BoundarySlot:  boundarySlot,
 		SnapshotSlot:  epochBoundarySnapshotSlot(boundarySlot),
 	}
+	evt.ProtocolVersion = protocolVersion
+
 	const savepoint = "epoch_boundary_snapshot_stake"
 	if err := txn.SavePoint(savepoint); err != nil {
 		ls.config.Logger.Warn(

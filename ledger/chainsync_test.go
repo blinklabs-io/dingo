@@ -10628,7 +10628,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookInvoked(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ls.captureEpochBoundarySnapshotStake(
-			txn, models.Epoch{EpochId: 0}, 432000,
+			txn, models.Epoch{EpochId: 0}, 432000, 0,
 		)
 		return nil
 	}))
@@ -10668,7 +10668,7 @@ func TestCaptureEpochBoundarySnapshotStakeHookFailureDeferred(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		ls.captureEpochBoundarySnapshotStake(
-			txn, models.Epoch{EpochId: 0}, 432000,
+			txn, models.Epoch{EpochId: 0}, 432000, 0,
 		)
 		return nil
 	}))
@@ -17933,6 +17933,42 @@ func TestHandleEventChainsyncRollbackRejectsBelowPruneFloor(t *testing.T) {
 		e.Reason,
 	)
 	require.Equal(t, fixture.connId, e.ConnectionId)
+}
+
+func TestCreateGenesisBlockPreservesPoolDeposit(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"devnet/config.json",
+		"devnet",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	cfg.ShelleyGenesis().ProtocolParameters.PoolDeposit = 500_000_000
+
+	pools, _, err := cfg.ShelleyGenesis().InitialPools()
+	require.NoError(t, err)
+	require.NotEmpty(t, pools)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{Database: db, CardanoNodeConfig: cfg,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))},
+	}
+	require.NoError(t, ls.createGenesisBlock())
+	for key := range pools {
+		hash, err := hex.DecodeString(key)
+		require.NoError(t, err)
+		pool, err := db.GetPool(lcommon.PoolKeyHash(hash), true, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, pool.Registration)
+		require.Equal(
+			t,
+			uint64(cfg.ShelleyGenesis().ProtocolParameters.PoolDeposit),
+			uint64(pool.Registration[0].DepositAmount),
+		)
+	}
 }
 
 // A peer repeating a rollback to our own tip must cost constant work: the
