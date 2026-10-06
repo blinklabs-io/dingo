@@ -71,7 +71,6 @@ WHERE n < 48000
 		require.NoError(b, store.writeDB.QueryRow(
 			`SELECT stat FROM sqlite_stat1 WHERE tbl = 'transaction' AND idx = 'idx_transaction_hash'`,
 		).Scan(&staleStat))
-		b.ResetTimer()
 		b.StartTimer()
 		err = store.RebuildRewardLiveStakeFromRunningTotalsInBatches(1, runTxn)
 		b.StopTimer()
@@ -83,5 +82,6 @@ WHERE n < 48000
 			`SELECT stat FROM sqlite_stat1 WHERE tbl = 'transaction' AND idx = 'idx_transaction_hash'`,
 		).Scan(&refreshedStat))
 		b.Logf("transaction_stats_before=%s after=%s", staleStat, refreshedStat)
+		require.NoError(b, store.Close())
 	}
 }
