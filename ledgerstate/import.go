@@ -3509,10 +3509,11 @@ func importGovState(
 	// boundary (Conway/Rules/Epoch.hs, "cgsCommitteeL .~ ensCommittee").
 	// Only NoConfidence and UpdateCommittee rewrite ensCommittee
 	// (Conway/Rules/Enact.hs), so the two views corroborate each other
-	// exactly when rsEnacted carries neither. A snapshot from an epoch
-	// that ratified a committee action is expected to disagree, and the
-	// importer records those actions as ratified below so the next
-	// boundary enacts them.
+	// exactly when rsEnacted carries neither. A still-live committee action
+	// in rsEnacted is expected to disagree, and the importer records it as
+	// ratified so the next boundary enacts it. An exact UpdateCommittee that
+	// expired before the imported epoch was consumed at the boundary into
+	// that epoch; that narrower case imports rsEnactState below.
 	if govState.EnactCommitteeSet &&
 		!govState.EnactedCommitteeChange &&
 		!govState.EnactedActionTypesUnknown &&
@@ -3531,6 +3532,29 @@ func importGovState(
 		cfg,
 		cfg.State.Epoch,
 	)
+	enactedUpdateCommitteeIds, err := importedEnactedUpdateCommitteeIds(
+		govState,
+		cfg.State.Epoch,
+	)
+	if err != nil {
+		return err
+	}
+	committee := govState.Committee
+	committeeQuorum := govState.CommitteeQuorum
+	if len(enactedUpdateCommitteeIds) > 0 {
+		if govState.EnactedActionTypesUnknown {
+			return errors.New(
+				"imported expired UpdateCommittee has incomplete rsEnacted action types",
+			)
+		}
+		if !govState.EnactCommitteeSet || govState.EnactCommitteeQuorum == nil {
+			return errors.New(
+				"imported expired UpdateCommittee has incomplete enact-state committee",
+			)
+		}
+		committee = govState.EnactCommittee
+		committeeQuorum = govState.EnactCommitteeQuorum
+	}
 
 	// Import constitution
 	if govState.Constitution != nil {
@@ -3568,16 +3592,26 @@ func importGovState(
 	}
 
 	// Import committee members and quorum.
-	if len(govState.Committee) > 0 || govState.CommitteeQuorum != nil {
+	if len(committee) > 0 || committeeQuorum != nil {
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
-			if len(govState.Committee) > 0 {
+			if len(enactedUpdateCommitteeIds) > 0 {
+				if err := store.SoftDeleteAllCommitteeMembers(
+					currentEpochSlot,
+					txn.Metadata(),
+				); err != nil {
+					return fmt.Errorf(
+						"retiring superseded committee members: %w", err,
+					)
+				}
+			}
+			if len(committee) > 0 {
 				members := make(
 					[]*models.CommitteeMember,
-					len(govState.Committee),
+					len(committee),
 				)
-				for i, cm := range govState.Committee {
+				for i, cm := range committee {
 					if len(cm.ColdCredential.Hash) != 28 {
 						return fmt.Errorf(
 							"committee member %d: credential hash is %d bytes, expected 28",
@@ -3609,12 +3643,12 @@ func importGovState(
 					)
 				}
 			}
-			if govState.CommitteeQuorum != nil {
-				if govState.CommitteeQuorum.Rat == nil {
+			if committeeQuorum != nil {
+				if committeeQuorum.Rat == nil {
 					return errors.New("committee quorum present but missing Rat")
 				}
 				quorum := &types.Rat{
-					Rat: new(big.Rat).Set(govState.CommitteeQuorum.Rat),
+					Rat: new(big.Rat).Set(committeeQuorum.Rat),
 				}
 				if err := store.SetCommitteeQuorum(
 					quorum, currentEpochSlot, txn.Metadata(),
@@ -3639,8 +3673,8 @@ func importGovState(
 		cfg.Logger.Info(
 			"imported committee state",
 			"component", "ledgerstate",
-			"count", len(govState.Committee),
-			"quorum", govState.CommitteeQuorum != nil,
+			"count", len(committee),
+			"quorum", committeeQuorum != nil,
 		)
 	}
 
@@ -3701,10 +3735,10 @@ func importGovState(
 				orderIndex := uint32(position) //nolint:gosec // bounded by the decoded proposal array
 				var ratifiedEpoch *uint64
 				var ratifiedSlot *uint64
-				_, ratified := ratifiedIds[govActionIdKey(
-					prop.TxHash,
-					prop.ActionIndex,
-				)]
+				var enactedEpoch *uint64
+				var enactedSlot *uint64
+				propKey := govActionIdKey(prop.TxHash, prop.ActionIndex)
+				_, ratified := ratifiedIds[propKey]
 				if !ratified && ratifiedHFI != nil &&
 					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
 					prop.ActionIndex == ratifiedHFI.ActionIndex {
@@ -3715,6 +3749,12 @@ func importGovState(
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
 					ratifiedSlot = &rs
+				}
+				if _, enacted := enactedUpdateCommitteeIds[propKey]; enacted {
+					ee := cfg.State.Epoch
+					es := currentEpochSlot
+					enactedEpoch = &ee
+					enactedSlot = &es
 				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
@@ -3732,6 +3772,8 @@ func importGovState(
 						GovActionCbor:   prop.GovActionCbor,
 						RatifiedEpoch:   ratifiedEpoch,
 						RatifiedSlot:    ratifiedSlot,
+						EnactedEpoch:    enactedEpoch,
+						EnactedSlot:     enactedSlot,
 						// The snapshot lists proposals in submission order,
 						// and every proposal of one epoch shares its anchor
 						// slot, so this position stands in for the block
@@ -3931,6 +3973,67 @@ func ratifiedGovActionIdSet(
 		result[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
 	}
 	return result
+}
+
+func importedEnactedUpdateCommitteeIds(
+	govState *ParsedGovState,
+	epoch uint64,
+) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	for _, id := range govState.RatifiedGovActionIds {
+		if !id.ActionTypeSet || id.ActionType != govActionTypeUpdateCommittee {
+			continue
+		}
+		if id.ExpiresAfter >= epoch {
+			continue
+		}
+		matched := false
+		for _, prop := range govState.Proposals {
+			if !bytes.Equal(prop.TxHash, id.TxHash) ||
+				prop.ActionIndex != id.ActionIndex {
+				continue
+			}
+			matched = true
+			if prop.ActionType != govActionTypeUpdateCommittee {
+				return nil, fmt.Errorf(
+					"rsEnacted UpdateCommittee %s#%d disagrees with proposal action type %d",
+					hex.EncodeToString(id.TxHash), id.ActionIndex, prop.ActionType,
+				)
+			}
+			if prop.ExpiresAfter != id.ExpiresAfter {
+				return nil, fmt.Errorf(
+					"rsEnacted UpdateCommittee %s#%d expires after epoch %d but proposal expires after %d",
+					hex.EncodeToString(id.TxHash), id.ActionIndex,
+					id.ExpiresAfter, prop.ExpiresAfter,
+				)
+			}
+			result[govActionIdKey(id.TxHash, id.ActionIndex)] = struct{}{}
+			break
+		}
+		if !matched {
+			return nil, fmt.Errorf(
+				"expired rsEnacted UpdateCommittee %s#%d is missing from imported proposals",
+				hex.EncodeToString(id.TxHash), id.ActionIndex,
+			)
+		}
+	}
+	if len(result) == 0 {
+		return result, nil
+	}
+	for _, id := range govState.RatifiedGovActionIds {
+		if !id.ActionTypeSet ||
+			(id.ActionType != govActionTypeUpdateCommittee &&
+				id.ActionType != govActionTypeNoConfidence) {
+			continue
+		}
+		if _, selected := result[govActionIdKey(id.TxHash, id.ActionIndex)]; !selected {
+			return nil, fmt.Errorf(
+				"expired UpdateCommittee import is ambiguous with rsEnacted committee action %s#%d (type %d)",
+				hex.EncodeToString(id.TxHash), id.ActionIndex, id.ActionType,
+			)
+		}
+	}
+	return result, nil
 }
 
 func govActionIdKey(txHash []byte, actionIdx uint32) string {
