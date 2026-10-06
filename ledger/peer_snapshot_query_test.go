@@ -109,6 +109,7 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 
 	result, err := ls.queryLedgerPeerSnapshot(
 		olocalstatequery.LedgerPeerKindAll,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -130,6 +131,7 @@ func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
 
 	result, err := ls.queryLedgerPeerSnapshot(
 		olocalstatequery.LedgerPeerKindAll,
+		nil,
 	)
 	require.NoError(t, err)
 
