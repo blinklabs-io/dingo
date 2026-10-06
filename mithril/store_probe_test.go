@@ -24,27 +24,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // concurrencyStore records the peak number of Opens in flight. Each Open
 // waits until storeProbeWorkers of them are in flight, so a bounded pool is
-// observed at exactly its bound. A caller that never reaches the bound gives
-// up waiting once, after which no Open waits, so a serial caller is observed
-// at 1 rather than hanging.
+// observed at exactly its bound.
 type concurrencyStore struct {
 	ArtifactStore
-	mu       sync.Mutex
-	inflight int
-	peak     int
-	release  chan struct{}
-	once     sync.Once
+	mu           sync.Mutex
+	inflight     int
+	peak         int
+	reachedLimit chan struct{}
+	reachedOnce  sync.Once
+	release      chan struct{}
+	releaseOnce  sync.Once
 }
 
 func newConcurrencyStore(inner ArtifactStore) *concurrencyStore {
 	return &concurrencyStore{
 		ArtifactStore: inner,
+		reachedLimit:  make(chan struct{}),
 		release:       make(chan struct{}),
 	}
 }
@@ -57,7 +59,7 @@ func (s *concurrencyStore) Open(
 	s.inflight++
 	s.peak = max(s.peak, s.inflight)
 	if s.inflight >= storeProbeWorkers {
-		s.once.Do(func() { close(s.release) })
+		s.reachedOnce.Do(func() { close(s.reachedLimit) })
 	}
 	s.mu.Unlock()
 	defer func() {
@@ -68,10 +70,12 @@ func (s *concurrencyStore) Open(
 	select {
 	case <-s.release:
 	case <-ctx.Done():
-	case <-time.After(5 * time.Second):
-		s.once.Do(func() { close(s.release) })
 	}
 	return s.ArtifactStore.Open(ctx, key)
+}
+
+func (s *concurrencyStore) releaseOpens() {
+	s.releaseOnce.Do(func() { close(s.release) })
 }
 
 func (s *concurrencyStore) peakOpens() int {
@@ -111,11 +115,32 @@ func TestSnapshotArchivesPresentOpensConcurrently(t *testing.T) {
 	t.Parallel()
 	inner, snapshot := storeWithArchives(t, 40)
 	store := newConcurrencyStore(inner)
-	present, err := snapshotArchivesPresent(
-		context.Background(), store, snapshot,
+	t.Cleanup(store.releaseOpens)
+	type result struct {
+		present bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		present, err := snapshotArchivesPresent(
+			context.Background(), store, snapshot,
+		)
+		done <- result{present: present, err: err}
+	}()
+	testutil.RequireReceive(
+		t, store.reachedLimit, testutil.AsyncWait, "concurrent archive probes",
 	)
-	require.NoError(t, err)
-	assert.True(t, present)
+	select {
+	case got := <-done:
+		t.Fatalf("archive probes completed before release: %+v", got)
+	default:
+	}
+	store.releaseOpens()
+	got := testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "released archive probes",
+	)
+	require.NoError(t, got.err)
+	assert.True(t, got.present)
 	assert.Equal(t, storeProbeWorkers, store.peakOpens())
 }
 
@@ -165,10 +190,31 @@ func TestListSnapshotsReadsConcurrently(t *testing.T) {
 		))
 	}
 	store := newConcurrencyStore(inner)
-	list, err := ListSnapshots(context.Background(), store)
-	require.NoError(t, err)
-	require.Len(t, list, count)
-	for i, snapshot := range list {
+	t.Cleanup(store.releaseOpens)
+	type result struct {
+		list []CardanoDatabaseSnapshot
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		list, err := ListSnapshots(context.Background(), store)
+		done <- result{list: list, err: err}
+	}()
+	testutil.RequireReceive(
+		t, store.reachedLimit, testutil.AsyncWait, "concurrent metadata reads",
+	)
+	select {
+	case got := <-done:
+		t.Fatalf("metadata reads completed before release: %+v", got)
+	default:
+	}
+	store.releaseOpens()
+	got := testutil.RequireReceive(
+		t, done, testutil.AsyncWait, "released metadata reads",
+	)
+	require.NoError(t, got.err)
+	require.Len(t, got.list, count)
+	for i, snapshot := range got.list {
 		assert.Equal(t, testHash(count-1-i), snapshot.Hash)
 	}
 	assert.Equal(t, storeProbeWorkers, store.peakOpens())

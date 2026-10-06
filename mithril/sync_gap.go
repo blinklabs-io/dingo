@@ -698,6 +698,11 @@ func processGapBlockTransactions(
 				)
 			}
 			if len(level.ProposalProcedures()) > 0 {
+				if conwayPParams == nil {
+					return errors.New(
+						"missing Conway protocol parameters for governance gap block processing",
+					)
+				}
 				if err := governance.ProcessHistoricalProposals(
 					level,
 					point,
