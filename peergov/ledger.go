@@ -77,6 +77,19 @@ type PoolRelay struct {
 
 	// Port is the port number of the relay. If 0, defaults to 3001.
 	Port uint
+	// PoolKeyHash identifies the pool that registered this relay. Empty means
+	// the provider cannot associate the relay with a pool.
+	PoolKeyHash []byte
+
+	// Stake is the total delegated stake, in lovelace, of the pool that owns
+	// this relay. Weighted sampling gives zero stake a floor weight.
+	Stake uint64
+	// StakeKnown distinguishes a successful zero-stake lookup from absent data.
+	StakeKnown bool
+
+	// IsMultiHost marks a MultiHostName relay: a DNS name with no port, whose
+	// port is published in an SRV record. Addresses emits port 0 for it.
+	IsMultiHost bool
 }
 
 // Addresses returns the network addresses for this relay.
@@ -85,6 +98,18 @@ type PoolRelay struct {
 func (r PoolRelay) Addresses() []string {
 	var addresses []string
 	portStr := formatPort(r.Port)
+
+	// Port 0 is the signal to resolveAddress that the hostname's port must
+	// come from an SRV lookup.
+	if r.IsMultiHost && net.ParseIP(r.Hostname) == nil {
+		if IsResolvableHost(r.Hostname) {
+			addresses = append(
+				addresses,
+				net.JoinHostPort(r.Hostname, multiHostPort),
+			)
+		}
+		return addresses
+	}
 
 	// A hostname that cannot resolve is not a peer. The ledger carries
 	// whatever an operator registered, and a value like "--pool-relay-port"
@@ -163,6 +188,14 @@ func isValidDNSLabel(label string) bool {
 	return true
 }
 
+// multiHostPort is the placeholder port carried by a MultiHostName relay
+// address until its SRV record has been resolved.
+const multiHostPort = "0"
+
+// defaultCardanoPort is the port dialed for a MultiHostName relay whose SRV
+// lookup fails and for a relay registered without a port.
+const defaultCardanoPort = "3001"
+
 const (
 	// maxDNSNameLen is the longest name a resolver will accept, excluding the
 	// root label.
@@ -175,7 +208,7 @@ const (
 // Returns the default Cardano port "3001" if port is 0.
 func formatPort(port uint) string {
 	if port == 0 {
-		return "3001" // Default Cardano port
+		return defaultCardanoPort
 	}
 	return strconv.FormatUint(uint64(port), 10)
 }

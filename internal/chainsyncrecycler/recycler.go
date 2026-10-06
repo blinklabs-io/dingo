@@ -528,8 +528,8 @@ func (r *Recycler) checkLocalTipPlateau(
 	//
 	// This only ever runs because chain selection tracks that peer. The
 	// sequence a plateau resync sets off is: the resync closes the connection
-	// (LocalTipPlateau is in chainsyncResyncRequiresFreshConnection,
-	// ouroboros/chainsync.go), the ConnectionClosedEvent subscription in
+	// (SubscribeChainsyncResync in ouroboros/chainsync.go closes the
+	// connection for every resync reason), the ConnectionClosedEvent subscription in
 	// node.go calls ChainSelector.RemovePeer, which drops the peer tip and
 	// clears bestPeerConn, and the replacement's only chainsync traffic until
 	// the network's next block is its post-FindIntersect MsgRollBackward.
@@ -670,7 +670,7 @@ func (r *Recycler) checkLocalTipPlateau(
 	// spare and is suppressed at eligibleCount <= 1. A plateau resync instead
 	// closes the connection so peer governance reconnects to the SAME remote
 	// and re-enters FindIntersect with fresh intersect points anchored at the
-	// current local tip (see chainsyncResyncRequiresFreshConnection). That is
+	// current local tip (see SubscribeChainsyncResync). That is
 	// exactly the recovery a single-peer plateau needs: it restarts header
 	// delivery from local-tip+1 on the only upstream we have. The plateau
 	// predicate (peer ahead AND no local progress for the full plateau

@@ -103,6 +103,12 @@ var flagSpecs = []flagSpec{
 		"ledger catch-up timeout for load mode",
 	),
 	stringFlag(
+		"LocalStateQueryViewMaxLifetime",
+		"local-state-query-view-max-lifetime",
+		"",
+		"maximum lifetime of a local-state-query ledger snapshot",
+	),
+	stringFlag(
 		"TlsCertFilePath",
 		"tls-cert-file-path",
 		"",
@@ -893,6 +899,11 @@ var flagSpecs = []flagSpec{
 		"mithril-download-max-idle-retries",
 		"Mithril snapshot download idle retries without progress",
 	),
+	int64Flag(
+		"Mithril.DownloadMaxBytes",
+		"mithril-download-max-bytes",
+		"Mithril per-object compressed download limit in bytes (0 uses built-in limits)",
+	),
 	boolFlag(
 		"Mithril.CleanupAfterLoad",
 		"mithril-cleanup-after-load",
@@ -942,6 +953,11 @@ var flagSpecs = []flagSpec{
 		"DatabaseLifecycle.SnapshotEveryNEpochs",
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
+	),
+	durationFlag(
+		"DatabaseLifecycle.SnapshotMaxCommitPause",
+		"db-snapshot-max-commit-pause",
+		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
 	),
 }
 

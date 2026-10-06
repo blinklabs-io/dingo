@@ -21,6 +21,7 @@ import (
 	"math"
 	"strconv"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -264,8 +265,9 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 	// full-range count is a genuine lifetime total, not an approximation.
 	// blocks_epoch narrows the same indexed query to the current epoch's
 	// slot range.
-	blocksMintedByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{pkh}, 0, noSlotUpperBound, txn.Metadata(),
+	blocksMintedByPool, err := database.CountPoolBlocksLifetime(
+		db.Metadata(), txn.Metadata(),
+		[]lcommon.PoolKeyHash{pkh}, noSlotUpperBound,
 	)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
@@ -295,14 +297,32 @@ func (a *NodeAdapter) PoolDetail(poolID string) (PoolDetailInfo, error) {
 			"get epoch %d: no epoch row found", currentEpoch,
 		)
 	}
-	blocksEpochByPool, _, err := db.Metadata().CountPoolBlocksInSlotRange(
-		[]lcommon.PoolKeyHash{
-			pkh,
-		}, epochRow.StartSlot, noSlotUpperBound, txn.Metadata(),
-	)
+	blocksEpochByPool, blocksEpochTotal, err := db.Metadata().
+		CountPoolBlocksInSlotRange(
+			[]lcommon.PoolKeyHash{pkh},
+			epochRow.StartSlot, noSlotUpperBound, txn.Metadata(),
+		)
 	if err != nil {
 		return PoolDetailInfo{}, fmt.Errorf(
 			"count epoch blocks for pool %x: %w", poolKeyHash, err,
+		)
+	}
+	// A Mithril anchor inside the current epoch leaves the observed count
+	// covering only the blocks above it. An epoch the snapshot's counts do not
+	// cover is an error here rather than a smaller count.
+	blocksEpochByPool, _, blocksEpochKnown, err := database.
+		MergeImportedPoolBlockCounts(
+			db.Metadata(), txn.Metadata(), currentEpoch,
+			epochRow.StartSlot, blocksEpochByPool, blocksEpochTotal,
+		)
+	if err != nil {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"merge imported epoch blocks for pool %x: %w", poolKeyHash, err,
+		)
+	}
+	if !blocksEpochKnown {
+		return PoolDetailInfo{}, fmt.Errorf(
+			"block counts for epoch %d are not available", currentEpoch,
 		)
 	}
 
