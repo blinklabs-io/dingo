@@ -472,6 +472,33 @@ func TestGenesisConfigResultExtraConfigBytes(t *testing.T) {
 	)
 }
 
+// Genesis relay addresses originate as text, while the ledger codec stores
+// each 32-bit word in little-endian order.
+func TestGenesisConfigResultConvertsRelayAddressByteOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"musashi/config.json",
+		"musashi",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	pools := cfg.ShelleyGenesis().ExtraConfig.StakePools.Data
+	require.Len(t, pools, 1)
+	for id, pool := range pools {
+		pool.Relays = []byte(
+			`[{"type":0,"port":3001,"ipv4":"192.168.1.1","ipv6":"2001:db8::1"}]`,
+		)
+		pools[id] = pool
+	}
+
+	result, err := genesisConfigResult(cfg.ShelleyGenesis())
+	require.NoError(t, err)
+	encoded := hex.EncodeToString(result.ExtraConfig)
+	require.Contains(t, encoded, "440101a8c0")
+	require.Contains(t, encoded, "50b80d0120000000000000000001000000")
+}
+
 // TestQueryProposedProtocolParamsUpdatesPinnedBeforeConway resolves the era
 // of the acquired point: a point in a Shelley epoch is refused even though
 // the live era is Conway, and a point in a Conway epoch answers the empty map.
