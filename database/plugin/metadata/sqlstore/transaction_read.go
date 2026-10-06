@@ -133,9 +133,15 @@ func (s *Store) SumTransactionFeesInSlotRange(
 		return 0, err
 	}
 	total, err := sumUint64Rows(ctx, db, s.dialect.Rebind(`
-SELECT CASE WHEN valid THEN fee ELSE collateral_fee END
-FROM "transaction"
-WHERE slot >= ? AND slot <= ?`), validInt64(start), validInt64(end))
+SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
+FROM "transaction" tx
+WHERE tx.slot >= ? AND tx.slot <= ?
+  AND NOT EXISTS (SELECT 1 FROM leios_transaction_context context WHERE context.transaction_id = tx.id)
+UNION ALL
+SELECT CASE WHEN tx.valid THEN tx.fee ELSE tx.collateral_fee END
+FROM leios_transaction_context context
+JOIN "transaction" tx ON tx.id = context.transaction_id
+WHERE context.slot >= ? AND context.slot <= ?`), validInt64(start), validInt64(end), validInt64(start), validInt64(end))
 	if err != nil {
 		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
 	}

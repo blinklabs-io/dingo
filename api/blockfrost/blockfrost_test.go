@@ -833,6 +833,110 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
 }
 
+// TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders stores pairs of
+// equivalent metadata under different top-level and nested key orders. One
+// pair also distinguishes integer key 1 from text key "1". It checks that
+// every metadata endpoint returns the same label set, JSON availability and
+// per-label CBOR on every call. The vectors and expectations are written out
+// by hand from the CBOR bytes.
+func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
+	t.Parallel()
+	adapter, raw, _ := newDBBackedAdapter(t)
+
+	const (
+		collideIntFirst  = "a20163696e7461316474657874"
+		collideTextFirst = "a2613164746578740163696e74"
+	)
+	type metaTx struct {
+		hashByte byte
+		metadata string
+		label721 string
+	}
+	txs := []metaTx{
+		{0x51, "a21902d1" + collideIntFirst + "016161", collideIntFirst},
+		{0x52, "a2016161" + "1902d1" + collideIntFirst, collideIntFirst},
+		{0x53, "a21902d1" + collideTextFirst + "016161", collideTextFirst},
+		{0x54, "a2016161" + "1902d1" + collideTextFirst, collideTextFirst},
+	}
+	for i, mt := range txs {
+		metadataCbor, err := hex.DecodeString(mt.metadata)
+		require.NoError(t, err)
+		label721, err := hex.DecodeString(mt.label721)
+		require.NoError(t, err)
+		tx := &models.Transaction{
+			Hash:     bytes.Repeat([]byte{mt.hashByte}, 32),
+			Metadata: metadataCbor,
+		}
+		insertAdapterTransaction(t, raw, tx)
+		_, err = raw.Exec(`INSERT INTO transaction_metadata_label (transaction_id, label, slot, cbor_value, json_value) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`,
+			tx.ID, "1", i+1, []byte{0x61, 0x61}, `"a"`,
+			tx.ID, "721", i+1, label721, nil)
+		require.NoError(t, err)
+	}
+
+	for pass := range 16 {
+		for i, mt := range txs {
+			hash := bytes.Repeat([]byte{mt.hashByte}, 32)
+
+			jsonLabels, err := adapter.TransactionMetadata(hash)
+			require.NoError(t, err, "pass %d tx %d", pass, i)
+			require.Len(t, jsonLabels, 2)
+			require.Equal(t, "1", jsonLabels[0].Label)
+			require.Equal(t, `"a"`, string(jsonLabels[0].JSONMetadata))
+			require.Equal(t, "721", jsonLabels[1].Label)
+			require.Empty(t, jsonLabels[1].JSONMetadata, "pass %d tx %d", pass, i)
+
+			cborLabels, err := adapter.TransactionMetadataCBOR(hash)
+			require.NoError(t, err)
+			require.Len(t, cborLabels, 2)
+			require.Equal(t, "1", cborLabels[0].Label)
+			require.Equal(t, "6161", cborLabels[0].CBORMetadata)
+			require.Equal(t, "721", cborLabels[1].Label)
+			require.Equal(t, mt.label721, cborLabels[1].CBORMetadata)
+		}
+
+		params := PaginationParams{Count: 10, Page: 1, Order: PaginationOrderAsc}
+		jsonRows, total, err := adapter.MetadataTransactions(721, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), total)
+		require.Len(t, jsonRows, len(txs))
+		cborRows, cborTotal, err := adapter.MetadataTransactionsCBOR(721, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), cborTotal)
+		require.Len(t, cborRows, len(txs))
+		for i, mt := range txs {
+			require.Equal(t, hex.EncodeToString(bytes.Repeat([]byte{mt.hashByte}, 32)), jsonRows[i].TxHash)
+			require.Nil(t, jsonRows[i].JSONMetadata, "pass %d row %d", pass, i)
+			require.Equal(t, jsonRows[i].TxHash, cborRows[i].TxHash)
+			require.Equal(t, mt.label721, cborRows[i].Metadata)
+		}
+
+		// Representable label stays available alongside the colliding one.
+		oneRows, oneTotal, err := adapter.MetadataTransactions(1, params)
+		require.NoError(t, err)
+		require.Equal(t, len(txs), oneTotal)
+		require.Len(t, oneRows, len(txs))
+		for _, row := range oneRows {
+			require.Equal(t, `"a"`, string(row.JSONMetadata))
+		}
+
+		// Pagination does not drop or repeat the unavailable-JSON rows.
+		var seen []string
+		for page := 1; page <= len(txs); page++ {
+			rows, _, err := adapter.MetadataTransactions(721, PaginationParams{Count: 1, Page: page, Order: PaginationOrderAsc})
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			seen = append(seen, rows[0].TxHash)
+		}
+		require.Equal(t, []string{
+			hex.EncodeToString(bytes.Repeat([]byte{0x51}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x53}, 32)),
+			hex.EncodeToString(bytes.Repeat([]byte{0x54}, 32)),
+		}, seen)
+	}
+}
+
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
 	chainTip                      ChainTipInfo
