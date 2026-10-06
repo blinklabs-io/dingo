@@ -121,8 +121,9 @@ func (o *Ouroboros) subscribeTracked(
 }
 
 // Close releases everything this Ouroboros owns that outlives it: EventBus
-// subscriptions, Prometheus collectors, and the background Leios
-// endorser-block persistence writer.
+// subscriptions, Prometheus collectors, the background Leios endorser-block
+// persistence writer, and the ledger snapshots held by acquired
+// LocalStateQuery sessions.
 //
 // It exists because Ouroboros takes its dependencies at construction and so
 // cannot be retained across a live snapshot/restore. That operation discards
@@ -161,6 +162,7 @@ func (o *Ouroboros) Close() error {
 		}
 	}
 	o.StopLeiosPersistWriter()
+	o.closeLocalStateQuerySessions()
 	o.registerer.unregisterAll()
 	return nil
 }

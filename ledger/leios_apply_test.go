@@ -827,6 +827,58 @@ SELECT added_slot, deleted_slot FROM utxo WHERE tx_id = ?`,
 	require.Equal(t, uint64(0), utxo.DeletedSlot)
 }
 
+// The Haskell-conformant path commits the endorser-block blob in its own blob
+// transaction, which the shared batch transaction's snapshot predates. Reading
+// an endorser-produced output back through that batch after the shared block
+// cache has evicted the blob must therefore use a fresh snapshot, which only
+// applyEndorserBlock's separate-commit mark enables.
+func TestApplyEndorserBlockHaskellPathResolvesProducedUtxoAfterCacheEviction(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir:     t.TempDir(),
+		CacheConfig: database.CborCacheConfig{BlockLRUEntries: 1},
+	})
+	require.NoError(t, err)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6c)
+	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x7a),
+			1,
+			430,
+			leiosApplyTestEbHash(0x6d),
+			[]cbor.RawMessage{rawTx},
+		)
+		if err != nil {
+			return err
+		}
+		// A later block commit evicts the endorser block from the one-entry
+		// shared cache, so the read below reaches the blob store.
+		require.NoError(t, db.SetGenesisCbor(
+			431,
+			leiosApplyTestEbHash(0x6e),
+			[]byte{0x01},
+			nil,
+		))
+		got, err := db.CborCache().ResolveUtxoCbor(tx.Hash().Bytes(), 0, txn)
+		require.NoError(t, err)
+		require.Equal(t, tx.Produced()[0].Output.Cbor(), got)
+		return nil
+	}))
+}
+
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -2824,4 +2876,111 @@ func TestCIPGraceUnavailableIsNotRecordedAsATimeout(t *testing.T) {
 		promtestutil.ToFloat64(ls.metrics.leiosEbWaitTimeouts),
 		"the timeout counter must not move for a routine unfetchable block",
 	)
+}
+
+func TestApplyEndorserBlockContextFailureRollsBackEffects(t *testing.T) {
+	t.Parallel()
+	ls, db, raw := newLeiosApplyTestLedger(t)
+	closure, tx := leiosApplyTestProducerTx(t, 0xA5)
+	second, _ := leiosApplyTestProducerTx(t, 0xA8)
+	_, err := raw.Exec(`CREATE TRIGGER fail_closure_context BEFORE INSERT ON leios_transaction_context WHEN (SELECT COUNT(*) FROM leios_transaction_context) > 0 BEGIN SELECT RAISE(ABORT, 'injected closure context failure'); END`)
+	require.NoError(t, err)
+	contextSlot := uint64(990)
+	point := leiosApplyTestRankingPoint(0xA6)
+	point.Slot = 1020
+	apply := func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(txn, point, 1, 990, leiosApplyTestEbHash(0xA7), []cbor.RawMessage{closure, second}, &contextSlot)
+		return err
+	}
+	require.ErrorContains(t, db.Transaction(true).Do(apply), "injected closure context failure")
+	stored, err := db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored)
+	var outputs int
+	require.NoError(t, raw.QueryRow(`SELECT COUNT(*) FROM utxo WHERE tx_id = ?`, tx.Hash().Bytes()).Scan(&outputs))
+	require.Zero(t, outputs)
+	fees, err := db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
+	require.NoError(t, err)
+	require.Zero(t, fees)
+	_, err = raw.Exec(`DROP TRIGGER fail_closure_context`)
+	require.NoError(t, err)
+	require.NoError(t, db.Transaction(true).Do(apply))
+	fees, err = db.Metadata().SumTransactionFeesInSlotRange(0, 999, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2*tx.Fee().Uint64(), fees)
+}
+
+func TestUntickedClosureEventsWaitForCertifyingBlockCommit(t *testing.T) {
+	t.Parallel()
+	ls, db, _ := newLeiosApplyTestLedger(t)
+	closure, _ := leiosApplyTestProducerTx(t, 0xB1)
+	point := leiosApplyTestRankingPoint(0xB2)
+	point.Slot = 1020
+	contextSlot := uint64(990)
+	publications := 0
+	ls.beforeTransactionApplyPublish = func() { publications++ }
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure}, &contextSlot)
+		return err
+	}))
+	require.Zero(t, publications, "rollover alone must not publish certifying-block transaction events")
+	apply := func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(txn, point, 1, 990, leiosApplyTestEbHash(0xB3), []cbor.RawMessage{closure})
+		return err
+	}
+	require.ErrorContains(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		if err := apply(txn); err != nil {
+			return err
+		}
+		return errors.New("injected ranking body failure")
+	}), "injected ranking body failure")
+	require.Zero(t, publications)
+	require.NoError(t, db.Transaction(true).Do(apply))
+	require.Equal(t, 1, publications, "a retry publishes the closure after the certifying block commits")
+	require.NoError(t, db.Transaction(true).Do(apply))
+	require.Equal(t, 1, publications, "replaying the certifier does not publish duplicate closure events")
+}
+
+func TestRollbackSameTipRemovesUntickedClosure(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentTip = fixture.ancestorTip
+	ls.publishSnapshotsLocked()
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
+	contextSlot := fixture.ancestorTip.Point.Slot
+	require.NoError(t, ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+		return err
+	}))
+	require.NotNil(t, ls.untickedClosure)
+	require.NoError(t, ls.rollbackWithBlocks(fixture.ancestorTip.Point, nil, false))
+	require.Nil(t, ls.untickedClosure)
+	stored, err := ls.db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored, "a same-tip rollback must remove closure effects owned by the rejected next block")
+}
+
+func TestRollbackAheadOfParentRemovesUntickedClosure(t *testing.T) {
+	t.Parallel()
+	fixture := newChainsyncRollbackFixture(t)
+	ls := fixture.ls
+	t.Cleanup(func() { require.NoError(t, ls.Close()) })
+	ls.currentTip = fixture.ancestorTip
+	ls.publishSnapshotsLocked()
+	require.NoError(t, ls.db.SetTip(fixture.ancestorTip, nil))
+	closure, tx := leiosApplyTestProducerTx(t, 0xC1)
+	contextSlot := fixture.ancestorTip.Point.Slot
+	require.NoError(t, ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlockInContext(txn, fixture.currentTip.Point, fixture.currentTip.BlockNumber, contextSlot, leiosApplyTestEbHash(0xC2), []cbor.RawMessage{closure}, &contextSlot)
+		return err
+	}))
+	require.NotNil(t, ls.untickedClosure)
+	require.NoError(t, ls.rollbackWithBlocks(ocommon.Point{Slot: fixture.ancestorTip.Point.Slot + 1, Hash: fixture.ancestorTip.Point.Hash}, nil, false))
+	require.Nil(t, ls.untickedClosure)
+	stored, err := ls.db.GetTransactionByHash(tx.Hash().Bytes(), nil)
+	require.NoError(t, err)
+	require.Nil(t, stored, "rollback before the certifier must remove pending closure effects")
 }

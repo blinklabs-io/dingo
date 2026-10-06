@@ -163,6 +163,19 @@ func (ls *LedgerState) applyEndorserBlock(
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
+	ls.publishUntickedClosureAfterCommit(txn, rbPoint)
+	return ls.applyEndorserBlockInContext(txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+}
+
+func (ls *LedgerState) applyEndorserBlockInContext(
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	contextSlot *uint64,
+) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
 	}
@@ -236,8 +249,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
 	//     in its own blob transaction (nil txn) to avoid overflowing the shared
 	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     the blob is never read back within the chunk, so an independent commit
-	//     is safe.
+	//     offset reads use a fresh blob snapshot if the shared LRU misses.
 	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
 	//     the shared txn so a later block spending an endorser-produced output can
 	//     resolve it via read-your-writes.
@@ -250,6 +262,9 @@ func (ls *LedgerState) applyEndorserBlock(
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
+	if !ls.config.LeiosApplyEndorserBlockTxs {
+		txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	}
 
 	delta := NewLedgerDelta(
 		rbPoint,
@@ -258,6 +273,13 @@ func (ls *LedgerState) applyEndorserBlock(
 	)
 	defer delta.Release()
 	delta.Offsets = offsets
+	delta.closureContextSlot = contextSlot
+	if contextSlot != nil {
+		delta.stageApplyEvents = func(events []TransactionEvent) {
+			pending := &pendingLeiosClosure{point: ocommon.Point{Slot: rbPoint.Slot, Hash: bytes.Clone(rbPoint.Hash)}, events: events}
+			txn.AfterCommit(func() { ls.Lock(); ls.untickedClosure = pending; ls.Unlock() })
+		}
+	}
 	if ls.config.LeiosApplyEndorserBlockTxs {
 		for i, tx := range txs {
 			delta.addTransaction(tx, i)
@@ -1851,4 +1873,81 @@ func (b *leiosBackfiller) awaitFetch(
 		case <-ticker.C:
 		}
 	}
+}
+
+// applyUntickedBoundaryClosure folds a prototype closure onto the parent's
+// ledger before NEWEPOCH, retaining the certifying RB point for rollback.
+func (ls *LedgerState) applyUntickedBoundaryClosure(
+	txn *database.Txn,
+	block ledger.Block,
+	parentPoint ocommon.Point,
+) error {
+	if err := ls.validateBlockCheckpoint(block); err != nil {
+		return err
+	}
+	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
+		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+	}
+	if err := ls.validateDijkstraLeiosCertificate(block, nil); err != nil {
+		return err
+	}
+	hash, slot, _, referenced, err := ls.leiosEndorserBlockForApply(block)
+	if err != nil {
+		return err
+	}
+	if !referenced {
+		return nil
+	}
+	if ls.config.EndorserBlockProvider == nil {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	txs, found := ls.config.EndorserBlockProvider(hash.Bytes(), slot)
+	if !found {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
+	_, donation, err := ls.applyEndorserBlockInContext(txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	if err != nil {
+		return err
+	}
+	if donation > 0 {
+		ls.RLock()
+		epoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type pendingLeiosClosure struct {
+	point  ocommon.Point
+	events []TransactionEvent
+}
+
+// publishUntickedClosureAfterCommit keeps transaction Apply notifications with
+// the certifying RB's commit, including when a failed body is retried.
+func (ls *LedgerState) publishUntickedClosureAfterCommit(txn *database.Txn, point ocommon.Point) {
+	ls.RLock()
+	pending := ls.untickedClosure
+	ls.RUnlock()
+	if pending == nil || !pointMatches(pending.point, point) {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.Lock()
+		if ls.untickedClosure != pending {
+			ls.Unlock()
+			return
+		}
+		ls.untickedClosure = nil
+		ls.Unlock()
+		if ls.beforeTransactionApplyPublish != nil {
+			ls.beforeTransactionApplyPublish()
+		}
+		for _, evt := range pending.events {
+			ls.publishTransactionEvent(evt)
+		}
+	})
 }

@@ -32,12 +32,17 @@ import (
 
 var savepointNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// Config contains backend-neutral dependencies for a Store.
+// Config contains dependencies and optional provider capabilities for a Store.
 type Config struct {
-	WriteDB *sql.DB
-	ReadDB  *sql.DB
-	Dialect Dialect
-	Logger  *slog.Logger
+	// SQLitePath identifies the file opened by the provider, including its
+	// dataDir override. Reconstructing it from the node's global directory
+	// could point introspection clients at a different database. It is empty
+	// for in-memory SQLite and other backends, and immutable after construction.
+	SQLitePath string
+	WriteDB    *sql.DB
+	ReadDB     *sql.DB
+	Dialect    Dialect
+	Logger     *slog.Logger
 	// StorageMode controls retention of API-only transaction detail. Empty
 	// selects the consensus-focused core mode.
 	StorageMode string
@@ -124,6 +129,7 @@ type Config struct {
 // Store owns the shared database/sql pools. Provider packages own DSN and
 // driver selection; metadata behavior belongs here.
 type Store struct {
+	sqlitePath  string
 	writeDB     *sql.DB
 	readDB      *sql.DB
 	dialect     Dialect
@@ -193,6 +199,15 @@ type Store struct {
 	bulkMu           sync.RWMutex
 	bulkConnMu       sync.Mutex
 	bulkConn         *sql.Conn
+	// scheduledWorkMu keeps a scheduled checkpoint from crossing the bulk-mode
+	// transition. bulkMode and bulkRestorePending are protected by it. A Mithril
+	// import can keep bulk mode active for hours; checkpointing the same SQLite
+	// database during that interval adds lock traffic without improving recovery,
+	// because the import is explicitly incomplete until its final ready-state
+	// transaction commits.
+	scheduledWorkMu    sync.Mutex
+	bulkMode           bool
+	bulkRestorePending bool
 
 	closeOnce sync.Once
 	closeDone chan struct{}
@@ -269,6 +284,7 @@ func New(config Config) (*Store, error) {
 	store := &Store{
 		writeDB:                     config.WriteDB,
 		readDB:                      config.ReadDB,
+		sqlitePath:                  config.SQLitePath,
 		dialect:                     config.Dialect,
 		logger:                      config.Logger,
 		storageMode:                 config.StorageMode,
@@ -778,7 +794,7 @@ func (s *Store) startCheckpointTicker() {
 					return
 				}
 				started := time.Now()
-				err := s.checkpoint(ctx)
+				err := s.runCheckpoint(ctx)
 				s.checkpointState.CompareAndSwap(1, 0)
 				if err != nil {
 					if ctx.Err() == nil {
@@ -801,6 +817,22 @@ func (s *Store) startCheckpointTicker() {
 			}
 		}
 	}()
+}
+
+func (s *Store) runCheckpoint(ctx context.Context) error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
+	if s.bulkMode {
+		if !s.bulkRestorePending {
+			return nil
+		}
+		if err := s.restoreNormalPragmas(ctx); err != nil {
+			return fmt.Errorf("restoring normal pragmas: %w", err)
+		}
+		s.bulkMode = false
+		s.bulkRestorePending = false
+	}
+	return s.checkpoint(ctx)
 }
 
 func (s *Store) closeCheckpointAdmission() {
@@ -1150,6 +1182,11 @@ func (t *sqlTxn) execSavepoint(operation, name string) error {
 
 // SetBulkLoadPragmas enables backend-specific session tuning.
 func (s *Store) SetBulkLoadPragmas() error {
+	// Take this gate before startMu. CloseContext needs startMu to cancel an
+	// in-flight checkpoint, which lets that callback release this gate instead
+	// of deadlocking a concurrent bulk-mode transition.
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 	if s.closed.Load() {
@@ -1158,10 +1195,17 @@ func (s *Store) SetBulkLoadPragmas() error {
 	s.bulkMu.Lock()
 	defer s.bulkMu.Unlock()
 	if s.bulkConn != nil {
+		s.bulkMode = true
+		s.bulkRestorePending = false
 		return nil
 	}
 	if s.dialect.Name() == "sqlite" {
-		return s.dialect.SetBulkMode(context.Background(), s.writeDB)
+		if err := s.dialect.SetBulkMode(context.Background(), s.writeDB); err != nil {
+			return err
+		}
+		s.bulkMode = true
+		s.bulkRestorePending = false
+		return nil
 	}
 	conn, err := s.writeDB.Conn(context.Background())
 	if err != nil {
@@ -1176,14 +1220,25 @@ func (s *Store) SetBulkLoadPragmas() error {
 		return errors.Join(err, restoreErr, closeErr)
 	}
 	s.bulkConn = conn
+	s.bulkMode = true
+	s.bulkRestorePending = false
 	return nil
 }
 
 // RestoreNormalPragmas restores safe backend defaults.
 func (s *Store) RestoreNormalPragmas() error {
+	s.scheduledWorkMu.Lock()
+	defer s.scheduledWorkMu.Unlock()
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
-	return s.restoreNormalPragmas(context.Background())
+	err := s.restoreNormalPragmas(context.Background())
+	if err == nil {
+		s.bulkMode = false
+		s.bulkRestorePending = false
+	} else {
+		s.bulkRestorePending = true
+	}
+	return err
 }
 
 func (s *Store) restoreNormalPragmas(ctx context.Context) error {
@@ -1201,12 +1256,22 @@ func (s *Store) restoreNormalPragmas(ctx context.Context) error {
 
 // UpdatePlannerStats refreshes backend planner statistics.
 func (s *Store) UpdatePlannerStats() error {
+	return s.UpdatePlannerStatsContext(context.Background())
+}
+
+// UpdatePlannerStatsContext refreshes backend planner statistics until canceled.
+func (s *Store) UpdatePlannerStatsContext(ctx context.Context) error {
 	s.bulkMu.RLock()
 	defer s.bulkMu.RUnlock()
 	if s.bulkConn == nil {
-		return s.dialect.UpdatePlannerStats(context.Background(), s.writeDB)
+		return s.dialect.UpdatePlannerStats(ctx, s.writeDB)
 	}
 	s.bulkConnMu.Lock()
 	defer s.bulkConnMu.Unlock()
-	return s.dialect.UpdatePlannerStats(context.Background(), s.bulkConn)
+	return s.dialect.UpdatePlannerStats(ctx, s.bulkConn)
 }
+
+// SQLitePath returns the active provider's on-disk SQLite location, if any.
+// This optional capability lets clients own separate read-only pools without
+// exposing the provider's pools or requiring it on every MetadataStore.
+func (s *Store) SQLitePath() string { return s.sqlitePath }

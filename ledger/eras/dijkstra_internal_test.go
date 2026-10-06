@@ -24,9 +24,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/plutigo/lang"
 	"github.com/blinklabs-io/plutigo/syn"
@@ -750,4 +752,63 @@ func TestValidateTxDijkstraRejectsPlutusV2WhenSyntheticReferenceScript(
 	)
 
 	require.ErrorIs(t, err, ErrNoCostModelForPlutusV2)
+}
+
+// TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers pins the evaluation fee
+// to the Dijkstra minimum-fee rule, which prices reference scripts at the
+// protocol stride and multiplier rather than the fixed Conway tiers.
+func TestEvaluateTxDijkstraFeeUsesProtocolRefScriptTiers(t *testing.T) {
+	t.Parallel()
+	spendIn := shelley.NewShelleyTransactionInput(
+		"a228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee11", 0,
+	)
+	refIn := shelley.NewShelleyTransactionInput(
+		"b228b482a1aae768e4a796380f49e021d9c21f70d3c12cb186b188dedfc0ee22", 0,
+	)
+	ls := newMockLedgerState()
+	ls.addUtxo(spendIn, babbage.BabbageTransactionOutput{
+		OutputAmount: mary.MaryTransactionOutputValue{Amount: 10_000_000},
+	})
+	ls.addUtxo(refIn, babbage.BabbageTransactionOutput{
+		OutputAmount: mary.MaryTransactionOutputValue{Amount: 2_000_000},
+		TxOutScriptRef: &lcommon.ScriptRef{
+			Type:   lcommon.ScriptRefTypePlutusV4,
+			Script: lcommon.PlutusV4Script(make([]byte, 250)),
+		},
+	})
+	tx := &gdijkstra.DijkstraTransaction{
+		Body: gdijkstra.DijkstraTransactionBody{
+			TxInputs: conway.NewConwayTransactionInputSet(
+				[]shelley.ShelleyTransactionInput{spendIn},
+			),
+			TxReferenceInputs: cbor.NewSetType(
+				[]shelley.ShelleyTransactionInput{refIn},
+				false,
+			),
+		},
+		TxIsValid: true,
+	}
+	pp := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeB:                    1_000,
+			MinFeeRefScriptCostPerByte: &cbor.Rat{Rat: big.NewRat(1, 1)},
+		},
+		RefScriptCostStride:     100,
+		RefScriptCostMultiplier: &cbor.Rat{Rat: big.NewRat(2, 1)},
+	}
+
+	fee, _, _, err := EvaluateTxDijkstra(tx, ls, pp)
+	require.NoError(t, err)
+	// 100 bytes at 1, 100 at 2 and 50 at 4; the Conway tiers would charge 250.
+	require.Equal(t, uint64(1_000+100+200+200), fee)
+	ledgerMin, err := gdijkstra.MinFeeTxWithUtxo(tx, pp, ls)
+	require.NoError(t, err)
+	require.Equal(t, ledgerMin, fee)
+	pp.RefScriptCostStride = 0
+	pp.RefScriptCostMultiplier = nil
+	fee, _, _, err = EvaluateTxDijkstra(tx, ls, pp)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1_000+250), fee,
+		"absent Dijkstra tiers retain Conway reference-script pricing")
+
 }

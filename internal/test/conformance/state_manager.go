@@ -1014,6 +1014,7 @@ func (m *DingoStateManager) ApplyTransaction(
 			if err := governance.ProcessProposals(
 				level,
 				point,
+				storageIndex,
 				m.currentEpoch,
 				govActionLifetime,
 				m.db,

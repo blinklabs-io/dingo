@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/pipeline"
 	"github.com/prometheus/client_golang/prometheus"
@@ -244,12 +245,11 @@ type stateMetrics struct {
 	// Incremented by the block-number count the reconciler's undo-block
 	// resolution expects but has no block_nonce row for at all -- not
 	// merely unresolvable (reconciliationUndoUnresolved), but entirely
-	// absent from the query, the shape of a Byron-era applied block: Byron's
-	// BFT/PoA consensus writes no VRF nonce, so it is invisible to a
-	// block_nonce-keyed search. A rising value means an applied block's
-	// ledger.tx undo event could not even be attempted for lack of a
-	// durable per-block record, not merely because the content was no
-	// longer reachable.
+	// absent from the query, the shape of a Byron-era block applied before
+	// applied points were recorded for every era. A rising value means an
+	// applied block's ledger.tx undo event could not even be attempted for
+	// lack of a durable per-block record, not merely because the content
+	// was no longer reachable.
 	reconciliationUndoMissingRecord prometheus.Counter
 	// Cross-fork continuation audit outcomes. clean, missing_producer and
 	// inconclusive_eb_pending count one audited input each; disarmed_cap
@@ -656,6 +656,21 @@ type blockComposition struct {
 	certificates int
 }
 
+// createdUtxoCount returns how many UTxOs tx adds. This runs inside the
+// block-apply DB transaction for every applied block, so for a valid
+// Shelley-era or later transaction the count is taken without building the
+// UTxOs: Produced() allocates an lcommon.Utxo per output, and those eras
+// produce exactly one UTxO per output. A Byron transaction is the exception,
+// since only outputs 0 through 65535 become UTxOs, and the phase-2-failed rule
+// differs by era (Alonzo produces nothing, Babbage onward at most a collateral
+// return), so both cases are read from Produced() rather than restated here.
+func createdUtxoCount(tx lcommon.Transaction) int {
+	if _, isByron := tx.(*byron.ByronTransaction); isByron || !tx.IsValid() {
+		return len(tx.Produced())
+	}
+	return len(tx.Outputs())
+}
+
 // computeBlockComposition derives a blockComposition from one applied block.
 // UTxO churn follows Produced()/Consumed() semantics, not raw
 // Outputs()/Inputs() -- see the utxoCreatedTotal/utxoConsumedTotal field doc
@@ -669,20 +684,7 @@ func computeBlockComposition(block lcommon.Block) blockComposition {
 	txs := block.Transactions()
 	c.transactions = len(txs)
 	for _, tx := range txs {
-		// This runs inside the block-apply DB transaction for every applied
-		// block, so the created-UTxO count is taken without building the
-		// UTxOs. Produced() allocates an lcommon.Utxo per output and
-		// round-trips the transaction hash through hex to construct each
-		// one's input reference; only its length is wanted here, and every
-		// era defines Produced() for a valid transaction as exactly one UTxO
-		// per output. The phase-2-failed rule differs by era (Alonzo produces
-		// nothing, Babbage onward at most a collateral return), so that case
-		// is still read from Produced() rather than restated here.
-		if tx.IsValid() {
-			c.utxoCreated += len(tx.Outputs())
-		} else {
-			c.utxoCreated += len(tx.Produced())
-		}
+		c.utxoCreated += createdUtxoCount(tx)
 		c.utxoConsumed += len(tx.Consumed())
 		c.certificates += len(tx.Certificates())
 		witnesses := tx.Witnesses()
@@ -1163,7 +1165,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.reconciliationUndoMissingRecord = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_reconciliation_undo_missing_record_total",
-			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era applied block (issue #3778)",
+			Help: "applied blocks in a reconciliation undo range with no block_nonce row at all, not merely unresolvable content -- the shape of a Byron-era block applied before applied points were recorded for every era",
 		},
 	)
 	// Cross-fork continuation audit verdicts, labelled by result:

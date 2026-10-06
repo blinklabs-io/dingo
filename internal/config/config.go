@@ -71,6 +71,11 @@ const DefaultShutdownTimeout = "30s"
 // for the ledger to process all blocks before returning an error.
 const DefaultLedgerCatchupTimeout = "30m"
 
+// DefaultLocalStateQueryViewMaxLifetime is how long a node-to-client
+// LocalStateQuery session may hold one acquired ledger snapshot before the
+// node closes it. It must match the fallback in the ouroboros package.
+const DefaultLocalStateQueryViewMaxLifetime = "5m"
+
 func WithContext(ctx context.Context, cfg *Config) context.Context {
 	return context.WithValue(ctx, configContextKey, cfg)
 }
@@ -612,6 +617,10 @@ type Config struct {
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
 	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
+	// may hold one acquired ledger snapshot before the node closes it.
+	// Default: "5m".
+	LocalStateQueryViewMaxLifetime string `yaml:"localStateQueryViewMaxLifetime" envconfig:"DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -933,6 +942,7 @@ type APIPluginsConfig struct {
 	Kupo       hostplugin.Selection `yaml:"kupo"`
 	Mesh       hostplugin.Selection `yaml:"mesh"`
 	Utxorpc    hostplugin.Selection `yaml:"utxorpc"`
+	Mcp        hostplugin.Selection `yaml:"mcp"`
 }
 
 // APIConfig holds the shared TLS policy defaults
@@ -989,6 +999,10 @@ func defaultPluginsConfig() PluginsConfig {
 			Utxorpc: hostplugin.Selection{
 				Provider: "builtin",
 				Config:   map[string]any{"port": 9090},
+			},
+			Mcp: hostplugin.Selection{
+				Provider: "builtin",
+				Config:   map[string]any{"port": 0},
 			},
 		},
 	}
@@ -1154,6 +1168,11 @@ type MithrilConfig struct {
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
+	// DownloadMaxBytes bounds each compressed Mithril object, including
+	// resumed bytes. Zero uses the built-in limit for each object type. A
+	// positive value replaces those limits for every object, and raising it
+	// lowers how many immutable archives download concurrently.
+	DownloadMaxBytes int64 `yaml:"downloadMaxBytes"       envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_BYTES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
@@ -1275,6 +1294,7 @@ func newDefaultConfig() *Config {
 		ImmutableDbPath:                     "",
 		ShutdownTimeout:                     DefaultShutdownTimeout,
 		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
+		LocalStateQueryViewMaxLifetime:      DefaultLocalStateQueryViewMaxLifetime,
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
@@ -1438,6 +1458,7 @@ func cloneConfig(cfg *Config) *Config {
 	clone.Plugins.API.Kupo = clonePluginSelection(cfg.Plugins.API.Kupo)
 	clone.Plugins.API.Mesh = clonePluginSelection(cfg.Plugins.API.Mesh)
 	clone.Plugins.API.Utxorpc = clonePluginSelection(cfg.Plugins.API.Utxorpc)
+	clone.Plugins.API.Mcp = clonePluginSelection(cfg.Plugins.API.Mcp)
 	if cfg.provenance != nil {
 		clone.provenance = make(Provenance, len(cfg.provenance))
 		maps.Copy(clone.provenance, cfg.provenance)
@@ -1531,6 +1552,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, fmt.Errorf("error processing environment: %+w", err)
 	}
 	pluginEnviron := os.Environ()
+	applyMCPAuthCompatibilityEnvironment(cfg, pluginEnviron)
 	if err := applyAPIPortCompatibilityEnvironment(
 		cfg,
 		pluginEnviron,
@@ -1551,6 +1573,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		{hostplugin.CapabilityAPIKupo, &cfg.Plugins.API.Kupo},
 		{hostplugin.CapabilityAPIMesh, &cfg.Plugins.API.Mesh},
 		{hostplugin.CapabilityAPIUtxorpc, &cfg.Plugins.API.Utxorpc},
+		{hostplugin.CapabilityAPIMcp, &cfg.Plugins.API.Mcp},
 	}
 	for _, item := range pluginSelections {
 		if err := hostplugin.ApplyEnvironment(item.capability, item.selection, pluginEnviron); err != nil {
@@ -1609,6 +1632,11 @@ func applyAPIPortCompatibilityEnvironment(cfg *Config, environ []string) error {
 			legacyName:    "DINGO_UTXORPC_PORT",
 			canonicalName: "DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT",
 			selection:     &cfg.Plugins.API.Utxorpc,
+		},
+		{
+			legacyName:    "DINGO_MCP_PORT",
+			canonicalName: "DINGO_PLUGINS_API_MCP_CONFIG_PORT",
+			selection:     &cfg.Plugins.API.Mcp,
 		},
 	}
 	values := make(map[string]string, len(environ))
@@ -1896,4 +1924,27 @@ func embeddedTopologyFileMissing(file string) bool {
 
 func GetTopologyConfig() *topology.TopologyConfig {
 	return globalTopologyConfig
+}
+
+func applyMCPAuthCompatibilityEnvironment(cfg *Config, environ []string) {
+	var token string
+	var found bool
+	for _, entry := range environ {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if name == "DINGO_PLUGINS_API_MCP_CONFIG_AUTH_TOKEN" {
+			return
+		}
+		if name == "DINGO_MCP_AUTH_TOKEN" {
+			token, found = value, true
+		}
+	}
+	if found {
+		if cfg.Plugins.API.Mcp.Config == nil {
+			cfg.Plugins.API.Mcp.Config = make(map[string]any)
+		}
+		cfg.Plugins.API.Mcp.Config["authToken"] = token
+	}
 }

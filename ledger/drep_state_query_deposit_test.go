@@ -56,7 +56,7 @@ func drepStateQueryDeposits(
 	}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(creds)
+	result, err := ls.queryShelleyDRepState(creds, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)

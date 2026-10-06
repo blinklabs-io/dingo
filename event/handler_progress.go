@@ -14,7 +14,10 @@
 
 package event
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // handlerProgressWarnInterval is the stall threshold: how long a SubscribeFunc
 // handler may stay inside a single event before the subscription becomes
@@ -153,6 +156,22 @@ func (e *EventBus) StuckHandlerCount() int {
 		}
 	}
 	return count
+}
+
+// runningHandlerTypes returns the sorted, de-duplicated event types of
+// subscriptions whose handler is currently running. Subscriptions stay in
+// channelSubsById until their dispatch goroutine exits, so this still sees the
+// handlers a shutdown is waiting on.
+func (e *EventBus) runningHandlerTypes() []EventType {
+	now := time.Now()
+	var types []EventType
+	for _, sub := range e.channelSubscriberSnapshot() {
+		if _, _, running := sub.handlerStuckFor(now); running {
+			types = append(types, sub.eventType)
+		}
+	}
+	slices.Sort(types)
+	return slices.Compact(types)
 }
 
 // observeHandlerProgress materializes the zero-valued handler-stall series for
