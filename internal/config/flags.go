@@ -103,6 +103,12 @@ var flagSpecs = []flagSpec{
 		"ledger catch-up timeout for load mode",
 	),
 	stringFlag(
+		"LocalStateQueryViewMaxLifetime",
+		"local-state-query-view-max-lifetime",
+		"",
+		"maximum lifetime of a local-state-query ledger snapshot",
+	),
+	stringFlag(
 		"TlsCertFilePath",
 		"tls-cert-file-path",
 		"",

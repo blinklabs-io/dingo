@@ -277,6 +277,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// SQLite without a data directory is a shared-cache in-memory store whose
+	// table locks block the ledger's writes while any read transaction is
+	// open, which an acquired LocalStateQuery snapshot always holds.
+	if c.DatabasePath == "" &&
+		(c.Plugins.Storage.Metadata.Provider == "" ||
+			c.Plugins.Storage.Metadata.Provider == "sqlite") {
+		errs = append(errs, errors.New(
+			"databasePath must be set when the metadata provider is sqlite: "+
+				"an in-memory SQLite store blocks block production while "+
+				"a LocalStateQuery snapshot is held",
+		))
+	}
+
 	// Load mode requires a source ImmutableDB
 	if effectiveMode == RunModeLoad && c.ImmutableDbPath == "" {
 		errs = append(errs, errors.New(
@@ -707,6 +720,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"shutdownTimeout", c.ShutdownTimeout, true},
 		{"ledgerCatchupTimeout", c.LedgerCatchupTimeout, true},
+		{"localStateQueryViewMaxLifetime", c.LocalStateQueryViewMaxLifetime, true},
 		{"chainsync.stallTimeout", c.Chainsync.StallTimeout, true},
 		// Negative disables Mithril download idle detection
 		{"mithril.downloadIdleTimeout", c.Mithril.DownloadIdleTimeout, false},
