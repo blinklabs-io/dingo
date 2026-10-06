@@ -284,6 +284,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// SQLite without a data directory is a shared-cache in-memory store whose
+	// table locks block the ledger's writes while any read transaction is
+	// open, which an acquired LocalStateQuery snapshot always holds.
+	if c.DatabasePath == "" &&
+		(c.Plugins.Storage.Metadata.Provider == "" ||
+			c.Plugins.Storage.Metadata.Provider == "sqlite") {
+		errs = append(errs, errors.New(
+			"databasePath must be set when the metadata provider is sqlite: "+
+				"an in-memory SQLite store blocks block production while "+
+				"a LocalStateQuery snapshot is held",
+		))
+	}
+
 	// Load mode requires a source ImmutableDB
 	if effectiveMode == RunModeLoad && c.ImmutableDbPath == "" {
 		errs = append(errs, errors.New(
@@ -324,6 +337,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
 	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	mcpHost := "127.0.0.1"
+	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
+		mcpHost = host
+		if host == "" {
+			mcpHost = c.BindAddr
+		}
+	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
@@ -341,6 +361,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"debugPort", c.DebugBindAddr, c.DebugPort, auxListeners, false},
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
+		{
+			"plugins.api.mcp.config.port",
+			mcpHost,
+			APIPluginPort(c.Plugins.API.Mcp),
+			serving,
+			false,
+		},
 		{
 			"plugins.api.utxorpc.config.port",
 			c.BindAddr,
@@ -693,6 +720,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"shutdownTimeout", c.ShutdownTimeout, true},
 		{"ledgerCatchupTimeout", c.LedgerCatchupTimeout, true},
+		{"localStateQueryViewMaxLifetime", c.LocalStateQueryViewMaxLifetime, true},
 		{"chainsync.stallTimeout", c.Chainsync.StallTimeout, true},
 		// Negative disables Mithril download idle detection
 		{"mithril.downloadIdleTimeout", c.Mithril.DownloadIdleTimeout, false},
@@ -760,6 +788,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
 			c.Mithril.Backend,
+		))
+	}
+
+	if c.Mithril.DownloadMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.downloadMaxBytes %d: must not be negative",
+			c.Mithril.DownloadMaxBytes,
 		))
 	}
 

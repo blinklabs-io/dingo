@@ -321,8 +321,7 @@ func retryTxsubmissionAdmission(
 		if err == nil {
 			return nil
 		}
-		var fullErr *mempool.MempoolFullError
-		if !errors.As(err, &fullErr) {
+		if _, ok := errors.AsType[*mempool.MempoolFullError](err); !ok {
 			return err
 		}
 		retryStreak++
@@ -443,7 +442,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 ) error {
 	// Start async loop to request transactions from the peer's mempool
 	go func() {
-		conn := o.connManager.GetConnectionById(ctx.ConnectionId)
+		conn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
 		if conn == nil {
 			return
 		}
@@ -461,7 +460,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			if limitAdmission {
 				if !headroom.WaitForAdmissionHeadroom(
 					1,
-					conn.ErrorChan(),
+					connDone,
 				) {
 					return
 				}
@@ -485,7 +484,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 			}()
 			select {
 			case <-done:
-			case <-conn.ErrorChan():
+			case <-connDone:
 				return
 			}
 			if err != nil {
@@ -565,7 +564,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						) {
 							continue
 						}
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 				} else {
@@ -607,7 +606,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 						))
 						select {
 						case <-backoffTimer.C:
-						case <-conn.ErrorChan():
+						case <-connDone:
 							return
 						}
 						continue
@@ -615,7 +614,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					consecutiveImpossibleOffers = 0
 					if !headroom.WaitForAdmissionHeadroom(
 						advertisedBytes+maxDiscrepancyBytes,
-						conn.ErrorChan(),
+						connDone,
 					) {
 						return
 					}
@@ -697,7 +696,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					)
 					select {
 					case <-backoffTimer.C:
-					case <-conn.ErrorChan():
+					case <-connDone:
 						return
 					}
 					continue
@@ -729,7 +728,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 							func() bool {
 								return headroom.WaitForAdmissionHeadroom(
 									int64(len(txBody.TxBody)),
-									conn.ErrorChan(),
+									connDone,
 								)
 							},
 							o.recordTxsubmissionAdmissionRetry,

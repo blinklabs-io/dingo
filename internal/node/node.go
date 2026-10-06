@@ -412,12 +412,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
+	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
 		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"mcp", mcpPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
@@ -615,6 +617,11 @@ func buildDingoConfig(
 	chainsyncStallTimeout time.Duration,
 	chainsyncStrategy chainsync.HeaderSyncStrategy,
 ) dingo.Config {
+	// Validated by config.Validate before the node starts, so a parse
+	// failure here leaves the zero value and selects the default.
+	localStateQueryViewMaxLifetime, _ := time.ParseDuration(
+		cfg.LocalStateQueryViewMaxLifetime,
+	)
 	return dingo.NewConfig(
 		dingo.WithIntersectTip(cfg.IntersectTip),
 		dingo.WithLogger(logger),
@@ -646,6 +653,10 @@ func buildDingoConfig(
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIUtxorpc,
 			cfg.Plugins.API.Utxorpc,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIMcp,
+			cfg.Plugins.API.Mcp,
 		),
 		dingo.WithNetwork(cfg.Network),
 		dingo.WithNetworkMagic(cfg.NetworkMagic),
@@ -749,6 +760,7 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
+		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),

@@ -1122,8 +1122,7 @@ func TestAddLocalBlockRejectsStaleParentAndPreservesPendingHeaders(
 	}
 
 	err = c.AddLocalBlock(staleBlock)
-	var staleErr chain.BlockNotFitChainTipError
-	if !errors.As(err, &staleErr) {
+	if _, ok := errors.AsType[chain.BlockNotFitChainTipError](err); !ok {
 		t.Fatalf("expected stale parent error, got %v", err)
 	}
 	if got := c.HeaderCount(); got != 1 {
@@ -5797,8 +5796,7 @@ func assertOriginResult(
 			tc.blockNumber,
 		)
 	}
-	var notFitErr chain.BlockNotFitChainTipError
-	if !errors.As(err, &notFitErr) {
+	if _, ok := errors.AsType[chain.BlockNotFitChainTipError](err); !ok {
 		t.Fatalf(
 			"%s: expected BlockNotFitChainTipError, got %T: %s",
 			op,
@@ -5986,8 +5984,7 @@ func TestAddRawBlocksAfterRollbackToOriginWithQueuedHeader(t *testing.T) {
 				"missing prefix",
 		)
 	}
-	var notFitErr chain.BlockNotFitChainTipError
-	if !errors.As(err, &notFitErr) {
+	if _, ok := errors.AsType[chain.BlockNotFitChainTipError](err); !ok {
 		t.Fatalf("expected BlockNotFitChainTipError, got %T: %s", err, err)
 	}
 	assertStillAtOriginWithQueuedHeader(t, c)
@@ -6090,8 +6087,7 @@ func TestAddBlockAfterRollbackToOriginRejectsChainShortOfBlockZero(
 				"the chain is then permanently short block 0",
 		)
 	}
-	var notFitErr chain.BlockNotFitChainTipError
-	if !errors.As(err, &notFitErr) {
+	if _, ok := errors.AsType[chain.BlockNotFitChainTipError](err); !ok {
 		t.Fatalf("expected BlockNotFitChainTipError, got %T: %s", err, err)
 	}
 	assertStillAtOrigin(t, c, "rejected number-1 first block")

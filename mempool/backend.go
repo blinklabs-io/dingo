@@ -74,7 +74,7 @@ type Pool interface {
 type AdmissionHeadroom interface {
 	AdmissionHeadroomBytes() int64
 	MaxAdmissionHeadroomBytes() int64
-	WaitForAdmissionHeadroom(minBytes int64, done <-chan error) bool
+	WaitForAdmissionHeadroom(minBytes int64, done <-chan struct{}) bool
 }
 
 // FIFO exposes the current ordered mempool explicitly as the FIFO backend. The
@@ -123,7 +123,7 @@ func (f *FIFO) MaxAdmissionHeadroomBytes() int64 {
 
 func (f *FIFO) WaitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	return f.waitForAdmissionHeadroom(minBytes, done)
 }
@@ -179,7 +179,7 @@ func (d *DAG) MaxAdmissionHeadroomBytes() int64 {
 // budget is available or either the connection or mempool stops.
 func (d *DAG) WaitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	return d.waitForAdmissionHeadroom(minBytes, done)
 }
