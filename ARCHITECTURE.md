@@ -1658,9 +1658,7 @@ Phase 1: Stop accepting new work
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
   block forger, leader election, Leios pipeline and vote managers,
-  snapshot manager, database lifecycle manager, then a full Ouroboros
-  close (Leios persistence writer and retention GC, EventBus
-  subscriptions, Prometheus collectors, validation cancel)
+  snapshot manager, database lifecycle manager
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
   chain selector, peer governor, UTxO RPC,
@@ -1671,8 +1669,11 @@ Phase 1: Stop accepting new work
 Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
   (concurrent with ConnectionManager), ConnectionManager,
-  Ouroboros (`Ouroboros.Close`: releases acquired LocalStateQuery snapshots;
-  bounded by the shutdown deadline and skipped once a phase-2 wait was abandoned)
+  Ouroboros (`Ouroboros.Close`, the only shutdown close: releases acquired
+  LocalStateQuery snapshots, drains the Leios persistence writer and
+  retention GC, detaches EventBus subscriptions and Prometheus collectors,
+  cancels validation; bounded by the shutdown deadline and skipped once a
+  phase-2 wait was abandoned)
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -1685,9 +1686,10 @@ The phase-1 components enumerated by `shutdownPhase1ComponentStops` each
 wait for a goroutine to exit with no deadline of their own. That list starts
 with the two context-owned workers, continues with `quiesceComponentStops`,
 the set `quiesceForLiveLifecycleOp` stops before live restore/truncate closes
-storage, and ends with a full Ouroboros close. The close drains the Leios
-persistence writer and retention worker, detaches EventBus subscriptions and
-Prometheus collectors, and cancels validation work before storage closes.
+storage. Ouroboros is not in this list: an NtC client can acquire a
+LocalStateQuery snapshot until its connection drains, so shutdown closes
+Ouroboros once, after phase 2, and an unconfirmed Leios persistence drain
+there skips the phase-3 storage closes like an unfinished phase-1 wait.
 Each wait is routed through `stopWithDeadline` with whatever remains of the
 one shutdown deadline, not a fresh timeout per component, so a goroutine that
 never observes

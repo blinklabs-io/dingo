@@ -164,7 +164,7 @@ var closeOuroborosForShutdown = func(ouro *ouroborosPkg.Ouroboros) error {
 // direct calls after this list (chainSelector.Stop only cancels and does not
 // wait; peerGov.Stop already honors ctx).
 func (n *Node) shutdownPhase1ComponentStops() []namedStop {
-	stops := append([]namedStop{
+	return append([]namedStop{
 		{
 			name: "chainsync stall recycler",
 			stop: func() error { n.waitChainsyncStallRecycler(); return nil },
@@ -174,13 +174,6 @@ func (n *Node) shutdownPhase1ComponentStops() []namedStop {
 			stop: func() error { n.waitChainSelectedNoneWorker(); return nil },
 		},
 	}, n.quiesceComponentStops()...)
-	if ouro := n.ouroboros(); ouro != nil {
-		stops = append(stops, namedStop{
-			name: "ouroboros",
-			stop: func() error { return closeOuroborosForShutdown(ouro) },
-		})
-	}
-	return stops
 }
 
 // componentStopsForShutdownPhase1 is (*Node).shutdownPhase1ComponentStops,
@@ -429,15 +422,20 @@ func (n *Node) shutdown() error {
 		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
 	)
 
-	// Acquired LocalStateQuery snapshots are read transactions on the
-	// database phase 3 closes; release them first. Close waits on Leios
-	// validation and EventBus handlers with no deadline of its own, so it is
-	// bounded like a phase-1 stop and skipped when phase 2 already abandoned
-	// a handler: phase 3 then leaves the database open and the snapshots with
-	// it. Close is idempotent, so Run's deferred call is then a no-op.
+	// This is the only shutdown close of Ouroboros. Acquired LocalStateQuery
+	// snapshots are read transactions on the database phase 3 closes, and an
+	// NtC client can acquire one until its connection drains, so the close
+	// runs after phase 2 rather than in phase 1. It also drains the Leios
+	// persistence writer and retention GC, which write to the database. Close
+	// waits on Leios validation and EventBus handlers with no deadline of its
+	// own, so it is bounded like a phase-1 stop, and skipped when phase 2
+	// already abandoned a handler: phase 3 then leaves the database open and
+	// the snapshots with it. An unconfirmed persistence drain likewise leaves
+	// phase 3 skipping the storage closes.
 	if ouro := n.ouroboros(); ouro != nil && storageDrainConfirmed {
 		if stopErr := stopWithDeadline(
-			max(time.Until(deadline), 0), "ouroboros", ouro.Close,
+			max(time.Until(deadline), 0), "ouroboros",
+			func() error { return closeOuroborosForShutdown(ouro) },
 		); stopErr != nil {
 			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
 				storageDrainConfirmed = false

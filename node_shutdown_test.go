@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -219,6 +220,82 @@ func TestNodeStopSkipsStorageCloseWhenLeiosPersistenceDrainUnconfirmed(
 		"database must remain usable after an unconfirmed Leios worker drain",
 	)
 	require.NoError(t, n.ouroboros().Close())
+}
+
+// Not t.Parallel: swaps the package-level closeOuroborosInstance seam.
+//
+// Ouroboros.Close releases acquired LocalStateQuery snapshots, and nothing
+// stops an NtC client from acquiring a new one while connections are still
+// open. Shutdown must therefore close Ouroboros exactly once, after phase 2
+// has drained connections and before phase 3 closes the database.
+func TestNodeStopClosesOuroborosOnceAfterConnectionsDrain(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	order := &shutdownOrderLogHandler{}
+	n.config.logger = slog.New(order)
+	previous := closeOuroborosInstance
+	closeOuroborosInstance = func(ouro *ouroborosPkg.Ouroboros) error {
+		order.add("ouroboros close")
+		return previous(ouro)
+	}
+	t.Cleanup(func() { closeOuroborosInstance = previous })
+
+	require.NoError(t, n.Stop())
+
+	closes := order.indexes("ouroboros close")
+	require.Len(t, closes, 1, "shutdown must close Ouroboros exactly once")
+	phase2 := order.indexes("shutdown phase 2 complete")
+	phase3 := order.indexes("shutdown phase 3: flushing state")
+	require.Len(t, phase2, 1)
+	require.Len(t, phase3, 1)
+	assert.Greater(t, closes[0], phase2[0],
+		"Ouroboros must close after connections drain")
+	assert.Less(t, closes[0], phase3[0],
+		"Ouroboros must close before the database closes")
+}
+
+// shutdownOrderLogHandler records log messages, plus markers a test adds, in
+// the order they happen.
+type shutdownOrderLogHandler struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (h *shutdownOrderLogHandler) add(entry string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.entries = append(h.entries, entry)
+}
+
+func (h *shutdownOrderLogHandler) indexes(entry string) []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var ret []int
+	for i, e := range h.entries {
+		if e == entry {
+			ret = append(ret, i)
+		}
+	}
+	return ret
+}
+
+func (h *shutdownOrderLogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *shutdownOrderLogHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	h.add(record.Message)
+	return nil
+}
+
+func (h *shutdownOrderLogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *shutdownOrderLogHandler) WithGroup(string) slog.Handler {
+	return h
 }
 
 // shutdownTestResourceLogHandler counts closeWithShutdownTimeout's log records
