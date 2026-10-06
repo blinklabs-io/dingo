@@ -138,3 +138,25 @@ func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "does not resolve as the current root")
 }
+
+// A gov-state checkpoint can predate the root verifier, so a resumed import
+// that skips importGovState must still verify the snapshot roots.
+func TestImportLedgerStateResumeVerifiesPurposeRoots(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	root := &ParsedGovActionId{TxHash: bytes.Repeat([]byte{0x33}, 32)}
+	cfg := govImportConfigForTest(db, govStateWithRoots(
+		t, [4]*ParsedGovActionId{root, nil, nil, nil}, false,
+	))
+	cfg.ImportKey = "resume-purpose-roots"
+	cfg.State.Tip = &SnapshotTip{
+		Slot:      50_000,
+		BlockHash: bytes.Repeat([]byte{0x44}, 32),
+	}
+	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseGovState))
+
+	err = ImportLedgerState(context.Background(), cfg)
+	require.ErrorContains(t, err, "is not an enacted governance proposal")
+}

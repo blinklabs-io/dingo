@@ -4669,7 +4669,9 @@ actions from another governance purpose cannot advance this root.
 A ledger-state import writes one synthetic enacted row (`added_slot` 0) for
 each non-null per-purpose root in the snapshot, then re-reads every one and
 fails the import unless it is a row with `enacted_epoch` set that
-`GetLastEnactedGovernanceProposal` returns as that purpose's current root. A
+`GetLastEnactedGovernanceProposal` returns as that purpose's current root.
+A resumed import whose governance phase is already checkpointed re-parses the
+snapshot and runs the same check. A
 database with a `mithril_ledger_slot` sync-state row is Mithril-bootstrapped;
 at startup and at each epoch boundary such a database must have an enacted
 root for every chained purpose whose active proposals name a parent that is

@@ -4062,9 +4062,10 @@ The `LedgerView` interface provides query access to ledger state:
   three points. `ledgerstate` import re-reads every non-null
   `ParsedPrevGovActionIds` root after seeding and fails the import unless it is
   an enacted `governance_proposal` row that `GetLastEnactedGovernanceProposal`
-  resolves as its purpose's current root. After loading the epoch cache,
-  `LedgerState.Start` calls `governance.VerifyPurposeRoots` at the current
-  epoch and refuses to start a Mithril-bootstrapped
+  resolves as its purpose's current root; a resumed import that skips the
+  governance phase runs the same check. Before starting its worker pool and
+  cleanup timer, `LedgerState.Start` calls `governance.VerifyPurposeRoots` at
+  the latest stored epoch and refuses to start a Mithril-bootstrapped
   database (one with a `mithril_ledger_slot` sync-state row) when an active
   chained proposal names a parent that has no enacted purpose root, is not an
   active proposal and is not a stored row. The epoch tally applies the same

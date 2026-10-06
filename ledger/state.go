@@ -2075,6 +2075,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadMithrilTrustBoundary(); err != nil {
 		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
 	}
+	// Refuse to start on a snapshot-seeded database whose governance
+	// purpose roots are missing: tallying would skip ratifications the
+	// network performs and diverge at enactment. This runs before the
+	// worker pool and cleanup timer start because the caller only closes
+	// the ledger after Start succeeds, so the epoch comes from the stored
+	// epoch rows rather than currentEpoch, which loadEpochs sets later.
+	if err := ls.verifyGovernancePurposeRoots(); err != nil {
+		return fmt.Errorf("verify governance purpose roots: %w", err)
+	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart: without this the first
@@ -2119,15 +2128,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
 	ls.checkpointWrittenForEpoch = false
-	// Refuse to start on a snapshot-seeded database whose governance
-	// purpose roots are missing: tallying would skip ratifications the
-	// network performs and diverge at enactment. currentEpoch is only
-	// valid once loadEpochs has run.
-	if err := governance.VerifyPurposeRoots(
-		ls.db, nil, ls.currentEpoch.EpochId,
-	); err != nil {
-		return fmt.Errorf("verify governance purpose roots: %w", err)
-	}
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)
@@ -10029,6 +10029,20 @@ func (ls *LedgerState) computeGenesisProtocolParameters(
 	}
 
 	return pparams, nil
+}
+
+// verifyGovernancePurposeRoots runs governance.VerifyPurposeRoots at the
+// latest stored epoch, the epoch loadEpochs makes current.
+func (ls *LedgerState) verifyGovernancePurposeRoots() error {
+	epochs, err := ls.db.GetEpochs(nil)
+	if err != nil {
+		return fmt.Errorf("get epochs: %w", err)
+	}
+	var epoch uint64
+	if len(epochs) > 0 {
+		epoch = epochs[len(epochs)-1].EpochId
+	}
+	return governance.VerifyPurposeRoots(ls.db, nil, epoch)
 }
 
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {

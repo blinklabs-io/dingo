@@ -34,7 +34,10 @@ const purposeRootStartEpoch = 10
 // startWithUnseededChild starts a Mithril-bootstrapped ledger whose current
 // epoch is purposeRootStartEpoch and whose only proposal chains to a parent
 // that exists nowhere, expiring after expiresEpoch.
-func startWithUnseededChild(t *testing.T, expiresEpoch uint64) error {
+func startWithUnseededChild(
+	t *testing.T,
+	expiresEpoch uint64,
+) (*LedgerState, error) {
 	t.Helper()
 	db := newTestDB(t)
 	require.NoError(t, db.SetSyncState(mithrilLedgerSlotSyncKey, "42", nil))
@@ -67,25 +70,33 @@ func startWithUnseededChild(t *testing.T, expiresEpoch uint64) error {
 	require.NoError(t, err)
 	t.Cleanup(ls.publishCancel)
 	err = ls.Start(t.Context())
-	if err == nil {
-		t.Cleanup(func() { _ = ls.Close() })
-	}
-	return err
+	t.Cleanup(func() { _ = ls.Close() })
+	return ls, err
 }
 
 func TestLedgerStateStartRefusesUnseededPurposeRoot(t *testing.T) {
 	t.Parallel()
 
-	err := startWithUnseededChild(t, purposeRootStartEpoch+5)
+	ls, err := startWithUnseededChild(t, purposeRootStartEpoch+5)
 	require.ErrorIs(t, err, governance.ErrMissingEnactedRoot)
+	// Node.Run registers Close only after Start succeeds, so the refusal
+	// must happen before Start creates anything Close would release.
+	require.Nil(t, ls.dbWorkerPool, "worker pool started before refusal")
+	ls.cleanupMu.Lock()
+	timer := ls.timerCleanupConsumedUtxos
+	ls.cleanupMu.Unlock()
+	require.Nil(t, timer, "cleanup timer scheduled before refusal")
 }
 
-// The startup check reads the active set at the loaded current epoch, the
+// The startup check reads the active set at the latest stored epoch, the
 // set the next boundary tally reads, so a proposal already past its expiry
-// is not checked.
+// is not checked. The fixture cannot complete Start (it has no genesis
+// block), so the assertion is that Start got past the check: the worker
+// pool is created immediately after it.
 func TestLedgerStateStartChecksPurposeRootsAtLoadedEpoch(t *testing.T) {
 	t.Parallel()
 
-	err := startWithUnseededChild(t, purposeRootStartEpoch-5)
+	ls, err := startWithUnseededChild(t, purposeRootStartEpoch-5)
 	require.NotErrorIs(t, err, governance.ErrMissingEnactedRoot)
+	require.NotNil(t, ls.dbWorkerPool, "Start stopped before the check")
 }

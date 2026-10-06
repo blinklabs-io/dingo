@@ -789,6 +789,14 @@ func decideRatification(
 		)
 	}
 
+	// Resolved on the first rootless chained proposal and reused: the
+	// trust boundary cannot change and stillActive is not mutated by the
+	// loop, so genesis-synced tallies without such proposals pay nothing.
+	var (
+		bootstrapChecked bool
+		bootstrapped     bool
+		activeKeys       map[string]struct{}
+	)
 	for _, proposal := range stillActive {
 		actionType := lcommon.GovActionType(proposal.ActionType)
 		purpose := govActionPurposeOf(actionType)
@@ -808,16 +816,24 @@ func decideRatification(
 			// from their own enactments and keep the skip.
 			if root == nil && proposal.ParentTxHash != nil &&
 				purpose != purposeNone {
-				bootstrapped, err := isMithrilBootstrapped(in.DB, in.Txn)
-				if err != nil {
-					return nil, fmt.Errorf(
-						"read Mithril trust boundary: %w", err,
+				if !bootstrapChecked {
+					var err error
+					bootstrapped, err = isMithrilBootstrapped(
+						in.DB, in.Txn,
 					)
+					if err != nil {
+						return nil, fmt.Errorf(
+							"read Mithril trust boundary: %w", err,
+						)
+					}
+					bootstrapChecked = true
 				}
 				if bootstrapped {
+					if activeKeys == nil {
+						activeKeys = activeProposalKeys(stillActive)
+					}
 					if err := checkMissingEnactedRoot(
-						in.DB, in.Txn, proposal, root,
-						activeProposalKeys(stillActive),
+						in.DB, in.Txn, proposal, root, activeKeys,
 					); err != nil {
 						return nil, err
 					}

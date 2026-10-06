@@ -689,6 +689,17 @@ func ImportLedgerState(
 				"(already completed)",
 			"component", "ledgerstate",
 		)
+		// The checkpoint may predate the root verifier, so verify the
+		// seeded roots even though the phase is not re-run.
+		if cfg.State.GovStateData != nil &&
+			cfg.State.EraIndex >= EraConway {
+			if err := verifyImportedPurposeRoots(cfg); err != nil {
+				return fmt.Errorf(
+					"verifying per-purpose governance roots: %w",
+					err,
+				)
+			}
+		}
 	}
 
 	// Mithril v2 catch-up: the snapshot is the complete, trusted ledger state
@@ -4080,6 +4091,27 @@ func seedPrevGovActionIds(
 		)
 	}
 	return count, nil
+}
+
+// verifyImportedPurposeRoots parses the snapshot governance state and
+// verifies its per-purpose roots against the database.
+func verifyImportedPurposeRoots(cfg ImportConfig) error {
+	govState, err := ParseGovState(
+		cfg.State.GovStateData,
+		cfg.State.EraIndex,
+	)
+	if govState == nil {
+		if err != nil {
+			return fmt.Errorf("parsing governance state: %w", err)
+		}
+		return nil
+	}
+	if govState.PrevGovActionIds == nil {
+		return nil
+	}
+	return verifyPrevGovActionIdsSeeded(
+		cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
+	)
 }
 
 // verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
