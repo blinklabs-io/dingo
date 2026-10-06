@@ -29,6 +29,7 @@ import (
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/require"
 )
 
@@ -430,5 +431,291 @@ func TestVerifyPointQueryable_RejectsPointWhoseGoSnapshotIsPruned(
 	require.NoError(
 		t,
 		ls.VerifyPointQueryable(nil, QueryPoint{Slot: 550, Hash: retained}),
+	)
+}
+
+// newStakePoolsLedger seeds epochs 0-6 of 100 slots, a pool registered at
+// slot 100 and another at slot 600, and a tip at slot 650.
+func newStakePoolsLedger(t *testing.T) (*LedgerState, []byte, []byte) {
+	t.Helper()
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	epochs := map[uint64]uint64{}
+	for epoch := uint64(0); epoch <= 6; epoch++ {
+		epochs[epoch*100] = epoch
+	}
+	seedEpochs(t, ls, epochs)
+	early := repeatedBytes(28, 0x31)
+	late := repeatedBytes(28, 0x32)
+	for _, p := range []struct {
+		hash []byte
+		slot uint64
+	}{{early, 100}, {late, 600}} {
+		require.NoError(t, db.Metadata().ImportPool(
+			&models.Pool{
+				PoolKeyHash: p.hash,
+				VrfKeyHash:  repeatedBytes(32, p.hash[0]),
+			},
+			&models.PoolRegistration{
+				PoolKeyHash: p.hash,
+				VrfKeyHash:  repeatedBytes(32, p.hash[0]),
+				AddedSlot:   p.slot,
+				Pledge:      dbtypes.Uint64(1),
+				Cost:        dbtypes.Uint64(1),
+			},
+			nil,
+		))
+	}
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+	return ls, early, late
+}
+
+func stakePoolIDs(t *testing.T, result any) []ledger.PoolId {
+	t.Helper()
+	set, ok := result.([]any)[0].(cbor.Set)
+	require.True(t, ok)
+	ids := make([]ledger.PoolId, 0, len(set))
+	for _, v := range set {
+		id, ok := v.(ledger.PoolId)
+		require.True(t, ok)
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func poolID(hash []byte) ledger.PoolId {
+	return ledger.PoolId(lcommon.NewBlake2b224(hash))
+}
+
+func TestQueryShelleyStakePools_PinnedPointAnswersAtThatPoint(t *testing.T) {
+	t.Parallel()
+
+	ls, early, late := newStakePoolsLedger(t)
+
+	pinned, err := ls.queryShelleyStakePools(QueryPoint{Slot: 300}, nil)
+	require.NoError(t, err)
+	require.Equal(
+		t, []ledger.PoolId{poolID(early)}, stakePoolIDs(t, pinned),
+		"the pool registered at slot 600 did not exist at slot 300",
+	)
+
+	live, err := ls.queryShelleyStakePools(QueryPoint{}, nil)
+	require.NoError(t, err)
+	require.ElementsMatch(
+		t, []ledger.PoolId{poolID(early), poolID(late)}, stakePoolIDs(t, live),
+	)
+}
+
+func TestQueryShelleyStakePools_PinnedSlotWithoutEpochDataRejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls, _, _ := newStakePoolsLedger(t)
+	_, err := ls.queryShelleyStakePools(QueryPoint{Slot: 5_000}, nil)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+}
+
+// TestQuery_PinnedPointReachesStakePools sends GetStakePools through Query
+// with a point on chain, so a dispatch that dropped the point would answer
+// from the tip instead.
+func TestQuery_PinnedPointReachesStakePools(t *testing.T) {
+	t.Parallel()
+
+	ls, early, _ := newStakePoolsLedger(t)
+	hash := repeatedBytes(32, 0x56)
+	seedBlockAtSlot(t, ls, 300, hash)
+
+	result, err := ls.Query(
+		shelleyLeafQuery(&olocalstatequery.ShelleyStakePoolsQuery{}),
+		QueryPoint{Slot: 300, Hash: hash},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []ledger.PoolId{poolID(early)}, stakePoolIDs(t, result))
+}
+
+// seedStakeCertAt stores a transaction at slot carrying one stake
+// registration or deregistration certificate for stakeKey, with deposit as
+// that certificate's deposit or refund.
+func seedStakeCertAt(
+	t *testing.T,
+	db *database.Database,
+	stakeKey []byte,
+	register bool,
+	slot uint64,
+	deposit uint64,
+) {
+	t.Helper()
+	cred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(stakeKey),
+	}
+	txId := make([]byte, 32)
+	copy(txId, stakeKey[:4])
+	txId[30], txId[31] = byte(slot>>8), byte(slot)
+	txBuilder := mockledger.NewTransactionBuilder()
+	txBuilder.WithId(txId)
+	txBuilder.WithValid(true)
+	input, err := mockledger.NewSimpleTransactionInput(txId, 0)
+	require.NoError(t, err)
+	txBuilder.WithInputs(input)
+	output, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(
+			"addr1qytna5k2fq9ler0fuk45j7zfwv7t2zwhp777nvdjqqfr5tz8ztpwnk8zq5ngetcz5k5mckgkajnygtsra9aej2h3ek5seupmvd",
+		).
+		WithLovelace(1_000_000).
+		Build()
+	require.NoError(t, err)
+	txBuilder.WithOutputs(output)
+	if register {
+		txBuilder.WithCertificates(&lcommon.StakeRegistrationCertificate{
+			StakeCredential: cred,
+		})
+	} else {
+		txBuilder.WithCertificates(&lcommon.StakeDeregistrationCertificate{
+			StakeCredential: cred,
+		})
+	}
+	tx, err := txBuilder.Build()
+	require.NoError(t, err)
+	blockHash := make([]byte, 32)
+	copy(blockHash, txId)
+	require.NoError(t, db.SetTransactionMetadataOnly(
+		tx,
+		ocommon.NewPoint(slot, blockHash),
+		0,
+		map[int]uint64{0: deposit},
+		nil,
+	))
+}
+
+func stakeDeposits(
+	t *testing.T,
+	result any,
+) olocalstatequery.StakeDelegDepositsResult {
+	t.Helper()
+	reply := result.([]any)[0]
+	deposits, ok := reply.(olocalstatequery.StakeDelegDepositsResult)
+	require.True(t, ok)
+	return deposits
+}
+
+func stakeQueryCred(stakeKey []byte) olocalstatequery.StakeCredential {
+	return olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(stakeKey),
+	}
+}
+
+func TestQueryShelleyStakeDelegDeposits_PinnedPointAnswersAtThatPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	cycled := repeatedBytes(28, 0x41)
+	late := repeatedBytes(28, 0x42)
+	seedStakeCertAt(t, db, cycled, true, 100, 2_000_000)
+	seedStakeCertAt(t, db, cycled, false, 500, 2_000_000)
+	seedStakeCertAt(t, db, cycled, true, 700, 3_000_000)
+	seedStakeCertAt(t, db, late, true, 600, 2_000_000)
+	creds := []olocalstatequery.StakeCredential{
+		stakeQueryCred(cycled),
+		stakeQueryCred(late),
+	}
+
+	for _, tc := range []struct {
+		name string
+		at   QueryPoint
+		want olocalstatequery.StakeDelegDepositsResult
+	}{
+		{
+			"registered, before the later account", QueryPoint{Slot: 300},
+			olocalstatequery.StakeDelegDepositsResult{creds[0]: 2_000_000},
+		},
+		{
+			"after the deregistration", QueryPoint{Slot: 550},
+			olocalstatequery.StakeDelegDepositsResult{},
+		},
+		{
+			"tip, after the re-registration", QueryPoint{},
+			olocalstatequery.StakeDelegDepositsResult{
+				creds[0]: 3_000_000,
+				creds[1]: 2_000_000,
+			},
+		},
+	} {
+		result, err := ls.queryShelleyStakeDelegDeposits(creds, tc.at, nil)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, tc.want, stakeDeposits(t, result), tc.name)
+	}
+}
+
+// TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory puts more
+// events after the pinned point than one history page holds, so the event
+// in force at the point is only reached on a later page.
+func TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	key := repeatedBytes(28, 0x43)
+	seedStakeCertAt(t, db, key, true, 100, 2_000_000)
+	for i := range registrationHistoryPage + 2 {
+		seedStakeCertAt(
+			t, db, key, i%2 == 1, uint64(400+10*i), 5_000_000,
+		)
+	}
+	cred := stakeQueryCred(key)
+
+	result, err := ls.queryShelleyStakeDelegDeposits(
+		[]olocalstatequery.StakeCredential{cred},
+		QueryPoint{Slot: 300},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		olocalstatequery.StakeDelegDepositsResult{cred: 2_000_000},
+		stakeDeposits(t, result),
+	)
+}
+
+// TestQuery_PinnedPointReachesStakeDelegDeposits sends GetStakeDelegDeposits
+// through Query with a point on chain, so a dispatch that dropped the point
+// would answer from the tip instead.
+func TestQuery_PinnedPointReachesStakeDelegDeposits(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	key := repeatedBytes(28, 0x44)
+	seedStakeCertAt(t, db, key, true, 100, 2_000_000)
+	seedStakeCertAt(t, db, key, false, 500, 2_000_000)
+	hash := repeatedBytes(32, 0x57)
+	seedBlockAtSlot(t, ls, 300, hash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0B)),
+	}, nil))
+	cred := stakeQueryCred(key)
+
+	result, err := ls.Query(
+		shelleyLeafQuery(&olocalstatequery.ShelleyStakeDelegDepositsQuery{
+			Creds: cbor.NewSetType(
+				[]olocalstatequery.StakeCredential{cred}, true,
+			),
+		}),
+		QueryPoint{Slot: 300, Hash: hash},
+	)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		olocalstatequery.StakeDelegDepositsResult{cred: 2_000_000},
+		stakeDeposits(t, result),
 	)
 }

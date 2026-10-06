@@ -11553,11 +11553,19 @@ version for its PV11 zero-pool rule from that epoch's protocol parameters:
 the live consensus snapshot's for the current epoch, the persisted row for
 an earlier one. `VerifyPointQueryable` applies both of these conditions at
 Acquire, so outside API storage mode a point more than one epoch behind the
-live tip is refused there rather than failing a later `GetStakeSnapshots`. The per-credential, per-pool and per-proposal queries
-(`GetFilteredDelegationsAndRewardAccounts`, `GetStakeDelegDeposits`,
-`GetDRepState`, `GetFilteredVoteDelegatees`, `GetStakePools`,
-`GetProposals`) and `DebugChainDepState` still ignore the acquired point:
-Dingo keeps no history for that state.
+live tip is refused there rather than failing a later `GetStakeSnapshots`.
+`GetStakePools` (`queryShelleyStakePools`) answers with the pools active at
+the pinned slot through `GetActivePoolKeyHashesAtSlot`, the lookup the
+unpinned path already runs at the tip; pool registration and retirement rows
+are removed only by rollback, so no retention floor applies.
+`GetStakeDelegDeposits` (`queryShelleyStakeDelegDeposits`) reports each
+credential's deposit from its latest registration event at or before the
+pinned slot, skipping later events page by page; those events come from
+certificate rows, which are likewise removed only by rollback. The remaining
+per-credential and per-proposal queries
+(`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
+`GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still
+ignore the acquired point.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the
