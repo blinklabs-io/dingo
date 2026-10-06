@@ -1466,8 +1466,8 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 // the ledger has made forward progress past the failing region. Called from the
 // block-apply success path when the tip advances beyond the last recorded
 // at-tip failure slot, so a later, unrelated at-tip failure starts with a fresh
-// recovery budget instead of inheriting a stale hold or same-failure rewind
-// depth. Same-tip replay preserves both schedules. Runs on the ledger pipeline
+// recovery budget instead of inheriting a stale hold, same-failure rewind
+// depth, or spent epoch-boundary crossing. Same-tip replay preserves both schedules. Runs on the ledger pipeline
 // goroutine, the same goroutine that mutates these fields during recovery, so
 // no additional locking is required.
 func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
@@ -1480,6 +1480,7 @@ func (ls *LedgerState) resetAtTipRecoveryDescent(newTipSlot uint64) {
 	ls.atTipRecoveryLastFailSlot = 0
 	ls.atTipRecoveryDescentCount = 0
 	ls.atTipRecoveryHolding = false
+	ls.atTipRecoveryCrossedEpochStart = 0
 	ls.lastAtTipRecovery = nil
 }
 
@@ -1962,9 +1963,10 @@ func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
 // before reaching the same failing block, so the target moves to the first
 // block at or after the boundary, or to the ledger tip when none is applied.
 // The failing block counts because the rollover commits before the first
-// block of the epoch applies, leaving the tip in the previous epoch. The final scheduled attempt may cross the boundary once per
-// epoch, so a failure that only a different pre-boundary history can repair
-// still gets the deepest rewind. Any lookup failure holds at the ledger tip.
+// block of the epoch applies, leaving the tip in the previous epoch. The final
+// scheduled attempt may cross the boundary once per epoch until the ledger
+// applies past the failing block, so a failure that only a different
+// pre-boundary history can repair still gets the deepest rewind. Any lookup failure holds at the ledger tip.
 func (ls *LedgerState) clampRecoveryRewindToEpochBoundary(
 	rewindPoint ocommon.Point,
 	ledgerTip ocommon.Point,

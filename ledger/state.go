@@ -1337,7 +1337,9 @@ type LedgerState struct {
 	atTipRecoveryDescentCount int    // consecutive distinct failures that did not advance
 	atTipRecoveryHolding      bool   // sticky: deep rewinds suppressed until forward progress
 	// Start slot of the epoch whose boundary the final at-tip recovery
-	// attempt has already been allowed to rewind across. Zero means none.
+	// attempt has already been allowed to rewind across. Zero means none;
+	// cleared with the descent tracking once the ledger applies past the
+	// failing block.
 	atTipRecoveryCrossedEpochStart uint64
 	// Replay recovery non-convergence tracking. The
 	// unresolved-producer fallback can encounter different, slowly advancing

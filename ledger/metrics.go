@@ -1141,7 +1141,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	m.atTipRecoveryEpochBoundaryClamped = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "dingo_ledger_attip_recovery_epoch_boundary_clamped_total",
-			Help: "times an at-tip validation recovery rewind target below the most recent epoch boundary was clamped to the first block after it, to avoid recomputing a completed epoch rollover",
+			Help: "times an at-tip validation recovery rewind target below the most recent epoch boundary was clamped to the first applied block at or after it, or held at the ledger tip when none is applied, to avoid recomputing a completed epoch rollover",
 		},
 	)
 	m.replayRecoveryNonConverging = promautoFactory.NewCounter(

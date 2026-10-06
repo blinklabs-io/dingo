@@ -14023,3 +14023,49 @@ func TestAtTipRecoveryFinalAttemptCrossesEpochBoundaryOnce(t *testing.T) {
 	require.Equal(t, tip, got, "the same epoch boundary must not be crossed twice")
 	require.Equal(t, 2.0, promtestutil.ToFloat64(crossed))
 }
+
+// TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing verifies that
+// the once-per-epoch crossing is scoped to one failing region: once the ledger
+// applies past the failure, a later failure in the same epoch gets its own
+// deepest rewind instead of being clamped for the rest of the epoch.
+func TestAtTipRecoveryForwardProgressRestoresEpochBoundaryCrossing(
+	t *testing.T,
+) {
+	t.Parallel()
+	const boundarySlot = 120_000
+	f := newPrunedUtxoFixture(t, 0)
+	f.ls.currentEpoch = models.Epoch{
+		EpochId:   1,
+		StartSlot: boundarySlot,
+		EraId:     eras.ConwayEraDesc.Id,
+	}
+	failSlot := uint64(pruneFixtureTipSlot + 1)
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(failSlot, testHashBytes("crossing-reset")),
+	}
+	tip := ocommon.NewPoint(pruneFixtureTipSlot, testHashBytes("3766-tip"))
+	deep := ocommon.NewPoint(pruneFixtureFloorSlot, testHashBytes("3766-floor"))
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+
+	got := f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, deep, got, "final attempt should cross once")
+
+	// Re-applying up to the failing block is not progress past it.
+	f.ls.resetAtTipRecoveryDescent(failSlot)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(t, tip, got, "crossing must stay spent until the failure is passed")
+
+	f.ls.atTipRecoveryLastFailSlot = failSlot
+	f.ls.resetAtTipRecoveryDescent(failSlot + 1)
+	got = f.ls.clampRecoveryRewindToEpochBoundary(
+		deep, tip, validationErr, maxAtTipRecoveryAttempts,
+	)
+	require.Equal(
+		t, deep, got,
+		"a failure after forward progress should get its own crossing",
+	)
+}
