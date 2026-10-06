@@ -473,6 +473,7 @@ func (m *Manager) handleEpochTransition(
 		m.effectiveCloudDestination(),
 		"",
 		"",
+		lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause),
 	)
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)

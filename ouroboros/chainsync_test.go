@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1243,8 +1244,29 @@ func newTestLedgerStateWithChain(
 	blockCount uint64,
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
+	return newTestLedgerStateWithChainAt(t, blockCount, "")
+}
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+// newTestLedgerStateWithChainAt is newTestLedgerStateWithChain over a database
+// in dataDir. An empty dataDir makes dbtest.NewDatabase use a temporary
+// file-backed SQLite database; pass a dataDir to control where it lives.
+func newTestLedgerStateWithChainAt(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+) (*ledger.LedgerState, *database.Database) {
+	return newTestLedgerStateWithChainAtAndConfig(t, blockCount, dataDir, nil)
+}
+
+func newTestLedgerStateWithChainAtAndConfig(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+	cardanoConfig *cardano.CardanoNodeConfig,
+) (*ledger.LedgerState, *database.Database) {
+	t.Helper()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
@@ -1271,9 +1293,10 @@ func newTestLedgerStateWithChain(
 	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	return ls, db
@@ -2248,9 +2271,9 @@ func (f *chainsyncServerFixture) appendBlock(
 	).(*testBlockHeader)
 	require.True(t, ok)
 	block := &testBlock{
-		testBlockHeader: header,
-		blockType:       1,
-		cbor:            []byte{0x80},
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
 	}
 	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
@@ -3219,7 +3242,7 @@ type testBlockHeader struct {
 // testBlock is the smallest block implementation needed to wake a server-side
 // ChainIterator and drive the async RollForward path.
 type testBlock struct {
-	*testBlockHeader
+	gledger.BlockHeader
 	blockType int
 	cbor      []byte
 }
@@ -3261,7 +3284,7 @@ func (h *testBlockHeader) BlockBodyHash() gledger.Blake2b256 {
 }
 
 func (b *testBlock) Header() gledger.BlockHeader {
-	return b.testBlockHeader
+	return b.BlockHeader
 }
 
 func (b *testBlock) Type() int {
@@ -3568,7 +3591,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
-		testBlockHeader: &testBlockHeader{
+		BlockHeader: &testBlockHeader{
 			hash:        gledger.Blake2b256{0x01},
 			blockNumber: 1,
 			slotNumber:  10,

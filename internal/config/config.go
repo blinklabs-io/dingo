@@ -71,6 +71,11 @@ const DefaultShutdownTimeout = "30s"
 // for the ledger to process all blocks before returning an error.
 const DefaultLedgerCatchupTimeout = "30m"
 
+// DefaultLocalStateQueryViewMaxLifetime is how long a node-to-client
+// LocalStateQuery session may hold one acquired ledger snapshot before the
+// node closes it. It must match the fallback in the ouroboros package.
+const DefaultLocalStateQueryViewMaxLifetime = "5m"
+
 func WithContext(ctx context.Context, cfg *Config) context.Context {
 	return context.WithValue(ctx, configContextKey, cfg)
 }
@@ -302,7 +307,9 @@ type GenesisBootstrapConfig struct {
 	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
 	// for biased fast-sync sources: an uncorroborated or divergent fast source
 	// is denied selection and stalls rather than steering the local chain. A
-	// zero value disables corroboration (density-only Genesis selection).
+	// zero value disables the selection gate (density-only Genesis selection);
+	// a peer's frontier still needs one independent witness before it can
+	// exclude other candidates as behind.
 	CorroborationPeers int `yaml:"corroborationPeers"          envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 	// LimitOnPatienceEnabled turns on the Genesis Limit on Patience: while
 	// Genesis selection is syncing, a ChainSync peer that delivers its
@@ -612,6 +619,10 @@ type Config struct {
 	BarkBaseUrl            string    `yaml:"barkBaseUrl"                         envconfig:"DINGO_BARK_BASE_URL"`
 	BarkBlockDownloadHosts []string  `yaml:"barkBlockDownloadHosts"              envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
 	BarkPort               uint      `yaml:"barkPort"                            envconfig:"DINGO_BARK_PORT"`
+	// LocalStateQueryViewMaxLifetime is the longest a LocalStateQuery session
+	// may hold one acquired ledger snapshot before the node closes it.
+	// Default: "5m".
+	LocalStateQueryViewMaxLifetime string `yaml:"localStateQueryViewMaxLifetime" envconfig:"DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
 	// it to loopback-only (127.0.0.1) whenever the database lifecycle
 	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
@@ -1159,6 +1170,11 @@ type MithrilConfig struct {
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
+	// DownloadMaxBytes bounds each compressed Mithril object, including
+	// resumed bytes. Zero uses the built-in limit for each object type. A
+	// positive value replaces those limits for every object, and raising it
+	// lowers how many immutable archives download concurrently.
+	DownloadMaxBytes int64 `yaml:"downloadMaxBytes"       envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_BYTES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"       envconfig:"DINGO_MITHRIL_CLEANUP"`
@@ -1227,6 +1243,11 @@ type DatabaseLifecycleConfig struct {
 	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
 	// boundaries instead of every single one.
 	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs"           envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+	// SnapshotMaxCommitPause bounds how long a snapshot (manual or
+	// automatic) may hold the commit barrier once acquired. A snapshot still
+	// running at the bound is cancelled and removed, and commits resume.
+	// Zero means no bound.
+	SnapshotMaxCommitPause time.Duration `yaml:"snapshotMaxCommitPause"         envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_MAX_COMMIT_PAUSE"`
 }
 
 var configMu sync.RWMutex
@@ -1280,6 +1301,7 @@ func newDefaultConfig() *Config {
 		ImmutableDbPath:                     "",
 		ShutdownTimeout:                     DefaultShutdownTimeout,
 		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
+		LocalStateQueryViewMaxLifetime:      DefaultLocalStateQueryViewMaxLifetime,
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
