@@ -544,3 +544,114 @@ func TestLocalTxSubmissionServerSubmitTx_RejectsUnrepresentableEra(
 		})
 	}
 }
+
+func localTxSubmissionTestCtx() olocaltxsubmission.CallbackContext {
+	return olocaltxsubmission.CallbackContext{
+		ConnectionId: connection.ConnectionId{
+			LocalAddr:  &net.TCPAddr{},
+			RemoteAddr: &net.TCPAddr{},
+		},
+	}
+}
+
+func localTxSubmissionTestMsg(raw []byte) olocaltxsubmission.MsgSubmitTxTransaction {
+	return olocaltxsubmission.MsgSubmitTxTransaction{
+		EraId: uint16(gledger.EraIdConway),
+		Raw:   cbor.Tag{Number: 24, Content: raw},
+	}
+}
+
+// TestLocalTxSubmissionServerSubmitTx_AcceptsValidTransaction proves a valid
+// transaction is accepted and lands in the mempool.
+func TestLocalTxSubmissionServerSubmitTx_AcceptsValidTransaction(t *testing.T) {
+	t.Parallel()
+
+	o, _ := newTxSubmissionTestOuroboros(t)
+	fixture := txsubmissionTestFixtures(t)[0]
+
+	require.NoError(t, o.localtxsubmissionServerSubmitTx(
+		localTxSubmissionTestCtx(),
+		localTxSubmissionTestMsg(fixture.body),
+	))
+
+	txs := o.mempool.Transactions()
+	require.Len(t, txs, 1)
+	assert.Equal(t, fixture.hash, txs[0].Hash)
+}
+
+// TestLocalTxSubmissionServerSubmitTx_MalformedTransactionIsRejected proves
+// undecodable transaction bytes are refused with a ledger rejection, not a
+// panic and not a framing error, and leave the mempool untouched.
+func TestLocalTxSubmissionServerSubmitTx_MalformedTransactionIsRejected(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	o, _ := newTxSubmissionTestOuroboros(t)
+
+	require.NotPanics(t, func() {
+		err := o.localtxsubmissionServerSubmitTx(
+			localTxSubmissionTestCtx(),
+			localTxSubmissionTestMsg([]byte{0xff, 0x00, 0x01}),
+		)
+		require.Error(t, err)
+		var reason cborRejectReason
+		require.ErrorAs(t, err, &reason)
+	})
+	require.Empty(t, o.mempool.Transactions())
+}
+
+// TestLocalTxSubmissionServerSubmitTx_RequiresMempool covers the
+// unavailable-dependency case: it is a node fault, so it must not be encoded
+// as a ledger rejection of the transaction.
+func TestLocalTxSubmissionServerSubmitTx_RequiresMempool(t *testing.T) {
+	t.Parallel()
+
+	o := newOuroboros(OuroborosConfig{})
+
+	require.NotPanics(t, func() {
+		err := o.localtxsubmissionServerSubmitTx(
+			localTxSubmissionTestCtx(),
+			localTxSubmissionTestMsg([]byte{0x80}),
+		)
+		require.ErrorIs(t, err, errLocalTxSubmissionMempoolUnavailable)
+		var reason cborRejectReason
+		require.NotErrorAs(t, err, &reason)
+	})
+}
+
+// TestLocalTxSubmissionProtocol_AcceptThenReject drives the real handler over
+// a connection: a valid transaction is accepted, a malformed one is rejected
+// with an error the client can read, and the connection stays usable.
+func TestLocalTxSubmissionProtocol_AcceptThenReject(t *testing.T) {
+	t.Parallel()
+
+	o, _ := newTxSubmissionTestOuroboros(t)
+	conn := newNtCTestClientConn(
+		t,
+		gouroboros.WithLocalTxSubmissionConfig(
+			olocaltxsubmission.NewConfig(
+				o.localtxsubmissionServerConnOpts()...,
+			),
+		),
+	)
+	client := conn.LocalTxSubmission().Client
+	require.NotNil(t, client)
+	fixtures := txsubmissionTestFixtures(t)
+
+	require.NoError(t, client.SubmitTx(
+		gledger.EraIdConway, fixtures[0].body,
+	))
+	require.Len(t, o.mempool.Transactions(), 1)
+
+	err := client.SubmitTx(gledger.EraIdConway, []byte{0xff, 0x00, 0x01})
+	require.Error(t, err)
+	var rejected olocaltxsubmission.TransactionRejectedError
+	require.ErrorAs(t, err, &rejected)
+	require.Len(t, o.mempool.Transactions(), 1)
+
+	require.NoError(t, client.SubmitTx(
+		gledger.EraIdConway, fixtures[1].body,
+	))
+	require.Len(t, o.mempool.Transactions(), 2)
+}

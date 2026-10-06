@@ -33,6 +33,7 @@ import (
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
 	cfg := &Config{
+		DatabasePath:         ".dingo",
 		Plugins:              defaultPluginsConfig(),
 		Network:              "preview",
 		RunMode:              RunModeServe,
@@ -634,6 +635,20 @@ func TestValidate(t *testing.T) {
 			name:    "unparseable ledger catchup timeout",
 			modify:  func(c *Config) { c.LedgerCatchupTimeout = "1 hour" },
 			wantErr: "invalid ledgerCatchupTimeout",
+		},
+		{
+			name: "unparseable local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "a while"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime",
+		},
+		{
+			name: "non-positive local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "0s"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime \"0s\": must be positive",
 		},
 		{
 			name:    "unparseable chainsync stall timeout",
@@ -1460,4 +1475,14 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateRejectsEmptyDatabasePathForSQLite(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.DatabasePath = ""
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.ErrorContains(t, err, "databasePath must be set")
+	cfg.Plugins.Storage.Metadata.Provider = "postgres"
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
