@@ -17,9 +17,12 @@ package mithril
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -82,8 +85,9 @@ func withProgressContext(
 
 const (
 	// DefaultMaxDownloadBytes bounds each compressed archive, including any
-	// resumed prefix. It matches the existing 1 TiB extraction budget.
-	DefaultMaxDownloadBytes int64 = 1 << 40
+	// resumed prefix, when the caller sets no limit. v2 objects have tighter
+	// built-in limits; this one covers the v1 full-database snapshot.
+	DefaultMaxDownloadBytes int64 = 512 << 30
 
 	defaultDownloadIdleTimeout = 2 * time.Minute
 	defaultDownloadIdleRetries = 12
@@ -215,8 +219,11 @@ func (cfg DownloadConfig) sizeLimit() int64 {
 
 func (cfg DownloadConfig) sizeLimitError() error {
 	if cfg.ExpectedSize > 0 && cfg.ExpectedSize <= cfg.maxBytes() {
-		return fmt.Errorf("%w: download response exceeds expected size %d bytes",
-			ErrDownloadTooLarge, cfg.ExpectedSize)
+		return fmt.Errorf(
+			"%w: download response exceeds expected size %d bytes",
+			ErrDownloadTooLarge,
+			cfg.ExpectedSize,
+		)
 	}
 	return fmt.Errorf("%w: download response exceeds maximum %d bytes",
 		ErrDownloadTooLarge, cfg.maxBytes())
@@ -1089,7 +1096,10 @@ func downloadSnapshotOnce(
 	)
 	// Copy only the remaining file budget, then probe one byte without
 	// writing it. Separate probing avoids limit+1 overflow at MaxInt64.
-	_, copyErr := io.Copy(pw, io.LimitReader(body, cfg.sizeLimit()-existingSize))
+	_, copyErr := io.Copy(
+		pw,
+		io.LimitReader(body, cfg.sizeLimit()-existingSize),
+	)
 	if copyErr == nil && pw.written == cfg.sizeLimit() {
 		var probe [1]byte
 		var n int
@@ -1195,6 +1205,34 @@ const (
 	maxTotalExtractSize = 1 << 40
 )
 
+// expansionReader fails once the stream has produced more bytes than the
+// compressed input consumed so far can justify. The decoder reads ahead of
+// what it has returned, so the compressed count only over-estimates and the
+// check cannot refuse a legitimate archive early.
+type expansionReader struct {
+	reader   io.Reader
+	read     *atomic.Int64
+	ratio    int64
+	floor    int64
+	produced int64
+}
+
+func (r *expansionReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.produced += int64(n)
+	compressed := r.read.Load()
+	// Compare the rounded-up required input instead of multiplying the
+	// compressed count, which can overflow for large operator limits.
+	excess := r.produced - r.floor
+	if excess > 0 && (r.ratio <= 0 || (excess-1)/r.ratio+1 > compressed) {
+		return n, fmt.Errorf(
+			"%w: expanded %d bytes from %d compressed",
+			ErrExtractLimitExceeded, r.produced, r.read.Load(),
+		)
+	}
+	return n, err
+}
+
 // ExtractArchive extracts a zstd-compressed tar archive to the
 // specified destination directory. It returns the path to the
 // directory where files were extracted. The context is checked
@@ -1280,10 +1318,15 @@ func extractArchiveFile(
 	}
 	defer zr.Close()
 
-	// Create tar reader
-	tr := tar.NewReader(zr)
+	limits := extractCfg.limits
+	tr := tar.NewReader(&expansionReader{
+		reader: zr,
+		read:   &countingFile.read,
+		ratio:  limits.maxExpansion,
+		floor:  limits.expansionFloor,
+	})
 
-	var filesExtracted int
+	var entries, filesExtracted int
 	var totalExtracted int64
 	lastProgressLog := time.Time{}
 	lastLoggedPercent := -5.0
@@ -1304,6 +1347,14 @@ func extractArchiveFile(
 			)
 		}
 
+		entries++
+		if entries > limits.maxEntries {
+			return "", fmt.Errorf(
+				"%w: more than %d entries",
+				ErrExtractLimitExceeded, limits.maxEntries,
+			)
+		}
+
 		// Sanitize the path to prevent directory traversal.
 		// Use path.Clean (forward-slash) not filepath.Clean,
 		// because tar archives always use forward slashes and
@@ -1316,6 +1367,14 @@ func extractArchiveFile(
 			return "", fmt.Errorf(
 				"invalid path in archive: %s",
 				header.Name,
+			)
+		}
+
+		// Refused before anything is created, so a member the consumer never
+		// reads cannot land on disk or replace a verified file.
+		if limits.allow != nil && !limits.allow(name) {
+			return "", fmt.Errorf(
+				"%w: %s", ErrExtractUnexpectedMember, header.Name,
 			)
 		}
 
@@ -1340,10 +1399,11 @@ func extractArchiveFile(
 			// Enforce per-file size limit (header.Size is
 			// attacker-controlled, so we check it as a fast
 			// reject but also enforce actual bytes below).
-			if header.Size > maxExtractFileSize {
+			if header.Size > limits.maxMemberBytes {
 				return "", fmt.Errorf(
-					"file %s exceeds maximum size (%d > %d)",
-					header.Name, header.Size, maxExtractFileSize,
+					"%w: file %s size %d exceeds %d",
+					ErrExtractLimitExceeded,
+					header.Name, header.Size, limits.maxMemberBytes,
 				)
 			}
 
@@ -1368,9 +1428,22 @@ func extractArchiveFile(
 
 			// Cap actual bytes written to the per-file limit,
 			// independent of the attacker-controlled header.Size.
+			var dst io.Writer = outFile
+			var hasher hash.Hash
+			expectedDigest, verifyDigest := limits.digests[name]
+			if verifyDigest {
+				hasher = sha256.New()
+				dst = io.MultiWriter(outFile, hasher)
+			}
 			written, err := io.Copy(
-				outFile,
-				io.LimitReader(tr, maxExtractFileSize+1),
+				dst,
+				io.LimitReader(
+					tr,
+					min(
+						limits.maxMemberBytes,
+						limits.maxTotalBytes-totalExtracted,
+					)+1,
+				),
 			)
 			closeErr := outFile.Close()
 			if err != nil {
@@ -1389,21 +1462,33 @@ func extractArchiveFile(
 					closeErr,
 				)
 			}
-			if written > maxExtractFileSize {
+			if written > limits.maxMemberBytes {
 				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
-					"file %s decompressed beyond maximum size (%d > %d)",
-					header.Name, written, maxExtractFileSize,
+					"%w: file %s decompressed beyond %d",
+					ErrExtractLimitExceeded,
+					header.Name, limits.maxMemberBytes,
 				)
+			}
+			if hasher != nil {
+				observed := hex.EncodeToString(hasher.Sum(nil))
+				if observed != expectedDigest {
+					_ = workDir.Remove(target)
+					return "", &DigestMismatchError{
+						FileName: path.Base(name),
+						Expected: expectedDigest,
+						Observed: observed,
+					}
+				}
 			}
 			// Track actual bytes written (not attacker-controlled
 			// header.Size) for cumulative extraction limit.
 			totalExtracted += written
-			if totalExtracted > maxTotalExtractSize {
+			if totalExtracted > limits.maxTotalBytes {
 				_ = workDir.Remove(target)
 				return "", fmt.Errorf(
-					"archive extraction exceeds maximum total size (%d)",
-					maxTotalExtractSize,
+					"%w: expanded size exceeds %d",
+					ErrExtractLimitExceeded, limits.maxTotalBytes,
 				)
 			}
 			filesExtracted++
