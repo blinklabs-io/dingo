@@ -875,7 +875,7 @@ const deferredMarkerRestoreMaxAttempts = 3
 func (ls *LedgerState) deleteDeferredMarkerUnlessReadmitted(k string) error {
 	syncKey := deferredHeaderValidationSyncStatePrefix + k
 	if err := ls.db.DeleteSyncState(syncKey, nil); err != nil {
-		ls.config.Logger.Info(
+		ls.config.Logger.Warn(
 			"failed to delete stale deferred-header marker",
 			"key", syncKey,
 			"error", err,

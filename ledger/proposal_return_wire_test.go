@@ -289,11 +289,10 @@ func conwayWireBlock(
 
 // TestProposalReturnAddressWireDecisionIsIdenticalAcrossPaths feeds the same
 // proposal bytes to safedecode.Transaction and to the live and stored block
-// decoders. A
-// base address as return address is refused whether the transaction claims
-// phase-2 validity or not, at top level and in a child, and a valid account
-// address is accepted by each, so no entry point decides differently from
-// another for the same bytes.
+// decoders. A base address as return address is refused whether the
+// transaction claims phase-2 validity or not, at top level and in a child, and
+// a valid account address is accepted by each, so no entry point decides
+// differently from another for the same bytes.
 func TestProposalReturnAddressWireDecisionIsIdenticalAcrossPaths(
 	t *testing.T,
 ) {
