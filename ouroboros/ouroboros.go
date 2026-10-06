@@ -274,6 +274,12 @@ type Ouroboros struct {
 	// leiosFetchClaimPublished is an instance-local test seam used to hold a
 	// claimed offer before dispatch and expose admission ordering deterministically.
 	leiosFetchClaimPublished func()
+	// Exact-point peer provenance used by historical backfill. Entries share
+	// the endorser-block cache's retention horizon and are owner-bound so a
+	// replacement connection cannot inherit an earlier connection's offer.
+	leiosBackfillSourcesMu sync.Mutex
+	leiosBackfillSources   map[string]*leiosBackfillPointSources
+	leiosBackfillSourceSeq uint64
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
@@ -610,8 +616,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
 			headerDecodeCacheMaxBytes,
 		),
-		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters: make(map[string][]chan struct{}),
+		leiosEndorserBlocks:  make(map[string]*leiosEndorserBlockData),
+		leiosBackfillSources: make(map[string]*leiosBackfillPointSources),
+		leiosClosureWaiters:  make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),

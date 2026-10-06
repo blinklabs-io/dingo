@@ -19,12 +19,132 @@ package scenarios
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/devnet"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+func TestAwaitLeiosProducerOfferRequiresMatchingStreams(t *testing.T) {
+	t.Parallel()
+
+	point := pcommon.NewPoint(42, []byte("endorser-block"))
+	other := pcommon.NewPoint(43, []byte("other-endorser-block"))
+	tests := map[string][]struct {
+		manifest    *pcommon.Point
+		transaction *pcommon.Point
+	}{
+		"manifest before transaction": {
+			{manifest: &point},
+			{transaction: &point},
+		},
+		"transaction before manifest": {
+			{transaction: &point},
+			{manifest: &point},
+		},
+		"different points do not match": {
+			{manifest: &point},
+			{transaction: &other},
+			{transaction: &point},
+		},
+	}
+	for name, sequence := range tests {
+		t.Run(name, func(t *testing.T) {
+			matcher := leiosProducerOfferMatcher{}
+			manifests := make(chan pcommon.Point)
+			transactions := make(chan pcommon.Point)
+			result := make(chan struct {
+				point pcommon.Point
+				err   error
+			}, 1)
+			go func() {
+				got, err := matcher.await(
+					context.Background(),
+					manifests,
+					transactions,
+				)
+				result <- struct {
+					point pcommon.Point
+					err   error
+				}{point: got, err: err}
+			}()
+
+			for i, offer := range sequence {
+				switch {
+				case offer.manifest != nil:
+					manifests <- *offer.manifest
+				case offer.transaction != nil:
+					transactions <- *offer.transaction
+				default:
+					require.FailNow(t, "empty offer step")
+				}
+				if i < len(sequence)-1 {
+					select {
+					case premature := <-result:
+						require.FailNow(t, fmt.Sprintf(
+							"matched before both exact offers: %+v",
+							premature,
+						))
+					default:
+					}
+				}
+			}
+
+			got := <-result
+			require.NoError(t, got.err)
+			require.Equal(t, point, got.point)
+		})
+	}
+}
+
+func TestLeiosProducerOfferMatcherRetainsFutureCandidate(t *testing.T) {
+	t.Parallel()
+
+	matcher := leiosProducerOfferMatcher{}
+	first := pcommon.NewPoint(42, []byte("first-endorser-block"))
+	future := pcommon.NewPoint(43, []byte("future-endorser-block"))
+	manifests := make(chan pcommon.Point)
+	transactions := make(chan pcommon.Point)
+	result := make(chan struct {
+		point pcommon.Point
+		err   error
+	}, 1)
+	go func() {
+		point, err := matcher.await(
+			context.Background(),
+			manifests,
+			transactions,
+		)
+		result <- struct {
+			point pcommon.Point
+			err   error
+		}{point: point, err: err}
+	}()
+	manifests <- future
+	transactions <- first
+	manifests <- first
+	firstResult := <-result
+	require.NoError(t, firstResult.err)
+	require.Equal(t, first, firstResult.point)
+
+	go func() {
+		point, err := matcher.await(
+			context.Background(),
+			manifests,
+			transactions,
+		)
+		result <- struct {
+			point pcommon.Point
+			err   error
+		}{point: point, err: err}
+	}()
+	transactions <- future
+	futureResult := <-result
+	require.NoError(t, futureResult.err)
+	require.Equal(t, future, futureResult.point)
+}
 
 func TestAwaitLeiosApplicationStopsAfterReferenceRollback(t *testing.T) {
 	t.Parallel()
@@ -81,9 +201,10 @@ func TestAwaitLeiosApplicationRejectsAppliedRolledBackReference(
 func TestAwaitLeiosTransactionOfferStopsAfterReferenceRollback(t *testing.T) {
 	t.Parallel()
 
+	matcher := leiosTransactionOfferMatcher{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := awaitLeiosTransactionOffer(
+	err := matcher.await(
 		ctx,
 		make(chan pcommon.Point),
 		make(chan error),
@@ -98,11 +219,12 @@ func TestAwaitLeiosTransactionOfferRejectsOfferAfterReferenceRollback(
 ) {
 	t.Parallel()
 
+	matcher := leiosTransactionOfferMatcher{}
 	want := pcommon.NewPoint(42, []byte("endorser-block"))
 	offers := make(chan pcommon.Point, 1)
 	offers <- want
 	checks := 0
-	err := awaitLeiosTransactionOffer(
+	err := matcher.await(
 		context.Background(),
 		offers,
 		make(chan error),
@@ -114,6 +236,52 @@ func TestAwaitLeiosTransactionOfferRejectsOfferAfterReferenceRollback(
 	)
 	require.ErrorIs(t, err, errLeiosReferenceRolledBack)
 	require.Equal(t, 2, checks)
+}
+
+func TestLeiosTransactionOfferMatcherRetainsFutureOffer(t *testing.T) {
+	t.Parallel()
+
+	matcher := leiosTransactionOfferMatcher{}
+	future := pcommon.NewPoint(43, []byte("future-endorser-block"))
+	offers := make(chan pcommon.Point)
+	errorsCh := make(chan error)
+	result := make(chan error, 1)
+	go func() {
+		result <- matcher.await(
+			context.Background(),
+			offers,
+			errorsCh,
+			pcommon.NewPoint(42, []byte("first-endorser-block")),
+			func() bool { return true },
+		)
+	}()
+	offers <- future
+	close(offers)
+	require.ErrorContains(t, <-result, "transaction offer stream closed")
+
+	require.NoError(t, matcher.await(
+		context.Background(),
+		make(chan pcommon.Point),
+		make(chan error),
+		future,
+		func() bool { return true },
+	))
+}
+
+func TestLeiosTransactionOfferMatcherRejectsClosedErrorStream(t *testing.T) {
+	t.Parallel()
+
+	matcher := leiosTransactionOfferMatcher{}
+	errorsCh := make(chan error)
+	close(errorsCh)
+	err := matcher.await(
+		context.Background(),
+		make(chan pcommon.Point),
+		errorsCh,
+		pcommon.NewPoint(42, []byte("endorser-block")),
+		func() bool { return true },
+	)
+	require.ErrorContains(t, err, "error stream closed")
 }
 
 func TestLeiosReferenceOnCanonicalChainRejectsReplacement(t *testing.T) {

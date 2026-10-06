@@ -16,16 +16,21 @@ package ouroboros
 
 import (
 	"context"
+	"net"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -152,6 +157,222 @@ func TestLeiosBackfillConnOrderPreservesRotation(t *testing.T) {
 		),
 		"start=2 rotates the fresh partition",
 	)
+}
+
+func TestLeiosBackfillPrefersActivePeerThatSuppliedPoint(t *testing.T) {
+	t.Parallel()
+	cm, peers := newLeiosBackfillSelectorPeers(t, "first", "active", "third")
+	first, active, third := peers[0], peers[1], peers[2]
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(active.Id())
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
+	point := ocommon.Point{Slot: 200, Hash: []byte{0x04, 0x05}}
+	o.recordLeiosBackfillSource(point, active.Id(), active.LeiosNotify().Client)
+
+	got := o.leiosBackfillConnCandidatesForPoint(
+		[]ouroboros.ConnectionId{first.Id(), third.Id(), active.Id()},
+		0,
+		point,
+		time.Now(),
+	)
+	require.Equal(
+		t,
+		[]ouroboros.ConnectionId{
+			active.Id(), first.Id(), third.Id(), active.Id(),
+		},
+		leiosBackfillCandidateIds(got),
+	)
+	require.Same(t, active, got[0].conn)
+}
+
+func TestLeiosBackfillKeepsFallbackWhenActivePeerDidNotSupplyPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+	cm, peers := newLeiosBackfillSelectorPeers(t, "proven", "active", "fresh")
+	proven, active, fresh := peers[0], peers[1], peers[2]
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(active.Id())
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
+	order := []ouroboros.ConnectionId{proven.Id(), fresh.Id(), active.Id()}
+	got := o.leiosBackfillConnCandidatesForPoint(
+		order, 0, ocommon.Point{Slot: 200, Hash: []byte{0x04}}, time.Now(),
+	)
+	require.Equal(t, order, leiosBackfillCandidateIds(got))
+	for _, candidate := range got {
+		require.Nil(t, candidate.conn)
+	}
+}
+
+func TestLeiosBackfillPointSelectorUsesActiveAnnouncingPeer(t *testing.T) {
+	t.Parallel()
+	cm, peers := newLeiosBackfillSelectorPeers(t, "first", "active", "third")
+	first, active, third := peers[0], peers[1], peers[2]
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(active.Id())
+	o := newOuroboros(OuroborosConfig{
+		ConnManager:    cm,
+		ChainsyncState: state,
+	})
+	point := ocommon.Point{Slot: 200, Hash: []byte{0x04, 0x05}}
+	for _, conn := range []*ouroboros.Connection{first, active, third} {
+		require.NoError(t, o.leiosnotifyClientNotification(
+			oleiosnotify.CallbackContext{
+				ConnectionId: conn.Id(),
+				Client:       conn.LeiosNotify().Client,
+			},
+			oleiosnotify.NewMsgBlockTxsOffer(point),
+		))
+	}
+
+	got := o.leiosBackfillConnCandidatesForPoint(
+		[]ouroboros.ConnectionId{first.Id(), third.Id(), active.Id()},
+		0,
+		point,
+		time.Now(),
+	)
+	require.Equal(t, active.Id(), got[0].connId)
+	require.Same(t, active, got[0].conn)
+}
+
+func TestLeiosBackfillPointSelectorKeepsFallbackWithoutActiveAnnouncement(
+	t *testing.T,
+) {
+	t.Parallel()
+	cm, peers := newLeiosBackfillSelectorPeers(t, "first", "active")
+	first, active := peers[0], peers[1]
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(active.Id())
+	o := newOuroboros(OuroborosConfig{
+		ConnManager:    cm,
+		ChainsyncState: state,
+	})
+	point, raw := testLeiosEndorserBlockRaw(t, 200)
+	// A successful by-point store is not an announcement and must not create
+	// source provenance for the active peer.
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		raw,
+		nil,
+		leiosStoreBackfill,
+	))
+
+	fallback := []ouroboros.ConnectionId{first.Id(), active.Id()}
+	got := o.leiosBackfillConnCandidatesForPoint(fallback, 0, point, time.Now())
+	require.Equal(t, fallback, leiosBackfillCandidateIds(got))
+	for _, candidate := range got {
+		require.Nil(t, candidate.conn)
+	}
+}
+
+func TestLeiosBackfillPreferenceKeepsAnnouncingConnectionLifetime(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	local := fakeConnAddr("same-local")
+	remote := fakeConnAddr("same-remote")
+	first := newLeiosFetchConversationWithAddrs(t, local, remote)
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	require.True(t, cm.AddConnection(first, false, "active"))
+	state := chainsync.NewState(nil, nil)
+	state.SetClientConnId(first.Id())
+	o := newOuroboros(OuroborosConfig{ConnManager: cm, ChainsyncState: state})
+	point := ocommon.Point{Slot: 200, Hash: []byte{0x04, 0x05}}
+	o.recordLeiosBackfillSource(point, first.Id(), first.LeiosNotify().Client)
+
+	candidates := o.leiosBackfillConnCandidatesForPoint(
+		[]ouroboros.ConnectionId{first.Id()},
+		0,
+		point,
+		time.Now(),
+	)
+	require.Len(t, candidates, 2)
+	require.Same(t, first, candidates[0].conn)
+	require.Nil(t, candidates[1].conn)
+	require.Same(t, first, o.leiosBackfillCandidateConn(candidates[0], first))
+
+	replacement := newLeiosFetchConversationWithAddrs(t, local, remote)
+	require.Equal(t, first.Id(), replacement.Id())
+	require.True(t, cm.AddConnection(replacement, false, "active"))
+	require.Same(t, replacement, cm.GetConnectionById(first.Id()))
+	// The promoted attempt remains bound to the announcing connection. The
+	// replacement is available only at the unchanged fallback position.
+	require.Same(t, first, candidates[0].conn)
+	require.Nil(t, candidates[1].conn)
+	require.Nil(t, o.leiosBackfillCandidateConn(candidates[0], first))
+	require.Same(t, replacement,
+		o.leiosBackfillCandidateConn(candidates[1], first))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, cm.Stop(ctx))
+}
+
+type leiosFixedAddrConn struct {
+	net.Conn
+	local  net.Addr
+	remote net.Addr
+}
+
+func (c leiosFixedAddrConn) LocalAddr() net.Addr  { return c.local }
+func (c leiosFixedAddrConn) RemoteAddr() net.Addr { return c.remote }
+
+func newLeiosFetchConversationWithAddrs(
+	t *testing.T,
+	local net.Addr,
+	remote net.Addr,
+) *ouroboros.Connection {
+	t.Helper()
+	raw := leiosFixedAddrConn{
+		Conn: ouroboros_mock.NewConnection(
+			ouroboros_mock.ProtocolRoleClient,
+			leiosFetchHandshake(),
+		),
+		local:  local,
+		remote: remote,
+	}
+	conn, err := ouroboros.New(
+		ouroboros.WithConnection(raw),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+func leiosBackfillCandidateIds(
+	candidates []leiosBackfillConnCandidate,
+) []ouroboros.ConnectionId {
+	ret := make([]ouroboros.ConnectionId, 0, len(candidates))
+	for _, candidate := range candidates {
+		ret = append(ret, candidate.connId)
+	}
+	return ret
+}
+
+func newLeiosBackfillSelectorPeers(
+	t *testing.T,
+	names ...string,
+) (*connmanager.ConnectionManager, []*ouroboros.Connection) {
+	t.Helper()
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	peers := make([]*ouroboros.Connection, 0, len(names))
+	for _, name := range names {
+		conn, _ := newLeiosFetchConversation(t, leiosFetchHandshake())
+		t.Cleanup(func() { _ = conn.Close() })
+		require.NotNil(t, conn.LeiosNotify())
+		require.NotNil(t, conn.LeiosNotify().Client)
+		require.True(t, cm.AddConnection(conn, false, name))
+		peers = append(peers, conn)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	return cm, peers
 }
 
 // TestFetchEndorserBlockOnConnSkipsBusyConnection verifies that lock

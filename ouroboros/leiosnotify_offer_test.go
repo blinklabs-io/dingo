@@ -171,9 +171,19 @@ func TestLeiosRelayBackfillSurvivesTransientNotificationBurst(t *testing.T) {
 	log.registerConn("slow-downstream", nil, nil)
 	log.append(leiosForgedEBEntry{point: &point, size: 1234})
 	log.append(leiosForgedEBEntry{txOffer: &point})
-	for i := 0; i <= leiosEBLogMaxTransientEntries; i++ {
+	for i := range leiosEBLogMaxTransientEntries {
 		log.append(leiosForgedEBEntry{announcement: []byte{byte(i)}})
 	}
+	log.registerConn("caught-up-downstream", nil, nil)
+	log.append(leiosForgedEBEntry{announcement: []byte{0xff}})
+
+	newest, _ := log.next("caught-up-downstream")
+	require.NotNil(t, newest, "a slow peer must not suppress new announcements")
+	require.Equal(t, []byte{0xff}, newest.announcement)
+	log.mu.Lock()
+	transientEntries := log.transientEntriesLocked()
+	log.mu.Unlock()
+	require.Equal(t, leiosEBLogMaxTransientEntries, transientEntries)
 
 	manifest, _ := log.next("slow-downstream")
 	require.NotNil(t, manifest)
