@@ -263,14 +263,12 @@ func NewTokenRegistrySync(
 		return nil, err
 	}
 	if len(headers) > 0 {
-		parsedSource, parseErr := url.Parse(sourceURL)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse token registry source URL: %w", parseErr)
-		}
-		hostIP := net.ParseIP(parsedSource.Hostname())
-		loopback := parsedSource.Hostname() == "localhost" ||
-			(hostIP != nil && hostIP.IsLoopback())
-		if parsedSource.Scheme != "https" && !loopback {
+		// The parse error quotes the URL, which can carry a credential of
+		// its own. An unparsable source never sends a request: SyncOnce
+		// rejects it with the URL redacted before attaching any header.
+		if parsedSource, parseErr := url.Parse(sourceURL); parseErr == nil &&
+			parsedSource.Scheme != "https" &&
+			!isLoopbackHost(parsedSource.Hostname()) {
 			return nil, errors.New(
 				"token registry headers require an HTTPS or loopback source URL",
 			)
@@ -327,6 +325,11 @@ func NewTokenRegistrySync(
 		now:                  time.Now,
 		syncSlot:             make(chan struct{}, 1),
 	}, nil
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	return host == "localhost" || (ip != nil && ip.IsLoopback())
 }
 
 // validateRegistryHeaders returns a copy of headers, rejecting any that could
