@@ -469,6 +469,11 @@ func TestSubmitDelegationLogsRejectionOnlyForNodeRefusal(t *testing.T) {
 			return errors.New("refused")
 		},
 	))
+	unavailable := localtxsubmission.NewConfig(localtxsubmission.WithSubmitTxFunc(
+		func(localtxsubmission.CallbackContext, localtxsubmission.MsgSubmitTxTransaction) error {
+			return errors.New("local transaction submission unavailable")
+		},
+	))
 	for _, tc := range []struct {
 		name   string
 		client func(t *testing.T) *NodeClient
@@ -482,6 +487,15 @@ func TestSubmitDelegationLogsRejectionOnlyForNodeRefusal(t *testing.T) {
 				)
 			},
 			"rejected",
+		},
+		{
+			"submission unavailable",
+			func(t *testing.T) *NodeClient {
+				return newProtocolTestClient(
+					t, ouroboros.WithLocalTxSubmissionConfig(unavailable),
+				)
+			},
+			"error",
 		},
 		{"no connection", func(*testing.T) *NodeClient { return &NodeClient{} }, "error"},
 	} {

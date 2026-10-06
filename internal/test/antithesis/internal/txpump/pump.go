@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -540,7 +541,8 @@ func (p *Pump) submitDelegation(client *NodeClient, batchSize int) bool {
 	if submitErr != nil {
 		entry.Status = "error"
 		var rejected localtxsubmission.TransactionRejectedError
-		if errors.As(submitErr, &rejected) {
+		if errors.As(submitErr, &rejected) &&
+			!strings.Contains(submitErr.Error(), "local transaction submission unavailable") {
 			entry.Status = "rejected"
 		}
 		entry.ErrorMsg = submitErr.Error()
