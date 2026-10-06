@@ -8578,6 +8578,10 @@ republishes its stored metadata with the certificate.
 `s3://` / `gcs://` URI in builds with `dingo_extra_plugins`. Remote stores read
 credentials from the SDK default chain (`AWS_ENDPOINT` selects an
 S3-compatible endpoint) and serve ranged reads by lazy ranged GETs.
+Archive confirmation and snapshot listing keep up to 16 store requests in
+flight rather than one per archive or snapshot in turn, since the aggregator
+runs both while holding its mutex; a cancelled confirmation fails rather than
+reporting the archives present.
 When `mithril.server.keepSnapshots` is a positive N, `snapshot create` prunes
 all but the newest N complete snapshots, removing each one's metadata object
 first; 0 keeps every snapshot. A run that reproduces a stored snapshot older

@@ -37,6 +37,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sync/errgroup"
 )
 
 // Object names inside one snapshot's store prefix. The immutable archives are
@@ -267,6 +268,13 @@ func CreateSnapshot(
 // the store once its metadata had been written, so it was unlisted again.
 var ErrSnapshotArchivesMissing = errors.New("snapshot archives are missing")
 
+// storeProbeWorkers bounds the store requests one archive confirmation or
+// snapshot listing has in flight. A remote store answers each request in a
+// network round trip, and the aggregator confirms and lists while holding its
+// mutex, so serial requests would stall every aggregator endpoint for a round
+// trip per immutable file.
+const storeProbeWorkers = 16
+
 // snapshotArchiveKeys returns the store key of every archive of snapshot.
 func snapshotArchiveKeys(snapshot *CardanoDatabaseSnapshot) []string {
 	last := snapshot.Beacon.ImmutableFileNumber
@@ -288,15 +296,30 @@ func snapshotArchivesPresent(
 	store ArtifactStore,
 	snapshot *CardanoDatabaseSnapshot,
 ) (bool, error) {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(storeProbeWorkers)
 	for _, key := range snapshotArchiveKeys(snapshot) {
-		r, err := store.Open(ctx, key)
-		if errors.Is(err, ErrArtifactNotFound) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		_ = r.Close()
+		g.Go(func() error {
+			// A probe skipped after cancellation fails rather than passes,
+			// so a cancelled confirmation never reports every archive.
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			r, err := store.Open(gctx, key)
+			if err != nil {
+				return err
+			}
+			_ = r.Close()
+			return nil
+		})
+	}
+	// The first error is the one that cancelled the others.
+	err := g.Wait()
+	if errors.Is(err, ErrArtifactNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	return true, nil
 }

@@ -29,6 +29,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // hashPattern matches the 64-hex-digit identifiers used for artifact and
@@ -109,19 +111,33 @@ func ListSnapshots(
 	if err != nil {
 		return nil, fmt.Errorf("listing artifact store: %w", err)
 	}
+	dirs = slices.DeleteFunc(dirs, func(dir string) bool {
+		return !hashPattern.MatchString(dir)
+	})
+	read := make([]*CardanoDatabaseSnapshot, len(dirs))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(storeProbeWorkers)
+	for i, dir := range dirs {
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			snapshot, err := readSnapshot(gctx, store, dir)
+			if errors.Is(err, ErrArtifactNotFound) {
+				return nil
+			}
+			read[i] = snapshot
+			return err
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
 	var snapshots []CardanoDatabaseSnapshot
-	for _, dir := range dirs {
-		if !hashPattern.MatchString(dir) {
-			continue
+	for _, snapshot := range read {
+		if snapshot != nil {
+			snapshots = append(snapshots, *snapshot)
 		}
-		snapshot, err := readSnapshot(ctx, store, dir)
-		if errors.Is(err, ErrArtifactNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		snapshots = append(snapshots, *snapshot)
 	}
 	created := func(s CardanoDatabaseSnapshot) time.Time {
 		t, _ := time.Parse(time.RFC3339Nano, s.CreatedAt)
