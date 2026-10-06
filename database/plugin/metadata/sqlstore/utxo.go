@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -1747,12 +1748,57 @@ func (s *Store) GetUtxosByAddress(
 	maxResults int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddress",
+		patterns,
+		"utxo.deleted_slot = 0",
+		nil,
+		maxResults,
+		txn,
+	)
+}
+
+func (s *Store) GetUtxosByAddressAsOf(
+	patterns []models.UtxoAddressPattern,
+	atSlot uint64,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddressAsOf",
+		patterns,
+		"utxo.added_slot <= ? AND "+
+			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
+		[]any{sqlSlot, sqlSlot},
+		maxResults,
+		txn,
+	)
+}
+
+// utxosByAddressPatterns runs the chunked, bounded address lookup shared by
+// GetUtxosByAddress and GetUtxosByAddressAsOf. liveness selects which rows
+// count as unspent and is ANDed ahead of every chunk's address branches;
+// livenessArgs are its bind parameters and count against each chunk's
+// parameter budget.
+func (s *Store) utxosByAddressPatterns(
+	name string,
+	patterns []models.UtxoAddressPattern,
+	liveness string,
+	livenessArgs []any,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
 	if maxResults <= 0 {
 		return nil, fmt.Errorf(
-			"GetUtxosByAddress: maxResults must be positive, got %d",
+			"%s: maxResults must be positive, got %d",
+			name,
 			maxResults,
 		)
 	}
@@ -1787,9 +1833,9 @@ func (s *Store) GetUtxosByAddress(
 	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
 	// args alone produces a statement with paramLimit+1 total parameters,
 	// which the dialect may reject.
-	limitParamReserve := 0
+	limitParamReserve := len(livenessArgs)
 	if chunkQueryLimit > 0 {
-		limitParamReserve = 1
+		limitParamReserve++
 	}
 	type utxoKey struct {
 		txId string
@@ -1805,8 +1851,8 @@ func (s *Store) GetUtxosByAddress(
 		}
 		utxos, err := s.queryUtxos(
 			txn,
-			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
-			args,
+			liveness+" AND ("+strings.Join(branches, " OR ")+")",
+			append(slices.Clone(livenessArgs), args...),
 			"",
 			chunkQueryLimit,
 		)
@@ -1822,7 +1868,8 @@ func (s *Store) GetUtxosByAddress(
 			ret = append(ret, utxos[i])
 			if len(ret) > maxResults {
 				return fmt.Errorf(
-					"GetUtxosByAddress: %w (maxResults=%d)",
+					"%s: %w (maxResults=%d)",
+					name,
 					models.ErrTooManyUtxoResults,
 					maxResults,
 				)

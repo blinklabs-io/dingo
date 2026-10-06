@@ -93,6 +93,12 @@ func (n *Node) blockProducerStartupClock() (uint64, bool, error) {
 	return supportedSlot, supported, nil
 }
 
+func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
+	if creds != nil {
+		n.equivocation.setSelfPoolID(creds.GetPoolID().String())
+	}
+}
+
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (creds *forging.PoolCredentials, retErr error) {
@@ -832,6 +838,7 @@ func (n *Node) startBlockProducer(
 		)
 	}
 	n.blockProducerCreds.Store(creds)
+	n.setEquivocationSelfPoolID(creds)
 	started = append(started, func() {
 		if n.blockForger != nil {
 			n.blockForger.Stop()

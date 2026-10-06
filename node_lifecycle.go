@@ -1046,7 +1046,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 	}
 	applyPeerTargets(n.config, &peerGovConfig)
-	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
+	n.setPeerGovernor(peergov.NewPeerGovernor(peerGovConfig))
 	// Replace ouroboros. It takes its dependencies at construction and never
 	// reassigns them, so rebuilding those dependencies means rebuilding it
 	// too. Closing the old instance first is required, not merely tidy: it
@@ -1388,6 +1388,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	// If teardown could not confirm the old consumers stopped, intentionally
 	// retain their credentials without closing them: they may still use the keys.
 	n.blockProducerCreds.Store(creds)
+	n.setEquivocationSelfPoolID(creds)
 	// validateBlockProducerStartup may have dialled a KES agent and started
 	// its serve-key loop. Unlike Run's failure path this one leaves the node
 	// running, so a failure below would otherwise leave that loop installing
@@ -1557,6 +1558,9 @@ func (n *Node) Snapshot(
 		n.config.databaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		lifecycle.WithMaxCommitPause(
+			n.config.databaseLifecycle.SnapshotMaxCommitPause,
+		),
 	)
 }
 

@@ -36,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"golang.org/x/sync/errgroup"
 )
 
 // Sync-status values stored under the "sync_status" key. A complete sync clears
@@ -1069,8 +1068,8 @@ func Sync(
 	//
 	// Released on the way out whether or not the extracted tree is cleaned up:
 	// a run that keeps the tree for a later sync still must not leak the
-	// descriptors. This runs after the import errgroup is joined, which is what
-	// makes clearing the fields safe against the goroutines that read them.
+	// descriptors. This runs after both import phases return, which makes
+	// clearing the fields safe against code that reads them.
 	defer bootstrapResult.CloseHandles()
 	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
 	if err != nil {
@@ -1256,16 +1255,17 @@ func Sync(
 		return SyncResult{}, err
 	}
 
-	// Import ledger state and copy blocks in parallel.
-	// Ledger state goes to metadata (SQLite), blocks go to the blob
-	// store (Badger) — completely independent data stores.
+	// Copy blocks before importing the ledger state. Both phases write metadata:
+	// block copy advances the chain and records its transaction metadata, while
+	// the ledger import writes the snapshot state. Keeping the phases ordered
+	// prevents independent SQLite write transactions from contending during a
+	// bootstrap. Each phase is resumable if the later phase fails.
 	var loadResult *node.LoadBlobsResult
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte
 	var ledgerStateBeyondCertifiedTip bool
-	g, gctx := errgroup.WithContext(ctx)
 
-	g.Go(func() error {
+	importLedgerStatePhase := func() error {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		onLedger := func(p ledgerstate.ImportProgress) {
@@ -1284,7 +1284,7 @@ func Sync(
 		var importErr error
 		if preparedRepairImport != nil {
 			slot, hash, beyondCertifiedTip, importErr = importPreparedLedgerState(
-				gctx,
+				ctx,
 				db,
 				logger,
 				nodeCfg,
@@ -1295,7 +1295,7 @@ func Sync(
 			)
 		} else {
 			slot, hash, beyondCertifiedTip, importErr = importLedgerState(
-				gctx,
+				ctx,
 				db,
 				logger,
 				nodeCfg,
@@ -1321,9 +1321,9 @@ func Sync(
 			)
 		}
 		return nil
-	})
+	}
 
-	g.Go(func() error {
+	copyImmutablePhase := func() error {
 		cfg.emit(SyncProgress{Phase: PhaseImmutableCopy, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseImmutableCopy, Active: false})
 		logger.Info(
@@ -1333,7 +1333,7 @@ func Sync(
 		)
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
-			gctx, nil, logger, bootstrapResult.ImmutableDir, db,
+			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
@@ -1361,9 +1361,12 @@ func Sync(
 			})
 		}
 		return nil
-	})
+	}
 
-	if err := g.Wait(); err != nil {
+	if err := copyImmutablePhase(); err != nil {
+		return SyncResult{}, err
+	}
+	if err := importLedgerStatePhase(); err != nil {
 		return SyncResult{}, err
 	}
 	if cfg.RepairLegacyRewardState && preparedRepairImport != nil {
