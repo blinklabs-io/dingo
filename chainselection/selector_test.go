@@ -4288,7 +4288,7 @@ func peerSelectable(
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.peerTips[connId]
 	require.True(t, ok, "peer must be tracked")
-	return cs.isPeerSelectableLocked(connId, peerTip, false)
+	return cs.isPeerSelectableLocked(connId, peerTip)
 }
 
 // TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable pins the
@@ -5453,7 +5453,7 @@ func TestPinNoSwitchOnMicroForkDuringCatchUp(t *testing.T) {
 
 	// Confirm the pin is in the catch-up regime.
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	cs.mutex.RUnlock()
 	assert.True(t, catchingUp, "expected catch-up regime for this scenario")
 }
@@ -5491,7 +5491,7 @@ func TestPinNoSwitchOnSiblingHeadForkAtTip(t *testing.T) {
 
 	// Confirm we are NOT in the catch-up regime (tip-hold path exercised).
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	cs.mutex.RUnlock()
 	assert.False(t, catchingUp, "expected tip-hold (non-catch-up) regime")
 }
@@ -5742,7 +5742,7 @@ func TestPinInactiveWithoutLocalTip(t *testing.T) {
 
 	// Confirm catchingUpLocked is false with no local tip.
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	stalled := cs.localTipStalledLocked()
 	cs.mutex.RUnlock()
 	assert.False(t, catchingUp)

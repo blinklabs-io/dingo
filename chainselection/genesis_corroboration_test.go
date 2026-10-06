@@ -78,6 +78,22 @@ func feedPoints(pt *PeerChainTip, window uint64, points ...ocommon.Point) {
 	}
 }
 
+// feedPointsWithTipHistory also seeds the delivered-tip window used for recent checks.
+func feedPointsWithTipHistory(
+	pt *PeerChainTip,
+	window uint64,
+	historyLimit uint64,
+	points ...ocommon.Point,
+) {
+	feedPoints(pt, window, points...)
+	for i, point := range points {
+		pt.recordObservedTipHistory(ochainsync.Tip{
+			Point:       point,
+			BlockNumber: uint64(i + 1),
+		}, historyLimit)
+	}
+}
+
 // recordObservedPoint keeps the slot frontier and the point (slot+hash)
 // frontier in lockstep, storing the current hash at each slot.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
@@ -240,7 +256,7 @@ func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 	honestA := &PeerChainTip{}
 	honestB := &PeerChainTip{}
 	divergent := &PeerChainTip{}
-	feedPoints(honestA, window,
+	feedPointsWithTipHistory(honestA, window, 3,
 		ocommon.Point{Slot: 10, Hash: []byte("h10")},
 		ocommon.Point{Slot: 20, Hash: []byte("h20")},
 	)
@@ -268,7 +284,7 @@ func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
 	honest := &PeerChainTip{}
 	// Both agree on slot 100, then the fast source forks (x...) while the
 	// honest witness continues on the real chain (h...).
-	feedPoints(fast, window,
+	feedPointsWithTipHistory(fast, window, 4,
 		ocommon.Point{Slot: 100, Hash: []byte("shared-100")},
 		ocommon.Point{Slot: 105, Hash: []byte("x105")},
 		ocommon.Point{Slot: 110, Hash: []byte("x110")},
@@ -289,7 +305,7 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 	window := uint64(20)
 	ahead := &PeerChainTip{}
 	behind := &PeerChainTip{}
-	feedPoints(ahead, window,
+	feedPointsWithTipHistory(ahead, window, 3,
 		ocommon.Point{Slot: 200, Hash: []byte("h200")},
 		ocommon.Point{Slot: 210, Hash: []byte("h210")},
 	)
@@ -298,6 +314,47 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 		ocommon.Point{Slot: 105, Hash: []byte("h105")},
 	)
 	assert.False(t, ahead.confirmsRecentChain(behind))
+}
+
+func TestGenesisCorroborationRejectsOldMatchWithAheadWitness(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:        true,
+		SecurityParam:      1,
+		GenesisWindowSlots: 100,
+	})
+	candidateConn := corrConn(1)
+	witnessConn := corrConn(2)
+	candidateTip := NewPeerChainTip(candidateConn, genesisTip(40, "candidate-40", 4), nil)
+	witnessTip := NewPeerChainTip(witnessConn, genesisTip(80, "witness-80", 5), nil)
+	feedPointsWithTipHistory(candidateTip, 100, 2,
+		ocommon.Point{Slot: 10, Hash: []byte("shared-10")},
+		ocommon.Point{Slot: 20, Hash: []byte("candidate-20")},
+		ocommon.Point{Slot: 30, Hash: []byte("candidate-30")},
+		ocommon.Point{Slot: 40, Hash: []byte("candidate-40")},
+	)
+	feedPoints(witnessTip, 100,
+		ocommon.Point{Slot: 10, Hash: []byte("shared-10")},
+		ocommon.Point{Slot: 50, Hash: []byte("witness-50")},
+		ocommon.Point{Slot: 80, Hash: []byte("witness-80")},
+	)
+	cs.peerTips[candidateConn] = candidateTip
+	cs.peerTips[witnessConn] = witnessTip
+
+	cs.mutex.RLock()
+	suffixSupported := cs.witnessSupportsSuffixLocked(candidateTip, witnessTip)
+	corroboratingPeers := cs.corroboratingPeersLocked(
+		candidateConn,
+		candidateTip,
+	)
+	cs.mutex.RUnlock()
+	require.True(t, suffixSupported,
+		"the ahead witness is within the block-number suffix bound")
+	if corroboratingPeers != 0 {
+		t.Fatalf(
+			"an old shared ancestor counted as recent corroboration: got %d peers",
+			corroboratingPeers,
+		)
+	}
 }
 
 // Removing the selected best peer with no replacement also publishes a
@@ -375,11 +432,18 @@ func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
 	assert.False(t, cs.ShouldApplyIngress(fast),
 		"uncorroborated fast source must not be apply-eligible")
 
-	// A corroborator arrives: both become apply-eligible.
+	// A corroborator that has not delivered the candidate's current point does
+	// not authorize its unobserved suffix.
 	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 	)
+	assert.False(t, cs.ShouldApplyIngress(fast),
+		"a shared prefix must not authorize an unobserved suffix")
+
+	// Once the corroborator independently delivers the current point, both
+	// peers become apply-eligible.
+	feedFrontier(cs, witness, genesisTip(110, "h110", 110))
 	assert.True(t, cs.ShouldApplyIngress(fast))
 	assert.True(t, cs.ShouldApplyIngress(witness))
 
@@ -684,14 +748,15 @@ func TestChainSelectedNoneEventOnCorroborationRevocation(t *testing.T) {
 
 	fast := corrConn(1)
 	witness := corrConn(2)
-	feedFrontier(cs, fast,
+	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	feedFrontier(cs, witness,
+	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
@@ -728,20 +793,23 @@ func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
 	corroboratorA := corrConn(2)
 	corroboratorB := corrConn(3)
 
-	// Fast source: three blocks in the window (densest).
+	// The first corroborator is not selectable alone. As the fast source catches
+	// up to it, the fast source becomes the corroborated incumbent.
+	feedFrontier(cs, corroboratorA,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
 	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	// Corroborators are on the same chain: they report the SAME hashes at the
-	// slots they have both seen, just fewer blocks (they are slower sources).
-	feedFrontier(cs, corroboratorA,
-		genesisTip(100, "h100", 100),
-		genesisTip(105, "h105", 105),
-	)
+	// A second corroborator independently delivers the same dense chain.
 	feedFrontier(cs, corroboratorB,
 		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 
 	cs.EvaluateAndSwitch()
@@ -1044,14 +1112,15 @@ func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
 
 	fast := corrConn(1)
 	witness := corrConn(2)
-	feedFrontier(cs, fast,
+	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
-	feedFrontier(cs, witness,
+	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
@@ -1197,10 +1266,11 @@ func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
 	feedFrontier(cs, witness,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
 	)
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer())
-	assert.Equal(t, fast, *cs.GetBestPeer())
+	assert.True(t, cs.ShouldApplyIngress(fast))
 }
 
 // Corroboration is opt-in. With MinCorroboratingPeers == 0 (the default), a
@@ -1242,6 +1312,7 @@ func TestGenesisStatusObservability(t *testing.T) {
 		genesisTip(110, "h110", 110),
 	)
 	feedFrontier(cs, corroborator,
+		// This peer joined at the slot-105 intersection.
 		genesisTip(105, "h105", 105),
 		genesisTip(110, "h110", 110),
 	)
@@ -1252,7 +1323,6 @@ func TestGenesisStatusObservability(t *testing.T) {
 	assert.Equal(t, uint64(30), status.WindowSlots)
 	assert.Equal(t, 1, status.MinCorroboratingPeers)
 	require.NotNil(t, status.BestSource)
-	assert.Equal(t, fast, *status.BestSource)
 
 	byConn := make(
 		map[ouroboros.ConnectionId]GenesisPeerStatus,
@@ -1266,6 +1336,7 @@ func TestGenesisStatusObservability(t *testing.T) {
 	assert.Equal(t, uint64(3), fastStatus.ObservedDensity)
 	assert.GreaterOrEqual(t, fastStatus.CorroboratingPeers, 1)
 	assert.True(t, fastStatus.Corroborated)
+	assert.True(t, byConn[*status.BestSource].Corroborated)
 }
 
 // When the local tip catches up into the Genesis window of the best known

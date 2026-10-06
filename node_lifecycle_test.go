@@ -342,6 +342,19 @@ func lifecycleSnapshot(
 	)
 }
 
+// TestLiveSnapshotAppliesMaxCommitPause verifies the live-node path passes
+// databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
+// nanosecond bound has always elapsed by the time the state reads finish.
+func TestLiveSnapshotAppliesMaxCommitPause(t *testing.T) {
+	n, _ := newLiveLifecycleTestNode(t, 1)
+	n.config.databaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
+
+	snapshotDir := filepath.Join(t.TempDir(), "snap")
+	_, err := n.Snapshot(context.Background(), snapshotDir, "", "")
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, snapshotDir)
+}
+
 // TestInitLeiosManagersDoNotRequireOuroboros pins the startup ordering. Run
 // initializes the Leios managers well before it constructs Ouroboros, so the
 // init path must not reach for the instance: doing so dereferences a nil
