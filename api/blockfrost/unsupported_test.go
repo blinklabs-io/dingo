@@ -31,8 +31,7 @@ func TestRouterUnsupportedOperationsReturnExplicitError(t *testing.T) {
 	// specification independently of the production route table.
 	requests := []struct{ method, path string }{
 		{"GET", "/api/v0/"},
-		{"GET", "/api/v0/health"},
-		{"GET", "/api/v0/health/clock"},
+		{"GET", "/health/clock"},
 		{"GET", "/api/v0/blocks/latest/txs/cbor"},
 		{"GET", "/api/v0/blocks/testvalue/next"},
 		{"GET", "/api/v0/blocks/testvalue/previous"},

@@ -8849,10 +8849,9 @@ Dingo's internal state and Blockfrost response types and supports
 Blockfrost-style pagination headers. Pool and account list routes reject
 out-of-range count and page values before calling the adapter, using the
 shared strict pagination parser (count 1–100, page 1–21474836).
-The root document is served only at the literal `/` path (`GET /{$}`); any
-other unregistered path falls through to a catch-all `404` handler instead
-of the root document, matching real Blockfrost's behavior for unimplemented
-routes.
+The root document is served only at the literal `/` path (`GET /{$}`).
+Documented operations without a handler return `501`; unknown paths fall
+through to a catch-all `404` handler instead of the root document.
 
 The account UTxOs, withdrawals, and transactions endpoints resolve everything
 by stake credential rather than a single address. Account UTxOs reuse the

@@ -27,8 +27,7 @@ import (
 // remaining path, as an IPFS path may name an object inside a directory.
 var unsupportedOperations = []string{
 	"GET /api/v0/",
-	"GET /api/v0/health",
-	"GET /api/v0/health/clock",
+	"GET /health/clock",
 	"GET /api/v0/blocks/latest/txs/cbor",
 	"GET /api/v0/blocks/{hash_or_number}/next",
 	"GET /api/v0/blocks/{hash_or_number}/previous",
@@ -143,6 +142,24 @@ func (b *Blockfrost) writeUnsupportedOperation(w http.ResponseWriter, r *http.Re
 			w.Header().Set("Allow", allow)
 			writeError(w, http.StatusMethodNotAllowed, "Method Not Allowed", "The requested method is not allowed for this endpoint.")
 		}
+		return true
+	}
+	return false
+}
+
+func (b *Blockfrost) writeUnsupportedMethod(w http.ResponseWriter, r *http.Request) bool {
+	for _, operation := range unsupportedOperations {
+		method, path, _ := strings.Cut(operation, " ")
+		if !matchesOperationPath(path, r.URL.EscapedPath()) ||
+			r.Method == method || (method == http.MethodGet && r.Method == http.MethodHead) {
+			continue
+		}
+		allow := method
+		if method == http.MethodGet {
+			allow += ", HEAD"
+		}
+		w.Header().Set("Allow", allow)
+		writeError(w, http.StatusMethodNotAllowed, "Method Not Allowed", "The requested method is not allowed for this endpoint.")
 		return true
 	}
 	return false

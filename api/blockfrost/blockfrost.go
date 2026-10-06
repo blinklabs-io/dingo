@@ -274,7 +274,13 @@ func (b *Blockfrost) handler() http.Handler {
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
-	limited := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+	routed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if b.writeUnsupportedMethod(w, r) {
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	limited := http.MaxBytesHandler(routed, maxRequestBodyBytes)
 	return httpcors.Handler(
 		limited,
 		httpcors.Config{
