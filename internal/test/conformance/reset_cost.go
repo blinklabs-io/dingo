@@ -138,7 +138,7 @@ func (r *backendResetter) probeStatement(
 	if stmt, ok := r.probeStmts[query]; ok {
 		return stmt, nil
 	}
-	stmt, err := r.db.PrepareContext(ctx, query)
+	stmt, err := r.db.PrepareContext(ctx, query) //nolint:sqlclosecheck // cached below and closed by Close
 	if err != nil {
 		return nil, fmt.Errorf("prepare non-empty table probe: %w", err)
 	}
