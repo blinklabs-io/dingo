@@ -349,7 +349,7 @@ func validateUnknownVoters(
 			return err
 		}
 	}
-	state, ok := ls.(CommitteeCredentialState)
+	state, ok := stateCapability[CommitteeCredentialState](ls)
 	if !ok {
 		if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 			return nil
