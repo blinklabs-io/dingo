@@ -5753,9 +5753,11 @@ or reference -- cannot be repaired by selecting a different UTxO producer
 history. Every Shelley-family era delegates that rule to
 `shelley.UtxoValidateNoDuplicateInputs` and so reports
 `shelley.DuplicateInputError`. Byron permits a repeated input, but its
-`eras.TxTooLargeByronError`, `eras.UnknownAttributesByronError` and
-`eras.UnknownAddressAttributesByronError` read only the transaction and the
-protocol parameters. `isDeterministicTxValidationError` classifies all of them. Replay recovery therefore rejects the primary-chain branch
+`eras.TxTooLargeByronError`, `eras.InputIndexByronError`,
+`eras.UnknownAttributesByronError` and `eras.UnknownAddressAttributesByronError`
+read only the transaction and the protocol parameters.
+`isDeterministicTxValidationError` classifies all of them. Replay recovery
+therefore rejects the primary-chain branch
 and rolls both stores back to the last applied ledger tip, then publishes a
 `chainsync.resync` event with reason `deterministic tx validation recovery` so
 ChainSync obtains a fresh intersection. Other transaction-validation errors
