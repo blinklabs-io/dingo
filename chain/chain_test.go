@@ -4644,7 +4644,7 @@ func TestSkippedBatchRestoreIsRecorded(t *testing.T) {
 // sync.RWMutex sits in. Matching the frame rather than the goroutine's wait
 // reason keeps this independent of how the runtime spells that reason, which
 // has changed between Go releases.
-const semaphoreFrame = "sync.runtime_Semacquire"
+const semaphoreFrame = "runtime_Semacquire"
 
 // waitUntilParkedIn blocks until some goroutine is parked on a lock taken
 // inside symbol.
@@ -4656,6 +4656,10 @@ const semaphoreFrame = "sync.runtime_Semacquire"
 // silently unexercised whenever the goroutine was slower than the delay, so
 // this reads the condition off the runtime's own goroutine dump.
 func waitUntilParkedIn(t *testing.T, symbol string) {
+	waitUntilParkedInFrom(t, symbol, "")
+}
+
+func waitUntilParkedInFrom(t *testing.T, symbol, caller string) {
 	t.Helper()
 	buf := make([]byte, 1<<20)
 	testutil.WaitForConditionWithInterval(
@@ -4664,7 +4668,8 @@ func waitUntilParkedIn(t *testing.T, symbol string) {
 			dump := string(buf[:runtime.Stack(buf, true)])
 			for g := range strings.SplitSeq(dump, "\n\ngoroutine ") {
 				if strings.Contains(g, semaphoreFrame) &&
-					strings.Contains(g, symbol) {
+					strings.Contains(g, symbol) &&
+					(caller == "" || strings.Contains(g, caller)) {
 					return true
 				}
 			}
@@ -4693,7 +4698,7 @@ func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	)
 }
 
-func TestWithMutationBarrierExcludesPersistentAdds(t *testing.T) {
+func TestRollbackDeferredThenExcludesPersistentAdds(t *testing.T) {
 	t.Parallel()
 
 	_, c := callerTxnChain(t)
@@ -4701,17 +4706,27 @@ func TestWithMutationBarrierExcludesPersistentAdds(t *testing.T) {
 	releaseBarrier := make(chan struct{})
 	barrierDone := make(chan error, 1)
 	go func() {
-		barrierDone <- c.WithMutationBarrier(func() error {
+		_, err := c.RollbackDeferredThen(c.Tip().Point, func() error {
 			close(barrierEntered)
 			<-releaseBarrier
 			return nil
 		})
+		barrierDone <- err
 	}()
 	<-barrierEntered
 
 	addDone := make(chan error, 1)
-	go func() { addDone <- c.AddBlock(testBlocks[4], nil) }()
-	waitUntilGoroutineIn(t, "chain.(*Chain).beginStandaloneAdd")
+	addStarted := make(chan struct{})
+	go func() {
+		close(addStarted)
+		addDone <- c.AddBlock(testBlocks[4], nil)
+	}()
+	<-addStarted
+	waitUntilParkedInFrom(
+		t,
+		"chain.(*Chain).beginStandaloneAdd",
+		"chain_test.TestRollbackDeferredThenExcludesPersistentAdds.func2",
+	)
 
 	close(releaseBarrier)
 	if err := testutil.RequireReceive(

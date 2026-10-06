@@ -1718,20 +1718,6 @@ func (c *Chain) RollbackUnboundedDeferredThen(
 	return c.rollbackLockedThen(point, true, after)
 }
 
-// WithMutationBarrier runs fn while persistent-chain additions and removals
-// are excluded. fn must not call another Chain mutation method.
-func (c *Chain) WithMutationBarrier(fn func() error) error {
-	if c == nil {
-		return errors.New("chain is nil")
-	}
-	c.batchCommitMutex.Lock()
-	defer c.batchCommitMutex.Unlock()
-	if err := c.awaitPendingCallerAdds(); err != nil {
-		return fmt.Errorf("wait for pending caller transactions: %w", err)
-	}
-	return fn()
-}
-
 // rollbackForkDepth returns the number of blocks a rollback to
 // rollbackBlockIndex removes from the chain. The rollback point is normally at
 // or behind the tip, but it can sit ahead of the tip: rolled-back blocks stay

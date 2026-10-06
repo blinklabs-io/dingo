@@ -40,6 +40,13 @@ import (
 func commitTimestampRecoveryFixture(
 	t *testing.T,
 ) ([]chain.RawBlock, *database.Database) {
+	return commitTimestampRecoveryFixtureAtTip(t, 2)
+}
+
+func commitTimestampRecoveryFixtureAtTip(
+	t *testing.T,
+	tipIndex int,
+) ([]chain.RawBlock, *database.Database) {
 	t.Helper()
 	dataDir := t.TempDir()
 	cfg := &database.Config{
@@ -65,7 +72,7 @@ func commitTimestampRecoveryFixture(
 		prev = h
 	}
 	require.NoError(t, cm.PrimaryChain().AddRawBlocks(raw))
-	ledgerTip := rawBlockTip(raw[2])
+	ledgerTip := rawBlockTip(raw[tipIndex])
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		return db.SetTip(ledgerTip, txn)
@@ -231,16 +238,58 @@ func TestRecoverCommitTimestampConflictFailsClosedOnLaterDeleteError(
 			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.armContinuationAudit(rawBlockTip(raw[1]).Point, "test rollback")
 
 	err = ls.RecoverCommitTimestampConflict()
 
 	require.ErrorIs(t, err, injectedErr)
 	require.EqualValues(t, 2, failing.deletes.Load())
+	require.Nil(t, ls.continuationAudit.Load())
 	_, err = database.BlockByPoint(
 		db,
 		ocommon.NewPoint(raw[3].Slot, raw[3].Hash),
 	)
 	require.NoError(t, err, "recovery must stop before cleanup deletes more blocks")
+}
+
+func TestRecoverCommitTimestampConflictSerializesTipDecisionWithCleanup(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	raw, db := commitTimestampRecoveryFixtureAtTip(t, 4)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	nextHash := testHashBytes("commit-ts-recovery-concurrent-add")
+	next := chain.RawBlock{
+		Slot:        raw[4].Slot + 10,
+		Hash:        nextHash,
+		BlockNumber: raw[4].BlockNumber + 1,
+		Type:        1,
+		PrevHash:    raw[4].Hash,
+		Cbor:        []byte{0x80},
+	}
+	ls.beforeCommitRecoveryMutationBarrier = func() {
+		require.NoError(t, ls.chain.AddRawBlocks([]chain.RawBlock{next}))
+	}
+
+	require.NoError(t, ls.RecoverCommitTimestampConflict())
+
+	require.Equal(t, rawBlockTip(raw[4]), ls.chain.Tip())
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(next.Slot, next.Hash),
+	)
+	require.Error(t, err)
 }
 
 func TestRecoverCommitTimestampConflictSettlesContinuationAudit(

@@ -1529,6 +1529,10 @@ type LedgerState struct {
 	// window between that snapshot and the later, transactionEventMutex-
 	// held undo-block resolution, without relying on scheduler timing.
 	beforeReconciliationUndoSnapshot func()
+	// beforeCommitRecoveryMutationBarrier is a test-only sequencing hook, nil
+	// in production. It runs after recovery samples the chain tip and before it
+	// enters the chain mutation barrier.
+	beforeCommitRecoveryMutationBarrier func()
 
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
@@ -2471,6 +2475,9 @@ func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
 	ls.chainRollbackGeneration.Add(1)
 	priorAudit, auditGeneration := ls.takeContinuationAuditForRewind()
 	tipBeforeRewind := ls.chain.Tip().Point
+	if ls.beforeCommitRecoveryMutationBarrier != nil {
+		ls.beforeCommitRecoveryMutationBarrier()
+	}
 	if tipBeforeRewind.Slot < tip.Slot {
 		ls.chainRollbackGeneration.Store(priorGeneration)
 		ls.settleAuditAfterRewind(
@@ -2490,19 +2497,16 @@ func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
 		return ls.cleanupOrphanedBlobs(tip.Slot)
 	}
 	var rewindErr error
-	needsRewind := tipBeforeRewind.Slot > tip.Slot ||
-		!pointMatches(tipBeforeRewind, tip)
-	if !needsRewind {
-		rewindErr = ls.chain.WithMutationBarrier(cleanup)
-	} else if ls.config.ChainManager.SecurityParamConfigured() {
+	if ls.config.ChainManager.SecurityParamConfigured() {
 		_, rewindErr = ls.chain.RollbackDeferredThen(tip, cleanup)
 	} else {
 		_, rewindErr = ls.chain.RollbackUnboundedDeferredThen(tip, cleanup)
 	}
 	tipAfterRewind := ls.chain.Tip().Point
-	truncated := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
+	chainRegressed := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
 	safeRefusal := errors.Is(rewindErr, chain.ErrRollbackExceedsSecurityParam) &&
-		!truncated
+		!chainRegressed
+	truncated := chainRegressed || (rewindErr != nil && !safeRefusal)
 	if safeRefusal {
 		ls.chainRollbackGeneration.Store(priorGeneration)
 	}
