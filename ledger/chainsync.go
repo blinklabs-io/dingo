@@ -6473,6 +6473,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 		if err != nil {
 			return fmt.Errorf("parse genesis staking: %w", err)
 		}
+		for poolID, cert := range genesisPools {
+			cert.Relays = wireOrderRelays(cert.Relays)
+			genesisPools[poolID] = cert
+		}
 		genesisStake, err := genesisStakeDelegations(poolDelegators)
 		if err != nil {
 			return fmt.Errorf("parse genesis stake delegations: %w", err)
