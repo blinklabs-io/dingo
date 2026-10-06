@@ -127,51 +127,37 @@ func TestSQLiteBulkModeKeepsPlannerAndWritersAvailable(t *testing.T) {
 	require.NoError(t, store.RestoreNormalPragmas())
 }
 
-func TestBulkModeDrainsAndSuppressesCheckpoints(t *testing.T) {
+func TestBulkModeSerializesAndSuppressesCheckpoints(t *testing.T) {
 	store := newTestStore(t)
-	checkpointStarted := make(chan struct{})
-	checkpointRelease := make(chan struct{})
-	checkpointReturned := make(chan struct{})
+	gateErr := errors.New("scheduled work gate not held")
+	gateHeld := func() bool {
+		if store.scheduledWorkMu.TryLock() {
+			store.scheduledWorkMu.Unlock()
+			return false
+		}
+		return true
+	}
 	var checkpointCalls atomic.Uint32
 	checkpointErr := errors.New("checkpoint called")
 	store.checkpoint = func(context.Context) error {
-		if checkpointCalls.Add(1) == 1 {
-			close(checkpointStarted)
-			<-checkpointRelease
-			close(checkpointReturned)
+		if !gateHeld() {
+			return gateErr
 		}
+		checkpointCalls.Add(1)
 		return checkpointErr
 	}
 	dialect := store.dialect.(dialect)
 	setBulk := dialect.setBulk
 	dialect.setBulk = func(ctx context.Context, exec Execer) error {
-		select {
-		case <-checkpointReturned:
-		default:
-			return errors.New("bulk mode started before the active checkpoint drained")
+		if !gateHeld() {
+			return gateErr
 		}
 		return setBulk(ctx, exec)
 	}
 	store.dialect = dialect
 
-	checkpointDone := make(chan error, 1)
-	go func() {
-		checkpointDone <- store.runCheckpoint(t.Context())
-	}()
-	select {
-	case <-checkpointStarted:
-	case <-time.After(time.Second):
-		t.Fatal("checkpoint did not start")
-	}
-
-	bulkDone := make(chan error, 1)
-	go func() {
-		bulkDone <- store.SetBulkLoadPragmas()
-	}()
-
-	close(checkpointRelease)
-	require.ErrorIs(t, <-checkpointDone, checkpointErr)
-	require.NoError(t, <-bulkDone)
+	require.ErrorIs(t, store.runCheckpoint(t.Context()), checkpointErr)
+	require.NoError(t, store.SetBulkLoadPragmas())
 	require.NoError(t, store.runCheckpoint(t.Context()))
 	require.Equal(t, uint32(1), checkpointCalls.Load())
 
