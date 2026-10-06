@@ -464,6 +464,41 @@ func TestPeerTipAdmissionCandidatesStayOutOfSelectionUntilAdmitted(t *testing.T)
 	assert.Nil(t, cs.pendingPeerTipFrontiers[applicant])
 }
 
+// A disconnected peer's staged candidates are corroboration evidence only while
+// the connection lives; removing the peer must drop them with its tracked tip.
+func TestRemovePeerDropsStagedPeerTipAdmissions(t *testing.T) {
+	t.Parallel()
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+	applicant := corrConn(41)
+	departed := corrConn(42)
+	for _, connId := range []ouroboros.ConnectionId{applicant, departed} {
+		for i, tip := range []ochainsync.Tip{
+			genesisTip(100, "h100", 100),
+			genesisTip(105, "h105", 105),
+		} {
+			require.True(t, cs.PreparePeerTipAdmission(PeerTipUpdateEvent{
+				ConnectionId: connId,
+				AdmissionID:  uint64(i + 1),
+				Tip:          tip,
+				ObservedTip:  tip,
+			}))
+		}
+	}
+	require.True(t, cs.ShouldApplyIngress(applicant),
+		"the other staged frontier should corroborate the applicant")
+
+	cs.RemovePeer(departed)
+	assert.NotContains(t, cs.pendingPeerTips, departed)
+	assert.NotContains(t, cs.pendingPeerTipFrontiers, departed)
+	assert.False(t, cs.ShouldApplyIngress(applicant),
+		"a removed peer's staged candidates must not remain as evidence")
+}
+
 func TestPeerTipAdmissionCommitPromotesCandidate(t *testing.T) {
 	t.Parallel()
 
