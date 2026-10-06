@@ -512,14 +512,10 @@ func (cm *ChainManager) RewindPrimaryChainAtStartup(
 // to choose between RewindPrimaryChainAtStartup and
 // RewindPrimaryChainToPoint.
 //
-// This reads securityParam without cm.mutex, matching SetLedger's own
-// unguarded write: both rely on SetLedger completing, during single-
-// threaded startup composition, before any goroutine that could reach
-// either side of this field exists (node.go constructs the ouroboros
-// layer -- and with it every chainsync-reachable goroutine -- only after
-// SetLedger returns).
+// It takes the manager read lock because SetLedger can run again while the
+// node is serving. Callers must not hold cm.mutex.
 func (cm *ChainManager) SecurityParamConfigured() bool {
-	return cm.securityParam > 0
+	return cm.SecurityParam() > 0
 }
 
 // persistentPrimaryChain resolves the primary chain for
