@@ -376,6 +376,28 @@ jobs:
       - name: go-test
         run: go test -v -ldflags="-s -w" -timeout 30m ./...
 
+  validate-release-tag:
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      package_version: ${{ steps.validate.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        id: validate
+        env:
+          CANDIDATE_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="$(.github/scripts/validate-release-tag.sh "$CANDIDATE_RELEASE_TAG")"
+          {
+            echo "release_tag=$CANDIDATE_RELEASE_TAG"
+            echo "package_version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+
   # A release draft is created only once the supported platforms are green,
   # so a tag
   # cannot reach a half-published state the way v0.70.3 did.
@@ -388,11 +410,16 @@ jobs:
       - go-test-linux
       - go-test-linux-race
       - go-test-macos
-    if: github.ref_type == 'tag'
+      - validate-release-tag
+    if: >-
+      github.ref_type == 'tag'
+      && needs.validate-release-tag.result == 'success'
     permissions:
       contents: write
     outputs:
       RELEASE_ID: ${{ steps.create-release.outputs.result }}
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
         id: create-release
@@ -863,14 +890,19 @@ jobs:
   # is absent (e.g. forks), the job no-ops instead of failing.
   update-homebrew:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
     env:
       TAP_REPO: blinklabs-io/homebrew-cardano
       HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
     steps:
       - name: Check tap token
         id: gate
@@ -980,8 +1012,12 @@ jobs:
   # consumer repository; the default GITHUB_TOKEN cannot write across repos.
   update-consumers:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
@@ -999,6 +1035,8 @@ jobs:
       CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
       CONSUMER_REPOSITORY: ${{ matrix.repository }}
       CONSUMER_KIND: ${{ matrix.consumer }}
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
     steps:
       - name: Check consumer token
         id: gate
@@ -1018,11 +1056,9 @@ jobs:
           path: consumer
       - name: Update consumer version
         if: steps.gate.outputs.enabled == 'true'
-        env:
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="${PACKAGE_VERSION#v}"
+          version="$PACKAGE_VERSION"
           case "${CONSUMER_KIND}" in
             ansible)
               file="consumer/roles/dingo/defaults/main.yml"
@@ -1066,32 +1102,31 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cd consumer
           case "${CONSUMER_KIND}" in
             ansible) git add roles/dingo/defaults/main.yml ;;
-            cardano-up) git add "packages/dingo/dingo-${PACKAGE_VERSION#v}.yaml" ;;
+            cardano-up) git add "packages/dingo/dingo-${PACKAGE_VERSION}.yaml" ;;
             helm) git add charts/dingo/Chart.yaml charts/dingo/values.yaml ;;
           esac
           if git diff --cached --quiet; then
-            echo "${CONSUMER_REPOSITORY} already includes ${PACKAGE_VERSION}; nothing to do."
+            echo "${CONSUMER_REPOSITORY} already includes ${RELEASE_TAG}; nothing to do."
             exit 0
           fi
-          branch="dingo-${PACKAGE_VERSION}"
+          branch="dingo-${RELEASE_TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
-          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          git commit -m "chore(dingo): release ${RELEASE_TAG}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
           fi
           git push --force-with-lease origin "$branch"
           if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
-              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
-              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${branch}; pushed updated consumer files to it."
           fi
