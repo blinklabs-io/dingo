@@ -309,36 +309,112 @@ func TestAddClientConnId_DuplicatePreservesState(
 	)
 }
 
-func TestRecordClientDeliveryRefreshesStallClockWithoutMovingCursor(
+func TestRecordClientDeliveryRefreshesOnlyOnForwardProgress(
 	t *testing.T,
 ) {
+	t.Parallel()
+
+	now := time.Unix(1, 0)
 	bus := newTestEventBus(t)
 	s := newTestState(t, bus, chainsync.Config{
 		MaxClients:   5,
-		StallTimeout: 200 * time.Millisecond,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
 	})
 	conn := newTestConnId(1)
 	s.AddClientConnId(conn)
-	require.False(t, s.RecordClientDelivery(newTestConnId(99)))
+	replayed := ocommon.NewPoint(100, []byte("ha"))
+	require.False(t, s.RecordClientDelivery(newTestConnId(99), replayed))
+
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(conn, replayed))
+	first := s.GetTrackedClient(conn)
+	require.NotNil(t, first)
+
+	now = now.Add(2 * time.Minute)
+	require.True(t, s.RecordClientDelivery(conn, replayed))
+	duplicate := s.GetTrackedClient(conn)
+	require.NotNil(t, duplicate)
+	require.Equal(t, first.LastActivity, duplicate.LastActivity,
+		"replaying one suppressed header must not refresh activity")
+	require.Equal(t, first.HeadersRecv+1, duplicate.HeadersRecv)
+	require.Equal(t, []ouroboros.ConnectionId{conn}, s.CheckStalledClients())
+
+	forward := ocommon.NewPoint(101, []byte("hb"))
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(conn, forward))
+	advanced := s.GetTrackedClient(conn)
+	require.NotNil(t, advanced)
+	require.Equal(t, now, advanced.LastActivity)
+	require.Equal(t, chainsync.ClientStatusSyncing, advanced.Status)
+	require.Equal(t, ocommon.Point{}, advanced.Cursor,
+		"suppressed forward progress must not move the admitted cursor")
+}
+
+func TestDeliveryWatermarkRewindsAndResets(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1, 0)
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.Config{
+		MaxClients:   5,
+		StallTimeout: time.Minute,
+		Now:          func() time.Time { return now },
+	})
+	conn := newTestConnId(1)
+	require.True(t, s.AddClientConnId(conn))
 	point := ocommon.NewPoint(100, []byte("ha"))
+	now = now.Add(time.Second)
 	require.True(t, s.UpdateClientTipWithoutDedup(
 		conn, point, ochainsync.Tip{Point: point},
 	))
 
-	deadline := time.Now().Add(600 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		require.True(t, s.RecordClientDelivery(conn))
-		require.Empty(t, s.CheckStalledClients())
-		time.Sleep(20 * time.Millisecond)
-	}
-	tc := s.GetTrackedClient(conn)
-	require.NotNil(t, tc)
-	require.Equal(t, uint64(100), tc.Cursor.Slot)
-	require.Greater(t, tc.HeadersRecv, uint64(1))
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(
+		conn, ocommon.NewPoint(110, []byte("ahead")),
+	))
+	now = now.Add(time.Second)
+	rollback := ocommon.NewPoint(90, []byte("rollback"))
+	require.True(t, s.UpdateClientRollback(
+		conn, rollback, ochainsync.Tip{Point: point},
+	))
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(
+		conn, ocommon.NewPoint(91, []byte("after-rollback")),
+	))
+	require.Equal(t, now, s.GetTrackedClient(conn).LastActivity,
+		"delivery after peer rollback must advance the rewound watermark")
 
-	require.Eventually(t, func() bool {
-		return len(s.CheckStalledClients()) == 1
-	}, 2*time.Second, 10*time.Millisecond)
+	now = now.Add(time.Second)
+	behindRollback := ocommon.NewPoint(70, []byte("behind-local-rollback"))
+	require.True(t, s.UpdateClientTipWithoutDedup(
+		conn, behindRollback, ochainsync.Tip{Point: point},
+	))
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(
+		conn, ocommon.NewPoint(110, []byte("ahead-of-local-rollback")),
+	))
+	now = now.Add(time.Second)
+	localRollback := ocommon.NewPoint(80, []byte("local-rollback"))
+	require.Empty(t, s.RewindTrackedClientsTo(localRollback),
+		"a cursor behind the rollback must not be moved forward")
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(
+		conn, ocommon.NewPoint(81, []byte("after-local-rollback")),
+	))
+	require.Equal(t, now, s.GetTrackedClient(conn).LastActivity,
+		"local rewind must lower a watermark ahead of the rollback")
+	require.Equal(t, behindRollback, s.GetTrackedClient(conn).Cursor)
+
+	s.RemoveClientConnId(conn)
+	now = now.Add(time.Second)
+	require.True(t, s.AddClientConnId(conn))
+	now = now.Add(time.Second)
+	require.True(t, s.RecordClientDelivery(
+		conn, ocommon.NewPoint(1, []byte("after-reregister")),
+	))
+	require.Equal(t, now, s.GetTrackedClient(conn).LastActivity,
+		"re-registration must start with an empty delivery watermark")
 }
 
 func TestRemoveActiveClientDoesNotPromoteStalledFallback(t *testing.T) {

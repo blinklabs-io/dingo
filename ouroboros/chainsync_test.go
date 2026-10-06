@@ -4191,11 +4191,10 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 	}
 }
 
-// A delivered header that never reaches ledger admission must still count as
-// activity for its connection, or the stall checker recycles a peer that is
-// following the chain but suppressed as a duplicate or withheld by the apply
-// gate. The cursor stays where the last admitted header left it.
-func TestChainsyncClientRollForwardSuppressedHeaderRefreshesTrackedClient(
+// A suppressed header at a new point is forward protocol activity, while
+// replaying that point must not keep an otherwise stalled client eligible.
+// Neither delivery moves the admitted cursor.
+func TestChainsyncClientRollForwardSuppressedHeaderAdvancesActivityOnce(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -4213,7 +4212,16 @@ func TestChainsyncClientRollForwardSuppressedHeaderRefreshesTrackedClient(
 			bus := event.NewEventBus(nil, nil)
 			defer bus.Close()
 			_, ch := bus.Subscribe(ledger.ChainsyncEventType)
-			state := dchainsync.NewState(bus, nil)
+			now := time.Unix(1, 0)
+			state := dchainsync.NewStateWithConfig(
+				bus,
+				nil,
+				dchainsync.Config{
+					MaxClients:   3,
+					StallTimeout: time.Minute,
+					Now:          func() time.Time { return now },
+				},
+			)
 			connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 			connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
 			require.True(t, state.AddClientConnId(connA))
@@ -4250,24 +4258,33 @@ func TestChainsyncClientRollForwardSuppressedHeaderRefreshesTrackedClient(
 
 			before := state.GetTrackedClient(connB)
 			require.NotNil(t, before)
+			now = now.Add(time.Second)
 			require.NoError(t, o.chainsyncClientRollForward(
 				ochainsync.CallbackContext{ConnectionId: connB},
 				0,
 				header,
 				tip,
 			))
-			select {
-			case <-ch:
-				t.Fatal("suppressed header must not reach ledger ingress")
-			case <-time.After(100 * time.Millisecond):
-			}
 			after := state.GetTrackedClient(connB)
 			require.NotNil(t, after)
 			require.Equal(t, before.HeadersRecv+1, after.HeadersRecv,
 				"suppressed delivery must count as client activity")
-			require.False(t, after.LastActivity.Before(before.LastActivity))
+			require.Equal(t, now, after.LastActivity)
 			require.Equal(t, before.Cursor, after.Cursor,
 				"suppressed delivery must not move the cursor")
+
+			now = now.Add(2 * time.Minute)
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connB},
+				0,
+				header,
+				tip,
+			))
+			replayed := state.GetTrackedClient(connB)
+			require.NotNil(t, replayed)
+			require.Equal(t, after.LastActivity, replayed.LastActivity,
+				"replayed suppressed header must not refresh activity")
+			require.Contains(t, state.CheckStalledClients(), connB)
 		})
 	}
 }

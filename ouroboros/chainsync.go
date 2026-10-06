@@ -1372,7 +1372,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			) {
 			// The staged candidate for this point is not resolved here: it
 			// follows the connection whose copy reaches the ledger.
-			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId)
+			o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
 			dropReason := "duplicate"
 			if isNew {
 				dropReason = "not ingress driver"
@@ -1397,7 +1397,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// later corroborated peer can still publish this point.
 		if !applyEligible {
 			if o.chainsyncState != nil {
-				o.chainsyncState.RecordClientDelivery(ctx.ConnectionId)
+				o.chainsyncState.RecordClientDelivery(ctx.ConnectionId, point)
 			}
 			o.config.Logger.Debug(
 				"chainsync: header withheld (not apply eligible)",
