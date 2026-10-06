@@ -3551,6 +3551,15 @@ the child and enclosing body hashes and process governance per body; they do
 not reapply direct deposits to account balances already represented by their
 imported state.
 
+Persisting a ParameterChange proposal re-applies the era's proposal rule to the
+whole enclosing transaction once, under the protocol parameters transaction
+validation used for it: the previous era's for a block of that era applied
+after the ledger advanced. Live application, replay with or without validation,
+historical backfill and Mithril gap indexing therefore fail a block that
+carries a proposal the rule refuses, and no `governance_proposal` row is
+written for it. Ledger-state snapshot import is the exception: it stores the
+proposals the snapshot holds without running the rule.
+
 ### Checkpoint Enforcement
 
 When a network config supplies a `CheckpointsFile` (mainnet and preview ship one), `config/cardano` verifies its `CheckpointsFileHash` and loads it into a block-number to block-hash map, exposed via `CardanoNodeConfig.Checkpoints()`. `LedgerState` caches the map at construction, and `ledgerProcessBlock` (`ledger/state.go`) rejects any inbound block whose height matches a checkpoint but whose hash differs, in every validation mode, before header or transaction validation runs. This is an envelope-validity guard against following a chain that diverges from the known-good chain at a checkpointed height; honest chains always agree with the shipped checkpoints, so the rule never rejects a canonical block. Byron epoch boundary blocks share the preceding block's number and are skipped to avoid a false mismatch.

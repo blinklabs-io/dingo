@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -456,6 +457,13 @@ func (d *LedgerDelta) processGovernance(
 	ls.RLock()
 	currentEpoch := ls.currentEpoch.EpochId
 	pparams := ls.currentPParams
+	// A block of the era before the current one is judged under that era's
+	// parameters, as transaction validation did when it admitted the block.
+	proposalPParams := pparams
+	if d.BlockEraId != ls.currentEra.Id && ls.prevEraPParams != nil &&
+		eras.IsCompatibleEraIn(ls.eraList(), d.BlockEraId, ls.currentEra.Id) {
+		proposalPParams = ls.prevEraPParams
+	}
 	ls.RUnlock()
 
 	conwayPParams := conwayProtocolParameters(pparams)
@@ -474,7 +482,7 @@ func (d *LedgerDelta) processGovernance(
 			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
-			pparams,
+			proposalPParams,
 			ls.db,
 			txn,
 			validated,
