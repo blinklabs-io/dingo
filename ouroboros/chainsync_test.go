@@ -4191,6 +4191,87 @@ func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere
 	}
 }
 
+// A delivered header that never reaches ledger admission must still count as
+// activity for its connection, or the stall checker recycles a peer that is
+// following the chain but suppressed as a duplicate or withheld by the apply
+// gate. The cursor stays where the last admitted header left it.
+func TestChainsyncClientRollForwardSuppressedHeaderRefreshesTrackedClient(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name          string
+		applyEligible bool
+	}{
+		{name: "duplicate", applyEligible: true},
+		{name: "withheld", applyEligible: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			bus := event.NewEventBus(nil, nil)
+			defer bus.Close()
+			_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+			state := dchainsync.NewState(bus, nil)
+			connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+			connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+			require.True(t, state.AddClientConnId(connA))
+			require.True(t, state.AddClientConnId(connB))
+			selectTrackedChainsyncClient(t, state, connA)
+			o := newOuroboros(OuroborosConfig{
+				EventBus: bus,
+				ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+					return true
+				},
+				ChainsyncApplyEligible: func(
+					connId ouroboros.ConnectionId,
+				) bool {
+					return connId == connA || tt.applyEligible
+				},
+			})
+			o.chainsyncState = state
+			o.eventBus = bus
+
+			header := newTestBlockHeader(100, 1, 0xaa)
+			tip := ochainsync.Tip{
+				Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+				BlockNumber: 1,
+			}
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connA},
+				0,
+				header,
+				tip,
+			))
+			testutil.RequireReceive(
+				t, ch, time.Second, "active peer header published",
+			)
+
+			before := state.GetTrackedClient(connB)
+			require.NotNil(t, before)
+			require.NoError(t, o.chainsyncClientRollForward(
+				ochainsync.CallbackContext{ConnectionId: connB},
+				0,
+				header,
+				tip,
+			))
+			select {
+			case <-ch:
+				t.Fatal("suppressed header must not reach ledger ingress")
+			case <-time.After(100 * time.Millisecond):
+			}
+			after := state.GetTrackedClient(connB)
+			require.NotNil(t, after)
+			require.Equal(t, before.HeadersRecv+1, after.HeadersRecv,
+				"suppressed delivery must count as client activity")
+			require.False(t, after.LastActivity.Before(before.LastActivity))
+			require.Equal(t, before.Cursor, after.Cursor,
+				"suppressed delivery must not move the cursor")
+		})
+	}
+}
+
 func TestChainsyncClientRollForwardReplaysDuplicateFromEquivalentSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {

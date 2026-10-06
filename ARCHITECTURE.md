@@ -4963,7 +4963,10 @@ it. Dingo implements this as a **corroboration gate**
   reevaluates selection before the rejection callback returns. Apply-denied
   headers that are neither admitted nor rejected stay corroboration evidence
   without steering selection. Ledger admission advances the tracked ChainSync
-  cursor and publishes the accepted peer-tip event. This staged
+  cursor and publishes the accepted peer-tip event. A delivery suppressed as a
+  duplicate, from a non-driver peer, or withheld by the apply gate counts as
+  client activity without moving the cursor, so the stall checker does not
+  recycle a peer that is following the chain. This staged
   admission path applies when Genesis corroboration is disabled too, so a
   rejected or discarded header cannot advance the selector frontier. The
   roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
