@@ -228,6 +228,20 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 
 ## Overview
 
+The NPM distribution is a wrapper around the release binary. Its postinstall
+script selects only targets present in the release matrix, downloads the
+version-matched HTTPS archive, verifies it against the six-target checksum
+manifest embedded by the NPM release job, and streams its `dingo` member into
+a size-bounded temporary file before atomically installing the executable.
+Downloads have a size bound and retry only transient transport and server
+failures. Archive paths are never extracted as filesystem paths. The
+JavaScript command inherits standard I/O
+and forwards arguments and termination signals to the native process; it
+preserves the process exit result. The package contains only this installer,
+command wrapper and package documentation. For stable release tags, the
+release workflow stamps its version, verifies the finalized release asset and
+publishes it only after release finalization.
+
 Dingo's architecture is built on several key principles:
 
 1. Modular component design using dependency injection and composition
