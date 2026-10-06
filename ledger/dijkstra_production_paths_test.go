@@ -135,6 +135,14 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 		sc.reject(t, err)
 		requireRewards(t, f, initial, initialScript)
 		requireInputs(t, f, true)
+		for key := range sc.rewards {
+			_, seeded := initial[key]
+			require.Equal(t, seeded, f.accountPresent(0, key), "key account %x", key)
+		}
+		for key := range sc.scriptRewards {
+			_, seeded := initialScript[key]
+			require.Equal(t, seeded, f.accountPresent(1, key), "script account %x", key)
+		}
 	}
 	// Admission sees only the ledger state before the block, so it decides a
 	// lone transaction.
@@ -192,7 +200,7 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 		requireInputs(t, f, true)
 		for key := range sc.rewards {
 			_, seeded := initial[key]
-			require.Equal(t, seeded, f.accountPresent(key), "account %x", key)
+			require.Equal(t, seeded, f.accountPresent(0, key), "account %x", key)
 		}
 		requirePending(t, f, false)
 		require.NoError(t, f.applyBlock())

@@ -75,6 +75,20 @@ func TestDijkstraPlutusV4ContextThroughProductionPaths(t *testing.T) {
 			}}},
 		})
 	})
+	t.Run("failing later child rejects the batch", func(t *testing.T) {
+		t.Parallel()
+		runPathScenario(t, pathScenario{
+			txs: []pathTx{{children: []pathLevel{
+				{script: plutusv4script.MaybeScript(
+					t, plutusv4script.TxInfoSubTxIx, 1,
+				)},
+				{script: plutusv4script.MaybeScript(
+					t, plutusv4script.GuardingTopTxInfo, 0,
+				)},
+			}}},
+			reject: scriptFailed,
+		})
+	})
 }
 
 // The TxInfo maps that carry reward accounts and guards follow the

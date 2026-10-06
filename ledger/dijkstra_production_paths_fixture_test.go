@@ -619,24 +619,34 @@ func (f *pathFixture) rewardOf(tag uint8, key byte) uint64 {
 	return uint64(account.Reward)
 }
 
-// inputUnspent reports whether the transaction's top-level input is still
-// unspent.
+// inputUnspent reports whether every spending and collateral input at every
+// transaction level is still unspent.
 func (f *pathFixture) inputUnspent(index int) bool {
 	f.t.Helper()
-	input := f.txs[index].Inputs()[0]
-	utxo, err := f.db.Metadata().GetUtxo(
-		input.Id().Bytes(),
-		input.Index(),
-		nil,
-	)
-	require.NoError(f.t, err)
-	return utxo != nil
+	tx := f.txs[index]
+	inputs := append(slices.Clone(tx.Inputs()), tx.Collateral()...)
+	for _, child := range tx.Body.TxSubTransactions.Items() {
+		childInputs := child.Body.TxInputs.Items()
+		for i := range childInputs {
+			inputs = append(inputs, &childInputs[i])
+		}
+	}
+	for _, input := range inputs {
+		utxo, err := f.db.Metadata().GetUtxo(
+			input.Id().Bytes(), input.Index(), nil,
+		)
+		require.NoError(f.t, err)
+		if utxo == nil {
+			return false
+		}
+	}
+	return true
 }
 
 // accountPresent reports whether the reward account exists.
-func (f *pathFixture) accountPresent(key byte) bool {
+func (f *pathFixture) accountPresent(tag uint8, key byte) bool {
 	f.t.Helper()
-	_, err := f.db.GetAccountByCredential(0, pathStakeKey(key), false, nil)
+	_, err := f.db.GetAccountByCredential(tag, pathStakeKey(key), false, nil)
 	if errors.Is(err, models.ErrAccountNotFound) {
 		return false
 	}
