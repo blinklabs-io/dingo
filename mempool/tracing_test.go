@@ -58,4 +58,18 @@ func TestAddTransactionRecordsSpanWithValidationResult(t *testing.T) {
 		attribute.String("mempool.validation_result", "accepted"),
 	)
 	require.Equal(t, codes.Unset, ended[1].Status().Code)
+
+	m.validator = nil
+	require.ErrorIs(
+		t,
+		m.AddTransaction(context.Background(), txType, txBytes),
+		ErrNilValidator,
+	)
+	ended = spans.Ended()
+	require.Len(t, ended, 3)
+	require.Contains(
+		t,
+		ended[2].Attributes(),
+		attribute.String("mempool.validation_result", "unavailable"),
+	)
 }

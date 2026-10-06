@@ -84,7 +84,7 @@ func TestChainsyncClientRollForwardRecordsSpan(t *testing.T) {
 	))
 
 	attrs := onlySpan(t, recorder, "chainsync.roll_forward")
-	require.Equal(t, connID.String(), attrs["peer.id"].AsString())
+	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
 	require.Equal(t, int64(100), attrs["block.slot"].AsInt64())
 	require.Equal(
 		t,
@@ -108,7 +108,7 @@ func TestChainsyncClientRollBackwardRecordsSpan(t *testing.T) {
 	))
 
 	attrs := onlySpan(t, recorder, "chainsync.roll_backward")
-	require.Equal(t, connID.String(), attrs["peer.id"].AsString())
+	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
 	require.Equal(t, int64(90), attrs["block.slot"].AsInt64())
 	require.Equal(t, "bb", attrs["block.hash"].AsString())
 }
@@ -132,11 +132,35 @@ func TestBlockfetchClientBlockRecordsSpan(t *testing.T) {
 	))
 
 	attrs := onlySpan(t, recorder, "blockfetch.block")
-	require.Equal(t, connID.String(), attrs["peer.id"].AsString())
+	require.Equal(t, connID.String(), attrs["connection.id"].AsString())
 	require.Equal(t, int64(42), attrs["block.slot"].AsInt64())
 	require.Equal(
 		t,
 		block.Hash().String(),
 		attrs["block.hash"].AsString(),
+	)
+}
+
+// Not t.Parallel: installs a recording OpenTelemetry provider, which is a
+// process global.
+func TestBlockfetchClientBlockRawTracesDecodeFailure(t *testing.T) {
+	recorder := testutil.RecordSpans(t)
+	o := newTracingTestOuroboros(t)
+	connID := testConnId()
+
+	require.Error(t, o.blockfetchClientBlockRaw(
+		blockfetch.CallbackContext{ConnectionId: connID},
+		gledger.BlockTypeConway,
+		[]byte{0xff},
+	))
+
+	ended := recorder.Ended()
+	require.Len(t, ended, 1)
+	require.Equal(t, "blockfetch.block", ended[0].Name())
+	require.Equal(t, codes.Error, ended[0].Status().Code)
+	require.Contains(
+		t,
+		ended[0].Attributes(),
+		attribute.String("connection.id", connID.String()),
 	)
 }

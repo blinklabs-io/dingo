@@ -17,6 +17,7 @@ package dingo
 import (
 	"bytes"
 	"context"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -135,7 +136,15 @@ func TestSetupTracingExportsToConfiguredEndpoint(t *testing.T) {
 	))
 	t.Cleanup(server.Close)
 	previous := otel.GetTracerProvider()
-	t.Cleanup(func() { otel.SetTracerProvider(previous) })
+	previousPropagator := otel.GetTextMapPropagator()
+	t.Cleanup(func() {
+		otel.SetTracerProvider(previous)
+		otel.SetTextMapPropagator(previousPropagator)
+		// The global error handler has no getter; restore the SDK default.
+		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+			log.Print(err)
+		}))
+	})
 
 	n := &Node{config: Config{
 		tracing:            true,
@@ -166,6 +175,7 @@ func TestOTLPTracesURL(t *testing.T) {
 		"http://localhost:4318/":                "http://localhost:4318/v1/traces",
 		"https://tempo.example/otlp/v1/traces":  "https://tempo.example/otlp/v1/traces",
 		"http://collector.example:4318/custom/": "http://collector.example:4318/custom/",
+		"HTTPS://Tempo.example/otlp/v1/traces":  "https://Tempo.example/otlp/v1/traces",
 	} {
 		got, err := otlpTracesURL(endpoint)
 		require.NoError(t, err)

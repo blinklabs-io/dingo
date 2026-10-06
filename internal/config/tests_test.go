@@ -1003,6 +1003,7 @@ func TestValidateTracingSampleRatio(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := newDefaultConfig()
+			cfg.DatabasePath = t.TempDir()
 			cfg.TracingSampleRatio = tc.ratio
 			err := cfg.Validate(RunModeServe)
 			if tc.wantErr {
@@ -1010,9 +1011,7 @@ func TestValidateTracingSampleRatio(t *testing.T) {
 				assert.Contains(t, err.Error(), "tracingSampleRatio")
 				return
 			}
-			if err != nil {
-				assert.NotContains(t, err.Error(), "tracingSampleRatio")
-			}
+			require.NoError(t, err)
 		})
 	}
 }

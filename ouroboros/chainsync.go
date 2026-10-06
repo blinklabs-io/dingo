@@ -1050,7 +1050,7 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	_, span := tracing.Start(
 		context.Background(),
 		"chainsync.roll_backward",
-		attribute.String("peer.id", ctx.ConnectionId.String()),
+		attribute.String("connection.id", ctx.ConnectionId.String()),
 		tracing.Uint64("block.slot", point.Slot),
 		attribute.String("block.hash", hex.EncodeToString(point.Hash)),
 	)
@@ -1136,7 +1136,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		_, span := tracing.Start(
 			context.Background(),
 			"chainsync.roll_forward",
-			attribute.String("peer.id", ctx.ConnectionId.String()),
+			attribute.String("connection.id", ctx.ConnectionId.String()),
 			tracing.Uint64("block.slot", blockSlot),
 			attribute.String("block.hash", hex.EncodeToString(blockHash)),
 		)

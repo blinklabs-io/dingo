@@ -1506,7 +1506,12 @@ func (m *Mempool) AddTransaction(
 	_, span := tracing.Start(ctx, "mempool.add_transaction")
 	defer func() {
 		result := "accepted"
-		if err != nil {
+		switch {
+		case errors.Is(err, ErrNilValidator),
+			errors.Is(err, ErrMempoolStopped):
+			// Infrastructure faults, not verdicts on the transaction.
+			result = "unavailable"
+		case err != nil:
 			result = "rejected"
 		}
 		span.SetAttributes(

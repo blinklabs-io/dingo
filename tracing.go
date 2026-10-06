@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/internal/version"
 	"go.opentelemetry.io/otel"
@@ -128,6 +129,9 @@ func otlpTracesURL(endpoint string) (string, error) {
 	}
 	// url.Parse reads a bare host:port as a scheme and an opaque part, which
 	// the exporter would accept and then send nowhere.
+	// Schemes are case-insensitive, and the exporter only accepts them in
+	// lower case.
+	u.Scheme = strings.ToLower(u.Scheme)
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return "", fmt.Errorf(
 			"invalid tracing endpoint %q: want an http or https URL",

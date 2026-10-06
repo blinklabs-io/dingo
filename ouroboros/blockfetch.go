@@ -280,7 +280,15 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 	ctx blockfetch.CallbackContext,
 	blockType uint,
 	blockData []byte,
-) error {
+) (err error) {
+	// The span covers the decode, so a delivery that fails to decode is still
+	// traced; the block's own attributes are added once it has decoded.
+	_, span := tracing.Start(
+		context.Background(),
+		"blockfetch.block",
+		attribute.String("connection.id", ctx.ConnectionId.String()),
+	)
+	defer func() { tracing.End(span, err) }()
 	key := hashDecodeInput(blockType, blockData)
 	cacheBytes := decodeCacheChargeForRaw(len(blockData))
 	if !hasCborArrayEnvelope(blockData) {
@@ -320,7 +328,8 @@ func (o *Ouroboros) blockfetchClientBlockRaw(
 			blockType,
 		)
 	}
-	return o.blockfetchClientBlock(ctx, blockType, block)
+	span.SetAttributes(blockSpanAttributes(block)...)
+	return o.handleBlockfetchBlock(ctx, blockType, block)
 }
 
 // InvalidateBlockDecodeCache removes a decoded block when the ledger rejects it
@@ -884,18 +893,36 @@ func (o *Ouroboros) blockfetchClientBlock(
 	blockType uint,
 	block gledger.Block,
 ) error {
-	// Update metrics and peer scoring
 	_, span := tracing.Start(
 		context.Background(),
 		"blockfetch.block",
-		attribute.String("peer.id", ctx.ConnectionId.String()),
+		append(
+			blockSpanAttributes(block),
+			attribute.String("connection.id", ctx.ConnectionId.String()),
+		)...,
+	)
+	defer span.End()
+	return o.handleBlockfetchBlock(ctx, blockType, block)
+}
+
+// blockSpanAttributes describes a decoded block on its blockfetch span.
+func blockSpanAttributes(block gledger.Block) []attribute.KeyValue {
+	return []attribute.KeyValue{
 		tracing.Uint64("block.slot", block.SlotNumber()),
 		attribute.String(
 			"block.hash",
 			hex.EncodeToString(block.Hash().Bytes()),
 		),
-	)
-	defer span.End()
+	}
+}
+
+// handleBlockfetchBlock updates metrics and peer scoring for a decoded block
+// and forwards it to the shared block handler. Callers own the span.
+func (o *Ouroboros) handleBlockfetchBlock(
+	ctx blockfetch.CallbackContext,
+	blockType uint,
+	block gledger.Block,
+) error {
 	key := blockFetchKey{connId: ctx.ConnectionId, requestId: ctx.RequestId}
 	o.blockFetchMutex.Lock()
 	startTime, exists := o.blockFetchStarts[key]
