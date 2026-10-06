@@ -622,18 +622,18 @@ type Config struct {
 	// Default: "5m".
 	LocalStateQueryViewMaxLifetime string `yaml:"localStateQueryViewMaxLifetime" envconfig:"DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME"`
 	// BarkHost is the interface Bark binds to. Left empty, node.go defaults
-	// it to loopback-only (127.0.0.1) whenever the database lifecycle
-	// service (Restore/Truncate and friends — gated on BarkClientCAFilePath,
-	// see its own doc comment) is mounted, rather than bark's own
+	// it to loopback-only (127.0.0.1) whenever the database lifecycle or
+	// remote node lifecycle service is mounted, rather than bark's own
 	// all-interfaces "0.0.0.0" default; set explicitly to widen that on
 	// purpose.
 	BarkHost string `yaml:"barkHost"                            envconfig:"DINGO_BARK_HOST"`
 	// BarkClientCAFilePath is a PEM CA bundle Bark verifies client
 	// certificates (mTLS) against. Required whenever the database lifecycle
 	// service is mounted (databaseLifecycle.snapshotDir set alongside
-	// barkPort): every DatabaseService RPC requires a certificate verified
-	// against this CA. Destructive methods additionally require an explicit
-	// BarkOperatorCertificateFingerprints match. Also requires
+	// barkPort), or BarkLifecycleEnabled is true. Every DatabaseService and
+	// LifecycleService RPC requires a certificate verified against this CA.
+	// Destructive methods additionally require their service's explicit
+	// operator fingerprint match. Also requires
 	// TlsCertFilePath/TlsKeyFilePath to be set.
 	BarkClientCAFilePath string `yaml:"barkClientCaFilePath"                envconfig:"DINGO_BARK_CLIENT_CA_FILE_PATH"`
 	// BarkOperatorCertificateFingerprints is the explicit operator allowlist
@@ -641,8 +641,16 @@ type Config struct {
 	// authenticate with BarkClientCAFilePath; only these SHA-256 certificate
 	// fingerprints may invoke destructive methods.
 	BarkOperatorCertificateFingerprints []string `yaml:"barkOperatorCertificateFingerprints" envconfig:"DINGO_BARK_OPERATOR_CERTIFICATE_FINGERPRINTS"`
-	CORSAllowedOrigins                  []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort                         uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
+	// BarkLifecycleEnabled explicitly mounts Bark's remote node lifecycle
+	// service. It defaults to false so configuring DatabaseService credentials
+	// does not also grant process-control access.
+	BarkLifecycleEnabled bool `yaml:"barkLifecycleEnabled" envconfig:"DINGO_BARK_LIFECYCLE_ENABLED"`
+	// BarkLifecycleOperatorCertificateFingerprints is the separate operator
+	// allowlist for remote Stop and Restart. GetStatus requires only a client
+	// certificate verified through BarkClientCAFilePath.
+	BarkLifecycleOperatorCertificateFingerprints []string `yaml:"barkLifecycleOperatorCertificateFingerprints" envconfig:"DINGO_BARK_LIFECYCLE_OPERATOR_CERTIFICATE_FINGERPRINTS"`
+	CORSAllowedOrigins                           []string `yaml:"corsAllowedOrigins"                  envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort                                  uint     `yaml:"metricsPort"                                                                                  split_words:"true"`
 	// DebugBindAddr is the interface used by the unauthenticated pprof
 	// listener. It defaults to loopback independently of BindAddr and
 	// PrivateBindAddr; operators must set this field explicitly to expose
@@ -1284,17 +1292,19 @@ func newDefaultConfig() *Config {
 		BarkHost:                            "",
 		BarkClientCAFilePath:                "",
 		BarkOperatorCertificateFingerprints: nil,
-		CORSAllowedOrigins:                  []string{"*"},
-		Topology:                            "",
-		TlsCertFilePath:                     "",
-		TlsKeyFilePath:                      "",
-		StorageMode:                         "core",
-		RunMode:                             RunModeServe,
-		StartEra:                            StartEraDefault,
-		ImmutableDbPath:                     "",
-		ShutdownTimeout:                     DefaultShutdownTimeout,
-		LedgerCatchupTimeout:                DefaultLedgerCatchupTimeout,
-		LocalStateQueryViewMaxLifetime:      DefaultLocalStateQueryViewMaxLifetime,
+		BarkLifecycleEnabled:                false,
+		BarkLifecycleOperatorCertificateFingerprints: nil,
+		CORSAllowedOrigins:                           []string{"*"},
+		Topology:                                     "",
+		TlsCertFilePath:                              "",
+		TlsKeyFilePath:                               "",
+		StorageMode:                                  "core",
+		RunMode:                                      RunModeServe,
+		StartEra:                                     StartEraDefault,
+		ImmutableDbPath:                              "",
+		ShutdownTimeout:                              DefaultShutdownTimeout,
+		LedgerCatchupTimeout:                         DefaultLedgerCatchupTimeout,
+		LocalStateQueryViewMaxLifetime:               DefaultLocalStateQueryViewMaxLifetime,
 		// Defaults for database worker pool and API backfill tuning
 		DatabaseWorkers:   5,
 		DatabaseQueueSize: 50,
@@ -1430,6 +1440,10 @@ func cloneConfig(cfg *Config) *Config {
 	clone.BarkOperatorCertificateFingerprints = append(
 		[]string(nil),
 		cfg.BarkOperatorCertificateFingerprints...,
+	)
+	clone.BarkLifecycleOperatorCertificateFingerprints = append(
+		[]string(nil),
+		cfg.BarkLifecycleOperatorCertificateFingerprints...,
 	)
 	clone.CORSAllowedOrigins = append([]string(nil), cfg.CORSAllowedOrigins...)
 	if cfg.PeerSharing != nil {

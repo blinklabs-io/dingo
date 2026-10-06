@@ -71,10 +71,10 @@ func waitForStop(
 ) (*dingo.ShutdownRequest, bool, error) {
 	err, signaled := waitForSignalOrError(signalCtx, errChan)
 	req, ok := endRequests()
-	if err != nil || !ok {
+	if !ok {
 		return nil, signaled, err
 	}
-	return &req, signaled, nil
+	return &req, signaled, err
 }
 
 // runRequestedShutdown performs a stop or restart accepted over the remote
@@ -83,6 +83,7 @@ func waitForStop(
 // re-executes the process even then.
 func runRequestedShutdown(
 	req dingo.ShutdownRequest,
+	causalErr error,
 	shutdown func() error,
 	reExec func() error,
 ) error {
@@ -99,12 +100,12 @@ func runRequestedShutdown(
 		err = fmt.Errorf("graceful shutdown exceeded %s", req.Timeout)
 	}
 	if !req.Restart {
-		return err
+		return errors.Join(causalErr, err)
 	}
 	if reExecErr := reExec(); reExecErr != nil {
-		return errors.Join(err, reExecErr)
+		return errors.Join(causalErr, err, reExecErr)
 	}
-	return err
+	return errors.Join(causalErr, err)
 }
 
 func gracefulShutdown(
@@ -603,7 +604,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			"restart", req.Restart,
 			"timeout", req.Timeout,
 		)
-		return runRequestedShutdown(*req, shutdown, dingo.ReExec)
+		return runRequestedShutdown(*req, err, shutdown, dingo.ReExec)
 	}
 	if signaled {
 		logger.Info("signal received, initiating graceful shutdown")
@@ -733,6 +734,10 @@ func buildDingoConfig(
 		dingo.WithBarkClientCAFilePath(cfg.BarkClientCAFilePath),
 		dingo.WithBarkOperatorCertificateFingerprints(
 			cfg.BarkOperatorCertificateFingerprints,
+		),
+		dingo.WithBarkLifecycleEnabled(cfg.BarkLifecycleEnabled),
+		dingo.WithBarkLifecycleOperatorCertificateFingerprints(
+			cfg.BarkLifecycleOperatorCertificateFingerprints,
 		),
 		dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 			Enabled:   cfg.HistoryExpiry.Enabled,

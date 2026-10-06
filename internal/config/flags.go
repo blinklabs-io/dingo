@@ -415,6 +415,16 @@ var flagSpecs = []flagSpec{
 		"bark-operator-certificate-fingerprints",
 		"SHA-256 client certificate fingerprints authorized for destructive Bark DatabaseService RPCs",
 	),
+	boolFlag(
+		"BarkLifecycleEnabled",
+		"bark-lifecycle-enabled",
+		"enable Bark remote Stop, Restart, and GetStatus RPCs",
+	),
+	stringSliceFlag(
+		"BarkLifecycleOperatorCertificateFingerprints",
+		"bark-lifecycle-operator-certificate-fingerprints",
+		"SHA-256 client certificate fingerprints authorized for Bark Stop and Restart RPCs",
+	),
 
 	// History expiry
 	boolFlag(

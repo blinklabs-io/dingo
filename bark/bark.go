@@ -71,6 +71,9 @@ type Bark struct {
 	// identity must also appear here before a destructive DatabaseService RPC
 	// is authorized.
 	operatorFingerprints map[string]struct{}
+	// lifecycleOperatorFingerprints is immutable after construction and is
+	// used only for LifecycleService Stop and Restart authorization.
+	lifecycleOperatorFingerprints map[string]struct{}
 	// dbGate guards config.DB across a live Restore/Truncate's close-and-
 	// replace window: PauseDB write-locks it before the old database is
 	// closed, ResumeDB publishes the replacement and unlocks it. Acquire
@@ -140,8 +143,8 @@ type BarkConfig struct {
 	DB        *database.Database
 	Lifecycle *dblifecycle.Service
 	// Node, if set, mounts the LifecycleService (remote Stop, Restart and
-	// GetStatus). Like Lifecycle it requires TLS, a client CA and an operator
-	// certificate allowlist: Start refuses to mount it without them.
+	// GetStatus). Like Lifecycle it requires TLS and a client CA. Stop and
+	// Restart require LifecycleOperatorCertificateFingerprints.
 	Node NodeControl
 	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
 	// Restore RPCs write to and read from — required when Lifecycle is set.
@@ -185,7 +188,11 @@ type BarkConfig struct {
 	// are matched case-insensitively. Read-only DatabaseService calls require a
 	// verified client certificate but do not require membership in this list.
 	OperatorCertificateFingerprints []string
-	Host                            string
+	// LifecycleOperatorCertificateFingerprints is the independent
+	// authorization policy for LifecycleService Stop and Restart. GetStatus
+	// requires a verified client certificate but not membership in this list.
+	LifecycleOperatorCertificateFingerprints []string
+	Host                                     string
 	// Port is the TCP port to listen on. 0 selects a free port, which Addr
 	// reports once Start has bound it.
 	Port uint
@@ -304,12 +311,22 @@ func NewBark(cfg BarkConfig) (*Bark, error) {
 			err,
 		)
 	}
+	lifecycleOperatorFingerprints, err := normalizeOperatorCertificateFingerprints(
+		cfg.LifecycleOperatorCertificateFingerprints,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"bark: invalid lifecycle operator certificate fingerprint: %w",
+			err,
+		)
+	}
 	if cfg.Host == "" {
 		cfg.Host = "0.0.0.0"
 	}
 	return &Bark{
-		config:               cfg,
-		operatorFingerprints: operatorFingerprints,
+		config:                        cfg,
+		operatorFingerprints:          operatorFingerprints,
+		lifecycleOperatorFingerprints: lifecycleOperatorFingerprints,
 	}, nil
 }
 
@@ -351,11 +368,18 @@ func (b *Bark) Start(ctx context.Context) error {
 				"server's own TLS listener",
 		)
 	}
-	if authRequired && len(b.operatorFingerprints) == 0 {
+	if b.config.Lifecycle != nil && len(b.operatorFingerprints) == 0 {
 		return errors.New(
 			"bark: at least one OperatorCertificateFingerprint is required to " +
-				"start the authenticated DatabaseService or LifecycleService — " +
+				"start the authenticated DatabaseService — " +
 				"verified client identity alone does not authorize destructive RPCs",
+		)
+	}
+	if b.config.Node != nil && len(b.lifecycleOperatorFingerprints) == 0 {
+		return errors.New(
+			"bark: at least one LifecycleOperatorCertificateFingerprint is required " +
+				"to start the authenticated LifecycleService — verified client identity " +
+				"alone does not authorize Stop or Restart",
 		)
 	}
 
@@ -400,7 +424,7 @@ func (b *Bark) Start(ctx context.Context) error {
 					b.config.Logger,
 					destructiveLifecycleProcedures,
 					readOnlyLifecycleProcedures,
-					b.operatorFingerprints,
+					b.lifecycleOperatorFingerprints,
 				)),
 			),
 		)

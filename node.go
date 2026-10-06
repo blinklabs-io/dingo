@@ -1463,11 +1463,7 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 
 	if n.config.barkPort > 0 {
 		lifecycleEnabled := n.config.databaseLifecycle.SnapshotDir != ""
-		// Remote stop and restart are opt-in: they need the client CA and
-		// operator allowlist, and Archive-only deployments keep starting
-		// without either.
-		remoteLifecycleEnabled := n.config.barkClientCAFilePath != "" &&
-			len(n.config.barkOperatorCertificateFingerprints) > 0
+		remoteLifecycleEnabled := n.config.barkLifecycleEnabled
 		barkHost := effectiveBarkHost(
 			n.config.barkHost,
 			lifecycleEnabled || remoteLifecycleEnabled,
@@ -1480,16 +1476,17 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 			)
 		}
 		barkConfig := bark.BarkConfig{
-			Logger:                          n.config.logger,
-			DB:                              db,
-			TlsCertFilePath:                 n.config.tlsCertFilePath,
-			TlsKeyFilePath:                  n.config.tlsKeyFilePath,
-			TlsClientCAFilePath:             n.config.barkClientCAFilePath,
-			OperatorCertificateFingerprints: n.config.barkOperatorCertificateFingerprints,
-			Host:                            barkHost,
-			Port:                            n.config.barkPort,
-			CORSAllowedOrigins:              n.config.corsAllowedOrigins,
-			DestinationRegistry:             n.destinationRegistry,
+			Logger:                                   n.config.logger,
+			DB:                                       db,
+			TlsCertFilePath:                          n.config.tlsCertFilePath,
+			TlsKeyFilePath:                           n.config.tlsKeyFilePath,
+			TlsClientCAFilePath:                      n.config.barkClientCAFilePath,
+			OperatorCertificateFingerprints:          n.config.barkOperatorCertificateFingerprints,
+			LifecycleOperatorCertificateFingerprints: n.config.barkLifecycleOperatorCertificateFingerprints,
+			Host:                                     barkHost,
+			Port:                                     n.config.barkPort,
+			CORSAllowedOrigins:                       n.config.corsAllowedOrigins,
+			DestinationRegistry:                      n.destinationRegistry,
 		}
 		if remoteLifecycleEnabled {
 			barkConfig.Node = n

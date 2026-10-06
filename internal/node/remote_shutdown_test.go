@@ -30,6 +30,7 @@ func TestRunRequestedShutdown(t *testing.T) {
 	t.Parallel()
 
 	errReExec := errors.New("re-exec failed")
+	errComponent := errors.New("component failed")
 	tests := []struct {
 		name       string
 		restart    bool
@@ -38,10 +39,17 @@ func TestRunRequestedShutdown(t *testing.T) {
 		wantReExec bool
 		wantErr    error
 		wantText   string
+		causalErr  error
 	}{
 		{
 			name:     "stop completes gracefully",
 			shutdown: func(<-chan struct{}) error { return nil },
+		},
+		{
+			name:      "accepted stop preserves component error",
+			shutdown:  func(<-chan struct{}) error { return nil },
+			causalErr: errComponent,
+			wantErr:   errComponent,
 		},
 		{
 			name:       "restart re-executes after a graceful shutdown",
@@ -90,6 +98,7 @@ func TestRunRequestedShutdown(t *testing.T) {
 						Restart: tc.restart,
 						Timeout: 50 * time.Millisecond,
 					},
+					tc.causalErr,
 					func() error { return tc.shutdown(release) },
 					func() error {
 						reExecCalls++
@@ -139,7 +148,7 @@ func TestWaitForStopKeepsRemoteRequestWhenRunReturnsFirst(t *testing.T) {
 	assert.Equal(t, want, *req)
 }
 
-func TestWaitForStopPrefersComponentError(t *testing.T) {
+func TestWaitForStopPreservesAcceptedRequestAndComponentError(t *testing.T) {
 	t.Parallel()
 
 	errComponent := errors.New("component failed")
@@ -153,7 +162,8 @@ func TestWaitForStopPrefersComponentError(t *testing.T) {
 	)
 	require.ErrorIs(t, err, errComponent)
 	assert.False(t, signaled)
-	assert.Nil(t, req)
+	require.NotNil(t, req)
+	assert.Equal(t, time.Second, req.Timeout)
 }
 
 // TestWaitForStopEndsRequestsOnEveryPath pins that the request intake is

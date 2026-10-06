@@ -11655,8 +11655,10 @@ running gets `FAILED_PRECONDITION`) and is the backing store for
 
 **LifecycleService** (`bark/lifecycle.go`) mounts bark's `LifecycleService`
 (Stop, Restart, GetStatus) when `BarkConfig.Node` is set, which `node.go`'s
-`Run()` does when both `barkClientCaFilePath` and
-`barkOperatorCertificateFingerprints` are configured. Bark owns the transport,
+`Run()` does only when `barkLifecycleEnabled` is true. Stop and Restart use
+`barkLifecycleOperatorCertificateFingerprints`, a distinct allowlist from the
+DatabaseService operator policy, so enabling database lifecycle access grants
+no process-control privilege. Bark owns the transport,
 authentication and request validation (a negative `graceful_timeout` is
 `INVALID_ARGUMENT`) and delegates to `bark.NodeControl`, implemented by
 `*dingo.Node` in `node_remote_lifecycle.go`. `Stop` and `Restart` are

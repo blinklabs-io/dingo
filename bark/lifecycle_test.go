@@ -105,13 +105,13 @@ func TestStartRejectsNodeControlWithoutAuthentication(t *testing.T) {
 		"client CA": func(c *BarkConfig) {
 			c.TlsCertFilePath = serverCertPath
 			c.TlsKeyFilePath = serverKeyPath
-			c.OperatorCertificateFingerprints = []string{
+			c.LifecycleOperatorCertificateFingerprints = []string{
 				"0000000000000000000000000000000000000000000000000000000000000000",
 			}
 		},
 		"TLS": func(c *BarkConfig) {
 			c.TlsClientCAFilePath = caCertPath
-			c.OperatorCertificateFingerprints = []string{
+			c.LifecycleOperatorCertificateFingerprints = []string{
 				"0000000000000000000000000000000000000000000000000000000000000000",
 			}
 		},
@@ -138,6 +138,9 @@ func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 	serverCertPath, serverKeyPath := writeTestTLSCertKey(t)
 	ca, caKey, caCertPath := writeTestCA(t)
 	operatorCert, operatorKey := writeTestClientCert(t, ca, caKey, "operator")
+	databaseOperatorCert, databaseOperatorKey := writeTestClientCert(
+		t, ca, caKey, "database-operator",
+	)
 	readerCert, readerKey := writeTestClientCert(t, ca, caKey, "reader")
 
 	node := &fakeNode{deadline: time.Unix(1_700_000_000, 0)}
@@ -149,6 +152,9 @@ func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 		TlsKeyFilePath:      serverKeyPath,
 		TlsClientCAFilePath: caCertPath,
 		OperatorCertificateFingerprints: []string{
+			testCertificateFingerprint(t, databaseOperatorCert),
+		},
+		LifecycleOperatorCertificateFingerprints: []string{
 			testCertificateFingerprint(t, operatorCert),
 		},
 	})
@@ -163,6 +169,17 @@ func TestLifecycleServiceOverRealHTTP(t *testing.T) {
 		)
 	}
 	ctx := context.Background()
+
+	t.Run("database operator cannot control node lifecycle", func(t *testing.T) {
+		client := newClient(databaseOperatorCert, databaseOperatorKey)
+		_, err := client.GetStatus(ctx, connect.NewRequest(
+			&lifecyclev1alpha1.GetStatusRequest{}))
+		require.NoError(t, err)
+		_, err = client.Stop(ctx, connect.NewRequest(
+			&lifecyclev1alpha1.StopRequest{}))
+		require.Equal(t, connect.CodePermissionDenied, connect.CodeOf(err))
+		require.Empty(t, node.recorded())
+	})
 
 	t.Run("anonymous client is rejected from every RPC", func(t *testing.T) {
 		client := newClient("", "")
