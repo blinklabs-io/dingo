@@ -73,7 +73,7 @@ When Prometheus metrics are configured, inspect:
   around each rewrite, because Badger's own size counters refresh only once a
   minute;
 - `database_blob_gc_consecutive_successes` (the number of rewrites in the
-  most recently completed GC cycle) and
+  current GC cycle, retaining the last completed count while idle) and
   `database_blob_gc_last_success_timestamp_seconds`.
 
 ## Shutdown behavior
