@@ -17,8 +17,10 @@ package dmq
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -306,6 +308,15 @@ func TestStackSubmissionRejectReasons(t *testing.T) {
 				return 0, nil
 			}},
 			msg:   newTestMessage([]byte("future"), soon),
+			want:  ocommon.InvalidReason{},
+			label: reasonInvalid,
+		},
+		{
+			name: "operational certificate past its KES window",
+			cfg: StackConfig{CurrentKESPeriod: func() (uint64, error) {
+				return 1 + ocommon.DefaultMaxKESEvolutions, nil
+			}},
+			msg:   newTestMessage([]byte("stale"), soon),
 			want:  ocommon.InvalidReason{},
 			label: reasonInvalid,
 		},
@@ -615,4 +626,89 @@ func TestStackStopsFeederOnClientDone(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return !hasCursor(consumerID)
 	}, 10*time.Second, 10*time.Millisecond)
+}
+
+// The test message's certificate starts at KES period 1, so its last period
+// is the default maximum evolutions later, less one.
+func TestStackAdmitsCertificateLastKESPeriod(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{
+		CurrentKESPeriod: func() (uint64, error) {
+			return ocommon.DefaultMaxKESEvolutions, nil
+		},
+	})
+	submit := submitter(t, s)
+	require.Nil(t, submit(newTestMessage([]byte("last"), soonExpiry())))
+}
+
+// A consumer that sends MsgClientDone while the pool is idle must still have
+// its feeder stop and its cursor released, with no admission to wake on.
+func TestStackReleasesCursorOnIdleClientDone(t *testing.T) {
+	t.Parallel()
+	s, _ := newTestStack(t, StackConfig{})
+	c := newConsumer(t, s)
+	var id ouroboros.ConnectionId
+	hasCursor := func() bool {
+		s.pool.peersMu.Lock()
+		defer s.pool.peersMu.Unlock()
+		_, ok := s.pool.peers[id.String()]
+		return ok
+	}
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		for k := range s.feeders {
+			id = k
+		}
+		s.mu.Unlock()
+		return hasCursor()
+	}, 10*time.Second, 10*time.Millisecond)
+	require.NoError(t, c.client().Stop())
+	require.Eventually(t, func() bool {
+		return !hasCursor()
+	}, 10*time.Second, 10*time.Millisecond)
+}
+
+// refusalCounter counts the stack's log records for a notification queue
+// refusing a message.
+type refusalCounter struct{ n atomic.Int64 }
+
+func (r *refusalCounter) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (r *refusalCounter) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message == "dmq notification queue refused message" {
+		r.n.Add(1)
+	}
+	return nil
+}
+
+func (r *refusalCounter) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *refusalCounter) WithGroup(string) slog.Handler      { return r }
+
+// A connection that never requests notifications, such as a submit-only
+// client, fills its notification queue. Its feeder must back off rather than
+// re-offer the held message at a fixed short interval for the life of the
+// connection.
+func TestStackBacksOffFullNotificationQueue(t *testing.T) {
+	t.Parallel()
+	refusals := &refusalCounter{}
+	s, _ := newTestStack(t, StackConfig{Logger: slog.New(refusals)})
+	submit := submitter(t, s)
+	// One more than the notification server's default queue size.
+	for i := range localmessagenotification.NewConfig().MaxQueueSize + 1 {
+		require.Nil(t, submit(newTestMessage(
+			fmt.Appendf(nil, "fill-%d", i),
+			soonExpiry(),
+		)))
+	}
+	require.Eventually(t, func() bool {
+		return refusals.n.Load() > 0
+	}, 10*time.Second, 10*time.Millisecond)
+	start := refusals.n.Load()
+	const window = 3 * time.Second
+	time.Sleep(window)
+	// A fixed 100ms retry offers the message about 30 times in the window;
+	// doubling from 100ms offers it about 5 times.
+	require.LessOrEqual(t, refusals.n.Load()-start, int64(10))
 }

@@ -33,9 +33,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// feedRetryInterval is how long a notification feeder waits before offering a
-// message again after the consumer's queue refused it.
-const feedRetryInterval = 100 * time.Millisecond
+// A notification feeder waits feedRetryInterval before offering a refused
+// message again or re-checking an idle server, doubling the wait up to
+// maxFeedRetryInterval until it next delivers a message.
+const (
+	feedRetryInterval    = 100 * time.Millisecond
+	maxFeedRetryInterval = 2 * time.Second
+)
 
 // Reason labels for dingo_dmq_validation_failures_total, one per CIP-0137
 // reject reason.
@@ -66,8 +70,13 @@ type StackConfig struct {
 	// Required.
 	Authenticator *ocommon.MessageAuthenticator
 	// CurrentKESPeriod returns the KES period for the confirmed wall-clock
-	// slot. When set, messages claiming a future period are rejected.
+	// slot. When set, a message is rejected if it claims a future period or
+	// its operational certificate's KES window does not cover the current
+	// period.
 	CurrentKESPeriod func() (uint64, error)
+	// MaxKESEvolutions is the number of KES periods an operational
+	// certificate is valid for. Zero uses the Cardano mainnet value.
+	MaxKESEvolutions uint64
 }
 
 // Stack is one DMQ topic instance: its own message pool, connection manager
@@ -110,6 +119,9 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	logger = logger.With("component", "dmq")
+	if cfg.MaxKESEvolutions == 0 {
+		cfg.MaxKESEvolutions = ocommon.DefaultMaxKESEvolutions
+	}
 	factory := promauto.With(cfg.PromRegistry)
 	s := &Stack{
 		cfg:    cfg,
@@ -281,6 +293,15 @@ func (s *Stack) admit(msg *ocommon.DmqMessage) ocommon.RejectReason {
 		if msg.Payload.KESPeriod > current {
 			return ocommon.InvalidReason{Message: "message claims a future KES period"}
 		}
+		// The authenticator checks the window against the period the message
+		// claims, which an expired certificate's key can still sign for.
+		certPeriod := msg.OperationalCertificate.KESPeriod
+		if certPeriod <= current &&
+			current-certPeriod >= s.cfg.MaxKESEvolutions {
+			return ocommon.InvalidReason{
+				Message: "operational certificate KES window has ended",
+			}
+		}
 	}
 	if err := s.ttl.ValidateMessageTTL(msg); err != nil {
 		return ocommon.InvalidReason{Message: err.Error()}
@@ -370,7 +391,7 @@ func (s *Stack) handleClosed(id ouroboros.ConnectionId) {
 }
 
 // feed moves every message the consumer has not yet seen from the pool into
-// its notification server's queue. A message the queue refuses is held and
+// its notification server's queue. A message the queue refused is held and
 // offered again, so a slow consumer delays messages but skips only those that
 // expire first. It returns once the consumer ends notification with
 // MsgClientDone, which leaves the connection open for submission.
@@ -380,8 +401,10 @@ func (s *Stack) feed(
 	server *localmessagenotification.Server,
 ) {
 	var pending *ocommon.DmqMessage
+	wait := feedRetryInterval
 	for {
-		// Checked on every wake: the server's terminal state has no channel.
+		// The server's terminal state has no channel, so every wait below is
+		// bounded and this is checked on each wake.
 		if server.IsDone() {
 			return
 		}
@@ -409,29 +432,25 @@ func (s *Stack) feed(
 			}
 			s.sent.Inc()
 			pending = nil
+			wait = feedRetryInterval
 		}
+		// A full queue signals nothing when it drains, so a held message is
+		// retried on the timer alone. A connection that never requests
+		// notifications keeps its queue full for its whole life, hence the
+		// backoff.
+		var wake <-chan struct{}
 		if pending == nil {
-			timer := time.NewTimer(feedRetryInterval)
-			select {
-			case <-added:
-				if !timer.Stop() {
-					<-timer.C
-				}
-			case <-timer.C:
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return
-			}
-			continue
+			wake = added
 		}
-		timer := time.NewTimer(feedRetryInterval)
+		timer := time.NewTimer(wait)
 		select {
+		case <-wake:
 		case <-timer.C:
+			wait = min(2*wait, maxFeedRetryInterval)
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		}
+		timer.Stop()
 	}
 }

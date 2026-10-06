@@ -58,10 +58,12 @@
 // the topic's network magic. Each connection carries both local mini-protocols.
 //
 // Local message submission validates a message in order -- already expired,
-// expiry beyond the configured message TTL, CIP-0137 authentication -- and
-// then admits it to the pool. It replies accept, or rejects with the current
-// CIP-0137 reason: expired, invalid (with the validation error), alreadyReceived
-// for a duplicate ID, or other (with the error) when the pool is full.
+// the current KES period when one is configured, expiry beyond the configured
+// message TTL, CIP-0137 authentication -- and then admits it to the pool. It
+// replies accept, or rejects with the current CIP-0137 reason: expired,
+// invalid (with the validation error), alreadyReceived for a duplicate ID, or
+// other (with the error) when the current KES period cannot be resolved or the
+// pool is full.
 //
 // Local message notification gives each connection its own cursor over the
 // pool, so every consumer receives each unexpired message once. A feeder

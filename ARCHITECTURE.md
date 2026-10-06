@@ -6515,10 +6515,12 @@ Each connection carries local message submission (mini-protocol 14) and local
 message notification (mini-protocol 15).
 
 Submission validates in this order and replies with the CIP-0137 reject reason
-of the first check that fails: already expired (`expired`), expiry beyond
-`dmq.messageTtl` (`invalid`), `MessageAuthenticator.VerifyMessage` (`invalid`),
-then `MessageMempool.Add` (`expired`, `invalid` for a mismatched ID,
-`alreadyReceived` for a duplicate, `other` when the pool is full). The
+of the first check that fails: already expired (`expired`), the current KES
+period (`other` when it cannot be resolved, `invalid` for a message claiming a
+later period or an operational certificate whose KES window has ended), expiry
+beyond `dmq.messageTtl` (`invalid`), `MessageAuthenticator.VerifyMessage`
+(`invalid`), then `MessageMempool.Add` (`expired`, `invalid` for a mismatched
+ID, `alreadyReceived` for a duplicate, `other` when the pool is full). The
 gouroboros server's own TTL and authentication checks are disabled because
 `Stack` performs them, so that every refusal is counted by reason and an
 expired message is reported as expired rather than invalid.
@@ -6526,9 +6528,13 @@ expired message is reported as expired rather than invalid.
 Notification gives each connection a `NextForPeer` cursor keyed by connection
 ID. A feeder goroutine per connection moves messages into the gouroboros
 notification server's queue (`Server.AddMessage`) and keeps a refused message
-pending, retrying every 100ms, so a consumer with a full queue delays messages
-and loses only those that expire before delivery. Feeders wake on `MessageMempool.AddedSignal`, taken before
-each drain so an admission between the drain and the wait is not missed. The
+pending, so a consumer with a full queue delays messages and loses only those
+that expire before delivery. Feeders wake on `MessageMempool.AddedSignal`, taken
+before each drain so an admission between the drain and the wait is not missed.
+A full queue and a finished server have no signal, so a feeder also wakes on a
+timer that starts at 100ms and doubles to 2s until it next delivers a message;
+a connection that never requests notifications keeps a full queue for its
+whole life. The
 server's authentication and TTL checks are disabled here because pooled
 messages were validated on admission. The connection manager publishes its
 closed event only for node-to-node connections, so the stack learns of a local
@@ -6584,13 +6590,16 @@ reinitialization sets the rebuilt ledger state. Clearing waits for a lookup in
 flight, so it is one of the quiesce stops bounded by the shutdown timeout: a
 lookup that does not finish escalates to a supervised restart rather than
 letting storage close beneath it. Submissions in between are rejected as
-`invalid`.
+`other`, because the current KES period cannot be resolved.
 
-Before authentication, admission also compares the message's claimed KES
-period with the wall-clock slot derived from confirmed era history. A future
-period, unavailable ledger state, or a wall clock beyond the confirmed forecast
-horizon fails closed, so an otherwise valid signature cannot extend an old
-operational certificate into the future.
+Before authentication, admission resolves the current KES period from the
+wall-clock slot derived from confirmed era history. Unavailable ledger state or
+a wall clock beyond the confirmed forecast horizon fails closed (`other`). A
+message claiming a later period, or whose operational certificate's
+`maxKESEvolutions` window no longer covers the current period, is `invalid`:
+`VerifyMessage` checks the window only against the period the message claims,
+so without this an expired certificate's key could still sign accepted
+messages.
 
 `VerifyMessage` runs CIP-0137's full authentication chain against one
 message, in order: message-ID integrity, pool-ID derivation plus

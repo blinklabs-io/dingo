@@ -140,6 +140,7 @@ func (n *Node) startDMQ() error {
 		MaxMempoolBytes:  int64(cfg.MaxMempoolSize) << 20,
 		Authenticator:    authenticator,
 		CurrentKESPeriod: n.dmqStake.CurrentKESPeriod,
+		MaxKESEvolutions: n.config.MaxKESEvolutions(),
 	})
 	if err != nil {
 		return fmt.Errorf("creating dmq stack: %w", err)
