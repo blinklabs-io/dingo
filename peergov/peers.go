@@ -20,6 +20,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,105 @@ var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
 		ips[i] = addrs[i].IP
 	}
 	return ips, nil
+}
+
+// lookupSRV resolves the SRV records published at exactly the given name.
+// Like lookupIPAddr it honors the context and is a package var so tests can
+// inject a deterministic resolver.
+var lookupSRV = func(ctx context.Context, name string) ([]*net.SRV, error) {
+	// An empty service and protocol query the name verbatim; the caller
+	// supplies any _service._proto labels.
+	_, records, err := net.DefaultResolver.LookupSRV(ctx, "", "", name)
+	return records, err
+}
+
+// cardanoSRVPrefix is prepended to a MultiHostName relay's ledger domain to
+// form its SRV query name, per CIP-0155. The ledger carries the bare domain.
+const cardanoSRVPrefix = "_cardano._tcp."
+
+// maxSRVTargets bounds how many SRV targets are resolved for one relay, so a
+// record set padded by its operator cannot multiply discovery-time lookups.
+const maxSRVTargets = 3
+
+// resolveMultiHost resolves a MultiHostName relay: SRV first, taking the
+// target and port from the first record whose target resolves, then A/AAAA
+// with the default port. When nothing resolves it returns the lowercased
+// hostname with the default port and resolved=false. lookup resolves a
+// target's address records; filter narrows them to the dialable families.
+// It must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveMultiHost(
+	ctx context.Context,
+	host string,
+	lookup func(context.Context, string) ([]net.IP, error),
+	filter bool,
+) (string, bool) {
+	pickIP := func(ips []net.IP) net.IP {
+		if !filter {
+			if len(ips) > 0 {
+				return ips[0]
+			}
+			return nil
+		}
+		hasV4, hasV6 := p.supportedDialFamilies()
+		for _, ip := range ips {
+			if !IsRoutableIP(ip) {
+				continue
+			}
+			if hasV4 || hasV6 {
+				isV4 := ip.To4() != nil
+				if (isV4 && !hasV4) || (!isV4 && !hasV6) {
+					continue
+				}
+			}
+			return ip
+		}
+		return nil
+	}
+	records, err := lookupSRV(ctx, cardanoSRVPrefix+host)
+	if err == nil {
+		for i, record := range records {
+			if i >= maxSRVTargets {
+				break
+			}
+			if record == nil || record.Port == 0 {
+				continue
+			}
+			target := record.Target
+			if target == "" || target == "." {
+				continue
+			}
+			ips, err := lookup(ctx, target)
+			if err != nil || len(ips) == 0 {
+				continue
+			}
+			ip := pickIP(ips)
+			if ip == nil {
+				continue
+			}
+			return net.JoinHostPort(
+				ip.String(),
+				strconv.FormatUint(uint64(record.Port), 10),
+			), true
+		}
+	}
+	ips, err := lookup(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
+	ip := pickIP(ips)
+	if ip == nil {
+		return net.JoinHostPort(
+			strings.ToLower(host),
+			defaultCardanoPort,
+		), false
+	}
+	return net.JoinHostPort(
+		ip.String(),
+		defaultCardanoPort,
+	), true
 }
 
 // maxPeerListSize returns the hard cap for the total number of peers.
@@ -360,6 +460,29 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 		return net.JoinHostPort(ip.String(), port)
 	}
 
+	// Port 0 marks a MultiHostName relay, whose port lives in an SRV record.
+	if port == multiHostPort {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			dialDNSResolveTimeout,
+		)
+		defer cancel()
+		resolved, ok := p.resolveMultiHost(
+			ctx,
+			host,
+			lookupIPAddr,
+			false,
+		)
+		if !ok {
+			p.config.Logger.Warn(
+				"failed to resolve peer hostname",
+				"address", address,
+				"host", host,
+			)
+		}
+		return resolved
+	}
+
 	// It's a hostname - try to resolve it
 	ips, err := lookupIP(host)
 	if err != nil || len(ips) == 0 {
@@ -411,6 +534,12 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 	}
 
 	lowerHost := strings.ToLower(host)
+	// A MultiHostName relay carries port 0 until SRV resolution picks one;
+	// every fallback below must dial the default port, never port 0.
+	multiHost := port == multiHostPort
+	if multiHost {
+		port = defaultCardanoPort
+	}
 	// A hostname that just failed to resolve is not retried until its
 	// negative-cache entry expires. Discovery re-offers the whole relay set
 	// every round, so without this a dead hostname costs a lookup (and, for
@@ -422,6 +551,18 @@ func (p *PeerGovernor) resolveLedgerDiscoveryAddress(
 
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
+	if multiHost {
+		resolved, ok := p.resolveMultiHost(
+			lookupCtx,
+			host,
+			lookupIPAddr,
+			true,
+		)
+		if !ok && ctx.Err() == nil {
+			p.recordNegativeDNS(lowerHost)
+		}
+		return resolved
+	}
 	ips, err := lookupIPAddr(lookupCtx, host)
 	if err != nil || len(ips) == 0 {
 		// Debug, not Warn: a pool publishing a dead relay hostname is a fact
@@ -535,6 +676,12 @@ func (p *PeerGovernor) resolveDialAddress(
 	if net.ParseIP(host) != nil {
 		return address
 	}
+	if port == multiHostPort {
+		resolveCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+		defer cancel()
+		target, _ := p.resolveMultiHost(resolveCtx, host, lookupIPAddr, false)
+		return target
+	}
 	// Bound the fresh resolution so a hung or slow resolver cannot wedge the
 	// dial loop, and cancel it if the governor is shutting down.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
@@ -603,23 +750,40 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 	// hung or slow resolver cannot wedge the dial loop.
 	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
 	defer cancel()
-	ips, err := lookupIPAddr(lookupCtx, host)
-	if err != nil {
-		return "", err
-	}
-	if len(ips) == 0 {
-		return "", errors.New("no addresses returned for ledger relay hostname")
-	}
-	// Filter to the address families this host can actually dial before
-	// picking the one record that gets locked in forever; an unfiltered
-	// pick could permanently pin the peer to an unreachable family (e.g. an
-	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
-	// re-resolution would otherwise self-correct on the next try.
-	hasV4, hasV6 := p.supportedDialFamilies()
-	ips = filterDialFamilies(ips, hasV4, hasV6)
-	resolved := net.JoinHostPort(ips[0].String(), port)
-	if !isRoutableAddr(resolved) {
-		return "", ErrUnroutableAddress
+	var resolved string
+	originalHost, originalPort, originalErr := net.SplitHostPort(peer.Address)
+	if originalErr == nil && originalPort == multiHostPort {
+		var ok bool
+		resolved, ok = p.resolveMultiHost(
+			lookupCtx,
+			originalHost,
+			lookupIPAddr,
+			true,
+		)
+		if !ok {
+			return "", errors.New(
+				"no usable addresses returned for MultiHost ledger relay",
+			)
+		}
+	} else {
+		ips, err := lookupIPAddr(lookupCtx, host)
+		if err != nil {
+			return "", err
+		}
+		if len(ips) == 0 {
+			return "", errors.New("no addresses returned for ledger relay hostname")
+		}
+		// Filter to the address families this host can actually dial before
+		// picking the one record that gets locked in forever; an unfiltered
+		// pick could permanently pin the peer to an unreachable family (e.g. an
+		// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+		// re-resolution would otherwise self-correct on the next try.
+		hasV4, hasV6 := p.supportedDialFamilies()
+		ips = filterDialFamilies(ips, hasV4, hasV6)
+		resolved = net.JoinHostPort(ips[0].String(), port)
+		if !isRoutableAddr(resolved) {
+			return "", ErrUnroutableAddress
+		}
 	}
 
 	p.mu.Lock()
@@ -934,6 +1098,19 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
 		p.peers[peerIdx].LastActivity = time.Now()
 	}
+}
+
+// DiversityGroupByConnId returns the diversity group of the peer holding
+// connId, or "" when no tracked peer holds it.
+func (p *PeerGovernor) DiversityGroupByConnId(
+	connId ouroboros.ConnectionId,
+) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if peerIdx := p.peerIndexByConnId(connId); peerIdx != -1 {
+		return p.peerDiversityGroup(p.peers[peerIdx])
+	}
+	return ""
 }
 
 func (p *PeerGovernor) IsChainSelectionEligible(

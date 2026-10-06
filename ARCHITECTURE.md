@@ -1316,6 +1316,7 @@ dingo/
 │   ├── quotas.go        # Per-source quotas
 │   ├── score.go         # Peer scoring
 │   ├── ledger.go        # Ledger-based peer discovery
+│   ├── weighted_selection.go # Stake-weighted relay sampling
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
@@ -1856,6 +1857,29 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `peergov.quota_status` | PeerGov | Quota status update |
 | `peergov.bootstrap_exited` | PeerGov | Exited bootstrap mode |
 | `peergov.bootstrap_recovery` | PeerGov | Bootstrap recovery |
+
+**Equivocation detection.** The node subscribes an observer
+(`equivocationDetector`, `node_equivocation.go`) to `chain.update`, detachable
+because a missed event loses the metric, not node state. It keeps the blocks
+named by each `ChainRollbackEvent` (decoded for their issuer, bounded to 2160
+entries) and compares every later `ChainBlockEvent` block against them. A block
+with a different hash, the same slot or block number, and the same
+`IssuerVkey().PoolId()` as a retained block is equivocation: two pools cannot
+share a cold key, so that key is forging in two places. Each such pair
+increments `dingo_equivocation_total{pool_id,self_key}` and logs a warning;
+three competing blocks are three pairs. `self_key="true"` when the pool is this
+node's own, taken from the block producer credentials validated at startup. A
+distinct pair is counted once while it remains in the bounded recently
+reported pair set; after eviction, the same pair may be counted again.
+Repeated rolled-back hashes are retained only once. Both the rollback history
+and recently reported pair set are bounded to 2160 entries. On
+rollback, every rolled-back block is decoded to read its issuer. For later
+added blocks, the detector first scans stored slot and block-number fields and
+decodes only when a possible match exists, so each added block pays one scan
+of the rollback history. Entries leave it only by eviction at the 2160-entry
+cap, so on a long-running node the history fills to the cap and each added
+block scans up to 2160 entries. A competing block this node never applied,
+because it never became the chain, is not seen.
 
 The six topics the ChainSelector publishes itself —
 `chainselection.chain_switch`, `selection`, `peer_evicted`,
@@ -4902,22 +4926,52 @@ it. Dingo implements this as a **corroboration gate**
 
 - A candidate peer is **corroborated** when at least `corroborationPeers`
   independent witness peers *confirm the candidate's recent chain*
-  (`confirmsRecentChain`): every block a witness observed within the candidate's
-  window slot range matches the candidate's own `(slot, hash)`, and they share at
-  least one such block. The observed frontier is populated per header during
-  chainsync (dense), so two peers on the same chain agree on every block in their
-  overlap. This is deliberately stronger than "share any common point": a fast
-  source that agrees on one old ancestor and then produces different blocks for
+  (`confirmsRecentChain`): every block a witness observed within the slot range
+  of the candidate's observed frontier matches the candidate's own
+  `(slot, hash)`, and the witness independently delivered the candidate's
+  current point. The current-point requirement is what keeps a match in older
+  candidate history from authorizing blocks the witness never observed. The
+  observed frontier is populated per header during chainsync (dense), so two
+  peers on the same chain agree on every block in their overlap. This is
+  deliberately stronger than "share any common point": a fast source that agrees on one old ancestor and then produces different blocks for
   the rest of the window is **not** confirmed, because the witness observed
   recent blocks the candidate lacks (or a conflicting hash at the same slot).
-- Witnesses are counted by distinct remote **host**, and a witness on the
-  candidate's own host is excluded, so several connections from one operator
-  cannot self-corroborate a private fork. This is a lower bound on independence,
-  not a guarantee: genuine independence (distinct operators, ASNs, and chain
-  views) depends on the operator's validated topology and peer-governance
-  diversity groups. Raising `corroborationPeers` raises the *count* required, not
-  the independence of the peers supplied — that remains an operator
-  responsibility.
+- A witness must also **reach the candidate's suffix**: it must have delivered
+  the candidate's current point, and its delivered frontier block number must
+  remain within the `securityParam` bound (`witnessSupportsSuffixLocked`). A
+  witness that only shares an older point, however recently it answered a
+  keepalive, does not count, and neither does one that rolled back to a point
+  outside its retained history: it keeps the candidate's points but its block
+  number is unknown (zero), so it cannot vouch for the candidate's height.
+- Witnesses are counted by distinct **peer identity**, and a witness with the
+  candidate's own identity is excluded, so several connections from one operator
+  cannot self-corroborate a private fork. The identity is peer governance's
+  diversity group (`PeerGovernor.DiversityGroupByConnId`, wired through
+  `ChainSelectorConfig.PeerIdentity`): the topology group ID, else the /24
+  (IPv4) or /64 (IPv6) prefix, else the host name. A connection the hook
+  cannot place, such as an inbound connection peer governance declined to
+  track at its peer-list cap, has no identity and fails closed: as a candidate
+  it has no corroborators, and as a witness it does not count. Keying it by
+  remote host instead would put it in a different namespace from its tracked
+  siblings, so one operator could corroborate itself. Without a hook the
+  selector groups by remote host. This is a lower bound on independence, not a
+  guarantee: genuine independence (distinct operators, ASNs, and chain views)
+  depends on the operator's validated topology. Raising `corroborationPeers`
+  raises the *count* required, not the independence of the peers supplied —
+  that remains an operator responsibility.
+- **Candidate exclusion uses a trusted frontier, whatever the threshold.** In
+  Genesis mode the "behind the best known tip" filter
+  (`bestKnownBlockNumber`) takes its frontier only from a live, eligible,
+  non-stale peer corroborated by at least `max(1, corroborationPeers)`
+  witnesses (`frontierTrustedLocked`). One uncorroborated peer, or one whose
+  connection is gone, therefore cannot make honest candidates look behind. When
+  no frontier is trusted nothing is excluded as behind. Outside Genesis mode
+  every eligible, non-stale frontier counts. Trust costs a corroboration scan,
+  so frontiers are tried from the highest down and the first trusted one is
+  the answer, and an evaluation pass computes the frontier once and shares it
+  between the mode check, every candidate, the incumbent re-check and the
+  anti-flap pin. A delivered header in Genesis mode is always evaluated, so it
+  does not advance the mode separately beforehand.
 - In Genesis mode with `corroborationPeers > 0`, an **uncorroborated** candidate
   is denied chain selection (`isPeerSelectableLocked`). A fully divergent fast
   source shares no recent block with any honest peer, so it is never corroborated
@@ -4964,8 +5018,9 @@ it. Dingo implements this as a **corroboration gate**
   corroboration-failure event to react.
 - `corroborationPeers = 0` disables the gate (density-only Genesis selection,
   the historical default), preserving prior behavior for nodes that do not opt
-  into the Genesis trust model. While the gate is disabled the per-peer hash
-  frontier is not tracked, so normal Praos operation carries no extra state.
+  into the Genesis trust model. The per-peer hash frontier is tracked in every
+  Genesis mode (the trusted-frontier rule above needs it) and dropped in Praos,
+  so normal Praos operation carries no extra state.
 - **Header-crypto verification gates observation, independent of
   corroboration.** Density and the corroboration hash frontier are both
   populated from `recordObservedPoint`, driven by `PeerTipUpdateEvent`
@@ -5051,18 +5106,12 @@ corroboration is active, so corroboration granted or revoked takes effect
 immediately rather than on the next periodic tick.
 
 **Deferred / not implemented**: Dingo does not yet implement **ChainSync
-Jumping** or **Devoted BlockFetch**. The corroboration gate also cannot
-testify about blocks a fast source produced beyond every witness's frontier: a
-source that stays consistent with honest peers up to their frontiers but forks
-only in the not-yet-witnessed suffix remains corroborated until a witness
-advances past the fork. Intersection-anchored fork resolution still compares
-that fetched suffix against the local candidate, but independent corroboration
-of the suffix necessarily waits for witnesses to observe it. Wiring
+Jumping** or **Devoted BlockFetch**. The corroboration gate stalls a fast source
+until independent witnesses deliver its current point; it does not buffer and
+apply only the confirmed prefix of a source that runs ahead. Wiring
 peer-governance demotion to the corroboration-failure event is likewise
-deferred. These remain future work; the corroboration gate confirms only the
-overlap that independent witnesses have observed. Density-at-intersection can
-compare an unseen suffix with the local candidate, but does not independently
-corroborate that suffix.
+deferred. Density-at-intersection can compare an unseen suffix with the local
+candidate, but does not independently corroborate that suffix.
 
 #### Genesis Limit on Patience
 
@@ -5448,6 +5497,11 @@ unique local/public-root set by admitting public roots only into the remaining
 slots.
 
 `Start()` owns its inbound-connection and connection-closed EventBus subscriptions, and `Stop(ctx)` removes them with `UnsubscribeAndWaitContext`. This is required when live restore/truncate replaces the governor while retaining the EventBus: a stopped governor must not process delayed events or publish stale chain-selection updates after the replacement reconnects. The unsubscribe itself always happens; only the wait for a handler already in flight is bounded by `ctx`, so one stuck handler cannot overrun the shutdown deadline. A deadline expiry is returned as an error, unprefixed — every caller adds its own `peer governor shutdown:` prefix, as it does for the other components.
+
+The chain selector remains active while live restore/truncate replaces the peer
+governor. Node's peer-identity and peer-activity callbacks read and use the
+current governor while holding `peerGovMu`; replacement takes its write lock
+before publishing the new governor.
 
 Outbound-dial goroutines are registered with the governor's wait group while
 holding the same mutex `Stop()` uses to clear `stopCh`. Runtime peer additions,
@@ -6225,6 +6279,28 @@ Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral
 ledger/database types, while `internal/node/ledgerpeers` converts that data to
 the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
+
+`ledger.PoolRelayProvider` attaches each relay's delegated pool stake (one
+batched `Database.GetStakeByPools` per cache refill; a lookup failure leaves
+stake at zero rather than failing discovery) and flags MultiHostName relays
+(hostname, no port). Discovery draws pools without replacement weighted by
+their stake (`weightedSample` in `peergov/weighted_selection.go`, zero stake
+carrying a floor weight so such pools stay discoverable), chooses one relay
+from each drawn pool per round, and walks the resulting relay order until the
+ledger-peer deficit is filled. A MultiHostName relay is
+carried as `host:0`; resolution looks up its SRV record for target and port,
+falls back to A/AAAA on the default port, and never leaves port 0 as the
+dial target. MultiHost reconnects preserve SRV-selected ports and absolute
+SRV target names; resolution is bounded by the caller's context. Ledger SRV
+selection tries later targets and the hostname fallback when an earlier target
+has no supported routable address. Discovery offers one address per relay before
+alternates and resolves each distinct address once per round. Sampling keeps
+exact stake weights when their total fits, and scales them together on overflow.
+A discovered peer keeps its pool's stake in `StakeLovelace` and carries
+`StakeKnown` through the ledger adapter, so known zero stake scores below unknown
+stake. `UpdatePeerScore` folds stake in as a log-scaled sixth component (weight
+0.10, neutral 0.5 when unknown). Rediscovery refreshes retained peers' stake as
+well as newly admitted peers.
 
 Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
 be triggered by enough connected ledger peers, or by the configured slot/progress
