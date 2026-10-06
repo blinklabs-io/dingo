@@ -973,95 +973,46 @@ jobs:
             echo "Open PR already exists for ${branch}; pushed updated formula to it."
           fi
 
-  # Keep the maintained Ansible role, cardano-up package, and Helm chart
-  # aligned with each published Dingo release. These consumer PRs are
-  # independent of release publication and must not block a shipped release.
-  # ORG_PROJECT_PAT needs contents: write and pull-requests: write on each
-  # consumer repository; the default GITHUB_TOKEN cannot write across repos.
-  update-consumers:
+  # Keep the maintained Ansible role aligned with each published Dingo release.
+  # This consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-ansible:
     runs-on: ubuntu-latest
     needs: [finalize-release]
     if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - repository: blinklabs-io/ansible-cardano
-            consumer: ansible
-          - repository: blinklabs-io/cardano-up-packages
-            consumer: cardano-up
-          - repository: blinklabs-io/helm-charts
-            consumer: helm
     env:
       CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
-      CONSUMER_REPOSITORY: ${{ matrix.repository }}
-      CONSUMER_KIND: ${{ matrix.consumer }}
+      CONSUMER_REPOSITORY: blinklabs-io/ansible-cardano
     steps:
-      - name: Check consumer token
+      - name: Check Ansible repository token
         id: gate
         run: |
           if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
-            echo "ORG_PROJECT_PAT not set; skipping ${CONSUMER_REPOSITORY} update."
+            echo "ORG_PROJECT_PAT not set; skipping Ansible role update."
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Checkout consumer repository
+      - name: Checkout Ansible repository
         if: steps.gate.outputs.enabled == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
-          repository: ${{ matrix.repository }}
+          repository: ${{ env.CONSUMER_REPOSITORY }}
           token: ${{ env.CONSUMER_GITHUB_TOKEN }}
           path: consumer
-      - name: Update consumer version
+      - name: Update Ansible role version
         if: steps.gate.outputs.enabled == 'true'
         env:
           PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           version="${PACKAGE_VERSION#v}"
-          case "${CONSUMER_KIND}" in
-            ansible)
-              file="consumer/roles/dingo/defaults/main.yml"
-              sed -i -E "s/^dingo_version: '[^']*'/dingo_version: '${version}'/" "$file"
-              grep -qF "dingo_version: '${version}'" "$file"
-              ;;
-            cardano-up)
-              package_dir="consumer/packages/dingo"
-              latest="$(find "$package_dir" -maxdepth 1 -type f -name 'dingo-*.yaml' | sort -V | tail -n 1)"
-              target="${package_dir}/dingo-${version}.yaml"
-              if [ ! -f "$target" ]; then
-                cp "$latest" "$target"
-                sed -i -E "s/^version: .*/version: ${version}/" "$target"
-              fi
-              grep -qF "version: ${version}" "$target"
-              grep -qF 'releases/download/v{{ .Package.Version }}/dingo-v{{ .Package.Version }}-' "$target"
-              ;;
-            helm)
-              chart="consumer/charts/dingo/Chart.yaml"
-              values="consumer/charts/dingo/values.yaml"
-              if ! grep -qF "appVersion: \"${version}\"" "$chart" || \
-                ! grep -qF "tag: \"${version}\"" "$values"; then
-                chart_version="$(sed -n -E 's/^version: ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$chart")"
-                IFS=. read -r major minor patch <<< "$chart_version"
-                next_chart_version="${major}.${minor}.$((patch + 1))"
-                sed -i -E \
-                  -e "s/^version: .*/version: ${next_chart_version}/" \
-                  -e "s/^appVersion: .*/appVersion: \"${version}\"/" \
-                  "$chart"
-                sed -i -E "s/^  tag: .*/  tag: \"${version}\"/" "$values"
-              fi
-              grep -qF "appVersion: \"${version}\"" "$chart"
-              grep -qF "tag: \"${version}\"" "$values"
-              ;;
-            *)
-              echo "Unknown consumer kind: ${CONSUMER_KIND}" >&2
-              exit 1
-              ;;
-          esac
+          file="consumer/roles/dingo/defaults/main.yml"
+          sed -i -E "s/^dingo_version: '[^']*'/dingo_version: '${version}'/" "$file"
+          grep -qF "dingo_version: '${version}'" "$file"
       - name: Open consumer pull request
         if: steps.gate.outputs.enabled == 'true'
         env:
@@ -1070,13 +1021,9 @@ jobs:
         run: |
           set -euo pipefail
           cd consumer
-          case "${CONSUMER_KIND}" in
-            ansible) git add roles/dingo/defaults/main.yml ;;
-            cardano-up) git add "packages/dingo/dingo-${PACKAGE_VERSION#v}.yaml" ;;
-            helm) git add charts/dingo/Chart.yaml charts/dingo/values.yaml ;;
-          esac
+          git add roles/dingo/defaults/main.yml
           if git diff --cached --quiet; then
-            echo "${CONSUMER_REPOSITORY} already includes ${PACKAGE_VERSION}; nothing to do."
+            echo "Ansible role already includes ${PACKAGE_VERSION}; nothing to do."
             exit 0
           fi
           branch="dingo-${PACKAGE_VERSION}"
@@ -1093,5 +1040,178 @@ jobs:
               --title "chore(dingo): update to ${PACKAGE_VERSION}" \
               --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
           else
-            echo "Open PR already exists for ${branch}; pushed updated consumer files to it."
+            echo "Open PR already exists for ${branch}; pushed the updated role to it."
+          fi
+
+  # Keep the cardano-up package aligned with each published Dingo release.
+  # This consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-cardano-up-package:
+    runs-on: ubuntu-latest
+    needs: [finalize-release]
+    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      CONSUMER_REPOSITORY: blinklabs-io/cardano-up-packages
+    steps:
+      - name: Check cardano-up repository token
+        id: gate
+        run: |
+          if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
+            echo "ORG_PROJECT_PAT not set; skipping cardano-up package update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout cardano-up repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.CONSUMER_REPOSITORY }}
+          token: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          path: consumer
+      - name: Add cardano-up package version
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${PACKAGE_VERSION#v}"
+          package_dir="consumer/packages/dingo"
+          latest="$(find "$package_dir" -maxdepth 1 -type f -name 'dingo-*.yaml' | sort -V | tail -n 1)"
+          if [ -z "$latest" ] || [ ! -f "$latest" ]; then
+            echo "::error::No Dingo package manifest is available to use as a template."
+            exit 1
+          fi
+          target="${package_dir}/dingo-${version}.yaml"
+          if [ ! -f "$target" ]; then
+            cp "$latest" "$target"
+            sed -i -E "s/^version: .*/version: ${version}/" "$target"
+          fi
+          grep -qF "version: ${version}" "$target"
+          grep -qF 'releases/download/v{{ .Package.Version }}/dingo-v{{ .Package.Version }}-' "$target"
+      - name: Open consumer pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd consumer
+          git add "packages/dingo/dingo-${PACKAGE_VERSION#v}.yaml"
+          if git diff --cached --quiet; then
+            echo "cardano-up package already includes ${PACKAGE_VERSION}; nothing to do."
+            exit 0
+          fi
+          branch="dingo-${PACKAGE_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          fi
+          git push --force-with-lease origin "$branch"
+          if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
+              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
+              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+          else
+            echo "Open PR already exists for ${branch}; pushed the new package manifest to it."
+          fi
+
+  # Keep the Helm chart aligned with each published Dingo release. This
+  # consumer PR must not block a shipped release. ORG_PROJECT_PAT needs
+  # contents: write and pull-requests: write on the consumer repository.
+  update-helm-chart:
+    runs-on: ubuntu-latest
+    needs: [finalize-release]
+    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      CONSUMER_REPOSITORY: blinklabs-io/helm-charts
+    steps:
+      - name: Check Helm repository token
+        id: gate
+        run: |
+          if [ -z "${CONSUMER_GITHUB_TOKEN}" ]; then
+            echo "ORG_PROJECT_PAT not set; skipping Helm chart update."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout Helm repository
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          repository: ${{ env.CONSUMER_REPOSITORY }}
+          token: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          path: consumer
+      - name: Update Helm chart version
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${PACKAGE_VERSION#v}"
+          chart="consumer/charts/dingo/Chart.yaml"
+          values="consumer/charts/dingo/values.yaml"
+          if ! grep -qF "appVersion: \"${version}\"" "$chart" || \
+            ! grep -qF "tag: \"${version}\"" "$values"; then
+            chart_version="$(sed -n -E 's/^version:[[:space:]]*(.*)$/\1/p' "$chart" | head -n 1 | sed -E 's/[[:space:]]+$//')"
+            chart_version="${chart_version#\"}"
+            chart_version="${chart_version%\"}"
+            chart_version="${chart_version#\'}"
+            chart_version="${chart_version%\'}"
+            if [[ ! "$chart_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Could not parse Helm chart version: ${chart_version}"
+              exit 1
+            fi
+            major="${BASH_REMATCH[1]}"
+            minor="${BASH_REMATCH[2]}"
+            patch="${BASH_REMATCH[3]}"
+            next_chart_version="${major}.${minor}.$((patch + 1))"
+            sed -i -E \
+              -e "s/^version: .*/version: ${next_chart_version}/" \
+              -e "s/^appVersion: .*/appVersion: \"${version}\"/" \
+              "$chart"
+            sed -i -E "s/^  tag: .*/  tag: \"${version}\"/" "$values"
+            grep -qE "^version: ${next_chart_version}$" "$chart"
+          fi
+          grep -qF "appVersion: \"${version}\"" "$chart"
+          grep -qF "tag: \"${version}\"" "$values"
+      - name: Open consumer pull request
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd consumer
+          git add charts/dingo/Chart.yaml charts/dingo/values.yaml
+          if git diff --cached --quiet; then
+            echo "Helm chart already includes ${PACKAGE_VERSION}; nothing to do."
+            exit 0
+          fi
+          branch="dingo-${PACKAGE_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$branch"
+          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
+          fi
+          git push --force-with-lease origin "$branch"
+          if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
+              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
+              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+          else
+            echo "Open PR already exists for ${branch}; pushed the updated chart to it."
           fi
