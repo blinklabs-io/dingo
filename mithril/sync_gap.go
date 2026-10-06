@@ -669,16 +669,6 @@ func processGapBlockTransactions(
 			protocolMajor = uint64(versioned.ProtocolMajorVersion())
 		}
 		for levelIndex, level := range levels {
-			if level.IsValid() {
-				if err := governance.ResetDormantDRepExpiryBeforeCertificates(
-					level,
-					point,
-					db,
-					txn,
-				); err != nil {
-					return fmt.Errorf("reset DRep dormancy before certificates: %w", err)
-				}
-			}
 			if err := db.SetGapBlockTransaction(
 				level,
 				point,
@@ -701,25 +691,21 @@ func processGapBlockTransactions(
 				continue
 			}
 			if conwayPParams == nil &&
-				governance.TransactionRequiresConwayParameters(level) {
+				governance.HistoricalTransactionRequiresConwayParameters(level) {
 				return errors.New(
 					"missing Conway protocol parameters for governance gap block processing",
 				)
 			}
-			drepInactivityPeriod := uint64(0)
 			govActionLifetime := uint64(0)
 			if conwayPParams != nil {
-				drepInactivityPeriod = conwayPParams.DRepInactivityPeriod
 				govActionLifetime = conwayPParams.GovActionValidityPeriod
 			}
-			if err := governance.ProcessTransactionEffects(
+			if err := governance.ProcessHistoricalTransactionEffects(
 				level,
 				point,
 				uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 				epochId,
-				drepInactivityPeriod,
 				govActionLifetime,
-				protocolMajor,
 				db,
 				txn,
 			); err != nil {

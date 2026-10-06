@@ -1596,6 +1596,52 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	assert.Equal(t, uint64(50), state.Slot)
 }
 
+// TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary pins the discard taken when
+// one credential's folded delta no longer fits in uint64. Two distributions of
+// the maximum amount to one credential overflow only in the per-credential
+// fold, so addCredit's running total never trips. A valid credit to a second
+// credential separates discarding the boundary from skipping the credential:
+// a skip would still credit it.
+func TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+
+	maxUint := ^uint64(0)
+	overflowCred := mirCred28(0x76)
+	validCred := mirCred28(0x77)
+	for slot, rewards := range map[uint64][]models.MoveInstantaneousRewardsReward{
+		200: {{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)}},
+		300: {
+			{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)},
+			{Credential: validCred, Amount: big.NewInt(100)},
+		},
+	} {
+		seedMIRDistribution(t, gdb, mirPotReserves, slot, rewards)
+	}
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}))
+	}
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
+
+	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+		"an uncreditable MIR fold must not fail the epoch boundary")
+
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), uint64(account.Reward),
+			"the whole boundary is discarded, not just the overflowing credential")
+	}
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	assert.Equal(t, maxUint, uint64(state.Reserves))
+	assert.Equal(t, uint64(50), state.Slot)
+}
+
 // withMIRCutoffEpoch gives ls a Shelley genesis with k=2160 and f=1/20, so a
 // 129,600-slot stability window, and publishes epoch as the only cached
 // epoch, which is what LedgerView.MIRDelegState needs to compute the cutoff.

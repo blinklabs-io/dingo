@@ -102,6 +102,7 @@ var governanceStoreMethods = []string{
 	"BumpDormantDRepExpiries",
 	"ResetDormantDRepEpochs",
 	"SetImportedDormantDRepEpochs",
+	"RecordDRepActivityEpoch",
 	"GetExpiredDReps",
 	"RestoreDrepStateAtSlot",
 
