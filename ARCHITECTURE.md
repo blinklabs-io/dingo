@@ -4064,6 +4064,22 @@ The `LedgerView` interface provides query access to ledger state:
   and 11 to reject key-hash reward withdrawals whose stake credential is not
   delegated to a DRep. Script-hash reward credentials are governed by script
   validation and do not participate in this DRep-delegation gate.
+- Governance purpose roots seeded from a ledger-state snapshot are verified at
+  three points. `ledgerstate` import re-reads every non-null
+  `ParsedPrevGovActionIds` root after seeding and fails the import unless it is
+  an enacted `governance_proposal` row that `GetLastEnactedGovernanceProposal`
+  resolves as its purpose's current root; a resumed import that skips the
+  governance phase runs the same check. Before starting its worker pool and
+  cleanup timer, `LedgerState.Start` calls `governance.VerifyPurposeRoots` at
+  the latest stored epoch and refuses to start a Mithril-bootstrapped
+  database (one with a `mithril_ledger_slot` sync-state row) when an active
+  chained proposal names a parent that has no enacted purpose root, is not an
+  active proposal and is not a stored row. The epoch tally applies the same
+  predicate where `validateParentChain` fails and returns
+  `governance.MissingEnactedRootError` (`ErrMissingEnactedRoot`) instead of
+  skipping. A pending-sibling parent and a stored superseded or non-root parent
+  keep the skip, and a genesis-synced database always keeps it because a
+  rootless purpose is legitimate there.
 - Conway governance validation exposes the authoritative enacted root for each
   CIP-1694 purpose through `GovPurposeRoots`. A non-nil result with nil fields
   means those roots are known to be absent; lookup failures are propagated
