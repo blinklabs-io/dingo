@@ -14,7 +14,10 @@
 
 package blockfrost
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // BlockfrostNode is the interface that the Blockfrost API
 // server uses to query the node for blockchain data. This
@@ -88,6 +91,7 @@ type BlockfrostNode interface {
 	// an address along with the total number of matching
 	// results before pagination.
 	AddressUTXOs(
+		ctx context.Context,
 		address string,
 		params PaginationParams,
 	) ([]AddressUTXOInfo, int, error)
@@ -174,6 +178,7 @@ type BlockfrostNode interface {
 	// AssetAddresses returns paginated addresses currently holding the given
 	// asset, along with the total holder count before pagination.
 	AssetAddresses(
+		ctx context.Context,
 		policyID string,
 		assetName []byte,
 		params PaginationParams,

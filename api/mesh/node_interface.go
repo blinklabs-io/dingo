@@ -15,6 +15,7 @@
 package mesh
 
 import (
+	"context"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -53,6 +54,13 @@ type MeshLedgerState interface {
 	UtxosByAddressAtSlot(
 		addr lcommon.Address,
 		slot uint64,
+	) ([]models.Utxo, error)
+	UtxosByAddressAtSlotBounded(
+		ctx context.Context,
+		addr lcommon.Address,
+		slot uint64,
+		maxResults int,
+		maxCborBytes int,
 	) ([]models.Utxo, error)
 }
 

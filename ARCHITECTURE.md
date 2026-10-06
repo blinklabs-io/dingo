@@ -9071,6 +9071,12 @@ as one ANDed address pattern; exact keyset queries scan through nonmatching
 coarse candidates before forming a limited page, preserving continuation-token
 correctness. Blockfrost address-transaction reads apply the same CBOR-backed
 exact check over credential-index candidates and paginate the exact matches.
+Public exact-address UTxO reads carry request cancellation into their
+coordinated transaction and cap both candidate count and decoded CBOR bytes.
+Ascending Blockfrost pages stop after the requested window; totals are emitted
+only when that bounded scan proves exhaustion. Asset-holder reads select only
+UTxOs carrying the requested asset in SQL and hydrate only that asset row before
+the bounded CBOR pass needed to recover complete pointer and Byron addresses.
 
 `/pools/extended` resolves the whole page with two batched queries rather than
 one query per pool: `database.CountPoolBlocksLifetime` returns every active pool's

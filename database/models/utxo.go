@@ -51,6 +51,9 @@ var (
 	ErrTooManyUtxoResults = errors.New(
 		"utxo query exceeded the requested maxResults bound",
 	)
+	ErrUtxoQueryBudgetExceeded = errors.New(
+		"utxo query exceeded its work budget",
+	)
 )
 
 // UtxoAddressPattern carries explicit address-match intent through the shared
@@ -446,6 +449,9 @@ type UtxoWithOrderingQuery struct {
 	Descending        bool
 	SkipAssets        bool
 	FilterByAsset     bool
+	// OnlyFilteredAsset loads only the asset selected by AssetPolicyID and
+	// AssetName. It requires FilterByAsset and is ignored with SkipAssets.
+	OnlyFilteredAsset bool
 	AssetPolicyID     []byte
 	AssetName         []byte
 }

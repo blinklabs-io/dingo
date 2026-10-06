@@ -563,8 +563,22 @@ func (b *Blockfrost) handleAssetAddresses(
 		)
 		return
 	}
-	holders, total, err := b.node.AssetAddresses(policyID, assetName, params)
+	holders, total, err := b.node.AssetAddresses(
+		r.Context(),
+		policyID,
+		assetName,
+		params,
+	)
 	if err != nil {
+		if isUtxoQueryBudgetError(err) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"The requested UTxO query exceeds the service limit.",
+			)
+			return
+		}
 		if errors.Is(err, ErrAssetNotFound) {
 			writeError(
 				w,
@@ -976,7 +990,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		return
 	}
 	address := r.PathValue("address")
-	utxos, total, err := b.node.AddressUTXOs(address, params)
+	utxos, total, err := b.node.AddressUTXOs(r.Context(), address, params)
 	if err != nil {
 		b.logger.Error(
 			"failed to get address utxos",
@@ -991,7 +1005,9 @@ func (b *Blockfrost) handleAddressUTXOs(
 		return
 	}
 
-	SetPaginationHeaders(w, total, params)
+	if total >= 0 {
+		SetPaginationHeaders(w, total, params)
+	}
 	resp := make([]AddressUTXOResponse, 0, len(utxos))
 	for _, utxo := range utxos {
 		resp = append(resp, AddressUTXOResponse{
@@ -2020,6 +2036,15 @@ func writeNodeQueryError(
 	err error,
 	message string,
 ) {
+	if isUtxoQueryBudgetError(err) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"The requested UTxO query exceeds the service limit.",
+		)
+		return
+	}
 	if errors.Is(err, ErrInvalidAddress) {
 		writeError(
 			w,
@@ -2035,6 +2060,11 @@ func writeNodeQueryError(
 		"Internal Server Error",
 		message,
 	)
+}
+
+func isUtxoQueryBudgetError(err error) bool {
+	return errors.Is(err, models.ErrTooManyUtxoResults) ||
+		errors.Is(err, models.ErrUtxoQueryBudgetExceeded)
 }
 
 func convertAddressAmounts(

@@ -12802,6 +12802,38 @@ func (ls *LedgerState) UtxosByAddressAtSlot(
 	return ls.db.UtxosByAddressAtSlot(addr, slot, nil)
 }
 
+// UtxosByAddressAtSlotBounded returns historical UTxOs under a request-aware
+// transaction and rejects coarse result sets above maxResults. Complete
+// address identity is absent from metadata for pointer and Byron addresses,
+// so exact matching still requires bounded output-CBOR decoding.
+func (ls *LedgerState) UtxosByAddressAtSlotBounded(
+	ctx context.Context,
+	addr lcommon.Address,
+	slot uint64,
+	maxResults int,
+	maxCborBytes int,
+) ([]models.Utxo, error) {
+	txn := database.NewTxnContext(ctx, ls.db, false)
+	defer txn.Release()
+	utxos, err := ls.db.UtxosByAddressAsOf(
+		[]lcommon.Address{addr},
+		slot,
+		maxResults,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	cborBytes := 0
+	for i := range utxos {
+		cborBytes += len(utxos[i].Cbor)
+		if cborBytes > maxCborBytes {
+			return nil, models.ErrUtxoQueryBudgetExceeded
+		}
+	}
+	return utxos, nil
+}
+
 // UtxoByRefIncludingSpent returns a UTxO by reference, including
 // spent outputs. This is needed for APIs that must resolve consumed
 // inputs to display source address and amount.

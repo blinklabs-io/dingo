@@ -1125,6 +1125,7 @@ func (a *NodeAdapter) populateAssetOnchainMetadata(
 
 // AssetAddresses returns paginated addresses currently holding the given asset.
 func (a *NodeAdapter) AssetAddresses(
+	ctx context.Context,
 	policyID string,
 	assetName []byte,
 	params PaginationParams,
@@ -1137,8 +1138,20 @@ func (a *NodeAdapter) AssetAddresses(
 			err,
 		)
 	}
-	utxos, err := a.ledgerState.Database().
-		UtxosByAssets(policyIDBytes, assetName, nil)
+	db := a.ledgerState.Database()
+	txn := database.NewTxnContext(ctx, db, false)
+	defer txn.Release()
+	ordered, err := db.UtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{
+			MatchAllAddresses: true,
+			Limit:             database.DefaultPublicUtxoResultLimit + 1,
+			FilterByAsset:     true,
+			OnlyFilteredAsset: true,
+			AssetPolicyID:     policyIDBytes,
+			AssetName:         assetName,
+		},
+		txn,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"get asset UTxOs for %s%x: %w",
@@ -1146,6 +1159,18 @@ func (a *NodeAdapter) AssetAddresses(
 			assetName,
 			err,
 		)
+	}
+	if len(ordered) > database.DefaultPublicUtxoResultLimit {
+		return nil, 0, models.ErrTooManyUtxoResults
+	}
+	utxos := make([]models.Utxo, len(ordered))
+	cborBytes := 0
+	for i := range ordered {
+		utxos[i] = ordered[i].Utxo
+		cborBytes += len(utxos[i].Cbor)
+		if cborBytes > database.DefaultPublicUtxoCborBudget {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
 	}
 	holders, err := assetHoldersFromUtxos(
 		policyIDBytes,
@@ -3437,6 +3462,7 @@ func (a *NodeAdapter) Address(
 }
 
 func (a *NodeAdapter) AddressUTXOs(
+	ctx context.Context,
 	address string,
 	params PaginationParams,
 ) ([]AddressUTXOInfo, int, error) {
@@ -3454,24 +3480,28 @@ func (a *NodeAdapter) AddressUTXOs(
 	if err != nil {
 		return nil, 0, err
 	}
-	// Shared between the reference scan and the page fetch below so the
-	// total and the returned page describe the same snapshot: two
-	// separate (nil-txn) calls could otherwise straddle a concurrent
-	// commit and return a page inconsistent with the reported total.
-	txn := a.ledgerState.Database().Transaction(false)
+	db := a.ledgerState.Database()
+	txn := database.NewTxnContext(ctx, db, false)
 	defer txn.Release()
-
-	// Exact-address matching requires decoding output CBOR (see
-	// models.RequiresExactAddressFilter), so getting an accurate total
-	// requires visiting every coarse candidate either way. Fetch only
-	// references (no assets, no full rows) for that pass, and materialize
-	// full UTxO data via UtxosByRefs for just the requested page, instead
-	// of loading the address's entire UTxO history in full.
-	refs, err := a.ledgerState.Database().MatchingUtxoRefsByAddressWithOrdering(
+	offset, ok := paginationOffset(params)
+	if !ok || offset > database.DefaultPublicUtxoResultLimit ||
+		params.Count > database.DefaultPublicUtxoResultLimit-offset {
+		return nil, 0, models.ErrUtxoQueryBudgetExceeded
+	}
+	requestedEnd := offset + params.Count
+	matchLimit := requestedEnd + 1
+	if params.Order == PaginationOrderDesc {
+		matchLimit = database.DefaultPublicUtxoResultLimit + 1
+	}
+	refs, exhausted, err := db.MatchingUtxoRefsByAddressWithOrderingBounded(
+		ctx,
 		&models.UtxoWithOrderingQuery{
 			AddressPatterns: []models.UtxoAddressPattern{pattern},
+			Limit:           matchLimit,
 		},
 		txn,
+		database.ExactAddressCandidateScanLimit,
+		database.DefaultPublicUtxoCborBudget,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
@@ -3480,19 +3510,15 @@ func (a *NodeAdapter) AddressUTXOs(
 			err,
 		)
 	}
-	total := len(refs)
-	start, end := paginationRange(total, params)
-	var pageRefs []models.UtxoId
-	if params.Order == PaginationOrderDesc {
-		// Page N in descending order is ascending index range
-		// [total-end, total-start), reversed.
-		pageRefs = append(
-			[]models.UtxoId(nil),
-			refs[total-end:total-start]...,
-		)
-		slices.Reverse(pageRefs)
-	} else {
-		pageRefs = refs[start:end]
+	pageRefs, total, err := addressUtxoPageRefs(
+		refs,
+		exhausted,
+		params,
+		offset,
+		requestedEnd,
+	)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	paged, err := a.orderedUtxosByRefs(pageRefs, txn)
@@ -3553,6 +3579,39 @@ func (a *NodeAdapter) AddressUTXOs(
 		})
 	}
 	return ret, total, nil
+}
+
+func addressUtxoPageRefs(
+	refs []models.UtxoId,
+	exhausted bool,
+	params PaginationParams,
+	offset int,
+	requestedEnd int,
+) ([]models.UtxoId, int, error) {
+	total := -1
+	if params.Order == PaginationOrderDesc {
+		if !exhausted {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		total = len(refs)
+		start, end := paginationRange(total, params)
+		pageRefs := append(
+			[]models.UtxoId(nil),
+			refs[total-end:total-start]...,
+		)
+		slices.Reverse(pageRefs)
+		return pageRefs, total, nil
+	} else {
+		if !exhausted && len(refs) < requestedEnd {
+			return nil, 0, models.ErrUtxoQueryBudgetExceeded
+		}
+		if exhausted {
+			total = len(refs)
+		}
+		start := min(offset, len(refs))
+		end := min(requestedEnd, len(refs))
+		return refs[start:end], total, nil
+	}
 }
 
 // orderedUtxosByRefs fetches full UTxO rows (including assets) for refs in

@@ -30,6 +30,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/apiconfig"
 	"github.com/blinklabs-io/dingo/internal/apilistener"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
@@ -48,7 +49,7 @@ import (
 // unbounded request arrays.
 const (
 	DefaultMaxBlockRefs    = 100
-	DefaultMaxUtxoKeys     = 1000
+	DefaultMaxUtxoKeys     = database.DefaultPublicUtxoResultLimit
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
 	// DefaultMaxRequestBody bounds each Connect message before it is decoded.

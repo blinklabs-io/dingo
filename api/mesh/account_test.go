@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -232,6 +233,16 @@ func TestAccountBalanceHistoricalByIndex(t *testing.T) {
 	req := balanceRequest(addr)
 	req.BlockIdentifier = byIndex(120)
 	rec := postJSON(t, h, "/account/balance", req)
+	require.Equal(
+		t,
+		database.DefaultPublicUtxoResultLimit,
+		deps.ledger.historicalMaxResults,
+	)
+	require.Equal(
+		t,
+		database.DefaultPublicUtxoCborBudget,
+		deps.ledger.historicalMaxBytes,
+	)
 
 	resp := decodeResponse[AccountBalanceResponse](t, rec)
 	require.Equal(
