@@ -4124,6 +4124,18 @@ Surfaces with no representation for an unknown deposit render it as `0` and are
 unchanged: the Blockfrost account registration-history response and the
 `StakeDelegDeposits` local-state query.
 
+`GetLatestAccountRegistrationAtOrBefore(credentialTag, stakingKey, slot, txn)`
+returns the single newest row of that same union whose `added_slot` is at or
+before `slot`, in the same `added_slot`, `block_index`, `cert_index` order, or
+nil when there is none. It wraps the union in a subquery filtered by
+`added_slot <= ?` with `LIMIT 1`, so the lookup is one round trip however many
+events follow the slot. A `slot` above `math.MaxInt64` is rejected. Like the
+history it reads, it does not consult `account_import_baseline`; the
+`StakeDelegDeposits` local-state query (`ledger.LedgerState.stakeRegistrationAsOf`)
+applies the baseline the way `LedgerView.StakeCredentialDeposit` does, as the
+latest registration when it is at least as new as the newest certificate at
+or before the queried point.
+
 ### `GetAccountSumsByCredential`
 
 Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and
