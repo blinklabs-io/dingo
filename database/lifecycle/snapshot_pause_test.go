@@ -115,6 +115,17 @@ func snapshotAt(
 	)
 }
 
+type barrierWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *barrierWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
 // requireBarrierReleased fails unless a read-write transaction can start,
 // which it cannot while a Snapshot still holds the commit barrier.
 func requireBarrierReleased(t *testing.T, db *database.Database) {
@@ -422,22 +433,27 @@ func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
 	var resumeOnce sync.Once
 	resumeBarrier := func() { resumeOnce.Do(resume) }
 	defer resumeBarrier()
-	barrierAttempted := make(chan struct{})
+	barrierWaiting := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
 		_, snapshotErr := snapshotAt(
 			t.Context(), db, dir,
 			lifecycle.WithMaxCommitPause(time.Minute),
-			lifecycle.WithSnapshotPauseClockForTest(now, func() {
-				close(barrierAttempted)
+			lifecycle.WithSnapshotPauseClockForTest(now, func(
+				ctx context.Context,
+			) context.Context {
+				return &barrierWaitContext{
+					Context: ctx,
+					waiting: barrierWaiting,
+				}
 			}),
 		)
 		result <- snapshotErr
 	}()
 
 	testutil.RequireReceive(
-		t, barrierAttempted, waitTimeout,
-		"snapshot must attempt the held commit barrier",
+		t, barrierWaiting, waitTimeout,
+		"snapshot must wait on the held commit barrier",
 	)
 	advance(barrierWait)
 	resumeBarrier()

@@ -83,7 +83,7 @@ func Snapshot(
 	if _, err := manifestByteLimit(opts); err != nil {
 		return Manifest{}, err
 	}
-	maxPause, pauseNow, beforePauseAcquire, err := commitPauseConfig(opts)
+	maxPause, pauseNow, pauseContext, err := commitPauseConfig(opts)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -209,10 +209,11 @@ func Snapshot(
 	// can block for as long as any currently open write transaction takes
 	// to commit, and this ctx is exactly what a caller cancels to give up
 	// on a Snapshot call that's stuck waiting behind one.
-	if beforePauseAcquire != nil {
-		beforePauseAcquire()
+	pauseCtx := ctx
+	if pauseContext != nil {
+		pauseCtx = pauseContext(ctx)
 	}
-	resume, err := db.PauseCommitsContext(ctx)
+	resume, err := db.PauseCommitsContext(pauseCtx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("pause commits: %w", err)
 	}

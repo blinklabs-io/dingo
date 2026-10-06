@@ -15,6 +15,7 @@
 package lifecycle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -47,7 +48,12 @@ func WithMaxCommitPause(limit time.Duration) ManifestOption {
 
 func commitPauseConfig(
 	opts []ManifestOption,
-) (time.Duration, func() time.Time, func(), error) {
+) (
+	time.Duration,
+	func() time.Time,
+	func(context.Context) context.Context,
+	error,
+) {
 	cfg := manifestConfig{}
 	for _, opt := range opts {
 		if opt != nil {
@@ -60,7 +66,7 @@ func commitPauseConfig(
 	if cfg.pauseNow == nil {
 		cfg.pauseNow = time.Now
 	}
-	return cfg.maxPause, cfg.pauseNow, cfg.beforePauseAcquire, nil
+	return cfg.maxPause, cfg.pauseNow, cfg.pauseContext, nil
 }
 
 // Snapshot outcomes recorded in the commit-pause histogram's result label.

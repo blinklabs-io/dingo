@@ -14,16 +14,19 @@
 
 package lifecycle
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // WithSnapshotPauseClockForTest supplies deterministic pause observation
 // seams to external lifecycle tests without exposing them in production.
 func WithSnapshotPauseClockForTest(
 	now func() time.Time,
-	beforeAcquire func(),
+	pauseContext func(context.Context) context.Context,
 ) ManifestOption {
 	return func(cfg *manifestConfig) {
 		cfg.pauseNow = now
-		cfg.beforePauseAcquire = beforeAcquire
+		cfg.pauseContext = pauseContext
 	}
 }
