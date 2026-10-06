@@ -178,6 +178,19 @@ func TestNewTokenRegistrySyncRejectsInvalidHeaders(t *testing.T) {
 	}
 }
 
+func TestNewTokenRegistrySyncRejectsHeadersOverRemoteHTTP(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewTokenRegistrySync(TokenRegistryConfig{
+		Store:     newFakeTokenRegistryStore(),
+		SourceURL: "http://registry.example/snapshot.tar.gz",
+		Headers:   map[string]string{"Authorization": "Bearer " + redactHeader},
+	})
+
+	require.ErrorContains(t, err, "headers require an HTTPS or loopback")
+	require.NotContains(t, err.Error(), redactHeader)
+}
+
 func TestTokenRegistryRedirectGuardRunsAfterCustomCallback(t *testing.T) {
 	t.Parallel()
 	target, seen := headerRecorderFor(t, "X-API-Key", serveRegistry(t))

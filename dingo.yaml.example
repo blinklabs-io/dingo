@@ -357,7 +357,8 @@
   # userAgent: ""
   # Extra HTTP headers sent with every registry request, for a mirror that
   # needs authentication. The values are credentials: they are redacted from
-  # logged configuration and are not sent to another origin after a redirect.
+  # logged configuration, require HTTPS except on loopback, and are not sent
+  # to another origin after a redirect.
   # There is no CLI flag, since arguments are visible in the process list.
   # Can be overridden with DINGO_TOKEN_REGISTRY_HEADER_SECRETS
   # (comma-separated name:value pairs, split at the first colon)

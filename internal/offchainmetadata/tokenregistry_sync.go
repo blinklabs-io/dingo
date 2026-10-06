@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -262,6 +263,18 @@ func NewTokenRegistrySync(
 		return nil, err
 	}
 	if len(headers) > 0 {
+		parsedSource, parseErr := url.Parse(sourceURL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse token registry source URL: %w", parseErr)
+		}
+		hostIP := net.ParseIP(parsedSource.Hostname())
+		loopback := parsedSource.Hostname() == "localhost" ||
+			(hostIP != nil && hostIP.IsLoopback())
+		if parsedSource.Scheme != "https" && !loopback {
+			return nil, errors.New(
+				"token registry headers require an HTTPS or loopback source URL",
+			)
+		}
 		client.CheckRedirect = dropHeadersOnOriginChange(
 			client.CheckRedirect, headers,
 		)

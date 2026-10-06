@@ -2599,7 +2599,8 @@ otherwise.
 
 `tokenRegistry.headerSecrets` adds request headers (for example
 `Authorization`) for an authenticated mirror. It is YAML and environment only,
-is redacted from `Config.LogValue`, and the sync removes the headers from a
+is redacted from `Config.LogValue`, and requires HTTPS except for a loopback
+source. The sync removes the headers from a
 redirect that changes scheme or host so a redirect cannot forward the
 credential, including after a custom redirect callback. Header names reserved
 for transport or sync bookkeeping (`Host`, `Content-Length`, `User-Agent`,
