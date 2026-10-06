@@ -169,6 +169,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 		}
 		levels := TransactionLevelsForApply(tr.Tx)
 		childCount := uint64(len(levels)) - 1
+		// #nosec G115 -- the transaction index is checked against uint32 above.
 		storageBaseIndex := uint64(tr.Index) + storageIndexOffset
 		storageParentIndex := storageBaseIndex + childCount
 		if storageParentIndex > math.MaxUint32 {
