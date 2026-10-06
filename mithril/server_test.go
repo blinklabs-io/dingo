@@ -341,10 +341,10 @@ func (s *blockingListStore) Subdirs(
 	}
 }
 
-func TestServerSignatureRouteUsesSixteenRequestAdmissionLimit(t *testing.T) {
+func TestServerSignatureRouteUsesPublicRequestAdmissionLimit(t *testing.T) {
 	t.Parallel()
 
-	const requestLimit = 16
+	const requestLimit = publicRequestLimit
 	aggregator := newAggregatorFixture(t, lotteryParams).aggregator
 	store := &blockingListStore{
 		entered:  make(chan struct{}, requestLimit),
@@ -701,4 +701,57 @@ func TestServerSnapshotSyncsEndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), result.LedgerSlot)
+}
+
+// A v2 bootstrap downloads immutableDownloadWorkers archives and the
+// ancillary archive at once; none of those requests may be shed.
+func TestServerAdmitsOneBootstrapAtFullConcurrency(t *testing.T) {
+	t.Parallel()
+
+	const requests = immutableDownloadWorkers + 1
+	store := &blockingListStore{
+		entered:  make(chan struct{}, requests),
+		release:  make(chan struct{}),
+		blockAll: true,
+	}
+	t.Cleanup(func() {
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+	})
+	handler := NewServerHandler(ServerConfig{
+		Store:         store,
+		PublicBaseURL: "http://127.0.0.1",
+	})
+	codes := make(chan int, requests)
+	for range requests {
+		go func() {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(
+				rec,
+				httptest.NewRequest(
+					http.MethodGet, "/artifact/cardano-database", nil,
+				),
+			)
+			codes <- rec.Code
+		}()
+	}
+	for range requests {
+		select {
+		case <-store.entered:
+		case code := <-codes:
+			t.Fatalf("request answered %d while the others were held", code)
+		case <-time.After(testutil.AsyncWait):
+			t.Fatal("timed out waiting for admitted requests")
+		}
+	}
+	close(store.release)
+	for range requests {
+		code := testutil.RequireReceive(
+			t, codes, testutil.AsyncWait, "admitted response",
+		)
+		assert.Equal(t, http.StatusOK, code)
+	}
 }

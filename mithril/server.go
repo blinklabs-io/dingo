@@ -41,9 +41,13 @@ var (
 	)
 )
 
+// publicRequestLimit bounds concurrent public requests. One v2 bootstrap
+// holds immutableDownloadWorkers archive downloads and the ancillary download
+// at once, so the bound admits two of them without shedding a request.
+const publicRequestLimit = 2 * (immutableDownloadWorkers + 1)
+
 const (
 	certificatesPrefix           = "certificates"
-	publicRequestLimit           = 16
 	publicRequestReadTimeout     = 15 * time.Second
 	artifactResponseWriteTimeout = 15 * time.Second
 )

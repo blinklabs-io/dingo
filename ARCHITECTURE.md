@@ -8535,7 +8535,9 @@ mounted, the list omits snapshots that carry no certificate yet, since a
 verifying client bootstraps from the newest listed one.
 
 All public artifact reads, including pending-certificate and stake-distribution
-reads, and public signature submissions share a 16-request admission bound and
+reads, and public signature submissions share an admission bound of
+`2 * (immutableDownloadWorkers + 1)` (34) requests, enough for two v2
+bootstraps each running its 16 immutable downloads beside the ancillary one, and
 return `503 Service Unavailable` with `Retry-After: 1` when it is full. A
 15-second request-body read deadline is armed before decoding a signature
 submission. Each response write refreshes a separate 15-second progress
