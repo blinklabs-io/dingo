@@ -379,6 +379,28 @@ jobs:
   # A release draft is created only once the supported platforms are green,
   # so a tag
   # cannot reach a half-published state the way v0.70.3 did.
+  validate-release-tag:
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    outputs:
+      release_tag: ${{ steps.validate.outputs.release_tag }}
+      package_version: ${{ steps.validate.outputs.package_version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        id: validate
+        env:
+          CANDIDATE_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          package_version="$(.github/scripts/validate-release-tag.sh "$CANDIDATE_RELEASE_TAG")"
+          {
+            echo "release_tag=$CANDIDATE_RELEASE_TAG"
+            echo "package_version=$package_version"
+          } >> "$GITHUB_OUTPUT"
+
   create-draft-release:
     name: create-draft-release
     runs-on: ubuntu-latest
@@ -388,11 +410,16 @@ jobs:
       - go-test-linux
       - go-test-linux-race
       - go-test-macos
-    if: github.ref_type == 'tag'
+      - validate-release-tag
+    if: >-
+      github.ref_type == 'tag'
+      && needs.validate-release-tag.result == 'success'
     permissions:
       contents: write
     outputs:
       RELEASE_ID: ${{ steps.create-release.outputs.result }}
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
     steps:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0 https://github.com/actions/github-script/releases/tag/v9.0.0
         id: create-release
@@ -801,15 +828,19 @@ jobs:
 
   npm-release:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
+    needs: [finalize-release, validate-release-tag]
     if: >-
       github.ref_type == 'tag'
       && !contains(github.ref_name, '-')
       && !contains(github.ref_name, '+')
       && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     permissions:
       contents: read
       id-token: write
+    env:
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
         with:
@@ -819,10 +850,8 @@ jobs:
           node-version: '22.x'
           registry-url: https://registry.npmjs.org
       - name: Stamp package version
-        env:
-          PACKAGE_RELEASE_TAG: ${{ github.ref_name }}
         run: >-
-          npm version "${PACKAGE_RELEASE_TAG#v}" --no-git-tag-version
+          npm version "${PACKAGE_VERSION}" --no-git-tag-version
           --ignore-scripts --allow-same-version
       - name: Embed finalized release checksums
         env:
@@ -863,14 +892,19 @@ jobs:
   # is absent (e.g. forks), the job no-ops instead of failing.
   update-homebrew:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
     env:
       TAP_REPO: blinklabs-io/homebrew-cardano
       HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
     steps:
       - name: Check tap token
         id: gate
@@ -978,14 +1012,20 @@ jobs:
   # contents: write and pull-requests: write on the consumer repository.
   update-ansible:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
     env:
       CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
       CONSUMER_REPOSITORY: blinklabs-io/ansible-cardano
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
     steps:
       - name: Check Ansible repository token
         id: gate
@@ -1005,11 +1045,9 @@ jobs:
           path: consumer
       - name: Update Ansible role version
         if: steps.gate.outputs.enabled == 'true'
-        env:
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="${PACKAGE_VERSION#v}"
+          version="$PACKAGE_VERSION"
           file="consumer/roles/dingo/defaults/main.yml"
           sed -i -E "s/^dingo_version: '[^']*'/dingo_version: '${version}'/" "$file"
           grep -qF "dingo_version: '${version}'" "$file"
@@ -1017,28 +1055,27 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cd consumer
           git add roles/dingo/defaults/main.yml
           if git diff --cached --quiet; then
-            echo "Ansible role already includes ${PACKAGE_VERSION}; nothing to do."
+            echo "Ansible role already includes ${RELEASE_TAG}; nothing to do."
             exit 0
           fi
-          branch="dingo-${PACKAGE_VERSION}"
+          branch="dingo-${RELEASE_TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
-          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          git commit -m "chore(dingo): release ${RELEASE_TAG}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
           fi
           git push --force-with-lease origin "$branch"
           if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
-              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
-              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${branch}; pushed the updated role to it."
           fi
@@ -1048,14 +1085,20 @@ jobs:
   # contents: write and pull-requests: write on the consumer repository.
   update-cardano-up-package:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
     env:
       CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
       CONSUMER_REPOSITORY: blinklabs-io/cardano-up-packages
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
     steps:
       - name: Check cardano-up repository token
         id: gate
@@ -1075,11 +1118,9 @@ jobs:
           path: consumer
       - name: Add cardano-up package version
         if: steps.gate.outputs.enabled == 'true'
-        env:
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="${PACKAGE_VERSION#v}"
+          version="$PACKAGE_VERSION"
           package_dir="consumer/packages/dingo"
           latest="$(find "$package_dir" -maxdepth 1 -type f -name 'dingo-*.yaml' | sort -V | tail -n 1)"
           if [ -z "$latest" ] || [ ! -f "$latest" ]; then
@@ -1097,28 +1138,27 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cd consumer
           git add "packages/dingo/dingo-${PACKAGE_VERSION#v}.yaml"
           if git diff --cached --quiet; then
-            echo "cardano-up package already includes ${PACKAGE_VERSION}; nothing to do."
+            echo "cardano-up package already includes ${RELEASE_TAG}; nothing to do."
             exit 0
           fi
-          branch="dingo-${PACKAGE_VERSION}"
+          branch="dingo-${RELEASE_TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
-          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          git commit -m "chore(dingo): release ${RELEASE_TAG}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
           fi
           git push --force-with-lease origin "$branch"
           if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
-              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
-              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${branch}; pushed the new package manifest to it."
           fi
@@ -1128,14 +1168,20 @@ jobs:
   # contents: write and pull-requests: write on the consumer repository.
   update-helm-chart:
     runs-on: ubuntu-latest
-    needs: [finalize-release]
-    if: always() && github.ref_type == 'tag' && needs.finalize-release.result == 'success'
+    needs: [finalize-release, validate-release-tag]
+    if: >-
+      always()
+      && github.ref_type == 'tag'
+      && needs.finalize-release.result == 'success'
+      && needs.validate-release-tag.result == 'success'
     continue-on-error: true
     permissions:
       contents: read
     env:
       CONSUMER_GITHUB_TOKEN: ${{ secrets.ORG_PROJECT_PAT }}
       CONSUMER_REPOSITORY: blinklabs-io/helm-charts
+      RELEASE_TAG: ${{ needs.validate-release-tag.outputs.release_tag }}
+      PACKAGE_VERSION: ${{ needs.validate-release-tag.outputs.package_version }}
     steps:
       - name: Check Helm repository token
         id: gate
@@ -1155,11 +1201,9 @@ jobs:
           path: consumer
       - name: Update Helm chart version
         if: steps.gate.outputs.enabled == 'true'
-        env:
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version="${PACKAGE_VERSION#v}"
+          version="$PACKAGE_VERSION"
           chart="consumer/charts/dingo/Chart.yaml"
           values="consumer/charts/dingo/values.yaml"
           if ! grep -qF "appVersion: \"${version}\"" "$chart" || \
@@ -1190,28 +1234,27 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           GH_TOKEN: ${{ env.CONSUMER_GITHUB_TOKEN }}
-          PACKAGE_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           cd consumer
           git add charts/dingo/Chart.yaml charts/dingo/values.yaml
           if git diff --cached --quiet; then
-            echo "Helm chart already includes ${PACKAGE_VERSION}; nothing to do."
+            echo "Helm chart already includes ${RELEASE_TAG}; nothing to do."
             exit 0
           fi
-          branch="dingo-${PACKAGE_VERSION}"
+          branch="dingo-${RELEASE_TAG}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
-          git commit -m "chore(dingo): release ${PACKAGE_VERSION}"
+          git commit -m "chore(dingo): release ${RELEASE_TAG}"
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
           fi
           git push --force-with-lease origin "$branch"
           if [ -z "$(gh pr list --repo "$CONSUMER_REPOSITORY" --head "$branch" --state open --json number --jq '.[].number')" ]; then
             gh pr create --repo "$CONSUMER_REPOSITORY" --base main --head "$branch" \
-              --title "chore(dingo): update to ${PACKAGE_VERSION}" \
-              --body "Automated Dingo consumer update for [${PACKAGE_VERSION}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PACKAGE_VERSION})."
+              --title "chore(dingo): update to ${RELEASE_TAG}" \
+              --body "Automated Dingo consumer update for [${RELEASE_TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG})."
           else
             echo "Open PR already exists for ${branch}; pushed the updated chart to it."
           fi
