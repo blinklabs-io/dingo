@@ -66,7 +66,7 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturedVectors: %v", err)
 	}
-	const expectedScenarioCount = 5
+	const expectedScenarioCount = 7
 	if len(vectors) != expectedScenarioCount {
 		t.Fatalf(
 			"consensus profile has %d scenarios, want %d; update the profile summary and tests with the shared corpus",
@@ -80,6 +80,8 @@ func TestConsensusConformanceVectors(t *testing.T) {
 		"fork_and_select_v1":               true,
 		"slot_battle_v1":                   true,
 		"exceeds_k_no_switch_v1":           true,
+		"intersect_non_origin_v1":          true,
+		"within_k_fork_winner_first_v1":    true,
 	}
 	profileCounts := map[string]int{
 		"single-peer": 0,
@@ -263,17 +265,10 @@ type replayAdapter struct {
 	tipCh      <-chan event.Event
 	switchCh   <-chan event.Event
 	switches   []format.SwitchEvent
-	headers    map[string]replayHeader
 	downstream []format.ServedMessage
 
 	headersFed    int
 	tipEventsSeen int
-}
-
-type replayHeader struct {
-	hash     []byte
-	prevHash []byte
-	slot     uint64
 }
 
 func newReplayAdapter(
@@ -328,7 +323,6 @@ func newReplayAdapter(
 		capture:  capture,
 		tipCh:    tipCh,
 		switchCh: switchCh,
-		headers:  make(map[string]replayHeader),
 	}
 }
 
@@ -345,13 +339,6 @@ func (a *replayAdapter) RollForward(
 	); err != nil {
 		return err
 	}
-	hash := hdr.Hash()
-	prevHash := hdr.PrevHash()
-	a.headers[string(hash[:])] = replayHeader{
-		hash:     append([]byte(nil), hash[:]...),
-		prevHash: append([]byte(nil), prevHash[:]...),
-		slot:     hdr.SlotNumber(),
-	}
 	a.headersFed++
 	return nil
 }
@@ -360,10 +347,7 @@ func (a *replayAdapter) RollBackward(
 	peerID uint64, point format.Point, tip format.Tip,
 ) error {
 	connId := a.connFor(peerID)
-	rollbackPoint := ocommon.Point{
-		Slot: point.Slot,
-		Hash: append([]byte(nil), point.Hash...),
-	}
+	rollbackPoint := toGouroborosPoint(point)
 	rollbackTip := toGouroborosTip(tip)
 	if err := a.o.chainsyncClientRollBackward(
 		ochainsync.CallbackContext{ConnectionId: connId},
@@ -400,7 +384,110 @@ func (a *replayAdapter) Stabilize() {
 	})
 	a.cs.EvaluateAndSwitch()
 	a.collectSwitchesThroughBarrier()
-	a.downstream = a.selectedPeerTrace()
+	a.downstream = a.observeDownstream(a.selectedPeerTrace())
+}
+
+// observeDownstream serves the selected peer's chain from Dingo's ChainSync
+// server to a node-to-node client that intersects where the selected peer's
+// trace starts, and returns what the server sent before its first AwaitReply.
+// A trace that opens with a RollBackward to a block intersected above origin;
+// the server cannot find that point without a block there, so a stand-in
+// block with the point's slot and hash anchors the chain one block below the
+// first header served. The stand-in is never served: the client intersects at
+// it, and the first header must extend it.
+//
+// The replay has headers and no ledger, so the harness stands in for block
+// fetch: each header the selected peer rolled forward is added to the server's
+// chain as a block whose CBOR is a one-element array holding that header. A
+// node-to-node RollForward carries only a block's first element, so this is
+// everything a downstream peer could observe. The ledger tip is set to the
+// tip the selector adopted, which is the tip the harness's final_tip assertion
+// reads: a peer can advertise a tip beyond the last header it served.
+func (a *replayAdapter) observeDownstream(
+	selected []format.ServedMessage,
+) []format.ServedMessage {
+	a.t.Helper()
+	if len(selected) == 0 {
+		return nil
+	}
+	f := newChainsyncServerFixture(a.t, csmock.ModeNtN)
+	ls := f.o.ledgerState
+	intersect := ocommon.NewPointOrigin()
+	if m := selected[0]; m.MsgType == format.ChainSyncMsgRollBackward &&
+		len(m.Point.Hash) > 0 {
+		intersect = toGouroborosPoint(*m.Point)
+	}
+	anchored := len(intersect.Hash) == 0
+	for _, m := range selected {
+		switch m.MsgType {
+		case format.ChainSyncMsgRollForward:
+			hdr, err := gledger.NewBlockHeaderFromCbor(*m.Era, m.HeaderCbor)
+			require.NoError(a.t, err)
+			if !anchored {
+				require.Positive(a.t, hdr.BlockNumber(),
+					"header extending a non-origin intersect has block number 0")
+				require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+					BlockHeader: &testBlockHeader{
+						hash:        gledger.NewBlake2b256(intersect.Hash),
+						slotNumber:  intersect.Slot,
+						blockNumber: hdr.BlockNumber() - 1,
+					},
+					blockType: int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+					cbor:      []byte{0x80},
+				}, nil))
+				anchored = true
+			}
+			blockCbor, err := cbor.Encode([]cbor.RawMessage{
+				cbor.RawMessage(m.HeaderCbor),
+			})
+			require.NoError(a.t, err)
+			require.NoError(a.t, ls.Chain().AddBlock(&testBlock{
+				BlockHeader: hdr,
+				blockType:   int(gledger.BlockHeaderToBlockTypeMap[*m.Era]),
+				cbor:        blockCbor,
+			}, nil))
+		case format.ChainSyncMsgRollBackward:
+			if !anchored {
+				continue
+			}
+			require.NoError(a.t, ls.Chain().Rollback(toGouroborosPoint(*m.Point)))
+		}
+	}
+	bestTip, ok := a.BestTip()
+	require.True(a.t, ok, "selector has no best tip")
+	ls.SetTipForTesting(toGouroborosTip(bestTip))
+
+	require.NoError(a.t, f.h.FindIntersect([]ocommon.Point{intersect}))
+	require.True(a.t, f.observe(a.t).IsIntersectFound(), "expected IntersectFound")
+	var served []format.ServedMessage
+	for {
+		require.NoError(a.t, f.h.RequestNext())
+		msg := f.observe(a.t)
+		if msg.IsAwaitReply() {
+			return served
+		}
+		tip, ok := msg.Tip()
+		require.True(a.t, ok, "server message %d carries no tip", msg.Type())
+		formatTip := fromGouroborosTip(tip)
+		out := format.ServedMessage{
+			Protocol: format.ProtocolChainSync,
+			Tip:      &formatTip,
+		}
+		if header, _, ok := msg.RollForwardNtN(); ok {
+			era := header.Era
+			out.MsgType = format.ChainSyncMsgRollForward
+			out.Era = &era
+			out.HeaderCbor = header.HeaderCbor()
+		} else {
+			point, ok := msg.Point()
+			require.True(a.t, msg.IsRollBackward() && ok,
+				"unexpected server message type %d", msg.Type())
+			formatPoint := fromGouroborosPoint(point)
+			out.MsgType = format.ChainSyncMsgRollBackward
+			out.Point = &formatPoint
+		}
+		served = append(served, out)
+	}
 }
 
 // collectSwitchesThroughBarrier records every chain switch the selector has
@@ -425,11 +512,15 @@ func (a *replayAdapter) collectSwitchesThroughBarrier() {
 		case switchBarrier:
 			return
 		case chainselection.ChainSwitchEvent:
-			a.switches = append(a.switches, format.SwitchEvent{
-				PreviousTip:   fromGouroborosTip(e.PreviousTip),
-				NewTip:        fromGouroborosTip(e.NewTip),
-				RollbackPoint: a.rollbackPoint(e),
-			})
+			sw := format.SwitchEvent{
+				PreviousTip: fromGouroborosTip(e.PreviousTip),
+				NewTip:      fromGouroborosTip(e.NewTip),
+			}
+			if e.RollbackPoint != nil {
+				point := fromGouroborosPoint(*e.RollbackPoint)
+				sw.RollbackPoint = &point
+			}
+			a.switches = append(a.switches, sw)
 		default:
 			// Only the selector and the barrier above publish on this
 			// lane, so anything else is a bug in one of them. Skipping it
@@ -477,53 +568,6 @@ func (a *replayAdapter) selectedPeerTrace() []format.ServedMessage {
 	return nil
 }
 
-func (a *replayAdapter) rollbackPoint(e chainselection.ChainSwitchEvent) *format.Point {
-	previous := e.PreviousObservedTip
-	if len(previous.Point.Hash) == 0 && previous.Point.Slot == 0 {
-		previous = e.PreviousTip
-	}
-	newTip := e.NewObservedTip
-	if !e.NewObservedTipSet {
-		newTip = e.NewTip
-	}
-
-	newAncestors := a.ancestors(newTip)
-	for current := previous; ; {
-		key := string(current.Point.Hash)
-		if header, ok := newAncestors[key]; ok {
-			return &format.Point{
-				Slot: header.slot,
-				Hash: append(format.HexBytes(nil), header.hash...),
-			}
-		}
-		header, ok := a.headers[key]
-		if !ok || isZeroHash(header.prevHash) {
-			break
-		}
-		current.Point.Hash = append([]byte(nil), header.prevHash...)
-		current.Point.Slot = 0
-	}
-	return &format.Point{}
-}
-
-func (a *replayAdapter) ancestors(tip ochainsync.Tip) map[string]replayHeader {
-	ancestors := make(map[string]replayHeader)
-	current := tip.Point.Hash
-	for len(current) != 0 && !isZeroHash(current) {
-		header, ok := a.headers[string(current)]
-		if !ok {
-			break
-		}
-		ancestors[string(current)] = header
-		current = header.prevHash
-	}
-	return ancestors
-}
-
-func isZeroHash(hash []byte) bool {
-	return len(hash) == 0 || bytes.Equal(hash, make([]byte, len(hash)))
-}
-
 func cloneServedMessages(messages []format.ServedMessage) []format.ServedMessage {
 	cloned := make([]format.ServedMessage, len(messages))
 	for i, message := range messages {
@@ -566,22 +610,24 @@ func drainEvents(ch <-chan event.Event, f func(event.Event)) {
 	}
 }
 
+func toGouroborosPoint(p format.Point) ocommon.Point {
+	return ocommon.Point{Slot: p.Slot, Hash: append([]byte(nil), p.Hash...)}
+}
+
+func fromGouroborosPoint(p ocommon.Point) format.Point {
+	return format.Point{Slot: p.Slot, Hash: append(format.HexBytes(nil), p.Hash...)}
+}
+
 func toGouroborosTip(t format.Tip) ochainsync.Tip {
 	return ochainsync.Tip{
-		Point: ocommon.Point{
-			Slot: t.Slot,
-			Hash: append([]byte(nil), t.Hash...),
-		},
+		Point:       toGouroborosPoint(format.Point{Slot: t.Slot, Hash: t.Hash}),
 		BlockNumber: t.BlockNumber,
 	}
 }
 
 func fromGouroborosTip(t ochainsync.Tip) format.Tip {
-	return format.Tip{
-		Slot:        t.Point.Slot,
-		Hash:        append(format.HexBytes(nil), t.Point.Hash...),
-		BlockNumber: t.BlockNumber,
-	}
+	p := fromGouroborosPoint(t.Point)
+	return format.Tip{Slot: p.Slot, Hash: p.Hash, BlockNumber: t.BlockNumber}
 }
 
 // testDijkstraAnnouncementHeaderRawFor builds a ranking-block header

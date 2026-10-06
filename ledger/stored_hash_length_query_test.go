@@ -132,7 +132,7 @@ func TestAllDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 			},
 		}
 	})
-	delegators, err := ls.allDRepDelegators()
+	delegators, err := ls.allDRepDelegators(nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -151,7 +151,7 @@ func TestDRepDelegatorsRejectsMalformedStoredCredential(t *testing.T) {
 	})
 	delegators, err := ls.drepDelegators(&models.Drep{
 		Credential: bytes.Repeat([]byte{0x74}, lcommon.Blake2b224Size),
-	})
+	}, nil)
 	require.ErrorContains(t, err, "drep delegator")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
 	require.Nil(t, delegators)
@@ -178,6 +178,7 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			Tag:   0,
 			Bytes: lcommon.NewBlake2b224(cred),
 		}},
+		nil,
 	)
 	require.ErrorContains(t, err, "delegation pool id")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
@@ -203,6 +204,7 @@ func TestGovernanceProposalStateRejectsMalformedStoredSPOVoter(t *testing.T) {
 			GovActionCbor: []byte{0x80},
 		},
 		lcommon.GovActionId{},
+		nil,
 	)
 	require.ErrorContains(t, err, "governance vote")
 	require.ErrorContains(t, err, "invalid blake2b-224 hash")
