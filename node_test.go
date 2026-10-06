@@ -1706,12 +1706,17 @@ type apiLifecycleProbe struct {
 	starts   atomic.Int32
 	stops    atomic.Int32
 	startErr error
+	// onStart, when set, runs in place of returning startErr.
+	onStart func() error
 }
 
 func (p *apiLifecycleProbe) instance() plugin.Instance {
 	return plugin.Lifecycle{
 		StartFunc: func(context.Context) error {
 			p.starts.Add(1)
+			if p.onStart != nil {
+				return p.onStart()
+			}
 			return p.startErr
 		},
 		StopFunc: func(context.Context) error {
