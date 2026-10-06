@@ -482,6 +482,21 @@ LIMIT 1`)
 	)
 }
 
+func (s *Store) refreshRewardLiveStakePlannerStats(
+	ctx context.Context,
+	db queryer,
+) error {
+	if s.dialect.Name() != "sqlite" {
+		return nil
+	}
+	// Historical replay grows this table after the bulk-load ANALYZE. Refresh
+	// its estimates before the finalizer joins certificates to transactions.
+	if _, err := db.ExecContext(ctx, `ANALYZE "transaction"`); err != nil {
+		return fmt.Errorf("analyze transaction before reward live stake rebuild: %w", err)
+	}
+	return nil
+}
+
 // rewardLiveStakeRebuildBatch is how many stake keys one pass of the rebuild
 // ranks, materializes and upserts. A single pass over every key has to hold
 // the whole result set in Go before it can write (see
@@ -752,6 +767,11 @@ func (s *Store) rebuildRewardLiveStake(
 		txn,
 		func(db queryer, ctx context.Context) error {
 			rebuildStart := time.Now()
+			if fromRunningTotals {
+				if err := s.refreshRewardLiveStakePlannerStats(ctx, db); err != nil {
+					return err
+				}
+			}
 			if !fromRunningTotals {
 				if _, err := db.ExecContext(
 					ctx,
@@ -877,6 +897,9 @@ func (s *Store) rebuildRewardLiveStakeInBatches(
 		if err := s.verifyRewardLiveStakeRunningTotals(ctx, db); err != nil {
 			return err
 		}
+		if err := s.refreshRewardLiveStakePlannerStats(ctx, db); err != nil {
+			return err
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -910,6 +933,12 @@ func (s *Store) rebuildRewardLiveStakeInBatches(
 		}
 		var rows int
 		err = runWriteTxn(func(db queryer, ctx context.Context) error {
+			// A pooled connection may still cache statistics from before replay.
+			if s.dialect.Name() == "sqlite" {
+				if _, err := db.ExecContext(ctx, "ANALYZE sqlite_schema"); err != nil {
+					return fmt.Errorf("reload reward live stake planner stats: %w", err)
+				}
+			}
 			upserter := s.newRewardLiveStakeUpserter(db)
 			defer upserter.Close()
 			var err error
