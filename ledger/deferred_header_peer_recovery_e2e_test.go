@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	dingoouroboros "github.com/blinklabs-io/dingo/ouroboros"
@@ -137,6 +138,8 @@ func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndFollowsHonestChain(
 		badConn := newPeerConnection(t, remote)
 		require.True(t, connManager.AddConnection(badConn, false, remote))
 		bad := badConn.Id()
+		_, badDone := connManager.GetConnectionWithDone(bad)
+		require.NotNil(t, badDone)
 
 		require.True(
 			t,
@@ -145,13 +148,13 @@ func TestDeferredHeaderFailureDeniesOnlySupplyingPeerAndFollowsHonestChain(
 		)
 
 		assert.Equal(t, fixture.RewindPoint(), fixture.PrimaryTip())
-		require.Eventually(
+		testutil.RequireReceive(
 			t,
-			func() bool { return connManager.GetConnectionById(bad) == nil },
-			2*time.Second,
-			20*time.Millisecond,
-			"the supplying connection %s must be closed", remote,
+			badDone,
+			5*time.Second,
+			"the supplying connection must be closed",
 		)
+		assert.Nil(t, connManager.GetConnectionById(bad))
 		require.True(
 			t,
 			peerGov.IsDenied(remote),

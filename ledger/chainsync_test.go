@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
@@ -18289,6 +18290,73 @@ func TestDeferredHeaderLegacyMarkerRestoresWithoutSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, required)
 	assert.Equal(t, ouroboros.ConnectionId{}, source)
+}
+
+// A persisted key with a malformed value cannot silently restore without its
+// peer attribution. Startup must stop so the source cannot evade the cooldown
+// through damaged marker state.
+func TestDeferredHeaderMalformedMarkerFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		"true@",
+		"true@not-an-address",
+		"truejunk",
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			tb := createTestBlock(t, [32]byte{52}, 0, tamperNone)
+			ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+			point := ocommon.NewPoint(
+				tb.block.SlotNumber(),
+				tb.block.Hash().Bytes(),
+			)
+			require.NoError(t, db.SetSyncState(
+				deferredHeaderValidationSyncStateKey(point),
+				value,
+				nil,
+			))
+
+			err := ls.repopulateDeferredHeaderValidation()
+			require.ErrorContains(t, err, "decode deferred-header marker")
+			assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
+		})
+	}
+}
+
+func TestDeferredHeaderMarkerReadFailureFailsStartup(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("deferred marker read failed")
+	point := ocommon.Point{Slot: 1_171, Hash: []byte{0x14}}
+	key := deferredHeaderValidationSyncStateKey(point)
+	db, err := dbtest.NewDatabaseWithMetadataWrapper(
+		t,
+		dbtest.Options{},
+		func(store metadata.MetadataStore) metadata.MetadataStore {
+			return syncStateReadFailingMetadataStore{
+				MetadataStore: store,
+				key:           key,
+				err:           readErr,
+			}
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.SetSyncState(
+		key,
+		deferredHeaderValidationSyncStateValue,
+		nil,
+	))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.repopulateDeferredHeaderValidation()
+	require.ErrorIs(t, err, readErr)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.deferredHeaderSource(point))
 }
 
 // An attributed marker with no in-memory entry, as on an apply retry after the
