@@ -421,6 +421,11 @@ var importBoundaryRules = []importBoundaryRule{
 			"ledger/dijkstra_child_production_test.go": {
 				"mempool",
 			},
+			// Requires the same minimum-fee decision from mempool admission
+			// as from block validation and replay.
+			"ledger/fee_deposit_production_test.go": {
+				"mempool",
+			},
 		},
 	},
 	{
