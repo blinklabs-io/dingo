@@ -574,7 +574,7 @@ func (o *Ouroboros) drainLeiosPersist() {
 }
 
 // StopLeiosPersistWriter stops the background persistence and GC workers,
-// sharing one bounded wait across both. It logs if a worker does not stop in
+// giving each its own bounded wait. It logs if a worker does not stop in
 // time; callers that must confirm the drain should use Close. Safe when
 // neither worker started and idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {

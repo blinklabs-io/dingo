@@ -1640,8 +1640,9 @@ Phase 1: Stop accepting new work
   context-owned by `n.cancel()`; the latter must finish before the
   chain selector is stopped, since it reads the selector's state),
   block forger, leader election, Leios pipeline and vote managers,
-  Ouroboros Leios persistence and optional retention GC, snapshot manager,
-  database lifecycle manager
+  snapshot manager, database lifecycle manager, then a full Ouroboros
+  close (Leios persistence writer and retention GC, EventBus
+  subscriptions, Prometheus collectors, validation cancel)
   (`shutdownPhase1ComponentStops`, `node_shutdown.go`),
   Midnight indexer (unsubscribes from BlockEventType),
   chain selector, peer governor, UTxO RPC,
@@ -1669,8 +1670,9 @@ the set `quiesceForLiveLifecycleOp` stops before live restore/truncate closes
 storage, and ends with a full Ouroboros close. The close drains the Leios
 persistence writer and retention worker, detaches EventBus subscriptions and
 Prometheus collectors, and cancels validation work before storage closes.
-Each wait is routed through `stopWithDeadline` with whatever remains of the one shutdown deadline,
-not a fresh timeout per component, so a goroutine that never observes
+Each wait is routed through `stopWithDeadline` with whatever remains of the
+one shutdown deadline, not a fresh timeout per component, so a goroutine that
+never observes
 `n.cancel()` cannot hold `Node.Stop` past the configured shutdown timeout with
 no observable error. The two workers touch node components only
 under `liveLifecycleMu`, which shutdown already holds, so bounding their wait
