@@ -1282,6 +1282,8 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 		ChainsyncBlockTimeout:          n.config.chainsyncStallTimeout,
 		EnableLeios:                    enableLeiosNetworking,
 		LeiosPersistenceRetentionSlots: n.config.leiosPersistenceRetentionSlots,
+		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
+		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
 		// extension ahead of the IOG Leios prototype. The prototype relays do
 		// not run a protocol-20 responder and reset the connection if we
@@ -2496,6 +2498,9 @@ func (n *Node) chainsyncConfig() chainsync.Config {
 		}
 		active, _ := n.chainSelector.GenesisSelectionState()
 		return active
+	}
+	chainsyncCfg.IsRoot = func(connId ouroboros.ConnectionId) bool {
+		return n.peerGov != nil && n.peerGov.IsConfiguredRootConnection(connId)
 	}
 	chainsyncCfg.ObservedHeaderLimitFunc = func() int {
 		if n.chainSelector == nil {

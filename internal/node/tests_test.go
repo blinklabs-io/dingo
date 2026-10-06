@@ -481,6 +481,34 @@ func TestBuildDingoConfigWiresLeiosPersistenceRetention(t *testing.T) {
 	require.Equal(t, uint64(12345), built.LeiosPersistenceRetentionSlots())
 }
 
+// TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime follows the
+// composition path for the LocalStateQuery snapshot lifetime: a missing
+// With... call would drop the operator's value and leave the default.
+func TestBuildDingoConfigWiresLocalStateQueryViewMaxLifetime(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{LocalStateQueryViewMaxLifetime: "7m"}
+	logger := slog.New(slog.NewTextHandler(new(bytes.Buffer), nil))
+
+	built := buildDingoConfig(
+		cfg,
+		logger,
+		nil,
+		nil,
+		false,
+		dingo.StorageModeCore,
+		30*time.Second,
+		chainsync.DefaultStallTimeout,
+		chainsync.HeaderSyncStrategyPrimary,
+	)
+
+	require.Equal(
+		t,
+		7*time.Minute,
+		built.LocalStateQueryViewMaxLifetimeDuration(),
+	)
+}
+
 // TestBuildDingoConfigPreservesExplicitZeroForgeEBCaps carries the
 // zero-means-disabled contract through the composition path: an operator
 // who wrote 0 must not have it replaced by the default on the way to the

@@ -429,6 +429,23 @@ func (n *Node) shutdown() error {
 		"elapsed", time.Since(phase2Start).Round(time.Millisecond),
 	)
 
+	// Acquired LocalStateQuery snapshots are read transactions on the
+	// database phase 3 closes; release them first. Close waits on Leios
+	// validation and EventBus handlers with no deadline of its own, so it is
+	// bounded like a phase-1 stop and skipped when phase 2 already abandoned
+	// a handler: phase 3 then leaves the database open and the snapshots with
+	// it. Close is idempotent, so Run's deferred call is then a no-op.
+	if ouro := n.ouroboros(); ouro != nil && storageDrainConfirmed {
+		if stopErr := stopWithDeadline(
+			max(time.Until(deadline), 0), "ouroboros", ouro.Close,
+		); stopErr != nil {
+			if errors.Is(stopErr, errStorageDrainUnconfirmed) {
+				storageDrainConfirmed = false
+			}
+			err = errors.Join(err, stopErr)
+		}
+	}
+
 	// Phase 3: Flush state and close database
 	n.config.logger.Info("shutdown phase 3: flushing state")
 	phase3Start := time.Now()
