@@ -3150,6 +3150,10 @@ registrations include the accumulated count when computing their initial
 expiry, while PV10 and later use the already-adjusted expiry model. Processing
 a governance proposal resets the consecutive dormant count, and both boundary
 increments and resets are slot-journaled for rollback.
+Backfill and gap replay of blocks at or below a Mithril anchor do not run
+these rules: they record each DRep's activity epoch but keep the imported
+expiry and dormancy counter, which already account for every epoch the replay
+covers.
 
 ### Era-Specific Validation
 

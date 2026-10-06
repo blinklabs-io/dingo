@@ -391,7 +391,7 @@ func TestPV9DRepRegistrationUsesProposalDormancyReset(t *testing.T) {
 		if err := ProcessDRepActivityCertificates(tx, point, 100, 20, 9, db, txn); err != nil {
 			return err
 		}
-		return ProcessProposals(tx, point, 100, 20, db, txn)
+		return ProcessProposals(tx, point, 0, 100, 20, db, txn)
 	}))
 
 	drep, err := db.GetDrepByCredential(0, drepCredential, true, nil)

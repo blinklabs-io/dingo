@@ -192,7 +192,7 @@ func TestGapBlockDRepCertificatesUseBabbageProtocolMajor(t *testing.T) {
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
-func TestGapBlockResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
+func TestGapBlockKeepsImportedDormancyForHistoricalDRepRegistration(t *testing.T) {
 	t.Parallel()
 
 	db, err := dbtest.NewDatabase(t, &database.Config{
@@ -266,10 +266,11 @@ func TestGapBlockResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// The imported state already covers the gap, so replay neither resets the
+	// dormancy counter nor recomputes the recorded expiry.
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
-	assert.Zero(t, dormantEpochs)
+	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
 func (m *mockGapGovernanceTransaction) Hash() lcommon.Blake2b256 {
@@ -763,50 +764,64 @@ func TestProcessGapBlockTransactionsProcessesGovernanceAndDRepDeregistration(
 
 	votes, err := db.GetGovernanceVotes(proposal.ID, nil)
 	require.NoError(t, err)
-	require.Len(t, votes, 1)
-	assert.Equal(t, uint8(models.VoterTypeCC), votes[0].VoterType)
-	assert.Equal(t, ccCred, votes[0].VoterCredential)
-	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
-	assert.Equal(t, point.Slot, votes[0].AddedSlot)
+	// Gap blocks replay below the Mithril anchor, so the proposal is stored
+	// settled and DRep deregistration, which clears votes only on live
+	// proposals, leaves both votes as history.
+	require.Len(t, votes, 2)
+	voterTypes := []uint8{votes[0].VoterType, votes[1].VoterType}
+	assert.ElementsMatch(
+		t,
+		[]uint8{uint8(models.VoterTypeCC), uint8(models.VoterTypeDRep)},
+		voterTypes,
+	)
+	for _, vote := range votes {
+		assert.Equal(t, uint8(models.VoteYes), vote.Vote)
+		assert.Equal(t, point.Slot, vote.AddedSlot)
+	}
 }
 
-// A gap transaction that only deregisters DReps reads neither the DRep
-// inactivity period nor the governance action lifetime, so it must replay
-// without Conway protocol parameters; one that reads them must still fail.
+// Gap replay reads Conway parameters only for proposals (action lifetime) and
+// votes. A transaction that only registers or deregisters DReps replays
+// without them; one that reads them must still fail.
 func TestProcessGapBlockTransactionsWithoutConwayParameters(t *testing.T) {
 	t.Parallel()
 
 	drepCred := testGapHash28("drep-without-params")
-	drepCertificate := func(certType uint) []lcommon.Certificate {
-		credential := lcommon.Credential{
-			CredType:   0,
-			Credential: lcommon.NewBlake2b224(drepCred),
-		}
-		if certType == uint(lcommon.CertificateTypeRegistrationDrep) {
-			return []lcommon.Certificate{&lcommon.RegistrationDrepCertificate{
-				CertType:       certType,
-				DrepCredential: credential,
-				Amount:         500,
-			}}
-		}
+	drepCertificate := func() []lcommon.Certificate {
 		return []lcommon.Certificate{&lcommon.DeregistrationDrepCertificate{
-			CertType:       certType,
-			DrepCredential: credential,
+			CertType: uint(lcommon.CertificateTypeDeregistrationDrep),
+			DrepCredential: lcommon.Credential{
+				CredType:   0,
+				Credential: lcommon.NewBlake2b224(drepCred),
+			},
 		}}
 	}
-	for _, test := range []struct {
-		name     string
-		certType uint
-		wantErr  string
-	}{
-		{
-			name:     "deregistration only",
-			certType: uint(lcommon.CertificateTypeDeregistrationDrep),
+	rewardAddress, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, testGapHash28("no-params-return")...),
+	)
+	require.NoError(t, err)
+	proposal := conway.ConwayProposalProcedure{
+		PPDeposit:       1,
+		PPRewardAccount: rewardAddress,
+		PPGovAction: conway.ConwayGovAction{
+			Type:   uint(lcommon.GovActionTypeInfo),
+			Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
 		},
+		PPAnchor: lcommon.GovAnchor{
+			Url:      "https://example.com/gap-no-params",
+			DataHash: lcommon.Blake2b256Hash(testGapHash32("no-params-anchor")),
+		},
+	}
+	for _, test := range []struct {
+		name      string
+		proposals []lcommon.ProposalProcedure
+		wantErr   string
+	}{
+		{name: "deregistration only"},
 		{
-			name:     "registration",
-			certType: uint(lcommon.CertificateTypeRegistrationDrep),
-			wantErr:  "missing Conway protocol parameters",
+			name:      "proposal",
+			proposals: []lcommon.ProposalProcedure{proposal},
+			wantErr:   "missing Conway protocol parameters",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -827,7 +842,9 @@ func TestProcessGapBlockTransactionsWithoutConwayParameters(t *testing.T) {
 			tx := &mockGapGovernanceTransaction{
 				hash:         txHash,
 				isValid:      true,
-				certificates: drepCertificate(test.certType),
+				certificates: drepCertificate(),
+
+				proposalProcedures: test.proposals,
 			}
 			point := ocommon.Point{
 				Slot: 1000,

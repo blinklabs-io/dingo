@@ -544,6 +544,9 @@ func processGapBlocks(
 		}
 		txs := parsedBlock.Transactions()
 		point := ocommon.NewPoint(block.Slot, block.Hash)
+		if len(txs) == 0 {
+			continue
+		}
 		epoch, err := gapBlockEpoch(epochs, block.Slot)
 		if err != nil {
 			return fmt.Errorf(
@@ -551,11 +554,6 @@ func processGapBlocks(
 				block.Slot,
 				err,
 			)
-		}
-		if len(txs) == 0 {
-			// The imported state already includes epoch dormancy through its
-			// tip, so gap metadata replay must not advance DRep expiry again.
-			continue
 		}
 		indexer := database.NewBlockIndexer(block.Slot, block.Hash)
 		offsets, err := indexer.ComputeOffsets(block.Cbor, parsedBlock)

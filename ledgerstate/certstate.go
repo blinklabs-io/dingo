@@ -2132,7 +2132,28 @@ func looksLikeDRepMap(data []byte) bool {
 		looksLikeCommitteeCredentialMap(data) {
 		return false
 	}
-	return parseDRepState(entry.ValueRaw, &ParsedDRep{}) == nil
+	return looksLikeDRepStateShape(entry.ValueRaw)
+}
+
+// looksLikeDRepStateShape checks only the expiry and anchor positions of a
+// DRepState. Classification must not depend on the later fields: a malformed
+// deposit or delegator set on the first entry would otherwise make the whole
+// map unrecognised and import with no DReps and no error, instead of failing
+// in parseDRepState.
+func looksLikeDRepStateShape(data []byte) bool {
+	var state []cbor.RawMessage
+	if _, err := cbor.Decode(data, &state); err != nil || len(state) < 3 {
+		return false
+	}
+	var expiry uint64
+	if _, err := cbor.Decode(state[0], &expiry); err != nil {
+		return false
+	}
+	var anchor []cbor.RawMessage
+	if _, err := cbor.Decode(state[1], &anchor); err != nil {
+		return false
+	}
+	return true
 }
 
 // looksLikeAccountMap reports whether a map's first value decodes as an

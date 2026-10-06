@@ -715,7 +715,7 @@ func TestProcessGovernanceAllowsDRepDeregistrationWithoutConwayParameters(
 	defer delta.Release()
 
 	err = db.Transaction(true).Do(func(txn *database.Txn) error {
-		return delta.processGovernance(ls, tx, txn)
+		return delta.processGovernance(ls, tx, 0, txn)
 	})
 	require.NoError(t, err)
 }
@@ -969,7 +969,7 @@ func TestProcessGovernanceClearsDRepVotesAfterVotes(t *testing.T) {
 		}); err != nil {
 			return err
 		}
-		return (&LedgerDelta{Point: point}).processGovernance(ls, tx, txn)
+		return (&LedgerDelta{Point: point}).processGovernance(ls, tx, 0, txn)
 	}))
 
 	votes, err := db.GetGovernanceVotes(proposal.ID, nil)

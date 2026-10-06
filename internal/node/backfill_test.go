@@ -462,10 +462,9 @@ func TestBackfillProcessBlockGovernanceCleansDeregistrationVotes(t *testing.T) {
 	assert.Nil(t, account.Drep, "backfill must clear deregistered DRep delegations")
 }
 
-// A transaction that only deregisters DReps reads neither the DRep inactivity
-// period nor the governance action lifetime, so replay must apply it while no
-// Conway protocol parameters are available; a transaction that does read them
-// must still fail.
+// Replay reads Conway parameters only for proposals (action lifetime) and
+// votes. A transaction that only registers or deregisters DReps applies while
+// no parameters are available; one that reads them must still fail.
 func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 	t *testing.T,
 ) {
@@ -487,16 +486,24 @@ func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 		tx.WithValid(true)
 		return tx
 	}
-	registration := func() lcommon.Transaction {
+	proposal := func() lcommon.Transaction {
+		rewardAddress, err := lcommon.NewAddressFromBytes(
+			append([]byte{0xE1}, bytes.Repeat([]byte{0xA6}, lcommon.Blake2b224Size)...),
+		)
+		require.NoError(t, err)
 		tx := mockledger.NewTransactionBuilder()
 		tx.WithId(bytes.Repeat([]byte{0xA3}, lcommon.Blake2b256Size))
-		tx.WithCertificates(&lcommon.RegistrationDrepCertificate{
-			CertType: uint(lcommon.CertificateTypeRegistrationDrep),
-			DrepCredential: lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: credentialHash,
+		tx.WithProposalProcedures(conway.ConwayProposalProcedure{
+			PPDeposit:       1,
+			PPRewardAccount: rewardAddress,
+			PPGovAction: conway.ConwayGovAction{
+				Type:   uint(lcommon.GovActionTypeInfo),
+				Action: &lcommon.InfoGovAction{Type: uint(lcommon.GovActionTypeInfo)},
 			},
-			Amount: 500,
+			PPAnchor: lcommon.GovAnchor{
+				Url:      "https://example.com/no-params",
+				DataHash: [32]byte{0xA7},
+			},
 		})
 		tx.WithValid(true)
 		return tx
@@ -510,8 +517,8 @@ func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 	}{
 		{name: "deregistration only", tx: deregistration},
 		{
-			name:    "registration",
-			tx:      registration,
+			name:    "proposal",
+			tx:      proposal,
 			wantErr: "missing Conway protocol parameters",
 		},
 	} {
@@ -550,7 +557,7 @@ func TestBackfillProcessBlockGovernanceLevelWithoutConwayParameters(
 			txn := db.Transaction(true)
 			defer txn.Release()
 			err = backfill.processBlockGovernanceLevel(
-				test.tx(), point, 100, nil, txn,
+				test.tx(), point, 0, 100, nil, txn,
 			)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
@@ -656,7 +663,7 @@ func TestBackfillTransactionsUseBabbageProtocolMajorForDRepCertificates(
 	require.Nil(t, account.Drep, "PV9 DRep deregistration clears the stale reverse delegation")
 }
 
-func TestBackfillResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
+func TestBackfillKeepsImportedDormancyAndExpiryForHistoricalDRepRegistration(t *testing.T) {
 	t.Parallel()
 
 	db := newTestDB(t)
@@ -738,10 +745,11 @@ func TestBackfillResetsDormancyBeforeFreshDRepRegistration(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, drep)
 	assert.Equal(t, uint64(100), drep.LastActivityEpoch)
-	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
+	// Replay below the anchor neither resets the imported dormancy counter nor
+	// recomputes the expiry the snapshot recorded.
 	dormantEpochs, err := db.GetDormantDRepEpochs(nil)
 	require.NoError(t, err)
-	assert.Zero(t, dormantEpochs)
+	assert.Equal(t, uint64(3), dormantEpochs)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
@@ -1167,7 +1175,11 @@ func testRun_RestoresSnapshotAccountDelegationAtAnchor(
 		ocommon.Point{Slot: 1, Hash: bytes.Repeat([]byte{0x76}, 32)},
 		0,
 		eras.ConwayEraDesc.Id,
-		nil,
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+		},
 		&database.BlockIngestionResult{
 			TxOffsets: map[[32]byte]database.CborOffset{
 				txHash: {BlockSlot: 1, ByteLength: 1},

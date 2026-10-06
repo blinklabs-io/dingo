@@ -1235,7 +1235,7 @@ func TestParseCertStateConwayRejectsMalformedDRepDelegators(t *testing.T) {
 				uint64(CredentialTypeKey),
 				bytes.Repeat([]byte{byte(0x50 + i)}, 28),
 			},
-			[]any{},
+			[]any{uint64(0), uint64(0)},
 		)
 		dstate = append(dstate, accountMapEntry[1:]...)
 	}
