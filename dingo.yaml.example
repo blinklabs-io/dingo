@@ -12,6 +12,14 @@
 # CLI: --cardano-config
 # cardanoConfig: "./config/cardano/preview/config.json"
 
+# Longest a node-to-client LocalStateQuery session may hold one acquired
+# ledger snapshot. A snapshot past this age is closed and the session's next
+# query fails. Each held snapshot pins a database read transaction.
+# Default: "5m"
+# CLI: --local-state-query-view-max-lifetime
+# Env: DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME
+# localStateQueryViewMaxLifetime: "5m"
+
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
 # databasePath: ".dingo"
@@ -996,3 +1004,8 @@
   # every single one
   # CLI: --db-snapshot-every-n-epochs
   # snapshotEveryNEpochs: 1
+  # Cancel a snapshot (manual or automatic) still holding the commit
+  # barrier after this long; commits resume and the partial snapshot is
+  # removed. 0 means no bound
+  # CLI: --db-snapshot-max-commit-pause
+  # snapshotMaxCommitPause: 0s

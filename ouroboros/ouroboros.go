@@ -172,8 +172,14 @@ type Ouroboros struct {
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
-	localstatequeryAcquireMutex   sync.Mutex
-	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// localstatequerySessions holds each connection's acquired ledger
+	// snapshot. It is guarded by localstatequeryAcquireMutex like the maps
+	// above. localstatequeryAcquisitions tracks a snapshot open in progress so
+	// connection close can cancel it before it installs a session.
+	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
+	localstatequeryAcquisitions map[ouroboros.ConnectionId]*localstatequeryAcquisition
+	localstatequeryAcquireMutex sync.Mutex
+	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -409,6 +415,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
+	// one acquired LocalStateQuery ledger snapshot before it is forcibly
+	// closed. Values of 0 or below use the default of five minutes.
+	LocalStateQueryViewMaxLifetime time.Duration
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
 	// server waits for a certifying ranking block's endorser block transaction
 	// closure to become available before closing the connection. When 0 (the
@@ -578,6 +588,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		localstatequeryOwners: make(
 			map[ouroboros.ConnectionId]*olocalstatequery.Server,
+		),
+		localstatequerySessions: make(
+			map[ouroboros.ConnectionId]*localstatequerySession,
 		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -1243,8 +1244,29 @@ func newTestLedgerStateWithChain(
 	blockCount uint64,
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
+	return newTestLedgerStateWithChainAt(t, blockCount, "")
+}
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+// newTestLedgerStateWithChainAt is newTestLedgerStateWithChain over a database
+// in dataDir. An empty dataDir makes dbtest.NewDatabase use a temporary
+// file-backed SQLite database; pass a dataDir to control where it lives.
+func newTestLedgerStateWithChainAt(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+) (*ledger.LedgerState, *database.Database) {
+	return newTestLedgerStateWithChainAtAndConfig(t, blockCount, dataDir, nil)
+}
+
+func newTestLedgerStateWithChainAtAndConfig(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+	cardanoConfig *cardano.CardanoNodeConfig,
+) (*ledger.LedgerState, *database.Database) {
+	t.Helper()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
@@ -1271,9 +1293,10 @@ func newTestLedgerStateWithChain(
 	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	return ls, db

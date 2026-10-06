@@ -20,6 +20,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestUpdateBlockFetchObservationAndScore(t *testing.T) {
@@ -497,4 +499,66 @@ func TestAgePeerScoresLockedSkipsNeverObservedPeers(t *testing.T) {
 	if !fresh.ScoreLastUpdate.IsZero() {
 		t.Fatal("aging must not stamp a never-observed peer as observed")
 	}
+}
+
+func scoreFor(stakeLovelace uint64) float64 {
+	p := &Peer{StakeLovelace: stakeLovelace}
+	p.UpdateBlockFetchObservation(100, true)
+	p.UpdateConnectionStability(0.9)
+	return p.PerformanceScore
+}
+
+func TestStakeWeight_HighStakeScoredHigher(t *testing.T) {
+	t.Parallel()
+	high := scoreFor(100_000_000 * lovelacePerAda)
+	none := scoreFor(0)
+	if high <= none {
+		t.Fatalf("high-stake score %v must exceed zero-stake %v", high, none)
+	}
+}
+
+func TestStakeWeight_LogScaling(t *testing.T) {
+	t.Parallel()
+	at := func(ada uint64) float64 { return stakeScoreFor(ada * lovelacePerAda) }
+	small := at(10_000_000) - at(1_000)
+	large := at(100_000_000) - at(10_000_000)
+	if large >= small {
+		t.Fatalf(
+			"10M->100M delta %v must be below 1k->10M delta %v",
+			large,
+			small,
+		)
+	}
+	if got := stakeScoreFor(math.MaxUint64); got < 0 || got > 1 {
+		t.Fatalf("stake score %v outside [0,1]", got)
+	}
+}
+
+func TestStakeWeight_ZeroStakeGetsConservativeDefault(t *testing.T) {
+	t.Parallel()
+	if got := stakeScoreFor(0); got != defaultStakeScore {
+		t.Fatalf("zero stake score = %v, want %v", got, defaultStakeScore)
+	}
+	if got := scoreFor(0); got <= 0 {
+		t.Fatalf("zero-stake peer score %v must be positive", got)
+	}
+}
+
+func TestStakeWeight_SumOfWeightsIsOne(t *testing.T) {
+	t.Parallel()
+	sum := defaultLatencyWeight + defaultSuccessWeight +
+		defaultStabilityWeight + defaultHeaderRateWeight +
+		defaultTipDeltaWeight + defaultStakeWeight
+	if math.Abs(sum-1.0) > 1e-9 {
+		t.Fatalf("weights sum to %v, want 1.0", sum)
+	}
+}
+
+func TestKnownZeroStakeHasLowerScoreThanUnknownStake(t *testing.T) {
+	t.Parallel()
+	unknown := &Peer{}
+	known := &Peer{StakeKnown: true}
+	unknown.UpdateBlockFetchObservation(100, true)
+	known.UpdateBlockFetchObservation(100, true)
+	require.Less(t, known.PerformanceScore, unknown.PerformanceScore)
 }

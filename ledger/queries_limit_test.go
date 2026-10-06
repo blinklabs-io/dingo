@@ -100,9 +100,10 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 				if queryName == "GetFilteredVoteDelegatees" {
 					result, err = state.queryShelleyFilteredVoteDelegatees(
 						credentials[:count],
+						nil,
 					)
 				} else {
-					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(stakeCredentials[:count])
+					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(stakeCredentials[:count], nil)
 				}
 				if count > MaxLocalStateQueryItems {
 					require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
@@ -169,6 +170,7 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			run: func() (any, error) {
 				return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 					stakeCredentials,
+					nil,
 				)
 			},
 		},
@@ -176,21 +178,21 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "filtered vote delegatees",
 			query: "GetFilteredVoteDelegatees",
 			run: func() (any, error) {
-				return ls.queryShelleyFilteredVoteDelegatees(credentials)
+				return ls.queryShelleyFilteredVoteDelegatees(credentials, nil)
 			},
 		},
 		{
 			name:  "DRep state",
 			query: "GetDRepState",
 			run: func() (any, error) {
-				return ls.queryShelleyDRepState(credentials)
+				return ls.queryShelleyDRepState(credentials, nil)
 			},
 		},
 		{
 			name:  "stake delegation deposits",
 			query: "GetStakeDelegDeposits",
 			run: func() (any, error) {
-				return ls.queryShelleyStakeDelegDeposits(stakeCredentials)
+				return ls.queryShelleyStakeDelegDeposits(stakeCredentials, nil)
 			},
 		},
 	}
@@ -237,7 +239,7 @@ func TestLocalStateQueryEmptyDRepStateRemainsUnrestricted(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -293,7 +295,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -306,7 +308,7 @@ func TestLocalStateQueryEmptyDRepStateMatchesPerDRepDelegators(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, dreps, numDreps)
 	for _, drep := range dreps {
-		want, err := ls.drepDelegators(drep)
+		want, err := ls.drepDelegators(drep, nil)
 		require.NoError(t, err)
 		require.Len(t, want, delegatorsPerDrep)
 		key := olocalstatequery.StakeCredential{
@@ -357,7 +359,7 @@ func TestAllDRepDelegatorsCrossesBatchBoundary(t *testing.T) {
 
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
-	delegators, err := ls.allDRepDelegators()
+	delegators, err := ls.allDRepDelegators(nil)
 	require.NoError(t, err)
 	key := models.StakeCredentialRef{
 		Tag: uint8(models.DrepTypeAddrKeyHash),
@@ -409,7 +411,7 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 		}))
 	}
 	result, err := (&LedgerState{db: db}).
-		queryShelleyFilteredVoteDelegatees(credentials)
+		queryShelleyFilteredVoteDelegatees(credentials, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -457,7 +459,7 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
-	result, err = ls.queryShelleyStakeSnapshots(query)
+	result, err = ls.queryShelleyStakeSnapshots(query, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok = result.([]any)
 	require.True(t, ok)
