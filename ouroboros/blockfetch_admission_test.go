@@ -206,6 +206,31 @@ func TestBlockfetchServerRequestRange_ReservationLifecycle(t *testing.T) {
 	}, testutil.AsyncWait, "reservation held after completed range")
 }
 
+// A peer that disconnects mid-range must not leave its reservation held. The
+// fixture never delivers ConnectionClosedEvent, so only the sender goroutine's
+// own exit can release the slot here.
+func TestBlockfetchServerRequestRange_PeerDisconnectMidRangeReleases(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	f := newBlockfetchRangeFixture(t)
+	f.requestRange(t, f.point(0), f.point(2))
+	// StartBatch proves the sender goroutine owns the reservation. The rest
+	// of the batch is left unread, so the sender is blocked mid-range.
+	require.Equal(t,
+		[]byte{blockfetch.MessageTypeStartBatch}, f.readMessageTypes(t, 1))
+	total, conn := f.o.blockfetchRangeAdmission.counts(f.connID)
+	require.Equal(t, 1, total)
+	require.Equal(t, 1, conn)
+
+	require.NoError(t, f.peer.peerConn.Close())
+	testutil.WaitForCondition(t, func() bool {
+		total, conn := f.o.blockfetchRangeAdmission.counts(f.connID)
+		return total == 0 && conn == 0
+	}, testutil.AsyncWait, "reservation held after peer disconnect mid-range")
+}
+
 // With the only slot held, a request is rejected; once released the same
 // request streams, so the rejection was caused by admission and not the range.
 func TestBlockfetchServerRequestRange_AdmitsAfterRelease(t *testing.T) {
