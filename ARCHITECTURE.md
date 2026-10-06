@@ -1190,6 +1190,7 @@ dingo/
 │   ├── peer_tip.go      # Peer tip tracking
 │   └── vrf.go           # VRF verification
 ├── consensus/praos/     # Praos comparison, snapshots, and ledger views
+├── consensus/peras/     # Peras (CIP-0140) package scaffold, no logic yet
 ├── chainsync/           # Block synchronization protocol state
 │   ├── chainsync.go     # Multi-client sync state, stall detection
 │   └── strategy.go      # Configurable multi-active header-sync strategy
@@ -1646,7 +1647,9 @@ Phase 1: Stop accepting new work
 
 Phase 2: Drain and close connections
   Mempool, terminal EventBus close bounded by the shutdown deadline
-  (concurrent with ConnectionManager), ConnectionManager
+  (concurrent with ConnectionManager), ConnectionManager,
+  Ouroboros (`Ouroboros.Close`: releases acquired LocalStateQuery snapshots;
+  bounded by the shutdown deadline and skipped once a phase-2 wait was abandoned)
 
 Phase 3: Flush state and close database
   LedgerState, Database
@@ -2007,8 +2010,8 @@ paths, where the point is to report before the goroutine unwinds.
   failure instead falls through to the ordinary continuation, which
   re-dispatches the still-queued range on the next blockfetch connection.
 - During deep catch-up (queued headers past `shadowBlockfetchMaxHeaders`, the
-  same threshold that gates the near-tip shadow-peer dispatch below and is
-  mutually exclusive with it), `startQueuedBlockfetchLockedWithWaitSignal`
+  same threshold that gates the near-tip shadow-peer dispatch, which the node
+  leaves unwired, and is mutually exclusive with it), `startQueuedBlockfetchLockedWithWaitSignal`
   also pre-queues a second `RequestRange` call on the same connection for the
   header window immediately after the active batch's own claimed range
   (`startQueuedBlockfetchPrefetchLocked`), tracked in
@@ -2059,7 +2062,7 @@ paths, where the point is to report before the goroutine unwinds.
   two-topic coupling above — which silently stops the node from following the
   chain while it continues to forge
 - Every close must release server-side ChainSync state (including its live
-  `chain.ChainIterator`), LocalStateQuery pins, Leios serving waits, and
+  `chain.ChainIterator`), LocalStateQuery pins and ledger snapshots, Leios serving waits, and
   LeiosNotify cursors without deleting a replacement connection that reused
   the same `ConnectionId`. `ConnectionManager` therefore calls the direct
   `ConnClosedOwnerFunc` for NtC and NtN with the concrete connection. Protocol
@@ -3144,6 +3147,11 @@ Validated Conway and Dijkstra block admission checks the aggregate consumed
 reference-script size before validating the block's individual transactions.
 Imported blocks use the same database transaction as application, after any
 applicable endorser transactions and before the ranking block's own mutations.
+The check resolves UTxOs from the block's single prefetch, which the
+per-transaction validators then reuse, so each input the prefetch returns is
+read from the database once; an input it does not return is read by each check
+that needs it. A block of the era listed before the ledger's era is judged under
+the previous era's parameters, the same rule applied to its transactions.
 Forged blocks check a read view of the pre-block state even when full
 self-validation is disabled. Aggregate dispatch rejects missing or typed-nil
 era parameters with an error before the upstream rule dereferences them.
@@ -3782,9 +3790,10 @@ There is therefore no reference-node case in which cardano-node *accepts* a
 non-genesis-delegate block at a `d=1` overlay slot, and the defer never makes
 dingo accept one either: `verifyGenesisDelegateHeader` defers only while
 `allowStateDefer && ledgerTipBehindSlot(slot)`, and at ledger apply
-`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderStateWithEpochAdvance(
-block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — with the defer
-switch off, so the stateful genesis-delegate check runs to an authoritative
+`verifyDeferredBlockHeaderState` re-runs `verifyBlockHeaderCryptoWithEpochAdvance(
+block, /*epochCacheAdvance*/ true, /*allowStateDefer*/ false)` — the VRF, KES and
+operational-certificate signature checks followed by the stateful ones, with the
+defer switch off, so the stateful genesis-delegate check runs to an authoritative
 accept/reject verdict before the block can be adopted. The deferral moves *when*
 the verdict is computed, not *whether* it is enforced; the marker
 (`deferred_header_validation:<slot>:<hash>`, in memory and in `sync_state`) is
@@ -4146,7 +4155,9 @@ The `LedgerView` interface provides query access to ledger state:
 ### Local State Query
 
 The node-to-client LocalStateQuery server in `ouroboros/localstatequery.go`
-delegates decoded ledger queries to `LedgerState.Query`. Stake-address
+delegates decoded ledger queries to the connection's acquired
+`ledger.QueryView` (see "Acquired ledger snapshots" below), which dispatches
+through the same `LedgerState` query handlers as `LedgerState.Query`. Stake-address
 inspection combines several independently encoded queries: filtered pool
 delegations and rewards, the registration deposits locked by the requested
 stake credentials, current DRep vote delegatees, and active governance
@@ -4201,6 +4212,55 @@ beyond what has actually been applied -- e.g. a header-ahead-of-ledger
 buffer entry -- and a purely slot-keyed lookup has no notion of "applied"
 at all) or when the chain's block at `at.Slot` doesn't have hash `at.Hash`
 (rolled back after acquisition, or never on this node's chain at all).
+
+**Acquired ledger snapshots.** Every `Acquire` -- specific point, volatile tip
+or immutable tip -- calls `LedgerState.AcquireQueryView`, which waits (inside the
+caller's deadline) for any epoch-boundary job, opens a coordinated read
+snapshot
+(`database.NewReadSnapshotContext`, whose blob and metadata views are fixed at
+one commit boundary), and validates the point against it with
+`VerifyPointQueryable`. A boundary can commit before its job is published, so
+a snapshot that still contains the boundary's pending-ratification record is
+dropped and the open retried once the job settles. The
+returned `ledger.QueryView` is held in `Ouroboros.localstatequerySessions`
+beside the acquired point and owner maps, and every `Query` on the connection
+is answered by `QueryView.Query`, which runs the ordinary query handlers
+through that held transaction: a block applied, a rollback or a retention
+prune committed after `Acquire` is invisible to the session, and the point
+validated at `Acquire` stays answerable. Chain-tip queries
+(`GetChainPoint`, `GetChainBlockNo`) read the snapshot's own tip. Queries the
+ledger otherwise answers from its in-memory consensus snapshot for an unpinned
+acquire -- current epoch number, era, current protocol parameters, the epoch
+`GetStakeSnapshots` reports, and the tip and current era of `GetEraHistory` (pinned or not) --
+resolve from the epoch record covering the snapshot's tip, so a view that
+outlives an epoch boundary keeps answering for the epoch it froze. They fall
+back to the live value when no epoch record covers the tip or, for protocol
+parameters, no row was persisted for the ended epoch. The `GetEraHistory`
+transition forecast stays live: it is predicted state with no stored form.
+Genesis configuration and system start never change. In-memory SQLite (no
+data directory) gives readers table locks rather than a snapshot, so a held
+view blocks the ledger's own writes and stalls block production; config
+validation therefore rejects an empty `databasePath` while the metadata
+provider is `sqlite`, and snapshot isolation applies to on-disk databases.
+
+A snapshot pins a database read transaction (holding back WAL checkpoints and
+one read connection), so both its number and its lifetime are bounded. It
+counts against the database's read-snapshot admission cap, which always leaves
+one metadata read connection free for the rest of the node; once the cap is
+reached an `Acquire` waits up to five seconds for a snapshot to close and then
+fails. It is closed on `Release`,
+on re-`Acquire` (before the replacement opens, so a connection never needs a
+second admission slot; a failed `Acquire` leaves the session registered with a
+closed view), on the connection closing, and on
+`Ouroboros.Close`, which shutdown calls after connections drain and before the
+ledger and database close. A snapshot still held after
+`localStateQueryViewMaxLifetime` (default `5m`, env
+`DINGO_LOCAL_STATE_QUERY_VIEW_MAX_LIFETIME`) is closed by a per-session timer
+and logged with its age and idle time; the session stays recorded so its next
+query fails with `ledger.ErrQueryViewClosed` -- ending the connection, as any
+query error does -- instead of silently reading live state. Closing a view
+never waits for a query in flight: that query completes against the snapshot
+and the last one out releases it.
 
 Only some query types honor a pinned point today: `GetPoolDistr2`
 (`PoolStakeDistribution`, resolving the pinned slot to the epoch that
@@ -4380,12 +4440,10 @@ target synchronously, at Acquire time, rather than leaving it to the first
 `Query`: an Acquire-time rejection has a graceful wire-level
 `AcquireFailure` reply, so a point ahead of the tip or naming the wrong fork
 is now rejected without this failure mode applying at all. A point that
-passes Acquire (on-chain at that instant) but whose historical data a later
-Query can no longer serve — e.g. a rollback or retention-floor pruning
-between Acquire and Query — still hits this same connection-teardown
-behavior; closing that residual gap needs either a gouroboros protocol
-change or cross-cutting historical-state retention, neither of which exists
-yet.
+passes Acquire is answered from the snapshot Acquire opened, so a rollback or
+retention-floor pruning committed afterwards does not reach the session. Only a
+snapshot closed by the lifetime bound above reproduces this connection-teardown
+behavior.
 `GetPoolDistr2` therefore logs and omits a pool that holds snapshot stake but
 has no registration to supply a VRF key hash (the unfiltered form covers every
 pool on the chain, so aborting would take `leadership-schedule` down for every
@@ -4548,7 +4606,11 @@ comparison, and behind-peer filtering use the delivered frontier. A
 `ChainSwitchEvent` preserves the advertised tips in `NewTip`/`PreviousTip` for
 protocol compatibility and carries the decision frontiers separately in
 `NewObservedTip`/`PreviousObservedTip`; ledger resync decisions use the observed
-field (falling back to `NewTip` for legacy/direct event producers). Before the
+field (falling back to `NewTip` for legacy/direct event producers). When the
+best peer changes, including on disconnect and stale cleanup, `RollbackPoint`
+carries the highest point the previous and new peers' candidate fragments
+share. It is not intersected with the local chain and can lie above the local
+tip; it is nil when the fragments share no retained point. Before the
 node has applied any local block, new peers' advertisements remain bounded
 against the first bootstrap peer; after a local tip exists, the delivered
 frontier is the authority. This lets a node resume when the honest advertised
@@ -4998,8 +5060,7 @@ tokens per second. It follows the reference ChainSync client:
   `ouroboros.chainsyncClientRollForwardAt` charges the peer only up to the
   header's network arrival (`PatienceMessageArrived`) and resumes after the
   callback (`PatienceHeaderAccepted`), so decoding, future-header admission
-  waits, verification and ledger backpressure are not charged, and a
-  ChainSync restart pauses it (`PatiencePause`). A new bucket starts paused
+  waits, verification and ledger backpressure are not charged. A new bucket starts paused
   until the peer's first accepted header or rollback, because tracked clients
   are registered inside their first callback. Headers from a peer that is
   not ingress-eligible are not verified, so they pause the bucket rather than
@@ -5276,7 +5337,11 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Stall detection with configurable timeout
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
-- Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection). The "peers are ahead" comparison reads a peer's DELIVERED frontier. A peer that has delivered no header has that frontier pinned at the point its session intersected at, which immediately after a plateau resync is the stalled local tip itself, so comparing against it would disarm this watchdog exactly when it has just acted. While such a peer is still awaiting its first header (`PeerChainTip.AwaitingFirstHeader`, `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's ADVERTISED tip, but only when the advertised tip is higher and only when the advertising peer IS the connection this plateau would recycle (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by rendered address, so a replacement connection reusing a listen port does not inherit a stale peer's claim). An untrusted advertised tip can therefore only ever be spent on its own connection, and the substituted value also flows into `isLedgerApplicationBacklog` as the best-peer tip, so it sets the backlog-versus-stall classification too. "Awaiting its first header" means the `awaitingFirstHeader` flag chain selection sets only when it registers a peer from a rollback and clears on that peer's first delivered header, not a delivered block number of 0: a tracked peer that has delivered headers and then rolls back to a point outside its retained delivered-header history is also left with a block number of 0 (`ApplyRollback` keeps the point and cannot recover one), but it has delivered headers on this connection, so it is judged on its delivered frontier and its advertised tip is never substituted. That fallback is reachable only because chain selection tracks such a peer in the first place: a plateau resync closes the connection (`LocalTipPlateau` is in `chainsyncResyncRequiresFreshConnection`, `ouroboros/chainsync.go`), the `ConnectionClosedEvent` subscription in `node.go` calls `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a peer by `registerPeerFromRollbackLocked` and made selectable with a delivered block number of 0 by the `awaitingFirstHeader` exemption in `isPeerSelectableLocked` (`chainselection/selector.go`). Without that registration `GetBestPeer()` is nil through the whole window and the plateau check returns before the fallback, so the two belong together
+- Configured roots take client slots first. `chainsync.Config.IsRoot` (wired to `PeerGovernor.IsConfiguredRootConnection`, local and public roots with a client connection) lets a root displace the longest-idle non-root, non-active client when every slot is taken; the displaced client stays connected as an observer. A peer that finds every slot taken is tracked as an observer rather than left without a client, and an observed root is promoted into a slot freed by a disconnect or a demotion without waiting for its next message.
+- `State.RecordBlockfetchThroughput` and `RecordBlockfetchLatency` keep a per-connection delivery model (first-block latency plus per-byte cost, both EWMA). `State.SelectBlockfetchPeer` ranks the header peer and every other eligible peer that announced the last header of the range (headers chain by hash, so that peer holds the whole range, while one that announced only its start may have forked away) by the time that model predicts for a typical batch. Estimates within 5% tie and a per-node salt decides, so near-equal peers do not flap. An unsampled peer is explored for one range in eight using the salted range hash; when every candidate is unsampled, the header peer is used outside those exploration ranges. With no other holder, the header peer is always used. The ledger asks once per batch window (`selectBlockfetchConnForWindow`): at the first batch, at each continuation, and during deep catch-up when a promoted pre-queued request would top its pipeline up, where a preference for another peer leaves the pipeline empty. A better peer therefore takes over at a batch boundary while the batch in flight finishes on its own peer. Decisions and peer changes are counted in `dingo_blockfetch_peer_selections_total` and `dingo_blockfetch_peer_handoffs_total`. The node no longer wires the shadow duplicate-dispatch inputs (`PeersWithBlockFunc`, `BlockfetchLatencyFunc`, `BlockfetchLatencyMedianFunc`), so that path stays off.
+- A rollback to the cursor a peer already sits at does not refresh its stall clock or clear a stalled status (`UpdateClientRollback`). The ledger recognizes a rollback to its own tip before tracking it; it keeps a bounded `maxRollbackHistory` event history and a separate per-connection/point count window so event eviction does not hide a repeated rollback.
+- When a `chainsync.resync` event identifies affected connections, the handler clears local history and generally closes those connections so peer governance can reconnect from fresh intersect points. `LocalLedgerRollback` first attempts ledger-side recovery and leaves connections open when recovery succeeds, no connections need recovery, or the chain is already past the rollback point. Only rollback/fork-resolution failures beyond K and Mithril trust-boundary failures add a peer cooldown; `PersistentFork` does not. Header-driven requests (`requestChainsyncResync`) are coalesced per connection for `chainsyncResyncCoalesceWindow`, and closing the connection clears that record so a reconnect can begin a new resync episode.
+- Plateau detection: if the applied tip does not advance and the downloaded primary-chain tip does not change while peers are ahead, the recycler first asks ledger to reconcile any live primary-chain/ledger divergence (`ReconcileLivePrimaryChainLedgerDivergence`). Primary-chain movement, including rollback, resets the plateau clock even when ledger application is temporarily behind, avoiding a resync of an active catch-up stream. When the local repair succeeds, connection-level recovery is skipped so ledger replay can resume from the repaired tip. If no divergence is found, or the divergence's common ancestor sits more than the security parameter K behind the primary chain tip — a rewind that far is declined rather than forced through, per the bound below — the active chainsync connection is recycled — except when the primary (header) chain has already caught up to the peer and the gap is dominated by downloaded-but-not-yet-applied blocks (`isLedgerApplicationBacklog`, `internal/chainsyncrecycler/recycler.go`). That plateau is a ledger-application backlog, not a chainsync stall, so the healthy connection is left running and the condition is logged at INFO instead of recycling (recycling cannot advance the applied tip and only churns the connection). The "peers are ahead" comparison reads a peer's DELIVERED frontier. A peer that has delivered no header has that frontier pinned at the point its session intersected at, which immediately after a plateau resync is the stalled local tip itself, so comparing against it would disarm this watchdog exactly when it has just acted. While such a peer is still awaiting its first header (`PeerChainTip.AwaitingFirstHeader`, `chainselection/peer_tip.go`) the recycler therefore falls back to that peer's ADVERTISED tip, but only when the advertised tip is higher and only when the advertising peer IS the connection this plateau would recycle (`advertisesForOwnConnection`, compared by `ConnectionId` rather than by rendered address, so a replacement connection reusing a listen port does not inherit a stale peer's claim). An untrusted advertised tip can therefore only ever be spent on its own connection, and the substituted value also flows into `isLedgerApplicationBacklog` as the best-peer tip, so it sets the backlog-versus-stall classification too. "Awaiting its first header" means the `awaitingFirstHeader` flag chain selection sets only when it registers a peer from a rollback and clears on that peer's first delivered header, not a delivered block number of 0: a tracked peer that has delivered headers and then rolls back to a point outside its retained delivered-header history is also left with a block number of 0 (`ApplyRollback` keeps the point and cannot recover one), but it has delivered headers on this connection, so it is judged on its delivered frontier and its advertised tip is never substituted. That fallback is reachable only because chain selection tracks such a peer in the first place: a plateau resync closes the connection (`SubscribeChainsyncResync`, `ouroboros/chainsync.go`, closes it for every resync reason), the `ConnectionClosedEvent` subscription in `node.go` calls `ChainSelector.RemovePeer`, and the replacement's only chainsync traffic until the next block is its post-`FindIntersect` `MsgRollBackward` — registered as a peer by `registerPeerFromRollbackLocked` and made selectable with a delivered block number of 0 by the `awaitingFirstHeader` exemption in `isPeerSelectableLocked` (`chainselection/selector.go`). Without that registration `GetBestPeer()` is nil through the whole window and the plateau check returns before the fallback, so the two belong together
 - The recycler itself is `internal/chainsyncrecycler.Recycler`, a `Start`/`Stop` background component that owns only the stall/plateau decision logic. It never reads node fields: the node passes a `ComponentProvider` (`nodeRecyclerComponents`, `node_chainsync_recycler.go`) that hands each tick the live `LedgerSource`, `ChainsyncState`, and `ChainSelector`, plus an `EventPublisher` for the recycle/resync/client-remove requests it decides on. Those are interfaces defined in the recycler package and satisfied structurally by `ledger.LedgerState`, `chainsync.State`, `chainselection.ChainSelector`, and the `EventBus`, so the dependency only goes one way and the whole component is exercised against fakes without constructing a node
 - Every tick `TryLock`s `n.liveLifecycleMu` (the mutex a live Restore/Truncate holds for its entire quiesce-through-reinitialize duration, since those calls actually nil/rebuild `n.ledgerState`/`n.chainsyncState`) (in the provider, for the whole callback) and skips entirely on contention, rather than just nil-checking those fields once up front: they are plain, unsynchronized fields a live restore/truncate reassigns, and the tick dereferences them many more times after any initial check, so holding the lock for the whole tick — not only the check — is what actually closes the race rather than merely narrowing its window. Snapshot deliberately does *not* hold `liveLifecycleMu` (it takes a separate `snapshotMu` instead, excluding a concurrent Restore/Truncate without contending with this tick) — see `snapshotMu`'s doc comment (`node.go`) — since Snapshot never touches either field and blocking this tick for its whole local-copy-plus-cloud-upload duration would contradict Snapshot's own documented "keeps syncing normally" behavior
 - Ledger callbacks that need the replaceable chainsync state use the same lock through `withLiveChainsyncState`. Both `Run()`'s initial publication and a Restore/Truncate's replacement hold that lock while constructing and assigning the state. Callbacks skip while the lock is held instead of blocking: the lifecycle operation can be waiting for the ledger goroutine to stop, so a blocking lock would deadlock quiesce.
@@ -5308,6 +5373,17 @@ active or while corroboration is incomplete.
 #### Header Verification Handoff
 
 When full-block header verification needs an epoch nonce that is not cached yet, blockfetch first flushes already-received predecessor blocks from the pending batch into the primary chain, then `ensureEpochForSlot` may forecast the nonce only within the cache tail's era. A confirmed transition or configured epoch trigger stops that forecast at the hard-fork boundary and defers verification without penalizing the peer; the full ledger rollover remains the only path that publishes successor-era parameters and rotates snapshots. Chainsync-header VRF/KES/opcert crypto verification runs only when the header's epoch nonce is already present in the in-memory epoch cache, so headers beyond that window are queued as unverified until blockfetch. The chain header queue records, per queued header, whether its stateless crypto was verified; blockfetch skips that duplicate stateless work when the fetched block's own queued header, matched by slot and hash, is marked verified. Fetched blocks wait in the pending batch before insertion, so that header is usually queued behind the head, and matching only the head would re-run the crypto for every later block in the batch. The skip is sound because the block hash is the hash of the header bytes, and chain insertion still requires the block to match the queue head. The stateful header checks (registered VRF key binding and Praos leader-stake eligibility) still run on the fetched full block. If those stateful facts are ahead of the ledger apply cursor — for example a pool registration or epoch mark snapshot is in predecessor/endorser data that blockfetch has seen but `ledgerProcessBlock` has not applied yet — blockfetch records that block point for deferred validation rather than recycling the peer. The marker is both in memory and durable in `sync_state` as `deferred_header_validation:<slot>:<hash>` before the block is inserted, so a restart cannot replay the persisted block without the pending stateful check. `ledgerProcessBlock` consults that marker even if normal replay validation is disabled, replays the deferred stateful check strictly after referenced Leios endorser-block metadata is processed and before the ranking block's own transactions are applied, then clears the durable marker in the apply transaction.
+
+#### Deferred Header Validation Bounds and Attribution
+
+Four rules shape the deferred-header path beyond the marker itself.
+
+- **Bounded set.** The deferred set holds at most `defaultMaxDeferredHeaderMarkers` entries. The rollback-horizon eviction is keyed to the applied tip, so it cannot bound the set while the header chain runs far ahead of a stalled tip; `boundDeferredHeaderValidation` runs after each admission and, once over the cap, evicts the lowest-slot entries and their `sync_state` markers. Concurrent bounds serialize their snapshot, durable floor write, and marker deletion so an older floor cannot overwrite a newer one. Startup restore applies the same cap before returning, persisting the raised floor before deleting excess markers. A non-Mithril block below the floor gets full header verification at apply with or without a marker, so eviction never skips a check. The floor is reloaded at startup.
+- **Size limits at header time.** `verifyHeaderSizeLimits` rejects a Shelley-and-later header declaring a body larger than `maxBlockBodySize` or whose encoding exceeds `maxBlockHeaderSize`, using the applied ledger's parameters. A header from an epoch later than the ledger tip's defers instead of failing, because the parameters may change at the boundary.
+- **Admission-verified replay.** With `BlockPipelineValidateEnabled`, a block whose admission verification completed is recorded in a bounded in-memory set keyed by slot and hash. The pipeline's nonce provider tells the validate stage to skip that slot, and block-pipeline replay accepts the block without the VRF/KES and operational-certificate re-check when the recorded hash matches exactly. A block with no record, a record for another hash at its slot, or a deferred admission is verified in full. The set is not persisted, so blocks admitted before a restart are verified in full.
+- **Peer attribution.** The deferred marker records the connection that supplied the block (not persisted). When apply-time validation rejects the block with a verdict on the block itself, rather than a gap in local state, recovery publishes a `ChainsyncResyncEvent` with reason `deferred header validation failure` for that connection only. The chainsync handler treats it like the other peer-fault reasons: it clears that connection's observed header history, denies the peer in peer governance for the divergent-peer cooldown, and closes the connection.
+
+Header state verification resolves the producing pool's electing stake snapshot row once per header (`resolveElectingSnapshot`) for both the VRF-key cutoff and the leader stake.
 
 #### Leios CertRB Serving (NtC)
 
@@ -5519,6 +5595,40 @@ will deterministically be rejected again moments later.
 A rollback below the consumed-UTxO prune floor also closes the bearer for a
 fresh intersection, but does not deny the peer: another chain from that peer
 may still be usable.
+
+An outbound session that ends on the ChainSync `MustReply` stall timeout backs
+the peer off like a short-lived session even when it was long, so a peer that
+repeatedly stalls is not redialed immediately. The close handler then redials
+known alternates at once (`redialDisconnectedPeersLocked`) instead of waiting
+for the next reconcile, and redial ranking puts a peer that stalled within
+`chainsyncStallRankWindow` behind every other candidate.
+
+Inbound source ports are ephemeral, so inbound identity is the host.
+`resolveInboundIdentity` reuses a disconnected inbound entry from the same host
+when a peer reconnects from a new port, keeping its short-session history. A
+session counts toward that history whenever it is short, whatever the close
+error: the connection layer reports a remote close as clean when every protocol
+is still idle, so a peer that handshakes and disconnects arrives with no error.
+Inbound admission refuses an arrival whose exact connection tuple is denied.
+When a repeatedly short-lived inbound-only peer is pruned, a bounded host
+record also keeps its cooldown and escalation count across source-port changes.
+The record expires after the cooldown and one more admission window; the first
+admitted session consumes it. This host cooldown does not apply to a configured
+topology identity, so an ordinary peer denial does not cut off a downstream
+that reconnects because this node closed its sessions. A denial on a configured
+peer is instead applied to its upstream role. While the peer is denied, its
+open connection has `PeerConnection.UpstreamWithheld` set and
+`chainSelectionEligible` excludes it,
+while the connection stays open so the peer can still consume from this node.
+The withhold is read against the live denial (`upstreamWithheldLocked`), so an
+expired denial restores eligibility immediately; `syncUpstreamWithholdLocked`,
+run when a denial is added and on every reconcile, clears the stored flag and
+publishes `PeerEligibilityChanged` when a denial starts or expires on an open
+connection. A withheld connection is not reusable inbound topology demand, is
+not promoted to hot, and is not counted toward hot or warm totals in bootstrap
+recovery. Inbound-only
+entries are never chain selection sources, so flapping is bounded for them by
+the warm-peer prune and the hot-promotion check.
 
 An outbound handshake refusal that proves the remote address belongs to a
 different Cardano network is denied for the lifetime of the in-memory peer
@@ -7440,12 +7550,14 @@ also carry completed/total archive counts. Bootstrap logs add the phase,
 artifact, snapshot identity, and archive/destination paths so interleaved
 download and extraction output remains attributable to one operation.
 
-Compressed downloads have a per-object limit of 1 TiB by default, matching
-the existing extracted-archive total limit. Library callers can set
-`SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`, or
-`DownloadConfig.MaxBytes`; zero selects the default and negatives fail
-validation. The setting reaches both v1 archives and all v2 digest,
-immutable, and ancillary archives. `ExpectedSize`, when positive, remains
+Compressed downloads have a per-object limit: 512 GiB for a v1 archive, and
+for v2 objects 1 GiB per immutable archive, 256 MiB for the digest list and
+64 GiB for the ancillary archive. Operators set `mithril.downloadMaxBytes`
+(`--mithril-download-max-bytes`, `DINGO_MITHRIL_DOWNLOAD_MAX_BYTES`); library
+callers can set `SyncConfig.DownloadMaxBytes`, `BootstrapConfig.DownloadMaxBytes`,
+or `DownloadConfig.MaxBytes`. Zero selects the built-in limit and negatives
+fail validation. A positive value replaces the limit of every v1 and v2
+object. `ExpectedSize`, when positive, remains
 an exact-size requirement and cannot exceed the configured maximum.
 Resumed prefixes count against the limit; responses without Content-Length
 are bounded while streaming. An extra byte is read only as an overflow
@@ -7465,6 +7577,23 @@ download keeps its partial file for resumption, and a cancelled run keeps its
 archive, since neither says anything about the bytes already on disk.
 The zstd decoder separately defaults to a 512 MiB window and 256 MiB decoder
 memory limit, configurable through `WithZstdLimits`.
+
+Extraction also bounds the archive's shape while it is read: an entry-count
+cap (directories and empty files count), per-member and aggregate expanded-byte
+caps, and an expansion bound of 256 times the compressed bytes read plus a
+64 MiB floor. Each archive type except the v1 full snapshot admits only the
+members its consumer reads, and a refused member is never created. An
+immutable archive admits its own certified trio (plus a `ledger/` tree, where
+v1-layout archives keep the ledger state). Its expanded-byte limits allow
+8 GiB per member and 1 TiB in total so ledger tables retain the same limits
+as full snapshots; each trio file is
+SHA-256-checked against the certified digest list as it is written, so a
+mismatching file is removed before the pool moves on. The digest list archive
+admits one top-level JSON file of at most 64 MiB. The v1 and v2 ancillary
+archives admit the signed manifest, the `ledger/` tree and the next immutable
+trio. The immutable pool charges each in-flight download at its size limit
+against a 16 GiB budget. Raising the limit lowers concurrency; an override
+above 16 GiB allows only one download, with capacity equal to that override.
 
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
@@ -8294,7 +8423,16 @@ path. Blocks beyond the ImmutableDB tip are not imported from ancillary
 volatile state or pre-processed as gap blocks; chainsync/blockfetch obtains and
 validates them normally. API-mode historical metadata backfill is capped at the
 anchor so it cannot pre-apply and thereby bypass the ledger path for either
-suffix.
+suffix: `mithril sync` passes the anchor, and a backfill that `dingo serve`
+resumes reads the recorded `mithril_ledger_slot`. Replay reaches the anchor
+without POOLREAP or the PV10 HARDFORK rule, so the backfill then restores each
+snapshot-imported account's registration and delegation from its import
+baseline before rebuilding the live-stake aggregate. Replayed DRep activity
+(backfill and gap blocks) records only the activity epoch and keeps the
+snapshot's DRep expiry, and a replayed governance proposal the snapshot does
+not hold is stored as already expired and dropped. Protocol parameters are
+resolved per epoch as replay reaches it, enacting the boundary's classic updates
+before any hard-fork translation, as the live rollover does.
 
 Historical block validation before the stable anchor is controlled
 independently. With `ValidateHistorical: true` (the default), ledger replay
@@ -8723,6 +8861,11 @@ whose reverse iterators list the complete key prefix before seeking.
 
 ### Blockfrost API (`api/blockfrost/`)
 
+The latest-block transaction list validates `count`, `page`, and `order`
+with the shared pagination rules. It pages transaction hashes in block-index
+order, reverses that order for descending requests, and reports pagination
+totals for the whole block. Empty or out-of-range pages return an empty array.
+
 Blockfrost submission and both evaluation endpoints bound request body reads
 by their existing byte limits and a 15-second read deadline. The deadline is
 cleared after a successful read, before transaction processing; stalled or
@@ -9004,6 +9147,23 @@ second, in-process mode — an epoch-boundary observer the node itself can
 register from its own `Run()` composition — described in its own subsection
 below; both modes share the same `internal/koiosparity` comparison logic
 (`compare.go`/`check.go`) so a mismatch means the same thing either way.
+
+The observer separately selects its ERROR epochs for startup retries even when
+reference data has not changed; CLI freshness selection keeps its existing
+contract. Each observer queue retries its own ERROR outcomes after at least
+`ObserverConfig.ErrorRetryDelay` (five minutes by default), without needing a
+new epoch transition. A completed non-ERROR check removes that pending retry.
+Fetch and check failures persist the affected queue's ERROR status before
+scheduling the in-memory retry, so restart recovery also selects an epoch
+whose previous comparison passed and whose Koios reference remains fresh.
+The aggregate and account timers are independent, and cancellation stops both.
+Strict-mode fatal eligibility is unchanged: only pure reference lag continues;
+DB failures and validation disagreements still stop strict validation.
+
+Status reports retain total mismatch counts and separately report significant
+counts using the comparison's severity classification. Aggregate and account
+phase writes retain the other phase's counts, so concurrent observer queues
+cannot erase each other's evidence.
 
 **Architecture:**
 
@@ -14815,19 +14975,23 @@ primary chain or metadata was already rewound. This also ensures the ordinary
 case where the primary chain is behind the ledger tip emits the missing undo
 notifications before forward processing resumes.
 
+Block application writes a `block_nonce` row for every applied block, with a
+NULL nonce for an era that has no evolving nonce (Byron's BFT/PoA consensus
+has none), so `reconciliationUndoBlocks`, `durableAppliedFloor` and
+`latestLedgerPrimaryChainAncestor` all see Byron applied points.
+
 `reconciliationUndoBlocks` also detects, and counts separately via
 `reconciliationUndoMissingRecord`, an applied block with no `block_nonce`
-row at all in its undo range — the shape of a Byron-era block, since
-Byron's BFT/PoA consensus writes no VRF nonce — distinct from
-`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap.
-It cannot name or resolve that block (there
-is no row to read a hash from, and falling back to whatever the primary
-chain's blob store currently holds at that slot would risk resolving the
-wrong branch's block, the exact failure mode this function exists to
-avoid), but it can detect that one is missing: it resolves the ancestor's
-own block for its `BlockNumber` and compares the resulting
-`ledgerTipBlockNumber - ancestorBlockNumber` delta — independent of
-`block_nonce` entirely — against how many nonce rows accounted for it. A
+row at all in its undo range — the shape of a Byron-era block applied by a
+release that wrote rows only for eras with an evolving nonce — distinct from
+`reconciliationUndoUnresolved`'s "has a row, content unreachable" gap. It
+cannot name or resolve that block (there is no row to read a hash from, and
+falling back to whatever the primary chain's blob store currently holds at
+that slot would risk resolving the wrong branch's block, the exact failure
+mode this function exists to avoid), but it can detect that one is missing:
+it resolves the ancestor's own block for its `BlockNumber` and compares the
+resulting `ledgerTipBlockNumber - ancestorBlockNumber` delta — independent
+of `block_nonce` entirely — against how many nonce rows accounted for it. A
 shortfall means the reconciler had no durable record of that many applied
 blocks' existence at all, not merely of their content.
 
