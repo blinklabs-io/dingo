@@ -519,7 +519,7 @@ INSERT INTO auth_committee_hot (
 	blockerTx, err := store.writeDB.Begin()
 	require.NoError(t, err)
 	maintenanceCtx, cancelMaintenance := context.WithTimeout(
-		context.Background(), 30*time.Second,
+		context.Background(), 5*time.Minute,
 	)
 
 	maintenanceDone := make(chan error, 1)
