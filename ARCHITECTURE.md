@@ -8502,14 +8502,24 @@ that ledger state. The archives are re-hashed as they are written, so a file
 rewritten after its digest was taken fails the run. `artifact.json` is written
 last and is the completion marker: a snapshot without it is not listed and not
 pruned, so a run that fails or is interrupted before writing it deletes the
-objects it uploaded. Archives are a function of the directory and the
+objects under the hash, unless a concurrent run has published the snapshot
+with every archive. The store has no transactions, so every writer of
+`artifact.json` (a producer run or the aggregator) reads each archive back
+after writing it and removes it again when one is missing, and every removal
+reads `artifact.json` back after deleting the archives and removes it again
+unless every archive has been rewritten. Whichever side of a race reads last
+sees the other's write, so no interleaving of producers, retention and the
+aggregator leaves a listed snapshot without its archives; the losing producer
+fails instead. Archives are a function of the directory and the
 ancillary key (sorted entries, zero timestamps and owners, single-threaded
 zstd), and the artifact hash covers only the epoch and digest merkle root, so a
 second run reproduces the same archives and hash; `artifact.json` also records
 a `created_at` time of the run. `certificate_hash` is empty until the
 aggregator certifies the snapshot.
 A run whose hash is already complete in the store writes nothing and returns
-the stored snapshot, so a certificate attached to it is kept.
+the stored snapshot, so a certificate attached to it is kept. If the stored
+snapshot is missing an archive, the run unlists it, rebuilds the archives and
+republishes its stored metadata with the certificate.
 
 **Storage** is the `ArtifactStore` interface (`Put`, `Open`, `Subdirs`,
 `DeletePrefix`) selected by `mithril.server.artifactStore`: a directory, or an
@@ -8558,7 +8568,9 @@ builds the registration Merkle commitment and aggregate verification key, and
 issues a genesis certificate at `epoch-1` signed with the genesis key. The
 pending message binds the oldest uncertified snapshot's digest Merkle root; if
 retention prunes that snapshot while it is open, signing moves on to the next
-one rather than certifying it. Each
+one rather than certifying it; a removal that lands after that check makes the
+certifying signature submission answer `409 Conflict`, with the certificate
+left in the chain and the snapshot unlisted. Each
 `POST /register-signatures` single signature is verified (key, lottery wins,
 signer index) before it counts; once the signatures cover `k` distinct lottery
 indices the aggregator selects them as the reference does, builds the batch

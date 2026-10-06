@@ -482,8 +482,8 @@ func (a *Aggregator) handlePending(w http.ResponseWriter, r *http.Request) {
 func (a *Aggregator) ensureOpen(ctx context.Context) (*openMessage, error) {
 	if a.open != nil {
 		// Retention may have pruned the open snapshot. Certifying it would
-		// write its metadata back with no archives behind it, so signing
-		// moves on to the next snapshot instead.
+		// spend a certificate on a snapshot publishing then unlists, so
+		// signing moves on to the next snapshot instead.
 		_, err := readSnapshot(ctx, a.cfg.Store, a.open.snapshot.Hash)
 		switch {
 		case err == nil:
@@ -816,10 +816,14 @@ func (a *Aggregator) tryCertify(
 	a.state = state
 	snapshot := open.snapshot
 	snapshot.CertificateHash = cert.Hash
-	if err := putJSON(
-		ctx, a.cfg.Store, path.Join(snapshot.Hash, artifactMetadataName),
-		snapshot,
-	); err != nil {
+	err = publishSnapshot(ctx, a.cfg.Store, &snapshot)
+	if errors.Is(err, ErrSnapshotArchivesMissing) {
+		// Retention removed the snapshot after ensureOpen read it. The
+		// certificate stays in the chain and signing moves on.
+		a.open = nil
+		return conflict("the open snapshot was removed before certification")
+	}
+	if err != nil {
 		return err
 	}
 	a.open = nil

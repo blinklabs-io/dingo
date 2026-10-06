@@ -179,15 +179,36 @@ func CreateSnapshot(
 	// Rewriting its metadata would drop the certificate an aggregator has
 	// since attached to it, so the stored snapshot is returned as it is.
 	existing, err := readSnapshot(ctx, cfg.Store, artifact.Hash)
-	if err == nil {
-		logger.Info(
-			"snapshot already in store",
+	switch {
+	case err == nil:
+		present, err := snapshotArchivesPresent(ctx, cfg.Store, existing)
+		if err != nil {
+			return nil, fmt.Errorf("checking existing snapshot: %w", err)
+		}
+		if present {
+			logger.Info(
+				"snapshot already in store",
+				"component", "mithril",
+				"hash", existing.Hash,
+			)
+			return existing, nil
+		}
+		// A removal racing a publish can leave the metadata without every
+		// archive. The snapshot is unlisted while its archives are rebuilt,
+		// and republished with its stored metadata so a certificate it
+		// carries survives.
+		logger.Warn(
+			"snapshot in store is missing archives, rebuilding",
 			"component", "mithril",
 			"hash", existing.Hash,
 		)
-		return existing, nil
-	}
-	if !errors.Is(err, ErrArtifactNotFound) {
+		if err := cfg.Store.DeletePrefix(
+			ctx, path.Join(existing.Hash, artifactMetadataName),
+		); err != nil {
+			return nil, fmt.Errorf("unlisting incomplete snapshot: %w", err)
+		}
+		artifact = existing
+	case !errors.Is(err, ErrArtifactNotFound):
 		return nil, fmt.Errorf("reading existing snapshot: %w", err)
 	}
 
@@ -228,15 +249,8 @@ func CreateSnapshot(
 		return nil, err
 	}
 	// Written last: listing treats the metadata as the completion marker.
-	metadata, err := json.Marshal(artifact)
-	if err != nil {
-		return nil, fmt.Errorf("encoding artifact metadata: %w", err)
-	}
-	if err := cfg.Store.Put(
-		ctx, path.Join(artifact.Hash, artifactMetadataName),
-		strings.NewReader(string(metadata)),
-	); err != nil {
-		return nil, fmt.Errorf("writing artifact metadata: %w", err)
+	if err := publishSnapshot(ctx, cfg.Store, artifact); err != nil {
+		return nil, err
 	}
 	complete = true
 	logger.Info(
@@ -249,11 +263,117 @@ func CreateSnapshot(
 	return artifact, nil
 }
 
+// ErrSnapshotArchivesMissing reports a snapshot whose archives were not all in
+// the store once its metadata had been written, so it was unlisted again.
+var ErrSnapshotArchivesMissing = errors.New("snapshot archives are missing")
+
+// snapshotArchiveKeys returns the store key of every archive of snapshot.
+func snapshotArchiveKeys(snapshot *CardanoDatabaseSnapshot) []string {
+	last := snapshot.Beacon.ImmutableFileNumber
+	keys := make([]string, 0, last+3)
+	for num := range last + 1 {
+		keys = append(keys, path.Join(snapshot.Hash, immutableArchiveName(num)))
+	}
+	return append(
+		keys,
+		path.Join(snapshot.Hash, digestsArchiveName),
+		path.Join(snapshot.Hash, ancillaryArchiveName),
+	)
+}
+
+// snapshotArchivesPresent reports whether every archive of snapshot is in
+// store.
+func snapshotArchivesPresent(
+	ctx context.Context,
+	store ArtifactStore,
+	snapshot *CardanoDatabaseSnapshot,
+) (bool, error) {
+	for _, key := range snapshotArchiveKeys(snapshot) {
+		r, err := store.Open(ctx, key)
+		if errors.Is(err, ErrArtifactNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		_ = r.Close()
+	}
+	return true, nil
+}
+
+// publishSnapshot writes the metadata that lists snapshot and then confirms
+// its archives, unlisting it again and returning ErrSnapshotArchivesMissing
+// when any is gone.
+//
+// The store has no transactions, and producers, retention and the aggregator
+// may run in separate processes. Publishing writes the metadata before reading
+// the archives, and removeSnapshot deletes the archives before reading the
+// metadata, so whichever of a racing pair reads last sees the other's write
+// and unlists the snapshot. A metadata check before the write cannot give
+// that guarantee, since the archives can go between the check and the write.
+func publishSnapshot(
+	ctx context.Context,
+	store ArtifactStore,
+	snapshot *CardanoDatabaseSnapshot,
+) error {
+	key := path.Join(snapshot.Hash, artifactMetadataName)
+	if err := putJSON(ctx, store, key, snapshot); err != nil {
+		return fmt.Errorf("writing artifact metadata: %w", err)
+	}
+	present, err := snapshotArchivesPresent(ctx, store, snapshot)
+	if err != nil {
+		return fmt.Errorf("confirming snapshot archives: %w", err)
+	}
+	if present {
+		return nil
+	}
+	missing := fmt.Errorf("%w: %s", ErrSnapshotArchivesMissing, snapshot.Hash)
+	if err := store.DeletePrefix(ctx, key); err != nil {
+		return errors.Join(missing, fmt.Errorf("unlisting snapshot: %w", err))
+	}
+	return missing
+}
+
+// removeSnapshot deletes the snapshot under hash. The metadata goes first, so
+// a removal interrupted part way leaves an unlisted remainder rather than a
+// listed snapshot with missing archives. A publish racing the removal can
+// write the metadata back, so it is read again once the archives are gone and
+// removed unless every archive has since been written again.
+func removeSnapshot(
+	ctx context.Context,
+	store ArtifactStore,
+	hash string,
+) error {
+	key := path.Join(hash, artifactMetadataName)
+	if err := store.DeletePrefix(ctx, key); err != nil {
+		return err
+	}
+	if err := store.DeletePrefix(ctx, hash); err != nil {
+		return err
+	}
+	snapshot, err := readSnapshot(ctx, store, hash)
+	if errors.Is(err, ErrArtifactNotFound) {
+		return nil
+	}
+	if err == nil {
+		present, err := snapshotArchivesPresent(ctx, store, snapshot)
+		if err != nil {
+			return err
+		}
+		if present {
+			return nil
+		}
+	}
+	return store.DeletePrefix(ctx, key)
+}
+
 // removeIncompleteSnapshot deletes the objects of a run that failed before
-// writing the snapshot metadata. Such objects are neither listed nor pruned, so
+// publishing the snapshot. Such objects are neither listed nor pruned, so
 // nothing else would ever remove them. It ignores cancellation of ctx so an
-// interrupted run still cleans up, and leaves the snapshot alone if a concurrent
-// run over the same database has completed it.
+// interrupted run still cleans up, and leaves the snapshot alone if a
+// concurrent run over the same database has published it whole. A concurrent
+// run still uploading loses the archives this removal deletes and then fails
+// to publish, rather than listing the snapshot without them.
 func removeIncompleteSnapshot(
 	ctx context.Context,
 	store ArtifactStore,
@@ -262,18 +382,33 @@ func removeIncompleteSnapshot(
 ) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	if _, err := readSnapshot(ctx, store, hash); !errors.Is(
-		err, ErrArtifactNotFound,
-	) {
+	warn := func(err error) {
+		if logger != nil {
+			logger.Warn(
+				"failed to remove incomplete snapshot",
+				"component", "mithril",
+				"hash", hash,
+				"error", err,
+			)
+		}
+	}
+	snapshot, err := readSnapshot(ctx, store, hash)
+	switch {
+	case err == nil:
+		present, err := snapshotArchivesPresent(ctx, store, snapshot)
+		if err != nil {
+			warn(err)
+			return
+		}
+		if present {
+			return
+		}
+	case !errors.Is(err, ErrArtifactNotFound):
+		warn(err)
 		return
 	}
-	if err := store.DeletePrefix(ctx, hash); err != nil {
-		logger.Warn(
-			"failed to remove incomplete snapshot",
-			"component", "mithril",
-			"hash", hash,
-			"error", err,
-		)
+	if err := removeSnapshot(ctx, store, hash); err != nil {
+		warn(err)
 	}
 }
 
@@ -642,18 +777,10 @@ func PruneSnapshots(
 	}
 	var removed []string
 	for _, snapshot := range snapshots[keep:] {
-		// The metadata goes first so a removal interrupted part way leaves
-		// an unlisted remainder rather than a listed snapshot with missing
-		// archives.
-		for _, key := range []string{
-			path.Join(snapshot.Hash, artifactMetadataName),
-			snapshot.Hash,
-		} {
-			if err := store.DeletePrefix(ctx, key); err != nil {
-				return removed, fmt.Errorf(
-					"removing snapshot %s: %w", snapshot.Hash, err,
-				)
-			}
+		if err := removeSnapshot(ctx, store, snapshot.Hash); err != nil {
+			return removed, fmt.Errorf(
+				"removing snapshot %s: %w", snapshot.Hash, err,
+			)
 		}
 		removed = append(removed, snapshot.Hash)
 	}

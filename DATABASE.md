@@ -796,10 +796,15 @@ artifact hash; certificates are keyed by certificate hash under
 Local stores write each object to a uniquely named `.partial-*` file and
 rename it, so a reader never sees a partial object and concurrent writers of
 one key do not share a file. A run that fails before writing `artifact.json`
-deletes the objects it wrote under the hash. Retention
-(`mithril.server.keepSnapshots`) deletes `artifact.json` first, so an
+deletes the objects under the hash unless another run has published the
+snapshot whole. Removal, by a failed run or by retention
+(`mithril.server.keepSnapshots`), deletes `artifact.json` first, so an
 interrupted removal leaves an unlisted remainder rather than a listed snapshot
-with missing archives.
+with missing archives, then reads `artifact.json` back after deleting the
+archives and deletes it again unless every archive has been rewritten. Every
+write of `artifact.json`, by a producer or by the aggregator when it records a
+certificate, opens each archive afterwards and deletes `artifact.json` again
+when one is missing.
 
 ## Store Topology
 
