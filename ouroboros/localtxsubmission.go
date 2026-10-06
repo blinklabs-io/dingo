@@ -26,6 +26,13 @@ import (
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
+// errLocalTxSubmissionMempoolUnavailable is returned by the LocalTxSubmission
+// callback when this Ouroboros was built without a mempool. It is a fault of
+// the node, not of the submitted transaction, so it carries no CBOR rejection.
+var errLocalTxSubmissionMempoolUnavailable = errors.New(
+	"local-tx-submission: mempool unavailable",
+)
+
 func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
 		olocaltxsubmission.WithSubmitTxFunc(
@@ -69,6 +76,9 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 		return errors.New(
 			"local-tx-submission: unexpected transaction content type",
 		)
+	}
+	if o.mempool == nil {
+		return errLocalTxSubmissionMempoolUnavailable
 	}
 	// Add transaction to mempool
 	err := o.mempool.AddTransaction(

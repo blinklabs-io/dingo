@@ -88,10 +88,6 @@ jobs:
       # are written out by hand.
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-      - name: golangci-lint (internal/test/antithesis)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: internal/test/antithesis
       # Unpinned like golangci-lint above, so a new analyzer release's findings
       # are fixed when it lands. Both run through the Makefile so this job and
       # `make lint` use the same build tags, flags, and package set.
@@ -355,6 +351,7 @@ jobs:
           ./database/plugin/metadata/sqlstore
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
+          ./internal/node
           -timeout 10m
       - name: go-test-live-lifecycle
         # These two-node tests exercise live Truncate/Restore while a real

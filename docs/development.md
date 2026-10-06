@@ -22,6 +22,22 @@ The Makefile also provides `make lint`, `make docs-parity`,
 `make config-parity`, and `make sql-check`. After changing SQL queries, run
 `make sql` to regenerate the checked-in code before `make sql-check`.
 
+## Conformance profiles
+
+Dingo reports compatibility in separate layers; a green ledger result is not
+complete node conformance.
+
+| Profile | Command | Scope |
+| --- | --- | --- |
+| Ledger rules | `go test ./internal/test/conformance/` | Pinned Cardano Blueprint ledger vectors from `ouroboros-mock`, Dingo era validation entry points, and real metadata backends |
+| Deterministic consensus | `go test ./ouroboros/ -run TestConsensusConformance` | Shared `ouroboros-mock` consensus scenarios: final chain choice, rollback points, and the ChainSync Dingo serves downstream |
+| Reference node | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` on the live DevNet; not run by either deterministic profile |
+
+The release and Linux CI gates run the ledger and deterministic consensus
+profiles as part of `./...`, and their verbose output reports the exact corpus
+and scenario counts. The [conformance tests](../internal/test/conformance/README.md)
+document what each profile proves and excludes.
+
 ## Local development workflows
 
 - [Run Dingo on the local DevNet](devnet.md).
