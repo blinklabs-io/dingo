@@ -2079,6 +2079,23 @@ skipped. A reader at the WAL tip can still make TRUNCATE return `busy` even
 after PASSIVE drains the frames. In either case the file stays at its current
 size until a WAL reset or later TRUNCATE succeeds.
 
+Mithril bootstrap completes its final ImmutableDB copy before ledger-state
+import. The copy writes block and transaction metadata in addition to blob
+data, so running it beside the ledger import would create two independent
+SQLite metadata writers. Both phases retain idempotent resume behavior; an
+interruption retries incomplete work without requiring their metadata
+transactions to overlap.
+
+Explicit bulk mode, used by Mithril ledger-state import, pauses this scheduled
+checkpoint callback. Entering bulk mode first drains an in-flight callback, so
+the dedicated checkpoint connection cannot overlap the import's metadata
+writes; restoring normal pragmas re-enables the ticker. Writer-owned
+`wal_autocheckpoint` remains active at 10000 pages throughout the import, so
+WAL frames are still backfilled while only the independent TRUNCATE attempts
+are postponed until the bulk phase completes. If the caller's final pragma
+restore fails, the next scheduled checkpoint retries it and runs TRUNCATE only
+after recovery succeeds.
+
 The checkpoint runs on a dedicated connection opened fresh for each attempt
 and closed immediately after — never against `writeDB` or `readDB`. An
 earlier version issued it against `writeDB` on the theory that
