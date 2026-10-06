@@ -319,6 +319,8 @@ Dingo is a modular, high-performance Cardano node written in Go.
    - Exposes tools, resources, and documentation for autonomous AI agents and operator interfaces.
 `
 
+const defaultResourceQueryTimeout = 5 * time.Second
+
 // RegisterResources registers passive MCP resources for schema exploration and db-sync guidance.
 func RegisterResources(
 	server *mcp.Server,
@@ -327,7 +329,7 @@ func RegisterResources(
 	network string,
 	timeouts ...time.Duration,
 ) {
-	queryTimeout := 5 * time.Second
+	queryTimeout := defaultResourceQueryTimeout
 	if len(timeouts) > 0 && timeouts[0] > 0 {
 		queryTimeout = timeouts[0]
 	}
@@ -491,7 +493,9 @@ func RegisterResources(
 
 	// Register dynamic resource for tables if db is available
 	if db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+		// A short request timeout must not omit dynamic resources during startup.
+		discoveryTimeout := max(queryTimeout, defaultResourceQueryTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 		defer cancel()
 		rows, err := db.QueryContext(ctx,
 			"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
