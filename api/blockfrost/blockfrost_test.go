@@ -833,11 +833,12 @@ func TestMetadataTransactionsCollisionKeepsLabelAndRawCBOR(t *testing.T) {
 	require.Equal(t, "a20163696e7461316474657874", transactionCBOR[0].CBORMetadata)
 }
 
-// TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders stores the same
-// logical metadata under different top-level and nested key orders and checks
-// that every metadata endpoint returns the same label set, JSON availability
-// and per-label CBOR on every call. The vectors and expectations are written
-// out by hand from the CBOR bytes.
+// TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders stores pairs of
+// equivalent metadata under different top-level and nested key orders. One
+// pair also distinguishes integer key 1 from text key "1". It checks that
+// every metadata endpoint returns the same label set, JSON availability and
+// per-label CBOR on every call. The vectors and expectations are written out
+// by hand from the CBOR bytes.
 func TestMetadataEndpointsDeterministicAcrossRepeatsAndKeyOrders(t *testing.T) {
 	t.Parallel()
 	adapter, raw, _ := newDBBackedAdapter(t)
