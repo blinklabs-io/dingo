@@ -2075,14 +2075,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadMithrilTrustBoundary(); err != nil {
 		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
 	}
-	// Refuse to start on a snapshot-seeded database whose governance
-	// purpose roots are missing: tallying would skip ratifications the
-	// network performs and diverge at enactment.
-	if err := governance.VerifyPurposeRoots(
-		ls.db, nil, ls.currentEpoch.EpochId,
-	); err != nil {
-		return fmt.Errorf("verify governance purpose roots: %w", err)
-	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart: without this the first
@@ -2127,6 +2119,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to load epoch info: %w", err)
 	}
 	ls.checkpointWrittenForEpoch = false
+	// Refuse to start on a snapshot-seeded database whose governance
+	// purpose roots are missing: tallying would skip ratifications the
+	// network performs and diverge at enactment. currentEpoch is only
+	// valid once loadEpochs has run.
+	if err := governance.VerifyPurposeRoots(
+		ls.db, nil, ls.currentEpoch.EpochId,
+	); err != nil {
+		return fmt.Errorf("verify governance purpose roots: %w", err)
+	}
 	// Load current protocol parameters from DB
 	if err := ls.loadPParams(); err != nil {
 		return fmt.Errorf("failed to load pparams: %w", err)

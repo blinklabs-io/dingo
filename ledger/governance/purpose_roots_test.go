@@ -144,3 +144,32 @@ func TestProcessEpochMithrilSupersededParentKeepsSkip(t *testing.T) {
 	assert.Nil(t, chainTestReload(t, db, stored[1]).RatifiedEpoch)
 	require.NoError(t, VerifyPurposeRoots(db, nil, stabilityTestEpoch-1))
 }
+
+// A parent whose deposit was already refunded is still a stored row, so its
+// orphaned child keeps the skip.
+func TestProcessEpochMithrilDroppedParentKeepsSkip(t *testing.T) {
+	t.Parallel()
+
+	db, store := newTallyTestDB(t)
+	require.NoError(t, store.SetNetworkState(10, 20, 1, nil))
+	markMithrilBootstrapped(t, db)
+	droppedEpoch := uint64(stabilityTestEpoch - 2)
+	parent := chainTestProposal(
+		lcommon.GovActionTypeParameterChange, testBytes(32, 0x74), nil,
+		400, 0, testBytes(29, 0), chainTestParameterChange(t, 61),
+	)
+	parent.ExpiresEpoch = droppedEpoch - 1
+	parent.ExpiredEpoch = &parent.ExpiresEpoch
+	parent.DroppedEpoch = &droppedEpoch
+	child := chainTestProposal(
+		lcommon.GovActionTypeParameterChange, testBytes(32, 0x73), parent,
+		401, 0, testBytes(29, 0), chainTestParameterChange(t, 62),
+	)
+	stored := chainTestStore(t, db, parent, child)
+
+	out, err := purposeRootsProcessEpoch(t, db)
+	require.NoError(t, err)
+	assert.Equal(t, 0, out.RatifiedCount)
+	assert.Nil(t, chainTestReload(t, db, stored[1]).RatifiedEpoch)
+	require.NoError(t, VerifyPurposeRoots(db, nil, stabilityTestEpoch-1))
+}

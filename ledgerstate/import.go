@@ -4083,22 +4083,39 @@ func seedPrevGovActionIds(
 }
 
 // verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
-// root in the snapshot resolves to an enacted governance_proposal row.
-// Without it a skipped or partial seed is only visible later as chained
-// proposals that never ratify.
+// root in the snapshot is an enacted governance_proposal row that the tally
+// resolves as that purpose's current root. Without it a skipped seed, or an
+// enacted row left above the snapshot that outranks the seed, is only
+// visible later as chained proposals that never ratify.
 func verifyPrevGovActionIdsSeeded(
 	cfg ImportConfig,
 	store metadata.MetadataStore,
 	prev *ParsedPrevGovActionIds,
 ) error {
 	roots := []struct {
-		purpose string
-		id      *ParsedGovActionId
+		purpose     string
+		id          *ParsedGovActionId
+		actionTypes []uint8
 	}{
-		{"parameter-change", prev.PParamUpdate},
-		{"hard-fork", prev.HardFork},
-		{"committee", prev.Committee},
-		{"constitution", prev.Constitution},
+		{
+			"parameter-change", prev.PParamUpdate,
+			[]uint8{govActionTypeParameterChange},
+		},
+		{
+			"hard-fork", prev.HardFork,
+			[]uint8{govActionTypeHardForkInitiation},
+		},
+		{
+			"committee", prev.Committee,
+			[]uint8{
+				govActionTypeNoConfidence,
+				govActionTypeUpdateCommittee,
+			},
+		},
+		{
+			"constitution", prev.Constitution,
+			[]uint8{govActionTypeNewConstitution},
+		},
 	}
 	txn := cfg.Database.MetadataTxn(false)
 	defer txn.Release()
@@ -4123,6 +4140,24 @@ func verifyPrevGovActionIdsSeeded(
 		if row == nil || row.EnactedEpoch == nil {
 			return fmt.Errorf(
 				"%s root %s#%d is not an enacted governance proposal",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+		current, err := store.GetLastEnactedGovernanceProposal(
+			r.actionTypes, txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"resolving current %s root: %w", r.purpose, err,
+			)
+		}
+		if current == nil ||
+			!bytes.Equal(current.TxHash, r.id.TxHash) ||
+			current.ActionIndex != r.id.ActionIndex {
+			return fmt.Errorf(
+				"%s root %s#%d does not resolve as the current root",
 				r.purpose,
 				hex.EncodeToString(r.id.TxHash),
 				r.id.ActionIndex,

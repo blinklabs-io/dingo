@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/require"
 )
@@ -107,4 +108,33 @@ func TestImportGovStateRejectsUnseededPurposeRoot(t *testing.T) {
 		func(ImportProgress) {},
 	)
 	require.ErrorContains(t, err, "is not an enacted governance proposal")
+}
+
+// An enacted row left above the snapshot epoch outranks the seeded root, so
+// the snapshot root would be stored but never resolved; the import must fail
+// rather than tally against the stale root.
+func TestImportGovStateRejectsShadowedPurposeRoot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	staleEpoch := uint64(501)
+	staleSlot := uint64(50_100)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        bytes.Repeat([]byte{0x22}, 32),
+		ActionType:    govActionTypeParameterChange,
+		EnactedEpoch:  &staleEpoch,
+		EnactedSlot:   &staleSlot,
+		ReturnAddress: make([]byte, 29),
+		AnchorHash:    make([]byte, 32),
+	}, nil))
+	root := &ParsedGovActionId{TxHash: bytes.Repeat([]byte{0x11}, 32)}
+	err = importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateWithRoots(
+			t, [4]*ParsedGovActionId{root, nil, nil, nil}, false,
+		)),
+		func(ImportProgress) {},
+	)
+	require.ErrorContains(t, err, "does not resolve as the current root")
 }
