@@ -2716,30 +2716,34 @@ func TestCompleteOperationReleasesBusyBeforePublishingTerminalStatus(
 		databasev1alpha1.OperationType_OPERATION_TYPE_SNAPSHOT,
 	)
 	require.NoError(t, err)
+	op.setRunning()
 
-	op.reserveCompletion()
-	op.mu.Lock()
+	h.mu.Lock()
 	var unlockOnce sync.Once
-	unlock := func() { unlockOnce.Do(op.mu.Unlock) }
+	unlock := func() { unlockOnce.Do(h.mu.Unlock) }
 	defer unlock()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.finishOperation()
-		op.complete(nil, 0)
+		h.completeOperation(op, nil, 0)
 	}()
-	released := func() bool {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return !h.busy
+	completionReserved := func() bool {
+		op.mu.Lock()
+		defer op.mu.Unlock()
+		return op.completionReserved
 	}
 	require.Eventually(
 		t,
-		released,
+		completionReserved,
 		10*time.Second,
 		time.Millisecond,
-		"busy flag must be released before the terminal status is published",
+		"completion must be reserved before releasing the busy flag",
+	)
+	require.Equal(
+		t,
+		databasev1alpha1.OperationStatus_OPERATION_STATUS_RUNNING,
+		op.progress().GetStatus(),
 	)
 	unlock()
 	<-done
