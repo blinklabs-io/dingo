@@ -295,11 +295,14 @@ func (s *submitServiceServer) EvalTx(
 	redeemerData := redeemerPlutusDataByKey(tx)
 	tmpRedeemers := make([]*cardano.Redeemer, 0, len(redeemerExUnits))
 	for key, val := range redeemerExUnits {
+		purpose := cardano.RedeemerPurpose(key.Tag + 1)
+		if _, ok := cardano.RedeemerPurpose_name[int32(purpose)]; !ok {
+			continue
+		}
 		r := &cardano.Redeemer{
-			Purpose: cardano.RedeemerPurpose(
-				key.Tag + 1,
-			), // gouroboros tags are 0-based, cardano tags are offset by 1
-			Index: key.Index,
+			// gouroboros tags are 0-based; UTxO RPC values start at 1.
+			Purpose: purpose,
+			Index:   key.Index,
 			ExUnits: &cardano.ExUnits{
 				Steps:  uint64(val.Steps),  // nolint:gosec
 				Memory: uint64(val.Memory), // nolint:gosec
