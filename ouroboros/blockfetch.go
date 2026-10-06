@@ -517,7 +517,14 @@ func (o *Ouroboros) blockfetchRejectSaturated(
 	start ocommon.Point,
 	result blockfetchRangeAdmitResult,
 ) error {
-	o.config.Logger.Warn(
+	// Global saturation is load from other peers and can repeat for every
+	// request on every connection, so it logs at Debug; per-connection
+	// saturation is this peer's doing and precedes a disconnect.
+	logFn := o.config.Logger.Debug
+	if result == blockfetchRangeConnSaturated {
+		logFn = o.config.Logger.Warn
+	}
+	logFn(
 		"blockfetch: range admission saturated, sending NoBlocks",
 		"connection_id", ctx.ConnectionId.String(),
 		"start_slot", start.Slot,
