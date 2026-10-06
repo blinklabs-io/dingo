@@ -592,11 +592,13 @@ func TestTruncateAfterSlotRestoresPoolDenormalizedFields(t *testing.T) {
 		"reward_account must revert to the surviving pre-truncate registration")
 }
 
-// TestRollbackAfterSlotResetsHistoryExpiryCursor verifies a slot rollback
-// clears the expiry cursor. Replay after the rollback can store blocks below
-// the old cursor, and a pruner resuming there would never expire them.
-func TestRollbackAfterSlotResetsHistoryExpiryCursor(t *testing.T) {
-	for _, tc := range []struct {
+// TestRollbackAfterSlotLowersHistoryExpiryCursor verifies a slot rollback
+// lowers the expiry cursor to the rollback point and leaves a cursor at or
+// below it alone. Replay stores blocks only above the rollback point, so a
+// cursor there still covers every replayed block, and an untouched lower
+// cursor keeps routine rollbacks from restarting the scan at slot 0.
+func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
+	rollbacks := []struct {
 		name     string
 		rollback func(*Database, ocommon.Point) error
 	}{
@@ -613,20 +615,35 @@ func TestRollbackAfterSlotResetsHistoryExpiryCursor(t *testing.T) {
 				return db.RollbackMetadataAfterSlot(point, 0, nil)
 			},
 		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			db := newTestDB(t)
-			targetBlock := testIndexedBlock(1500, 1, 0x15)
-			require.NoError(t, db.BlockCreate(targetBlock, nil))
-			require.NoError(
-				t,
-				db.SetSyncState(HistoryExpiryCursorSyncKey, "1400", nil),
-			)
-			point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
-			require.NoError(t, tc.rollback(db, point))
-			got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
-			require.NoError(t, err)
-			require.Equal(t, "0", got)
-		})
+	}
+	cursors := []struct {
+		name   string
+		cursor string
+		want   string
+	}{
+		{name: "below point", cursor: "1400", want: "1400"},
+		{name: "at point", cursor: "1500", want: "1500"},
+		{name: "above point", cursor: "1600", want: "1500"},
+		{name: "absent", cursor: "", want: ""},
+	}
+	for _, rb := range rollbacks {
+		for _, tc := range cursors {
+			t.Run(rb.name+"/"+tc.name, func(t *testing.T) {
+				db := newTestDB(t)
+				targetBlock := testIndexedBlock(1500, 1, 0x15)
+				require.NoError(t, db.BlockCreate(targetBlock, nil))
+				if tc.cursor != "" {
+					require.NoError(
+						t,
+						db.SetSyncState(HistoryExpiryCursorSyncKey, tc.cursor, nil),
+					)
+				}
+				point := ocommon.Point{Slot: 1500, Hash: targetBlock.Hash}
+				require.NoError(t, rb.rollback(db, point))
+				got, err := db.GetSyncState(HistoryExpiryCursorSyncKey, nil)
+				require.NoError(t, err)
+				require.Equal(t, tc.want, got)
+			})
+		}
 	}
 }

@@ -769,9 +769,11 @@ Local restore copies the two manifest-declared payloads into a private temporary
 directory, bounded by their declared sizes, and verifies and consumes those
 copies. Replacing a source pathname after verification cannot change the bytes
 restored. Cloud downloads reject existing output paths and propagate transfer
-completion errors. `TruncateAfterSlot` resets the history-expiry cursor in its
-metadata transaction so rollback replay below the old cursor is scanned again;
-an expiry failure ends the current round before any later block is processed.
+completion errors. `TruncateAfterSlot` and `RollbackMetadataAfterSlot` lower
+the history-expiry cursor to the rollback point in their metadata transaction,
+since replay stores blocks only above it; a cursor already at or below the point
+is left alone, so a routine rollback does not restart the scan at slot 0. An
+expiry failure ends the current round before any later block is processed.
 
 `database/lifecycle/cloud_destination_credentials_test.go` (`dingo_extra_plugins`) exercises both real implementations end to end — upload, list, fetch-manifest, download+restore, delete — against a real bucket, skipping outright when no credentials are configured (`DINGO_TEST_S3_BUCKET`/`DINGO_TEST_GCS_BUCKET`, the same convention `internal/integration/storage_migration_test.go` already uses for the blob-store plugins); CI's MinIO service exercises the S3 half for real via `AWS_ENDPOINT`. Before this, only the generic orchestration logic (`SnapshotToCloud`/`ListCloudSnapshots`/etc.) had test coverage, against a fake `CloudDestination` — the real S3/GCS client code itself had none.
 
@@ -2757,8 +2759,9 @@ older than the ledger stability window:
   `history_expiry_cursor`: the slot every earlier block has already been expired
   through. Each round scans from that slot instead of slot 0, so its cost follows
   the newly eligible blocks rather than every tombstone earlier rounds left. The
-  cursor stops at the first block whose expiry fails so that block is retried, and
-  `lifecycle.Truncate` deletes it because truncation can remove blocks below it.
+  cursor stops at the first block whose expiry fails so that block is retried.
+  A rollback or `lifecycle.Truncate` lowers it to the target slot when it lies
+  above it, because replay stores new blocks only above the target.
 - Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries.
   SQL metadata rows also remain. Blob readers return `types.ErrHistoryExpired`
   with the slot/hash. Without an archive wrapper this is the final read error;
