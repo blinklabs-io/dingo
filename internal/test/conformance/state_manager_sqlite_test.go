@@ -475,9 +475,10 @@ func TestSqliteResetterExcludesInternalAndMigrationTables(t *testing.T) {
 }
 
 // TestSqliteResetterClearsDespiteForeignKeys pins deletion working regardless
-// of parent/child ordering. Postgres gets this from TRUNCATE ... CASCADE;
-// SQLite has no CASCADE on DELETE, so the resetter's own connection must not
-// enforce foreign keys.
+// of parent/child ordering. Postgres gets this from clearing every table in one
+// statement and MySQL from disabling FOREIGN_KEY_CHECKS for its delete
+// transaction; SQLite has no CASCADE on DELETE, so the resetter's own
+// connection must not enforce foreign keys.
 func TestSqliteResetterClearsDespiteForeignKeys(t *testing.T) {
 	// Names chosen so listSqliteConformanceTables' ORDER BY name yields the
 	// referenced table first: deleting a_parent while z_child still

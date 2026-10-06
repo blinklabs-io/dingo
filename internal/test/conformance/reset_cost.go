@@ -118,12 +118,14 @@ type backendResetter struct {
 // probeStatement returns the prepared form of the non-empty probe query,
 // compiling it at most once per distinct query text.
 //
-// Preparing matters because the probe's text is one UNION ALL branch per
-// managed table -- 91 of them here -- and every Reset re-sent it. Almost all
-// of its cost is compiling that text, not running it: measured over 200 calls
-// against a migrated conformance database, 1.33ms ad hoc against 0.07ms
-// prepared, and 31.78ms against 2.20ms under -race, where the compiler is
-// instrumented Go in modernc.org/sqlite.
+// Preparing matters because the probe is one UNION ALL branch per managed
+// table, split into batches of at most nonEmptyTablesBatchSize -- six
+// statements for the 91 tables here -- and every Reset re-sent all of them.
+// Almost all of their cost is compiling that text, not running it: measured
+// over 200 resets against a migrated SQLite conformance database, the six
+// batches took 0.81ms ad hoc against 0.07ms prepared, and 28.6ms against
+// 1.87ms under -race, where the compiler is instrumented Go in
+// modernc.org/sqlite.
 //
 // The table list is discovered once and cannot change afterwards, so in
 // practice this compiles one statement per batch; keying by text still gives
