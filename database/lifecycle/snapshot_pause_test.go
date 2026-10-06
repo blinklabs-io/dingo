@@ -21,6 +21,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -374,6 +375,55 @@ func TestSnapshotRecordsCommitPauseAndBytesMetrics(t *testing.T) {
 		"blob":     float64(m.BlobBytes),
 		"metadata": float64(m.MetadataBytes),
 	}, got)
+}
+
+func TestSnapshotCommitPauseMetricExcludesBarrierWait(t *testing.T) {
+	t.Parallel()
+
+	reg := prometheus.NewRegistry()
+	hooks := &backupHooks{
+		blob: func(_ context.Context, w io.Writer) error {
+			_, err := w.Write([]byte("blob"))
+			return err
+		},
+		metadata: func(_ context.Context, dst string) error {
+			return os.WriteFile(dst, []byte("metadata"), 0o600)
+		},
+	}
+	db := newHookedDB(t, reg, hooks)
+	dir := filepath.Join(t.TempDir(), "snap")
+	resume, err := db.PauseCommitsContext(t.Context())
+	require.NoError(t, err)
+	var resumeOnce sync.Once
+	resumeBarrier := func() { resumeOnce.Do(resume) }
+	started := time.Now()
+	timer := time.AfterFunc(300*time.Millisecond, resumeBarrier)
+	defer func() {
+		timer.Stop()
+		resumeBarrier()
+	}()
+
+	_, err = snapshotAt(
+		t.Context(), db, dir,
+		lifecycle.WithMaxCommitPause(150*time.Millisecond),
+	)
+	elapsed := time.Since(started)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, elapsed, 250*time.Millisecond)
+
+	pause := gatherFamily(t, reg, "dingo_snapshot_commit_pause_seconds")
+	require.NotNil(t, pause)
+	var success *dto.Histogram
+	for _, mt := range pause.GetMetric() {
+		if metricLabel(mt, "result") == "ok" {
+			success = mt.GetHistogram()
+			break
+		}
+	}
+	require.NotNil(t, success)
+	require.Equal(t, uint64(1), success.GetSampleCount())
+	require.Positive(t, success.GetSampleSum())
+	require.Less(t, success.GetSampleSum(), elapsed.Seconds())
 }
 
 func TestSnapshotRecordsPauseResultOnFailure(t *testing.T) {
