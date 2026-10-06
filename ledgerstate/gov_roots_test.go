@@ -160,3 +160,25 @@ func TestImportLedgerStateResumeVerifiesPurposeRoots(t *testing.T) {
 	err = ImportLedgerState(context.Background(), cfg)
 	require.ErrorContains(t, err, "is not an enacted governance proposal")
 }
+
+// A GovRelation that fails to decode leaves PrevGovActionIds nil, so the
+// resumed check must reject the parse error rather than read it as a
+// snapshot with no roots.
+func TestImportLedgerStateResumeRejectsUndecodableRoots(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	cfg := govImportConfigForTest(db, govStateWithEncodedRoots(
+		t, []any{[]any{}, []any{}, []any{}}, false, nil, nil,
+	))
+	cfg.ImportKey = "resume-undecodable-roots"
+	cfg.State.Tip = &SnapshotTip{
+		Slot:      50_000,
+		BlockHash: bytes.Repeat([]byte{0x44}, 32),
+	}
+	require.NoError(t, setCheckpoint(cfg, models.ImportPhaseGovState))
+
+	err = ImportLedgerState(context.Background(), cfg)
+	require.ErrorContains(t, err, "GovRelation has 3 elements")
+}

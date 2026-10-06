@@ -4106,6 +4106,14 @@ func verifyImportedPurposeRoots(cfg ImportConfig) error {
 		}
 		return nil
 	}
+	// A GovRelation that fails to decode leaves PrevGovActionIds nil, which
+	// would otherwise read as a snapshot with no roots.
+	if govState.ImportParseError != nil {
+		return fmt.Errorf(
+			"parsing governance state: %w",
+			govState.ImportParseError,
+		)
+	}
 	if govState.PrevGovActionIds == nil {
 		return nil
 	}
