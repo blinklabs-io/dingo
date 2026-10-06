@@ -283,6 +283,7 @@ jobs:
           ./database/plugin/metadata/sqlstore
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
+          ./internal/node
           -timeout 10m
       - name: go-test-live-lifecycle
         run: make test-live-lifecycle
