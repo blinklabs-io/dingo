@@ -999,9 +999,7 @@ func TestRunTestsLeiosRejectsIncompatibleModes(t *testing.T) {
 		{"--leios", "-run", "TestAnything"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			result := runFakeDevnetWithEnv(t, 0, false, map[string]string{
-				"DEVNET_NET_BASE": "172.30.99",
-			}, args...)
+			result := runFakeDevnet(t, 0, false, args...)
 			require.NotZero(t, result.exitCode, result.output)
 			require.NotContains(t, result.dockerLog, " up -d")
 		})
@@ -1142,10 +1140,6 @@ func runFakeDevnetScript(
 
 	root := repoRootDir(t)
 	tempRoot := t.TempDir()
-	require.NoError(
-		t,
-		os.WriteFile(filepath.Join(tempRoot, "docker.log"), nil, 0o600),
-	)
 	// A fail-before run intentionally leaves a read-only directory behind.
 	// Restore owner permissions before testing.TempDir performs final cleanup.
 	t.Cleanup(func() {
