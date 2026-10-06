@@ -15,10 +15,13 @@
 package docsparity_test
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestReleaseTagValidation(t *testing.T) {
@@ -84,5 +87,102 @@ func TestPrivilegedReleaseJobsNeedValidatedTag(t *testing.T) {
 		"needs: [finalize-release, validate-release-tag]",
 	); got != 2 {
 		t.Errorf("validated release-tag dependency count = %d, want 2", got)
+	}
+}
+
+func TestReleaseConsumerUpdateFailsClosed(t *testing.T) {
+	t.Parallel()
+	script := releaseConsumerUpdateScript(t)
+
+	t.Run("missing cardano-up template", func(t *testing.T) {
+		dir := t.TempDir()
+		requireTestDir(t, filepath.Join(dir, "consumer/packages/dingo"))
+		output, err := runConsumerUpdate(t, dir, script, "cardano-up")
+		if err == nil {
+			t.Fatalf("consumer update unexpectedly succeeded: %s", output)
+		}
+		if !strings.Contains(string(output), "No dingo package templates found") {
+			t.Fatalf("consumer update error = %q", output)
+		}
+	})
+
+	t.Run("invalid chart version", func(t *testing.T) {
+		dir := t.TempDir()
+		chart := filepath.Join(dir, "consumer/charts/dingo/Chart.yaml")
+		values := filepath.Join(dir, "consumer/charts/dingo/values.yaml")
+		requireTestFile(t, chart, "version: invalid\nappVersion: \"0.1.0\"\n")
+		requireTestFile(t, values, "image:\n  tag: \"0.1.0\"\n")
+		output, err := runConsumerUpdate(t, dir, script, "helm")
+		if err == nil {
+			t.Fatalf("consumer update unexpectedly succeeded: %s", output)
+		}
+		if !strings.Contains(string(output), "Unsupported chart version") {
+			t.Fatalf("consumer update error = %q", output)
+		}
+		if got := readRepoFile(t, dir, "consumer/charts/dingo/Chart.yaml"); strings.Contains(got, "version: ..1") {
+			t.Fatalf("invalid chart version was rewritten: %q", got)
+		}
+	})
+
+	t.Run("chart version increment", func(t *testing.T) {
+		dir := t.TempDir()
+		chart := filepath.Join(dir, "consumer/charts/dingo/Chart.yaml")
+		values := filepath.Join(dir, "consumer/charts/dingo/values.yaml")
+		requireTestFile(t, chart, "version: 0.3.2\nappVersion: \"0.1.0\"\n")
+		requireTestFile(t, values, "image:\n  tag: \"0.1.0\"\n")
+		output, err := runConsumerUpdate(t, dir, script, "helm")
+		if err != nil {
+			t.Fatalf("consumer update: %v: %s", err, output)
+		}
+		if got := readRepoFile(t, dir, "consumer/charts/dingo/Chart.yaml"); got != "version: 0.3.3\nappVersion: \"1.2.3\"\n" {
+			t.Fatalf("updated Chart.yaml = %q", got)
+		}
+	})
+}
+
+func releaseConsumerUpdateScript(t *testing.T) string {
+	t.Helper()
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal(
+		[]byte(readRepoFile(t, repoRoot(t), publishWorkflow)),
+		&workflow,
+	); err != nil {
+		t.Fatalf("parse %s: %v", publishWorkflow, err)
+	}
+	for _, step := range workflow.Jobs["update-consumers"].Steps {
+		if step.Name == "Update consumer version" {
+			return step.Run
+		}
+	}
+	t.Fatal("update-consumers has no version update step")
+	return ""
+}
+
+func runConsumerUpdate(
+	t *testing.T,
+	dir, script, kind string,
+) ([]byte, error) {
+	t.Helper()
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"CONSUMER_KIND="+kind,
+		"PACKAGE_VERSION=1.2.3",
+	)
+	return cmd.CombinedOutput()
+}
+
+func requireTestDir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func requireTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	requireTestDir(t, filepath.Dir(path))
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
