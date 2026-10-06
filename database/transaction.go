@@ -395,7 +395,11 @@ func (d *Database) SetTransactionWithOpts(
 		if !opts.SkipConsumedInputRecovery {
 			return errors.New("ledger context requires a prototype closure")
 		}
-		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot, txn.Metadata())
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(
+			tx, point, idx, certDeposits,
+			opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot,
+			txn.Metadata(), opts.ProtocolMajor,
+		)
 	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,

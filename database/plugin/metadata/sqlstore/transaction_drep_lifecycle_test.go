@@ -807,3 +807,36 @@ func TestDrepDeregistrationEffectsPreserveTaggedStateAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ratifiedVotes, 1)
 }
+
+func TestLeiosClosureInContextAppliesDRepDelegation(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	drepCredential := bytes.Repeat([]byte{0x59}, 28)
+	stakeCredential := bytes.Repeat([]byte{0x5a}, 28)
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    stakeCredential,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		CreatedSlot:   10,
+		Active:        true,
+	}, nil))
+	tx := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.VoteDelegationCertificate{
+			CertType:        uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{CredType: 0, Credential: common.NewBlake2b224(stakeCredential)},
+			Drep:            common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drepCredential},
+		},
+	)
+	tx.WithId(bytes.Repeat([]byte{0x5b}, 32))
+	tx.WithValid(true)
+	point := ocommon.Point{Slot: 20, Hash: tx.Hash().Bytes()}
+
+	require.NoError(t, store.SetTransactionLeiosClosureInContext(
+		tx, point, 0, nil, false, 19, nil, 10,
+	))
+	account, err := store.GetAccountByCredential(0, stakeCredential, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, drepCredential, account.Drep)
+}

@@ -264,11 +264,23 @@ func (s *Store) SetTransactionLeiosClosure(
 
 // SetTransactionLeiosClosureInContext records the execution context before
 // certificates are applied, so epoch-dependent effects use the unticked state.
-func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn) error {
+func (s *Store) SetTransactionLeiosClosureInContext(
+	transaction lcommon.Transaction,
+	point ocommon.Point,
+	index uint32,
+	certDeposits map[int]uint64,
+	skipWithdrawalWitness bool,
+	slot uint64,
+	txn types.Txn,
+	protocolMajor ...uint64,
+) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
-	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn)
+	return s.setTransactionWithAccumulator(
+		transaction, point, index, certDeposits, skipWithdrawalWitness,
+		false, true, nil, &slot, txn, protocolMajor...,
+	)
 }
 
 func (s *Store) setTransaction(
