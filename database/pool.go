@@ -235,6 +235,20 @@ func (d *Database) GetActivePoolRelays(
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
 }
 
+// GetStakeByPools returns delegated stake for multiple pools in a single
+// query: pool key hash (as a string) to total stake, and to delegator count.
+// A pool with no delegation maps to zero.
+func (d *Database) GetStakeByPools(
+	poolKeyHashes [][]byte,
+	txn *Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetStakeByPools(poolKeyHashes, txn.Metadata())
+}
+
 // GetActivePoolKeyHashes returns the key hashes of all currently active
 // (registered, non-retired) stake pools. This backs the GetStakePools
 // local-state-query.

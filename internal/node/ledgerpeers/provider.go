@@ -61,6 +61,11 @@ func toPeerGovRelays(relays []ledger.PoolRelay) []peergov.PoolRelay {
 			Port:     relay.Port,
 			IPv4:     copyIP(relay.IPv4),
 			IPv6:     copyIP(relay.IPv6),
+
+			PoolKeyHash: append([]byte(nil), relay.PoolKeyHash...),
+			Stake:       relay.Stake,
+			StakeKnown:  relay.StakeKnown,
+			IsMultiHost: relay.IsMultiHost,
 		}
 	}
 	return result
