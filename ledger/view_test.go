@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -3515,6 +3516,7 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		_ func(func() error) (bool, error),
 	) error {
 		return validate(tx, nil, nil, nil)
 	})
@@ -3522,6 +3524,78 @@ func TestWithTxValidationSessionSurfacesStorageFaultOverNilVerdict(
 	require.Error(t, err)
 	require.ErrorIs(t, err, stubErr)
 	require.ErrorIs(t, err, ErrLedgerViewStorageFault)
+}
+
+func TestTxValidationCommitExcludesLedgerPublication(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := newFakeEraLedgerState(db, nil, nil)
+	before, _ := ls.loadStateSnapshots()
+
+	err = ls.WithTxValidationSession(func(
+		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+		_ func() bool,
+		commitIfCurrent func(func() error) (bool, error),
+	) error {
+		writerAttempted := make(chan struct{})
+		writerDone := make(chan struct{})
+		committed, commitErr := commitIfCurrent(func() error {
+			go func() {
+				ls.Lock()
+				close(writerAttempted)
+				ls.publishSnapshotsLocked()
+				ls.Unlock()
+				close(writerDone)
+			}()
+			<-writerAttempted
+			select {
+			case <-writerDone:
+				t.Fatal("ledger publication completed inside guarded commit")
+			default:
+			}
+			return nil
+		})
+		require.NoError(t, commitErr)
+		require.True(t, committed)
+		<-writerDone
+		return nil
+	})
+	require.NoError(t, err)
+	after, _ := ls.loadStateSnapshots()
+	require.Equal(t, before.generation+1, after.generation)
+}
+
+func TestTxValidationCommitDoesNotWaitForLedgerWriteLock(t *testing.T) {
+	t.Parallel()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	ls := newFakeEraLedgerState(db, nil, nil)
+
+	ls.Lock()
+	defer ls.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ls.WithTxValidationSession(func(
+			_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
+			_ func() bool,
+			commitIfCurrent func(func() error) (bool, error),
+		) error {
+			committed, commitErr := commitIfCurrent(func() error { return nil })
+			if !committed {
+				return errors.New("validation generation changed")
+			}
+			return commitErr
+		})
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("validation commit waited for ledger write lock")
+	}
 }
 
 // TestLedgerProcessBlockSurfacesStorageFaultOverRuleVerdict drives the

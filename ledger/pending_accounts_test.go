@@ -226,6 +226,7 @@ func TestTxValidationSessionAccountsForPendingWithdrawals(t *testing.T) {
 			*utxoref.StateOverlay,
 		) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 	) error {
 		overlay := utxoref.NewStateOverlay()
 		require.NoError(t, validate(first, nil, nil, overlay))

@@ -1033,6 +1033,13 @@ type LedgerState struct {
 	// snapshotGeneration is incremented while writers are serialized by Lock.
 	// It lets readers that need both snapshots reject adjacent publications.
 	snapshotGeneration uint64
+	// txValidationCommitMutex serializes snapshot publication against the
+	// final generation check and mutation performed by a validation session.
+	// It is separate from LedgerState's main lock because validation sessions
+	// hold a database transaction while committing; taking the main read lock
+	// there can deadlock with a publisher that holds the write lock and needs a
+	// database connection.
+	txValidationCommitMutex sync.RWMutex
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
 	// publish a fresh immutable snapshot before unlocking.
@@ -1899,6 +1906,8 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 // writer-owned fields. Callers must hold ls.Lock, except during construction
 // and single-threaded startup before the LedgerState is made visible.
 func (ls *LedgerState) publishSnapshotsLocked() {
+	ls.txValidationCommitMutex.Lock()
+	defer ls.txValidationCommitMutex.Unlock()
 	ls.snapshotGeneration++
 	generation := ls.snapshotGeneration
 	// Prevent a later append to the writer-owned slice from reusing storage
@@ -12991,9 +13000,9 @@ var (
 
 // WithTxValidationSession pins a mempool revalidation batch to one immutable
 // ledger publication, one validation slot/era/parameter set, and one
-// repeatable-read database transaction. stillCurrent lets the mempool reject
-// the candidate immediately before its atomic swap if a block or rollback
-// published a newer generation while validation was running.
+// repeatable-read database transaction. stillCurrent lets callers abandon
+// stale work early; commitIfCurrent holds the publication read lock across the
+// final generation check and the caller's mutation.
 type txValidationApplyFunc func(
 	tx ledger.Transaction,
 	index int,
@@ -13011,14 +13020,16 @@ func (ls *LedgerState) WithTxValidationSession(
 			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
 	return ls.withTxValidationSession(nil, nil, false, func(
 		validate func(ledger.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 		_ txValidationApplyFunc,
 	) error {
-		return fn(validate, stillCurrent)
+		return fn(validate, stillCurrent, commitIfCurrent)
 	})
 }
 
@@ -13034,6 +13045,7 @@ func (ls *LedgerState) withTxValidationSession(
 			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error,
 ) error {
@@ -13117,6 +13129,14 @@ func (ls *LedgerState) withTxValidationSession(
 			return currentConsensus.generation == snapshot.generation &&
 				currentTip.generation == snapshot.generation
 		}
+		commitIfCurrent := func(commit func() error) (bool, error) {
+			ls.txValidationCommitMutex.RLock()
+			defer ls.txValidationCommitMutex.RUnlock()
+			if !stillCurrent() {
+				return false, nil
+			}
+			return true, commit()
+		}
 		applyTx := func(
 			tx ledger.Transaction,
 			index int,
@@ -13148,7 +13168,7 @@ func (ls *LedgerState) withTxValidationSession(
 			}
 			return delta.applyWithoutRecordingDonations(ls, txn)
 		}
-		if err := fn(validate, stillCurrent, applyTx); err != nil {
+		if err := fn(validate, stillCurrent, commitIfCurrent, applyTx); err != nil {
 			return err
 		}
 		return rollbackValidationSession
@@ -13209,6 +13229,7 @@ func (ls *LedgerState) ValidateLeiosEndorserBlockTransactions(
 				accounts *utxoref.StateOverlay,
 			) error,
 			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
 			applyTx txValidationApplyFunc,
 		) error {
 			consumed := make(map[utxoref.Key]struct{}, len(txs)*2)

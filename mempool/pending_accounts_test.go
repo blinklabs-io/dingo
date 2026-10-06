@@ -156,9 +156,15 @@ func (v *balanceValidator) WithTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	return fn(v.ValidateTxWithOverlay, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(
+		v.ValidateTxWithOverlay,
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
 }
 
 func newWithdrawalPool(
@@ -527,6 +533,7 @@ func (v *overlappingRebuildValidator) WithTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	// The first validation session is the initial admission. The next session
@@ -539,7 +546,12 @@ func (v *overlappingRebuildValidator) WithTxValidationSession(
 			v.missedOverlap.Store(true)
 		}
 	}
-	return fn(v.balanceValidator.ValidateTxWithOverlay, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(
+		v.balanceValidator.ValidateTxWithOverlay,
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
 }
 
 func TestConcurrentAdmissionsReconcileThePoolOnce(t *testing.T) {

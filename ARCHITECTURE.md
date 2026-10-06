@@ -6441,11 +6441,14 @@ way, and its descendants are judged against the ledger without its outputs.
 `LedgerState.WithTxValidationSession` is the narrow boundary for every backend
 rebuild. It pins one published ledger generation (tip, era, and protocol
 parameters), one validation reference slot, and one repeatable-read
-metadata/blob transaction for every transaction in the batch. The mempool
-verifies that generation again immediately before the swap; if a block or
-rollback published a newer one, the candidate is discarded and retried from
-the live pool. This prevents one FIFO or DAG candidate from mixing transaction
-results from different ledger or database views.
+metadata/blob transaction for every transaction in the batch.
+The session's commit callback adds the mempool commit boundary: the ledger
+publication read lock covers the final generation check and only the admission
+or candidate swap that follows it. A block or rollback therefore publishes
+either before the check, causing the admission or candidate to retry, or after
+the mempool commit, when its chain update can revalidate that committed state.
+This prevents an admission or FIFO or DAG candidate from surviving with a
+verdict from an older ledger or database view.
 
 CBOR decoding and ledger validation run without the primary pool RW lock or
 consumer lock. `Transactions` likewise snapshots transaction values under the

@@ -1296,10 +1296,16 @@ func (v *fifoRevalidationBenchmarkValidator) WithTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
 	v.once.Do(func() { close(v.started) })
-	return fn(v.ValidateTxWithOverlay, func() bool { return true })
+	stillCurrent := func() bool { return true }
+	return fn(
+		v.ValidateTxWithOverlay,
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
+	)
 }
 
 func BenchmarkFIFOAdmissionNoRevalidation(b *testing.B) {

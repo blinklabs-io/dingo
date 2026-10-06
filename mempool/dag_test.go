@@ -119,14 +119,17 @@ func (v *oneShotBlockingValidator) WithTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
 	generation := v.generation.Load()
+	stillCurrent := func() bool {
+		return v.generation.Load() == generation
+	}
 	return fn(
 		v.ValidateTxWithOverlay,
-		func() bool {
-			return v.generation.Load() == generation
-		},
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
 	)
 }
 

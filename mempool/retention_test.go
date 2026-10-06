@@ -327,8 +327,10 @@ func retainedSize(t *testing.T, txBytes []byte) int64 {
 // first revalidation pass runs: that pass sees the old ledger and is then
 // reported stale, and every later pass sees the parent confirmed.
 type confirmingSessionValidator struct {
-	parentHash string
-	sessions   atomic.Int32
+	parentHash     string
+	sessions       atomic.Int32
+	confirmOnCheck atomic.Bool
+	confirmed      atomic.Bool
 }
 
 func (v *confirmingSessionValidator) ValidateTx(gledger.Transaction) error {
@@ -353,9 +355,20 @@ func (v *confirmingSessionValidator) WithTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		func() bool,
+		func(func() error) (bool, error),
 	) error,
 ) error {
-	confirmed := v.sessions.Add(1) > 1
+	confirmed := v.confirmed.Load()
+	if v.confirmOnCheck.Load() || confirmed {
+		v.sessions.Add(1)
+	}
+	stillCurrent := func() bool {
+		if v.confirmOnCheck.CompareAndSwap(true, false) {
+			v.confirmed.Store(true)
+			return false
+		}
+		return v.confirmed.Load() == confirmed
+	}
 	return fn(
 		func(
 			tx gledger.Transaction,
@@ -368,7 +381,8 @@ func (v *confirmingSessionValidator) WithTxValidationSession(
 			}
 			return nil
 		},
-		func() bool { return confirmed },
+		stillCurrent,
+		testCommitIfCurrent(stillCurrent),
 	)
 }
 
@@ -408,6 +422,7 @@ func TestRevalidationKeepsDescendantWhenParentConfirmedMidPass(t *testing.T) {
 			require.NoError(t, pool.AddTransaction(txType, parentBytes))
 			require.NoError(t, pool.AddTransaction(txType, childBytes))
 
+			validator.confirmOnCheck.Store(true)
 			require.NoError(t, pool.rebuildOverlay())
 
 			require.EqualValues(t, 2, validator.sessions.Load())

@@ -129,6 +129,7 @@ type TxValidationSessionProvider interface {
 	WithTxValidationSession(func(
 		validate TxValidationFunc,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error) error
 }
 
@@ -163,7 +164,13 @@ func withTxValidationSession(
 	fn func(TxValidationFunc, func() bool) error,
 ) error {
 	if provider, ok := validator.(TxValidationSessionProvider); ok {
-		return provider.WithTxValidationSession(fn)
+		return provider.WithTxValidationSession(func(
+			validate TxValidationFunc,
+			stillCurrent func() bool,
+			_ func(func() error) (bool, error),
+		) error {
+			return fn(validate, stillCurrent)
+		})
 	}
 	return fn(validator.ValidateTxWithOverlay, func() bool { return true })
 }

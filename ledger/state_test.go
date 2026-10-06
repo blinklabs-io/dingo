@@ -6243,6 +6243,7 @@ func TestLeiosValidationSessionRollsBackStagedCertificateWrites(t *testing.T) {
 	err = ls.withTxValidationSession(nil, nil, true, func(
 		_ func(lcommon.Transaction, map[utxoref.Key]struct{}, map[utxoref.Key]lcommon.Utxo, *utxoref.StateOverlay) error,
 		_ func() bool,
+		_ func(func() error) (bool, error),
 		applyTx txValidationApplyFunc,
 	) error {
 		return applyTx(

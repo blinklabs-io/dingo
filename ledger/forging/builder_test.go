@@ -4328,6 +4328,7 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		_ func(func() error) (bool, error),
 	) error,
 ) error {
 	v.sessions++
@@ -4357,7 +4358,13 @@ func (v *sessionMockTxValidator) WithTxValidationSession(
 		return nil
 	}
 	stillCurrent := func() bool { return !stale }
-	return fn(validate, stillCurrent)
+	commitIfCurrent := func(commit func() error) (bool, error) {
+		if !stillCurrent() {
+			return false, nil
+		}
+		return true, commit()
+	}
+	return fn(validate, stillCurrent, commitIfCurrent)
 }
 
 var (

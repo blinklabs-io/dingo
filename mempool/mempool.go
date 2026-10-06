@@ -153,6 +153,7 @@ type TxValidationSessionProvider interface {
 			accounts *utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error) error
 }
 
@@ -1198,6 +1199,7 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error {
 		candidate := newRevalidationCandidate()
 		for _, at := range base {
@@ -1252,50 +1254,56 @@ func (m *Mempool) rebuildOverlayAttempt() ([]event.Event, error) {
 					return errValidationSnapshotChanged
 				}
 
-				m.Lock()
-				if m.stopped {
+				committed, err := commitIfCurrent(func() error {
+					m.Lock()
+					if m.stopped {
+						m.Unlock()
+						return ErrMempoolStopped
+					}
+					m.consumersMutex.Lock()
+					for _, consumer := range m.consumers {
+						consumer.nextTxIdxMu.Lock()
+						oldIdx := min(consumer.nextTxIdx, len(liveOrder))
+						consumer.nextTxIdx = prefixValid[oldIdx]
+						consumer.nextTxIdxMu.Unlock()
+					}
+					if m.eventBus != nil {
+						for _, hash := range invalidHashes {
+							events = append(events, event.NewEvent(
+								RemoveTransactionEventType,
+								RemoveTransactionEvent{Hash: hash},
+							))
+						}
+					}
+					m.overlay = candidate.overlay
+					m.transactions = candidate.transactions
+					m.txByHash = candidate.txByHash
+					m.currentSizeBytes = candidate.sizeBytes
+					if m.dag != nil {
+						m.dag.rebuild(candidate.overlay.applied)
+					}
+					m.notifyHeadroomChangedLocked()
+					m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
+					m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
+					m.consumersMutex.Unlock()
 					m.Unlock()
+					return nil
+				})
+				if !committed || err != nil {
 					m.journalActive = false
 					m.mutationJournal = nil
 					m.journalOverflow = false
 					m.mutationMutex.Unlock()
-					return ErrMempoolStopped
-				}
-				m.consumersMutex.Lock()
-				for _, consumer := range m.consumers {
-					consumer.nextTxIdxMu.Lock()
-					oldIdx := min(consumer.nextTxIdx, len(liveOrder))
-					consumer.nextTxIdx = prefixValid[oldIdx]
-					consumer.nextTxIdxMu.Unlock()
-				}
-				if m.eventBus != nil {
-					for _, hash := range invalidHashes {
-						events = append(events, event.NewEvent(
-							RemoveTransactionEventType,
-							RemoveTransactionEvent{Hash: hash},
-						))
+					if err != nil {
+						return err
 					}
+					return errValidationSnapshotChanged
 				}
-				m.overlay = candidate.overlay
-				m.transactions = candidate.transactions
-				m.txByHash = candidate.txByHash
-				m.currentSizeBytes = candidate.sizeBytes
-				if m.dag != nil {
-					m.dag.rebuild(candidate.overlay.applied)
-				}
-				m.notifyHeadroomChangedLocked()
-				m.metrics.txsInMempool.Set(float64(len(candidate.transactions)))
-				m.metrics.mempoolBytes.Set(float64(candidate.sizeBytes))
-				m.consumersMutex.Unlock()
-				m.Unlock()
 				m.journalActive = false
 				m.mutationJournal = nil
 				m.journalOverflow = false
 				if len(invalidHashes) > 0 {
-					removed := make(
-						map[string]struct{},
-						len(invalidHashes),
-					)
+					removed := make(map[string]struct{}, len(invalidHashes))
 					for _, hash := range invalidHashes {
 						removed[hash] = struct{}{}
 					}
@@ -1462,12 +1470,17 @@ func (m *Mempool) withTxValidationSession(
 			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error,
 ) error {
 	if provider, ok := m.validator.(TxValidationSessionProvider); ok {
 		return provider.WithTxValidationSession(fn)
 	}
-	return fn(m.validator.ValidateTxWithOverlay, func() bool { return true })
+	return fn(
+		m.validator.ValidateTxWithOverlay,
+		func() bool { return true },
+		func(commit func() error) (bool, error) { return true, commit() },
+	)
 }
 
 // expireTransactions periodically removes transactions that have
@@ -1662,6 +1675,7 @@ func (m *Mempool) addTransactionAttempt(
 			*utxoref.StateOverlay,
 		) error,
 		stillCurrent func() bool,
+		commitIfCurrent func(func() error) (bool, error),
 	) error {
 		// Serialize mutations without blocking snapshot readers during ledger
 		// validation. This gate also guarantees the overlay used for validation
@@ -1742,52 +1756,61 @@ func (m *Mempool) addTransactionAttempt(
 			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
 
-		m.Lock()
-		m.consumersMutex.Lock()
-		defer func() {
-			m.consumersMutex.Unlock()
-			m.Unlock()
-		}()
-		if needsEviction {
-			evictedEvents = m.evictOldestLocked(targetBytes)
-		}
-		txCbor := slices.Clone(txBytes)
-		m.overlay.applyTx(txHash, txType, tmpTx, txCbor)
-		added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
-		if m.dag != nil {
-			applied := m.overlay.applied[len(m.overlay.applied)-1]
-			m.dag.add(applied)
-		}
-		tx := &MempoolTransaction{
-			Hash:        txHash,
-			Type:        txType,
-			Cbor:        txCbor,
-			LastSeen:    time.Now(),
-			outputBytes: outputBytes,
-		}
-		m.transactions = append(m.transactions, tx)
-		m.txByHash[txHash] = tx
-		m.currentSizeBytes += txSize
-		m.notifyHeadroomChangedLocked()
-		m.logger.Debug(
-			"added transaction",
-			"component", "mempool",
-			"tx_hash", txHash,
-		)
-		m.metrics.txsProcessedNum.Inc()
-		m.metrics.txsInMempool.Inc()
-		m.metrics.mempoolBytes.Add(float64(txSize))
-		m.recordMutationLocked(mempoolMutation{added: &added, addedTx: tx})
-		if m.eventBus != nil {
-			evt := event.NewEvent(
-				AddTransactionEventType,
-				AddTransactionEvent{
-					Hash: txHash,
-					Type: txType,
-					Body: slices.Clone(txBytes),
-				},
+		committed, err := commitIfCurrent(func() error {
+			m.Lock()
+			m.consumersMutex.Lock()
+			defer func() {
+				m.consumersMutex.Unlock()
+				m.Unlock()
+			}()
+			if needsEviction {
+				evictedEvents = m.evictOldestLocked(targetBytes)
+			}
+			txCbor := slices.Clone(txBytes)
+			m.overlay.applyTx(txHash, txType, tmpTx, txCbor)
+			added := cloneAppliedTx(m.overlay.applied[len(m.overlay.applied)-1])
+			if m.dag != nil {
+				applied := m.overlay.applied[len(m.overlay.applied)-1]
+				m.dag.add(applied)
+			}
+			tx := &MempoolTransaction{
+				Hash:        txHash,
+				Type:        txType,
+				Cbor:        txCbor,
+				LastSeen:    time.Now(),
+				outputBytes: outputBytes,
+			}
+			m.transactions = append(m.transactions, tx)
+			m.txByHash[txHash] = tx
+			m.currentSizeBytes += txSize
+			m.notifyHeadroomChangedLocked()
+			m.logger.Debug(
+				"added transaction",
+				"component", "mempool",
+				"tx_hash", txHash,
 			)
-			addEvent = &evt
+			m.metrics.txsProcessedNum.Inc()
+			m.metrics.txsInMempool.Inc()
+			m.metrics.mempoolBytes.Add(float64(txSize))
+			m.recordMutationLocked(mempoolMutation{added: &added, addedTx: tx})
+			if m.eventBus != nil {
+				evt := event.NewEvent(
+					AddTransactionEventType,
+					AddTransactionEvent{
+						Hash: txHash,
+						Type: txType,
+						Body: slices.Clone(txBytes),
+					},
+				)
+				addEvent = &evt
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if !committed {
+			return errPendingStateMoved
 		}
 		return nil
 	})
