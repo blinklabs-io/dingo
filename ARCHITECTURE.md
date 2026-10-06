@@ -1660,11 +1660,13 @@ Phase 4: Cleanup resources
 ```
 
 The phase-1 components enumerated by `shutdownPhase1ComponentStops` each
-wait for a goroutine to exit with no deadline of their own. That list is the
-two context-owned workers followed by `quiesceComponentStops`, the set
-`quiesceForLiveLifecycleOp` stops before live restore/truncate closes storage,
-so both paths stop the same storage-facing components. Each wait is routed
-through `stopWithDeadline` with whatever remains of the one shutdown deadline,
+wait for a goroutine to exit with no deadline of their own. That list starts
+with the two context-owned workers, continues with `quiesceComponentStops`,
+the set `quiesceForLiveLifecycleOp` stops before live restore/truncate closes
+storage, and ends with a full Ouroboros close. The close drains the Leios
+persistence writer and retention worker, detaches EventBus subscriptions and
+Prometheus collectors, and cancels validation work before storage closes.
+Each wait is routed through `stopWithDeadline` with whatever remains of the one shutdown deadline,
 not a fresh timeout per component, so a goroutine that never observes
 `n.cancel()` cannot hold `Node.Stop` past the configured shutdown timeout with
 no observable error. The two workers touch node components only

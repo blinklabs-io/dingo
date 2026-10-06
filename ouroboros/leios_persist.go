@@ -584,12 +584,11 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 }
 
 func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
 	writerDone, writerStarted := o.requestLeiosPersistWriterStop()
 	gcDone, gcStarted := o.requestLeiosPersistenceGCStop()
 	writerStopped := true
 	if writerStarted {
-		writerTimeout := time.Until(deadline)
+		writerTimeout := timeout
 		writerStopped = waitForLeiosPersistWorker(
 			writerDone,
 			writerTimeout,
@@ -600,7 +599,7 @@ func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
 	}
 	gcStopped := true
 	if gcStarted {
-		gcTimeout := time.Until(deadline)
+		gcTimeout := timeout
 		gcStopped = waitForLeiosPersistWorker(gcDone, gcTimeout)
 		if gcStopped {
 			o.leiosPersistGCStarted.Store(false)
