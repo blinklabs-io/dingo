@@ -103,6 +103,7 @@ func TestLocalTxSubmissionInfrastructureErrorsStayGeneric(t *testing.T) {
 		mempool.ErrNilValidator,
 		fmt.Errorf("wrapped: %w", mempool.ErrMempoolStopped),
 		&mempool.MempoolFullError{CurrentSize: 10, TxSize: 2, Capacity: 10},
+		fmt.Errorf("validate transaction: %w", mempool.ErrPendingStateMoved),
 	} {
 		require.True(t, isLocalTxSubmissionInfrastructureError(err))
 		rejectErr := localTxSubmissionRejectReason(gledger.EraIdConway, err)

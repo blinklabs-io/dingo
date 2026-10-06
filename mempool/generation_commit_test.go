@@ -162,3 +162,54 @@ func TestRevalidationCommitRejectsSupersededLedgerGeneration(t *testing.T) {
 	require.NoError(t, pool.rebuildOverlay())
 	require.Empty(t, pool.Transactions())
 }
+
+// alwaysMovingValidator models a ledger that publishes again before every
+// commit, so no admission attempt can ever commit its verdict.
+type alwaysMovingValidator struct {
+	generationCommitRaceValidator
+}
+
+func (v *alwaysMovingValidator) WithTxValidationSession(
+	fn func(
+		func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]common.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		func() bool,
+		func(func() error) (bool, error),
+	) error,
+) error {
+	return v.session(func(
+		validate func(
+			gledger.Transaction,
+			map[utxoref.Key]struct{},
+			map[utxoref.Key]common.Utxo,
+			*utxoref.StateOverlay,
+		) error,
+		stillCurrent func() bool,
+		_ func(func() error) (bool, error),
+	) error {
+		return fn(validate, stillCurrent, func(func() error) (bool, error) {
+			return false, nil
+		})
+	})
+}
+
+// TestAdmissionReportsUnsettledLedgerAsPendingStateMoved pins that running
+// out of reconcile attempts is reported as ErrPendingStateMoved, which API
+// surfaces classify as unavailability rather than a ledger rejection.
+func TestAdmissionReportsUnsettledLedgerAsPendingStateMoved(t *testing.T) {
+	t.Parallel()
+	pool := newTestMempoolWithValidator(t, &alwaysMovingValidator{})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, pool.Stop(ctx))
+	})
+
+	err := pool.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	require.ErrorIs(t, err, ErrPendingStateMoved)
+	require.Empty(t, pool.Transactions())
+}

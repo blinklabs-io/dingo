@@ -1083,9 +1083,11 @@ const maxRevalidationCatchupRounds = 16
 // because the ledger moved under it.
 const maxAdmissionReconciles = 2
 
-// errPendingStateMoved means an admission validated against a state overlay
-// whose transactions were recorded under an earlier ledger publication.
-var errPendingStateMoved = errors.New(
+// ErrPendingStateMoved is returned by AddTransaction when the ledger kept
+// publishing new state while the transaction was being admitted, so no
+// verdict was reached. It is not a rejection: the same transaction may be
+// admitted once the ledger settles.
+var ErrPendingStateMoved = errors.New(
 	"mempool: ledger moved since pending transactions were validated",
 )
 
@@ -1641,13 +1643,19 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		addEvent, evictedEvents, seen, err = m.addTransactionAttempt(
 			txType, txBytes, tmpTx, txHash,
 		)
-		if !errors.Is(err, errPendingStateMoved) {
+		if !errors.Is(err, ErrPendingStateMoved) {
 			break
 		}
 		if attempt == maxAdmissionReconciles {
-			return fmt.Errorf("validate transaction: %w", errPendingStateMoved)
+			return fmt.Errorf("validate transaction: %w", ErrPendingStateMoved)
 		}
 		if err := m.reconcileOverlay(seen); err != nil {
+			if errors.Is(err, errValidationSnapshotChanged) {
+				return fmt.Errorf(
+					"reconcile pending transactions: %w: %w",
+					ErrPendingStateMoved, err,
+				)
+			}
 			return fmt.Errorf("reconcile pending transactions: %w", err)
 		}
 	}
@@ -1667,7 +1675,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 }
 
 // addTransactionAttempt validates and admits one transaction. On
-// errPendingStateMoved it also returns the overlay it validated against.
+// ErrPendingStateMoved it also returns the overlay it validated against.
 func (m *Mempool) addTransactionAttempt(
 	txType uint,
 	txBytes []byte,
@@ -1760,7 +1768,7 @@ func (m *Mempool) addTransactionAttempt(
 		// Checked before the verdict: a base that already contains some of
 		// the pending transactions yields a wrong verdict either way.
 		if validAccounts.Moved() || !stillCurrent() {
-			return errPendingStateMoved
+			return ErrPendingStateMoved
 		}
 		if validateErr != nil {
 			return fmt.Errorf("validate transaction: %w", validateErr)
@@ -1820,7 +1828,7 @@ func (m *Mempool) addTransactionAttempt(
 			return err
 		}
 		if !committed {
-			return errPendingStateMoved
+			return ErrPendingStateMoved
 		}
 		return nil
 	})

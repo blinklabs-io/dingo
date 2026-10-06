@@ -6500,6 +6500,13 @@ right now rather than that it judged a transaction and declined it, so
 and answers 503 — the same answer its missing-submitter branch already gave —
 instead of reporting the transaction itself as rejected with a 400.
 
+An admission whose ledger publication moves again after each pool rebuild
+stops after a fixed number of reconciles and returns
+`mempool.ErrPendingStateMoved`: no verdict was reached, so the same
+transaction may be admitted once the ledger settles. `api/blockfrost` answers
+it with `ErrMempoolUnavailable`, and LocalTxSubmission reports it as
+unavailability rather than as a ledger failure.
+
 Admission also runs ledger validation, which resolves the transaction's inputs
 through the database, so a storage fault returns from `AddTransaction` on the
 same path as a rule violation. `api/blockfrost` classifies the sentinels the
