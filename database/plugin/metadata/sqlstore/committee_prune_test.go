@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -147,6 +149,33 @@ WHERE cold_credential_tag = ? AND cold_credential = ?`,
 	return count
 }
 
+func newCommitteeMaintenanceTestStore(t *testing.T) *Store {
+	t.Helper()
+	dsn := fmt.Sprintf(
+		"file:committee_maintenance_%d?mode=memory&cache=shared",
+		testStoreSequence.Add(1),
+	)
+	writeDB, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	writeDB.SetMaxOpenConns(1)
+	readDB, err := sql.Open("sqlite", dsn)
+	require.NoError(t, err)
+	readDB.SetMaxOpenConns(1)
+	registry, err := migrations.SQLiteRegistry()
+	require.NoError(t, err)
+	store, err := New(Config{
+		WriteDB:         writeDB,
+		ReadDB:          readDB,
+		Dialect:         SQLiteDialect(),
+		Migrations:      registry,
+		MigrationLocker: migrations.NewProcessLocker(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, store.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	return store
+}
+
 func TestCommitteeHotPruneSelectionUsesOrderedIndex(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -162,6 +191,26 @@ LIMIT ? OFFSET 1`,
 		[]byte{0x01},
 		100,
 		committeeAuthPruneBatch,
+	)
+	require.Contains(
+		t,
+		plan,
+		"idx_auth_committee_hot_cold_credential_prune_order",
+	)
+	require.NotContains(t, plan, "USE TEMP B-TREE FOR ORDER BY")
+}
+
+func TestCommitteeHotMaintenanceCandidatesUseOrderedIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	plan := queryPlan(
+		t,
+		store.readDB,
+		committeeAuthMaintenanceNextCandidatesQuery,
+		preprodTipSlot,
+		uint8(lcommon.CredentialTypeAddrKeyHash),
+		credentialHash(0x01),
+		committeeAuthMaintenanceBatchSize,
 	)
 	require.Contains(
 		t,
@@ -388,16 +437,14 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 	)
 }
 
-// TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the
-// dataset shape observed live -- 35 cold credentials each with a long run
-// of authorizations -- and proves GetActiveCommitteeMembers returns exactly
-// the same tally after pruning as before it. See preprodAuthsPerMember for
-// the full-size measurement.
-func TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale(
+// TestAuthCommitteeHotMaintenanceKeepsTallyAndYieldsWriterAtPreprodScale uses
+// scaled Preprod history to check pruning preserves committee reads and lets a
+// waiting writer acquire the single SQLite connection between delete batches.
+func TestAuthCommitteeHotMaintenanceKeepsTallyAndYieldsWriterAtPreprodScale(
 	t *testing.T,
 ) {
 	t.Parallel()
-	store := newManagementTestStore(t)
+	store := newCommitteeMaintenanceTestStore(t)
 	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
 
 	// Multi-row inserts in one transaction: 647,500 single-row round trips
@@ -465,25 +512,66 @@ INSERT INTO auth_committee_hot (
 		memberBefore = append(memberBefore, found)
 	}
 
-	// Drive the same production pruning call the certificate write path makes,
-	// repeatedly, the way a run of real authorization certificates would.
-	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
-	total := int64(0)
-	for member := range preprodColdCredentials {
-		cold := credentialHash(byte(0x10 + member))
-		for {
-			pruned, err := store.pruneCommitteeHotAuthorizations(
-				context.Background(), queryer, coldTag, cold, preprodTipSlot,
-			)
-			require.NoError(t, err)
-			total += pruned
-			if pruned == 0 {
-				break
-			}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+
+	blockerTx, err := store.writeDB.Begin()
+	require.NoError(t, err)
+	maintenanceCtx, cancelMaintenance := context.WithTimeout(
+		context.Background(), 30*time.Second,
+	)
+
+	maintenanceDone := make(chan error, 1)
+	maintenanceResultReceived := false
+	defer func() {
+		cancelMaintenance()
+		_ = blockerTx.Rollback()
+		if !maintenanceResultReceived {
+			<-maintenanceDone
 		}
+	}()
+	waitCount := store.writeDB.Stats().WaitCount
+	go func() {
+		maintenanceDone <- store.pruneCommitteeHotAuthorizationsMaintenance(
+			maintenanceCtx,
+		)
+	}()
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().WaitCount > waitCount
+	}, 5*time.Second, 10*time.Millisecond)
+
+	writerCtx, cancelWriter := context.WithTimeout(
+		context.Background(), 5*time.Second,
+	)
+	defer cancelWriter()
+	writerWaitCount := store.writeDB.Stats().WaitCount
+	type beginResult struct {
+		tx  *sql.Tx
+		err error
 	}
+	writerDone := make(chan beginResult, 1)
+	go func() {
+		tx, err := store.writeDB.BeginTx(writerCtx, nil)
+		writerDone <- beginResult{tx: tx, err: err}
+	}()
+	require.Eventually(t, func() bool {
+		return store.writeDB.Stats().WaitCount > writerWaitCount
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, blockerTx.Rollback())
+	select {
+	case result := <-writerDone:
+		require.NoError(t, result.err)
+		require.NoError(t, result.tx.Rollback())
+	case <-writerCtx.Done():
+		t.Fatal("maintenance sweep held the SQLite writer between delete batches")
+	}
+	maintenanceErr := <-maintenanceDone
+	maintenanceResultReceived = true
+	require.NoError(t, maintenanceErr)
 
 	after := authRowCount(t, store)
+	total := int64(before - after)
 	t.Logf(
 		"auth_committee_hot rows after pruning: %d (deleted %d, %.2f%% removed)",
 		after,
