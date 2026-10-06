@@ -1512,6 +1512,14 @@ func TestValidateDMQ(t *testing.T) {
 			},
 			wantErr: "dmq.messageTtl must be positive",
 		},
+		{
+			name: "zero mempool size",
+			mutate: func(c *Config) {
+				c.DMQ.Enabled = true
+				c.DMQ.MaxMempoolSize = 0
+			},
+			wantErr: "dmq.maxMempoolSize must be positive",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

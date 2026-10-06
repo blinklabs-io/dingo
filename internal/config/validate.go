@@ -852,7 +852,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 				maxMessageTTL,
 			))
 		}
-		if uint64(c.DMQ.MaxMempoolSize) > maxMempoolSize {
+		// The pool reads a zero capacity as unbounded.
+		switch {
+		case c.DMQ.MaxMempoolSize == 0:
+			errs = append(errs, errors.New(
+				"dmq.maxMempoolSize must be positive",
+			))
+		case uint64(c.DMQ.MaxMempoolSize) > maxMempoolSize:
 			errs = append(errs, fmt.Errorf(
 				"dmq.maxMempoolSize must be at most %d megabytes",
 				maxMempoolSize,
