@@ -2425,17 +2425,17 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
-	if !ls.rewindPrimaryChainForOrphanCleanup(currentTip.Point) {
+	cleaned, cleanupErr := ls.rewindPrimaryChainForOrphanCleanup(
+		currentTip.Point,
+	)
+	if cleanupErr != nil {
+		return errors.Join(committedRollbackErr, cleanupErr)
+	}
+	if !cleaned {
 		ls.config.Logger.Warn(
-			"skipping orphaned blob cleanup: primary chain could not be rewound to the metadata tip",
+			"skipping orphaned blob cleanup: rewind exceeds the security parameter",
 			"tip_slot",
 			currentTip.Point.Slot,
-		)
-	} else if cleanupErr := ls.cleanupOrphanedBlobs(currentTip.Point.Slot); cleanupErr != nil {
-		// Log but don't fail - partial cleanup is acceptable
-		ls.config.Logger.Warn(
-			"failed to clean up orphaned blobs",
-			"error", cleanupErr,
 		)
 	}
 	if err := ls.db.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
@@ -2454,44 +2454,97 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 // that no longer exists, and every later add or iteration fails. Rewinding
 // through the manager deletes the same blocks and moves its tip with them.
 //
-// It reports false when the chain is ahead but could not be rewound (for
-// example a gap beyond the security parameter). The caller then skips the blob
-// trim: a chain ahead of the ledger is a forward extension the ledger replays
-// (see reconcilePrimaryChainTipWithLedgerTip), while a trimmed chain is not.
+// It reports false without an error only when the configured security parameter
+// refuses the rewind before any block is removed. Every other rewind or cleanup
+// failure is returned so startup or live recovery stops on an inconsistent
+// chain rather than continuing with a partially repaired store.
 func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
 	tip ocommon.Point,
-) bool {
+) (bool, error) {
 	if ls.chain == nil || ls.config.ChainManager == nil {
-		return true
+		return false, errors.New(
+			"recover orphaned blobs: primary chain manager is unavailable",
+		)
 	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	priorGeneration := ls.chainRollbackGeneration.Load()
+	ls.chainRollbackGeneration.Add(1)
+	priorAudit, auditGeneration := ls.takeContinuationAuditForRewind()
 	tipBeforeRewind := ls.chain.Tip().Point
-	if tipBeforeRewind.Slot <= tip.Slot {
-		return true
+	if tipBeforeRewind.Slot < tip.Slot {
+		ls.chainRollbackGeneration.Store(priorGeneration)
+		ls.settleAuditAfterRewind(
+			priorAudit,
+			auditGeneration,
+			false,
+			tip,
+		)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		return false, fmt.Errorf(
+			"recover orphaned blobs: primary chain tip %d is behind metadata tip %d",
+			tipBeforeRewind.Slot,
+			tip.Slot,
+		)
 	}
-	// Same K selection as reconcilePrimaryChainTipWithLedgerTip: recovery
-	// can run before or after node startup has called SetLedger.
+	cleanup := func() error {
+		return ls.cleanupOrphanedBlobs(tip.Slot)
+	}
 	var rewindErr error
-	if ls.config.ChainManager.SecurityParamConfigured() {
-		rewindErr = ls.config.ChainManager.RewindPrimaryChainToPoint(tip)
+	needsRewind := tipBeforeRewind.Slot > tip.Slot ||
+		!pointMatches(tipBeforeRewind, tip)
+	if !needsRewind {
+		rewindErr = ls.chain.WithMutationBarrier(cleanup)
+	} else if ls.config.ChainManager.SecurityParamConfigured() {
+		_, rewindErr = ls.chain.RollbackDeferredThen(tip, cleanup)
 	} else {
-		rewindErr = ls.config.ChainManager.RewindPrimaryChainAtStartup(tip)
+		_, rewindErr = ls.chain.RollbackUnboundedDeferredThen(tip, cleanup)
 	}
-	// A truncation outside the rollback paths must disarm the continuation
-	// audit itself; see settleAuditAfterRewind.
-	if rewindErr == nil ||
-		primaryChainTipRegressed(tipBeforeRewind, ls.chain.Tip().Point) {
-		ls.disarmContinuationAudit()
+	tipAfterRewind := ls.chain.Tip().Point
+	truncated := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
+	safeRefusal := errors.Is(rewindErr, chain.ErrRollbackExceedsSecurityParam) &&
+		!truncated
+	if safeRefusal {
+		ls.chainRollbackGeneration.Store(priorGeneration)
+	}
+	// A prior audit whose fork point remains on the retained prefix still
+	// describes this chain. Re-arm it at the recovery target so the existing
+	// carry-forward rules keep only producers the rewind did not remove.
+	if rewindErr == nil && truncated && priorAudit != nil &&
+		(priorAudit.forkPoint.Slot < tip.Slot ||
+			pointMatches(priorAudit.forkPoint, tip)) {
+		restored := false
+		ls.continuationAuditMutex.Lock()
+		if ls.continuationAudit.Load() == nil &&
+			ls.continuationAuditGen == auditGeneration {
+			ls.publishContinuationAudit(priorAudit)
+			restored = true
+		}
+		ls.continuationAuditMutex.Unlock()
+		if restored {
+			ls.armContinuationAudit(tip, "commit timestamp recovery")
+		}
+	}
+	ls.settleAuditAfterRewind(
+		priorAudit,
+		auditGeneration,
+		truncated,
+		tip,
+	)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	// RollbackDeferredThen queues chain events while the blockfetch mutex is
+	// held. Publish only after releasing it so a backpressured subscriber cannot
+	// deadlock the chainsync drain.
+	ls.chain.PublishPendingChainUpdates()
+	if safeRefusal {
+		return false, nil
 	}
 	if rewindErr != nil {
-		ls.config.Logger.Warn(
-			"failed to rewind primary chain to metadata tip during recovery",
-			"error", rewindErr,
-			"chain_tip_slot", tipBeforeRewind.Slot,
-			"metadata_tip_slot", tip.Slot,
+		return false, fmt.Errorf(
+			"rewind primary chain and clean orphaned blobs: %w",
+			rewindErr,
 		)
-		return false
 	}
-	return true
+	return true, nil
 }
 
 // orphanedBlock holds information needed to delete an orphaned block from blob store.
@@ -2539,13 +2592,12 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 
 	for _, orphan := range orphans {
 		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
-			ls.config.Logger.Warn(
-				"failed to delete orphaned block",
-				"slot", orphan.slot,
-				"hash", hex.EncodeToString(orphan.hash),
-				"error", err,
+			return fmt.Errorf(
+				"delete orphaned block at slot %d (%s): %w",
+				orphan.slot,
+				hex.EncodeToString(orphan.hash),
+				err,
 			)
-			continue
 		}
 		deleted++
 	}

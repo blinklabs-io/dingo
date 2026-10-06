@@ -1693,6 +1693,45 @@ func (c *Chain) RollbackDeferred(
 	return c.rollbackLocked(point, false)
 }
 
+// RollbackDeferredThen rewinds the chain like RollbackDeferred and runs after
+// the rewind before admitting another persistent-chain mutation. Event
+// publication stays deferred until the caller has released its own outer locks.
+func (c *Chain) RollbackDeferredThen(
+	point ocommon.Point,
+	after func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	return c.rollbackLockedThen(point, false, after)
+}
+
+// RollbackUnboundedDeferredThen is RollbackDeferredThen without the security
+// parameter bound. It is restricted to startup reconciliation of local state.
+func (c *Chain) RollbackUnboundedDeferredThen(
+	point ocommon.Point,
+	after func() error,
+) ([]event.Event, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	return c.rollbackLockedThen(point, true, after)
+}
+
+// WithMutationBarrier runs fn while persistent-chain additions and removals
+// are excluded. fn must not call another Chain mutation method.
+func (c *Chain) WithMutationBarrier(fn func() error) error {
+	if c == nil {
+		return errors.New("chain is nil")
+	}
+	c.batchCommitMutex.Lock()
+	defer c.batchCommitMutex.Unlock()
+	if err := c.awaitPendingCallerAdds(); err != nil {
+		return fmt.Errorf("wait for pending caller transactions: %w", err)
+	}
+	return fn()
+}
+
 // rollbackForkDepth returns the number of blocks a rollback to
 // rollbackBlockIndex removes from the chain. The rollback point is normally at
 // or behind the tip, but it can sit ahead of the tip: rolled-back blocks stay
@@ -1927,12 +1966,36 @@ func (c *Chain) rollbackLocked(
 	point ocommon.Point,
 	unbounded bool,
 ) ([]event.Event, error) {
+	return c.rollbackLockedThen(point, unbounded, nil)
+}
+
+func (c *Chain) rollbackLockedThen(
+	point ocommon.Point,
+	unbounded bool,
+	after func() error,
+) ([]event.Event, error) {
 	// Wait for any chain-owned batch transaction that has already applied to
 	// the in-memory chain to conclude, so the removal loop below cannot ask
 	// the store for an index whose write has not committed yet. See the
 	// batchCommitMutex field.
 	c.batchCommitMutex.Lock()
 	defer c.batchCommitMutex.Unlock()
+	events, err := c.rollbackWithMutationBarrierHeld(point, unbounded)
+	if err != nil {
+		return events, err
+	}
+	if after != nil {
+		if err := after(); err != nil {
+			return events, err
+		}
+	}
+	return events, nil
+}
+
+func (c *Chain) rollbackWithMutationBarrierHeld(
+	point ocommon.Point,
+	unbounded bool,
+) ([]event.Event, error) {
 	// A queued-header rollback does not remove persistent blocks and therefore
 	// must not wait for unrelated caller transactions. Check that case before
 	// waiting; the full check is repeated below after the wait because headers

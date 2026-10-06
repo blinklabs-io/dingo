@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -68,6 +71,7 @@ func commitTimestampRecoveryFixture(
 		return db.SetTip(ledgerTip, txn)
 	}))
 	blobTxn := db.Blob().NewTransaction(true)
+	defer blobTxn.Rollback() //nolint:errcheck
 	require.NoError(t, db.Blob().SetCommitTimestamp(1, blobTxn))
 	require.NoError(t, blobTxn.Commit())
 	require.NoError(t, dbtest.CloseDatabase(db))
@@ -82,6 +86,25 @@ func commitTimestampRecoveryFixture(
 		err,
 	)
 	return raw, reopened
+}
+
+type nthDeleteFailingBlobStore struct {
+	blob.BlobStore
+	failAt  int32
+	deletes atomic.Int32
+	err     error
+}
+
+func (s *nthDeleteFailingBlobStore) DeleteBlock(
+	txn dbtypes.Txn,
+	slot uint64,
+	hash []byte,
+	id uint64,
+) error {
+	if s.deletes.Add(1) == s.failAt {
+		return s.err
+	}
+	return s.BlobStore.DeleteBlock(txn, slot, hash, id)
 }
 
 func rawBlockTip(b chain.RawBlock) ochainsync.Tip {
@@ -181,5 +204,91 @@ func TestRecoverCommitTimestampConflictKeepsChainWhenRewindRefused(
 	for _, b := range raw {
 		_, err := ls.chain.BlockByPoint(ocommon.NewPoint(b.Slot, b.Hash), nil)
 		require.NoError(t, err, "block at slot %d must remain", b.Slot)
+	}
+}
+
+func TestRecoverCommitTimestampConflictFailsClosedOnLaterDeleteError(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	raw, db := commitTimestampRecoveryFixture(t)
+	injectedErr := errors.New("injected second block delete failure")
+	failing := &nthDeleteFailingBlobStore{
+		BlobStore: db.Blob(),
+		failAt:    2,
+		err:       injectedErr,
+	}
+	db.SetBlobStore(failing)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			ChainManager: cm,
+			Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.RecoverCommitTimestampConflict()
+
+	require.ErrorIs(t, err, injectedErr)
+	require.EqualValues(t, 2, failing.deletes.Load())
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(raw[3].Slot, raw[3].Hash),
+	)
+	require.NoError(t, err, "recovery must stop before cleanup deletes more blocks")
+}
+
+func TestRecoverCommitTimestampConflictSettlesContinuationAudit(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		forkIndex int
+		wantAudit bool
+	}{
+		{name: "fork point survives rewind", forkIndex: 1, wantAudit: true},
+		{name: "fork point is truncated", forkIndex: 3, wantAudit: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, db := commitTimestampRecoveryFixture(t)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+			require.NoError(t, cm.SetLedger(
+				testSecurityParamLedger{securityParam: 2},
+			))
+			ls := &LedgerState{
+				db:    db,
+				chain: cm.PrimaryChain(),
+				config: LedgerStateConfig{
+					ChainManager: cm,
+					Logger: slog.New(
+						slog.NewTextHandler(io.Discard, nil),
+					),
+				},
+			}
+			forkPoint := rawBlockTip(raw[tc.forkIndex]).Point
+			ls.armContinuationAudit(forkPoint, "test rollback")
+
+			require.NoError(t, ls.RecoverCommitTimestampConflict())
+
+			window := ls.continuationAudit.Load()
+			if tc.wantAudit {
+				require.NotNil(t, window)
+				require.True(t, pointMatches(
+					window.forkPoint,
+					rawBlockTip(raw[2]).Point,
+				))
+			} else {
+				require.Nil(t, window)
+			}
+		})
 	}
 }

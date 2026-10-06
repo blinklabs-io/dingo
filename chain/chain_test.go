@@ -4693,6 +4693,48 @@ func waitUntilGoroutineIn(t *testing.T, symbol string) {
 	)
 }
 
+func TestWithMutationBarrierExcludesPersistentAdds(t *testing.T) {
+	t.Parallel()
+
+	_, c := callerTxnChain(t)
+	barrierEntered := make(chan struct{})
+	releaseBarrier := make(chan struct{})
+	barrierDone := make(chan error, 1)
+	go func() {
+		barrierDone <- c.WithMutationBarrier(func() error {
+			close(barrierEntered)
+			<-releaseBarrier
+			return nil
+		})
+	}()
+	<-barrierEntered
+
+	addDone := make(chan error, 1)
+	go func() { addDone <- c.AddBlock(testBlocks[4], nil) }()
+	waitUntilGoroutineIn(t, "chain.(*Chain).beginStandaloneAdd")
+
+	close(releaseBarrier)
+	if err := testutil.RequireReceive(
+		t,
+		barrierDone,
+		30*time.Second,
+		"mutation barrier did not finish",
+	); err != nil {
+		t.Fatalf("mutation barrier: %v", err)
+	}
+	if err := testutil.RequireReceive(
+		t,
+		addDone,
+		30*time.Second,
+		"persistent add did not resume after mutation barrier",
+	); err != nil {
+		t.Fatalf("persistent add: %v", err)
+	}
+	if got := c.Tip().Point; got.Slot != testBlocks[4].SlotNumber() {
+		t.Fatalf("tip slot after persistent add = %d, want %d", got.Slot, testBlocks[4].SlotNumber())
+	}
+}
+
 // headerRestoreChain builds a persistent primary chain holding the first three
 // test blocks and queues headers for the remaining three on top of that tip.
 func headerRestoreChain(t *testing.T) (*database.Database, *chain.Chain) {
