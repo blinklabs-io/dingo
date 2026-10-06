@@ -11587,8 +11587,10 @@ unpinned path already runs at the tip; pool registration and retirement rows
 are removed only by rollback, so no retention floor applies.
 `GetStakeDelegDeposits` (`queryShelleyStakeDelegDeposits`) reports each
 credential's deposit from its latest registration event at or before the
-pinned slot, skipping later events page by page; those events come from
-certificate rows, which are likewise removed only by rollback. The remaining
+pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
+the credential's snapshot import baseline when that is at least as new, as
+`LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
+baseline are likewise removed only by rollback. The remaining
 per-credential and per-proposal queries
 (`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
 `GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still

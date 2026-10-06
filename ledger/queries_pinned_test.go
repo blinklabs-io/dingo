@@ -654,9 +654,9 @@ func TestQueryShelleyStakeDelegDeposits_PinnedPointAnswersAtThatPoint(
 	}
 }
 
-// TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory puts more
-// events after the pinned point than one history page holds, so the event
-// in force at the point is only reached on a later page.
+// TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory puts many
+// events after the pinned point, so only the event in force at the point may
+// decide the answer.
 func TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory(
 	t *testing.T,
 ) {
@@ -666,7 +666,7 @@ func TestQueryShelleyStakeDelegDeposits_PinnedPointSkipsLongHistory(
 	ls := newPoolDistr2Ledger(t, db)
 	key := repeatedBytes(28, 0x43)
 	seedStakeCertAt(t, db, key, true, 100, 2_000_000)
-	for i := range registrationHistoryPage + 2 {
+	for i := range 18 {
 		seedStakeCertAt(
 			t, db, key, i%2 == 1, uint64(400+10*i), 5_000_000,
 		)
@@ -718,4 +718,46 @@ func TestQuery_PinnedPointReachesStakeDelegDeposits(t *testing.T) {
 		olocalstatequery.StakeDelegDepositsResult{cred: 2_000_000},
 		stakeDeposits(t, result),
 	)
+}
+
+// TestQueryShelleyStakeDelegDeposits_ImportedBaseline covers a credential
+// imported from a ledger snapshot: it has no registration certificate, only
+// the import baseline, until a later deregistration certificate.
+func TestQueryShelleyStakeDelegDeposits_ImportedBaseline(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	key := repeatedBytes(28, 0x45)
+	deposit := dbtypes.Uint64(2_000_000)
+	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
+		StakingKey:    key,
+		CredentialTag: 0,
+		Active:        true,
+		AddedSlot:     200,
+		ImportDeposit: &deposit,
+	}, nil))
+	cred := stakeQueryCred(key)
+	creds := []olocalstatequery.StakeCredential{cred}
+
+	registered := olocalstatequery.StakeDelegDepositsResult{cred: 2_000_000}
+	none := olocalstatequery.StakeDelegDepositsResult{}
+	check := func(
+		at QueryPoint,
+		want olocalstatequery.StakeDelegDepositsResult,
+		msg string,
+	) {
+		t.Helper()
+		result, err := ls.queryShelleyStakeDelegDeposits(creds, at, nil)
+		require.NoError(t, err, msg)
+		require.Equal(t, want, stakeDeposits(t, result), msg)
+	}
+	check(QueryPoint{Slot: 100}, none, "before the import baseline")
+	check(QueryPoint{Slot: 300}, registered, "after the import baseline")
+	check(QueryPoint{}, registered, "tip, baseline only")
+
+	seedStakeCertAt(t, db, key, false, 500, 2_000_000)
+	check(QueryPoint{Slot: 400}, registered, "before the deregistration")
+	check(QueryPoint{Slot: 600}, none, "after the deregistration")
+	check(QueryPoint{}, none, "tip, after the deregistration")
 }

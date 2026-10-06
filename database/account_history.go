@@ -108,6 +108,34 @@ func (d *Database) GetAccountRegistrationHistoryByCredential(
 	return rows, nil
 }
 
+// GetLatestAccountRegistrationAtOrBefore returns the newest registration
+// history row for a stake credential at or before slot, or nil when there is
+// none. The import baseline is not consulted.
+func (d *Database) GetLatestAccountRegistrationAtOrBefore(
+	credentialTag uint8,
+	stakeKey []byte,
+	slot uint64,
+	txn *Txn,
+) (*models.AccountRegistrationHistoryRow, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	row, err := d.certificateStore().GetLatestAccountRegistrationAtOrBefore(
+		credentialTag,
+		stakeKey,
+		slot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get latest account registration at or before slot: %w",
+			err,
+		)
+	}
+	return row, nil
+}
+
 // CountAccountRegistrationHistoryByCredential returns the total number of
 // registration history rows for a stake credential.
 func (d *Database) CountAccountRegistrationHistoryByCredential(

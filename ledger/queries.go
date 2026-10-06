@@ -1154,7 +1154,8 @@ func (ls *LedgerState) queryShelley(
 // ShelleyStakePoolsQuery (queryShelleyStakePools, the pools active at
 // at.Slot through GetActivePoolKeyHashesAtSlot), and
 // ShelleyStakeDelegDepositsQuery (queryShelleyStakeDelegDeposits, each
-// credential's latest registration event at or before at.Slot). Pool and
+// credential's latest registration event at or before at.Slot, or its
+// snapshot import baseline when that is at least as new). Pool and
 // stake certificate rows are removed only by rollback, so neither needs a
 // retention floor.
 //
@@ -2459,9 +2460,9 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 // credential. The latest registration event carries the historical deposit
 // actually paid, which may differ from the current protocol parameter.
 //
-// A pinned at reads the latest event at or before at.Slot instead. The
-// registration history comes from certificate rows, which are removed only
-// by rollback, so no retention floor applies.
+// A pinned at reads the state at at.Slot instead. Certificate rows and the
+// import baseline are removed only by rollback, so no retention floor
+// applies.
 func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	creds []olocalstatequery.StakeCredential,
 	at QueryPoint,
@@ -2479,7 +2480,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		if err != nil {
 			return nil, err
 		}
-		latest, found, err := ls.latestRegistrationEventAsOf(
+		registered, deposit, err := ls.stakeRegistrationAsOf(
 			credentialTag,
 			cred.Bytes[:],
 			at,
@@ -2488,7 +2489,7 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		if err != nil {
 			return nil, err
 		}
-		if !found || latest.Action != "registered" {
+		if !registered {
 			continue
 		}
 		// StakeDelegDeposits has no representation for an unknown deposit,
@@ -2496,8 +2497,8 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 		// local-state-query wire behaviour. Value conservation reads the same
 		// row through LedgerView.StakeCredentialDeposit, where the nil is
 		// preserved and falls back to KeyDeposit.
-		if latest.Deposit != nil {
-			ret[cred] = *latest.Deposit
+		if deposit != nil {
+			ret[cred] = *deposit
 		} else {
 			ret[cred] = 0
 		}
@@ -2505,46 +2506,63 @@ func (ls *LedgerState) queryShelleyStakeDelegDeposits(
 	return []any{ret}, nil
 }
 
-// registrationHistoryPage is how many registration events
-// latestRegistrationEventAsOf reads per round trip while skipping events
-// after a pinned point.
-const registrationHistoryPage = 16
-
-// latestRegistrationEventAsOf returns the newest registration history event
-// for a stake credential: overall when at is unpinned, otherwise the newest
-// at or before at.Slot. History is ordered newest first, so events after the
-// point are skipped page by page.
-func (ls *LedgerState) latestRegistrationEventAsOf(
+// stakeRegistrationAsOf reports whether a stake credential is registered,
+// and with what deposit, at the tip or at a pinned at. The newest
+// registration certificate decides, unless the credential's snapshot import
+// baseline is at least as new, as in LedgerView.StakeCredentialDeposit: an
+// imported credential has no certificate for the registration the snapshot
+// carried.
+func (ls *LedgerState) stakeRegistrationAsOf(
 	credentialTag uint8,
 	stakingKey []byte,
 	at QueryPoint,
 	txn *database.Txn,
-) (models.AccountRegistrationHistoryRow, bool, error) {
-	limit := 1
+) (bool, *uint64, error) {
+	var latest *models.AccountRegistrationHistoryRow
 	if at.pinned() {
-		limit = registrationHistoryPage
-	}
-	for offset := 0; ; offset += limit {
+		row, err := ls.db.GetLatestAccountRegistrationAtOrBefore(
+			credentialTag,
+			stakingKey,
+			at.Slot,
+			txn,
+		)
+		if err != nil {
+			return false, nil, err
+		}
+		latest = row
+	} else {
 		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
 			credentialTag,
 			stakingKey,
-			limit,
-			offset,
+			1,
+			0,
 			"desc",
 			txn,
 		)
 		if err != nil {
-			return models.AccountRegistrationHistoryRow{}, false, err
+			return false, nil, err
 		}
-		for _, row := range history {
-			if !at.pinned() || row.AddedSlot <= at.Slot {
-				return row, true, nil
-			}
-		}
-		if len(history) < limit {
-			return models.AccountRegistrationHistoryRow{}, false, nil
+		if len(history) > 0 {
+			latest = &history[0]
 		}
 	}
+	imported, err := ls.db.GetAccountImportRegistrationByCredential(
+		credentialTag,
+		stakingKey,
+		txn,
+	)
+	if err != nil {
+		return false, nil, err
+	}
+	if imported != nil &&
+		(!at.pinned() || imported.AddedSlot <= at.Slot) &&
+		(latest == nil || imported.AddedSlot >= latest.AddedSlot) {
+		return true, imported.Deposit, nil
+	}
+	if latest == nil || latest.Action != "registered" {
+		return false, nil, nil
+	}
+	return true, latest.Deposit, nil
 }
 
 // queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
