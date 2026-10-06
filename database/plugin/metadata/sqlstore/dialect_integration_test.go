@@ -546,11 +546,11 @@ func testBatchedTransactionWrites(t *testing.T, store *Store) {
 		var err error
 		if historical {
 			err = store.SetTransactionBatchedHistorical(
-				transaction, point, uint32(id), nil, false, true, batch, txn,
+				transaction, point, uint32(id), nil, false, true, batch, txn, 0,
 			)
 		} else {
 			err = store.SetTransactionBatched(
-				transaction, point, uint32(id), nil, false, batch, txn,
+				transaction, point, uint32(id), nil, false, batch, txn, 0,
 			)
 		}
 		require.NoError(t, err)

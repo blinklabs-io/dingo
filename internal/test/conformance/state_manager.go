@@ -609,6 +609,16 @@ func initialDRepDeposit(pp common.ProtocolParameters) (uint64, error) {
 	return deposit.Uint64(), nil
 }
 
+func stateManagerProtocolMajor(
+	pp common.ProtocolParameters,
+) (uint64, error) {
+	versioned, ok := pp.(common.PoolRuleProtocolParameters)
+	if !ok {
+		return 0, errors.New("protocol parameters do not define a protocol version")
+	}
+	return uint64(versioned.ProtocolMajorVersion()), nil
+}
+
 func stateManagerConwayProtocolParameters(
 	pp common.ProtocolParameters,
 ) *conway.ConwayProtocolParameters {
@@ -691,8 +701,12 @@ func (m *DingoStateManager) seedAuthCommitteeHot(
 		return fmt.Errorf("build synthetic auth-committee-hot tx: %w", err)
 	}
 	point := ocommon.Point{Slot: 0, Hash: syntheticBlockHash(0)}
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
+	}
 	if err := m.db.SetTransactionMetadataOnly(
-		tx, point, 0, map[int]uint64{}, txn,
+		tx, point, 0, map[int]uint64{}, txn, protocolMajor,
 	); err != nil {
 		return fmt.Errorf("seed auth committee hot: %w", err)
 	}
@@ -947,9 +961,9 @@ func (m *DingoStateManager) ApplyTransaction(
 		govActionLifetime = conwayPP.GovActionValidityPeriod
 		drepInactivityPeriod = conwayPP.DRepInactivityPeriod
 	}
-	protocolMajor := uint64(0)
-	if versioned, ok := m.protocolParams.(common.PoolRuleProtocolParameters); ok {
-		protocolMajor = uint64(versioned.ProtocolMajorVersion())
+	protocolMajor, err := stateManagerProtocolMajor(m.protocolParams)
+	if err != nil {
+		return fmt.Errorf("resolve protocol major: %w", err)
 	}
 
 	for levelIndex, level := range levels {

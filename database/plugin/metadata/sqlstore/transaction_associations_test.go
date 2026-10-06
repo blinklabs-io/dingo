@@ -99,7 +99,7 @@ func TestSetTransactionBatchedCommitAndRollback(t *testing.T) {
 		require.NoError(t, store.SetTransactionBatched(
 			transaction,
 			ocommon.Point{Slot: uint64(index + 1), Hash: transaction.Hash().Bytes()},
-			uint32(index), nil, false, commitBatch, commitTxn,
+			uint32(index), nil, false, commitBatch, commitTxn, 0,
 		))
 	}
 	require.NoError(t, store.FlushBatch(commitBatch, commitTxn))
@@ -137,7 +137,7 @@ func TestSetTransactionBatchedCommitAndRollback(t *testing.T) {
 		require.NoError(t, store.SetTransactionBatched(
 			transaction,
 			ocommon.Point{Slot: uint64(index + 10), Hash: transaction.Hash().Bytes()},
-			uint32(index), nil, false, rollbackBatch, rollbackTxn,
+			uint32(index), nil, false, rollbackBatch, rollbackTxn, 0,
 		))
 	}
 	require.NoError(t, rollbackTxn.Rollback())
@@ -173,7 +173,7 @@ func collateralProductionFlow(t *testing.T, store *Store, db *sql.DB) {
 		tx   lcommon.Transaction
 		slot uint64
 	}{{txA, 10}, {txB, 20}} {
-		require.NoError(t, store.SetTransaction(item.tx, ocommon.Point{Slot: item.slot, Hash: item.tx.Hash().Bytes()}, 0, nil, false, nil))
+		require.NoError(t, store.SetTransaction(item.tx, ocommon.Point{Slot: item.slot, Hash: item.tx.Hash().Bytes()}, 0, nil, false, nil, 0))
 	}
 	for _, hash := range [][]byte{txA.Hash().Bytes(), txB.Hash().Bytes()} {
 		got, err := store.GetTransactionByHash(hash, nil)

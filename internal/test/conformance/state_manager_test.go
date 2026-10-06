@@ -607,6 +607,9 @@ func TestPoolCurrentStatePendingRetirement(t *testing.T) {
 	m, err := NewDingoStateManager()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, m.Close()) }()
+	m.protocolParams = &conway.ConwayProtocolParameters{
+		ProtocolVersion: common.ProtocolParametersProtocolVersion{Major: 9},
+	}
 
 	poolKeyHash := common.PoolKeyHash(testHash28(0x61))
 
@@ -1598,7 +1601,7 @@ func TestCommitteeHotCredentialColdCredentialsIncludesUnseatedAuthorization(
 			ocommon.Point{Slot: slot, Hash: syntheticBlockHash(slot)},
 			0,
 			map[int]uint64{},
-			nil,
+			nil, 0,
 		))
 	}
 	persist("pending-auth", 10,

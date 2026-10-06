@@ -166,14 +166,8 @@ func (d *LedgerDelta) applyWithDonationRecording(
 	// certificate-free validation deltas may run before snapshots are
 	// initialized during startup.
 	var pparams lcommon.ProtocolParameters
+	var protocolMajor uint64
 	var snapshotLoaded bool
-	ls.RLock()
-	currentPParams := ls.currentPParams
-	ls.RUnlock()
-	protocolMajor := uint64(0)
-	if version, err := GetProtocolVersion(currentPParams); err == nil {
-		protocolMajor = uint64(version.Major)
-	}
 	appliedTxs := make([]bool, len(d.Transactions))
 	storageIndexOffset := d.expandedIndexOffset
 	for i, tr := range d.Transactions {
@@ -219,6 +213,15 @@ func (d *LedgerDelta) applyWithDonationRecording(
 					)
 				}
 				pparams = snapshot.currentPParams
+				version, err := GetProtocolVersion(pparams)
+				if err != nil {
+					certDepositsMapPool.Put(certDeposits)
+					return fmt.Errorf(
+						"resolve certificate protocol version: %w",
+						err,
+					)
+				}
+				protocolMajor = uint64(version.Major)
 				snapshotLoaded = true
 			}
 			for certIndex, cert := range certs {

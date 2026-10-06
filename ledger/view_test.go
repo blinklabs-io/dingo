@@ -4404,7 +4404,7 @@ func persistViewStakeRegistration(
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,
 		map[int]uint64{0: deposit},
-		nil,
+		nil, 0,
 	))
 }
 
@@ -4462,7 +4462,7 @@ func TestLedgerViewPoolCurrentStatePendingRetirement(t *testing.T) {
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -4588,7 +4588,7 @@ func TestLedgerViewIsVrfKeyInUseRespectsEpochBoundaryDeferral(t *testing.T) {
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -4702,7 +4702,7 @@ func TestLedgerViewIsVrfKeyInUseIgnoresConcurrentSnapshotRepublish(
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -4823,7 +4823,7 @@ func TestLedgerViewIsVrfKeyInUseFreesSupersededFutureKey(
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -4939,7 +4939,7 @@ func TestValidateTxDijkstraRejectsDifferentPoolClaimingActiveKeyDuringDeferral(
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -5004,7 +5004,7 @@ func TestValidateTxDijkstraAllowsReuseOfSupersededFutureKey(
 		require.NoError(
 			t,
 			db.SetTransactionMetadataOnly(
-				tx, point, 0, map[int]uint64{0: 500_000_000}, nil,
+				tx, point, 0, map[int]uint64{0: 500_000_000}, nil, 0,
 			),
 		)
 	}
@@ -7385,7 +7385,7 @@ func seedStakeRegistration(
 		ocommon.NewPoint(slot, bytes.Repeat([]byte{seed + 2}, 32)),
 		0,
 		certDeposits,
-		nil,
+		nil, 0,
 	))
 }
 

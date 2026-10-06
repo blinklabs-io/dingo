@@ -59,7 +59,7 @@ type certificateAccountState struct {
 
 func validateDRepDelegationProtocolMajor(
 	certificates []lcommon.Certificate,
-	protocolMajor []uint64,
+	protocolMajor uint64,
 ) error {
 	for _, certificate := range certificates {
 		switch certificate.(type) {
@@ -67,7 +67,7 @@ func validateDRepDelegationProtocolMajor(
 			*lcommon.StakeVoteRegistrationDelegationCertificate,
 			*lcommon.VoteRegistrationDelegationCertificate,
 			*lcommon.VoteDelegationCertificate:
-			if len(protocolMajor) != 1 || protocolMajor[0] == 0 {
+			if protocolMajor == 0 {
 				return errors.New(
 					"protocol major is required for certificates that change DRep delegations",
 				)
@@ -103,7 +103,7 @@ func (s *Store) applyTransactionCertificates(
 	blockIndex uint32,
 	deposits map[int]uint64,
 	policy depositPolicy,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) ([]models.StakeCredentialRef, error) {
 	if len(certificates) == 0 {
 		return nil, nil
@@ -115,10 +115,6 @@ func (s *Store) applyTransactionCertificates(
 		return nil, err
 	}
 	refs := make(map[string]models.StakeCredentialRef)
-	protocolMajorValue := uint64(0)
-	if len(protocolMajor) > 0 {
-		protocolMajorValue = protocolMajor[0]
-	}
 	for certIndex, certificate := range certificates {
 		certType, err := certificateType(certificate)
 		if err != nil {
@@ -180,7 +176,7 @@ RETURNING id`,
 			blockIndex,
 			uint(certIndex),
 			deposit,
-			protocolMajorValue,
+			protocolMajor,
 		)
 		if err != nil {
 			return nil, fmt.Errorf(

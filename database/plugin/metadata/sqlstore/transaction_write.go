@@ -152,7 +152,7 @@ func (s *Store) SetTransactionBatched(
 	skipWithdrawalWitness bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -170,7 +170,7 @@ func (s *Store) SetTransactionBatched(
 		false,
 		accumulator,
 		txn,
-		protocolMajor...,
+		protocolMajor,
 	)
 }
 
@@ -187,7 +187,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	historicalBackfill bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	if _, ok := accumulator.(*transactionBatchAccumulator); !ok {
 		return fmt.Errorf(
@@ -198,8 +198,7 @@ func (s *Store) SetTransactionBatchedHistorical(
 	return s.setTransactionBatched(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill, false,
-		accumulator, txn,
-		protocolMajor...,
+		accumulator, txn, protocolMajor,
 	)
 }
 
@@ -210,11 +209,11 @@ func (s *Store) SetTransaction(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, false, txn, protocolMajor...,
+		skipWithdrawalWitness, false, false, txn, protocolMajor,
 	)
 }
 
@@ -228,13 +227,12 @@ func (s *Store) setTransactionBatched(
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, accumulator, nil, txn,
-		protocolMajor...,
+		tolerateConsumedInputConflict, accumulator, nil, txn, protocolMajor,
 	)
 }
 
@@ -254,11 +252,11 @@ func (s *Store) SetTransactionLeiosClosure(
 	certDeposits map[int]uint64,
 	skipWithdrawalWitness bool,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	return s.setTransaction(
 		transaction, point, index, certDeposits,
-		skipWithdrawalWitness, false, true, txn, protocolMajor...,
+		skipWithdrawalWitness, false, true, txn, protocolMajor,
 	)
 }
 
@@ -272,14 +270,14 @@ func (s *Store) SetTransactionLeiosClosureInContext(
 	skipWithdrawalWitness bool,
 	slot uint64,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	if slot >= point.Slot {
 		return errors.New("closure context must precede its certifying block")
 	}
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits, skipWithdrawalWitness,
-		false, true, nil, &slot, txn, protocolMajor...,
+		false, true, nil, &slot, txn, protocolMajor,
 	)
 }
 
@@ -303,12 +301,12 @@ func (s *Store) setTransaction(
 	// double-spend still fails.
 	tolerateConsumedInputConflict bool,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, nil, txn, protocolMajor...,
+		tolerateConsumedInputConflict, nil, nil, txn, protocolMajor,
 	)
 }
 
@@ -323,7 +321,7 @@ func (s *Store) setTransactionWithAccumulator(
 	accumulator types.MetadataBatchAccumulator,
 	ledgerContextSlot *uint64,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	if transaction == nil {
 		return errors.New("set transaction: nil transaction")
@@ -437,7 +435,7 @@ func (s *Store) setTransactionWithAccumulator(
 					index,
 					certDeposits,
 					requireKnownDeposits,
-					protocolMajor...,
+					protocolMajor,
 				)
 				if err != nil {
 					return err
@@ -662,7 +660,7 @@ func (s *Store) SetGapBlockTransaction(
 	index uint32,
 	certDeposits map[int]uint64,
 	txn types.Txn,
-	protocolMajor ...uint64,
+	protocolMajor uint64,
 ) error {
 	// Gap ingestion intentionally has no available input state, so this is
 	// equivalent to SetTransaction with the consumed-input update suppressed.
@@ -718,7 +716,7 @@ RETURNING id`,
 				certificateRefs, err = s.applyTransactionCertificates(
 					ctx, db, transactionID, transaction.Certificates(),
 					point, index, certDeposits, allowUnknownDeposits,
-					protocolMajor...,
+					protocolMajor,
 				)
 				if err != nil {
 					return err

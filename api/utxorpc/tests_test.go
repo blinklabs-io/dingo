@@ -968,7 +968,7 @@ func indexFixtureTransactionsForReadTx(
 				nil,
 				nil,
 				offsets,
-				nil,
+				nil, 0,
 			)
 			if err != nil {
 				continue

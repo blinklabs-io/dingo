@@ -58,7 +58,7 @@ func seedCip163Certificate(
 		ocommon.NewPoint(slot, txID),
 		0,
 		map[int]uint64{0: 0},
-		nil,
+		nil, 0,
 	))
 }
 

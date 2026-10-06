@@ -102,7 +102,7 @@ func TestDRepDelegationRequiresProtocolMajor(t *testing.T) {
 	tx.WithValid(true)
 	point := ocommon.Point{Slot: 20, Hash: tx.Hash().Bytes()}
 
-	err := store.SetTransaction(tx, point, 0, nil, false, nil)
+	err := store.SetTransaction(tx, point, 0, nil, false, nil, 0)
 	require.ErrorContains(t, err, "protocol major is required")
 	err = store.SetTransaction(tx, point, 0, nil, false, nil, 0)
 	require.ErrorContains(t, err, "protocol major is required")
@@ -619,7 +619,7 @@ func TestDrepActivityAndExpirySurviveDeregistrationRollback(t *testing.T) {
 		0,
 		map[int]uint64{0: 500},
 		false,
-		nil,
+		nil, 0,
 	))
 
 	require.NoError(t, store.RestoreDrepStateAtSlot(50, nil))

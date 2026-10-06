@@ -1477,7 +1477,7 @@ func TestResolveUtxoCborWithRecoveryReconstructsMissingBlob(t *testing.T) {
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1550,7 +1550,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesBlobOnlyTxnForRecovery(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1626,7 +1626,7 @@ func TestResolveUtxoCborWithRecoveryUpgradesMetadataOnlyTxnForRecovery(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1710,7 +1710,7 @@ func TestResolveUtxoCborWithRecoveryMetadataOnlyWriteCapableCallerPersistsRepair
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1798,7 +1798,7 @@ func TestResolveUtxoCborWithRecoverySharedBlobRollbackDoesNotFinishCallersTxn(
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1895,7 +1895,7 @@ func TestResolveUtxoCborWithRecoverySharedMetadataRollbackDoesNotFinishCallersTx
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)
@@ -1994,7 +1994,7 @@ func TestRepairUtxoBlobWritesThroughCallersPinnedStore(t *testing.T) {
 		t,
 		metaTxn.Do(func(txn *Txn) error {
 			return db.Metadata().SetGapBlockTransaction(
-				producer.tx, producer.point, 0, nil, txn.Metadata(),
+				producer.tx, producer.point, 0, nil, txn.Metadata(), 0,
 			)
 		}),
 	)

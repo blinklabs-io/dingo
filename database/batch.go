@@ -138,7 +138,7 @@ type transactionStoreHistoricalBackfill interface {
 		bool,
 		BatchAccumulator,
 		types.Txn,
-		...uint64,
+		uint64,
 	) error
 }
 
@@ -163,11 +163,12 @@ func (d *Database) SetTransactionBatched(
 	offsets *BlockIngestionResult,
 	acc BatchAccumulator,
 	txn *Txn,
+	protocolMajor uint64,
 ) (retErr error) {
 	return d.SetTransactionBatchedWithOpts(
 		tx, point, idx, updateEpoch, pparamUpdates,
 		certDeposits, offsets, acc, txn,
-		BatchedTxIngestOpts{},
+		BatchedTxIngestOpts{ProtocolMajor: protocolMajor},
 	)
 }
 
@@ -328,8 +329,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		metadataErr = d.transactionStore().SetTransactionBatched(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite, acc, metadataTxn,
-			opts.ProtocolMajor,
-		)
+			opts.ProtocolMajor)
 	}
 	if err := metadataErr; err != nil {
 		return fmt.Errorf(

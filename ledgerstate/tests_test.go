@@ -540,7 +540,7 @@ func TestPersistImportedCommitteeCertificatesWritesRows(t *testing.T) {
 	const slot = uint64(197789347)
 	require.NotPanics(t, func() {
 		require.NoError(t, persistImportedCommitteeCertificates(
-			db, certState, slot, nil,
+			db, certState, slot, nil, 0,
 		))
 	})
 

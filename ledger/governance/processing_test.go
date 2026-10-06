@@ -836,7 +836,7 @@ func TestProcessVotesRepairsMissingGovernanceProposal(t *testing.T) {
 				0,
 				nil,
 				offsets,
-				txn,
+				txn, 0,
 			); err != nil {
 				return err
 			}
@@ -1021,7 +1021,7 @@ func TestProcessVotesRepairsMissingDijkstraGovernanceProposal(t *testing.T) {
 			0,
 			nil,
 			offsets,
-			txn,
+			txn, 0,
 		); err != nil {
 			return err
 		}
@@ -1187,7 +1187,7 @@ func TestProcessHistoricalVotesSettlesRebuiltProposal(t *testing.T) {
 					return err
 				}
 				if err := db.SetGapBlockTransaction(
-					proposalTx, proposalPoint, 0, nil, offsets, txn,
+					proposalTx, proposalPoint, 0, nil, offsets, txn, 0,
 				); err != nil {
 					return err
 				}

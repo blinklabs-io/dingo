@@ -106,7 +106,7 @@ func TestPersistedMetadataEndpointsDeterministicAcrossKeyOrders(t *testing.T) {
 			},
 			0,
 			nil,
-			nil,
+			nil, 0,
 		))
 	}
 

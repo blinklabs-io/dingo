@@ -1166,13 +1166,16 @@ func importCertState(
 			),
 		})
 	}
-	if err := persistImportedCommitteeCertificates(
-		cfg.Database,
-		certState,
-		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
-		nil,
-	); err != nil {
-		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+	if len(certState.CommitteeHotKeys) > 0 || len(certState.CommitteeResignations) > 0 {
+		if err := persistImportedCommitteeCertificates(
+			cfg.Database,
+			certState,
+			snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
+			nil,
+			0,
+		); err != nil {
+			return 0, fmt.Errorf("importing committee authorizations: %w", err)
+		}
 	}
 
 	return importedPools, nil
@@ -3889,6 +3892,7 @@ func persistImportedCommitteeCertificates(
 	certState *ParsedCertState,
 	slot uint64,
 	txn *database.Txn,
+	protocolMajor uint64,
 ) error {
 	if certState == nil ||
 		(len(certState.CommitteeHotKeys) == 0 && len(certState.CommitteeResignations) == 0) {
@@ -3939,7 +3943,8 @@ func persistImportedCommitteeCertificates(
 	hash := lcommon.Blake2b256Hash(seed)
 	tx := importedCommitteeTransaction{hash: hash, certs: certs}
 	return db.SetTransactionMetadataOnly(
-		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{}, txn,
+		&tx, ocommon.Point{Slot: slot, Hash: hash[:]}, 0, map[int]uint64{},
+		txn, protocolMajor,
 	)
 }
 
