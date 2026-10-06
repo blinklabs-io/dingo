@@ -1101,6 +1101,19 @@ func (p *PeerGovernor) TouchPeerByConnId(connId ouroboros.ConnectionId) {
 	}
 }
 
+// DiversityGroupByConnId returns the diversity group of the peer holding
+// connId, or "" when no tracked peer holds it.
+func (p *PeerGovernor) DiversityGroupByConnId(
+	connId ouroboros.ConnectionId,
+) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if peerIdx := p.peerIndexByConnId(connId); peerIdx != -1 {
+		return p.peerDiversityGroup(p.peers[peerIdx])
+	}
+	return ""
+}
+
 func (p *PeerGovernor) IsChainSelectionEligible(
 	connId ouroboros.ConnectionId,
 ) bool {

@@ -147,12 +147,9 @@ func TestLocalstatequeryServerAcquire_PointOnChain_Succeeds(t *testing.T) {
 	require.NoError(t, db.SetEpoch(
 		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
 	))
-	// verifyStakeDistributionRetentionOnly's network_state floor is gated
-	// on CardanoNodeConfig having a real ShelleyGenesis with a nonzero
-	// MaxLovelaceSupply (ledger.circulatingSupplyGenesis) --
-	// newTestLedgerStateWithChain sets neither, so that floor is inactive
-	// here and needs no network_state row seeded: the floor never actually
-	// checks one when it isn't active in the first place.
+	// GetAccountState needs a network_state row at or before the acquired
+	// slot; genesis sync writes this slot-0 baseline on a real node.
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
 
 	connID := ouroboros.ConnectionId{}
 	err := o.localstatequeryServerAcquire(
@@ -414,6 +411,15 @@ func TestLocalstatequeryProtocol_PointAheadOfTip_ConnectionSurvivesAndStaysUsabl
 	client := cliConn.LocalStateQuery().Client
 	require.NotNil(t, client)
 
+	origin := ocommon.NewPointOrigin()
+	originErr := client.Acquire(&origin)
+	require.Error(t, originErr, "an origin Acquire must fail")
+	require.ErrorIs(
+		t,
+		originErr,
+		olocalstatequery.ErrAcquireFailurePointTooOld,
+	)
+
 	aheadHash := bytes.Repeat([]byte{2}, 32)
 	aheadPoint := ocommon.NewPoint(2, aheadHash)
 	acquireErr := client.Acquire(&aheadPoint)
@@ -539,9 +545,161 @@ func TestLocalstatequeryQueryAnswersFromAcquiredSnapshot(t *testing.T) {
 	)
 }
 
-// TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot proves a rejected
-// re-Acquire leaves the session registered with its snapshot closed.
-func TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot(t *testing.T) {
+func TestLocalstatequerySpecificPointReportsAcquiredPoint(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	moveTestTip(t, db, 2)
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	point := ocommon.NewPoint(1, bytes.Repeat([]byte{1}, 32))
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx,
+		olocalstatequery.AcquireSpecificPoint{Point: point},
+		false,
+	))
+
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(t, point, got)
+	blockNo, err := o.localstatequeryServerQuery(
+		ctx,
+		olocalstatequery.QueryWrapper{
+			Query: &olocalstatequery.ChainBlockNoQuery{},
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, []any{1, uint64(1)}, blockNo)
+}
+
+func TestLocalstatequeryImmutableTipReportsDepthKPoint(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newTestLedgerStateWithChainAtAndConfig(
+		t,
+		5,
+		t.TempDir(),
+		smallSecurityParamCardanoConfig(t, 2),
+	)
+	o := newOuroboros(OuroborosConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	o.ledgerState = ls
+	t.Cleanup(func() { require.NoError(t, o.Close()) })
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(4, bytes.Repeat([]byte{4}, 32)),
+		BlockNumber: 4,
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.SetTipForTesting(tip)
+	require.NoError(t, db.SetEpoch(
+		0, 0, nil, nil, nil, nil, 0, 1, 100, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+
+	ctx := olocalstatequery.CallbackContext{ConnectionId: ouroboros.ConnectionId{}}
+	require.NoError(t, o.localstatequeryServerAcquire(
+		ctx,
+		olocalstatequery.AcquireImmutableTip{},
+		false,
+	))
+	got, err := queryChainPoint(t, o, ctx)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		ocommon.NewPoint(2, bytes.Repeat([]byte{2}, 32)),
+		got,
+	)
+}
+
+func TestLocalstatequeryDisconnectCancelsBlockedAcquire(t *testing.T) {
+	t.Parallel()
+
+	o, db, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	limit := db.Metadata().(interface{ ReadSnapshotLimit() int }).
+		ReadSnapshotLimit()
+	held := make([]*ledger.QueryView, 0, limit)
+	for range limit {
+		view, err := o.ledgerState.AcquireQueryView(
+			t.Context(),
+			ledger.QueryPoint{},
+		)
+		require.NoError(t, err)
+		held = append(held, view)
+	}
+	t.Cleanup(func() {
+		for _, view := range held {
+			view.Close()
+		}
+	})
+
+	owner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+		Server:       owner,
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- o.localstatequeryServerAcquire(
+			ctx,
+			olocalstatequery.AcquireVolatileTip{},
+			false,
+		)
+	}()
+	testutil.WaitForCondition(t, func() bool {
+		o.localstatequeryAcquireMutex.Lock()
+		defer o.localstatequeryAcquireMutex.Unlock()
+		return o.localstatequeryAcquisitions[ctx.ConnectionId] != nil
+	}, testutil.AsyncWait, "Acquire did not reach snapshot admission")
+
+	o.ReleaseLocalStateQueryAcquiredPointOwner(ctx.ConnectionId, owner)
+	held[len(held)-1].Close()
+	held = held[:len(held)-1]
+	require.Error(t, testutil.RequireReceive(
+		t,
+		done,
+		testutil.AsyncWait,
+		"Acquire did not stop after disconnect",
+	))
+	o.localstatequeryAcquireMutex.Lock()
+	_, acquiring := o.localstatequeryAcquisitions[ctx.ConnectionId]
+	_, session := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, acquiring)
+	require.False(t, session)
+}
+
+func TestLocalstatequeryAcquireRejectsClosedConnection(t *testing.T) {
+	t.Parallel()
+
+	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
+	owner := olocalstatequery.NewServer(protocol.ProtocolOptions{}, nil)
+	owner.Stop()
+	ctx := olocalstatequery.CallbackContext{
+		ConnectionId: ouroboros.ConnectionId{},
+		Server:       owner,
+	}
+
+	err := o.localstatequeryServerAcquire(
+		ctx,
+		olocalstatequery.AcquireVolatileTip{},
+		false,
+	)
+	require.ErrorIs(t, err, errLocalStateQueryConnectionClosed)
+	o.localstatequeryAcquireMutex.Lock()
+	_, acquiring := o.localstatequeryAcquisitions[ctx.ConnectionId]
+	_, session := o.localstatequerySessions[ctx.ConnectionId]
+	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, acquiring)
+	require.False(t, session)
+}
+
+// TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot proves a rejected
+// re-Acquire closes and removes the prior session.
+func TestLocalstatequeryFailedReAcquireForgetsPreviousSnapshot(t *testing.T) {
 	t.Parallel()
 
 	o, _, _ := newSnapshotTestOuroboros(t, OuroborosConfig{})
@@ -557,13 +715,9 @@ func TestLocalstatequeryFailedReAcquireClosesPreviousSnapshot(t *testing.T) {
 	)
 	require.ErrorIs(t, err, olocalstatequery.ErrAcquireFailurePointNotOnChain)
 
-	// The previous snapshot was closed to free its admission slot for the
-	// replacement, so the session stays registered but no longer answers.
-	_, err = queryChainPoint(t, o, ctx)
+	_, err = session.view.Query(t.Context(), &olocalstatequery.ChainPointQuery{}, 0)
 	require.ErrorIs(t, err, ledger.ErrQueryViewClosed)
-	o.localstatequeryAcquireMutex.Lock()
-	require.Same(t, session, o.localstatequerySessions[ctx.ConnectionId])
-	o.localstatequeryAcquireMutex.Unlock()
+	require.False(t, o.HasLocalStateQueryAcquiredPointForTesting(ctx.ConnectionId))
 }
 
 // TestLocalstatequeryReleaseClosesSnapshot proves Release closes the session's

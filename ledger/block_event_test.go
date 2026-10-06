@@ -995,7 +995,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	ls := fixture.ls
 
 	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
+	t.Cleanup(bus.Close)
 	ls.config.EventBus = bus
 
 	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)

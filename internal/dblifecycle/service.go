@@ -190,6 +190,9 @@ func (s *Service) Snapshot(
 		s.cfg.DatabaseLifecycle.SnapshotCloudDestination,
 		name,
 		description,
+		lifecycle.WithMaxCommitPause(
+			s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause,
+		),
 	)
 }
 

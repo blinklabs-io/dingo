@@ -129,6 +129,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosBySlot",
 	"GetUtxosDeletedBeforeSlot",
 	"GetUtxosByAddress",
+	"GetUtxosByAddressAsOf",
 	"GetUtxosByAddressWithOrdering",
 	"GetUtxosWithHistory",
 	"CountUtxosByAddressWithOrdering",
