@@ -671,7 +671,9 @@ func (s *Store) startMaintenance() {
 // measured from process start lands on the same wall-clock offset every day,
 // so it would meet the same recurring network activity every day.
 func jitteredInterval(every time.Duration) time.Duration {
-	return every + rand.N(every/10+1) //nolint:gosec // schedule jitter, not a secret
+	const maxDuration = time.Duration(1<<63 - 1)
+	jitterMax := min(every/10, maxDuration-every)
+	return every + rand.N(jitterMax+1) //nolint:gosec // schedule jitter, not a secret
 }
 
 // postponeWarnEvery is how many consecutive postponements pass between

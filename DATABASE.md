@@ -208,9 +208,11 @@ authorization cleanup schedule.
 
 The maintenance and VACUUM tickers wait their interval plus up to 10% random
 jitter between runs, so they do not recur at the same offset every day. A run
-that comes due while a write-pool connection is in use is postponed and
-rechecked after the shorter of the interval and one minute. A job postponed
-ten consecutive times logs a warning naming the job.
+that comes due while a connection in the write pool is in use is postponed and
+rechecked after the shorter of the interval and one minute. For PostgreSQL and
+MySQL the read and write handles share one pool, so read traffic can also
+postpone a run. A job postponed ten consecutive times logs a warning naming
+the job.
 
 Dingo stores chain state in two sibling stores:
 
