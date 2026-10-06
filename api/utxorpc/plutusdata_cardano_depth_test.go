@@ -51,6 +51,9 @@ func TestPlutusDatumCBORToCardano_DeepNestingRoundTrip(t *testing.T) {
 	if err := proto.Unmarshal(wire, &binaryRoundTrip); err != nil {
 		t.Fatalf("binary consumer rejected depth %d (%d bytes): %v", depth, len(wire), err)
 	}
+	if !proto.Equal(mapped, &binaryRoundTrip) {
+		t.Fatal("binary round trip changed the mapped datum")
+	}
 	jsonWire, err := protojson.Marshal(mapped)
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +61,9 @@ func TestPlutusDatumCBORToCardano_DeepNestingRoundTrip(t *testing.T) {
 	var jsonRoundTrip cardano.PlutusData
 	if err := protojson.Unmarshal(jsonWire, &jsonRoundTrip); err != nil {
 		t.Fatalf("JSON consumer rejected depth %d (%d bytes): %v", depth, len(jsonWire), err)
+	}
+	if !proto.Equal(mapped, &jsonRoundTrip) {
+		t.Fatal("JSON round trip changed the mapped datum")
 	}
 }
 
