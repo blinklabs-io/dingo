@@ -25,8 +25,12 @@ import (
 // against that file. Implemented operations are registered separately and
 // take precedence over this list. A final {name...} parameter matches the
 // remaining path, as an IPFS path may name an object inside a directory.
+// Specification paths sit under the /api/v0 server prefix; /health/clock is
+// also listed unprefixed beside the unprefixed GET /health handler.
 var unsupportedOperations = []string{
 	"GET /api/v0/",
+	"GET /api/v0/health",
+	"GET /api/v0/health/clock",
 	"GET /health/clock",
 	"GET /api/v0/blocks/latest/txs/cbor",
 	"GET /api/v0/blocks/{hash_or_number}/next",
