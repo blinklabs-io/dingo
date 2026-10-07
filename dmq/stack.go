@@ -41,6 +41,28 @@ const (
 	maxFeedRetryInterval = 2 * time.Second
 )
 
+type feedTimer struct {
+	wake <-chan time.Time
+	stop func()
+}
+
+type inboundEventSubscriber interface {
+	SubscribeFuncWithBufferPolicy(
+		event.EventType,
+		int,
+		event.SubscriberBackpressurePolicy,
+		event.EventHandlerFunc,
+	) event.EventSubscriberId
+}
+
+func newFeedTimer(wait time.Duration) feedTimer {
+	timer := time.NewTimer(wait)
+	return feedTimer{
+		wake: timer.C,
+		stop: func() { timer.Stop() },
+	}
+}
+
 // Reason labels for dingo_dmq_validation_failures_total, one per CIP-0137
 // reject reason.
 const (
@@ -104,6 +126,7 @@ type Stack struct {
 	mu         sync.Mutex // guards feeders
 	feeders    map[ouroboros.ConnectionId]context.CancelFunc
 	inboundSub event.EventSubscriberId
+	feedTimer  func(time.Duration) feedTimer
 }
 
 // NewStack builds a Stack. Call Start to open its socket.
@@ -146,7 +169,8 @@ func NewStack(cfg StackConfig) (*Stack, error) {
 			Name: "dingo_dmq_connections",
 			Help: "open local DMQ connections",
 		}),
-		feeders: make(map[ouroboros.ConnectionId]context.CancelFunc),
+		feeders:   make(map[ouroboros.ConnectionId]context.CancelFunc),
+		feedTimer: newFeedTimer,
 	}
 	for _, reason := range []string{
 		reasonInvalid, reasonAlreadyReceived, reasonExpired, reasonOther,
@@ -193,14 +217,7 @@ func (s *Stack) Mempool() *MessageMempool {
 // Start opens the local socket and begins serving.
 func (s *Stack) Start(ctx context.Context) error {
 	s.pool.Start()
-	// Lossless: a detached handler would start no feeder for any later
-	// connection, and nothing would resubscribe it.
-	s.inboundSub = s.bus.SubscribeFuncWithBufferPolicy(
-		connmanager.InboundConnectionEventType,
-		event.DefaultSubscriberBuffer,
-		event.SubscriberBackpressureBlock,
-		s.handleInbound,
-	)
+	s.inboundSub = subscribeInbound(s.bus, s.handleInbound)
 	if err := s.connMgr.Start(ctx); err != nil {
 		localErr := s.shutdownLocal(ctx)
 		return errors.Join(
@@ -210,6 +227,20 @@ func (s *Stack) Start(ctx context.Context) error {
 		)
 	}
 	return nil
+}
+
+func subscribeInbound(
+	bus inboundEventSubscriber,
+	handler event.EventHandlerFunc,
+) event.EventSubscriberId {
+	// Lossless: a detached handler would start no feeder for any later
+	// connection, and nothing would resubscribe it.
+	return bus.SubscribeFuncWithBufferPolicy(
+		connmanager.InboundConnectionEventType,
+		event.DefaultSubscriberBuffer,
+		event.SubscriberBackpressureBlock,
+		handler,
+	)
 }
 
 // Stop closes the socket and every local connection, and waits for the
@@ -243,8 +274,7 @@ func (s *Stack) shutdownLocal(ctx context.Context) error {
 	case <-ctx.Done():
 		err = errors.Join(err, ctx.Err())
 	}
-	s.bus.Stop()
-	return err
+	return errors.Join(err, s.bus.CloseContext(ctx))
 }
 
 // submissionConfig serves protocol 14. Validation happens in submit, not in
@@ -442,15 +472,15 @@ func (s *Stack) feed(
 		if pending == nil {
 			wake = added
 		}
-		timer := time.NewTimer(wait)
+		timer := s.feedTimer(wait)
 		select {
 		case <-wake:
-		case <-timer.C:
+		case <-timer.wake:
 			wait = min(2*wait, maxFeedRetryInterval)
 		case <-ctx.Done():
-			timer.Stop()
+			timer.stop()
 			return
 		}
-		timer.Stop()
+		timer.stop()
 	}
 }

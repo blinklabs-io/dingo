@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -488,6 +489,60 @@ func TestStackStartFailureStopsPool(t *testing.T) {
 	}
 }
 
+func TestStackShutdownBoundsBlockedEventHandler(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	s, err := NewStack(StackConfig{
+		SocketPath:    filepath.Join(dir, "dmq.sock"),
+		NetworkMagic:  testDMQMagic,
+		Authenticator: ocommon.NewNoOpAuthenticator(nil),
+	})
+	require.NoError(t, err)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := sync.OnceFunc(func() { close(release) })
+	defer released()
+	s.inboundSub = s.bus.SubscribeFuncWithBufferPolicy(
+		connmanager.InboundConnectionEventType,
+		1,
+		event.SubscriberBackpressureBlock,
+		func(event.Event) {
+			close(entered)
+			<-release
+		},
+	)
+	s.bus.Publish(
+		connmanager.InboundConnectionEventType,
+		event.NewEvent(connmanager.InboundConnectionEventType, struct{}{}),
+	)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("event handler did not start")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- s.shutdownLocal(ctx) }()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+		require.ErrorContains(
+			t,
+			err,
+			string(connmanager.InboundConnectionEventType),
+		)
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown exceeded its bounded EventBus close")
+	}
+
+	released()
+	require.NoError(t, s.bus.CloseContext(context.Background()))
+}
+
 // A rate() alert on a reject reason needs the series to exist before the
 // first rejection of that reason.
 func TestStackPreRegistersRejectReasons(t *testing.T) {
@@ -509,9 +564,40 @@ func TestStackPreRegistersRejectReasons(t *testing.T) {
 	}, reasons)
 }
 
-// An inbound handler that falls behind for longer than the bus's delivery
-// bound must not be detached, or no later connection would ever get a
-// notification feeder.
+type inboundSubscriptionRecorder struct {
+	eventType event.EventType
+	buffer    int
+	policy    event.SubscriberBackpressurePolicy
+}
+
+func (r *inboundSubscriptionRecorder) SubscribeFuncWithBufferPolicy(
+	eventType event.EventType,
+	buffer int,
+	policy event.SubscriberBackpressurePolicy,
+	_ event.EventHandlerFunc,
+) event.EventSubscriberId {
+	r.eventType = eventType
+	r.buffer = buffer
+	r.policy = policy
+	return 1
+}
+
+func TestStackInboundSubscriptionIsLossless(t *testing.T) {
+	t.Parallel()
+
+	recorder := &inboundSubscriptionRecorder{}
+	subscribeInbound(recorder, func(event.Event) {})
+	require.Equal(
+		t,
+		event.EventType(connmanager.InboundConnectionEventType),
+		recorder.eventType,
+	)
+	require.Equal(t, event.DefaultSubscriberBuffer, recorder.buffer)
+	require.Equal(t, event.SubscriberBackpressureBlock, recorder.policy)
+}
+
+// A full inbound queue must drain without losing the subscription, or no
+// later connection would ever get a notification feeder.
 func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	t.Parallel()
 	s, _ := newTestStack(t, StackConfig{})
@@ -520,12 +606,14 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 	s.mu.Lock()
 	newConsumer(t, s)
 	flooded := make(chan struct{})
+	var attempts atomic.Int64
 	go func() {
 		defer close(flooded)
 		// Unknown connection IDs: the handler returns early for each, once
 		// it is running again. One more than the subscriber buffer parks
 		// the publisher on a full queue.
 		for range event.DefaultSubscriberBuffer + 1 {
+			attempts.Add(1)
 			s.bus.Publish(
 				connmanager.InboundConnectionEventType,
 				event.NewEvent(
@@ -535,8 +623,14 @@ func TestStackServesConnectionsAfterInboundStall(t *testing.T) {
 			)
 		}
 	}()
-	// Outlast the bus's delivery bound for a full subscriber.
-	time.Sleep(event.RemoteDeliverTimeout + time.Second)
+	require.Eventually(t, func() bool {
+		return attempts.Load() == event.DefaultSubscriberBuffer+1
+	}, 5*time.Second, time.Millisecond)
+	select {
+	case <-flooded:
+		t.Fatal("inbound publisher did not backpressure on a full queue")
+	default:
+	}
 	s.mu.Unlock()
 	select {
 	case <-flooded:
@@ -686,6 +780,20 @@ func (r *refusalCounter) Handle(_ context.Context, rec slog.Record) error {
 func (r *refusalCounter) WithAttrs([]slog.Attr) slog.Handler { return r }
 func (r *refusalCounter) WithGroup(string) slog.Handler      { return r }
 
+type manualFeedTimer struct {
+	wait    time.Duration
+	wake    chan time.Time
+	stopped chan struct{}
+	once    sync.Once
+}
+
+func (t *manualFeedTimer) timer() feedTimer {
+	return feedTimer{
+		wake: t.wake,
+		stop: func() { t.once.Do(func() { close(t.stopped) }) },
+	}
+}
+
 // A connection that never requests notifications, such as a submit-only
 // client, fills its notification queue. Its feeder must back off rather than
 // re-offer the held message at a fixed short interval for the life of the
@@ -694,6 +802,16 @@ func TestStackBacksOffFullNotificationQueue(t *testing.T) {
 	t.Parallel()
 	refusals := &refusalCounter{}
 	s, _ := newTestStack(t, StackConfig{Logger: slog.New(refusals)})
+	timers := make(chan *manualFeedTimer, 2*localmessagenotification.NewConfig().MaxQueueSize)
+	s.feedTimer = func(wait time.Duration) feedTimer {
+		timer := &manualFeedTimer{
+			wait:    wait,
+			wake:    make(chan time.Time, 1),
+			stopped: make(chan struct{}),
+		}
+		timers <- timer
+		return timer.timer()
+	}
 	submit := submitter(t, s)
 	// One more than the notification server's default queue size.
 	for i := range localmessagenotification.NewConfig().MaxQueueSize + 1 {
@@ -705,10 +823,35 @@ func TestStackBacksOffFullNotificationQueue(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return refusals.n.Load() > 0
 	}, 10*time.Second, 10*time.Millisecond)
-	start := refusals.n.Load()
-	const window = 3 * time.Second
-	time.Sleep(window)
-	// A fixed 100ms retry offers the message about 30 times in the window;
-	// doubling from 100ms offers it about 5 times.
-	require.LessOrEqual(t, refusals.n.Load()-start, int64(10))
+	nextActiveTimer := func() *manualFeedTimer {
+		t.Helper()
+		for {
+			select {
+			case timer := <-timers:
+				select {
+				case <-timer.stopped:
+					continue
+				default:
+					return timer
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("feeder did not create its retry timer")
+				return nil
+			}
+		}
+	}
+
+	for i, want := range []time.Duration{
+		feedRetryInterval,
+		2 * feedRetryInterval,
+		4 * feedRetryInterval,
+	} {
+		timer := nextActiveTimer()
+		require.Equal(t, want, timer.wait)
+		before := refusals.n.Load()
+		timer.wake <- time.Now()
+		require.Eventually(t, func() bool {
+			return refusals.n.Load() > before
+		}, 5*time.Second, time.Millisecond, "retry %d did not run", i+1)
+	}
 }
