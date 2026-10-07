@@ -400,6 +400,32 @@ func TestGetProtocolVersion_Nil(t *testing.T) {
 	)
 }
 
+func TestGetProtocolVersion_TypedNil(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pparams lcommon.ProtocolParameters
+	}{
+		{name: "Shelley", pparams: (*shelley.ShelleyProtocolParameters)(nil)},
+		{name: "Mary", pparams: (*mary.MaryProtocolParameters)(nil)},
+		{name: "Alonzo", pparams: (*alonzo.AlonzoProtocolParameters)(nil)},
+		{name: "Babbage", pparams: (*babbage.BabbageProtocolParameters)(nil)},
+		{name: "Conway", pparams: (*conway.ConwayProtocolParameters)(nil)},
+		{name: "Dijkstra", pparams: (*dijkstra.DijkstraProtocolParameters)(nil)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.NotPanics(t, func() {
+				_, err := GetProtocolVersion(test.pparams)
+				require.ErrorContains(t, err, "protocol parameters are a nil")
+			})
+		})
+	}
+}
+
 func TestEraForVersion(t *testing.T) {
 	t.Parallel()
 
