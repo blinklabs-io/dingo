@@ -4965,8 +4965,7 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 		))
 		if explicitShelleyHardFork {
 			// ExperimentalHardForksEnabled is set independently: preview ships
-			// TestShelleyHardForkAtEpoch with the flag false, and
-			// CardanoNodeConfig.HardForkEpoch reports nothing in that case.
+			// TestShelleyHardForkAtEpoch with the flag false.
 			if experimentalHardForks {
 				cfg.ExperimentalHardForksEnabled = new(true)
 			}
@@ -5011,12 +5010,10 @@ func TestPrepareEpochCacheForStartupPreservesByronPrefix(t *testing.T) {
 	)
 
 	// preview's shipped shape: TestShelleyHardForkAtEpoch: 0 with
-	// ExperimentalHardForksEnabled: False. Reading the declaration through
-	// CardanoNodeConfig.HardForkEpoch hides it, because that accessor returns
-	// (0, false) unless the experimental flag is set -- which forced a node
-	// back to Byron on a network with no Byron prefix and left currentPParams
-	// nil for every GetCurrentPParams consumer (api/utxorpc ReadParams
-	// returned "current protocol parameters empty").
+	// ExperimentalHardForksEnabled: False. Ignoring the declaration when the
+	// flag is off forced a node back to Byron on a network with no Byron
+	// prefix and left currentPParams nil for every GetCurrentPParams consumer
+	// (api/utxorpc ReadParams returned "current protocol parameters empty").
 	t.Run(
 		"explicit hard fork without experimental flag starts in Shelley",
 		func(t *testing.T) {
@@ -5373,20 +5370,24 @@ func TestEvaluateTriggerAtEpoch_SetsTransitionKnown(t *testing.T) {
 	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
 }
 
-// Without ExperimentalHardForksEnabled, the override is inert.
-func TestEvaluateTriggerAtEpoch_InertWithoutExperimentalFlag(t *testing.T) {
+// Without ExperimentalHardForksEnabled the override still applies, matching
+// cardano-node: a devnet with TestBabbageHardForkAtEpoch: 2 and the flag unset
+// enters Babbage at epoch 2, so an Alonzo ledger in epoch 1 must publish
+// TransitionKnown(2).
+func TestEvaluateTriggerAtEpoch_AppliesWithoutExperimentalFlag(t *testing.T) {
 	t.Parallel()
 
-	target := uint64(5)
+	target := uint64(2)
 	ls := newTestLedgerStateWithTrigger(
 		t,
-		eras.ByronEraDesc.Id, 3,
+		eras.AlonzoEraDesc.Id, 1,
 		hardfork.NewTransitionUnknown(),
-		"shelley", &target, false,
+		"babbage", &target, false,
 	)
 	ls.evaluateTriggerAtEpoch()
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"override must be ignored without ExperimentalHardForksEnabled")
+	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
+		"override must apply without ExperimentalHardForksEnabled")
+	assert.Equal(t, target, ls.transitionInfo.KnownEpoch)
 }
 
 // When currentEpoch.EpochId >= target epoch, the trigger is not applied
@@ -7971,6 +7972,7 @@ func TestBoundaryEraForBlockUsesSuccessorHeaderEra(t *testing.T) {
 		eras.AlonzoEraDesc.Id,
 		7,
 		true,
+		0,
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.True(t, allowTwoTransitions)
@@ -7985,6 +7987,7 @@ func TestBoundaryEraForBlockDoesNotAdvanceFromHeaderAlone(t *testing.T) {
 		eras.AlonzoEraDesc.Id,
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(
 		t,
@@ -8004,9 +8007,83 @@ func TestBoundaryEraForBlockRejectsNonAdjacentHeaderEra(t *testing.T) {
 		eras.AlonzoEraDesc.Id,
 		eras.ConwayEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(t, eras.AlonzoEraDesc.Id, target)
 	require.False(t, allowTwoTransitions)
+}
+
+// TestBoundaryEraForBlockHonoursScheduledEpoch pins that a configured
+// TestXHardForkAtEpoch is authoritative over the boundary block's header
+// protocol major. cardano-node stamps every header with its own
+// cardanoProtocolVersion (11 without ExperimentalHardForksEnabled, 12 with
+// it), not with the block's era, so on a devnet with Babbage at epoch 4 and
+// Conway at epoch 5 the first Babbage block carries major 11. Read as an
+// announced era, that took the ledger Alonzo -> Babbage -> Conway at epoch 4,
+// and the node then forged Conway blocks cardano-node rejected.
+func TestBoundaryEraForBlockHonoursScheduledEpoch(t *testing.T) {
+	t.Parallel()
+
+	newLedger := func(t *testing.T) *LedgerState {
+		t.Helper()
+		cfg := newTestEraHistoryCfg(t)
+		babbage, conway := uint64(4), uint64(5)
+		cfg.TestBabbageHardForkAtEpoch = &babbage
+		cfg.TestConwayHardForkAtEpoch = &conway
+		return &LedgerState{
+			config: LedgerStateConfig{CardanoNodeConfig: cfg},
+		}
+	}
+
+	t.Run("before the successor's epoch", func(t *testing.T) {
+		t.Parallel()
+		target, allowTwoTransitions := newLedger(t).boundaryEraForBlock(
+			eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id,
+			11,
+			true,
+			4,
+		)
+		require.Equal(t, eras.BabbageEraDesc.Id, target,
+			"Conway is scheduled for epoch 5, so epoch 4 stays in Babbage")
+		require.False(t, allowTwoTransitions)
+	})
+
+	t.Run("at the successor's epoch", func(t *testing.T) {
+		t.Parallel()
+		target, allowTwoTransitions := newLedger(t).boundaryEraForBlock(
+			eras.AlonzoEraDesc.Id,
+			eras.BabbageEraDesc.Id,
+			11,
+			true,
+			5,
+		)
+		require.Equal(t, eras.ConwayEraDesc.Id, target)
+		require.True(t, allowTwoTransitions)
+	})
+}
+
+// TestBoundaryEraForBlockVersionTriggerKeepsHeaderElevation pins that the
+// scheduled-epoch guard leaves version-triggered networks alone: with no
+// TestXHardForkAtEpoch override, Prime-mainnet's Mary -> Alonzo -> Babbage
+// boundary still resolves from the Alonzo body's header major 7.
+func TestBoundaryEraForBlockVersionTriggerKeepsHeaderElevation(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newTestEraHistoryCfg(t),
+		},
+	}
+	target, allowTwoTransitions := ls.boundaryEraForBlock(
+		eras.MaryEraDesc.Id,
+		eras.AlonzoEraDesc.Id,
+		7,
+		true,
+		10,
+	)
+	require.Equal(t, eras.BabbageEraDesc.Id, target)
+	require.True(t, allowTwoTransitions)
 }
 
 func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
@@ -8020,6 +8097,7 @@ func TestEraAdvancementRejectsRawTwoStepBodyJumpWithoutHeaderElevation(
 		eras.BabbageEraDesc.Id,
 		eras.BabbageEraDesc.MinMajorVersion,
 		true,
+		0,
 	)
 	require.Equal(t, eras.BabbageEraDesc.Id, target)
 	require.False(t, allowTwoTransitions)
@@ -8511,6 +8589,43 @@ func TestConsensusModeForEpoch_UnresolvableShapeFailsClosed(t *testing.T) {
 	_, err = broken.ConsensusModeForEpoch(600)
 	require.Error(t, err,
 		"a future-epoch consensus mode must fail closed without a shape")
+}
+
+// TestConsensusModeForEpoch_AtEpochOverrideWithoutExperimentalFlag is the
+// forging-side half of the TestBabbageHardForkAtEpoch scenario: with the flag
+// unset, an Alonzo ledger in epoch 1 must forecast Babbage's CPraos for epoch
+// 2, or a producer would forge Alonzo blocks that cardano-node rejects.
+func TestConsensusModeForEpoch_AtEpochOverrideWithoutExperimentalFlag(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newTestEraHistoryCfg(t)
+	babbage := uint64(2)
+	cfg.TestBabbageHardForkAtEpoch = &babbage
+	epoch := models.Epoch{
+		EpochId:       1,
+		StartSlot:     432_000,
+		SlotLength:    1_000,
+		LengthInSlots: 432_000,
+		EraId:         eras.AlonzoEraDesc.Id,
+	}
+	ls := &LedgerState{
+		epochCache:   []models.Epoch{epoch},
+		currentEra:   eras.AlonzoEraDesc,
+		currentEpoch: epoch,
+		config:       LedgerStateConfig{CardanoNodeConfig: cfg},
+	}
+	ls.publishSnapshotsLocked()
+
+	mode, err := ls.ConsensusModeForEpoch(1)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeTPraos, mode)
+
+	mode, err = ls.ConsensusModeForEpoch(2)
+	require.NoError(t, err)
+	assert.Equal(t, consensus.ConsensusModeCPraos, mode,
+		"the configured Babbage fork must apply without the experimental flag")
 }
 
 func TestEmptyGenesisCommitteeValidation(t *testing.T) {
@@ -10383,8 +10498,24 @@ func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
 // resolved from the complete era history. Dividing an absolute slot by the
 // current era's epoch length loses the epochs occupied by a Byron prefix and
 // can therefore miss a scheduled fork at the first future Shelley boundary.
+// cardano-node honours TestAllegraHardForkAtEpoch whatever
+// ExperimentalHardForksEnabled says, so the forger must forecast the fork with
+// the flag unset too.
 func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	t.Parallel()
+	for _, experimental := range []bool{true, false} {
+		t.Run(fmt.Sprintf("experimental=%t", experimental), func(t *testing.T) {
+			t.Parallel()
+			testProtocolParamsForSlotUsesMultiEraEpochs(t, experimental)
+		})
+	}
+}
+
+func testProtocolParamsForSlotUsesMultiEraEpochs(
+	t *testing.T,
+	experimental bool,
+) {
+	t.Helper()
 
 	const (
 		byronEpochs       = 2
@@ -10399,6 +10530,9 @@ func TestProtocolParamsForSlot_UsesMultiEraEpochs(t *testing.T) {
 	)
 
 	cfg := newMultiEraForecastCfg(t, shelleyEpoch+1)
+	if !experimental {
+		cfg.ExperimentalHardForksEnabled = nil
+	}
 	epochCache := make([]models.Epoch, 0, int(shelleyEpoch)+1)
 	for epoch := range uint64(byronEpochs) {
 		epochCache = append(epochCache, models.Epoch{

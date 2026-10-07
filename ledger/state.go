@@ -2073,9 +2073,17 @@ func (ls *LedgerState) eraTransitionPath(
 // advances an unchanged body era: source-era blocks can advertise the next
 // protocol major before the hard fork. The boolean result records whether the
 // validated body-plus-header elevation justifies a two-transition path.
+//
+// A configured TriggerAtEpoch for the body era's successor is authoritative
+// over the header: the elevation is refused before that epoch. cardano-node
+// stamps headers with its own cardanoProtocolVersion rather than the block's
+// era, so on a devnet scheduling Babbage at epoch 4 and Conway at 5 the first
+// Babbage block advertises major 11 and would otherwise pull the ledger into
+// Conway an epoch early. newEpochID is the epoch the boundary block opens.
 func (ls *LedgerState) boundaryEraForBlock(
 	currentEraID, blockEraID, headerMajor uint,
 	headerMajorKnown bool,
+	newEpochID uint64,
 ) (uint, bool) {
 	targetEraID := blockEraID
 	if blockEraID == currentEraID || !headerMajorKnown {
@@ -2084,6 +2092,11 @@ func (ls *LedgerState) boundaryEraForBlock(
 	headerEraID, ok := ls.eraForVersion(headerMajor)
 	if !ok || headerEraID == blockEraID ||
 		!ls.isValidEraAdvancement(blockEraID, headerEraID) {
+		return targetEraID, false
+	}
+	if entry, ok := ls.eraShape().EraForID(blockEraID); ok &&
+		entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
+		newEpochID < entry.NextEraTrigger.Epoch {
 		return targetEraID, false
 	}
 	path, ok := ls.eraTransitionPath(currentEraID, headerEraID, true)
@@ -8260,6 +8273,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 								uint(next.Era().Id),
 								headerMajor,
 								headerMajorKnown,
+								snapshotEpoch.EpochId+1,
 							)
 							// Cache rest of the batch for next loop
 							cachedNextBatch = nextBatch[i+offset:]
@@ -9657,7 +9671,7 @@ func (ls *LedgerState) eraShape() hardfork.Shape {
 // evaluateTriggerAtEpoch sets transitionInfo to TransitionKnown(e) when the
 // current era's NextEraTrigger is TriggerAtEpoch(e) and that epoch has not
 // yet arrived. The trigger is resolved once at Shape build time from
-// CardanoNodeConfig (TestXHardForkAtEpoch + ExperimentalHardForksEnabled);
+// CardanoNodeConfig.HardForkEpoch (TestXHardForkAtEpoch);
 // this method only consumes that resolution.
 //
 // The AtEpoch override is authoritative: it supersedes a prior
@@ -10346,12 +10360,8 @@ func (ls *LedgerState) warnOnPreByronPrefixEpochCache() {
 // with no Byron prefix from one that reaches Shelley on chain.
 //
 // Read through CardanoNodeConfig.DeclaredHardForkEpoch, which reports what the
-// file says regardless of ExperimentalHardForksEnabled. HardForkEpoch answers a
-// different question -- whether a fork is *scheduled* -- and returns
-// (0, false) when the flag is unset, which hides preview's declaration
-// (TestShelleyHardForkAtEpoch: 0 with ExperimentalHardForksEnabled: False).
-// Both accessors read the same field through the same switch, so there is one
-// interpreter of it rather than two.
+// file says. preview declares TestShelleyHardForkAtEpoch: 0 with
+// ExperimentalHardForksEnabled: False, and that declaration must count.
 //
 // Only epoch 0 counts. A nonzero value declares a Shelley hard fork some
 // epochs in, which means epochs 0..N-1 are Byron -- a Byron prefix, not the
