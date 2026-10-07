@@ -20,7 +20,6 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -46,8 +45,6 @@ var (
 		"credential generation changed during block production",
 	)
 )
-
-const maxSecretKeyFileSize = 1 << 20
 
 // PoolCredentials holds the cryptographic keys required for block production.
 // All keys are loaded using Bursa from standard cardano-cli format files.
@@ -195,38 +192,35 @@ func NewPoolCredentials() *PoolCredentials {
 // loadSecretKeyFromFile opens and checks a secret key before reading from the
 // same handle, avoiding a TOCTOU race between the permission check and read.
 func loadSecretKeyFromFile(path string) (*bursa.LoadedKey, error) {
-	f, err := openSecretKeyFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
-	}
-	defer f.Close() //nolint:errcheck // read-only handle
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("failed to stat key file %q: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf(
-			"key file %q is not a regular file (mode %s)",
-			path, info.Mode(),
-		)
-	}
-	if err := keystore.CheckOpenFilePermissions(f); err != nil {
-		return nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(f, maxSecretKeyFileSize+1))
+	data, err := keystore.ReadSecretKeyFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
-	}
-	if len(data) > maxSecretKeyFileSize {
-		return nil, fmt.Errorf(
-			"key file %q exceeds maximum size of %d bytes",
-			path, maxSecretKeyFileSize,
-		)
 	}
 	key, err := bursa.LoadKeyFromBytes(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse key file %q: %w", path, err)
+	}
+	key.File = filepath.Base(path)
+	return key, nil
+}
+
+// LoadOperationalCertificateFile loads a cardano-cli operational certificate
+// from a regular file. Operational certificates contain public data, so their
+// file permissions are not restricted.
+func LoadOperationalCertificateFile(path string) (*bursa.LoadedKey, error) {
+	data, err := keystore.ReadRegularKeyFile(path)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to read operational certificate %q: %w",
+			path, err,
+		)
+	}
+	key, err := bursa.LoadKeyFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to parse operational certificate %q: %w",
+			path, err,
+		)
 	}
 	key.File = filepath.Base(path)
 	return key, nil
@@ -272,7 +266,7 @@ func loadPoolCredentialsFromFiles(
 	loaded.kesVKey = kesKey.VKey
 
 	// Load operational certificate
-	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
+	opCertKey, err := LoadOperationalCertificateFile(opCertPath)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to load operational certificate: %w",
@@ -605,7 +599,7 @@ func loadPoolCredentialsFromAgentSign(
 	loaded.vrfSKey = vrfSKey
 	loaded.vrfVKey = vrfVKey
 
-	opCertKey, err := bursa.LoadKeyFromFile(opCertPath)
+	opCertKey, err := LoadOperationalCertificateFile(opCertPath)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"failed to load operational certificate: %w",

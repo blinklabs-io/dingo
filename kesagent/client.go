@@ -81,7 +81,8 @@ var (
 // Config configures a Client.
 type Config struct {
 	// SocketPath is the Unix-domain service socket of a running bursa KES
-	// agent (--shelley-kes-agent-socket).
+	// agent (--shelley-kes-agent-socket). NewClient resolves a relative
+	// filesystem path once and reuses that endpoint for every reconnect.
 	SocketPath string
 	// Mode selects ModeServeKey or ModeSign. Empty defaults to ModeServeKey.
 	Mode string
@@ -130,6 +131,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.SocketPath == "" {
 		return nil, errors.New("kesagent: socket path is required")
 	}
+	resolvedSocketPath, err := resolveSocketPath(cfg.SocketPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SocketPath = resolvedSocketPath
 	// Checked here rather than left to the first dial: an over-long path
 	// fails with a bare "invalid argument" that names neither the length nor
 	// the limit, and block-producer startup is where an operator can still

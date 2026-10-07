@@ -4709,6 +4709,32 @@ bridge the gap, the ledger emits `chainsync.resync` with reason
 for a fresh intersect from the current local tip instead of waiting for a cursor
 that has already moved past the missing blocks.
 
+Two bounds keep that close from looping while the node is far behind the
+network, where every selected peer is ahead by construction and closing one
+moves selection to the next:
+
+- The close is speculative, so it applies only to a peer near its advertised
+  tip, which may send nothing for many slots. A peer with at least
+  `headerMismatchResyncThreshold` blocks left before its advertised tip keeps
+  streaming headers, and a cursor past the local tip then shows up in the
+  header handler as consecutive mismatches, which request a resync from
+  headers actually received. The advertised tip is untrusted, but it only
+  withholds a close; overstating it cannot force one. A fallback connection,
+  which the switch event carries no advertised tip for, is measured against
+  the chain selector's sync target instead. That target never exceeds the
+  advertised tip, so the fallback withholds a close less often, never more.
+- The close reconnects the peer under a new connection ID, so the ledger
+  records the request against the peer's remote address and does not request
+  another fresh cursor for that peer until a header from it reaches the
+  ledger, or for 30 minutes. A request coalesced into one made moments earlier
+  for the same connection closes nothing, so it is not recorded.
+
+A switch that withholds a repeat logs it once per request at Info, and
+`freshCursorStallWarnRequests` fresh-cursor requests without the local tip
+moving past the highest tip it has reached log a Warn, since each one closes a
+connection and nothing else reports the stall. A rollback, or a return to a
+tip already reached, is not progress.
+
 Each peer has two distinct frontiers. `PeerChainTip.Tip` is the remote peer's
 untrusted advertised network tip; `PeerChainTip.ObservedTip` is the latest
 header that peer actually delivered locally. Plausibility checks, Praos
@@ -7560,10 +7586,14 @@ fixed-size `sun_path` field --- 104 bytes on macOS, 108 on Linux --- so a
 longer path is refused with `EINVAL`, which Go reports as a bare
 `invalid argument` naming neither the length nor the limit. macOS is four
 bytes tighter than Linux, so a path that works on a Linux node can fail on a
-developer's Mac. Dingo never constructs this path; it connects to exactly what
-`--shelley-kes-agent-socket` names, and `kesagent.NewClient` rejects an
-over-long one at block-producer startup with an error that states the length
-and the limit.
+developer's Mac. `kesagent.NewClient` resolves a relative filesystem path to
+one absolute path before the first connection, then reuses that path for every
+reconnect; changing the process working directory cannot redirect later
+connections to another local agent. Absolute filesystem paths are cleaned,
+and Linux abstract socket addresses use Go's `@name` form and are kept as
+configured. Literal NUL-prefixed addresses are rejected as nonportable. The
+client rejects an over-long resolved path at block-producer startup with an
+error that states the length and the limit.
 
 `internal/config.ValidateKESKeySources` rejects a block producer that sets
 both `shelleyKesKey` and `shelleyKesAgentSocket`, so an operator's explicit

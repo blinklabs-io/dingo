@@ -14,14 +14,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package forging
+package keystore
 
 import (
 	"os"
 	"syscall"
 )
 
-func openSecretKeyFile(path string) (*os.File, error) {
+func openFileForValidation(path string) (*os.File, error) {
 	return os.OpenFile( // #nosec G304 -- operator-configured key path
 		path,
 		os.O_RDONLY|syscall.O_NONBLOCK,
