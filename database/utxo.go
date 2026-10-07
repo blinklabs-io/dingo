@@ -837,6 +837,48 @@ func (d *Database) UtxosByAddress(
 	return filterUtxosByAddressPatterns(utxos, patterns)
 }
 
+// UtxosByAddressAsOf is UtxosByAddress as the outputs stood at atSlot (see
+// the metadata store's GetUtxosByAddressAsOf). Rows spent at or before
+// atSlot and later removed by consumed-UTxO cleanup are missing, so callers
+// must reject a point below their retention floor first.
+func (d *Database) UtxosByAddressAsOf(
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if len(addrs) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	patterns := make([]models.UtxoAddressPattern, len(addrs))
+	for i, addr := range addrs {
+		pattern, err := models.ExactUtxoAddressPattern(addr)
+		if err != nil {
+			return nil, err
+		}
+		patterns[i] = pattern
+	}
+	utxos, err := d.utxoStore().GetUtxosByAddressAsOf(
+		patterns,
+		atSlot,
+		maxResults,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	for i := range utxos {
+		if err := loadCbor(&utxos[i], txn); err != nil {
+			return nil, err
+		}
+	}
+	return filterUtxosByAddressPatterns(utxos, patterns)
+}
+
 // UtxosWithHistory returns retained live and spent outputs with their
 // producing and spending chain positions. The metadata store performs the
 // indexed coarse query; this coordinated layer resolves output CBOR and

@@ -777,6 +777,65 @@ WHERE pool_key_hash = ?`,
 	)
 }
 
+// RestoreImportedAccountStates rewrites an account's registration and
+// delegation to its import baseline when that baseline was established at or
+// after minBaselineSlot, and returns the number of rows it changed.
+//
+// Historical API backfill replays certificates over accounts a Mithril
+// snapshot imported at its anchor, but certificates are not the only rule
+// that moves a delegation: POOLREAP clears delegations to a reaped pool
+// (Shelley/Rules/PoolReap.hs, removeStakePoolDelegations) and the PV10
+// HARDFORK rule clears delegations to an unregistered DRep
+// (Conway/Rules/HardFork.hs, updateDRepDelegations). Backfill runs neither,
+// so replay can leave a delegation the snapshot no longer holds. Once replay
+// has reached the anchor, the snapshot is the ledger state there. reward is
+// not touched: historical backfill never debits it.
+func (s *Store) RestoreImportedAccountStates(
+	minBaselineSlot uint64,
+	txn types.Txn,
+) (int, error) {
+	slot, err := checkedInt64(minBaselineSlot)
+	if err != nil {
+		return 0, fmt.Errorf("restore imported account states: %w", err)
+	}
+	var restored int
+	err = s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			const baseline = `FROM account_import_baseline b
+WHERE b.credential_tag = account.credential_tag
+  AND b.staking_key = account.staking_key`
+			result, err := db.ExecContext(ctx, s.dialect.Rebind(`
+UPDATE account SET
+    pool = (SELECT b.pool `+baseline+`),
+    drep = (SELECT b.drep `+baseline+`),
+    drep_type = (SELECT b.drep_type `+baseline+`),
+    active = (SELECT b.active `+baseline+`),
+    added_slot = (SELECT b.added_slot `+baseline+`)
+WHERE EXISTS (
+    SELECT 1 `+baseline+`
+      AND b.added_slot >= ?
+      AND ((account.pool IS NULL) <> (b.pool IS NULL)
+        OR account.pool <> b.pool
+        OR (account.drep IS NULL) <> (b.drep IS NULL)
+        OR account.drep <> b.drep
+        OR account.drep_type <> b.drep_type
+        OR account.active <> b.active)
+)`), slot)
+			if err != nil {
+				return fmt.Errorf("restore imported account states: %w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("restore imported account states: %w", err)
+			}
+			restored = int(affected)
+			return nil
+		},
+	)
+	return restored, err
+}
+
 // DeactivateAccounts tombstones the given credentials and their import
 // baselines. The two writes and every chunk of them share one transaction: an
 // account tombstoned while its baseline stays active is contradictory state

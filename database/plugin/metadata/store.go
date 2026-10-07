@@ -495,6 +495,16 @@ type GovernanceStore interface {
 		types.Txn,
 	) error
 
+	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
+	// for historical replay below a snapshot anchor whose recorded expiry
+	// must stand.
+	RecordDRepActivityEpoch(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
+		types.Txn,
+	) error
+
 	// GetExpiredDReps retrieves all active DReps whose expiry epoch is at
 	// or before the given epoch.
 	GetExpiredDReps(
@@ -723,6 +733,19 @@ type UtxoStore interface {
 		[]models.UtxoAddressPattern,
 		int,
 		types.Txn,
+	) ([]models.Utxo, error)
+
+	// GetUtxosByAddressAsOf is GetUtxosByAddress as the outputs stood at
+	// atSlot, using GetUtxosByRefsAsOf's predicate: a row is included when
+	// its AddedSlot is at-or-before atSlot and it was either never spent or
+	// was spent strictly after atSlot. It inherits GetUtxosByRefsAsOf's
+	// ambiguity for an old atSlot, so callers must reject a point below
+	// their retention floor before calling it.
+	GetUtxosByAddressAsOf(
+		patterns []models.UtxoAddressPattern,
+		atSlot uint64,
+		maxResults int,
+		txn types.Txn,
 	) ([]models.Utxo, error)
 
 	// GetControlledAmountByCredential returns the sum of live UTxO
@@ -1065,6 +1088,10 @@ type TransactionStore interface {
 		bool, // skipWithdrawalWitness
 		types.Txn,
 	) error
+
+	// SetTransactionLeiosClosureInContext applies a closure using the parent's
+	// unticked slot while retaining point as its rollback owner.
+	SetTransactionLeiosClosureInContext(lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool, uint64, types.Txn) error
 
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
@@ -1443,6 +1470,17 @@ type CertificateStore interface {
 		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// GetLatestAccountRegistrationAtOrBefore returns the newest registration
+	// history row for a stake credential whose AddedSlot is at or before
+	// slot, ordered as GetAccountRegistrationHistoryByCredential orders them,
+	// or nil when there is none. It does not consult the import baseline.
+	GetLatestAccountRegistrationAtOrBefore(
+		credentialTag uint8,
+		stakingKey []byte,
+		slot uint64,
+		txn types.Txn,
+	) (*models.AccountRegistrationHistoryRow, error)
 
 	// CountAccountRegistrationHistoryByCredential retrieves the total count of
 	// registration history rows for a stake credential tag/hash pair.
@@ -2007,6 +2045,14 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetEpochBoundaryActivePoolKeyHashes excludes boundary retirements in
+	// Dijkstra, while retaining the pre-boundary transaction certificate cut.
+	GetEpochBoundaryActivePoolKeyHashes(
+		slot uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([][]byte, error)
+
 	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had
 	// registered as of a slot, using the same latest-certificate-wins
 	// ordering as GetActivePoolKeyHashesAtSlot. The bool reports whether any
@@ -2278,6 +2324,13 @@ type MetadataStore interface {
 	// the sqlstore implementation for why the import baseline is left alone.
 	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
 
+	// RestoreImportedAccountStates sets active, pool and DRep delegation back
+	// to each account's import baseline recorded at or after the given slot,
+	// leaving reward untouched, and returns the number of rows changed.
+	// Historical API backfill calls it at the Mithril anchor, because replay
+	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
+	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
+
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
@@ -2440,6 +2493,16 @@ type MetadataStore interface {
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
 		keyDeposit uint64,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
+	// SetGenesisStakingWithDeposits also records the genesis pool deposit.
+	SetGenesisStakingWithDeposits(
+		pools map[string]lcommon.PoolRegistrationCertificate,
+		stakeDelegations map[string]string,
+		keyDeposit uint64,
+		poolDeposit uint64,
 		blockHash []byte,
 		txn types.Txn,
 	) error

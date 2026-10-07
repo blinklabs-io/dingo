@@ -295,15 +295,28 @@ func BlockIDByPointLocalTxn(
 	txn *Txn,
 	point ocommon.Point,
 ) (uint64, error) {
+	metadata, err := BlockMetadataByPointLocalTxn(txn, point)
+	if err != nil {
+		return 0, err
+	}
+	return metadata.ID, nil
+}
+
+// BlockMetadataByPointLocalTxn returns retained local metadata for point
+// without requiring the block body to remain available.
+func BlockMetadataByPointLocalTxn(
+	txn *Txn,
+	point ocommon.Point,
+) (types.BlockMetadata, error) {
 	if txn == nil {
-		return 0, types.ErrNilTxn
+		return types.BlockMetadata{}, types.ErrNilTxn
 	}
 	if txn.Blob() == nil {
-		return 0, types.ErrNilTxn
+		return types.BlockMetadata{}, types.ErrNilTxn
 	}
 	store := txn.BlobStore()
 	if store == nil {
-		return 0, types.ErrBlobStoreUnavailable
+		return types.BlockMetadata{}, types.ErrBlobStoreUnavailable
 	}
 	var (
 		metadata types.BlockMetadata
@@ -320,18 +333,18 @@ func BlockIDByPointLocalTxn(
 	}
 	if err != nil && !errors.Is(err, types.ErrHistoryExpired) {
 		if errors.Is(err, types.ErrBlobKeyNotFound) {
-			return 0, models.ErrBlockNotFound
+			return types.BlockMetadata{}, models.ErrBlockNotFound
 		}
-		return 0, err
+		return types.BlockMetadata{}, err
 	}
 	if metadata.ID == 0 && errors.Is(err, types.ErrHistoryExpired) {
-		return 0, fmt.Errorf(
+		return types.BlockMetadata{}, fmt.Errorf(
 			"%w: expired block at slot %d has no local metadata ID",
 			models.ErrBlockNotFound,
 			point.Slot,
 		)
 	}
-	return metadata.ID, nil
+	return metadata, nil
 }
 
 // BlockPointBySlotTxn returns the canonical point at slot without loading
