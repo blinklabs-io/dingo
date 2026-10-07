@@ -4923,14 +4923,17 @@ epoch `E` (the `E-1 -> E` boundary), the caller passes `E-1`
 `epoch-1` from the target epoch; `ForecastPParamUpdates` likewise), because a
 proposal for epoch `e` is enacted as epoch `e+1`'s parameters.
 `selectClassicPParamUpdate` then follows the reference `votedFuturePParams`
-and `updatePpup`: each genesis key's vote is its latest row in (`added_slot`,
-`id`) order; rows added before epoch `E-1` began (proposals carried over from
-`E-2`) are all discarded when any key's latest carried-over row proposes a
-protocol version that cannot follow epoch `E-1`'s, which is the only case that
-reads the `epoch` row for `E-1`; votes are grouped by decoded update value, not
-by CBOR bytes; and exactly one value must reach `updateQuorum`, with the
-result keeping `maxTxSize + maxBlockHeaderSize < maxBlockBodySize`.
-Otherwise nothing is enacted.
+and `updatePpup`: a row outside the reference domain, or carrying a cost
+model that epoch `E-1`'s protocol version rejects, is refused and skipped, as
+the reference would have rejected its transaction; each genesis key's vote is
+its latest remaining row in (`added_slot`, `id`) order; rows added before epoch
+`E-1` began (proposals carried over from `E-2`) are all discarded when any
+key's latest remaining carried-over row proposes a protocol version that
+cannot follow epoch `E-1`'s, which is the only case that reads the `epoch` row
+for `E-1`; votes are grouped by decoded update value, not by CBOR bytes; and
+exactly one value must reach `updateQuorum`, with the result keeping
+`maxTxSize + maxBlockHeaderSize < maxBlockBodySize`. Otherwise nothing is
+enacted.
 
 ```sql
 SELECT *
