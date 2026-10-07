@@ -124,7 +124,7 @@ var flagSpecs = []flagSpec{
 		"ImmutableDbPath",
 		"immutable-db-path",
 		"",
-		"path to ImmutableDB for load mode",
+		"path or http(s) URL of the ImmutableDB for load mode",
 	),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag(
