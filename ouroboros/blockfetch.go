@@ -353,6 +353,22 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		)
 		return nil
 	}
+	// Reserve range capacity before the first allocation (the chain
+	// iterator below and the sender goroutine). Saturation is answered with
+	// NoBlocks, the only rejection BlockFetch defines for a request.
+	release, admitted := o.blockfetchRangeAdmission.reserve(
+		ctx.ConnectionId,
+		ctx.Server.ProtocolInstance().DoneChan(),
+	)
+	if admitted != blockfetchRangeAdmitted {
+		return o.blockfetchRejectSaturated(ctx, start, admitted)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	// The requested slot span is not validated here: on a sparse or
 	// low-active-slot-coefficient network, a valid run of consecutive
 	// blocks can span far more slots than mainnet's stability window.
@@ -460,9 +476,14 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 		}
 	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
-	// Start async process to send requested block range
+	// Start async process to send requested block range. The goroutine owns
+	// the reservation from here on.
+	handedOff = true
 	go func() {
-		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+		defer release()
+		rawConn, connDone := o.connManager.GetConnectionWithDone(
+			ctx.ConnectionId,
+		)
 		if rawConn == nil {
 			chainIter.Cancel()
 			return
@@ -487,6 +508,27 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 			)
 		}
 	}()
+	return nil
+}
+
+// blockfetchRejectSaturated answers a range request that exceeded the
+// per-connection or global admission bound. BlockFetch permits pipelined range
+// requests, so saturation is backpressure and must not feed the stuck-peer
+// valve or disconnect a protocol-compliant peer.
+func (o *Ouroboros) blockfetchRejectSaturated(
+	ctx blockfetch.CallbackContext,
+	start ocommon.Point,
+	result blockfetchRangeAdmitResult,
+) error {
+	o.config.Logger.Debug(
+		"blockfetch: range admission saturated, sending NoBlocks",
+		"connection_id", ctx.ConnectionId.String(),
+		"start_slot", start.Slot,
+		"per_connection", result == blockfetchRangeConnSaturated,
+	)
+	if err := ctx.Server.NoBlocks(); err != nil {
+		return fmt.Errorf("blockfetch NoBlocks after saturation: %w", err)
+	}
 	return nil
 }
 
@@ -908,6 +950,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 				block.Hash(),
 				delaySeconds,
 				fetchDuration.Seconds(),
+			)
+			o.blockfetchMetrics.recentForks.recordParticipant(
+				block.BlockNumber(),
+				block.SlotNumber(),
+				block.Hash(),
 			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all

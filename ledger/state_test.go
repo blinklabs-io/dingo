@@ -382,6 +382,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
 	original := &shelley.ShelleyProtocolParameters{
 		MinFeeA:          44,
+		NOpt:             1,
 		A0:               rat(),
 		Rho:              rat(),
 		Tau:              rat(),
@@ -401,6 +402,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 	ls.publishSnapshotsLocked()
 	oldConsensus := ls.consensus.Load()
 
@@ -470,6 +472,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 
 	var result *EpochRolloverResult
 	txn := db.Transaction(true)
@@ -971,6 +974,22 @@ func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
 		t.Fatalf("ReportTipGapFunc called during catch-up with gap %d", gap)
 	default:
 	}
+}
+
+// A paused slot clock is still running, so handleBehindHorizon reports it
+// alive; otherwise a node whose tip fell behind the era-history horizon after
+// it had ticked would read as a stopped clock and fail liveness.
+func TestHandleBehindHorizonReportsTheSlotClockAlive(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newTipGapTestLedgerState(t, 100, nil)
+	alive := 0
+	ls.config.ReportSlotClockAliveFunc = func() { alive++ }
+
+	ls.handleBehindHorizon(1_000)
+	ls.handleBehindHorizon(1_001)
+
+	assert.Equal(t, 2, alive)
 }
 
 // An epoch length that is not yet known is left unset rather than
@@ -8087,6 +8106,7 @@ func newBoundaryRolloverLedger(
 		currentPParams: &shelley.ShelleyProtocolParameters{
 			ProtocolMajor:    shelley.MinProtocolVersionShelley,
 			MinFeeA:          44,
+			NOpt:             1,
 			A0:               rat(),
 			Rho:              rat(),
 			Tau:              rat(),
@@ -8097,6 +8117,7 @@ func newBoundaryRolloverLedger(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
 	return ls, db
 }
 
@@ -8793,6 +8814,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, pparams)
 	return &hardForkRatifyFixture{
 		ls:       ls,
 		db:       db,
@@ -8807,6 +8829,7 @@ func (f *hardForkRatifyFixture) rollover(
 	pparams lcommon.ProtocolParameters,
 ) *EpochRolloverResult {
 	t.Helper()
+	seedEmptyRewardBasisForRollover(t, f.db, currentEpoch, pparams)
 	var result *EpochRolloverResult
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
