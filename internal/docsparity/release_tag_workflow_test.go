@@ -90,6 +90,44 @@ func TestPrivilegedReleaseJobsNeedValidatedTag(t *testing.T) {
 	}
 }
 
+func TestNPMReleaseUsesTrustedPublishing(t *testing.T) {
+	t.Parallel()
+	root := repoRoot(t)
+	workflowText := readRepoFile(t, root, publishWorkflow)
+	var workflow releaseWorkflow
+	if err := yaml.Unmarshal([]byte(workflowText), &workflow); err != nil {
+		t.Fatalf("parse %s: %v", publishWorkflow, err)
+	}
+
+	if !strings.Contains(workflowText, "id-token: write") {
+		t.Error("publish workflow does not grant the npm job OIDC token access")
+	}
+	if !strings.Contains(workflowText, "node-version: '24.x'") {
+		t.Error("npm release does not use a Node.js version supported by trusted publishing")
+	}
+	job := workflow.Jobs["npm-release"]
+	installedTrustedCLI := false
+	published := false
+	for _, step := range job.Steps {
+		if step.Name == "Install npm CLI for trusted publishing" &&
+			step.Run == "npm install --global npm@11.5.1" {
+			installedTrustedCLI = true
+		}
+		if step.Name == "Publish to NPM" {
+			published = step.Run == "npm publish --access public"
+			if _, hasToken := step.Env["NODE_AUTH_TOKEN"]; hasToken {
+				t.Error("npm release still uses a long-lived authentication token")
+			}
+		}
+	}
+	if !installedTrustedCLI {
+		t.Error("npm release does not install the minimum npm CLI for trusted publishing")
+	}
+	if !published {
+		t.Error("npm release does not publish through npm's OIDC trusted publisher")
+	}
+}
+
 func TestReleaseConsumerUpdateFailsClosed(t *testing.T) {
 	t.Parallel()
 	t.Run("missing cardano-up template", func(t *testing.T) {
@@ -104,23 +142,25 @@ func TestReleaseConsumerUpdateFailsClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("invalid chart version", func(t *testing.T) {
-		dir := t.TempDir()
-		chart := filepath.Join(dir, "consumer/charts/dingo/Chart.yaml")
-		values := filepath.Join(dir, "consumer/charts/dingo/values.yaml")
-		requireTestFile(t, chart, "version: invalid\nappVersion: \"0.1.0\"\n")
-		requireTestFile(t, values, "image:\n  tag: \"0.1.0\"\n")
-		output, err := runConsumerUpdate(t, dir, releaseConsumerUpdateScript(t, "helm"), "helm")
-		if err == nil {
-			t.Fatalf("consumer update unexpectedly succeeded: %s", output)
-		}
-		if !strings.Contains(string(output), "Unsupported chart version") {
-			t.Fatalf("consumer update error = %q", output)
-		}
-		if got := readRepoFile(t, dir, "consumer/charts/dingo/Chart.yaml"); strings.Contains(got, "version: ..1") {
-			t.Fatalf("invalid chart version was rewritten: %q", got)
-		}
-	})
+	for _, version := range []string{"invalid", "01.2.3"} {
+		t.Run("invalid chart version "+version, func(t *testing.T) {
+			dir := t.TempDir()
+			chart := filepath.Join(dir, "consumer/charts/dingo/Chart.yaml")
+			values := filepath.Join(dir, "consumer/charts/dingo/values.yaml")
+			requireTestFile(t, chart, "version: "+version+"\nappVersion: \"0.1.0\"\n")
+			requireTestFile(t, values, "image:\n  tag: \"0.1.0\"\n")
+			output, err := runConsumerUpdate(t, dir, releaseConsumerUpdateScript(t, "helm"), "helm")
+			if err == nil {
+				t.Fatalf("consumer update unexpectedly succeeded: %s", output)
+			}
+			if !strings.Contains(string(output), "Unsupported chart version") {
+				t.Fatalf("consumer update error = %q", output)
+			}
+			if got := readRepoFile(t, dir, "consumer/charts/dingo/Chart.yaml"); strings.Contains(got, "version: ..1") {
+				t.Fatalf("invalid chart version was rewritten: %q", got)
+			}
+		})
+	}
 
 	t.Run("chart version increment", func(t *testing.T) {
 		dir := t.TempDir()
