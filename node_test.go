@@ -4612,3 +4612,16 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
 }
+
+func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+
+	assert.Positive(
+		t,
+		cfg.MaxTxSubmissionsPerSecond,
+		"production ouroboros config must enable the TxSubmission limiter",
+	)
+}
