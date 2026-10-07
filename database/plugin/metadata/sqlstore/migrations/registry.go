@@ -208,6 +208,7 @@ var schemaVersions = []struct {
 	},
 	{Version: 34, Name: "leios-transaction-ledger-context", Dir: "v34"},
 	{Version: 35, Name: accountDRepClearSchemaRelease, Dir: "v35"},
+	{Version: 36, Name: "drep-expiry-history", Dir: "v36"},
 }
 
 // SQLiteRegistry returns the checked-in SQLite migration registry.

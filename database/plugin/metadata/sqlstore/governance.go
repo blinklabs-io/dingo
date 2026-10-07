@@ -111,6 +111,31 @@ func (s *Store) GetGovernanceProposalSet(
 	)
 }
 
+func (s *Store) GetGovernanceProposalSetAtSlot(
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	// The predicate GetGovernanceProposalSet applies at the tip, read
+	// through the lifecycle slots rollback reverts by.
+	return s.queryGovernanceProposals(
+		txn,
+		"governance_proposal.added_slot <= ? "+
+			"AND (enacted_slot IS NULL OR enacted_slot > ?) "+
+			"AND (governance_proposal_drop.dropped_slot IS NULL "+
+			"OR governance_proposal_drop.dropped_slot > ?) "+
+			"AND (deleted_slot IS NULL OR deleted_slot > ?)",
+		governanceProposalOrderSQL,
+		slotValue,
+		slotValue,
+		slotValue,
+		slotValue,
+	)
+}
+
 func (s *Store) GetExpiringGovernanceProposals(
 	epoch uint64,
 	txn types.Txn,
@@ -487,6 +512,62 @@ SELECT id, proposal_id, voter_type, voter_credential_tag, voter_credential,
 FROM governance_vote
 WHERE proposal_id = ? AND deleted_slot IS NULL`,
 		proposalID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ret := []*models.GovernanceVote{}
+	for rows.Next() {
+		vote, err := scanGovernanceVote(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, vote)
+	}
+	return ret, rows.Err()
+}
+
+func (s *Store) GetGovernanceVotesAtSlot(
+	proposalID uint,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceVote, error) {
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return nil, err
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+	// A replaced vote keeps only its latest value; the value in effect at
+	// slot is the latest governance_vote_history entry at or before it,
+	// which SetGovernanceVote writes on every change including the first
+	// cast. A vote with no such entry predates the journal and keeps its row.
+	rows, err := db.QueryContext(ctx, `
+SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
+       v.voter_credential,
+       CASE WHEN h.id IS NULL THEN v.vote ELSE h.vote END,
+       CASE WHEN h.id IS NULL THEN v.anchor_url ELSE h.anchor_url END,
+       CASE WHEN h.id IS NULL THEN v.anchor_hash ELSE h.anchor_hash END,
+       v.added_slot,
+       CASE WHEN h.id IS NULL THEN v.vote_updated_slot
+            ELSE h.transition_slot END,
+       NULL
+FROM governance_vote v
+LEFT JOIN governance_vote_history h ON h.id = (
+    SELECT h2.id FROM governance_vote_history h2
+    WHERE h2.vote_id = v.id AND h2.transition_slot <= ?
+    ORDER BY h2.transition_slot DESC, h2.id DESC
+    LIMIT 1
+)
+WHERE v.proposal_id = ? AND v.added_slot <= ?
+  AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)`,
+		slotValue,
+		proposalID,
+		slotValue,
+		slotValue,
 	)
 	if err != nil {
 		return nil, err

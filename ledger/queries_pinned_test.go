@@ -1238,3 +1238,390 @@ func TestVerifyPointQueryable_RejectsPointBelowMithrilTrustBoundary(
 	)
 	require.NoError(t, ls.VerifyPointQueryable(nil, boundary))
 }
+
+func seedProposalAt(
+	t *testing.T,
+	db *database.Database,
+	marker byte,
+	addedSlot uint64,
+) *models.GovernanceProposal {
+	t.Helper()
+	govAction, err := cbor.Encode([]any{uint64(lcommon.GovActionTypeInfo)})
+	require.NoError(t, err)
+	proposal := &models.GovernanceProposal{
+		TxHash:        repeatedBytes(32, marker),
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ExpiresEpoch:  10,
+		AnchorURL:     "https://example.com/proposal.json",
+		AnchorHash:    repeatedBytes(32, marker+1),
+		Deposit:       100_000_000,
+		ReturnAddress: append([]byte{0xe0}, repeatedBytes(28, marker+2)...),
+		GovActionCbor: govAction,
+		AddedSlot:     addedSlot,
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+	return proposal
+}
+
+// proposalsAt returns the proposals GetProposals reports at, keyed by the
+// first byte of their transaction hash, with each one's DRep votes.
+func proposalsAt(
+	t *testing.T,
+	ls *LedgerState,
+	at QueryPoint,
+) map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote {
+	t.Helper()
+	result, err := ls.queryShelleyGetProposals(nil, at, nil)
+	require.NoError(t, err)
+	proposals, ok := result.([]any)[0].(olocalstatequery.ProposalsResult)
+	require.True(t, ok)
+	ret := make(map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote)
+	for _, proposal := range proposals {
+		ret[proposal.Id.TransactionId[0]] = proposal.DRepVotes
+	}
+	return ret
+}
+
+func TestQueryShelleyGetProposals_PinnedPointAnswersAtThatPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	enacted := seedProposalAt(t, db, 0x71, 100)
+	dropped := seedProposalAt(t, db, 0x81, 100)
+	seedProposalAt(t, db, 0x91, 300)
+	voter := repeatedBytes(28, 0x75)
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      enacted.ID,
+		VoterType:       models.VoterTypeDRep,
+		VoterCredential: voter,
+		Vote:            models.VoteYes,
+		AddedSlot:       150,
+	}, nil))
+	require.NoError(t, db.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:      enacted.ID,
+		VoterType:       models.VoterTypeDRep,
+		VoterCredential: voter,
+		Vote:            models.VoteNo,
+		AddedSlot:       150,
+		VoteUpdatedSlot: new(uint64(350)),
+	}, nil))
+	expiredEpoch, expiredSlot := uint64(3), uint64(300)
+	droppedEpoch, droppedSlot := uint64(4), uint64(400)
+	dropped.ExpiredEpoch, dropped.ExpiredSlot = &expiredEpoch, &expiredSlot
+	dropped.DroppedEpoch, dropped.DroppedSlot = &droppedEpoch, &droppedSlot
+	require.NoError(t, db.SetGovernanceProposal(dropped, nil))
+	enactedEpoch, enactedSlot := uint64(5), uint64(500)
+	enacted.EnactedEpoch, enacted.EnactedSlot = &enactedEpoch, &enactedSlot
+	require.NoError(t, db.SetGovernanceProposal(enacted, nil))
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(voter),
+	}
+	none := map[olocalstatequery.StakeCredential]lcommon.Vote{}
+	yes := map[olocalstatequery.StakeCredential]lcommon.Vote{
+		cred: lcommon.Vote(models.VoteYes),
+	}
+	no := map[olocalstatequery.StakeCredential]lcommon.Vote{
+		cred: lcommon.Vote(models.VoteNo),
+	}
+	tip := map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote{
+		0x91: none,
+	}
+	for _, tc := range []struct {
+		name string
+		at   QueryPoint
+		want map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote
+	}{
+		{
+			name: "before any vote",
+			at:   QueryPoint{Slot: 120},
+			want: map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote{
+				0x71: none, 0x81: none,
+			},
+		},
+		{
+			name: "first vote",
+			at:   QueryPoint{Slot: 200},
+			want: map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote{
+				0x71: yes, 0x81: none,
+			},
+		},
+		{
+			name: "replaced vote, third proposal, expired not dropped",
+			at:   QueryPoint{Slot: 380},
+			want: map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote{
+				0x71: no, 0x81: none, 0x91: none,
+			},
+		},
+		{
+			name: "dropped",
+			at:   QueryPoint{Slot: 450},
+			want: map[byte]map[olocalstatequery.StakeCredential]lcommon.Vote{
+				0x71: no, 0x91: none,
+			},
+		},
+		{name: "enacted", at: QueryPoint{Slot: 600}, want: tip},
+		{name: "unpinned", at: QueryPoint{}, want: tip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, proposalsAt(t, ls, tc.at))
+		})
+	}
+}
+
+func drepAnchorAt(url string, marker byte) *lcommon.GovAnchor {
+	anchor := &lcommon.GovAnchor{Url: url}
+	copy(anchor.DataHash[:], repeatedBytes(32, marker))
+	return anchor
+}
+
+// seedDRepAt writes one DRep certificate at slot and, for a registration or
+// update, the activity renewal the ledger applies with it.
+func seedDRepAt(
+	t *testing.T,
+	db *database.Database,
+	drep []byte,
+	cert lcommon.Certificate,
+	slot uint64,
+	epoch uint64,
+	deposit uint64,
+) {
+	t.Helper()
+	seedAccountTxAt(t, db, drep, slot, map[int]uint64{0: deposit},
+		func(tx *mockledger.MockTransaction) {
+			tx.WithCertificates(cert)
+		})
+	switch cert.(type) {
+	case *lcommon.RegistrationDrepCertificate, *lcommon.UpdateDrepCertificate:
+		require.NoError(t, db.UpdateDRepActivity(0, drep, epoch, 20, slot, nil))
+	}
+}
+
+func drepStates(
+	t *testing.T,
+	result any,
+) olocalstatequery.DRepStateResult {
+	t.Helper()
+	states, ok := result.([]any)[0].(olocalstatequery.DRepStateResult)
+	require.True(t, ok)
+	return states
+}
+
+func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	retiring := repeatedBytes(28, 0xD5)
+	late := repeatedBytes(28, 0xD6)
+	retiringCred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(retiring),
+	}
+	lateCred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeAddrKeyHash,
+		Credential: lcommon.NewBlake2b224(late),
+	}
+	firstAnchor := drepAnchorAt("https://example.com/first.json", 0xA6)
+	secondAnchor := drepAnchorAt("https://example.com/second.json", 0xA7)
+	seedDRepAt(t, db, retiring, &lcommon.RegistrationDrepCertificate{
+		DrepCredential: retiringCred,
+		Amount:         500_000_000,
+		Anchor:         firstAnchor,
+	}, 100, 1, 500_000_000)
+	early := repeatedBytes(28, 0x5A)
+	later := repeatedBytes(28, 0x5B)
+	moved := repeatedBytes(28, 0x5C)
+	seedStakeCertAt(t, db, early, true, 110, 2_000_000)
+	seedStakeCertAt(t, db, later, true, 110, 2_000_000)
+	seedStakeCertAt(t, db, moved, true, 110, 2_000_000)
+	drep := lcommon.Drep{
+		Type:       lcommon.DrepTypeAddrKeyHash,
+		Credential: retiring,
+	}
+	seedVoteDelegationAt(t, db, early, drep, 200)
+	seedVoteDelegationAt(t, db, moved, drep, 220)
+	seedDRepAt(t, db, retiring, &lcommon.UpdateDrepCertificate{
+		DrepCredential: retiringCred,
+		Anchor:         secondAnchor,
+	}, 300, 3, 0)
+	seedDRepAt(t, db, late, &lcommon.RegistrationDrepCertificate{
+		DrepCredential: lateCred,
+		Amount:         500_000_000,
+	}, 350, 3, 500_000_000)
+	require.NoError(t, db.UpdateDRepActivity(0, retiring, 4, 20, 400, nil))
+	seedVoteDelegationAt(t, db, later, drep, 450)
+	seedVoteDelegationAt(
+		t, db, moved, lcommon.Drep{Type: lcommon.DrepTypeAbstain}, 550,
+	)
+	seedDRepAt(t, db, retiring, &lcommon.DeregistrationDrepCertificate{
+		DrepCredential: retiringCred,
+		Amount:         500_000_000,
+	}, 600, 6, 500_000_000)
+	// A vote renews the second DRep's expiry without touching its row.
+	require.NoError(t, db.UpdateDRepActivity(0, late, 6, 20, 650, nil))
+
+	retiringKey := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(retiring),
+	}
+	lateKey := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: lcommon.NewBlake2b224(late),
+	}
+	entry := func(
+		expiry uint64,
+		anchor *lcommon.GovAnchor,
+		delegators ...[]byte,
+	) olocalstatequery.DRepStateEntry {
+		e := olocalstatequery.DRepStateEntry{
+			Expiry:  expiry,
+			Anchor:  anchor,
+			Deposit: 500_000_000,
+		}
+		for _, key := range delegators {
+			e.Delegators = append(e.Delegators, stakeQueryCred(key))
+		}
+		return e
+	}
+	lateEntry := entry(23, nil)
+	tip := olocalstatequery.DRepStateResult{lateKey: entry(26, nil)}
+	for _, tc := range []struct {
+		name  string
+		creds []lcommon.Credential
+		at    QueryPoint
+		want  olocalstatequery.DRepStateResult
+	}{
+		{
+			name: "registered",
+			at:   QueryPoint{Slot: 150},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(21, firstAnchor),
+			},
+		},
+		{
+			name: "first delegator",
+			at:   QueryPoint{Slot: 250},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(21, firstAnchor, early, moved),
+			},
+		},
+		{
+			name: "updated, second DRep",
+			at:   QueryPoint{Slot: 380},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(23, secondAnchor, early, moved),
+				lateKey:     lateEntry,
+			},
+		},
+		{
+			name:  "restricted to one DRep",
+			creds: []lcommon.Credential{retiringCred},
+			at:    QueryPoint{Slot: 380},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(23, secondAnchor, early, moved),
+			},
+		},
+		{
+			name: "renewed by a vote, second delegator",
+			at:   QueryPoint{Slot: 500},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(24, secondAnchor, early, later, moved),
+				lateKey:     lateEntry,
+			},
+		},
+		{name: "deregistered", at: QueryPoint{Slot: 700}, want: tip},
+		{name: "unpinned", at: QueryPoint{}, want: tip},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := ls.queryShelleyDRepState(tc.creds, tc.at, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, drepStates(t, result))
+		})
+	}
+}
+
+// TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory covers rollback of a
+// DRep's expiry: a vote renews it without a certificate or a drep.added_slot
+// change, and a registration's expiry used to be reset to 0 on rollback.
+func TestRestoreDrepStateAtSlot_RestoresExpiryFromHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		rollbackTo uint64
+		want       uint64
+	}{
+		{name: "past a vote only", rollbackTo: 350, want: 23},
+		{name: "past an update certificate", rollbackTo: 250, want: 21},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			key := repeatedBytes(28, 0xD7)
+			cred := lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.NewBlake2b224(key),
+			}
+			seedDRepAt(t, db, key, &lcommon.RegistrationDrepCertificate{
+				DrepCredential: cred,
+				Amount:         500_000_000,
+			}, 100, 1, 500_000_000)
+			seedDRepAt(t, db, key, &lcommon.UpdateDrepCertificate{
+				DrepCredential: cred,
+			}, 300, 3, 0)
+			require.NoError(t, db.UpdateDRepActivity(0, key, 4, 20, 400, nil))
+
+			require.NoError(t, db.RestoreDrepStateAtSlot(tc.rollbackTo, nil))
+			drep, err := db.GetDrepByCredential(0, key, true, nil)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, drep.ExpiryEpoch)
+		})
+	}
+}
+
+func TestQuery_PinnedPointReachesDRepStateAndProposals(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := newPoolDistr2Ledger(t, db)
+	key := repeatedBytes(28, 0xD8)
+	seedDRepAt(t, db, key, &lcommon.RegistrationDrepCertificate{
+		DrepCredential: lcommon.Credential{
+			CredType:   lcommon.CredentialTypeAddrKeyHash,
+			Credential: lcommon.NewBlake2b224(key),
+		},
+		Amount: 500_000_000,
+	}, 500, 5, 500_000_000)
+	seedProposalAt(t, db, 0xA1, 500)
+	hash := repeatedBytes(32, 0x59)
+	seedBlockAtSlot(t, ls, 300, hash)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(650, repeatedBytes(32, 0x0E)),
+	}, nil))
+	at := QueryPoint{Slot: 300, Hash: hash}
+
+	result, err := ls.Query(
+		shelleyLeafQuery(&olocalstatequery.ShelleyDRepStateQuery{
+			Credentials: cbor.NewSetType([]lcommon.Credential{}, true),
+		}),
+		at,
+	)
+	require.NoError(t, err)
+	require.Empty(t, drepStates(t, result))
+
+	result, err = ls.Query(
+		shelleyLeafQuery(&olocalstatequery.ShelleyGetProposalsQuery{
+			ActionIds: cbor.NewSetType([]lcommon.GovActionId{}, true),
+		}),
+		at,
+	)
+	require.NoError(t, err)
+	proposals, ok := result.([]any)[0].(olocalstatequery.ProposalsResult)
+	require.True(t, ok)
+	require.Empty(t, proposals)
+}

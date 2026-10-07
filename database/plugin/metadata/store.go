@@ -205,6 +205,14 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetGovernanceProposalSetAtSlot is GetGovernanceProposalSet as the set
+	// stood at slot: proposals added at or before it and not yet enacted,
+	// dropped, or soft-deleted by then.
+	GetGovernanceProposalSetAtSlot(
+		uint64, // slot
+		types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetRatifiedGovernanceProposals returns proposals that have been
 	// ratified but not yet enacted. Used at epoch start by enactment.
 	GetRatifiedGovernanceProposals(
@@ -307,6 +315,15 @@ type GovernanceStore interface {
 	// GetGovernanceVotes retrieves all votes for a governance proposal.
 	GetGovernanceVotes(
 		uint, // proposalID
+		types.Txn,
+	) ([]*models.GovernanceVote, error)
+
+	// GetGovernanceVotesAtSlot is GetGovernanceVotes as the votes stood at
+	// slot: votes cast at or before it and not deleted by then, each with
+	// the value governance_vote_history records in effect at slot.
+	GetGovernanceVotesAtSlot(
+		uint, // proposalID
+		uint64, // slot
 		types.Txn,
 	) ([]*models.GovernanceVote, error)
 
@@ -461,6 +478,36 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
 
+	// GetDRepDelegatorsAtSlot returns, for each of dreps (every DRep when
+	// empty), the stake credentials delegating to it at slot, keyed by the
+	// DRep's StakeCredentialRef.MapKey() and in canonical (tag, hash) order.
+	// Accounts are read as GetAccountsByCredentialAtSlot reads them.
+	GetDRepDelegatorsAtSlot(
+		[]models.StakeCredentialRef, // dreps
+		uint64, // slot
+		types.Txn,
+	) (map[string][]models.StakeCredentialRef, error)
+
+	// GetDrepsAtSlot returns the given DReps (every DRep when refs is
+	// empty) that were registered at slot, with the anchor and expiry they
+	// had there. A row last written at or before slot with no later
+	// drep_expiry_history entry is exact there; any other is derived as
+	// RestoreDrepStateAtSlot derives it on rollback.
+	GetDrepsAtSlot(
+		[]models.StakeCredentialRef, // refs
+		uint64, // slot
+		types.Txn,
+	) ([]*models.Drep, error)
+
+	// GetDrepRegistrationDepositAtSlot is GetDrepLastRegistrationDeposit
+	// restricted to registrations at or before slot.
+	GetDrepRegistrationDepositAtSlot(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // slot
+		types.Txn,
+	) (*uint64, error)
+
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both
@@ -487,11 +534,14 @@ type GovernanceStore interface {
 	// UpdateDRepActivity updates the DRep's last activity epoch and
 	// recalculates the expiry epoch. credentialTag distinguishes key (0)
 	// from script (1) DRep credentials that share the same 28-byte hash.
+	// slot is the slot of the activity; the new values are also recorded in
+	// drep_expiry_history at it.
 	UpdateDRepActivity(
 		uint8, // credentialTag
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
+		uint64, // slot
 		types.Txn,
 	) error
 

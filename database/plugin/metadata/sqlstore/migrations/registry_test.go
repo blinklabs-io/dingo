@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 35)
+	require.Len(t, registry, 36)
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
@@ -349,7 +349,7 @@ func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
 			t.Parallel()
 			registry, err := registryForDialect(dialect)
 			require.NoError(t, err)
-			migration := registry[len(registry)-1]
+			migration := registry[34]
 			require.Equal(t, accountDRepClearSchemaRelease, migration.Name)
 			sql := strings.Join(migration.SQL[dialect].Expand, "\n")
 			require.Contains(t, sql, "account_drep_clear")
@@ -481,7 +481,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 35)
+	require.Len(t, registry, 36)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

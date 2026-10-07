@@ -1181,9 +1181,15 @@ func (ls *LedgerState) queryShelley(
 // ShelleyFilteredDelegationAndRewardAccountsQuery and
 // ShelleyFilteredVoteDelegateesQuery (both through
 // GetAccountsByCredentialAtSlot: the accounts registered at at.Slot with the
-// pool, DRep and reward balance they held). Pool and stake certificate rows,
-// the import baseline and the reward journal are removed only by rollback, so
-// none of these needs a retention floor.
+// pool, DRep and reward balance they held), ShelleyDRepStateQuery
+// (queryShelleyDRepStateAt: the DReps registered at at.Slot with the anchor,
+// expiry and deposit they had, from certificates and drep_expiry_history, and
+// their delegators as GetAccountsByCredentialAtSlot reads accounts), and
+// ShelleyGetProposalsQuery (the proposals set at at.Slot from the lifecycle
+// slots, with votes from governance_vote_history). Pool and stake certificate
+// rows, the import baseline, the reward journal, DRep certificates and expiry
+// history, proposal lifecycle slots and vote history are removed only by
+// rollback, so none of these needs a retention floor.
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -1194,11 +1200,6 @@ func (ls *LedgerState) queryShelley(
 // case answers unconditionally from live state regardless of at, because
 // making it historically correct needs storage or reconstruction logic
 // that does not exist yet --
-//   - ShelleyDRepStateQuery, ShelleyGetProposalsQuery: each
-//     reads live per-credential/per-proposal state with no
-//     historical-by-point lookup wired in yet; would need new
-//     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
-//     slot columns, not attempted.
 //   - ShelleyDebugChainDepStateQuery: consensus nonce/opcert state.
 //     computeCandidateNonceAsOf already takes an arbitrary end-slot
 //     internally (a possible future entry point), but OpCertCounters
@@ -1240,7 +1241,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools(at, txn)
 	case *olocalstatequery.ShelleyDRepStateQuery:
-		return ls.queryShelleyDRepState(q.Credentials.Items(), txn)
+		return ls.queryShelleyDRepState(q.Credentials.Items(), at, txn)
 	case *olocalstatequery.ShelleyAccountStateQuery:
 		return ls.queryShelleyAccountState(at, txn)
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
@@ -1252,7 +1253,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 			txn,
 		)
 	case *olocalstatequery.ShelleyGetProposalsQuery:
-		return ls.queryShelleyGetProposals(q.ActionIds.Items(), txn)
+		return ls.queryShelleyGetProposals(q.ActionIds.Items(), at, txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		return ls.queryShelleyDebugChainDepState(txn)
 	case *olocalstatequery.ShelleyPoolDistr2Query:
@@ -1980,8 +1981,12 @@ func (ls *LedgerState) queryShelleyStakePools(
 // epoch, optional anchor, deposit}. A malformed stored credential fails the
 // whole query: returning a map that silently omits one active DRep would
 // claim to be the complete state for this point.
+//
+// A pinned at answers as the DReps stood at at.Slot; see
+// queryShelleyDRepStateAt.
 func (ls *LedgerState) queryShelleyDRepState(
 	creds []lcommon.Credential,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
@@ -1989,6 +1994,9 @@ func (ls *LedgerState) queryShelleyDRepState(
 		len(creds),
 	); err != nil {
 		return nil, err
+	}
+	if at.pinned() {
+		return ls.queryShelleyDRepStateAt(creds, at.Slot, txn)
 	}
 	result := make(olocalstatequery.DRepStateResult)
 	var dreps []*models.Drep
@@ -2084,6 +2092,101 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// The result map is wrapped in the single-element result array cardano-cli
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
+	return []any{result}, nil
+}
+
+// queryShelleyDRepStateAt is queryShelleyDRepState at a pinned slot: the
+// DReps registered then, with the anchor, expiry and registration deposit they
+// had and the stake credentials delegating to them. Certificates, the
+// drep_expiry_history journal and the account history it reads are removed
+// only by rollback, so no retention floor applies.
+func (ls *LedgerState) queryShelleyDRepStateAt(
+	creds []lcommon.Credential,
+	slot uint64,
+	txn *database.Txn,
+) (any, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(creds))
+	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, models.StakeCredentialRef{
+			Tag: credentialTag,
+			Key: cred.Credential[:],
+		})
+	}
+	txn, release := ls.readTxn(txn)
+	defer release()
+	dreps, err := ls.db.GetDrepsAtSlot(refs, slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	var delegatorFilter []models.StakeCredentialRef
+	if len(refs) > 0 {
+		delegatorFilter = make([]models.StakeCredentialRef, 0, len(dreps))
+		for _, drep := range dreps {
+			delegatorFilter = append(delegatorFilter, models.StakeCredentialRef{
+				Tag: drep.CredentialTag,
+				Key: drep.Credential,
+			})
+		}
+	}
+	delegatorRefs, err := ls.db.GetDRepDelegatorsAtSlot(
+		delegatorFilter,
+		slot,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make(olocalstatequery.DRepStateResult)
+	for _, drep := range dreps {
+		recorded, err := ls.db.GetDrepRegistrationDepositAtSlot(
+			drep.CredentialTag,
+			drep.Credential,
+			slot,
+			txn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		var deposit uint64
+		if recorded != nil {
+			deposit = *recorded
+		}
+		var delegators []olocalstatequery.StakeCredential
+		for _, ref := range delegatorRefs[models.StakeCredentialRef{
+			Tag: drep.CredentialTag,
+			Key: drep.Credential,
+		}.MapKey()] {
+			credential, err := lcommon.NewBlake2b224Checked(ref.Key)
+			if err != nil {
+				return nil, fmt.Errorf("drep delegator: %w", err)
+			}
+			delegators = append(delegators, olocalstatequery.StakeCredential{
+				Tag:   uint64(ref.Tag),
+				Bytes: credential,
+			})
+		}
+		credential, err := lcommon.NewBlake2b224Checked(drep.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("drep state: %w", err)
+		}
+		anchor, err := drepAnchor(drep)
+		if err != nil {
+			return nil, err
+		}
+		result[olocalstatequery.StakeCredential{
+			Tag:   uint64(drep.CredentialTag),
+			Bytes: credential,
+		}] = olocalstatequery.DRepStateEntry{
+			Expiry:     drep.ExpiryEpoch,
+			Anchor:     anchor,
+			Deposit:    deposit,
+			Delegators: delegators,
+		}
+	}
 	return []any{result}, nil
 }
 
@@ -2708,13 +2811,24 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 
 // queryShelleyGetProposals returns the active Conway governance proposals,
 // optionally filtered by action ID.
+//
+// A pinned at answers with the proposals set and votes as they stood at
+// at.Slot. Proposal lifecycle slots and the vote history are removed only by
+// rollback, so no retention floor applies.
 func (ls *LedgerState) queryShelleyGetProposals(
 	actionIds []lcommon.GovActionId,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	// GetProposals returns the Conway proposals set, which keeps an action
 	// RATIFY classified expired until the boundary that drops it.
-	proposals, err := ls.db.GetGovernanceProposalSet(txn)
+	var proposals []*models.GovernanceProposal
+	var err error
+	if at.pinned() {
+		proposals, err = ls.db.GetGovernanceProposalSetAtSlot(at.Slot, txn)
+	} else {
+		proposals, err = ls.db.GetGovernanceProposalSet(txn)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2739,7 +2853,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 				continue
 			}
 		}
-		state, err := ls.governanceProposalState(proposal, id, txn)
+		state, err := ls.governanceProposalState(proposal, id, at, txn)
 		if err != nil {
 			return nil, err
 		}
@@ -2751,6 +2865,7 @@ func (ls *LedgerState) queryShelleyGetProposals(
 func (ls *LedgerState) governanceProposalState(
 	proposal *models.GovernanceProposal,
 	id lcommon.GovActionId,
+	at QueryPoint,
 	txn *database.Txn,
 ) (olocalstatequery.GovActionState, error) {
 	rewardAccount, err := lcommon.NewAddressFromBytes(proposal.ReturnAddress)
@@ -2796,7 +2911,12 @@ func (ls *LedgerState) governanceProposalState(
 		ProposedIn:        proposal.ProposedEpoch,
 		ExpiresAfter:      proposal.ExpiresEpoch,
 	}
-	votes, err := ls.db.GetGovernanceVotes(proposal.ID, txn)
+	var votes []*models.GovernanceVote
+	if at.pinned() {
+		votes, err = ls.db.GetGovernanceVotesAtSlot(proposal.ID, at.Slot, txn)
+	} else {
+		votes, err = ls.db.GetGovernanceVotes(proposal.ID, txn)
+	}
 	if err != nil {
 		return olocalstatequery.GovActionState{}, err
 	}
