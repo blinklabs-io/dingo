@@ -2904,11 +2904,11 @@ func jobNeeds(t *testing.T, workflow, name string, job any) []string {
 }
 
 // TestPipelineStagesMatch checks that every shared stage runs the same steps
-// in both pipelines, allowing only the PR documentation gate. A fix applied to the pull-request pipeline and not to
-// the publish one means main is tested differently from the change that was
-// reviewed, which is the failure mode the old split between go-test.yml and
-// publish.yml's `ci` job actually produced: the release gate drifted into
-// running commands no pull request had run.
+// in both pipelines, allowing only the PR documentation gate. A fix applied
+// only to the pull-request pipeline means main is tested differently from the
+// reviewed change. The old split between go-test.yml and publish.yml's `ci`
+// job caused that failure: the release gate drifted into running commands no
+// pull request had run.
 func TestPipelineStagesMatch(t *testing.T) {
 	root := repoRoot(t)
 	prJobs := pipelineJobs(t, root, prPipeline)
@@ -2947,6 +2947,26 @@ func TestPipelineStagesMatch(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestPullRequestChangeGateRunsDocsParity(t *testing.T) {
+	root := repoRoot(t)
+	jobs := pipelineJobs(t, root, prPipeline)
+	changes, ok := jobs["changes"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s changes job is missing or not a mapping", prPipeline)
+	}
+	steps, ok := changes["steps"].([]any)
+	if !ok {
+		t.Fatalf("%s changes job has no steps", prPipeline)
+	}
+	for _, step := range steps {
+		fields, ok := step.(map[string]any)
+		if ok && fields["run"] == "make docs-parity" {
+			return
+		}
+	}
+	t.Errorf("%s changes job does not run make docs-parity", prPipeline)
 }
 
 // TestPipelineStagesAreOrdered checks the dependency chain that makes the

@@ -25,10 +25,11 @@ The Makefile also provides `make lint`, `make docs-parity`,
 ## Pull-request CI selection
 
 Pull requests that change only root-level Markdown files or Markdown files
-under `docs/` skip lint, vulnerability scanning, Go tests, binary builds, and
-Docker builds. All other paths run the full staged pipeline, including Go
-package documentation (`doc.go`), configuration, fixtures, dependencies, and
-CI scripts. Mixed documentation and code changes also run the full pipeline.
+under `docs/` run documentation parity checks, then skip lint, vulnerability
+scanning, the full Go test suite, binary builds, and Docker builds. All other
+paths run the full staged pipeline, including Go package documentation
+(`doc.go`), configuration, fixtures, dependencies, and CI scripts. Mixed
+documentation and code changes also run the full pipeline.
 
 The `changes` job compares the PR merge base with its head using Git, including
 both sides of renames. An empty diff or a failed comparison runs full CI.
