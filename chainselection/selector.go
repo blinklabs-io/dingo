@@ -206,9 +206,11 @@ type ChainSelector struct {
 	// They exist so that a second connection delivering a similar far
 	// frontier is accepted, the first claim then being marked corroborated
 	// and bounding that connection's next update, and so that a lone
-	// connection's run of connected headers can be counted -- see
-	// corroborateFarTipClaimLocked. Bounded to maxTrackedPeers entries and
-	// pruned in deletePeerLocked. Guarded by mutex.
+	// connection's run of connected headers can be counted. An accepted lone
+	// claim remains here alongside its peer tip so it can be revoked, but is
+	// never a reference for another peer -- see corroborateFarTipClaimLocked.
+	// Bounded to maxTrackedPeers entries and pruned in deletePeerLocked.
+	// Guarded by mutex.
 	farTipClaims map[ouroboros.ConnectionId]farTipClaim
 	mutex        sync.RWMutex
 	ctx          context.Context
@@ -791,9 +793,16 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 			advertisedReferenceBlock = prevTip.Tip.BlockNumber
 		} else if len(cs.peerTips) > 0 {
 			// Case 2: new peer — check against the best observed and
-			// advertised frontiers separately.
-			for _, pt := range cs.peerTips {
+			// advertised frontiers separately. A frontier admitted from one
+			// peer's connected run is not independent evidence for another
+			// peer while its claim remains marked lone.
+			excludedLone := false
+			for otherConn, pt := range cs.peerTips {
 				if pt == nil || pt.awaitingFirstHeader {
+					continue
+				}
+				if claim, ok := cs.farTipClaims[otherConn]; ok && claim.lone {
+					excludedLone = true
 					continue
 				}
 				hasReference = true
@@ -804,6 +813,13 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 				if pt.Tip.BlockNumber > advertisedReferenceBlock {
 					advertisedReferenceBlock = pt.Tip.BlockNumber
 				}
+			}
+			// If every delivered frontier is lone-only, keep the local tip as
+			// the trusted reference. Treating the new peer as a bootstrap peer
+			// here would admit its first unrelated far header without a run.
+			if !hasReference && excludedLone && cs.localTip.BlockNumber > 0 {
+				hasReference = true
+				referenceBlock = cs.localTip.BlockNumber
 			}
 		}
 		if hasReference {
@@ -927,9 +943,10 @@ func (cs *ChainSelector) checkPeerTipPlausibleLocked(
 // header. Nothing here tells two connections to one operator from two
 // independent peers, so corroboration is not a Sybil defence either.
 //
-// Entries recorded here are provisional: they never enter cs.peerTips and so
-// never influence chain selection, corroboration, or the Genesis exit
-// horizon by themselves.
+// Pending entries recorded here are provisional: they never enter cs.peerTips
+// and so never influence chain selection, corroboration, or the Genesis exit
+// horizon by themselves. An accepted lone claim remains alongside its peer
+// tip only to enforce revocation and is excluded from other peers' references.
 //
 // Must be called with cs.mutex held and cs.securityParam > 0.
 func (cs *ChainSelector) corroborateFarTipClaimLocked(

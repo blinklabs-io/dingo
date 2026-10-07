@@ -4759,11 +4759,15 @@ block, a different parent, a non-increasing slot or a delivery with no parent
 hash restarts it. Two connections delivering frontiers more than
 `securityParam` apart do not corroborate each other.
 
-The accepted connection keeps its `farTipClaims` entry marked `lone`. While its
-frontier stays beyond the catch-up allowance, every delivery must continue the
-frontier it last delivered by the same rules, or the peer is removed from the
-selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a new
-run from nothing. After a RollBackward to a point inside the retained `k+1`
+The accepted connection keeps its `farTipClaims` entry marked `lone`. A marked
+frontier is excluded from the reference frontier used to admit a new peer; if
+no independently admitted frontier remains, the local tip is the reference.
+The lone peer therefore cannot indirectly admit an unrelated peer, which would
+otherwise retain ordinary standing after the lone frontier was revoked. While
+its frontier stays beyond the catch-up allowance, every delivery must continue
+the frontier it last delivered by the same rules, or the peer is removed from
+the selector (`loneFrontierBrokenLocked`, then `RemovePeer`) and has to build a
+new run from nothing. After a RollBackward to a point inside the retained `k+1`
 delivered-header history, where the block number is known, the next header must
 continue that point's block number by one. A rollback
 to any other point leaves the block number unknown (zero), and an unknown

@@ -5572,6 +5572,45 @@ func TestLoneFarFrontierAcceptsConnectedChain(t *testing.T) {
 	}
 }
 
+// A frontier admitted from one peer's connected run is not independent
+// evidence for an unrelated peer. Losing that first peer must not leave the
+// unrelated peer with an ordinary frontier it can advance by K at a time.
+func TestLoneFarFrontierDoesNotAdmitUnlinkedPeer(t *testing.T) {
+	t.Parallel()
+
+	c := newLoneFarChain()
+	cs := c.newSelector(t)
+	stale := newTestConnectionId(1)
+	lone := newTestConnectionId(2)
+	first := c.first()
+	for i := range c.k + 1 {
+		c.deliver(cs, lone, first+i, c.prevHash(first+i))
+	}
+	require.NotNil(t, cs.GetPeerTip(lone))
+	cs.RemovePeer(stale)
+
+	last := c.tip(first + c.k)
+	unlinked := c.tip(last.BlockNumber + 1)
+	other := newTestConnectionId(3)
+	assert.False(t, c.deliverHeader(
+		cs, other, unlinked, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+
+	broken := c.tip(last.BlockNumber + 1)
+	broken.Point.Hash = []byte("broken-lone-frontier")
+	assert.False(t, c.deliverHeader(
+		cs, lone, broken, []byte("unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(lone))
+
+	advanced := c.tip(unlinked.BlockNumber + c.k)
+	assert.False(t, c.deliverHeader(
+		cs, other, advanced, []byte("another-unrelated-parent"), false,
+	))
+	assert.Nil(t, cs.GetPeerTip(other))
+}
+
 // TestLoneFarFrontierFabricatedNumbersStayRejected covers a lone peer that
 // advances its claimed block number without delivering a connected chain.
 func TestLoneFarFrontierFabricatedNumbersStayRejected(t *testing.T) {
@@ -6075,9 +6114,16 @@ func TestLoneFarFrontierRollbackCannotMoveHeight(t *testing.T) {
 			BlockNumber: 1,
 		}
 		assert.Equal(t, stepBroken, link.step(0, 5, []byte("p"), false, observed))
-		link.boundary = true
-		observed.BlockNumber = 0
-		assert.Equal(t, stepBroken, link.step(0, 5, []byte("p"), false, observed))
+	})
+
+	t.Run("a boundary continues its parent's height", func(t *testing.T) {
+		t.Parallel()
+		link := deliveredLink{prevHash: []byte("p"), boundary: true}
+		observed := ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 10, Hash: []byte("h")},
+			BlockNumber: 1,
+		}
+		assert.Equal(t, stepBoundary, link.step(1, 5, []byte("p"), false, observed))
 	})
 }
 
