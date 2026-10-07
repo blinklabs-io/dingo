@@ -1668,6 +1668,17 @@ type LedgerState struct {
 	// connection, so one divergence episode publishes a single request.
 	resyncCoalesce      map[string]*resyncCoalesceRecord
 	resyncCoalesceMutex sync.Mutex
+	// freshCursorPeers records, by remote address, each peer a chain switch
+	// closed for a fresh chainsync cursor that has not delivered a header to
+	// the ledger since. It is keyed by peer rather than connection because
+	// the close itself reconnects the peer under a new connection ID.
+	// Guarded by chainsyncMutex.
+	freshCursorPeers map[string]*freshCursorRequest
+	// freshCursorStallTip is the highest local tip reached, and
+	// freshCursorStallRequests the chain-switch fresh-cursor requests made
+	// since the tip last moved past it. Guarded by chainsyncMutex.
+	freshCursorStallTip      ochainsync.Tip
+	freshCursorStallRequests int
 
 	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
 	// us to cross to but that we cannot apply locally (block missing below
