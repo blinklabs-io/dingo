@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"os/signal"
 	"slices"
 	"strconv"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
+	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
 )
@@ -100,7 +100,9 @@ func runMithrilSnapshotCreate(
 			"mithril.server.ancillarySigningKeyFile is required",
 		)
 	}
-	keyData, err := os.ReadFile(server.AncillarySigningKeyFile)
+	keyData, err := keystore.ReadSecretKeyFile(
+		server.AncillarySigningKeyFile,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("reading ancillary signing key: %w", err)
 	}
@@ -266,7 +268,7 @@ func newMithrilAggregator(
 	if !agg.Enabled {
 		return nil, nil
 	}
-	keyData, err := os.ReadFile(agg.GenesisSigningKeyFile)
+	keyData, err := keystore.ReadSecretKeyFile(agg.GenesisSigningKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading genesis signing key: %w", err)
 	}
@@ -274,7 +276,7 @@ func newMithrilAggregator(
 	if err != nil {
 		return nil, err
 	}
-	tokenData, err := os.ReadFile(agg.OperatorTokenFile)
+	tokenData, err := keystore.ReadSecretKeyFile(agg.OperatorTokenFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading aggregator operator token: %w", err)
 	}

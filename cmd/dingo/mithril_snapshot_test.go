@@ -377,3 +377,17 @@ func TestNewMithrilServerRejectsUnusableAggregatorKey(t *testing.T) {
 	_, err = newMithrilServer(t.Context(), malformed, discardLogger)
 	assert.Error(t, err)
 }
+
+func TestNewMithrilServerRejectsOversizedOperatorToken(t *testing.T) {
+	t.Parallel()
+
+	cfg := aggregatorTestConfig(t)
+	require.NoError(t, os.WriteFile(
+		cfg.Mithril.Server.Aggregator.OperatorTokenFile,
+		make([]byte, 2<<20),
+		0o600,
+	))
+
+	_, err := newMithrilServer(t.Context(), cfg, discardLogger)
+	require.ErrorContains(t, err, "exceeds maximum size")
+}
