@@ -33,6 +33,7 @@ import (
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
 	cfg := &Config{
+		DatabasePath:         ".dingo",
 		Plugins:              defaultPluginsConfig(),
 		Network:              "preview",
 		RunMode:              RunModeServe,
@@ -219,6 +220,29 @@ func TestValidate(t *testing.T) {
 			wantErr: "metricsPort must be set",
 		},
 		{
+			name:    "MCP port range in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, 65536) },
+			wantErr: "invalid plugins.api.mcp.config.port",
+		},
+		{
+			name:    "MCP collision in core mode",
+			modify:  func(c *Config) { setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "MCP empty host inherits node bind address",
+			modify: func(c *Config) {
+				c.BindAddr = "127.0.0.2"
+				c.Plugins.API.Mcp.Config["host"] = ""
+				setPluginPort(&c.Plugins.API.Mcp, c.RelayPort)
+			},
+			wantErr: "is assigned to both",
+		},
+		{
+			name:   "MCP distinct host avoids collision",
+			modify: func(c *Config) { c.BindAddr = "127.0.0.2"; setPluginPort(&c.Plugins.API.Mcp, c.RelayPort) },
+		},
+		{
 			name: "optional port disabled with zero",
 			modify: func(c *Config) {
 				c.StorageMode = storageModeAPI
@@ -238,7 +262,7 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
-			// UTxORPC/Blockfrost/Mesh/Midnight bind only under API storage
+			// UTxORPC/Blockfrost/Kupo/Mesh/Midnight bind only under API storage
 			// mode; in core mode their ports never bind, so even an
 			// out-of-range or privileged value must not be rejected.
 			name: "core mode skips inactive API port validation",
@@ -613,6 +637,20 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid ledgerCatchupTimeout",
 		},
 		{
+			name: "unparseable local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "a while"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime",
+		},
+		{
+			name: "non-positive local state query view lifetime",
+			modify: func(c *Config) {
+				c.LocalStateQueryViewMaxLifetime = "0s"
+			},
+			wantErr: "invalid localStateQueryViewMaxLifetime \"0s\": must be positive",
+		},
+		{
 			name:    "unparseable chainsync stall timeout",
 			modify:  func(c *Config) { c.Chainsync.StallTimeout = "soon" },
 			wantErr: "invalid chainsync.stallTimeout",
@@ -629,6 +667,19 @@ func TestValidate(t *testing.T) {
 				c.Mithril.DownloadIdleTimeout = "later"
 			},
 			wantErr: "invalid mithril.downloadIdleTimeout",
+		},
+		{
+			name: "negative mithril download limit",
+			modify: func(c *Config) {
+				c.Mithril.DownloadMaxBytes = -1
+			},
+			wantErr: "invalid mithril.downloadMaxBytes",
+		},
+		{
+			name: "positive mithril download limit",
+			modify: func(c *Config) {
+				c.Mithril.DownloadMaxBytes = 1 << 30
+			},
 		},
 		{
 			name:    "invalid chainsync strategy",
@@ -1033,6 +1084,18 @@ func TestValidateDatabaseLifecycleSnapshotCloudDestination(t *testing.T) {
 	}
 }
 
+func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = -time.Second
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshotMaxCommitPause")
+
+	cfg = validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 // TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
 // filesystem permission error surfacing deep inside a snapshot attempt
 // instead of a clean, actionable one at startup -- the failure mode for a
@@ -1412,4 +1475,14 @@ func TestValidateMinPoolMargin(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+func TestValidateRejectsEmptyDatabasePathForSQLite(t *testing.T) {
+	t.Parallel()
+	cfg := validTestConfig()
+	cfg.DatabasePath = ""
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.ErrorContains(t, err, "databasePath must be set")
+	cfg.Plugins.Storage.Metadata.Provider = "postgres"
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }

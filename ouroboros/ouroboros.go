@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/ratewindow"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -121,7 +122,7 @@ type Ouroboros struct {
 	// Shared cache of decoded blocks/headers keyed by content hash, so
 	// multiple connections delivering byte-identical data (the common case
 	// when several peers relay the same block) decode once instead of once
-	// per connection. See #489 and decode_cache.go.
+	// per connection. See decode_cache.go.
 	blockDecodeCache   *decodeCache[gledger.Block]
 	headerDecodeCache  *decodeCache[gledger.BlockHeader]
 	decodeCacheMetrics *decodeCacheMetrics
@@ -140,6 +141,24 @@ type Ouroboros struct {
 	// one and only terminal callback has already run.
 	blockFetchDoneEarly map[blockFetchKey]struct{}
 	blockFetchMutex     sync.Mutex
+	// blockfetchForward holds, per connection, the blockfetch events
+	// received but not yet published to the ledger; see
+	// blockfetch_forward.go.
+	blockfetchForward   map[ouroboros.ConnectionId]*blockfetchForwardState
+	blockfetchForwardMu sync.Mutex
+	// blockfetchForwardSpawn and blockfetchForwardBeforePublish are nil in
+	// production. Tests set them to observe forwarder starts and to hold a
+	// forwarder inside its publish.
+	blockfetchForwardSpawn         func(ouroboros.ConnectionId, func(ouroboros.ConnectionId))
+	blockfetchForwardBeforePublish func(ouroboros.ConnectionId, event.Event)
+	// blockfetchForwardMaxBytes and blockfetchForwardMaxEvents override the
+	// per-connection forward queue bounds when positive; tests lower them.
+	// blockfetchForwardClose, when set, replaces blockfetchForwardCloseLive
+	// for a connection whose queue reached a bound; tests set it to observe
+	// the close.
+	blockfetchForwardMaxBytes  int
+	blockfetchForwardMaxEvents int
+	blockfetchForwardClose     func(ouroboros.ConnectionId)
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -148,13 +167,24 @@ type Ouroboros struct {
 	// no pin, answer from live state) an NtC client acquired on this
 	// connection's LocalStateQuery session, keyed by ConnectionId so
 	// multiple simultaneous NtC clients don't share state. Populated by
-	// localstatequeryServerAcquire when the client names a specific point
-	// (blinklabs-io/dingo#382), read by localstatequeryServerQuery, and
+	// localstatequeryServerAcquire when the client names a specific point,
+	// read by localstatequeryServerQuery, and
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
-	localstatequeryAcquireMutex   sync.Mutex
-	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// localstatequerySessions holds each connection's acquired ledger
+	// snapshot. It is guarded by localstatequeryAcquireMutex like the maps
+	// above. localstatequeryAcquisitions tracks a snapshot open in progress so
+	// connection close can cancel it before it installs a session.
+	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
+	localstatequeryAcquisitions map[ouroboros.ConnectionId]*localstatequeryAcquisition
+	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
+	// run just before Acquire verifies its point and just after the
+	// verified view opens. Tests use them to act at those exact moments.
+	localstatequeryVerifyHook   func()
+	localstatequeryVerifiedHook func()
+	localstatequeryAcquireMutex sync.Mutex
+	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -171,7 +201,7 @@ type Ouroboros struct {
 	// chainSelectionShouldVerifyHeaderCrypto and chainSelectionVerifyHeaderCrypto
 	// gate whether a peer-reported header may influence Genesis chain-selection
 	// density or corroboration before its VRF/KES cryptography (and, once local
-	// state has caught up, leader eligibility) has been checked (dingo #3517).
+	// state has caught up, leader eligibility) has been checked.
 	// Derived from ledgerState the same way chainsyncHeaderAdmission is, so
 	// tests exercising a single protocol handler can override either seam
 	// directly instead of standing up a full LedgerState.
@@ -186,8 +216,6 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
-	// Per-connection mutex to serialize chainsync restarts
-	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -244,7 +272,7 @@ type Ouroboros struct {
 	// offered on every connection). Keyed by slot and hash together, not hash
 	// alone, so an in-flight fetch for one occurrence does not suppress a
 	// legitimate offer of the same content-addressed hash recurring at a
-	// different slot (issue #3513).
+	// different slot.
 	leiosFetchInProgress sync.Map // leiosBlockKey(point.Slot, point.Hash) → struct{}
 	// Manifest offers have their own claim: a pending manifest fetch must not
 	// suppress a transaction offer needed to complete the same occurrence.
@@ -264,6 +292,9 @@ type Ouroboros struct {
 	// second description of the same ranking block from being relayed.
 	leiosAnnouncementsMu       sync.Mutex
 	leiosAnnouncements         map[string]leiosAnnouncement
+	leiosAnnouncementInFlight  map[string]struct{}
+	leiosInvalidAnnouncements  *ratewindow.FixedWindow
+	leiosInvalidAnnouncementMu sync.Mutex
 	leiosDeferredMu            sync.Mutex
 	leiosDeferredAnnouncements map[string]leiosDeferredAnnouncement
 	leiosAnnouncementSizes     map[string]uint64
@@ -271,13 +302,12 @@ type Ouroboros struct {
 	// the set of slots a live (unexpired) announcement has declared it at, so
 	// a later leios-fetch offer or store can be bound to a point its own
 	// announcement actually vouched for instead of trusting whatever point
-	// the offering connection supplies (issue #3513). It is a set rather than
+	// the offering connection supplies. It is a set rather than
 	// a single scalar because the manifest is content-addressed: the same
 	// hash can be a live, independently required occurrence at more than one
 	// slot at once (two elections producing an identical transaction-
 	// reference set), and a scalar would let a second live, legitimate
-	// announcement be rejected as "inconsistent" with the first (issue #3513
-	// review).
+	// announcement be rejected as "inconsistent" with the first.
 	leiosAnnouncementSlots map[string]map[uint64]struct{}
 	// LeiosNotify permits at most two distinct announcements for one election
 	// (slot plus issuer), shared across all sources so relays and reconnects
@@ -310,6 +340,11 @@ type Ouroboros struct {
 	leiosPersistStop     chan struct{}
 	leiosPersistDone     chan struct{}
 	leiosPersistDropped  atomic.Uint64
+	// leiosPersistAfterReserve, when non-nil, runs between the byte
+	// reservation and the payload copy. Tests use it to unwind or to stall
+	// inside that window, which allocation failure alone would reach only
+	// nondeterministically.
+	leiosPersistAfterReserve func()
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -385,6 +420,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
+	// one acquired LocalStateQuery ledger snapshot before it is forcibly
+	// closed. Values of 0 or below use the default of five minutes.
+	LocalStateQueryViewMaxLifetime time.Duration
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
 	// server waits for a certifying ranking block's endorser block transaction
 	// closure to become available before closing the connection. When 0 (the
@@ -474,8 +513,25 @@ type blockfetchMetrics struct {
 	// dingo_ledger_block_stage_duration_seconds in the ledger package for
 	// the header-verify/validate/apply stages that follow once a decoded
 	// block reaches the ledger.
-	stageDuration *prometheus.HistogramVec
-	stageDecode   prometheus.Observer
+	//
+	// "enqueue" is the time the blockfetch receive callbacks spend handing
+	// an event to the per-connection forward queue. "ledger_publish" is the
+	// time the forwarder spends in EventBus.Publish delivering it to the
+	// ledger, which includes any ledger backpressure.
+	stageDuration      *prometheus.HistogramVec
+	stageDecode        prometheus.Observer
+	stageEnqueue       prometheus.Observer
+	stageLedgerPublish prometheus.Observer
+	// inFlightBytes/inFlightBlocks are the aggregate size and count of
+	// blockfetch events received from peers but not yet handed to the
+	// ledger by the per-connection forwarder (blockfetch_forward.go).
+	// Aggregated across every connection rather than labelled by
+	// connection_id, whose series would grow without bound with reconnects.
+	inFlightBytes  prometheus.Gauge
+	inFlightBlocks prometheus.Gauge
+	// forwardOverflows counts connections closed because their forward
+	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
+	forwardOverflows prometheus.Counter
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -538,6 +594,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		localstatequeryOwners: make(
 			map[ouroboros.ConnectionId]*olocalstatequery.Server,
 		),
+		localstatequerySessions: make(
+			map[ouroboros.ConnectionId]*localstatequerySession,
+		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
 		),
@@ -551,15 +610,26 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		futureHeaderResyncCtx:    futureHeaderResyncCtx,
 		futureHeaderResyncCancel: futureHeaderResyncCancel,
-		blockDecodeCache:         newDecodeCache[gledger.Block](),
-		headerDecodeCache:        newDecodeCache[gledger.BlockHeader](),
-		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosClosureWaiters:      make(map[string][]chan struct{}),
+		blockDecodeCache: newDecodeCacheWithByteLimit[gledger.Block](
+			blockDecodeCacheMaxBytes,
+		),
+		headerDecodeCache: newDecodeCacheWithByteLimit[gledger.BlockHeader](
+			headerDecodeCacheMaxBytes,
+		),
+		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters: make(map[string][]chan struct{}),
 		leiosServeWaiters: make(
 			map[ouroboros.ConnectionId][]leiosServeWaiter,
 		),
-		leiosEBLog:                 newLeiosForgedEBLog(),
-		leiosAnnouncements:         make(map[string]leiosAnnouncement),
+		leiosEBLog:                newLeiosForgedEBLog(),
+		leiosAnnouncements:        make(map[string]leiosAnnouncement),
+		leiosAnnouncementInFlight: make(map[string]struct{}),
+		leiosInvalidAnnouncements: ratewindow.NewFixedWindow(
+			leiosInvalidAnnouncementWindow,
+			0,
+			0,
+			leiosInvalidAnnouncementMaxPeers,
+		),
 		leiosDeferredAnnouncements: make(map[string]leiosDeferredAnnouncement),
 		leiosAnnouncementSizes:     make(map[string]uint64),
 		leiosAnnouncementSlots:     make(map[string]map[uint64]struct{}),
@@ -650,12 +720,34 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
 		WithLabelValues("decode")
+	o.blockfetchMetrics.stageEnqueue = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("enqueue")
+	o.blockfetchMetrics.stageLedgerPublish = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("ledger_publish")
+	o.blockfetchMetrics.inFlightBytes = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_bytes",
+			Help: "aggregate bytes of blockfetch blocks received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.inFlightBlocks = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_blocks",
+			Help: "aggregate count of blockfetch events (blocks and batch-done markers) received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.forwardOverflows = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_forward_overflow_total",
+			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
+		},
+	)
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
 // this machine, the actual property the relaxed mux/query timeouts and
 // reassembly buffer in ConfigureListeners/localstatequeryServerConnOpts
-// depend on for safety (blinklabs-io/dingo#4183 review) -- "NtC" alone does
+// depend on for safety -- "NtC" alone does
 // not imply this: internal/node/node.go builds a UseNtC listener for both
 // cfg.SocketPath (a Unix socket, always local-only by construction) and
 // cfg.PrivateBindAddr:cfg.PrivatePort (an operator-configurable TCP
@@ -670,8 +762,20 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 // all recognised the same way a client connecting to this listener would
 // resolve them. Anything else (including a wildcard bind like "0.0.0.0",
 // which resolves to the unspecified address, not a loopback one) is
-// untrusted, and gets gouroboros' own anti-DoS defaults instead.
+// untrusted, and gets gouroboros' own anti-DoS defaults instead. When the
+// caller supplies a bound Listener, its Addr is authoritative; ListenAddress
+// is used only when the connection manager will bind the listener itself.
 func isTrustedNtCListener(l connmanager.ListenerConfig) bool {
+	if l.Listener != nil {
+		switch addr := l.Listener.Addr().(type) {
+		case *net.TCPAddr:
+			return addr.IP != nil && addr.IP.IsLoopback()
+		case *net.UnixAddr:
+			return true
+		default:
+			return false
+		}
+	}
 	if l.ListenNetwork == "unix" {
 		return true
 	}
@@ -697,8 +801,8 @@ func (o *Ouroboros) ConfigureListeners(
 			// isTrustedNtCListener's doc comment. Those exist to let a
 			// large, legitimate query (a whole-UTxO-set walk) run past
 			// gouroboros' anti-DoS defaults, which is only safe to grant
-			// unconditionally to a listener no non-local caller can reach
-			// (blinklabs-io/dingo#4183 review): a PrivateBindAddr an
+			// unconditionally to a listener no non-local caller can reach:
+			// a PrivateBindAddr an
 			// operator has pointed at a non-loopback address gets
 			// gouroboros' own defaults instead, same as any other NtC
 			// server would for an address reachable beyond this machine.
@@ -713,16 +817,16 @@ func (o *Ouroboros) ConfigureListeners(
 			// answer could then bind to a different, non-loopback address
 			// DNS gives on the second lookup, handing that non-loopback
 			// listener the relaxed timeouts and 2GiB reassembly buffer
-			// meant only for a verified-local one (blinklabs-io/dingo#4183
-			// review). A resolution failure here is left for
-			// startListener's own bind to report -- isTrustedNtCListener
-			// treats it as untrusted either way.
-			if l.ListenNetwork == "tcp" {
+			// meant only for a verified-local one. A resolution failure here is
+			// left for startListener's own bind to report --
+			// isTrustedNtCListener treats it as untrusted either way.
+			if l.Listener == nil && l.ListenNetwork == "tcp" {
 				if addr, err := net.ResolveTCPAddr("tcp", l.ListenAddress); err == nil {
 					l.ListenAddress = addr.String()
 				}
 			}
 			trusted := isTrustedNtCListener(l)
+			l.TrustedLocal = trusted
 			ntcOpts := []ouroboros.ConnectionOptionFunc{
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				o.chainsyncConnectionConfigOption(false),
@@ -752,7 +856,7 @@ func (o *Ouroboros) ConfigureListeners(
 				// against an untrusted remote peer, which does not describe
 				// a verified-local-only NtC client; disabling it here is
 				// what stops a slow-but-legitimate reply from getting the
-				// connection killed mid-flight (blinklabs-io/dingo#4082).
+				// connection killed mid-flight.
 				// Real cardano-node's own mux applies no equivalent timeout
 				// on local NtC connections either.
 				ntcOpts = append(
@@ -907,6 +1011,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 
+	// Counts keep-alive pong timeouts.
+	if classifyKeepaliveTimeoutClose(e.Error) {
+		o.recordKeepaliveTimeout()
+	}
+
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
 	if o.peerGov != nil {
@@ -947,12 +1056,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
+	o.releaseBlockfetchForwardOverflow(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
-	// Clean up per-connection restart mutex
-	o.restartMu.Delete(connId)
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)

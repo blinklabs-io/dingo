@@ -172,7 +172,7 @@ func TestKeyAllocationFree(t *testing.T) {
 // BenchmarkKeyOldPatternInput reproduces, verbatim, the input-side dedup-key
 // construction that ledger.LedgerView.UtxoById, ledger's block-application
 // and forged-tx-validation overlays, and ledger/forging's block-assembly
-// overlay used before this change: a formatted "hash:index" string built
+// overlay used previously: a formatted "hash:index" string built
 // with fmt.Sprintf, once per consulted or recorded input, purely to key a
 // map. Kept for direct before/after comparison against
 // BenchmarkKeyNewPatternInput.

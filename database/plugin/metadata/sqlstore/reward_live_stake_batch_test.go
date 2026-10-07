@@ -15,11 +15,14 @@
 package sqlstore
 
 import (
+	"errors"
+	"sort"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 )
 
 // populateRewardLiveStakeBatchFixture writes stake keys under both
@@ -134,4 +137,67 @@ func testRewardLiveStakeBatchBoundaries(t *testing.T, store *Store) {
 func TestRebuildRewardLiveStakeBatchBoundaries(t *testing.T) {
 	t.Parallel()
 	testRewardLiveStakeBatchBoundaries(t, newMigratedSQLiteStore(t))
+}
+
+func TestRebuildRewardLiveStakeBatchSkipsLegacyNullAccountKey(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	_, err := store.writeDB.Exec(`
+INSERT INTO account (staking_key, credential_tag, added_slot, created_slot, reward)
+VALUES (NULL, 0, 1, 1, '0')`)
+	require.NoError(t, err)
+	keys := populateRewardLiveStakeBatchFixture(t, store)
+	store.rewardLiveStakeBatchSize = 1
+	require.NoError(t, store.RebuildRewardLiveStakeFromRunningTotals(500, nil))
+	require.Len(t, readRewardLiveStakeSnapshot(t, store), keys)
+}
+
+func TestRebuildRewardLiveStakeFromRunningTotalsCommitsAndRetriesBatches(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	store.rewardLiveStakeBatchSize = 1
+	populateRewardLiveStakeBatchFixture(t, store)
+	require.NoError(t, store.RebuildRewardLiveStake(500, nil))
+	expected := readRewardLiveStakeSnapshot(t, store)
+	keys := make([]string, 0, len(expected))
+	for key := range expected {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	require.Greater(t, len(keys), 1)
+
+	_, err := store.writeDB.Exec(`
+UPDATE reward_live_stake
+SET pool_key_hash = NULL,
+    reward_stake = '999',
+    total_stake = '999',
+    registered = FALSE,
+    pool_delegation_slot = 0,
+    pool_delegation_block_index = 0,
+    pool_delegation_cert_index = 0`)
+	require.NoError(t, err)
+	stopAfterFirstBatch := errors.New("stop after first committed range")
+	runTxn := func(runBatch func(types.Txn) error) error {
+		return runBatch(nil)
+	}
+	err = store.rebuildRewardLiveStakeInBatches(
+		500,
+		runTxn,
+		func(processed int64) error {
+			require.Equal(t, int64(1), processed)
+			current := readRewardLiveStakeSnapshot(t, store)
+			require.Equal(t, expected[keys[0]], current[keys[0]])
+			require.Equal(t, "999", current[keys[1]].rewardStake)
+			return stopAfterFirstBatch
+		},
+	)
+	require.ErrorIs(t, err, stopAfterFirstBatch)
+
+	require.NoError(
+		t,
+		store.RebuildRewardLiveStakeFromRunningTotalsInBatches(500, runTxn),
+	)
+	require.Equal(t, expected, readRewardLiveStakeSnapshot(t, store))
 }

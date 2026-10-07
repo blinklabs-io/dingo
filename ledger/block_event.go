@@ -44,7 +44,6 @@ func (ls *LedgerState) handleEventChainUpdate(evt event.Event) {
 		// that goroutine is free to apply the post-rollback chain the
 		// moment the truncation lands. emitRollbackTransactionEvents is
 		// called from the rollback path instead, before the truncation.
-		// See blinklabs-io/dingo#2287.
 	}
 }
 
@@ -132,7 +131,7 @@ func (ls *LedgerState) emitRollbackTransactionEvents(
 // events, and applying a block's transactions out of order -- or applying a
 // rollback's undo after the redo that followed it -- leaves that state wrong
 // in ways no later event corrects. PublishAsync cannot be used here because
-// the shared worker pool reorders (blinklabs-io/dingo#2287).
+// the shared worker pool reorders.
 //
 // This stays asynchronous rather than becoming a PublishBlocking like
 // publishBlockEvent: the forward path calls it from a database AfterCommit
@@ -355,7 +354,7 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 
 // reconciliationUndoBlocks returns the blocks the ledger itself applied
 // between ancestor (exclusive) and ledgerTipSlot (inclusive), newest first,
-// for the primary-chain/ledger divergence reconciler (issue #3516).
+// for the primary-chain/ledger divergence reconciler.
 //
 // It deliberately does not reuse readBlocksAboveSlot: that helper reads
 // whatever the primary chain's blob store currently holds above a slot,
@@ -390,35 +389,28 @@ func (ls *LedgerState) readBlocksAboveSlot(slot uint64) ([]models.Block, error) 
 // decode failure: the reconciliation is what keeps the ledger correct, and
 // it must not fail because a notification could not be built.
 //
-// A block_nonce row only exists for a block whose era has a
-// CalculateEtaVFunc (see ledger/eras): Byron's BFT/PoA consensus has no VRF
-// nonce to evolve, so a Byron block is never in this query's result at
-// all, not merely unresolvable -- reconciliationUndoUnresolved cannot even
-// see it to count it. This is not new to this function: durableAppliedFloor
-// and latestLedgerPrimaryChainAncestor already key the same reconciliation's
-// applied-point search on block_nonce rows, so a divergence spanning Byron
-// blocks already has no era-agnostic durable record of applied points to
-// resolve an ancestor from, let alone build undo events for. Closing that
-// would mean adding an era-agnostic applied-block record the rest of the
-// reconciler doesn't have either -- out of scope for issue #3516, which
-// bounds and correctly sources this rewind's data, not the reconciler's
-// pre-existing era coverage. Tracked separately as issue #3778.
+// Block application writes a block_nonce row for every applied block, with
+// no nonce for an era that has no CalculateEtaVFunc (see ledger/eras):
+// Byron's BFT/PoA consensus has no VRF nonce to evolve, yet its blocks are
+// still applied points here, and durableAppliedFloor and
+// latestLedgerPrimaryChainAncestor read the same rows.
 //
-// Because such a block has no row to iterate over at all, this cannot name
-// it the way an unresolvable block is named -- but it can detect that one
-// is missing: the block-number gap between ancestor and ledgerTipBlockNumber
-// is independent of block_nonce entirely, so comparing it against how many
-// nonce rows accounted for that gap reveals a block-number's worth of
-// applied history this function had no record of, without guessing at
-// which block or reading it from the primary chain's current index (which
-// would risk resolving the wrong branch's block for that slot -- the exact
-// failure mode this function exists to avoid, see above). Logged and
-// counted via reconciliationUndoMissingRecord, distinctly from
-// reconciliationUndoUnresolved, so an operator can tell "we know what's
-// missing but can't reach it" apart from "we don't even have a record of
-// it existing" (wolf31o2 review, PR #3611). Skipped when ancestor's own
-// block cannot be resolved (e.g., after a restart) rather than reporting a
-// false gap from a missing baseline.
+// A database written before application recorded every era's points has no
+// row for an applied Byron block. Such a block has nothing to iterate over,
+// so this cannot name it the way an unresolvable block is named -- but it
+// can detect that one is missing: the block-number gap between ancestor and
+// ledgerTipBlockNumber is independent of block_nonce entirely, so comparing
+// it against how many nonce rows accounted for that gap reveals a
+// block-number's worth of applied history this function had no record of,
+// without guessing at which block or reading it from the primary chain's
+// current index (which would risk resolving the wrong branch's block for
+// that slot -- the exact failure mode this function exists to avoid, see
+// above). Logged and counted via reconciliationUndoMissingRecord, distinctly
+// from reconciliationUndoUnresolved, so an operator can tell "we know what's
+// missing but can't reach it" apart from "we don't even have a record of it
+// existing". Skipped when ancestor's own block cannot be resolved (e.g.,
+// after a restart) rather than reporting a false gap from a missing
+// baseline.
 func (ls *LedgerState) reconciliationUndoBlocks(
 	ancestor ocommon.Point,
 	ledgerTipSlot uint64,
@@ -493,8 +485,9 @@ func (ls *LedgerState) reconciliationUndoBlocks(
 			ls.config.Logger.Error(
 				"reconciliation undo range contains applied blocks with no "+
 					"block_nonce row at all (not merely unresolvable) -- "+
-					"likely Byron-era blocks, whose ledger.tx undo events "+
-					"cannot be built at all (issue #3778)",
+					"likely blocks applied before applied points were "+
+					"recorded for every era, whose ledger.tx undo events "+
+					"cannot be built",
 				"component", "ledger",
 				"ancestor_slot", ancestor.Slot,
 				"ledger_tip_slot", ledgerTipSlot,

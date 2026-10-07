@@ -8,9 +8,9 @@
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package blockfrost
 
@@ -123,7 +123,11 @@ func (a *NodeAdapter) AccountUTXOs(
 		txKey := hex.EncodeToString(utxo.TxId)
 		address := ""
 		var inlineDatum, referenceScriptHash *string
-		if cborBytes := utxoCbor[utxoRef(utxo.Utxo)]; len(cborBytes) > 0 {
+		ref, err := utxoRef(utxo.Utxo)
+		if err != nil {
+			return nil, 0, err
+		}
+		if cborBytes := utxoCbor[ref]; len(cborBytes) > 0 {
 			if output, decodeErr := gledger.NewTransactionOutputFromCbor(
 				cborBytes,
 			); decodeErr == nil {

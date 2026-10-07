@@ -21,18 +21,34 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-const proposalRewardSourcePrefix = "dingo:governance-proposal:"
+const (
+	proposalRewardSourcePrefix        = "dingo:governance-proposal:"
+	proposalDepositRefundSourcePrefix = "dingo:governance-proposal-refund:"
+)
 
 func proposalRewardSourceHash(proposal *models.GovernanceProposal) []byte {
+	return proposalSourceHash(proposalRewardSourcePrefix, proposal)
+}
+
+// proposalDepositRefundSourceHash discriminates a deposit refund from the
+// same proposal's treasury-withdrawal credit to the same reward account.
+// Every other refund keeps proposalRewardSourceHash, which journals written
+// before this discriminator existed already use.
+func proposalDepositRefundSourceHash(
+	proposal *models.GovernanceProposal,
+) []byte {
+	return proposalSourceHash(proposalDepositRefundSourcePrefix, proposal)
+}
+
+func proposalSourceHash(
+	prefix string,
+	proposal *models.GovernanceProposal,
+) []byte {
 	if proposal == nil {
 		return nil
 	}
-	buf := make(
-		[]byte,
-		0,
-		len(proposalRewardSourcePrefix)+len(proposal.TxHash)+4,
-	)
-	buf = append(buf, proposalRewardSourcePrefix...)
+	buf := make([]byte, 0, len(prefix)+len(proposal.TxHash)+4)
+	buf = append(buf, prefix...)
 	buf = append(buf, proposal.TxHash...)
 	buf = binary.BigEndian.AppendUint32(buf, proposal.ActionIndex)
 	sum := sha256.Sum256(buf)

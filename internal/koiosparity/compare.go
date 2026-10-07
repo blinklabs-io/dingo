@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strconv"
@@ -38,7 +39,7 @@ const (
 	// therefore never exists, so blocks_produced cannot be compared for that
 	// one epoch. Purely informational, like the account lifecycle categories
 	// below: both sides agree the pool departed, so it is a documented gap in
-	// coverage rather than a divergence (dingo #3485).
+	// coverage rather than a divergence.
 	CategoryPoolDeparted = "pool_departed"
 	// CategoryPoolZeroStake marks a pool that was in epoch K's stake basis
 	// and is absent from the K+1 reward-input set for a proven reason other
@@ -53,13 +54,13 @@ const (
 	// pool, so blocks_produced is not comparable for that one epoch -- the
 	// same uncomparable-input shape as CategoryPoolDeparted, but for a pool
 	// that never left the pool set, so folding it into that category would
-	// misreport it as having departed (dingo #4691). Purely informational,
+	// misreport it as having departed. Purely informational,
 	// like CategoryPoolDeparted.
 	CategoryPoolZeroStake = "pool_zero_stake"
 
 	// CategoryAcctOnlyDingo/CategoryAcctOnlyKoios mirror
 	// CategoryPoolOnlyDingo/CategoryPoolOnlyKoios but at per-account
-	// granularity (#3097) — a stake account (and specific reward type; see
+	// granularity — a stake account (and specific reward type; see
 	// CompareAccountEpoch) with a reward row on only one side.
 	CategoryAcctOnlyDingo = "acct_only_dingo"
 	CategoryAcctOnlyKoios = "acct_only_koios"
@@ -79,13 +80,13 @@ const (
 	CategoryAcctCoverageIncomplete = "acct_coverage_incomplete"
 
 	// CategoryAcctZeroReward/CategoryAcctNewlyRegistered/CategoryAcctDeregistered
-	// (dingo #3099) report the three account dimensions #3097's merged
+	// report the three account dimensions the merged
 	// comparison structurally cannot: CompareAccountEpoch only ever compares
 	// keys present in at least one side's row map, so an address absent from
 	// both (a confirmed-zero-reward account, meaning Koios returned no rows
 	// for it at all — distinct from Koios returning a row whose amount is
 	// zero, which it does emit and which CategoryAcctZeroRewardRow covers)
-	// never enters that comparison at all, and #3097's
+	// never enters that comparison at all, and the
 	// address universe is a single flat list reused across every epoch in one
 	// run, with no per-epoch persisted snapshot to diff for lifecycle
 	// changes. All three are purely informational — descriptive state, not a
@@ -114,13 +115,13 @@ const (
 	// CategoryCostModelSynthetic marks a PlutusV2-only-on-Dingo cost-model
 	// divergence where DingoProtocolParams.SyntheticV2CostModel says the
 	// only reason the two sides differ is that Dingo still carries
-	// HardForkBabbage's fabricated PlutusV2 default (dingo #3825) for an
+	// HardForkBabbage's fabricated PlutusV2 default for an
 	// epoch before the chain enacted a real one. Koios correctly reports no
 	// PlutusV2 model over that window, so both sides in fact agree on the
 	// true state (no real model exists yet) and disagree only about whether
 	// to report a placeholder — the same shape as the account lifecycle
-	// categories above. Purely informational and must never fail the epoch
-	// (dingo #4127); once the real update lands, SyntheticV2CostModel goes
+	// categories above. Purely informational and must never fail the epoch;
+	// once the real update lands, SyntheticV2CostModel goes
 	// false and any remaining divergence reports as a genuine
 	// value_mismatch again.
 	CategoryCostModelSynthetic = "cost_model_synthetic"
@@ -401,16 +402,15 @@ func CompareEpochTotals(
 }
 
 // CompareEpochProtocolParams compares the protocol parameters Dingo has in
-// force for an epoch against Koios /epoch_params for that same epoch
-// (dingo #3931).
+// force for an epoch against Koios /epoch_params for that same epoch.
 //
 // Why this is its own comparison rather than more fields on
 // CompareEpochAggregates: a wrong protocol parameter is wedge-class. It
 // changes what the node accepts, so it produces the same outcome as a wrong
-// validation rule (the #3928 maxTxSize replay wedge) — a canonical block
-// rejected and the node off the chain — while every reward, stake and pool
-// comparison in this checker keeps reporting PASS right up to the rejection.
-// The execution-unit parameters are sharper still: maxTxExUnits,
+// validation rule (a replay wedge on a transaction of exactly maxTxSize) — a
+// canonical block rejected and the node off the chain — while every reward,
+// stake and pool comparison in this checker keeps reporting PASS right up to
+// the rejection. The execution-unit parameters are sharper still: maxTxExUnits,
 // maxBlockExUnits and the execution prices gate phase-2 validation, where a
 // divergence stays silent until a script transaction fails.
 //
@@ -592,8 +592,9 @@ func CompareEpochProtocolParams(
 // PlutusV1 and 1 for PlutusV2, Koios publishes the same arrays under those
 // names, and the epoch-107 models agree entry for entry across all 166 and
 // 175 entries. Note this is NOT the same thing as a Plutus budget divergence
-// in general: dingo #3935 is one where the cost models were identical, so
-// this comparison would not have caught it.
+// in general: a canonical block whose Plutus evaluation exceeded the declared
+// budget is one where the cost models were identical, so this comparison would
+// not have caught it.
 //
 // Findings are reported per language and summarised rather than dumped: a
 // 166-integer array on each side of a mismatch row is unusable, while "entry
@@ -609,7 +610,7 @@ func CompareEpochProtocolParams(
 // synthetic is DingoProtocolParams.SyntheticV2CostModel: when true and the
 // only divergence is that Dingo prices PlutusV2 and Koios does not, the
 // finding is CategoryCostModelSynthetic (informational) rather than
-// CategoryValueMismatch (dingo #4127) — see that category's doc comment.
+// CategoryValueMismatch — see that category's doc comment.
 // This never suppresses any other cost-model finding: a length or entry
 // mismatch on a model both sides price, or a real value_mismatch once
 // synthetic goes false, is reported exactly as before.
@@ -635,7 +636,17 @@ func compareCostModels(
 		return nil
 	}
 
-	languages := make([]string, 0, len(dingoModels)+len(koiosModels))
+	dingoLen := len(dingoModels)
+	koiosLen := len(koiosModels)
+	if dingoLen > math.MaxInt-koiosLen {
+		return []CheckMismatch{mismatch(
+			"pparams_cost_models",
+			costModelSummary(dingoModels),
+			"unparseable: cost model language count too large",
+			CategoryValueMismatch,
+		)}
+	}
+	var languages []string
 	for language := range dingoModels {
 		languages = append(languages, language)
 	}
@@ -656,7 +667,7 @@ func compareCostModels(
 			// Dingo prices a language Koios does not, or vice versa below —
 			// a disagreement about which scripts can run at all. Downgraded
 			// to informational for exactly the synthetic-PlutusV2 case: see
-			// CategoryCostModelSynthetic's doc comment (dingo #4127). Any
+			// CategoryCostModelSynthetic's doc comment. Any
 			// other language, or a genuinely real PlutusV2 model Koios
 			// hasn't enacted, stays a real divergence.
 			cat := CategoryValueMismatch
@@ -776,12 +787,12 @@ func costModelFieldName(language string) string {
 // active pool from reward_pool_input while keeping it in the pool set. Those
 // are missing input rather than departure, and an epoch-level flag would
 // downgrade both. False whenever neither route could establish departure,
-// which keeps the stricter classification (dingo #3485, #3925). See
+// which keeps the stricter classification. See
 // poolDepartedAtParamEpoch in check.go.
 //
 // paramEpochPositiveStakeProven reports whether checkEpoch proved the K+1
 // reward-input set is the network's complete positive-stake pool set, using
-// reward_snapshot's own TotalPoolCount (dingo #4691). It is epoch-level, not
+// reward_snapshot's own TotalPoolCount. It is epoch-level, not
 // per-pool: every pool absent from K+1's reward-input set once this is true
 // genuinely has no positive stake at K+1 for a proven reason, distinct from
 // departedAtParamEpoch, which is specific evidence that this pool provably
@@ -883,7 +894,7 @@ func ComparePoolEpoch(
 		// parameters as of its own boundary, and those are the ones in force
 		// for the epoch that snapshot is the basis for, so cost and margin
 		// align with the stake epoch (K-1) rather than with blocks_produced
-		// at the param epoch (dingo #3484).
+		// at the param epoch.
 		if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
 			out = append(out, CheckMismatch{
 				Network:    network,
@@ -943,7 +954,7 @@ func ComparePoolEpoch(
 			// reached zero at the boundary. Still registered, still
 			// delegated to -- unlike departedAtParamEpoch above, this pool
 			// never left the pool set, so it gets its own category rather
-			// than being reported as departed (dingo #4691).
+			// than being reported as departed.
 			cat = CategoryPoolZeroStake
 		case graceHours > 0 && !epochEndTime.IsZero() &&
 			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
@@ -988,8 +999,8 @@ func ComparePoolEpoch(
 	// produced, spendable or not, so it exceeds Koios's figure by exactly the
 	// pool's unspendable member rewards — amounts computed for a credential
 	// the ledger correctly never credits. Comparing it reported a
-	// value_mismatch for any pool holding one, against a node that was right
-	// (dingo #3797). The row's own unspendable column is not a usable
+	// value_mismatch for any pool holding one, against a node that was right.
+	// The row's own unspendable column is not a usable
 	// correction either, since it accumulates unspendable leader rewards too.
 	//
 	// pool_fees and deleg_rewards are intentionally NOT compared against
@@ -1057,7 +1068,7 @@ func ComparePoolEpoch(
 				// Before the rewards are applied the spendable flags are
 				// provisional, so Dingo reads high by the forfeitures that
 				// have not happened yet. That is a timing statement, not a
-				// divergence, and must not be reported as one (dingo #3852).
+				// divergence, and must not be reported as one.
 				cat := CategoryValueMismatch
 				if dingoPool.RewardsPending {
 					cat = CategoryReferenceLag
@@ -1082,8 +1093,8 @@ func ComparePoolEpoch(
 // koiosAccountRewardTypesOutOfScope lists Koios /account_reward_history
 // "type" enum values that Dingo's reward_account_output does not currently
 // produce (MIR/refund distribution mechanisms — treasury/reserves MIR
-// transfers and protocol-parameter-change refunds), per this issue's (#3097)
-// explicit scope note. Rows of these types are filtered out of the
+// transfers and protocol-parameter-change refunds), which are
+// explicitly out of scope. Rows of these types are filtered out of the
 // comparison entirely — deliberately, not silently: they never contribute a
 // koios-only mismatch, so a real Dingo gap in ordinary member/leader reward
 // accounting is never masked by a flood of "missing" rows for a mechanism
@@ -1111,9 +1122,9 @@ type DingoAccountReward struct {
 }
 
 // accountRewardKey identifies one (stake_address, reward_type) reward row
-// within a single epoch — the granularity #3097 compares at, since one
-// account can legitimately carry both a member and a leader row in the same
-// epoch (a pool owner delegating to their own pool).
+// within a single epoch — the granularity the per-account comparison works at,
+// since one account can legitimately carry both a member and a leader row in
+// the same epoch (a pool owner delegating to their own pool).
 type accountRewardKey struct {
 	address string
 	rtype   string
@@ -1146,9 +1157,9 @@ type accountRewardPoolAmount struct {
 
 // CompareAccountEpoch compares every Koios /account_reward_history reference
 // row against Dingo's committed reward_account_output rows for one epoch,
-// exactly — integer lovelace, no rounding/sampling/tolerance — per #3097's
-// acceptance criteria. See ARCHITECTURE.md's Koios Parity Tracker
-// "Per-account exact parity (#3097)" subsection for the full design.
+// exactly — integer lovelace, no rounding/sampling/tolerance.
+// See ARCHITECTURE.md's Koios Parity Tracker
+// "Per-account exact parity" subsection for the full design.
 //
 // koiosRows/dingoRows are each scanned for internal duplicates first: the
 // same (stake_address, reward_type) key appearing more than once within one
@@ -1189,7 +1200,7 @@ type accountRewardPoolAmount struct {
 // reward for looks absent, and the spendable flags Dingo has computed are still
 // provisional, so a row it will later forfeit has no Koios counterpart. See
 // DingoPoolEpochData.RewardsPending; this is the account-granularity half of
-// the same guard (dingo #3857, #4130). It is a required parameter rather than
+// the same guard. It is a required parameter rather than
 // a variadic option so a caller cannot silently omit it and get the strict
 // answer for an epoch that has not been computed.
 func CompareAccountEpoch(
@@ -1257,8 +1268,7 @@ func CompareAccountEpoch(
 			// The chain-position form of the same question the grace window
 			// asks, and the one that survives a replay: an epoch Dingo has
 			// not computed yet makes every Koios reward look absent here,
-			// which is a statement about timing rather than a divergence
-			// (issue #3857).
+			// which is a statement about timing rather than a divergence.
 			cat := CategoryAcctOnlyKoios
 			switch {
 			case isZeroRewardAmount(kr.Amount):
@@ -1304,8 +1314,7 @@ func CompareAccountEpoch(
 				// for a credential that deregisters in the meantime is
 				// still marked spendable, so Dingo holds a row Koios will
 				// never publish. That is timing, not divergence, and the
-				// branch above already says so in the other direction
-				// (dingo #4130).
+				// branch above already says so in the other direction.
 				cat = CategoryReferenceLag
 			case graceHours > 0 && !epochEndTime.IsZero() &&
 				now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour:
@@ -1330,7 +1339,7 @@ func CompareAccountEpoch(
 			// way ComparePoolEpoch guards its own value comparison: before
 			// the applying boundary the amount can still change, so a
 			// difference is a statement about timing rather than a
-			// divergence (issue #3857). Leaving this strict while the
+			// divergence. Leaving this strict while the
 			// presence check is not would report the same epoch as both a
 			// lag and a mismatch.
 			cat := CategoryValueMismatch
@@ -1352,7 +1361,7 @@ func CompareAccountEpoch(
 			case !accountRewardPoolsAgree(dr.ByPool, kr.ByPool):
 				// The totals agree, so the disagreement is over which pool
 				// credited what. A reward account shared by several pools
-				// (dingo #3841) can differ per pool and still sum alike, and
+				// can differ per pool and still sum alike, and
 				// comparing only the sum reports that as a match. Reported
 				// only once the totals do agree: when they do not, the branch
 				// above has already said so and the per-pool breakdown adds
@@ -1504,9 +1513,9 @@ func foldAccountRewards(
 // disagreement that preserves it: two per-pool errors of equal magnitude and
 // opposite sign cancel, and so does a total one side attributes entirely to
 // one of the pools the other side splits it between. Both are real
-// divergences in what was credited from which pool, and dingo #3841 makes a
-// reward account shared by several pools an ordinary case rather than an edge
-// one, so the per-pool contributions are compared as well as their sum.
+// divergences in what was credited from which pool, and since a
+// reward account shared by several pools is an ordinary case rather than an
+// edge one, so the per-pool contributions are compared as well as their sum.
 //
 // A pool present on one side only is compared against zero rather than
 // treated as absent, so a pool that credited nothing on one side and has no
@@ -1771,7 +1780,7 @@ func normalizeAccountPoolID(poolID string) (string, bool) {
 
 // lovelaceEqual reports whether a and b represent the same non-negative
 // integer lovelace amount, parsed exactly via big.Int — never as a float or
-// rational — so #3097's "no rounding, sampling, or tolerance" requirement
+// rational — so the "no rounding, sampling, or tolerance" requirement
 // holds even for values exceeding float64's exact-integer range. An
 // unparsable value on either side compares unequal (never silently equal),
 // so a corrupt/malformed amount always surfaces as a mismatch rather than a
@@ -1958,8 +1967,8 @@ func isZeroRewardAmount(amount string) bool {
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, pool_only_koios,
 //     acct_only_dingo, acct_only_koios, or acct_duplicate entry — a strict
-//     run cannot report PASS while any of these are present (#3097's
-//     acceptance criteria: a single missing, extra, duplicate, or differing
+//     run cannot report PASS while any of these are present (per the
+//     exact-parity rule: a single missing, extra, duplicate, or differing
 //     account fails the whole epoch).
 //   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing),
 //     reference_lag (Koios data may be incomplete for a recent epoch), or

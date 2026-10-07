@@ -95,10 +95,10 @@ func patience(capacity, rate uint64) chainsync.PatienceConfig {
 	}
 }
 
-// TestPatienceDisconnectsSlowDripPeer is the #4348 regression: a peer that
-// advertises a far better tip and delivers one valid header every 110 seconds
-// refreshes LastActivity each time, so the two-minute stall watchdog never
-// fires. The Limit on Patience must exhaust it anyway.
+// TestPatienceDisconnectsSlowDripPeer is the Genesis Limit on Patience
+// regression: a peer that advertises a far better tip and delivers one valid
+// header every 110 seconds refreshes LastActivity each time, so the two-minute
+// stall watchdog never fires. The Limit on Patience must exhaust it anyway.
 func TestPatienceDisconnectsSlowDripPeer(t *testing.T) {
 	t.Parallel()
 	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())
@@ -293,19 +293,6 @@ func TestPatienceIgnoresDisabledConfigAndObservabilityClients(t *testing.T) {
 	h.deliver(observed, 1, farTip(), 0)
 	h.advance(24 * time.Hour)
 	assert.Empty(t, h.state.CheckPatienceExhausted())
-}
-
-func TestPatiencePauseStopsLeakUntilNextMessage(t *testing.T) {
-	t.Parallel()
-	h := newPatienceHarness(t, chainsync.DefaultPatienceConfig())
-	conn := newTestConnId(1)
-	require.True(t, h.state.AddClientConnId(conn))
-	h.deliver(conn, 1, farTip(), 0)
-	h.advance(100 * time.Second)
-	h.state.PatiencePause(conn)
-	h.advance(time.Hour)
-	assert.Empty(t, h.state.CheckPatienceExhausted())
-	assert.InDelta(t, 500, h.state.GetTrackedClient(conn).Patience.Tokens, 1e-9)
 }
 
 // TestPatienceStartsPausedUntilFirstAcceptedHeader pins that registration

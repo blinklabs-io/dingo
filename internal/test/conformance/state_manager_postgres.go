@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +13,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
-//go:build dingo_extra_plugins
 
 package conformance
 
@@ -40,7 +40,7 @@ import (
 // An earlier version of this constructor used a single fixed "conformance"
 // schema and stable os.TempDir() path shared across every call, every
 // process, and every machine running this suite against the same server.
-// That sharing was unsafe on two fronts a reviewer caught: concurrent
+// That sharing was unsafe on two fronts: concurrent
 // `go test` invocations (a local run alongside CI, or two CI shards)
 // truncated or dropped each other's in-progress backend, since Reset and
 // teardown for one process's manager operated on state another process's
@@ -63,7 +63,7 @@ import (
 // actually fixes the concurrency/staleness problem. Neither is torn down
 // by an individual manager's Close -- a sibling manager elsewhere in this
 // same process may still be using them -- TestMain
-// (conformance_main_test.go) drops the schema and removes the blob
+// (conformance_postgres_test.go) drops the schema and removes the blob
 // directory once, after every test in this process has finished.
 var (
 	postgresProcessSchema = fmt.Sprintf(

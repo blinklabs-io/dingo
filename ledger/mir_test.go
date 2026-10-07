@@ -17,6 +17,8 @@ package ledger
 import (
 	"bytes"
 	"database/sql"
+	"encoding/hex"
+	"io"
 	"log/slog"
 	"math/big"
 	"strconv"
@@ -27,12 +29,155 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestLedgerProcessBlockRejectsLateMIRCertificate is the block-application
+// other half: a block carrying a MIR certificate inside the final
+// stability window fails validation, so the certificate is never stored for
+// applyMIRCerts to credit at the boundary.
+func TestLedgerProcessBlockRejectsLateMIRCertificate(t *testing.T) {
+	t.Parallel()
+
+	// k=432 and f=1/20 give a 25,920-slot window, so the epoch
+	// [568,000, 1,000,000) has its cutoff at 974,080.
+	const blockSlot = uint64(974_080)
+	// [6, [reserves, {[key hash, 0x4e 00..00]: 1}]], hand-encoded because
+	// the gouroboros MIR reward type does not marshal back to its wire form.
+	mirCert, err := hex.DecodeString(
+		"82068200a18200581c4e" + strings.Repeat("00", 27) + "01",
+	)
+	require.NoError(t, err)
+	certsCbor, err := cbor.Encode([]any{cbor.RawMessage(mirCert)})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		map[uint]any{
+			0: []any{},
+			1: []any{},
+			2: uint64(0),
+			4: cbor.RawMessage(certsCbor),
+		},
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := babbage.NewBabbageTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	offsets := &database.BlockIngestionResult{
+		TxOffsets: map[[32]byte]database.CborOffset{
+			txHash: {
+				BlockSlot:  blockSlot,
+				ByteLength: uint32(len(txCbor)), // #nosec G115
+			},
+		},
+	}
+	block := &babbage.BabbageBlock{
+		BlockHeader: &babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber:  1,
+				Slot:         blockSlot,
+				ProtoVersion: babbage.BabbageProtoVersion{Major: 8},
+			},
+		},
+		TransactionBodies: []babbage.BabbageTransactionBody{tx.Body},
+		TransactionWitnessSets: []babbage.BabbageTransactionWitnessSet{
+			tx.WitnessSet,
+		},
+	}
+	// The header declares the body size: the four body components as
+	// they are encoded inside the block.
+	var bodySize int
+	for _, part := range []any{
+		block.TransactionBodies,
+		block.TransactionWitnessSets,
+		map[uint]any{},
+		[]uint{},
+	} {
+		encoded, err := cbor.Encode(part)
+		require.NoError(t, err)
+		bodySize += len(encoded)
+	}
+	block.BlockHeader.Body.BlockBodySize = uint64(bodySize) // #nosec G115
+	blockCbor, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	block.SetCbor(blockCbor)
+
+	nodeConfig := newTestShelleyGenesisCfg(t)
+	nodeConfig.ShelleyGenesis().NetworkId = "Testnet"
+	db := newTestDB(t)
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: nodeConfig,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	epoch := models.Epoch{
+		EpochId:       1,
+		StartSlot:     568_000,
+		LengthInSlots: 432_000,
+		EraId:         eras.BabbageEraDesc.Id,
+	}
+	ls.Lock()
+	ls.currentEpoch = epoch
+	ls.epochCache = []models.Epoch{epoch}
+	ls.publishSnapshotsLocked()
+	ls.Unlock()
+	pparams := &babbage.BabbageProtocolParameters{
+		ProtocolMajor:      8,
+		MaxBlockBodySize:   100_000,
+		MaxBlockHeaderSize: 100_000,
+		MaxTxSize:          16_384,
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{
+				Slot: blockSlot,
+				Hash: []byte("late-mir-certificate"),
+			},
+			block,
+			true,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			offsets,
+			eras.BabbageEraDesc,
+			pparams,
+			nil,
+			epoch.EpochId,
+			epoch.StartSlot,
+			false,
+		)
+		return err
+	})
+	var tooLate eras.MIRCertificateTooLateError
+	require.ErrorAs(t, err, &tooLate)
+	require.Equal(t, uint64(974_080), tooLate.Cutoff)
+
+	effects, err := db.GetMIRCertsInSlotRange(
+		epoch.StartSlot, epoch.StartSlot+uint64(epoch.LengthInSlots), nil,
+	)
+	require.NoError(t, err)
+	require.Empty(
+		t,
+		effects,
+		"a rejected block must not store its MIR certificate",
+	)
+}
 
 // mirCred28 builds a 28-byte stake credential filled with seed.
 func mirCred28(seed byte) []byte {
@@ -1451,6 +1596,52 @@ func TestApplyMIRCerts_NetNegativeDeltaDiscardsBoundary(t *testing.T) {
 	assert.Equal(t, uint64(50), state.Slot)
 }
 
+// TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary pins the discard taken when
+// one credential's folded delta no longer fits in uint64. Two distributions of
+// the maximum amount to one credential overflow only in the per-credential
+// fold, so addCredit's running total never trips. A valid credit to a second
+// credential separates discarding the boundary from skipping the credential:
+// a skip would still credit it.
+func TestApplyMIRCerts_NetBeyondUint64DiscardsBoundary(t *testing.T) {
+	t.Parallel()
+
+	ls, db, gdb := newMIRTestLedger(t)
+
+	maxUint := ^uint64(0)
+	overflowCred := mirCred28(0x76)
+	validCred := mirCred28(0x77)
+	for slot, rewards := range map[uint64][]models.MoveInstantaneousRewardsReward{
+		200: {{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)}},
+		300: {
+			{Credential: overflowCred, Amount: new(big.Int).SetUint64(maxUint)},
+			{Credential: validCred, Amount: big.NewInt(100)},
+		},
+	} {
+		seedMIRDistribution(t, gdb, mirPotReserves, slot, rewards)
+	}
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		require.NoError(t, db.CreateAccount(nil, &models.Account{
+			StakingKey: cred,
+			Active:     true,
+		}))
+	}
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
+
+	require.NoError(t, applyMIRCertsErr(ls, db, 0, 1_000),
+		"an uncreditable MIR fold must not fail the epoch boundary")
+
+	for _, cred := range [][]byte{overflowCred, validCred} {
+		account, err := db.GetAccountByCredential(0, cred, false, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(0), uint64(account.Reward),
+			"the whole boundary is discarded, not just the overflowing credential")
+	}
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	assert.Equal(t, maxUint, uint64(state.Reserves))
+	assert.Equal(t, uint64(50), state.Slot)
+}
+
 // withMIRCutoffEpoch gives ls a Shelley genesis with k=2160 and f=1/20, so a
 // 129,600-slot stability window, and publishes epoch as the only cached
 // epoch, which is what LedgerView.MIRDelegState needs to compute the cutoff.
@@ -1490,9 +1681,9 @@ func mirDelegState(
 	return state
 }
 
-// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example in
-// blinklabs-io/dingo#4362: a boundary at 1,000,000 and a 129,600-slot window
-// put it at 870,400, whichever slot of the epoch asks.
+// TestLedgerView_MIRDelegState_Cutoff pins the cutoff to the worked example: a
+// boundary at 1,000,000 and a 129,600-slot window put it at 870,400, whichever
+// slot of the epoch asks.
 func TestLedgerView_MIRDelegState_Cutoff(t *testing.T) {
 	t.Parallel()
 
@@ -1604,14 +1795,13 @@ func TestLedgerView_MIRDelegState_PotsAndTransfers(t *testing.T) {
 	assert.Equal(t, big.NewInt(260), state.DeltaTreasury)
 }
 
-// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover addresses a
-// human review finding on PR #4415: the query must read lv.epochStartSlot, a
-// value pinned once when this view was built for a specific transaction's
-// validation, never a fresh read of LedgerState.currentEpoch -- because a
-// concurrent writer can roll the epoch over while this transaction's
-// validation is still in flight. A view built fresh after the rollover
-// (ls.NewView, exactly what a caller must not do mid-validation) reproduces
-// the bug the review flagged: the rolled-over epoch's later start slot
+// TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover pins that the
+// query must read lv.epochStartSlot, a value pinned once when this view was
+// built for a specific transaction's validation, never a fresh read of
+// LedgerState.currentEpoch -- because a concurrent writer can roll the epoch
+// over while this transaction's validation is still in flight. A view built
+// fresh after the rollover (ls.NewView, exactly what a caller must not do
+// mid-validation) reproduces the bug: the rolled-over epoch's later start slot
 // exceeds the still-valid slot and hides every pending delta.
 func TestLedgerView_MIRDelegState_PinnedSurvivesConcurrentRollover(
 	t *testing.T,

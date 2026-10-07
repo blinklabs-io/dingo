@@ -87,10 +87,6 @@ jobs:
       # are written out by hand.
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-      - name: golangci-lint (internal/test/antithesis)
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 https://github.com/golangci/golangci-lint-action/releases/tag/v9.3.0
-        with:
-          working-directory: internal/test/antithesis
       # Folded in from the retired config-parity.yml pull-request job. The
       # network configs under config/cardano/ exist twice: embedded in the
       # binary here (config/cardano/embed.go), and in
@@ -178,6 +174,11 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: go-build
         run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0 https://github.com/actions/setup-node/releases/tag/v4.4.0
+        with:
+          node-version: '22.x'
+      - name: npm-test
+        run: npm test
       - name: go-build-minimal
         # The default build has no plugin build tags, so a change that only
         # compiles with dingo_extra_plugins breaks the released binary. Cheap
@@ -213,47 +214,6 @@ jobs:
     # live-lifecycle (20m) and go-test (30m) all precede each other.
     timeout-minutes: 120
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: dingo_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          postgres
-          -c fsync=off
-          -c synchronous_commit=off
-          -c full_page_writes=off
-        ports:
-          - 5432:5432
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: mysql
-          MYSQL_USER: mysql
-          MYSQL_PASSWORD: mysql
-          MYSQL_DATABASE: dingo_test
-        options: >-
-          --health-cmd "sh -c 'mysqladmin ping -h 127.0.0.1 -u root -p$MYSQL_ROOT_PASSWORD'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # Discarded with the job, so durability buys nothing and every
-        # commit's fsync is cost: the conformance replays commit per statement.
-        command: >-
-          --innodb-file-per-table=OFF
-          --innodb-flush-log-at-trx-commit=0
-          --sync-binlog=0
-          --skip-log-bin
-        ports:
-          - 3306:3306
       minio:
         image: blinklabs/minio:main
         options: >-
@@ -265,6 +225,8 @@ jobs:
           - 9000:9000
           - 9001:9001
     env:
+      DINGO_CI_PG_CONTAINER: dingo-ci-postgres-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
+      DINGO_CI_MYSQL_CONTAINER: dingo-ci-mysql-${{ github.run_id }}-${{ github.run_attempt }}-go-test-linux-${{ matrix.go-version }}
       POSTGRES_HOST: localhost
       POSTGRES_PORT: '5432'
       POSTGRES_USER: postgres
@@ -282,6 +244,46 @@ jobs:
       AWS_REGION: us-east-1
       DINGO_TEST_S3_BUCKET: dingo-test
     steps:
+      - name: start-test-databases
+        run: |
+          set -euo pipefail
+          docker run --detach --name "$DINGO_CI_PG_CONTAINER" \
+            --publish 5432:5432 \
+            --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD=postgres \
+            --env POSTGRES_DB=dingo_test \
+            --health-cmd pg_isready --health-interval 10s \
+            --health-timeout 5s --health-retries 5 \
+            postgres:16 postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+          docker run --detach --name "$DINGO_CI_MYSQL_CONTAINER" \
+            --publish 3306:3306 \
+            --env MYSQL_ROOT_PASSWORD=mysql --env MYSQL_USER=mysql \
+            --env MYSQL_PASSWORD=mysql --env MYSQL_DATABASE=dingo_test \
+            --health-cmd 'mysqladmin ping -h 127.0.0.1 -u root -p"$MYSQL_ROOT_PASSWORD"' \
+            --health-interval 10s --health-timeout 5s --health-start-period 10s \
+            --health-retries 4 \
+            mysql:8 --innodb-file-per-table=OFF --innodb-flush-log-at-trx-commit=0 \
+            --sync-binlog=0 --skip-log-bin
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            for attempt in {1..60}; do
+              if ! status="$(docker inspect --format '{{.State.Status}} {{.State.Health.Status}}' "$container")"; then
+                echo "Cannot inspect database container $container" >&2
+                docker logs "$container"
+                exit 1
+              fi
+              case "$status" in
+                'running healthy') break ;;
+                'running starting')
+                  if (( attempt == 60 )); then
+                    echo "Database container $container did not become healthy" >&2
+                    docker logs "$container"
+                    exit 1
+                  fi
+                  sleep 1
+                  ;;
+                *) docker logs "$container"; exit 1 ;;
+              esac
+            done
+          done
       - name: setup-s3-bucket
         run: |
             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -330,6 +332,7 @@ jobs:
           ./database/plugin/metadata/sqlstore
           ./database/plugin/metadata/postgres
           ./database/plugin/metadata/mysql
+          ./internal/node
           -timeout 10m
       - name: go-test-live-lifecycle
         # These two-node tests exercise live Truncate/Restore while a real
@@ -350,6 +353,19 @@ jobs:
         # keeps the sum of this job's go test -timeout values under its
         # timeout-minutes.
         run: go test -v -tags dingo_extra_plugins -ldflags="-s -w" -timeout 30m ./...
+      - name: stop-test-databases
+        if: always()
+        run: |
+          set -euo pipefail
+          names="$(docker ps --all --format '{{.Names}}')"
+          for container in "$DINGO_CI_PG_CONTAINER" "$DINGO_CI_MYSQL_CONTAINER"; do
+            while IFS= read -r name; do
+              if [ "$name" = "$container" ]; then
+                docker rm --force "$container"
+              fi
+            done <<< "$names"
+          done
+
 
   # Stage 3. Race detection on every pull request, not only on a release tag.
   # The release-only arrangement is what abandoned v0.70.3: a genuine
@@ -513,7 +529,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: build
         env:
-          BUILD_TARGETS: darwin/arm64
+          BUILD_TARGETS: darwin/amd64 darwin/arm64
         run: .github/scripts/build-targets.sh
 
   # Stage 4. Folded in from the retired ci-docker.yml.

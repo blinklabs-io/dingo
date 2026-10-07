@@ -204,12 +204,11 @@ func newPprofDebugServer(cfg *config.Config) *http.Server {
 // NewHealthServer builds the dedicated liveness/readiness listener, or nil
 // when healthPort is 0.
 //
-// Two properties are load-bearing and are covered by tests:
+// Two properties are covered by tests:
 //
-//  1. It is not gated on storage mode. All three API listeners are started
-//     only when storageMode.IsAPI(), and the shipped docker-compose.yml runs
-//     the default `core` mode, so a probe wired the way the APIs are would be
-//     inert in exactly the configuration the image ships with.
+//  1. It is not gated on storage mode. Client API listeners require
+//     storageMode.IsAPI(), while health probes must remain available in core
+//     mode so an orchestrator can verify node state.
 //  2. It binds cfg.BindAddr, the address the relay and metrics listeners
 //     already use, not the API listeners' loopback-by-default address. A
 //     probe is operational surface: a Docker HEALTHCHECK runs inside the
@@ -410,13 +409,17 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		storageMode = dingo.StorageModeAPI
 	}
 	blockfrostPort := config.APIPluginPort(cfg.Plugins.API.Blockfrost)
+	kupoPort := config.APIPluginPort(cfg.Plugins.API.Kupo)
 	utxorpcPort := config.APIPluginPort(cfg.Plugins.API.Utxorpc)
 	meshPort := config.APIPluginPort(cfg.Plugins.API.Mesh)
+	mcpPort := config.APIPluginPort(cfg.Plugins.API.Mcp)
 	logger.Info("storage mode",
 		"mode", string(storageMode),
 		"blockfrost", storageMode.IsAPI() && blockfrostPort > 0,
+		"kupo", storageMode.IsAPI() && kupoPort > 0,
 		"utxorpc", storageMode.IsAPI() && utxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && meshPort > 0,
+		"mcp", mcpPort > 0,
 		"midnight_indexing", cfg.Midnight.Enabled && storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() &&
 			cfg.Midnight.ServerEnabled && cfg.Midnight.Port > 0,
@@ -614,6 +617,11 @@ func buildDingoConfig(
 	chainsyncStallTimeout time.Duration,
 	chainsyncStrategy chainsync.HeaderSyncStrategy,
 ) dingo.Config {
+	// Validated by config.Validate before the node starts, so a parse
+	// failure here leaves the zero value and selects the default.
+	localStateQueryViewMaxLifetime, _ := time.ParseDuration(
+		cfg.LocalStateQueryViewMaxLifetime,
+	)
 	return dingo.NewConfig(
 		dingo.WithIntersectTip(cfg.IntersectTip),
 		dingo.WithLogger(logger),
@@ -635,12 +643,20 @@ func buildDingoConfig(
 			cfg.Plugins.API.Blockfrost,
 		),
 		dingo.WithPluginSelection(
+			plugin.CapabilityAPIKupo,
+			cfg.Plugins.API.Kupo,
+		),
+		dingo.WithPluginSelection(
 			plugin.CapabilityAPIMesh,
 			cfg.Plugins.API.Mesh,
 		),
 		dingo.WithPluginSelection(
 			plugin.CapabilityAPIUtxorpc,
 			cfg.Plugins.API.Utxorpc,
+		),
+		dingo.WithPluginSelection(
+			plugin.CapabilityAPIMcp,
+			cfg.Plugins.API.Mcp,
 		),
 		dingo.WithNetwork(cfg.Network),
 		dingo.WithNetworkMagic(cfg.NetworkMagic),
@@ -744,6 +760,7 @@ func buildDingoConfig(
 		dingo.WithRunMode(string(cfg.RunMode)),
 		dingo.WithStartEra(string(cfg.StartEra)),
 		dingo.WithShutdownTimeout(shutdownTimeout),
+		dingo.WithLocalStateQueryViewMaxLifetime(localStateQueryViewMaxLifetime),
 		// Enable metrics with default prometheus registry
 		dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
 		dingo.WithTracing(cfg.Tracing),
@@ -792,6 +809,10 @@ func buildDingoConfig(
 		),
 		dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 		dingo.WithMaxInboundConns(cfg.MaxInboundConns),
+		dingo.WithMaxNtCConns(cfg.MaxNtCConns),
+		dingo.WithMaxNtCConnectionsPerIP(cfg.MaxNtCConnectionsPerIP),
+		dingo.WithMaxTrustedLocalNtCConns(cfg.MaxTrustedLocalNtCConns),
+		dingo.WithSkipRewardLiveStakeBackfillCheck(cfg.SkipRewardLiveStakeBackfillCheck),
 		dingo.WithCacheConfig(
 			cfg.Cache.BlockLRUEntries,
 			cfg.Cache.HotUtxoEntries,
@@ -842,9 +863,6 @@ func buildDingoConfig(
 		dingo.WithForgeStaleGapThresholdSlots(
 			cfg.ForgeStaleGapThresholdSlots,
 		),
-		dingo.WithForgePrimaryChainTipToleranceSlots(
-			cfg.ForgePrimaryChainTipToleranceSlots,
-		),
 		dingo.WithForgeUpstreamStalenessSlots(
 			cfg.ForgeUpstreamStalenessSlots,
 		),
@@ -862,7 +880,7 @@ func buildDingoConfig(
 			forgeEBCap(cfg.ForgeEBMaxBytes, config.DefaultForgeEBMaxBytes),
 		),
 		dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
-		// Parallel block-decode pipeline (issue #1894 phases 1 and 3). Not
+		// Parallel block-decode pipeline (decode and validate stages). Not
 		// consensus-affecting; off by default.
 		dingo.WithBlockPipelineEnabled(cfg.BlockPipelineEnabled),
 		dingo.WithBlockPipelineValidateEnabled(

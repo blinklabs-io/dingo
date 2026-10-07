@@ -19,6 +19,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -93,6 +94,27 @@ func TestServiceSnapshotAndRestore(t *testing.T) {
 	require.Equal(t, m.CommitTimestamp, restoredManifest.CommitTimestamp)
 }
 
+// TestServiceSnapshotAppliesMaxCommitPause verifies the offline path passes
+// databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
+// nanosecond bound has always elapsed by the time the state reads finish.
+func TestServiceSnapshotAppliesMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	srcDir := filepath.Join(t.TempDir(), "src")
+	cfg := testConfig(srcDir)
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
+	svc := dblifecycle.NewService(cfg, nil, nil)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	snapDir := filepath.Join(t.TempDir(), "snap")
+	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, snapDir)
+}
+
 // TestServiceRestoreRejectsIncompatibleTarget verifies that Service.
 // Restore refuses a snapshot whose recorded network doesn't match the
 // restoring Service's own configured network, before ever creating the
@@ -132,7 +154,7 @@ func TestServiceRestoreRejectsIncompatibleTarget(t *testing.T) {
 // TestResolveTargetRejectsInconsistentCombinedFields below for the
 // "more than one field set" cases this test used to also cover, before
 // ResolveTarget started accepting a combination of fields as long as they
-// agree on the same block (dingo#1651 follow-up).
+// agree on the same block.
 func TestServiceTruncateRequiresAtLeastOneTarget(t *testing.T) {
 	t.Parallel()
 
@@ -184,7 +206,7 @@ func buildResolveTargetTestChain(
 // ResolveTarget accepts a target with more than one of Slot/Hash/
 // BlockNumber set, as long as they all identify the same block -- per the
 // bark proto's documented BlockRef contract ("When multiple fields are
-// set, all must agree"). Guards dingo#1651's finding that bark's own
+// set, all must agree"). Guards against bark's own
 // Truncate handler used to reject any such combination outright, even a
 // mutually consistent one an operator might pass for extra safety (e.g.
 // a slot and a hash it already resolved).

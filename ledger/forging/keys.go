@@ -1084,7 +1084,7 @@ func (g *credentialGeneration) kesSign(
 	// Non-negotiable: every KES signing path -- local key or agent-backed --
 	// must reject a period outside the operational certificate's validated
 	// lifetime, regardless of what a caller already checked. This is the
-	// gate #3115's agent client skipped: it signed through a direct call to
+	// gate the agent client once skipped: it signed through a direct call to
 	// the agent instead of through this method, bypassing the opcert-lifetime
 	// check on both the agent and local paths. Checking it again here, rather
 	// than trusting SignBlockHeader/buildBlock's own call to validateKESPeriod,
