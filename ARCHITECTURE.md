@@ -14114,13 +14114,30 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. It is a no-op until the required reward inputs exist (the mark
-   snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
-   Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
-   expansion and treasury tax synchronously with an empty Go distribution and
-   returns the post-tax amount to reserves. Epoch 1 uses empty previous block
-   counts, so its expansion is zero unless `d >= 0.8`. Neither is precomputed
-   because zero output rows cannot provide rollback-safe precompute provenance.
+   reads it. No round runs at epoch 0 or at a boundary whose ended or
+   performance epoch is Byron. Any other boundary whose required inputs are
+   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
+   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   names the new epoch and the missing input and points the operator at
+   re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
+   in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the
+   rollover does not commit, the ledger tip stops advancing, and the node shuts
+   down rather than forging on a short reward state. The producer loop runs
+   under a child of the cancelled node context and exits, and a forge already
+   in progress re-checks that context after building and self-validating and
+   before local adoption, dropping the block instead of adopting or diffusing
+   it. The rollover itself runs only when the first block of the new epoch
+   reaches ledger apply, so that block is forged and adopted before the
+   boundary can fail; holding it back would need a ledger tick ahead of the
+   block, and waiting for the rollover first would stall a sole producer, which
+   has no other block to trigger it. The opportunistic
+   precompute reads the same inputs and returns without an error; see "Reward
+   Calculation And Precomputation". Where epoch 0 is already Shelley, epochs 1
+   and 2 are the bootstrap rounds: each applies expansion and treasury tax
+   synchronously with an empty Go distribution and returns the post-tax amount
+   to reserves. Epoch 1 uses empty previous block counts, so its expansion is
+   zero unless `d >= 0.8`. Neither is precomputed because zero output rows
+   cannot provide rollback-safe precompute provenance.
 2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot

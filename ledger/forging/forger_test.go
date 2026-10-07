@@ -2228,6 +2228,71 @@ func (l *forgerCountingLeader) callCount() int {
 	return l.calls
 }
 
+// forgerNotLeader counts slot checks and never wins one, so every cycle of
+// the producer loop reaches the leader check and moves the count. When
+// cancelAt is set it calls cancel from inside that check, so the
+// cancellation lands at a known point in the loop.
+type forgerNotLeader struct {
+	forgerCountingLeader
+	cancelAt int
+	cancel   context.CancelFunc
+}
+
+func (l *forgerNotLeader) ShouldProduceBlock(slot uint64) bool {
+	l.forgerCountingLeader.ShouldProduceBlock(slot)
+	if l.cancelAt > 0 && l.callCount() == l.cancelAt {
+		l.cancel()
+	}
+	return false
+}
+
+// forgerFastSlotClock ends each slot a few milliseconds ahead so the
+// slot-aligned loop cycles quickly.
+type forgerFastSlotClock struct {
+	forgerTestSlotClock
+}
+
+func (forgerFastSlotClock) NextSlotTime() (time.Time, error) {
+	return time.Now().Add(5 * time.Millisecond), nil
+}
+
+// A fatal component error, such as a ledger rollover that cannot apply its
+// reward update, cancels the node context the producer loop runs under. The
+// loop must then exit and check no further slots, so the node stops forging
+// on a ledger that halted.
+func TestForgerStopsCheckingSlotsWhenItsContextIsCancelled(t *testing.T) {
+	t.Parallel()
+
+	// No deferred Stop: Stop waits for the loop, so on the failure this test
+	// exists to catch it would hang the package instead of failing the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	leader := &forgerNotLeader{cancelAt: 2, cancel: cancel}
+	forger, err := NewBlockForger(ForgerConfig{
+		Mode:             ModeProduction,
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Credentials:      setupTestCredentials(t),
+		LeaderChecker:    leader,
+		BlockBuilder:     &forgerTestBuilder{},
+		BlockBroadcaster: &forgerTestBroadcaster{},
+		SlotClock: forgerFastSlotClock{forgerTestSlotClock{
+			currentSlot:       10,
+			chainTipSlot:      9,
+			slotsPerKESPeriod: 100,
+		}},
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, forger.Start(ctx))
+
+	require.Eventually(t, func() bool {
+		return !forger.IsRunning()
+	}, 5*time.Second, time.Millisecond,
+		"producer loop kept running after its context was cancelled")
+	require.Equal(t, 2, leader.callCount(),
+		"producer loop checked a slot after its context was cancelled")
+}
+
 type forgerTestSlotClock struct {
 	currentSlot         uint64
 	chainTipSlot        uint64
@@ -4232,4 +4297,30 @@ func (v *trackingBlockValidator) ValidateForgedBlock(
 	[]byte,
 ) error {
 	return v.onValidate()
+}
+
+// A forge already in progress when the node context is cancelled must not
+// adopt or announce its block: cancellation is how a halted ledger stops the
+// node, and a block built on that ledger must not enter the local chain.
+func TestForgeDoesNotAdoptBlockWhenContextCancelledMidForge(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t, 200, 199, 199, &logs,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.onBuild = cancel
+	forged := 0
+	forger.blockForged = func(ledger.Block, []byte, time.Duration) {
+		forged++
+	}
+
+	err := forger.checkAndForgeProduction(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, builder.calls, "the forge must have reached the build")
+	require.Zero(t, broadcaster.calls, "a block was adopted after cancellation")
+	require.Zero(t, forged, "a block was announced after cancellation")
 }
