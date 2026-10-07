@@ -31,7 +31,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 
-	"github.com/blinklabs-io/dingo/eras"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 )
 
 // plominFixtureKeys holds the staking keys seeded by
@@ -361,7 +361,7 @@ func TestPrepareEraTransitionsAppliesPv3HardForkRule(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint(3), newVersion.Major)
 
-	_, err := db.UtxoByRef(avvmTxId, 0, nil)
+	_, err = db.UtxoByRef(avvmTxId, 0, nil)
 	assert.ErrorIs(t, err, database.ErrUtxoNotFound,
 		"the era-transition path must apply the pv3 AVVM return")
 	state, err := db.Metadata().GetNetworkState(nil)
