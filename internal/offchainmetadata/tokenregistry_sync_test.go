@@ -1168,7 +1168,7 @@ func TestTokenRegistrySyncSkipsOversizedMapping(t *testing.T) {
 
 	written, err := sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "unusable mappings: 1")
 	require.Zero(t, written)
 	require.Empty(t, store.snapshot())
 }

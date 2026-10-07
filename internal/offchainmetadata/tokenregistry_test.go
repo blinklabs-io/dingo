@@ -276,7 +276,7 @@ func TestTokenRegistrySyncRedactsCredentialsFromLogs(t *testing.T) {
 
 		_, err := sync.SyncOnce(t.Context())
 
-		require.NoError(t, err)
+		require.ErrorContains(t, err, "unusable mappings: 1")
 		requireRedacted(t, buf.String(), "unusable mappings")
 	})
 
