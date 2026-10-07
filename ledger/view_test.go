@@ -6872,7 +6872,6 @@ func (f *treasuryRolloverFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			currentPParams,
-			false,
 		)
 		return rolloverErr
 	})
@@ -7845,7 +7844,6 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 					f.currentEpoch,
 					era,
 					params,
-					false,
 				)
 				return err
 			}))

@@ -693,7 +693,7 @@ func (s *govDiffScenario) run(
 		require.NoError(t, txn.Do(func(txn *database.Txn) error {
 			var err error
 			result, err = s.ls.processEpochRollover(
-				txn, epoch, eras.ConwayEraDesc, pparams, false,
+				txn, epoch, eras.ConwayEraDesc, pparams,
 			)
 			return err
 		}))

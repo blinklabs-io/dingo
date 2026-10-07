@@ -1743,14 +1743,6 @@ type EpochRolloverResult struct {
 	// HardFork is non-nil when a protocol version change
 	// in the updated pparams triggers an era transition.
 	HardFork *HardForkInfo
-	// BoundarySnapshotDeferred is true when the caller asked
-	// processEpochRollover to skip the authoritative mark-snapshot capture and
-	// the rollover reached the point where it would otherwise have captured it.
-	// The caller then owns exactly one capture, taken after the remaining
-	// boundary era transitions have rewritten NewCurrentEra and
-	// NewCurrentPParams. It stays false for the initial-epoch path, which never
-	// captures a mark snapshot.
-	BoundarySnapshotDeferred bool
 	// RealV2CostModelObserved is true when this rollover's enacted governance
 	// ParamUpdate explicitly carried a PlutusV2 cost model
 	// (governance.EnactmentResult.PlutusV2CostModelWritten), not merely
@@ -5316,167 +5308,72 @@ func (ls *LedgerState) transitionToEraFrom(
 	return result, nil
 }
 
-// applyBoundaryEraTransitions applies the era transitions a multi-era boundary
-// block requires but the epoch rollover does not perform itself, then takes the
-// mark snapshot the rollover deferred.
-//
-// The rollover has to run first so pending protocol updates are enacted in the
-// source era; applying the transitions before it would let an old-era update
-// overwrite the successor era's parameters. The consequence is that when the
-// rollover would normally capture the mark snapshot, the final era and protocol
-// parameters do not exist yet. So the snapshot is captured here instead, after
-// the transitions and after the new epoch's era and parameters are made durable,
-// which is what makes the snapshot's recorded protocol major agree with the era
-// the epoch actually runs at and with the post-commit EpochTransitionEvent.
-//
-// rolloverResult is updated in place to describe the final era. The returned
-// transition results are in application order, for the caller's in-memory state
-// and hard-fork events.
-func (ls *LedgerState) applyBoundaryEraTransitions(
+func (ls *LedgerState) prepareEraTransitionsForRollover(
 	txn *database.Txn,
 	snapshotEpoch models.Epoch,
+	snapshotEra eras.EraDesc,
+	currentPParams lcommon.ProtocolParameters,
 	transitionPath []uint,
-	rolloverResult *EpochRolloverResult,
-) ([]*EraTransitionResult, error) {
-	workingPParams := rolloverResult.NewCurrentPParams
-	workingEraId := rolloverResult.NewCurrentEra.Id
-	transitionResults := make([]*EraTransitionResult, 0, len(transitionPath))
+) (
+	lcommon.ProtocolParameters,
+	uint,
+	[]*EraTransitionResult,
+	bool,
+	error,
+) {
+	if len(transitionPath) == 0 {
+		return currentPParams, snapshotEra.Id, nil, false, nil
+	}
+	boundarySlot := snapshotEpoch.StartSlot + uint64(snapshotEpoch.LengthInSlots)
+	workingPParams := currentPParams
+	var plutusV2CostModelWritten bool
+	if snapshotEra.Id != eras.ByronEraDesc.Id {
+		ownedPParams, err := cloneProtocolParametersForEra(
+			snapshotEra,
+			currentPParams,
+		)
+		if err != nil {
+			return nil, 0, nil, false, fmt.Errorf(
+				"clone source-era protocol parameters: %w", err,
+			)
+		}
+		if ownedPParams == nil {
+			return nil, 0, nil, false, errors.New(
+				"source-era protocol parameters are nil",
+			)
+		}
+		workingPParams, plutusV2CostModelWritten, err = ls.computeClassicPParamUpdates(
+			txn,
+			boundarySlot,
+			snapshotEpoch.EpochId+1,
+			snapshotEra,
+			ownedPParams,
+		)
+		if err != nil {
+			return nil, 0, nil, false, fmt.Errorf(
+				"apply source-era pparam updates: %w", err,
+			)
+		}
+	}
+	workingEraID := snapshotEra.Id
+	results := make([]*EraTransitionResult, 0, len(transitionPath))
 	for _, transitionEraID := range transitionPath {
 		result, err := ls.transitionToEraFrom(
 			txn,
 			transitionEraID,
-			snapshotEpoch.EpochId,
-			snapshotEpoch.StartSlot+uint64(snapshotEpoch.LengthInSlots),
+			snapshotEpoch.EpochId+1,
+			boundarySlot,
 			workingPParams,
-			workingEraId,
+			workingEraID,
 		)
 		if err != nil {
-			return nil, err
+			return nil, 0, nil, false, err
 		}
 		workingPParams = result.NewPParams
-		workingEraId = result.NewEra.Id
-		transitionResults = append(transitionResults, result)
+		workingEraID = result.NewEra.Id
+		results = append(results, result)
 	}
-
-	newEpoch := rolloverResult.NewCurrentEpoch
-	finalEra, ok := ls.eraById(workingEraId)
-	if !ok || finalEra == nil {
-		return nil, fmt.Errorf(
-			"unknown transitioned era ID %d", workingEraId,
-		)
-	}
-	slotLength, epochLength, err := finalEra.EpochLengthFunc(
-		ls.config.CardanoNodeConfig,
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"resolve transitioned era timing: %w", err,
-		)
-	}
-	newEpoch.EraId = workingEraId
-	newEpoch.SlotLength = slotLength
-	newEpoch.LengthInSlots = epochLength
-	// calculateEpochNonce short-circuits to an all-nil nonce whenever the
-	// ROLLOVER'S SOURCE era is Byron (no Praos nonce there), regardless of
-	// what era this boundary actually transitions into. That is correct
-	// when the new epoch stays in Byron, but here workingEraId has just
-	// been advanced past Byron (that is the only way this function runs),
-	// so the epoch needs a real nonce for header verification in its new
-	// era. Seed it the same way every other from-genesis nonce path does
-	// (computeEpochNonceForSlot, calculateEpochNonce's own no-prior-nonce
-	// branch): the Shelley genesis hash for nonce/evolving/candidate, with
-	// LastEpochBlockNonce left at NeutralNonce (nil) — Without
-	// this, header verification permanently rejects every block in the
-	// new era with "epoch has no nonce for slot" for any Byron-prefixed
-	// network that syncs from genesis instead of a Mithril snapshot.
-	if workingEraId != 0 && len(newEpoch.Nonce) == 0 {
-		if ls.config.CardanoNodeConfig == nil {
-			return nil, errors.New(
-				"seed post-Byron epoch nonce: CardanoNodeConfig is nil",
-			)
-		}
-		if ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-			return nil, errors.New(
-				"seed post-Byron epoch nonce: could not get Shelley genesis hash",
-			)
-		}
-		genesisHashBytes, err := hex.DecodeString(
-			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"decode Shelley genesis hash for post-Byron epoch nonce: %w",
-				err,
-			)
-		}
-		if len(genesisHashBytes) != lcommon.Blake2b256Size {
-			return nil, fmt.Errorf(
-				"seed post-Byron epoch nonce: Shelley genesis hash is %d bytes, expected %d",
-				len(genesisHashBytes),
-				lcommon.Blake2b256Size,
-			)
-		}
-		newEpoch.Nonce = genesisHashBytes
-		newEpoch.EvolvingNonce = genesisHashBytes
-		newEpoch.CandidateNonce = genesisHashBytes
-		newEpoch.LastEpochBlockNonce = nil
-	}
-	if err := ls.db.SetEpoch(
-		newEpoch.StartSlot,
-		newEpoch.EpochId,
-		newEpoch.Nonce,
-		newEpoch.EvolvingNonce,
-		newEpoch.CandidateNonce,
-		newEpoch.LastEpochBlockNonce,
-		newEpoch.EraId,
-		newEpoch.SlotLength,
-		newEpoch.LengthInSlots,
-		txn,
-	); err != nil {
-		return nil, fmt.Errorf("update transitioned epoch: %w", err)
-	}
-	pparamsCbor, err := cbor.Encode(&workingPParams)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"encode transitioned protocol parameters: %w", err,
-		)
-	}
-	if err := ls.db.SetPParams(
-		pparamsCbor,
-		newEpoch.StartSlot,
-		newEpoch.EpochId,
-		workingEraId,
-		txn,
-	); err != nil {
-		return nil, fmt.Errorf(
-			"persist transitioned protocol parameters: %w", err,
-		)
-	}
-	rolloverResult.NewCurrentEpoch = newEpoch
-	rolloverResult.NewCurrentPParams = workingPParams
-	rolloverResult.NewCurrentEra = *finalEra
-	rolloverResult.SchedulerIntervalMs = slotLength
-	for i := range rolloverResult.NewEpochCache {
-		if rolloverResult.NewEpochCache[i].EpochId == newEpoch.EpochId {
-			rolloverResult.NewEpochCache[i].EraId = workingEraId
-			rolloverResult.NewEpochCache[i].SlotLength = slotLength
-			rolloverResult.NewEpochCache[i].LengthInSlots = epochLength
-			rolloverResult.NewEpochCache[i].Nonce = newEpoch.Nonce
-			rolloverResult.NewEpochCache[i].EvolvingNonce = newEpoch.EvolvingNonce
-			rolloverResult.NewEpochCache[i].CandidateNonce = newEpoch.CandidateNonce
-			rolloverResult.NewEpochCache[i].LastEpochBlockNonce = newEpoch.LastEpochBlockNonce
-		}
-	}
-
-	if rolloverResult.BoundarySnapshotDeferred {
-		if err := ls.captureEpochBoundarySnapshot(
-			txn, snapshotEpoch, rolloverResult,
-		); err != nil {
-			return nil, err
-		}
-		rolloverResult.BoundarySnapshotDeferred = false
-	}
-	return transitionResults, nil
+	return workingPParams, workingEraID, results, plutusV2CostModelWritten, nil
 }
 
 // applyEraTransition applies a single era-transition result to the in-memory
@@ -7500,7 +7397,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 				}
 				workingPParams := snapshotPParams
-				workingEraId := snapshotEra.Id
+				var workingEraId uint
 
 				// Honor the era schedule when the boundary-crossing
 				// block did not bump the era itself. The current
@@ -7539,68 +7436,41 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						snapshotEra.Id, nextEpochEraId,
 					)
 				}
-				// Let the epoch rollover enact pending protocol updates in
-				// the source era first. Applying a successor transition before
-				// the rollover would decode an update using the successor's
-				// shape; fields removed by that era (for example Alonzo's
-				// decentralization field in Babbage) then fail to decode.
-				transitionsBeforeRollover,
-					transitionsAfterRollover := splitEraTransitionsForRollover(
+				// Translate into the era that owns the incoming epoch before
+				// running its boundary rules, matching the hard-fork
+				// combinator's extendToSlot-before-TICK ordering.
+				var transitionResults []*EraTransitionResult
+				var plutusV2CostModelWritten bool
+				workingPParams, workingEraId, transitionResults,
+					plutusV2CostModelWritten, err = ls.prepareEraTransitionsForRollover(
+					txn,
+					snapshotEpoch,
+					snapshotEra,
+					workingPParams,
 					transitionPath,
 				)
-				for _, transitionEraID := range transitionsBeforeRollover {
-					result, err := ls.transitionToEraFrom(
-						txn,
-						transitionEraID,
-						snapshotEpoch.EpochId,
-						snapshotEpoch.StartSlot+uint64(
-							snapshotEpoch.LengthInSlots,
-						),
-						workingPParams,
-						workingEraId,
-					)
-					if err != nil {
-						return err
-					}
-					workingPParams = result.NewPParams
-					workingEraId = result.NewEra.Id
-					eraTransitions = append(eraTransitions, result)
+				if err != nil {
+					return err
 				}
+				eraTransitions = append(eraTransitions, transitionResults...)
+				classicPParamsApplied := len(transitionPath) > 0
 				// Process epoch rollover
 				workingEraPtr, ok := ls.eraById(workingEraId)
 				if !ok {
 					return fmt.Errorf("unknown era ID %d", workingEraId)
 				}
-				result, err := ls.processEpochRollover(
+				result, err := ls.processEpochRolloverWithClassicPParams(
 					txn,
 					snapshotEpoch,
 					*workingEraPtr,
 					workingPParams,
-					len(transitionsAfterRollover) > 0,
+					classicPParamsApplied,
+					plutusV2CostModelWritten,
 				)
 				if err != nil {
 					return err
 				}
 				rolloverResult = result
-				if len(transitionsAfterRollover) > 0 {
-					transitionResults, err := ls.applyBoundaryEraTransitions(
-						txn,
-						snapshotEpoch,
-						transitionsAfterRollover,
-						rolloverResult,
-					)
-					if err != nil {
-						return err
-					}
-					// applyBoundaryEraTransitions updated
-					// rolloverResult in place, so the era and
-					// pparams the caller applies after commit
-					// already describe the final era.
-					eraTransitions = append(
-						eraTransitions,
-						transitionResults...,
-					)
-				}
 				return nil
 			})
 			rolloverElapsed := time.Since(rolloverStart)
@@ -10358,7 +10228,6 @@ func (ls *LedgerState) setEpochCache(
 		ls.currentEpoch,
 		ls.currentEra,
 		ls.currentPParams,
-		false,
 	)
 	if err != nil {
 		return err

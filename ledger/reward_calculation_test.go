@@ -6025,7 +6025,6 @@ func TestProcessEpochRolloverSnapshotEventUsesProtocolMajor(t *testing.T) {
 			},
 			eras.ShelleyEraDesc,
 			pparams,
-			false,
 		)
 		return err
 	})
@@ -8112,7 +8111,6 @@ func (f *epochBoundaryBenchFixture) rollover(
 			f.epochs[epochBoundaryBenchEndedEpoch],
 			eras.ConwayEraDesc,
 			f.pparams,
-			false,
 		)
 		bodyDone = time.Now()
 		return err
@@ -8559,7 +8557,6 @@ func TestMithrilImportProvidesPreview1398RewardPParams(t *testing.T) {
 			*currentEpoch,
 			eras.ConwayEraDesc,
 			currentParams,
-			false,
 		)
 		return rolloverErr
 	}))

@@ -413,7 +413,6 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -480,7 +479,6 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			currentEpoch,
 			eras.DijkstraEraDesc,
 			original,
-			false,
 		)
 		return rolloverErr
 	}))
@@ -3486,7 +3484,6 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		require.NoError(t, err)
 
@@ -3608,7 +3605,6 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -3742,7 +3738,6 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 				snapshotEpoch,
 				snapshotEra,
 				snapshotPParams,
-				false,
 			)
 			return err
 		})
@@ -8101,12 +8096,8 @@ func newBoundaryRolloverLedger(
 }
 
 // TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion drives a
-// two-era boundary the way ledgerProcessBlocksFromSource does: the rollover
-// runs first so source-era pparam updates are enacted, then the remaining era
-// transitions are applied. The authoritative mark snapshot must be captured
-// once, after those transitions, so its protocol version is the one the new
-// epoch actually runs at. Capturing it at the end of the rollover records the
-// source era's major instead, and that value is durable.
+// two-era boundary in production order: source-era updates, translations, then
+// the incoming era's epoch rules and snapshot capture.
 func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	t *testing.T,
 ) {
@@ -8133,38 +8124,37 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	var result *EpochRolloverResult
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(
-			txn,
-			ls.currentEpoch,
-			ls.currentEra,
-			ls.currentPParams,
-			true,
-		)
-		if err != nil {
-			return err
-		}
-		require.True(t, result.BoundarySnapshotDeferred,
-			"a multi-era boundary must defer the mark snapshot capture")
-		require.Empty(t, captures,
-			"the rollover must not capture the mark snapshot before the "+
-				"boundary's era transitions have run")
-
-		transitions, err := ls.applyBoundaryEraTransitions(
-			txn, ls.currentEpoch, transitionPath, result,
-		)
+		params, eraID, transitions, v2Written, err :=
+			ls.prepareEraTransitionsForRollover(
+				txn,
+				ls.currentEpoch,
+				ls.currentEra,
+				ls.currentPParams,
+				transitionPath,
+			)
 		if err != nil {
 			return err
 		}
 		require.Len(t, transitions, 2)
-		return nil
+		require.Empty(t, captures,
+			"translation must not capture before incoming-era epoch rules")
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParams(
+			txn,
+			ls.currentEpoch,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
+		)
+		return err
 	}))
 
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.Len(t, captures, 1,
-		"the deferred capture must run exactly once, not be re-run")
+	require.Len(t, captures, 1)
 	require.Equal(
 		t,
 		uint(mary.MinProtocolVersionMary),
@@ -8174,8 +8164,6 @@ func TestBoundaryEraTransitionsSnapshotRecordsFinalProtocolVersion(
 	)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEra.Id)
 	require.Equal(t, eras.MaryEraDesc.Id, result.NewCurrentEpoch.EraId)
-	require.False(t, result.BoundarySnapshotDeferred,
-		"the deferred capture must be marked as taken")
 
 	// The event the caller publishes after commit is built from the same
 	// result, so the durable row and the event must agree.
@@ -8204,22 +8192,25 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 	var result *EpochRolloverResult
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		result, err = ls.processEpochRollover(
+		params, eraID, _, v2Written, err := ls.prepareEraTransitionsForRollover(
 			txn,
 			ls.currentEpoch,
 			sourceEra,
 			ls.currentPParams,
-			true,
+			[]uint{eras.AllegraEraDesc.Id},
 		)
 		if err != nil {
 			return err
 		}
-		_, err = ls.applyBoundaryEraTransitions(
+		incomingEra, ok := ls.eraById(eraID)
+		require.True(t, ok)
+		result, err = ls.processEpochRolloverWithClassicPParams(
 			txn,
 			ls.currentEpoch,
-			[]uint{eras.AllegraEraDesc.Id},
-			result,
+			*incomingEra,
+			params,
+			true,
+			v2Written,
 		)
 		return err
 	}))
@@ -8254,8 +8245,7 @@ func TestBoundaryEraTransitionUsesTargetEraTiming(t *testing.T) {
 }
 
 // TestSingleEraBoundaryRolloverCapturesSnapshotInRollover covers the common
-// path: with no era transitions deferred, the rollover still captures the mark
-// snapshot itself, at its own era's protocol version.
+// path at its own era's protocol version.
 func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	t.Parallel()
 
@@ -8278,7 +8268,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 			ls.currentEpoch,
 			ls.currentEra,
 			ls.currentPParams,
-			false,
 		)
 		return err
 	}))
@@ -8286,7 +8275,6 @@ func TestSingleEraBoundaryRolloverCapturesSnapshotInRollover(t *testing.T) {
 	if result == nil {
 		t.Fatal("epoch rollover returned no result")
 	}
-	require.False(t, result.BoundarySnapshotDeferred)
 	require.Len(t, captures, 1)
 	require.Equal(
 		t,
@@ -8816,7 +8804,6 @@ func (f *hardForkRatifyFixture) rollover(
 			currentEpoch,
 			eras.ConwayEraDesc,
 			pparams,
-			false,
 		)
 		return rolloverErr
 	})
