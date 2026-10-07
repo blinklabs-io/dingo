@@ -173,6 +173,29 @@ func NewClient(cfg Config) (*Client, error) {
 	return &Client{cfg: cfg, logger: cfg.Logger}, nil
 }
 
+// CheckReady verifies the agent is currently serving the configured protocol
+// and mode using a fresh bounded Hello handshake. It never requests a signature
+// or evolves a key, and detects an agent lost while the signing socket was idle.
+func (c *Client) CheckReady() error {
+	c.mu.Lock()
+	closed := c.closed
+	cfg := c.cfg
+	c.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	// A probe must not overwrite the signing connection's metrics or backoff.
+	cfg.Metrics = nil
+	probe, err := NewClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer probe.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.HelloTimeout)
+	defer cancel()
+	return probe.connectLocked(ctx)
+}
+
 // Close closes the current connection, if any, and marks the client closed;
 // every subsequent call fails with ErrClosed.
 //

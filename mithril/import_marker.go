@@ -27,8 +27,8 @@ import (
 // chain-intersection check.
 //
 // It lives under sync_state but is NOT part of the ephemeral sync_status
-// lifecycle: ClearSyncState (run on sync completion) wipes every sync_state
-// entry, so this marker must be written AFTER the completion clear so it
+// lifecycle: Mithril completion cleanup removes transient sync_state
+// entries, so this marker must be written AFTER the completion clear so it
 // survives across runs. Only the Mithril completion path clears sync_state, so
 // nothing in normal `dingo serve` operation removes it.
 const syncKeyImmutableMax = "mithril_immutable_max"
@@ -136,7 +136,7 @@ func getImmutableImportMarker(
 // syncKeyCatchUpActive marks a catch-up import as having begun writing to the
 // database. Unlike syncKeyImmutableMax it IS part of the ephemeral sync
 // lifecycle: set alongside the in-progress sync_status when a catch-up starts
-// mutating, wiped by ClearSyncState on completion. Its only purpose is to
+// mutating, deleted by completion cleanup. Its only purpose is to
 // route an interrupted catch-up back through catch-up semantics on the next
 // run — a markerless catch-up (pre-marker database) leaves no other trace, and
 // resuming it as a plain bootstrap would skip the reconcile pass and leave

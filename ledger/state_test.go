@@ -976,6 +976,22 @@ func TestHandleBehindHorizonPublishesGaugesButNotReadiness(t *testing.T) {
 	}
 }
 
+// A paused slot clock is still running, so handleBehindHorizon reports it
+// alive; otherwise a node whose tip fell behind the era-history horizon after
+// it had ticked would read as a stopped clock and fail liveness.
+func TestHandleBehindHorizonReportsTheSlotClockAlive(t *testing.T) {
+	t.Parallel()
+
+	ls, _, _ := newTipGapTestLedgerState(t, 100, nil)
+	alive := 0
+	ls.config.ReportSlotClockAliveFunc = func() { alive++ }
+
+	ls.handleBehindHorizon(1_000)
+	ls.handleBehindHorizon(1_001)
+
+	assert.Equal(t, 2, alive)
+}
+
 // An epoch length that is not yet known is left unset rather than
 // published as a fabricated value.
 func TestHandleBehindHorizonLeavesUnknownEpochLengthUnset(t *testing.T) {
