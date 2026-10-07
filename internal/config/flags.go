@@ -395,7 +395,7 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag(
 		"BarkBlockDownloadHosts",
 		"bark-block-download-hosts",
-		"allowed HTTPS hostnames for Bark block downloads",
+		"allowed HTTPS origins for Bark block downloads (ports matched exactly)",
 	),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 	stringFlag(
