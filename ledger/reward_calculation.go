@@ -3205,8 +3205,11 @@ func (ls *LedgerState) requiredStakeRewardBasisUnavailable(
 		)
 	}
 	return fmt.Errorf(
-		"%w: %s (%s=%d)",
+		"%w for new epoch %d: %s (%s=%d); recover by re-running Mithril"+
+			" sync or ledger-state import, and see the earlier bootstrap"+
+			" and ledgerstate import warnings",
 		errRequiredStakeRewardBasisUnavailable,
+		newEpoch,
 		reason,
 		epochKey,
 		epochValue,

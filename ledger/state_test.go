@@ -13337,6 +13337,22 @@ func newPrunedUtxoFixture(t *testing.T, mithrilLedgerSlot uint64) *prunedUtxoFix
 	return f
 }
 
+func TestPrunedUtxoFixtureClosesLedgerStateOnCleanup(t *testing.T) {
+	t.Parallel()
+
+	var ls *LedgerState
+	t.Run("fixture", func(t *testing.T) {
+		ls = newPrunedUtxoFixture(t, 0).ls
+		require.False(t, ls.closed.Load())
+	})
+	require.NotNil(t, ls, "fixture must initialize before cleanup assertions")
+	require.True(
+		t,
+		ls.closed.Load(),
+		"fixture cleanup must close the ledger state before the database is torn down",
+	)
+}
+
 // inLiveSet mirrors the probe used by the rollback tests: it asks
 // the database.UtxoByRef lookup that LedgerView.UtxoById delegates to, so it
 // exercises the deleted_slot filter that decides Conway bad-inputs and, through
