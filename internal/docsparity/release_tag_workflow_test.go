@@ -140,7 +140,269 @@ func TestReleaseConsumerUpdateFailsClosed(t *testing.T) {
 	})
 }
 
+func TestReleaseConsumerUpdateContinuesRemoteBranch(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	remote := filepath.Join(root, "consumer.git")
+	seed := filepath.Join(root, "seed")
+	consumer := filepath.Join(root, "consumer")
+
+	releaseRunGit(t, root, "init", "--bare", "--initial-branch=main", remote)
+	releaseRunGit(t, root, "init", "--initial-branch=main", seed)
+	releaseRunGit(t, seed, "config", "user.name", "release test")
+	releaseRunGit(t, seed, "config", "user.email", "release-test@example.com")
+	requireTestFile(t, filepath.Join(seed, "consumer.txt"), "main\n")
+	requireTestFile(
+		t,
+		filepath.Join(seed, "roles/dingo/defaults/main.yml"),
+		"dingo_version: '1.2.1'\n",
+	)
+	releaseRunGit(t, seed, "add", ".")
+	releaseRunGit(t, seed, "commit", "-m", "initial consumer")
+	releaseRunGit(t, seed, "remote", "add", "origin", remote)
+	releaseRunGit(t, seed, "push", "-u", "origin", "main")
+	baseCommit := strings.TrimSpace(releaseRunGit(t, seed, "rev-parse", "HEAD"))
+	releaseRunGit(t, seed, "switch", "-c", "dingo-v1.2.3")
+	requireTestFile(t, filepath.Join(seed, "release.txt"), "existing branch\n")
+	requireTestFile(
+		t,
+		filepath.Join(seed, "roles/dingo/defaults/main.yml"),
+		"dingo_version: '1.2.2'\n",
+	)
+	releaseRunGit(t, seed, "add", ".")
+	releaseRunGit(t, seed, "commit", "-m", "existing release update")
+	releaseRunGit(t, seed, "push", "-u", "origin", "dingo-v1.2.3")
+	releaseRunGit(t, root, "clone", remote, consumer)
+
+	outputFile := filepath.Join(root, "github-output")
+	cmd := exec.Command("bash", "-c", releaseConsumerStepScript(
+		t,
+		"Prepare consumer release branch",
+	))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"RELEASE_TAG=v1.2.3",
+		"GITHUB_OUTPUT="+outputFile,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("prepare consumer branch: %v: %s", err, output)
+	}
+
+	if got := strings.TrimSpace(releaseRunGit(t, consumer, "branch", "--show-current")); got != "dingo-v1.2.3" {
+		t.Fatalf("checked out branch = %q", got)
+	}
+	remoteHead := strings.TrimSpace(releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"rev-parse",
+		"refs/heads/dingo-v1.2.3",
+	))
+	if got := strings.TrimSpace(releaseRunGit(t, consumer, "rev-parse", "HEAD")); got != remoteHead {
+		t.Fatalf("consumer HEAD = %s, want existing remote head %s", got, remoteHead)
+	}
+	if got := readRepoFile(t, consumer, "release.txt"); got != "existing branch\n" {
+		t.Fatalf("existing release branch content = %q", got)
+	}
+
+	openScript := releaseConsumerStepScript(t, "Open consumer pull request")
+	for _, forbidden := range []string{"git switch -C", "git push --force-with-lease"} {
+		if strings.Contains(openScript, forbidden) {
+			t.Errorf("consumer publication still rewrites branch with %q", forbidden)
+		}
+	}
+	if !strings.Contains(openScript, `git push -u origin "$RELEASE_BRANCH"`) {
+		t.Error("consumer publication does not use a normal upstream push")
+	}
+
+	if output, err := runConsumerUpdate(
+		t,
+		root,
+		releaseConsumerUpdateScript(t),
+		"ansible",
+	); err != nil {
+		t.Fatalf("update existing consumer branch: %v: %s", err, output)
+	}
+	fakeBin := filepath.Join(root, "bin")
+	ghLog := filepath.Join(root, "gh.log")
+	requireTestFile(t, filepath.Join(fakeBin, "gh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\n")
+	if err := os.Chmod(filepath.Join(fakeBin, "gh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("bash", "-c", openScript)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GH_LOG="+ghLog,
+		"BASE_COMMIT="+baseCommit,
+		"RELEASE_BRANCH=dingo-v1.2.3",
+		"RELEASE_TAG=v1.2.3",
+		"PACKAGE_VERSION=1.2.3",
+		"CONSUMER_KIND=ansible",
+		"CONSUMER_REPOSITORY=example/consumer",
+		"GITHUB_REPOSITORY=blinklabs-io/dingo",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("publish continued consumer branch: %v: %s", err, output)
+	}
+	newRemoteHead := strings.TrimSpace(releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"rev-parse",
+		"refs/heads/dingo-v1.2.3",
+	))
+	if newRemoteHead == remoteHead {
+		t.Fatal("consumer release branch did not advance")
+	}
+	releaseRunGit(t, root, "--git-dir="+remote, "merge-base", "--is-ancestor", remoteHead, newRemoteHead)
+	if got := releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"show",
+		"refs/heads/dingo-v1.2.3:roles/dingo/defaults/main.yml",
+	); got != "dingo_version: '1.2.3'\n" {
+		t.Fatalf("published consumer version = %q", got)
+	}
+	if got := readRepoFile(t, root, "gh.log"); !strings.Contains(got, "pr create") {
+		t.Fatalf("rerun did not recover the missing consumer PR: %q", got)
+	}
+}
+
+func TestHomebrewUpdateContinuesRemoteBranch(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	remote := filepath.Join(root, "tap.git")
+	seed := filepath.Join(root, "seed")
+	tap := filepath.Join(root, "homebrew-tap")
+
+	releaseRunGit(t, root, "init", "--bare", "--initial-branch=main", remote)
+	releaseRunGit(t, root, "init", "--initial-branch=main", seed)
+	releaseRunGit(t, seed, "config", "user.name", "release test")
+	releaseRunGit(t, seed, "config", "user.email", "release-test@example.com")
+	requireTestFile(t, filepath.Join(seed, "Formula/dingo.rb"), `class Dingo < Formula
+  url "https://example.com/dingo-v1.2.1.tar.gz"
+  sha256 "old"
+  ldflags "-X version.CommitHash=1111111"
+end
+`)
+	releaseRunGit(t, seed, "add", ".")
+	releaseRunGit(t, seed, "commit", "-m", "initial tap")
+	releaseRunGit(t, seed, "remote", "add", "origin", remote)
+	releaseRunGit(t, seed, "push", "-u", "origin", "main")
+	baseCommit := strings.TrimSpace(releaseRunGit(t, seed, "rev-parse", "HEAD"))
+	releaseRunGit(t, seed, "switch", "-c", "dingo-v1.2.3")
+	requireTestFile(t, filepath.Join(seed, "release.txt"), "existing branch\n")
+	releaseRunGit(t, seed, "add", ".")
+	releaseRunGit(t, seed, "commit", "-m", "existing tap update")
+	releaseRunGit(t, seed, "push", "-u", "origin", "dingo-v1.2.3")
+	releaseRunGit(t, root, "clone", remote, tap)
+
+	outputFile := filepath.Join(root, "github-output")
+	cmd := exec.Command("bash", "-c", releaseWorkflowStepScript(
+		t,
+		"update-homebrew",
+		"Prepare tap release branch",
+	))
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"RELEASE_TAG=v1.2.3",
+		"GITHUB_OUTPUT="+outputFile,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("prepare tap branch: %v: %s", err, output)
+	}
+	remoteHead := strings.TrimSpace(releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"rev-parse",
+		"refs/heads/dingo-v1.2.3",
+	))
+	if got := strings.TrimSpace(releaseRunGit(t, tap, "rev-parse", "HEAD")); got != remoteHead {
+		t.Fatalf("tap HEAD = %s, want existing remote head %s", got, remoteHead)
+	}
+
+	updateScript := releaseWorkflowStepScript(t, "update-homebrew", "Update formula")
+	cmd = exec.Command("bash", "-c", updateScript)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"TARBALL_URL=https://example.com/dingo-v1.2.3.tar.gz",
+		"SHA256=new-sha",
+		"SHORT_COMMIT=3333333",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("update existing tap branch: %v: %s", err, output)
+	}
+
+	openScript := releaseWorkflowStepScript(t, "update-homebrew", "Open tap pull request")
+	for _, forbidden := range []string{"git switch -C", "git push --force-with-lease"} {
+		if strings.Contains(openScript, forbidden) {
+			t.Errorf("tap publication still rewrites branch with %q", forbidden)
+		}
+	}
+	if !strings.Contains(openScript, `git push -u origin "$RELEASE_BRANCH"`) {
+		t.Error("tap publication does not use a normal upstream push")
+	}
+	fakeBin := filepath.Join(root, "bin")
+	ghLog := filepath.Join(root, "gh.log")
+	requireTestFile(t, filepath.Join(fakeBin, "gh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\n")
+	if err := os.Chmod(filepath.Join(fakeBin, "gh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("bash", "-c", openScript)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GH_LOG="+ghLog,
+		"BASE_COMMIT="+baseCommit,
+		"RELEASE_BRANCH=dingo-v1.2.3",
+		"RELEASE_TAG=v1.2.3",
+		"TAP_REPO=example/tap",
+		"GITHUB_REPOSITORY=blinklabs-io/dingo",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("publish continued tap branch: %v: %s", err, output)
+	}
+	newRemoteHead := strings.TrimSpace(releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"rev-parse",
+		"refs/heads/dingo-v1.2.3",
+	))
+	if newRemoteHead == remoteHead {
+		t.Fatal("tap release branch did not advance")
+	}
+	releaseRunGit(t, root, "--git-dir="+remote, "merge-base", "--is-ancestor", remoteHead, newRemoteHead)
+	if got := releaseRunGit(
+		t,
+		root,
+		"--git-dir="+remote,
+		"show",
+		"refs/heads/dingo-v1.2.3:Formula/dingo.rb",
+	); !strings.Contains(got, "dingo-v1.2.3.tar.gz") ||
+		!strings.Contains(got, `sha256 "new-sha"`) ||
+		!strings.Contains(got, "version.CommitHash=3333333") {
+		t.Fatalf("published formula is stale: %q", got)
+	}
+	if got := readRepoFile(t, root, "gh.log"); !strings.Contains(got, "pr create") {
+		t.Fatalf("rerun did not recover the missing tap PR: %q", got)
+	}
+}
+
 func releaseConsumerUpdateScript(t *testing.T) string {
+	t.Helper()
+	return releaseConsumerStepScript(t, "Update consumer version")
+}
+
+func releaseConsumerStepScript(t *testing.T, name string) string {
+	t.Helper()
+	return releaseWorkflowStepScript(t, "update-consumers", name)
+}
+
+func releaseWorkflowStepScript(t *testing.T, job, name string) string {
 	t.Helper()
 	var workflow releaseWorkflow
 	if err := yaml.Unmarshal(
@@ -149,13 +411,24 @@ func releaseConsumerUpdateScript(t *testing.T) string {
 	); err != nil {
 		t.Fatalf("parse %s: %v", publishWorkflow, err)
 	}
-	for _, step := range workflow.Jobs["update-consumers"].Steps {
-		if step.Name == "Update consumer version" {
+	for _, step := range workflow.Jobs[job].Steps {
+		if step.Name == name {
 			return step.Run
 		}
 	}
-	t.Fatal("update-consumers has no version update step")
+	t.Fatalf("%s has no %q step", job, name)
 	return ""
+}
+
+func releaseRunGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return string(output)
 }
 
 func runConsumerUpdate(
