@@ -501,16 +501,52 @@ func ImportLedgerState(
 		"slot", slot,
 	)
 
+	if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" &&
+		!models.IsPhaseCompleted(completedPhase, models.ImportPhaseUTxO) {
+		return errors.New(
+			"UTxO-HD ledger state requires external UTxO table file",
+		)
+	}
+
+	// Delete post-anchor rollover residue so replay can re-trigger every
+	// crossed epoch boundary. See DATABASE.md for the cleanup's scope and
+	// rationale.
+	//
+	// Run the full sweep atomically so a failed delete cannot leave only part
+	// of the post-anchor state removed.
+	sweepTxn := cfg.Database.MetadataTxn(true)
+	defer sweepTxn.Release()
+	if err := sweepTxn.Do(func(txn *database.Txn) error {
+		if err := cfg.Database.DeleteEpochsAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor epoch rows: %w", err)
+		}
+		if err := cfg.Database.DeleteRewardStateAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor reward state: %w", err)
+		}
+		if err := cfg.Database.DeleteBlockNoncesAfterPoint(
+			ocommon.Point{Slot: slot, Hash: cfg.State.Tip.BlockHash},
+			txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor block nonces: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkStateAfterSlot(slot, txn); err != nil {
+			return fmt.Errorf("deleting post-anchor network state: %w", err)
+		}
+		if err := cfg.Database.DeleteNetworkDonationsAfterSlot(
+			slot, txn,
+		); err != nil {
+			return fmt.Errorf("deleting post-anchor network donations: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	// Import UTxOs (from UTxO table file or inline data)
 	if !models.IsPhaseCompleted(
 		completedPhase,
 		models.ImportPhaseUTxO,
 	) {
-		if cfg.State.UTxOHD && cfg.State.UTxOTablePath == "" {
-			return errors.New(
-				"UTxO-HD ledger state requires external UTxO table file",
-			)
-		}
 		if cfg.State.UTxOTablePath != "" ||
 			cfg.State.UTxOData != nil {
 			if err := importUTxOs(
