@@ -1129,6 +1129,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// verification, or ledger backpressure below. A header that clears
 		// verification resumes the leak when the callback returns.
 		patienceGrant := false
+		patienceResume := false
 		if o.chainsyncState != nil {
 			o.chainsyncState.PatienceMessageArrived(
 				ctx.ConnectionId,
@@ -1142,6 +1143,8 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						point.Slot == tip.Point.Slot &&
 							bytes.Equal(point.Hash, tip.Point.Hash),
 					)
+				} else if patienceResume {
+					o.chainsyncState.PatienceMessageProcessed(ctx.ConnectionId)
 				}
 			}()
 		}
@@ -1161,6 +1164,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			ctx.ConnectionId,
 			o.shouldPublishChainsyncToLedger(ctx.ConnectionId),
 		)
+		patienceResume = ingressEligible
 		o.config.Logger.Debug(
 			"chainsync: header received",
 			"component", "ouroboros",
@@ -1247,10 +1251,23 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// application, not a peer fault. Only a definite crypto/eligibility
 		// failure excludes the header from observation and recycles the
 		// connection.
+		selectionEligible := ingressEligible
 		if ingressEligible && o.chainSelectionShouldVerifyHeaderCrypto != nil &&
 			o.chainSelectionShouldVerifyHeaderCrypto(blockSlot) {
-			if verifyErr := o.chainSelectionVerifyHeaderCrypto(v); verifyErr != nil {
-				if ledger.IsHeaderVerificationDeferred(verifyErr) {
+			if verifyErr := o.chainSelectionVerifyHeaderCrypto(
+				ctx.ConnectionId,
+				v,
+			); verifyErr != nil {
+				if ledger.IsHeaderVerificationWithheld(verifyErr) {
+					selectionEligible = false
+					o.config.Logger.Debug(
+						"chainsync: header withheld from chain selection",
+						"component", "ouroboros",
+						"slot", blockSlot,
+						"connection_id", ctx.ConnectionId.String(),
+						"error", verifyErr,
+					)
+				} else if ledger.IsHeaderVerificationDeferred(verifyErr) {
 					o.config.Logger.Debug(
 						"chainsync: header verification deferred for chain selection",
 						"component", "ouroboros",
@@ -1259,6 +1276,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 						"error", verifyErr,
 					)
 				} else {
+					selectionEligible = false
 					o.config.Logger.Warn(
 						"chainsync: excluding header from chain selection after verification failure",
 						"component", "ouroboros",
@@ -1280,7 +1298,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				}
 			}
 		}
-		patienceGrant = ingressEligible
+		patienceGrant = selectionEligible
 		// Observe the tip for chain selection FIRST, so the apply-eligibility
 		// decision below reflects this header. Only ingress-eligible peers are
 		// observed; random inbound peers reporting ephemeral tips are filtered
@@ -1289,7 +1307,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 			Point:       point,
 			BlockNumber: v.BlockNumber(),
 		}
-		if ingressEligible {
+		if selectionEligible {
 			// Update the tracked tip before synchronous chain selection. Genesis
 			// corroboration can select this peer from the callback, and the
 			// resulting switch must see a delivered tip.
@@ -1329,7 +1347,7 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 		// header. A peer can be ingress-eligible yet not apply-eligible (an
 		// uncorroborated Genesis fast source): its tips are observed but its
 		// blocks are withheld from the ledger.
-		applyEligible := ingressEligible &&
+		applyEligible := selectionEligible &&
 			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
 		// Update tracked client cursor/tip and deduplicate headers. Record the
 		// cross-peer dedup entry ONLY for headers we will actually apply, so a
@@ -1361,6 +1379,10 @@ func (o *Ouroboros) chainsyncClientRollForwardAt(
 				"slot", blockSlot,
 				"connection_id", ctx.ConnectionId.String(),
 			)
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
+		if !selectionEligible {
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}

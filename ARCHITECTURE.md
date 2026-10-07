@@ -5172,11 +5172,23 @@ it. Dingo implements this as a **corroboration gate**
   ingress-eligible peer — not only the currently apply-eligible one, since a
   competing candidate's headers never reach the ledger's own chainsync
   header-queue verification (that only runs for headers actually applied).
+  For a competing fork, verification follows the retained headers for that
+  peer back to a primary-chain intersection and folds their nonce
+  contributions through the source epoch's stability cutoff. This supplies
+  the fork's frozen candidate nonce at the next epoch boundary while retaining
+  the same pool-key, leader-eligibility, size, KES, and operational-certificate
+  checks for every folded header. Hash links, slots, block numbers, and era
+  order are validated across the reconstructed path before it can affect
+  selection. The verifier receives the ChainSync connection identity so
+  ancestry from one peer cannot be used for another peer's header.
   Verification is skipped only for a slot an imported Mithril snapshot
   already covers, the same exemption the ledger's own header-queue path
   applies; a result showing local state has not caught up to
   the header's slot (`IsHeaderVerificationDeferred`) still leaves the header
-  eligible — both preserve legitimate catch-up behavior. A header whose
+  eligible — both preserve legitimate catch-up behavior. Missing or
+  multi-epoch ancestry instead withholds the header from selection and ledger
+  ingress without recycling its peer; ChainSync retains that observed header
+  so later ancestry can become reconstructable. A header whose
   point (slot and hash) is on the chain (`Chain.HoldsPoint`) at or below the
   ledger tip returns success without re-verification: it was fully verified
   when applied, and re-judging it against pool snapshots the 3-epoch

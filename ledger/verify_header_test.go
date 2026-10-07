@@ -150,6 +150,53 @@ func createTestBlock(
 	tamper tamperOption,
 ) *testBlockResult {
 	t.Helper()
+	epochNonce := make([]byte, 32)
+	for i := range epochNonce {
+		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
+	}
+	return createTestBlockWithNonceAtSlots(
+		t,
+		seed,
+		epochNonce,
+		1,
+		200,
+		make([]byte, 32),
+		tamper,
+	)
+}
+
+func createTestBlockWithNonceAtSlots(
+	t testing.TB,
+	seed [32]byte,
+	epochNonce []byte,
+	firstSlot uint64,
+	lastSlot uint64,
+	prevHash []byte,
+	tamper tamperOption,
+) *testBlockResult {
+	return createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		seed,
+		epochNonce,
+		firstSlot,
+		lastSlot,
+		prevHash,
+		nil,
+		tamper,
+	)
+}
+
+func createTestBlockWithNonceAtSlotsAndBlockNumber(
+	t testing.TB,
+	seed [32]byte,
+	epochNonce []byte,
+	firstSlot uint64,
+	lastSlot uint64,
+	prevHash []byte,
+	blockNumber *uint64,
+	tamper tamperOption,
+) *testBlockResult {
+	t.Helper()
 
 	// Generate VRF key pair
 	vrfPk, vrfSk, err := vrf.KeyGen(seed[:])
@@ -168,11 +215,6 @@ func createTestBlock(
 	coldPubKey := coldPrivKey.Public().(ed25519.PublicKey)
 
 	slotsPerKesPeriod := uint64(129600)
-	epochNonce := make([]byte, 32)
-	for i := range epochNonce {
-		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
-	}
-
 	// Create OpCert: the cold key signs the cardano-ledger OCertSignable
 	// representation — KES vkey (32) || issue number (8 BE) || KES period
 	// (8 BE), the raw concatenation real cardano-cli opcerts use, NOT a CBOR
@@ -195,7 +237,7 @@ func createTestBlock(
 	activeSlotCoeff := big.NewRat(99, 100) // 99% active slots
 
 	var result *realBabbageBlock
-	for slot := uint64(1); slot <= 200; slot++ {
+	for slot := firstSlot; slot <= lastSlot; slot++ {
 		vrfInput, vrfInputErr := vrf.MkInputVrf(
 			int64(slot),
 			epochNonce,
@@ -221,10 +263,13 @@ func createTestBlock(
 			vrfProof[0] ^= 0xFF
 		}
 
-		prevHash := make([]byte, 32)
 		bodyHash := make([]byte, 32)
+		candidateBlockNumber := slot
+		if blockNumber != nil {
+			candidateBlockNumber = *blockNumber
+		}
 		headerBody := babbage.BabbageBlockHeaderBody{
-			BlockNumber: slot,
+			BlockNumber: candidateBlockNumber,
 			Slot:        slot,
 			PrevHash: func() lcommon.Blake2b256 {
 				var h lcommon.Blake2b256
@@ -282,6 +327,11 @@ func createTestBlock(
 			Body:      headerBody,
 			Signature: kesSig,
 		}
+		headerCbor, encErr := cbor.Encode(header)
+		if encErr != nil {
+			continue
+		}
+		header.SetCbor(headerCbor)
 
 		result = &realBabbageBlock{
 			header: header,
@@ -783,7 +833,7 @@ func (b *realBabbageBlock) SlotNumber() uint64 {
 }
 
 func (b *realBabbageBlock) Hash() lcommon.Blake2b256 {
-	return lcommon.Blake2b256{}
+	return b.header.Hash()
 }
 
 func (b *realBabbageBlock) PrevHash() lcommon.Blake2b256 {
@@ -6704,6 +6754,431 @@ func TestValidateChainSelectionHeaderCryptoAcceptsVerifiedHeader(
 		err,
 		"a header with valid crypto and confirmed leader eligibility must verify",
 	)
+}
+
+func TestValidatePeerChainSelectionHeaderCryptoUsesForkNonce(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	cfg := newHighFreqShelleyGenesisCfg(t)
+	sourceNonce := bytes.Repeat([]byte{0x21}, lcommon.Blake2b256Size)
+	anchor := createTestBlockWithNonceAtSlots(
+		t,
+		[32]byte{80},
+		sourceNonce,
+		10,
+		100,
+		make([]byte, lcommon.Blake2b256Size),
+		tamperNone,
+	)
+	anchorPoint := ocommon.NewPoint(
+		anchor.block.SlotNumber(),
+		anchor.block.Hash().Bytes(),
+	)
+	anchorNonce, err := eras.BabbageEraDesc.CalculateEtaVFunc(
+		cfg,
+		sourceNonce,
+		anchor.block,
+	)
+	require.NoError(t, err)
+
+	forkBlockNumber := anchor.block.BlockNumber() + 1
+	forkHeader := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{81},
+		sourceNonce,
+		300,
+		400,
+		anchorPoint.Hash,
+		&forkBlockNumber,
+		tamperNone,
+	)
+	forkCandidate, err := eras.BabbageEraDesc.CalculateEtaVFunc(
+		cfg,
+		anchorNonce,
+		forkHeader.block,
+	)
+	require.NoError(t, err)
+
+	const targetEpochStart = uint64(2_000)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.PrimaryChain().AddLocalBlock(anchor.block))
+	require.NoError(t, db.SetBlockNonce(
+		anchorPoint.Hash,
+		anchorPoint.Slot,
+		anchorNonce,
+		false,
+		nil,
+	))
+
+	localNonce := bytes.Repeat([]byte{0xa5}, lcommon.Blake2b256Size)
+	localCandidate := bytes.Repeat([]byte{0xb6}, lcommon.Blake2b256Size)
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		epochCache: []models.Epoch{
+			{
+				EpochId:             5,
+				StartSlot:           0,
+				SlotLength:          1_000,
+				LengthInSlots:       uint(targetEpochStart),
+				EraId:               eras.BabbageEraDesc.Id,
+				Nonce:               sourceNonce,
+				EvolvingNonce:       sourceNonce,
+				CandidateNonce:      sourceNonce,
+				LastEpochBlockNonce: nil,
+			},
+			{
+				EpochId:        6,
+				StartSlot:      targetEpochStart,
+				SlotLength:     1_000,
+				LengthInSlots:  uint(targetEpochStart),
+				EraId:          eras.BabbageEraDesc.Id,
+				Nonce:          localNonce,
+				CandidateNonce: localCandidate,
+			},
+		},
+		currentEra: eras.BabbageEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       6,
+			StartSlot:     targetEpochStart,
+			LengthInSlots: uint(targetEpochStart),
+			EraId:         eras.BabbageEraDesc.Id,
+			Nonce:         localNonce,
+		},
+		currentTip: ochainsync.Tip{
+			Point:       anchorPoint,
+			BlockNumber: anchor.block.BlockNumber(),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger: slog.New(
+				slog.NewTextHandler(io.Discard, nil),
+			),
+		},
+	}
+	peerLookup := func(peerHeader *testBlockResult) PeerHeaderLookupFunc {
+		point := ocommon.NewPoint(
+			peerHeader.block.SlotNumber(),
+			peerHeader.block.Hash().Bytes(),
+		)
+		return func(
+			_ ouroboros.ConnectionId,
+			hash []byte,
+		) (ChainsyncEvent, []byte, bool) {
+			if !bytes.Equal(hash, point.Hash) {
+				return ChainsyncEvent{}, nil, false
+			}
+			return ChainsyncEvent{
+				Point:       point,
+				BlockHeader: peerHeader.block.Header(),
+			}, anchorPoint.Hash, true
+		}
+	}
+	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
+	ls.slotsPerKESPeriod.Store(anchor.slotsPerKesPeriod)
+	ls.publishSnapshotsLocked()
+	require.True(t, ls.chain.HoldsPoint(anchorPoint))
+	storedAnchorNonce, err := ls.db.GetBlockNonce(anchorPoint, nil)
+	require.NoError(t, err)
+	require.Equal(t, anchorNonce, storedAnchorNonce)
+	foldedForkNonce, err := ls.foldHeaderEtaV(anchorNonce, forkHeader.block.Header())
+	require.NoError(t, err)
+	require.Equal(t, forkCandidate, foldedForkNonce)
+	cutoff, ready := ls.nextEpochNonceReadyCutoffSlot(ls.epochCache[0])
+	require.True(t, ready)
+	require.Less(t, forkHeader.block.SlotNumber(), cutoff)
+	extraEntropy, err := ls.recordedExtraEntropyForEpoch(
+		ls.epochCache[1].EpochId,
+		ls.epochCache[1].EraId,
+	)
+	require.NoError(t, err)
+	forkEpochNonce, err := assembleEpochNonce(
+		forkCandidate,
+		ls.epochCache[0].LastEpochBlockNonce,
+		extraEntropy,
+	)
+	require.NoError(t, err)
+	targetBlockNumber := forkHeader.block.BlockNumber() + 1
+	target := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{82},
+		forkEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		forkHeader.block.Hash().Bytes(),
+		&targetBlockNumber,
+		tamperNone,
+	)
+	seedBlockPoolRegistration(t, db, forkHeader.block)
+	forkPool := forkHeader.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, forkPool[:], 1_000_000_000)
+	seedBlockPoolRegistration(t, db, target.block)
+	targetPool := target.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 5, targetPool[:], 1_000_000_000)
+	require.NotEqual(t, anchor.block.Hash(), forkHeader.block.Hash())
+	require.Equal(t, forkHeader.block.Hash(), target.block.Header().PrevHash())
+	pathAncestor, pathHeaders, pathFound, pathErr := ls.peerHeaderForkPath(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	)
+	require.NoError(t, pathErr)
+	require.True(t, pathFound)
+	require.Equal(t, anchorPoint, pathAncestor)
+	require.Len(t, pathHeaders, 2)
+	require.Equal(t, forkHeader.block.Hash(), pathHeaders[0].Hash())
+	require.Equal(t, target.block.Hash(), pathHeaders[1].Hash())
+
+	peerNonce, peerEpoch, fork, nonceErr :=
+		ls.peerChainSelectionEpochNonce(
+			ouroboros.ConnectionId{},
+			target.block.Header(),
+		)
+	require.NoError(t, nonceErr)
+	require.True(t, fork)
+	require.Equal(t, uint64(6), peerEpoch.EpochId)
+	require.Equal(t, forkEpochNonce, peerNonce)
+
+	localErr := ls.ValidateChainSelectionHeaderCrypto(target.block.Header())
+	require.Error(t, localErr)
+	require.False(t, IsHeaderVerificationDeferred(localErr))
+
+	peerErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	)
+	require.NoError(t, peerErr)
+
+	tamperedTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{83},
+		forkEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		forkHeader.block.Hash().Bytes(),
+		&targetBlockNumber,
+		tamperVRFProof,
+	)
+	tamperedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		tamperedTarget.block.Header(),
+	)
+	require.Error(t, tamperedErr)
+	require.False(t, IsHeaderVerificationDeferred(tamperedErr))
+
+	inflatedBlockNumber := targetBlockNumber + 1
+	inflatedTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{84},
+		forkEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		forkHeader.block.Hash().Bytes(),
+		&inflatedBlockNumber,
+		tamperNone,
+	)
+	inflatedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		inflatedTarget.block.Header(),
+	)
+	require.Error(t, inflatedErr)
+	require.False(t, IsHeaderVerificationDeferred(inflatedErr))
+	require.ErrorContains(t, inflatedErr, "block number")
+
+	malformedForkBlockNumber := forkBlockNumber
+	malformedFork := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{80},
+		sourceNonce,
+		anchor.block.SlotNumber(),
+		anchor.block.SlotNumber(),
+		anchorPoint.Hash,
+		&malformedForkBlockNumber,
+		tamperNone,
+	)
+	malformedTargetBlockNumber := malformedForkBlockNumber + 1
+	malformedTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{86},
+		forkEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		malformedFork.block.Hash().Bytes(),
+		&malformedTargetBlockNumber,
+		tamperNone,
+	)
+	ls.config.PeerHeaderLookupFunc = peerLookup(malformedFork)
+	malformedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		malformedTarget.block.Header(),
+	)
+	require.Error(t, malformedErr)
+	require.False(t, IsHeaderVerificationDeferred(malformedErr))
+	require.ErrorContains(t, malformedErr, "slot")
+
+	unverifiedFork := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{81},
+		sourceNonce,
+		300,
+		400,
+		anchorPoint.Hash,
+		&forkBlockNumber,
+		tamperVRFProof,
+	)
+	unverifiedTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{82},
+		forkEpochNonce,
+		targetEpochStart,
+		targetEpochStart+100,
+		unverifiedFork.block.Hash().Bytes(),
+		&targetBlockNumber,
+		tamperNone,
+	)
+	ls.config.PeerHeaderLookupFunc = peerLookup(unverifiedFork)
+	unverifiedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		unverifiedTarget.block.Header(),
+	)
+	require.Error(t, unverifiedErr)
+	require.False(t, IsHeaderVerificationDeferred(unverifiedErr))
+	require.ErrorContains(t, unverifiedErr, "VRF")
+
+	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
+	require.NoError(t, db.Metadata().DeletePoolStakeSnapshotsForEpoch(
+		5,
+		models.PoolStakeSnapshotTypeMark,
+		nil,
+	))
+	ls.currentEpoch.EpochId = 10
+	ls.publishSnapshotsLocked()
+	prunedErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	)
+	require.Error(t, prunedErr)
+	require.ErrorIs(t, prunedErr, errPoolSnapshotPruned)
+	require.True(t, IsHeaderVerificationDeferred(prunedErr))
+
+	ls.config.PeerHeaderLookupFunc = func(
+		ouroboros.ConnectionId,
+		[]byte,
+	) (ChainsyncEvent, []byte, bool) {
+		return ChainsyncEvent{}, nil, false
+	}
+	missingAncestryErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		target.block.Header(),
+	)
+	require.Error(t, missingAncestryErr)
+	require.True(t, IsHeaderVerificationWithheld(missingAncestryErr))
+	require.False(t, IsHeaderVerificationDeferred(missingAncestryErr))
+
+	invalidMissingAncestryErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		tamperedTarget.block.Header(),
+	)
+	require.Error(t, invalidMissingAncestryErr)
+	require.True(t, IsHeaderVerificationWithheld(invalidMissingAncestryErr))
+
+	ls.config.PeerHeaderLookupFunc = peerLookup(forkHeader)
+	ls.epochCache = append(ls.epochCache, models.Epoch{
+		EpochId:       7,
+		StartSlot:     2 * targetEpochStart,
+		SlotLength:    1_000,
+		LengthInSlots: uint(targetEpochStart),
+		EraId:         eras.BabbageEraDesc.Id,
+		Nonce:         bytes.Repeat([]byte{0xc7}, lcommon.Blake2b256Size),
+	})
+	ls.publishSnapshotsLocked()
+	twoBoundaryTarget := createTestBlockWithNonceAtSlotsAndBlockNumber(
+		t,
+		[32]byte{87},
+		ls.epochCache[2].Nonce,
+		2*targetEpochStart,
+		2*targetEpochStart+100,
+		forkHeader.block.Hash().Bytes(),
+		&targetBlockNumber,
+		tamperNone,
+	)
+	twoBoundaryErr := ls.ValidatePeerChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		twoBoundaryTarget.block.Header(),
+	)
+	require.Error(t, twoBoundaryErr)
+	require.True(t, IsHeaderVerificationWithheld(twoBoundaryErr))
+}
+
+func TestPeerChainSelectionEpochNonceUsesSeededShelleyBoundaryNonce(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := boundaryFixtures[1]
+	byronBlock := loadBoundaryBlock(t, fixture.byronFile, fixture.byronType)
+	shelleyBlock := loadBoundaryBlock(
+		t,
+		fixture.shelleyFile,
+		fixture.shelleyType,
+	)
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.PrimaryChain().AddLocalBlock(byronBlock))
+
+	seededNonce := bytes.Repeat([]byte{0x5c}, lcommon.Blake2b256Size)
+	ls := &LedgerState{
+		db:    db,
+		chain: cm.PrimaryChain(),
+		epochCache: []models.Epoch{
+			{
+				EpochId:       4,
+				StartSlot:     0,
+				LengthInSlots: uint(fixture.shelleySlot),
+				EraId:         eras.ByronEraDesc.Id,
+			},
+			{
+				EpochId:       5,
+				StartSlot:     fixture.shelleySlot,
+				LengthInSlots: 432_000,
+				EraId:         eras.ShelleyEraDesc.Id,
+				Nonce:         seededNonce,
+			},
+		},
+		currentEpoch: models.Epoch{EpochId: 5},
+		config: LedgerStateConfig{
+			PeerHeaderLookupFunc: func(
+				ouroboros.ConnectionId,
+				[]byte,
+			) (ChainsyncEvent, []byte, bool) {
+				return ChainsyncEvent{}, nil, false
+			},
+		},
+	}
+	ls.publishSnapshotsLocked()
+	byronNonce, err := db.GetBlockNonce(
+		ocommon.NewPoint(byronBlock.SlotNumber(), byronBlock.Hash().Bytes()),
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, byronNonce)
+
+	nonce, epoch, candidate, err := ls.peerChainSelectionEpochNonce(
+		ouroboros.ConnectionId{},
+		shelleyBlock.Header(),
+	)
+	require.NoError(t, err)
+	require.True(t, candidate)
+	require.Equal(t, uint64(5), epoch.EpochId)
+	require.Equal(t, seededNonce, nonce)
 }
 
 // TestValidateChainSelectionHeaderCryptoRejectsTamperedProof proves that a

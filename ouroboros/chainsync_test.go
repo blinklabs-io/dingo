@@ -764,7 +764,12 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 	o.chainsyncState = state
 	o.eventBus = bus
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
+	var verifiedConn ouroboros.ConnectionId
+	o.chainSelectionVerifyHeaderCrypto = func(
+		connId ouroboros.ConnectionId,
+		_ gledger.BlockHeader,
+	) error {
+		verifiedConn = connId
 		return errors.New("boom: invalid VRF proof")
 	}
 
@@ -780,6 +785,7 @@ func TestChainsyncClientRollForwardExcludesHeaderFailingCryptoVerification(
 		header,
 		tip,
 	))
+	require.Equal(t, conn, verifiedConn)
 
 	select {
 	case <-tipCh:
@@ -848,7 +854,12 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	// the real verifier's own error classification, without the readiness gate,
 	// must still get fast-sync-safe (deferred, not excluded) behavior.
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = ls.ValidateChainSelectionHeaderCrypto
+	o.chainSelectionVerifyHeaderCrypto = func(
+		_ ouroboros.ConnectionId,
+		header gledger.BlockHeader,
+	) error {
+		return ls.ValidateChainSelectionHeaderCrypto(header)
+	}
 
 	var hash gledger.Blake2b256
 	hash[0] = 0xdd
@@ -890,6 +901,66 @@ func TestChainsyncClientRollForwardObservesHeaderWithDeferredCryptoVerification(
 	}
 }
 
+func TestChainsyncClientRollForwardWithholdsUnauthenticatedCandidate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	_, recycleCh := bus.Subscribe(ledger.ConnectionRecycleRequestedEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6013", "1.1.1.4:3001")
+	require.True(t, state.AddClientConnId(conn))
+
+	o := newOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.chainsyncState = state
+	o.eventBus = bus
+	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
+	o.chainSelectionVerifyHeaderCrypto = func(
+		ouroboros.ConnectionId,
+		gledger.BlockHeader,
+	) error {
+		return ledger.ErrHeaderVerificationWithheld
+	}
+
+	header := newTestBlockHeader(400, 1, 0xab)
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockNumber: header.BlockNumber(),
+		},
+	))
+
+	select {
+	case <-tipCh:
+		t.Fatal("an unauthenticated candidate must not be observed")
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case <-recycleCh:
+		t.Fatal("missing local ancestry must not recycle the peer")
+	case <-time.After(200 * time.Millisecond):
+	}
+	_, _, found := state.LookupObservedHeader(conn, header.Hash().Bytes())
+	require.True(t, found, "withheld ancestry must remain reconstructable")
+}
+
 // TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted
 // proves the verification gate applies independently to every ingress-eligible
 // peer, not only the currently apply-eligible one -- covering the acceptance
@@ -929,7 +1000,10 @@ func TestChainsyncClientRollForwardCompetingPeersOnlyVerifiedHeaderCounted(
 	o.chainsyncState = state
 	o.eventBus = bus
 	o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool { return true }
-	o.chainSelectionVerifyHeaderCrypto = func(h gledger.BlockHeader) error {
+	o.chainSelectionVerifyHeaderCrypto = func(
+		_ ouroboros.ConnectionId,
+		h gledger.BlockHeader,
+	) error {
 		if h.Hash() == badHeader.Hash() {
 			return errors.New("boom: invalid VRF proof")
 		}
@@ -1997,13 +2071,35 @@ func TestRollForwardGrantsNoPatienceForRejectedHeaders(t *testing.T) {
 		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
 			return true
 		}
-		f.o.chainSelectionVerifyHeaderCrypto = func(gledger.BlockHeader) error {
+		f.o.chainSelectionVerifyHeaderCrypto = func(
+			ouroboros.ConnectionId,
+			gledger.BlockHeader,
+		) error {
 			return errors.New("bad vrf")
 		}
 		f.now = f.now.Add(40 * time.Second)
 		f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
 		tc := f.state.GetTrackedClient(f.conn)
 		require.Zero(t, tc.Patience.BestBlockNumber)
+		require.InDelta(t, 60, tc.Patience.Tokens, 1e-9)
+	})
+	t.Run("verification withheld", func(t *testing.T) {
+		t.Parallel()
+		f := newPatienceRollForwardFixture(t, true)
+		f.o.chainSelectionShouldVerifyHeaderCrypto = func(uint64) bool {
+			return true
+		}
+		f.o.chainSelectionVerifyHeaderCrypto = func(
+			ouroboros.ConnectionId,
+			gledger.BlockHeader,
+		) error {
+			return ledger.ErrHeaderVerificationWithheld
+		}
+		f.now = f.now.Add(40 * time.Second)
+		f.rollForward(t, newTestBlockHeader(100, 1, 0xaa))
+		tc := f.state.GetTrackedClient(f.conn)
+		require.Zero(t, tc.Patience.BestBlockNumber)
+		require.False(t, tc.Patience.Paused)
 		require.InDelta(t, 60, tc.Patience.Tokens, 1e-9)
 	})
 	t.Run("not ingress eligible", func(t *testing.T) {

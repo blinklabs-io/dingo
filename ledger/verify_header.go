@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -130,6 +131,12 @@ var (
 	errHeaderLocalConfiguration = errors.New(
 		"header local configuration invalid",
 	)
+	// ErrHeaderVerificationWithheld means chain selection cannot authenticate
+	// a candidate yet. The peer is not at fault, but the header must not
+	// influence selection until its chain-dependent state is reconstructable.
+	ErrHeaderVerificationWithheld = errors.New(
+		"header verification withheld from chain selection",
+	)
 )
 
 // headerStateLookupErr marks err, a failure reading local state, with
@@ -156,6 +163,13 @@ func headerStateLookupErr(err error) error {
 func IsHeaderVerificationDeferred(err error) bool {
 	return errors.Is(err, errHeaderVerificationDeferred) ||
 		errors.Is(err, errEpochNonceUnavailable)
+}
+
+// IsHeaderVerificationWithheld reports that a header lacks enough
+// chain-dependent context to be authenticated for chain selection. Callers
+// retain its ancestry for later headers without observing or applying it.
+func IsHeaderVerificationWithheld(err error) bool {
+	return errors.Is(err, ErrHeaderVerificationWithheld)
 }
 
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
@@ -255,6 +269,29 @@ func (ls *LedgerState) ShouldVerifyChainSelectionHeaderCrypto(
 func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	header ledger.BlockHeader,
 ) error {
+	return ls.validateChainSelectionHeaderCrypto(
+		ouroboros.ConnectionId{},
+		header,
+		false,
+	)
+}
+
+// ValidatePeerChainSelectionHeaderCrypto verifies a peer header against the
+// nonce of the candidate chain that delivered it. A fork that diverges before
+// the candidate nonce freezes can have a different nonce in the next epoch,
+// even while it remains within the rollback window.
+func (ls *LedgerState) ValidatePeerChainSelectionHeaderCrypto(
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+) error {
+	return ls.validateChainSelectionHeaderCrypto(connId, header, true)
+}
+
+func (ls *LedgerState) validateChainSelectionHeaderCrypto(
+	connId ouroboros.ConnectionId,
+	header ledger.BlockHeader,
+	peerRelative bool,
+) error {
 	if header == nil {
 		return errors.New("nil block header")
 	}
@@ -267,15 +304,91 @@ func (ls *LedgerState) ValidateChainSelectionHeaderCrypto(
 	if ls.headerApplied(header) {
 		return nil
 	}
+	if peerRelative {
+		epochNonce, epoch, fork, err := ls.peerChainSelectionEpochNonce(
+			connId,
+			header,
+		)
+		if err != nil {
+			return err
+		}
+		if fork {
+			block := headerOnlyBlock{header: header, peerRelative: true}
+			if err := ls.verifyBlockHeaderStatelessCryptoWithEpochNonce(
+				block,
+				epoch,
+				epochNonce,
+			); err != nil {
+				return err
+			}
+			return chainSelectionHeaderStateError(
+				ls.verifyBlockHeaderStateWithCache(
+					block,
+					epoch.EpochId,
+					ls.epochCacheSnapshot(),
+					true,
+				),
+			)
+		}
+	}
 	err := ls.verifyBlockHeaderCryptoWithEpochAdvance(
 		headerOnlyBlock{header: header, peerRelative: true},
 		false,
 		true,
 	)
+	return chainSelectionHeaderStateError(err)
+}
+
+func chainSelectionHeaderStateError(err error) error {
 	if errors.Is(err, errPoolSnapshotPruned) {
 		return fmt.Errorf("%w: %w", errHeaderVerificationDeferred, err)
 	}
 	return err
+}
+
+func (ls *LedgerState) verifyBlockHeaderStatelessCryptoWithEpochNonce(
+	block ledger.Block,
+	epoch models.Epoch,
+	epochNonce []byte,
+) error {
+	if block.Era().Id == byron.EraIdByron {
+		return ls.validateByronPBFTHeaderCrypto(block)
+	}
+	if len(epochNonce) != lcommon.Blake2b256Size {
+		return fmt.Errorf(
+			"%w: candidate epoch %d nonce has length %d",
+			errHeaderVerificationDeferred,
+			epoch.EpochId,
+			len(epochNonce),
+		)
+	}
+	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
+	if slotsPerKesPeriod == 0 {
+		return fmt.Errorf(
+			"%w: Shelley genesis is unavailable for candidate header verification",
+			errHeaderLocalConfiguration,
+		)
+	}
+	if err := verifyBlockHeaderHex(
+		block,
+		hex.EncodeToString(epochNonce),
+		slotsPerKesPeriod,
+	); err != nil {
+		return err
+	}
+	if err := verifyOpCertHeaderCrypto(
+		block.Header(),
+		block.SlotNumber(),
+		slotsPerKesPeriod,
+		ls.maxKESEvolutions(),
+	); err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	return nil
 }
 
 // headerApplied reports whether the ledger has applied header: its point is on
