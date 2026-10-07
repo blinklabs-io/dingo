@@ -100,6 +100,20 @@ func TestImportLedgerStateRejectsIncompleteEraHistoryBeforeMutation(
 			wantErr: "resolving Byron era parameters",
 		},
 		{
+			name: "zero parameters for zero-span era",
+			bounds: []EraBound{
+				{Slot: 0, Epoch: 0},
+				{Slot: 0, Epoch: 0},
+			},
+			params: func(era uint) (uint, uint, error) {
+				if era == EraByron {
+					return 0, 0, nil
+				}
+				return 1, 100, nil
+			},
+			wantErr: "invalid Byron era parameters",
+		},
+		{
 			name: "gap between eras",
 			bounds: []EraBound{
 				{Slot: 0, Epoch: 0},

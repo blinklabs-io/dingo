@@ -13213,13 +13213,14 @@ skipped rather than seeded from a guessed window.
 Before any snapshot phase mutates the database, import validates the complete
 era-bound sequence against the node configuration. The sequence must contain
 every era through the snapshot's current era, begin at slot 0 and epoch 0, and
-place each next era exactly after the preceding era's configured whole epochs.
-Missing bounds, extraction failures, unknown era parameters, gaps and overlaps
-abort the import. The snapshot tip must also fall within the half-open slot
-range of its declared current epoch. Epoch history therefore cannot be
-committed with a later era treated as the chain's time origin, with an omitted
-interval between eras, or with an attacker-sized epoch range detached from the
-tip.
+place each advancing era exactly after the preceding era's configured whole
+epochs. Consecutive zero-duration eras may share the same slot and epoch
+boundary, as they do on preview. Missing bounds, extraction failures, unknown
+era parameters, gaps and overlaps abort the import. The snapshot tip must also
+fall within the half-open slot range of its declared current epoch. Epoch
+history therefore cannot be committed with a later era treated as the chain's
+time origin, with an omitted interval between eras, or with an attacker-sized
+epoch range detached from the tip.
 
 Block counts are seeded, because they cannot be derived. A bootstrap applies no
 block at or below its anchor, so there is no imported chain for
