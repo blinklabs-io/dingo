@@ -16,6 +16,7 @@ package sqlstore
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -117,4 +118,42 @@ func TestGetGovernanceVotesAtSlot_OmitsVoteReplacedBeforeJournal(
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	require.Equal(t, uint8(models.VoteNo), votes[0].Vote)
+}
+
+// TestDrepExpiryWritesAreAtomic covers a write the expiry history cannot
+// hold: the call fails without changing the live row, so the row and its
+// history never disagree.
+func TestDrepExpiryWritesAreAtomic(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedTestStore(t)
+	credential := bytes.Repeat([]byte{0xE7}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		Credential:        credential,
+		AddedSlot:         100,
+		LastActivityEpoch: 1,
+		ExpiryEpoch:       21,
+		Active:            true,
+	}))
+
+	require.Error(t, store.UpdateDRepActivity(
+		0, credential, 5, 20, math.MaxUint64, nil,
+	))
+	drep, err := store.GetDrepByCredential(0, credential, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(21), drep.ExpiryEpoch,
+		"a failed renewal must not change the live expiry")
+
+	unwritable := bytes.Repeat([]byte{0xE8}, 28)
+	require.Error(t, store.CreateDrep(nil, &models.Drep{
+		Credential: unwritable,
+		AddedSlot:  math.MaxUint64,
+		Active:     true,
+	}))
+	missing, err := store.GetDrepByCredential(0, unwritable, true, nil)
+	if err == nil {
+		require.Nil(t, missing, "a failed create must not leave a row")
+	} else {
+		require.ErrorIs(t, err, models.ErrDrepNotFound)
+	}
 }

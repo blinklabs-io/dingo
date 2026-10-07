@@ -76,32 +76,43 @@ func (s *Store) CreateDrep(txn types.Txn, drep *models.Drep) error {
 	if drep == nil {
 		return errors.New("create drep: drep is nil")
 	}
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
 	params, err := drepParams(drep)
 	if err != nil {
 		return err
 	}
-	id, err := q.CreateDrep(
-		ctx,
-		sqlitequery.CreateDrepParams(params),
-	)
-	if err != nil {
-		return fmt.Errorf("create drep: %w", err)
-	}
-	drep.ID = uint(id)
-	drep.Active = params.Active.Bool
-	return recordDrepExpiry(
-		ctx,
-		db,
-		drep.CredentialTag,
-		drep.Credential,
+	// Validated before the row is written, so a value the history cannot
+	// hold fails the call instead of leaving a row without its history.
+	for _, value := range []uint64{
 		drep.AddedSlot,
 		drep.LastActivityEpoch,
 		drep.ExpiryEpoch,
+	} {
+		if _, err := checkedInt64(value); err != nil {
+			return err
+		}
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			id, err := s.operationalQueries(db).CreateDrep(
+				ctx,
+				sqlitequery.CreateDrepParams(params),
+			)
+			if err != nil {
+				return fmt.Errorf("create drep: %w", err)
+			}
+			drep.ID = uint(id)
+			drep.Active = params.Active.Bool
+			return recordDrepExpiry(
+				ctx,
+				db,
+				drep.CredentialTag,
+				drep.Credential,
+				drep.AddedSlot,
+				drep.LastActivityEpoch,
+				drep.ExpiryEpoch,
+			)
+		},
 	)
 }
 
@@ -1041,19 +1052,11 @@ func (s *Store) UpdateDRepActivity(
 	// rely on the *current* semantics -- see EnsureOffchainMetadataPointers
 	// in offchain_metadata.go, which would silently over-count duplicates
 	// as newly created rows under CLIENT_FOUND_ROWS).
-	existing, err := s.GetDrepByCredential(credentialTag, credential, true, txn)
-	if err != nil {
-		return fmt.Errorf("check drep exists before activity update: %w", err)
-	}
-	if existing == nil {
-		return models.ErrDrepActivityNotUpdated
-	}
-
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return err
-	}
-	q := s.operationalQueries(db)
+	//
+	// Every value is validated before the first write, and the row and its
+	// drep_expiry_history entry commit together: a row renewed without the
+	// matching history entry would leave reads at an older point and
+	// rollback without the event that explains the live expiry.
 	activity, err := checkedInt64(activityEpoch)
 	if err != nil {
 		return err
@@ -1069,25 +1072,50 @@ func (s *Store) UpdateDRepActivity(
 	if err != nil {
 		return err
 	}
-	if _, err := q.UpdateDRepActivity(
-		ctx,
-		sqlitequery.UpdateDRepActivityParams{
-			LastActivityEpoch: validInt64(activity),
-			ExpiryEpoch:       validInt64(expiry),
-			CredentialTag:     int64(credentialTag),
-			Credential:        credential,
-		},
-	); err != nil {
-		return fmt.Errorf("update drep activity: %w", err)
+	if _, err := checkedInt64(slot); err != nil {
+		return err
 	}
-	return recordDrepExpiry(
-		ctx,
-		db,
-		credentialTag,
-		credential,
-		slot,
-		activityEpoch,
-		activityEpoch+inactivityPeriod,
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			q := s.operationalQueries(db)
+			_, err := q.GetDrepByCredential(
+				ctx,
+				sqlitequery.GetDrepByCredentialParams{
+					CredentialTag: int64(credentialTag),
+					Credential:    credential,
+				},
+			)
+			if errors.Is(err, sql.ErrNoRows) {
+				return models.ErrDrepActivityNotUpdated
+			}
+			if err != nil {
+				return fmt.Errorf(
+					"check drep exists before activity update: %w",
+					err,
+				)
+			}
+			if _, err := q.UpdateDRepActivity(
+				ctx,
+				sqlitequery.UpdateDRepActivityParams{
+					LastActivityEpoch: validInt64(activity),
+					ExpiryEpoch:       validInt64(expiry),
+					CredentialTag:     int64(credentialTag),
+					Credential:        credential,
+				},
+			); err != nil {
+				return fmt.Errorf("update drep activity: %w", err)
+			}
+			return recordDrepExpiry(
+				ctx,
+				db,
+				credentialTag,
+				credential,
+				slot,
+				activityEpoch,
+				activityEpoch+inactivityPeriod,
+			)
+		},
 	)
 }
 
