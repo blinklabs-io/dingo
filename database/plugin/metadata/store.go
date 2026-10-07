@@ -2187,6 +2187,20 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsByCredentialAtSlot is GetAccountsByCredential with
+	// includeInactive false, answered as the accounts stood at slot: the
+	// accounts registered then, with the pool, DRep and reward balance they
+	// held. Pool and DRep come from the live row when it was last written at
+	// or before slot, otherwise from the derivation RestoreAccountStateAtSlot
+	// applies on rollback. Reward is the balance reconstructed from the
+	// account_reward_delta journal, including credits of a pending reward
+	// round applied at or before slot.
+	GetAccountsByCredentialAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]*models.Account, error)
+
 	// GetAccountsActiveAtSlot returns the subset of stake credentials that
 	// were registered and not subsequently deregistered at or before the given
 	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
@@ -2331,10 +2345,10 @@ type MetadataStore interface {
 	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
 	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
 
-	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
-	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
-	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	// DeactivateAccounts records the imported snapshot's inactive state for the
+	// given accounts at the supplied slot. Used by Mithril v2 catch-up
+	// reconciliation; credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only

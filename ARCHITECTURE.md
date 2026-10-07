@@ -11641,11 +11641,36 @@ credential's deposit from its latest registration event at or before the
 pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
 the credential's snapshot import baseline when that is at least as new, as
 `LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
-baseline are likewise removed only by rollback. The remaining
-per-credential and per-proposal queries
-(`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
-`GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still
+baseline are likewise removed only by rollback.
+`GetFilteredDelegationsAndRewardAccounts` and `GetFilteredVoteDelegatees`
+read the requested accounts as they stood at the pinned slot through
+`GetAccountsByCredentialAtSlot`: an account registered then, with the pool,
+DRep and reward balance it held. The pool and DRep come from the live account
+row when it was last written at or before the slot, and otherwise from the
+derivation `RestoreAccountStateAtSlot` applies on rollback. Certificate,
+snapshot-import baseline, POOLREAP, and PV10 dangling-DRep-clear history share
+that derivation. A snapshot baseline is the authoritative full state at its
+slot and wins ties; a same-slot certificate wins a PV10 clear because the
+clear runs at the epoch transition before the block. The reward balance is
+reconstructed from the
+`account_reward_delta` journal the way historical stake reads it, including
+the credits of a pending reward round applied at or before the slot, so the
+unpinned path's separate pending-credit addition is skipped. Certificates,
+baselines, PV10 clear rows, and the reward journal are removed only by
+rollback, so no retention floor applies. `GetDRepState`, `GetProposals` and
+`DebugChainDepState` still
 ignore the acquired point.
+
+Every pinned query also needs history the node actually holds, so
+`VerifyPointQueryable` refuses a point below the latest Mithril import's
+ledger slot (`mithril_ledger_slot`, `checkMithrilTrustBoundary`). The
+import writes the snapshot's state, not the history that led to it: the
+blocks below that slot carry no certificate, transaction or reward-journal
+rows. Catch-up reconciliation records accounts absent from the newer snapshot
+as an inactive full-state baseline at that slot; it also deactivates DReps,
+retires pools, and tombstones UTxOs the snapshot no longer holds. A point at
+the snapshot slot or after it is exact. A node synced from genesis has no such
+slot and is unaffected.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the

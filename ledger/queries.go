@@ -393,6 +393,9 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if err := ls.verifyPointOnChain(txn, at); err != nil {
 		return err
 	}
+	if err := ls.checkMithrilTrustBoundary(at); err != nil {
+		return err
+	}
 	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 		return err
 	}
@@ -427,6 +430,25 @@ func (ls *LedgerState) VerifyPointQueryable(
 		return err
 	}
 	return ls.checkAnnouncedPruneFloors(txn, at)
+}
+
+// checkMithrilTrustBoundary rejects a point below the latest Mithril import's
+// ledger slot. The import writes the snapshot's state, not the history that
+// led to it: blocks below the slot carry no certificate, transaction or reward
+// journal rows, and a catch-up import deactivates accounts the snapshot no
+// longer holds without recording when. The snapshot slot itself is exact.
+func (ls *LedgerState) checkMithrilTrustBoundary(at QueryPoint) error {
+	boundary := ls.mithrilLedgerSlotSnapshot()
+	if boundary == 0 || at.Slot >= boundary {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: pinned slot %d is below the Mithril snapshot slot %d this "+
+			"database was imported at",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+		boundary,
+	)
 }
 
 // checkAnnouncedPruneFloors rejects at when a pruning path has already
@@ -1155,9 +1177,13 @@ func (ls *LedgerState) queryShelley(
 // at.Slot through GetActivePoolKeyHashesAtSlot), and
 // ShelleyStakeDelegDepositsQuery (queryShelleyStakeDelegDeposits, each
 // credential's latest registration event at or before at.Slot, or its
-// snapshot import baseline when that is at least as new). Pool and
-// stake certificate rows are removed only by rollback, so neither needs a
-// retention floor.
+// snapshot import baseline when that is at least as new),
+// ShelleyFilteredDelegationAndRewardAccountsQuery and
+// ShelleyFilteredVoteDelegateesQuery (both through
+// GetAccountsByCredentialAtSlot: the accounts registered at at.Slot with the
+// pool, DRep and reward balance they held). Pool and stake certificate rows,
+// the import baseline and the reward journal are removed only by rollback, so
+// none of these needs a retention floor.
 //
 // Intentionally live-only, not a gap: ShelleyGenesisConfigQuery
 // (genesis is an immutable chain-wide constant with no historical variant),
@@ -1168,9 +1194,7 @@ func (ls *LedgerState) queryShelley(
 // case answers unconditionally from live state regardless of at, because
 // making it historically correct needs storage or reconstruction logic
 // that does not exist yet --
-//   - ShelleyFilteredDelegationAndRewardAccountsQuery,
-//     ShelleyDRepStateQuery, ShelleyFilteredVoteDelegateesQuery,
-//     ShelleyGetProposalsQuery: each
+//   - ShelleyDRepStateQuery, ShelleyGetProposalsQuery: each
 //     reads live per-credential/per-proposal state with no
 //     historical-by-point lookup wired in yet; would need new
 //     historical tracking analogous to GetUtxoRefsAsOfAfter's added/deleted
@@ -1206,6 +1230,7 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyFilteredDelegationAndRewardAccountsQuery:
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			q.Creds.Items(),
+			at,
 			txn,
 		)
 	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
@@ -1221,7 +1246,11 @@ func (ls *LedgerState) queryShelleyLeaf(
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
 		return ls.queryShelleyStakeSnapshots(q, at, txn)
 	case *olocalstatequery.ShelleyFilteredVoteDelegateesQuery:
-		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items(), txn)
+		return ls.queryShelleyFilteredVoteDelegatees(
+			q.Credentials.Items(),
+			at,
+			txn,
+		)
 	case *olocalstatequery.ShelleyGetProposalsQuery:
 		return ls.queryShelleyGetProposals(q.ActionIds.Items(), txn)
 	case *olocalstatequery.ShelleyDebugChainDepStateQuery:
@@ -2375,8 +2404,13 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 // filtered out. The delegations map only contains accounts whose `Pool`
 // is currently set; an account that is registered but undelegated will
 // appear in the rewards map only.
+//
+// A pinned at answers as the accounts stood at at.Slot. The certificate
+// history, import baseline and reward journal it reads are removed only by
+// rollback, so no retention floor applies.
 func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	creds []olocalstatequery.StakeCredential,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
@@ -2411,18 +2445,22 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	pending := make(map[string]uint64)
 	txn, release := ls.readTxn(txn)
 	defer release()
-	accounts, err := ls.db.GetAccountsByCredential(stakeCreds, false, txn)
+	accounts, err := ls.accountsByCredentialAt(stakeCreds, at, txn)
 	if err != nil {
 		return nil, err
 	}
-	for key, account := range accounts {
-		amount, err := ls.pendingRewardCredit(
-			txn, account.CredentialTag, account.StakingKey,
-		)
-		if err != nil {
-			return nil, err
+	// The as-of reward balance already carries the pending credits visible
+	// at the slot.
+	if !at.pinned() {
+		for key, account := range accounts {
+			amount, err := ls.pendingRewardCredit(
+				txn, account.CredentialTag, account.StakingKey,
+			)
+			if err != nil {
+				return nil, err
+			}
+			pending[key] = amount
 		}
-		pending[key] = amount
 	}
 	for _, cred := range creds {
 		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
@@ -2571,11 +2609,26 @@ func (ls *LedgerState) stakeRegistrationAsOf(
 	return true, latest.Deposit, nil
 }
 
+// accountsByCredentialAt returns the registered accounts among refs, live or
+// as they stood at a pinned at.
+func (ls *LedgerState) accountsByCredentialAt(
+	refs []models.StakeCredentialRef,
+	at QueryPoint,
+	txn *database.Txn,
+) (map[string]*models.Account, error) {
+	if at.pinned() {
+		return ls.db.GetAccountsByCredentialAtSlot(refs, at.Slot, txn)
+	}
+	return ls.db.GetAccountsByCredential(refs, false, txn)
+}
+
 // queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
 // each requested active stake credential. Credentials without a vote
-// delegation are omitted.
+// delegation are omitted. A pinned at answers at at.Slot, as
+// queryShelleyFilteredDelegationAndRewardAccounts does.
 func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 	creds []lcommon.Credential,
+	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
 	if err := checkLocalStateQueryItemLimit(
@@ -2607,7 +2660,7 @@ func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
 		seen[key] = struct{}{}
 		refs = append(refs, ref)
 	}
-	accounts, err := ls.db.GetAccountsByCredential(refs, false, txn)
+	accounts, err := ls.accountsByCredentialAt(refs, at, txn)
 	if err != nil {
 		return nil, err
 	}

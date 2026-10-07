@@ -296,6 +296,25 @@ func (d *Database) GetAccountsByCredential(
 	)
 }
 
+// GetAccountsByCredentialAtSlot returns the given staking credentials'
+// accounts as they stood at slot, keyed by StakeCredentialRef.MapKey(). Only
+// accounts registered at slot are returned.
+func (d *Database) GetAccountsByCredentialAtSlot(
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn *Txn,
+) (map[string]*models.Account, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetAccountsByCredentialAtSlot(
+		refs,
+		slot,
+		txn.Metadata(),
+	)
+}
+
 // AddAccountRewardByCredential credits the reward balance for a registered
 // account identified by stake credential tag and key. sourceHash uniquely
 // identifies the credit event (refunded proposal identity hash, reaped pool
