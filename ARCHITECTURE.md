@@ -11621,7 +11621,11 @@ read the requested accounts as they stood at the pinned slot through
 DRep and reward balance it held. The pool and DRep come from the live account
 row when it was last written at or before the slot, and otherwise from the
 derivation `RestoreAccountStateAtSlot` applies on rollback (certificates,
-import baseline, POOLREAP). The reward balance is reconstructed from the
+import baseline, POOLREAP). That derivation cannot see the PV10 HARDFORK
+rule's clearing of dangling DRep delegations, which writes no certificate:
+on a node synced from genesis, an account rewritten after the slot can
+return a DRep delegation PV10 had already cleared there. Rollback shares
+this limitation. The reward balance is reconstructed from the
 `account_reward_delta` journal the way historical stake reads it, including
 the credits of a pending reward round applied at or before the slot, so the
 unpinned path's separate pending-credit addition is skipped. Certificates,
