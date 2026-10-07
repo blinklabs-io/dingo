@@ -12836,22 +12836,16 @@ func (ls *LedgerState) UtxosByAddressAtSlotBounded(
 			)
 		}
 	}
-	utxos, err := ls.db.UtxosByAddressAsOfContext(
+	utxos, err := ls.db.UtxosByAddressAsOfContextBounded(
 		ctx,
 		[]lcommon.Address{addr},
 		slot,
 		maxResults,
+		maxCborBytes,
 		txn,
 	)
 	if err != nil {
 		return nil, err
-	}
-	cborBytes := 0
-	for i := range utxos {
-		cborBytes += len(utxos[i].Cbor)
-		if cborBytes > maxCborBytes {
-			return nil, models.ErrUtxoQueryBudgetExceeded
-		}
 	}
 	return utxos, nil
 }

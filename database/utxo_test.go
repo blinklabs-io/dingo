@@ -1162,6 +1162,67 @@ func TestMatchingUtxoRefsByAddressWithOrderingBoundedBudgets(t *testing.T) {
 	})
 }
 
+func TestUtxosByAddressAsOfContextStopsAtCborBudget(t *testing.T) {
+	t.Parallel()
+
+	newFixture := func(t *testing.T, outputs int) (*Database, lcommon.Address, []byte) {
+		t.Helper()
+		db := openTestDB(t)
+		raw := rawSQLiteMetadataFixture(t, db)
+		payment := bytes.Repeat([]byte{0x9c}, lcommon.AddressHashSize)
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			payment,
+			nil,
+		)
+		require.NoError(t, err)
+		encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+			OutputAddress: addr,
+			OutputAmount:  1_000_000,
+		})
+		require.NoError(t, err)
+		for i := range outputs {
+			txHash := make([]byte, 32)
+			binary.BigEndian.PutUint32(txHash[28:], uint32(i)+1)
+			seedExactAddressImportedUtxo(t, raw, addr, uint64(i)+1, 0, txHash)
+			if i < 2 {
+				require.NoError(t, db.BlobTxn(true).Do(func(txn *Txn) error {
+					return db.Blob().SetUtxo(txn.Blob(), txHash, 0, encoded)
+				}))
+			}
+		}
+		return db, addr, encoded
+	}
+
+	t.Run("at limit", func(t *testing.T) {
+		db, addr, encoded := newFixture(t, 2)
+		utxos, err := db.UtxosByAddressAsOfContextBounded(
+			t.Context(),
+			[]lcommon.Address{addr},
+			2,
+			3,
+			len(encoded)*2,
+			nil,
+		)
+		require.NoError(t, err)
+		require.Len(t, utxos, 2)
+	})
+
+	t.Run("first byte overrun stops before later blob", func(t *testing.T) {
+		db, addr, encoded := newFixture(t, 3)
+		_, err := db.UtxosByAddressAsOfContextBounded(
+			t.Context(),
+			[]lcommon.Address{addr},
+			3,
+			4,
+			len(encoded),
+			nil,
+		)
+		require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+	})
+}
+
 // TestMatchingUtxoRefsByAddressWithOrderingExceedsOldCandidateScanLimit
 // seeds more exact-address UTxOs than the page-fill scan's
 // exactAddressCandidateScanLimit (10,000). AddressUTXOs relies on this scan

@@ -13967,3 +13967,45 @@ func TestUtxosByAddressAtSlotBoundedRejectsUnverifiableHistory(
 		require.Empty(t, utxos)
 	})
 }
+
+func TestUtxosByAddressAtSlotBoundedStopsAtCborBudget(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+	payment := bytes.Repeat([]byte{0x6c}, lcommon.AddressHashSize)
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		lcommon.AddressNetworkTestnet,
+		payment,
+		nil,
+	)
+	require.NoError(t, err)
+	encoded, err := cbor.Encode(&shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	})
+	require.NoError(t, err)
+
+	for i := range 3 {
+		txID := make([]byte, 32)
+		binary.BigEndian.PutUint32(txID[28:], uint32(i)+1)
+		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
+			TxId:       txID,
+			OutputIdx:  0,
+			PaymentKey: payment,
+			AddedSlot:  uint64(i) + 1,
+			Amount:     types.Uint64(1_000_000),
+		}))
+		if i < 2 {
+			require.NoError(t, db.BlobTxn(true).Do(func(txn *database.Txn) error {
+				return db.Blob().SetUtxo(txn.Blob(), txID, 0, encoded)
+			}))
+		}
+	}
+
+	_, err = ls.UtxosByAddressAtSlotBounded(
+		t.Context(), addr, 3, 4, len(encoded),
+	)
+	require.ErrorIs(t, err, models.ErrUtxoQueryBudgetExceeded)
+}

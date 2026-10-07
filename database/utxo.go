@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
@@ -860,7 +861,7 @@ func (d *Database) UtxosByAddressAsOf(
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	return d.utxosByAddressAsOf(
-		context.Background(), addrs, atSlot, maxResults, txn,
+		context.Background(), addrs, atSlot, maxResults, math.MaxInt, txn,
 	)
 }
 
@@ -876,7 +877,27 @@ func (d *Database) UtxosByAddressAsOfContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return d.utxosByAddressAsOf(ctx, addrs, atSlot, maxResults, txn)
+	return d.utxosByAddressAsOf(
+		ctx, addrs, atSlot, maxResults, math.MaxInt, txn,
+	)
+}
+
+// UtxosByAddressAsOfContextBounded applies cancellation, result-count, and
+// cumulative output-CBOR byte limits while loading historical UTxOs.
+func (d *Database) UtxosByAddressAsOfContextBounded(
+	ctx context.Context,
+	addrs []ledger.Address,
+	atSlot uint64,
+	maxResults int,
+	maxCborBytes int,
+	txn *Txn,
+) ([]models.Utxo, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return d.utxosByAddressAsOf(
+		ctx, addrs, atSlot, maxResults, maxCborBytes, txn,
+	)
 }
 
 func (d *Database) utxosByAddressAsOf(
@@ -884,6 +905,7 @@ func (d *Database) utxosByAddressAsOf(
 	addrs []ledger.Address,
 	atSlot uint64,
 	maxResults int,
+	maxCborBytes int,
 	txn *Txn,
 ) ([]models.Utxo, error) {
 	if len(addrs) == 0 {
@@ -910,13 +932,21 @@ func (d *Database) utxosByAddressAsOf(
 	if err != nil {
 		return nil, err
 	}
+	cborBytes := 0
 	for i := range utxos {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := loadCbor(&utxos[i], txn); err != nil {
+		utxo := utxos[i]
+		if err := loadCbor(&utxo, txn); err != nil {
 			return nil, err
 		}
+		if cborBytes > maxCborBytes ||
+			len(utxo.Cbor) > maxCborBytes-cborBytes {
+			return nil, models.ErrUtxoQueryBudgetExceeded
+		}
+		cborBytes += len(utxo.Cbor)
+		utxos[i] = utxo
 	}
 	return filterUtxosByAddressPatterns(utxos, patterns)
 }
