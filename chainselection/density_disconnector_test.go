@@ -143,6 +143,23 @@ func TestGDDKeepsPeerWithIncompleteWindow(t *testing.T) {
 	assert.Empty(t, f.disconnected())
 }
 
+// A peer whose window is incomplete is only disconnected for a rival offering
+// more than k headers after the intersection, as in ouroboros-consensus
+// densityDisconnect. Here the slow peer can gain at most 5 more blocks before
+// the window end (130), so the dense peer's 40 exceed its upper bound of 6,
+// but 40 headers is not more than k=40.
+func TestGDDKeepsIncompletePeerAgainstRivalWithinK(t *testing.T) {
+	t.Parallel()
+	f := newGDDFixture(t, true)
+	dense, slow := corrConn(1), corrConn(2)
+	f.deliver(t, dense, 0, append([]uint64{10}, slotRange(11, 50)...)...)
+	f.deliver(t, slow, 0, 10, 125)
+
+	f.evaluate()
+
+	assert.Empty(t, f.disconnected())
+}
+
 func TestGDDNeverDisconnectsLastPeer(t *testing.T) {
 	t.Parallel()
 	f := newGDDFixture(t, true)
