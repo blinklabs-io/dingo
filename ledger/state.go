@@ -2223,12 +2223,9 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if ls.startupRewardPrecomputeHook != nil {
 		ls.startupRewardPrecomputeHook()
 	}
-	// Now that both tip and epoch are loaded, check whether the safe zone
-	// already covers the epoch end (TransitionImpossible).  This handles the
-	// case where the node was shut down after the tip advanced past the
-	// stability window but before the next epoch rollover was processed.
-	// First honor any TestXHardForkAtEpoch override (TriggerAtEpoch): this
-	// short-circuits TransitionUnknown/Impossible with a known-in-advance
+	// Now that both tip and epoch are loaded, classify an indefinite final era
+	// as TransitionImpossible. First honor any TestXHardForkAtEpoch override;
+	// this short-circuits TransitionUnknown/Impossible with a known-in-advance
 	// transition epoch, matching the Haskell HFC semantics.
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
@@ -8417,11 +8414,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
-				// then check whether the stability window reaches or exceeds
-				// the epoch end, in which case a hard fork cannot happen
-				// within this epoch and TransitionImpossible should be
-				// recorded so queryHardForkEraHistory serves the confirmed
-				// epoch-end slot instead of a stale safeZone cap.
+				// then classify an indefinite final era as
+				// TransitionImpossible.
 				ls.evaluateTriggerAtEpoch()
 				ls.evaluateTransitionImpossible()
 				ls.evaluateProtocolVersionBump()
@@ -9580,18 +9574,10 @@ func (ls *LedgerState) evaluateProtocolVersionBump() {
 	ls.transitionInfo = hardfork.NewTransitionKnown(targetEpoch)
 }
 
-// evaluateTransitionImpossible sets transitionInfo to TransitionImpossible
-// when the safe-zone end for the current era already reaches or exceeds the
-// current epoch's end slot.
-//
-// At that point a hard-fork transition is impossible within this epoch: the
-// stability window has "vouched for" slots up to (and past) the boundary, so
-// no rollover can introduce a new era within the epoch.  Serving the full
-// epoch-end slot as EraEnd is therefore safe and more informative than the
-// stale tipSlot+safeZone cap.
-//
-// The method is a no-op unless transitionInfo.State is TransitionUnknown; it
-// must not override a confirmed TransitionKnown.
+// evaluateTransitionImpossible records that the current era has no transition
+// during this execution and an indefinite safe zone. A finite safe zone means
+// the node must keep forecasting from the tip even when the current era is the
+// last one this binary models.
 //
 // Call under ls.Lock() (runtime tip-update) or without a lock during
 // single-threaded startup (after loadTip).
@@ -9599,23 +9585,14 @@ func (ls *LedgerState) evaluateTransitionImpossible() {
 	if ls.transitionInfo.State != hardfork.TransitionUnknown {
 		return
 	}
-	// Only meaningful when we have a fully-populated epoch.
-	if ls.currentEpoch.LengthInSlots == 0 {
+	shape := ls.eraShape()
+	idx, ok := shape.EraIndex(ls.currentEra.Id)
+	if !ok {
 		return
 	}
-	epochEndSlot, addErr := checkedSlotAdd(
-		ls.currentEpoch.StartSlot,
-		uint64(ls.currentEpoch.LengthInSlots),
-	)
-	if addErr != nil {
-		return
-	}
-	safeZone := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
-	safeEndSlot, addErr := checkedSlotAdd(ls.currentTip.Point.Slot, safeZone)
-	if addErr != nil {
-		return
-	}
-	if safeEndSlot >= epochEndSlot {
+	entry := shape.Eras[idx]
+	if entry.NextEraTrigger.Kind == hardfork.TriggerNotDuringThisExecution &&
+		entry.Params.SafeZoneSlots == 0 {
 		ls.transitionInfo = hardfork.NewTransitionImpossible()
 	}
 }

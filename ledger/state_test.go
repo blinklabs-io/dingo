@@ -5076,130 +5076,68 @@ func newTestEpoch(
 // evaluateTransitionImpossible tests
 // ---------------------------------------------------------------------------
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd verifies
-// that TransitionImpossible is set when tipSlot + safeZone >= epochEndSlot.
-//
-// Using Shelley-era parameters from newTestEraHistoryCfg:
-//
-//	securityParam=432, activeSlotsCoeff=0.05
-//	safeZone = ceil(3*432/0.05) = 25_920
-//	epoch: startSlot=100_000, length=432_000, end=532_000
-//	tipSlot = 532_000 - 25_920 = 506_080 → safeEnd = 532_000 = epochEnd → Impossible
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(
+func TestEvaluateTransitionImpossible_FiniteSafeZoneRemainsUnknown(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		safeZone   = uint64(25_920)
-		// tipSlot such that tipSlot + safeZone == epochEnd (boundary case)
-		tipSlot = epochEnd - safeZone // 506_080
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
-	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State,
-		"when safeEndSlot == epochEndSlot, TransitionImpossible must be set")
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd verifies
-// that TransitionImpossible is set when safeEndSlot > epochEndSlot.
-func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(
-	t *testing.T,
-) {
+func TestEvaluateTransitionImpossible_SuccessorRemainsUnknown(t *testing.T) {
 	t.Parallel()
 
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		epochEnd   = uint64(532_000)
-		// tipSlot well past the safe-zone boundary
-		tipSlot = uint64(520_000)
-	)
-
-	cfg := newTestEraHistoryCfg(t)
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{
+		{
+			EraID:          eras.ConwayEraDesc.Id,
+			Params:         hardfork.EraParams{SafeZoneSlots: 25_920},
+			NextEraTrigger: hardfork.NewTriggerAtVersion(12),
+		},
+		{
+			EraID:          eras.DijkstraEraDesc.Id,
+			NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+		},
+	}}
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
+		currentEra:     eras.ConwayEraDesc,
 		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
 	}
+	ls.cachedShape.Store(&shape)
+
+	ls.evaluateTransitionImpossible()
+
+	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
+}
+
+func TestEvaluateTransitionImpossible_IndefiniteFinalEra(t *testing.T) {
+	t.Parallel()
+
+	shape := hardfork.Shape{Eras: []hardfork.ShapeEntry{{
+		EraID:          eras.ConwayEraDesc.Id,
+		NextEraTrigger: hardfork.NewTriggerNotDuringThisExecution(),
+	}}}
+	ls := &LedgerState{
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+	}
+	ls.cachedShape.Store(&shape)
 
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch verifies
-// that TransitionImpossible is NOT set when safeEndSlot < epochEndSlot.
-func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	const (
-		epochStart = uint64(100_000)
-		epochLen   = uint(432_000)
-		// tipSlot one slot before the boundary: safeEnd = epochEnd - 1
-		tipSlot = uint64(506_079) // 532_000 - 25_920 - 1
-	)
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			epochStart,
-			epochLen,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"safeEndSlot < epochEndSlot: TransitionImpossible must NOT be set")
 }
 
 // TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown verifies that
@@ -5209,17 +5147,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			// tipSlot past the safe-zone boundary → would normally trigger Impossible
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionKnown(501),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5241,16 +5169,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra: requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: newTestEpoch(
-			500,
-			100_000,
-			432_000,
-			eras.ConwayEraDesc.Id,
-		),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(520_000, []byte("tip")),
-		},
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		transitionInfo: hardfork.NewTransitionImpossible(),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
@@ -5261,31 +5180,6 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	ls.evaluateTransitionImpossible()
 
 	assert.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
-}
-
-// TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero verifies that a
-// zero LengthInSlots (uninitialized epoch) is skipped safely.
-func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestEraHistoryCfg(t)
-	ls := &LedgerState{
-		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
-		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(999_999, []byte("tip")),
-		},
-		transitionInfo: hardfork.NewTransitionUnknown(),
-		config: LedgerStateConfig{
-			CardanoNodeConfig: cfg,
-			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		},
-	}
-
-	ls.evaluateTransitionImpossible()
-
-	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
-		"zero-length epoch must not trigger TransitionImpossible")
 }
 
 // ---------------------------------------------------------------------------
@@ -5404,9 +5298,8 @@ func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 }
 
-// AtEpoch override supersedes a prior TransitionImpossible: AtEpoch is
-// authoritative info about a known upcoming transition and must override the
-// safe-zone-derived "no transition in this epoch" verdict.
+// AtEpoch override supersedes a prior TransitionImpossible because it carries
+// the exact upcoming transition epoch.
 func TestEvaluateTriggerAtEpoch_OverridesTransitionImpossible(t *testing.T) {
 	t.Parallel()
 
@@ -5480,8 +5373,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	ls := &LedgerState{
 		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
-		// Simulate state at end of epoch 500: TransitionImpossible was set
-		// because the tip's safe zone reached the epoch end.
+		// Simulate a stale TransitionImpossible state at epoch rollover.
 		transitionInfo: hardfork.NewTransitionImpossible(),
 	}
 
@@ -13138,9 +13030,9 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(
 
 // TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown pins
 // the priority order: TransitionKnown is strictly more informative than
-// TransitionImpossible (the latter only says "no transition this epoch
-// before safe-zone end", the former says "transition will happen at
-// epoch+1"). When both could apply, Known wins.
+// TransitionImpossible (the latter carries no transition epoch, while the
+// former says "transition will happen at epoch+1"). When both could apply,
+// Known wins.
 func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(
 	t *testing.T,
 ) {

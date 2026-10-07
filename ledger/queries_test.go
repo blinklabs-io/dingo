@@ -595,11 +595,7 @@ func TestQueryHardFork_CurrentEra_NoEpochRecordRejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestQueryHardForkEraHistory_EmitsAllKnownEras pins an invariant that
-// existing tests don't: the CBOR result always contains one entry per era in
-// eras.Eras (7 entries for Cardano), even when most eras have no epochs in the
-// DB. Clients rely on this shape.
-func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
+func TestQueryHardForkEraHistory_OmitsAbsentEras(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -611,7 +607,6 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 	)
 
 	db := newTestDB(t)
-	// Populate only Conway — every other era is empty.
 	require.NoError(t, db.SetEpoch(
 		epochStartSlot, epochId,
 		nil, nil, nil, nil,
@@ -637,8 +632,8 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
 	require.True(t, ok)
-	require.Len(t, list, len(eras.Eras),
-		"era history must emit one entry per era in eras.Eras")
+	require.Len(t, list, 1,
+		"era history must not emit zero-bound placeholders for absent eras")
 
 	// Inspect each entry: [start, end, params].
 	for i, entry := range list {
@@ -695,20 +690,26 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 	ls := &LedgerState{
 		db:             db,
 		currentEra:     eras.ConwayEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
 		transitionInfo: hardfork.NewTransitionUnknown(),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			EnableDijkstra:    true,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
 
+	ls.evaluateTransitionImpossible()
+	require.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State)
 	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	eraList := result.(cbor.IndefLengthList)
+	require.Len(t, eraList, 1,
+		"an unreached successor must not be emitted before its transition is known")
 	lastEra := eraList[len(eraList)-1].([]any)
 	eraEnd := lastEra[1].([]any)
 
@@ -899,19 +900,10 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 		"byron end epoch must equal shelley start epoch")
 }
 
-// TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra reproduces
-// the real-world case that the single-epoch TransitionImpossible tests miss:
-// the current era has been running for several epochs, and the current
-// epoch is well past the first.
-//
-// dingo sets TransitionImpossible in `evaluateTransitionImpossible` when the
-// CURRENT epoch's end is inside the safe-zone horizon. The caller therefore
-// expects `queryHardForkEraHistory` to serve the CURRENT epoch's end as
-// EraEnd. But if the caller naively forwards `TransitionImpossible` into
-// `hardfork.BuildSummary`, BuildSummary's Haskell-aligned semantics apply
-// the safe zone from `current.Start` (the *first* epoch of the era) — and
-// the resulting EraEnd lags many epochs behind the tip.
-func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
+// TransitionImpossible applies the safe zone from the era start. It is only
+// valid for an unreached future era or a final era with an indefinite safe
+// zone, never as a statement about the current epoch's stability window.
+func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraBoundary(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -927,10 +919,9 @@ func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
 		secondEpochSlot = uint64(532_000) // 100_000 + 432_000
 		thirdEpochId    = uint64(502)
 		thirdEpochSlot  = uint64(964_000) // 532_000 + 432_000
-		thirdEpochEnd   = uint64(1_396_000)
-
-		// Tip well inside epoch 502.
-		tipSlot = uint64(1_100_000)
+		tipSlot         = uint64(1_100_000)
+		expectedEnd     = uint64(532_000)
+		expectedEpoch   = uint64(501)
 	)
 
 	db := newTestDB(t)
@@ -980,19 +971,11 @@ func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
 
 	assert.Equal(
 		t,
-		thirdEpochEnd,
+		expectedEnd,
 		slot,
-		"TransitionImpossible with a multi-epoch era must serve the CURRENT epoch's end "+
-			"(slot %d, end of epoch %d), not a safe-zone projection from the era's first epoch",
-		thirdEpochEnd,
-		thirdEpochId,
+		"TransitionImpossible must measure its finite safe zone from the era start",
 	)
-	assert.Equal(t, thirdEpochId+1, epoch,
-		"TransitionImpossible EraEnd epoch must be the current epoch + 1 (%d)",
-		thirdEpochId+1)
-	assert.GreaterOrEqual(t, slot, tipSlot,
-		"TransitionImpossible EraEnd (%d) must never lag the tip (%d)",
-		slot, tipSlot)
+	assert.Equal(t, expectedEpoch, epoch)
 }
 
 // seedBlockAtSlot writes a minimal block index entry for slot/hash, enough
@@ -2926,13 +2909,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 	)
 }
 
-// TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
-// verifies that TransitionKnown with a KnownEpoch absent from the DB falls back
-// to the safe-zone path, which snaps to the epoch-end boundary.
-//
-// Setup: one Conway epoch (500), transitionInfo.KnownEpoch = 999 (not in DB).
-// Expected: falls back to epoch-end snap (532_000), epoch number 501.
-func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone(
+func TestQueryHardForkEraHistory_TransitionKnownIncludesSuccessor(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -2943,12 +2920,10 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		epochLen       = uint(432_000)
 		slotLenMs      = uint(1_000)
 		epochId        = uint64(500)
-		missingEpoch   = uint64(999) // deliberately absent from DB
+		knownEpoch     = uint64(502)
+		boundarySlot   = uint64(964_000)
+		successorEnd   = uint64(1_396_000)
 	)
-	const expectedSafeZone = uint64(25_920)
-	expectedEraEndSlot := epochStartSlot + uint64(
-		epochLen,
-	) // 532_000 (epoch end)
 
 	db := newTestDB(t)
 	require.NoError(t, db.SetEpoch(
@@ -2961,12 +2936,14 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ConwayEraDesc,
+		activeEras: eras.ErasWithDijkstra,
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
 		},
-		transitionInfo: hardfork.NewTransitionKnown(missingEpoch),
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
 		config: LedgerStateConfig{
 			CardanoNodeConfig: newTestEraHistoryCfg(t),
+			EnableDijkstra:    true,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
@@ -2977,28 +2954,24 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 
 	eraList, ok := result.(cbor.IndefLengthList)
 	require.True(t, ok)
-	require.NotEmpty(t, eraList)
+	require.Len(t, eraList, 2)
 
-	lastEra, ok := eraList[len(eraList)-1].([]any)
+	currentEra, ok := eraList[0].([]any)
 	require.True(t, ok, "era entry should be []any")
-	eraEnd, ok := lastEra[1].([]any)
+	currentEnd, ok := currentEra[1].([]any)
 	require.True(t, ok, "EraEnd should be []any")
-	actualSlot, ok := eraEnd[1].(uint64)
-	require.True(t, ok, "EraEnd slot should be uint64")
+	assert.Equal(t, boundarySlot, currentEnd[1])
+	assert.Equal(t, knownEpoch, currentEnd[2])
 
-	actualEpoch, ok := eraEnd[2].(uint64)
-	require.True(t, ok, "EraEnd epoch should be uint64")
-
-	assert.Equal(
-		t,
-		expectedEraEndSlot,
-		actualSlot,
-		"TransitionKnown with missing KnownEpoch must fall back to epoch-end snap (%d)",
-		expectedEraEndSlot,
-	)
-	assert.Equal(t, epochId+1, actualEpoch,
-		"EraEnd epoch should be epochId+1 (%d)", epochId+1,
-	)
+	nextEra, ok := eraList[1].([]any)
+	require.True(t, ok)
+	nextStart, ok := nextEra[0].([]any)
+	require.True(t, ok)
+	nextEnd, ok := nextEra[1].([]any)
+	require.True(t, ok)
+	assert.Equal(t, currentEnd, nextStart)
+	assert.Equal(t, successorEnd, nextEnd[1])
+	assert.Equal(t, knownEpoch+1, nextEnd[2])
 }
 
 // TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
@@ -3070,9 +3043,9 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	)
 }
 
-// TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd verifies
-// that when TransitionImpossible is set, queryHardForkEraHistory returns the
-// full epoch-end slot rather than a safe-zone cap.
+// TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart verifies
+// that a finite TransitionImpossible vector measures its safe zone from the
+// era start, matching reconstructSummary.
 //
 // Setup (mirrors TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone):
 //   - Conway epoch 500: startSlot=100_000, length=432_000 (ends at 532_000)
@@ -3080,7 +3053,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 //   - transitionInfo = TransitionImpossible
 //
 // Expected EraEnd slot: 532_000 (confirmed epoch end, no cap)
-func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
+func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraStart(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -3135,14 +3108,13 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
 		t,
 		epochEndSlot,
 		actualSlot,
-		"TransitionImpossible: EraEnd slot should be the confirmed epoch end (%d), not a safeZone cap",
+		"TransitionImpossible: EraEnd slot should be measured from the era start (%d)",
 		epochEndSlot,
 	)
 }
 
 // TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch
-// verifies that the EraEnd epoch number is epochId+1 when TransitionImpossible
-// is set (the epoch-loop sets tmpEnd with epochId+1 for the last epoch).
+// verifies the epoch bound produced from the era-start safe-zone anchor.
 func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 	t *testing.T,
 ) {
@@ -3191,20 +3163,12 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 		t,
 		epochId+1,
 		actualEpoch,
-		"TransitionImpossible: EraEnd epoch should be epochId+1 (%d)",
+		"TransitionImpossible: era-start safe zone should end at epoch %d",
 		epochId+1,
 	)
 }
 
-// TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison
-// confirms that TransitionImpossible and TransitionUnknown converge on the
-// same epoch-end boundary when tipSlot + safeZone still lies within the
-// current epoch — the common steady-state early-in-epoch case.
-//
-// Divergence at late-in-epoch tips (tip + safeZone crossing into the next
-// epoch) is covered by TransitionUnknown_FallsBackToSafeZone and matches
-// Haskell HFC's slotToEpochBound semantics.
-func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
+func TestQueryHardForkEraHistory_TransitionStateChangesSafeZoneAnchor(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -3214,9 +3178,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
 		epochLen       = uint(432_000)
 		slotLenMs      = uint(1_000)
 		epochId        = uint64(500)
-		// tipSlot well inside the epoch so tip + safeZone (25_920) stays in
-		// the same epoch — both states snap to the same epoch-end boundary.
-		tipSlot = uint64(200_000)
+		tipSlot        = uint64(520_000)
 	)
 
 	setupLS := func(state hardfork.TransitionState) *LedgerState {
@@ -3260,15 +3222,14 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
 	unknownSlot := eraEndSlot(setupLS(hardfork.TransitionUnknown))
 
 	assert.Equal(t, uint64(532_000), impossibleSlot,
-		"TransitionImpossible must serve the epoch end")
+		"TransitionImpossible measures from the era start")
 	assert.Equal(
 		t,
-		uint64(532_000),
+		uint64(964_000),
 		unknownSlot,
-		"TransitionUnknown snaps to epoch end when tip+safeZone stays in the same epoch",
+		"TransitionUnknown measures from the next slot after the tip",
 	)
-	assert.Equal(t, impossibleSlot, unknownSlot,
-		"both states return the same epoch-end slot")
+	assert.NotEqual(t, impossibleSlot, unknownSlot)
 }
 
 func TestCheckedSlotAdd(t *testing.T) {

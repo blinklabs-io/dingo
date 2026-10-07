@@ -1937,7 +1937,7 @@ func TestEpochInfoUsesMaterializedEpochPastForecast(t *testing.T) {
 	assert.Equal(t, uint(100), info.LengthInSlots)
 }
 
-func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
+func TestHardForkSummary_TransitionImpossibleStartsAtEraBoundary(
 	t *testing.T,
 ) {
 	ls := &LedgerState{
@@ -1966,7 +1966,7 @@ func TestHardForkSummary_TransitionImpossibleKeepsLiveForecastRolling(
 	assert.Equal(t, hardfork.NewTransitionImpossible(), sum.Transition)
 	require.Len(t, sum.Eras, 1)
 	require.NotNil(t, sum.Eras[0].End)
-	assert.Equal(t, uint64(26_500), sum.Eras[0].End.Slot)
+	assert.Equal(t, uint64(26_000), sum.Eras[0].End.Slot)
 
 	_, err = sum.SlotToEpoch(500)
 	require.NoError(t, err,

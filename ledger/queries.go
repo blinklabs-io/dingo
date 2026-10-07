@@ -859,11 +859,17 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		)
 	}
 
-	perEra := make([]eraBoundData, len(shape.Eras))
+	currentIdx, ok := shape.EraIndex(currentEraId)
+	if !ok {
+		return nil, fmt.Errorf(
+			"era history: current era %d is absent from shape",
+			currentEraId,
+		)
+	}
+	perEra := make([]eraBoundData, currentIdx+1)
 	timespan := big.NewInt(0)
-	currentIdx := -1
 
-	for i, entry := range shape.Eras {
+	for i, entry := range shape.Eras[:currentIdx+1] {
 		eraDesc := activeEras[i]
 		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, txn)
 		if dbErr != nil {
@@ -887,9 +893,8 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			)
 		}
 
-		if entry.EraID == currentEraId {
+		if i == currentIdx {
 			// Defer End to the BuildSummary step below.
-			currentIdx = i
 			continue
 		}
 
@@ -954,7 +959,7 @@ func (ls *LedgerState) queryHardForkEraHistory(
 
 	// Compute the current era's End via hardfork.BuildSummary, mirroring the
 	// Haskell HFC TransitionKnown/Unknown/Impossible semantics.
-	if currentIdx >= 0 {
+	if perEra[currentIdx].start != nil {
 		end, err := ls.currentEraEnd(
 			shape, perEra[currentIdx], currentIdx, tipSlot, transitionInfo,
 		)
@@ -962,32 +967,35 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			return nil, err
 		}
 		perEra[currentIdx].end = end
+
+		if transitionInfo.State == hardfork.TransitionKnown &&
+			currentIdx+1 < len(shape.Eras) {
+			successor, err := eraHistorySuccessor(
+				shape, currentIdx+1, end, tipSlot,
+			)
+			if err != nil {
+				return nil, err
+			}
+			perEra = append(perEra, successor)
+		}
 	}
 
-	retData := make([]any, 0, len(shape.Eras))
-	for i, entry := range shape.Eras {
+	retData := make([]any, 0, len(perEra))
+	for i, data := range perEra {
+		entry := shape.Eras[i]
 		tmpParams := eraParamsCBOR(entry.Params)
-		if perEra[i].start == nil || perEra[i].end == nil {
-			retData = append(retData, []any{
-				[]any{0, 0, 0},
-				[]any{0, 0, 0},
-				tmpParams,
-			})
+		if data.start == nil || data.end == nil {
 			continue
 		}
 		retData = append(retData, []any{
-			perEra[i].start, perEra[i].end, tmpParams,
+			data.start, data.end, tmpParams,
 		})
 	}
 	return cbor.IndefLengthList(retData), nil
 }
 
 // currentEraEnd computes the open era's End tuple (picosecondRelTime, slot,
-// epoch) from the HFC Summary, with a pre-check that falls back to
-// TransitionUnknown when TransitionKnown's KnownEpoch is missing from the DB
-// (e.g. a race or rollback). Without the fallback, serving the
-// BuildSummary-computed boundary would over-claim certainty about an epoch
-// the node hasn't actually seen.
+// epoch) from the HFC Summary.
 func (ls *LedgerState) currentEraEnd(
 	shape hardfork.Shape,
 	era eraBoundData,
@@ -1003,54 +1011,6 @@ func (ls *LedgerState) currentEraEnd(
 		)
 	}
 
-	// dingo sets TransitionImpossible when evaluateTransitionImpossible has
-	// confirmed the current epoch's end is within the safe-zone horizon
-	// (safeEndSlot >= epochEndSlot). The intended answer is the current
-	// epoch end. BuildSummary's TransitionImpossible branch, however,
-	// applies the safe zone from current.Start (= the *first* epoch of
-	// the era) and can return an EraEnd behind the tip for a long-running
-	// era. Serve the confirmed epoch-end directly instead.
-	if ti.State == hardfork.TransitionImpossible {
-		endRel := new(big.Int).Set(startRel)
-		for _, ep := range era.epochs {
-			endRel.Add(
-				endRel,
-				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
-			)
-		}
-		lastEp := era.epochs[len(era.epochs)-1]
-		endSlot, err := checkedSlotAdd(
-			lastEp.StartSlot,
-			uint64(lastEp.LengthInSlots),
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"current era epoch %d (start=%d, length=%d): %w",
-				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
-			)
-		}
-		return []any{
-			endRel,
-			endSlot,
-			lastEp.EpochId + 1,
-		}, nil
-	}
-
-	effectiveTI := ti
-	if ti.State == hardfork.TransitionKnown {
-		found := false
-		for _, ep := range era.epochs {
-			if ep.EpochId == ti.KnownEpoch &&
-				ep.EpochId > firstEp.EpochId {
-				found = true
-				break
-			}
-		}
-		if !found {
-			effectiveTI = hardfork.NewTransitionUnknown()
-		}
-	}
-
 	curr := hardfork.EraSummary{
 		EraID: shape.Eras[idx].EraID,
 		Start: hardfork.Bound{
@@ -1060,7 +1020,7 @@ func (ls *LedgerState) currentEraEnd(
 		},
 		Params: shape.Eras[idx].Params,
 	}
-	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, effectiveTI)
+	summ, err := hardfork.BuildSummary(shape, nil, curr, tipSlot, ti)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,6 +1034,58 @@ func (ls *LedgerState) currentEraEnd(
 		durationToPicoseconds(endBound.RelativeTime),
 		endBound.Slot,
 		endBound.Epoch,
+	}, nil
+}
+
+func eraHistorySuccessor(
+	shape hardfork.Shape,
+	idx int,
+	start []any,
+	tipSlot uint64,
+) (eraBoundData, error) {
+	startRel, ok := start[0].(*big.Int)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[0] has unexpected type %T", start[0],
+		)
+	}
+	startSlot, ok := start[1].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[1] has unexpected type %T", start[1],
+		)
+	}
+	startEpoch, ok := start[2].(uint64)
+	if !ok {
+		return eraBoundData{}, fmt.Errorf(
+			"successor era start[2] has unexpected type %T", start[2],
+		)
+	}
+	entry := shape.Eras[idx]
+	startBound := hardfork.Bound{
+		RelativeTime: picosecondsToDuration(startRel),
+		Slot:         startSlot,
+		Epoch:        startEpoch,
+	}
+	successor := hardfork.SuccessorEra(
+		startBound,
+		entry.EraID,
+		entry.Params,
+		tipSlot,
+	)
+	end := successor.End
+	if end == nil {
+		return eraBoundData{}, errors.New(
+			"hardfork: successor era End unbounded (SafeZoneSlots==0)",
+		)
+	}
+	return eraBoundData{
+		start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		end: []any{
+			durationToPicoseconds(end.RelativeTime),
+			end.Slot,
+			end.Epoch,
+		},
 	}, nil
 }
 
