@@ -12137,6 +12137,9 @@ being requested rather than only once the whole transfer already
 finished. The operation's cancelled context is also the authoritative
 terminal-status signal because storage drivers such as SQLite may return
 their own interruption error without wrapping `context.Canceled`.
+When a worker returns, completion is reserved before releasing the service's
+busy flag. Later cancellation requests cannot replace the worker's outcome;
+terminal status is published only after the next operation can start.
 `StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
