@@ -11614,10 +11614,19 @@ credential's deposit from its latest registration event at or before the
 pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
 the credential's snapshot import baseline when that is at least as new, as
 `LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
-baseline are likewise removed only by rollback. The remaining
-per-credential and per-proposal queries
-(`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
-`GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still
+baseline are likewise removed only by rollback.
+`GetFilteredDelegationsAndRewardAccounts` and `GetFilteredVoteDelegatees`
+read the requested accounts as they stood at the pinned slot through
+`GetAccountsByCredentialAtSlot`: an account registered then, with the pool,
+DRep and reward balance it held. The pool and DRep come from the live account
+row when it was last written at or before the slot, and otherwise from the
+derivation `RestoreAccountStateAtSlot` applies on rollback (certificates,
+import baseline, POOLREAP). The reward balance is reconstructed from the
+`account_reward_delta` journal the way historical stake reads it, including
+the credits of a pending reward round applied at or before the slot, so the
+unpinned path's separate pending-credit addition is skipped. Certificates,
+the baseline and the journal are removed only by rollback, so no retention
+floor applies. `GetDRepState`, `GetProposals` and `DebugChainDepState` still
 ignore the acquired point.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a

@@ -4136,6 +4136,30 @@ applies the baseline the way `LedgerView.StakeCredentialDeposit` does, as the
 latest registration when it is at least as new as the newest certificate at
 or before the queried point.
 
+### `GetAccountsByCredentialAtSlot`
+
+`GetAccountsByCredentialAtSlot(refs, slot, txn)` is
+`GetAccountsByCredential(refs, false, txn)` answered as the accounts stood at
+`slot`, keyed the same way. It reads each requested account row, inactive ones
+included, and keeps the row's `active`, `pool`, `drep` and `drep_type` when its
+`added_slot` is at or before `slot`. Every write to those columns stamps
+`added_slot`, including the two no certificate records:
+`ClearDelegationsToRetiredPool` (POOLREAP) and `ClearDanglingDRepDelegations`
+(the PV10 HARDFORK rule). A row written after `slot` is derived instead by
+`deriveAccountStateAtSlot`, the read-only derivation
+`RestoreAccountStateAtSlot` writes back on rollback: certificates at or before
+`slot`, the `account_import_baseline` row standing in for a missing
+registration, and the reap check. An account that derivation finds absent at
+`slot` (created after it with no registration at or before it), or inactive
+there, is omitted. `reward` is the balance at `slot` from `historicalRewards`,
+the reconstruction historical stake uses: the live balance less later
+`account_reward_delta` credits, or the first later withdrawal's
+`previous_reward` less the credits between, plus the unfolded credits of a
+pending round whose `boundary_slot` is at or before `slot`. Like the derivation
+it shares with rollback, it cannot see a PV10 clear when the row was rewritten
+after `slot`; the certificate naming the dangling DRep is then the latest
+surviving one.
+
 ### `GetAccountSumsByCredential`
 
 Backs the Blockfrost account `withdrawals_sum`, `reserves_sum`, and

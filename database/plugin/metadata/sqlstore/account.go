@@ -955,6 +955,216 @@ WHERE mir.pot = 1 AND reward.credential_tag = ?
 	return ret, nil
 }
 
+// accountStateAtSlot is one account's registration, pool and DRep state at a
+// slot, as derived from the certificate history and import baseline that
+// survive at that slot.
+type accountStateAtSlot struct {
+	// absent means nothing at or before the slot created the account.
+	absent   bool
+	active   bool
+	pool     []byte
+	drep     []byte
+	drepType uint64
+	// setPool and setDrep are false when nothing at or before the slot
+	// determines the value, so the live value stands.
+	setPool    bool
+	setDrep    bool
+	latestSlot uint64
+}
+
+// deriveAccountStateAtSlot derives an account's state at slot without writing
+// anything. RestoreAccountStateAtSlot writes the result back on rollback;
+// GetAccountsByCredentialAtSlot answers queries at a past slot with it.
+func deriveAccountStateAtSlot(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	key []byte,
+	createdSlot uint64,
+	slot uint64,
+) (accountStateAtSlot, error) {
+	var state accountStateAtSlot
+	registration, hasRegistration, err := latestAccountEvent(
+		ctx,
+		db,
+		accountRegistrationStateTables,
+		tag,
+		key,
+		slot,
+		"",
+	)
+	if err != nil {
+		return state, err
+	}
+	var baseline accountImportBaseline
+	hasBaseline := false
+	if !hasRegistration {
+		if createdSlot > slot {
+			state.absent = true
+			return state, nil
+		}
+		// No registration certificate is reachable at or before the slot, so
+		// the account predates every certificate this database holds: an
+		// imported or genesis-delegated account. Its import baseline stands in
+		// for the missing registration certificate, and the same derivation
+		// below then applies whichever certificates do survive at the slot.
+		baseline, hasBaseline, err = readAccountImportBaseline(
+			ctx,
+			db,
+			tag,
+			key,
+		)
+		if err != nil {
+			return state, err
+		}
+		registration = accountRestoreEvent{
+			position: baseline.position,
+		}
+	}
+	deregistration, hasDeregistration, err := latestAccountEvent(
+		ctx,
+		db,
+		accountDeregistrationStateTables,
+		tag,
+		key,
+		slot,
+		"",
+	)
+	if err != nil {
+		return state, err
+	}
+	pool, hasPool, err := latestAccountEvent(
+		ctx,
+		db,
+		[]string{
+			"stake_delegation",
+			"stake_registration_delegation",
+			"stake_vote_delegation",
+			"stake_vote_registration_delegation",
+		},
+		tag,
+		key,
+		slot,
+		"pool_key_hash",
+	)
+	if err != nil {
+		return state, err
+	}
+	drep, hasDrep, err := latestAccountEvent(
+		ctx,
+		db,
+		[]string{
+			"vote_delegation",
+			"vote_registration_delegation",
+			"stake_vote_delegation",
+			"stake_vote_registration_delegation",
+		},
+		tag,
+		key,
+		slot,
+		"drep",
+	)
+	if err != nil {
+		return state, err
+	}
+	// An account with a baseline but no delegation certificate at or before
+	// the slot delegates exactly as the snapshot recorded; without a baseline
+	// there is nothing to derive the pool or DRep from, and the live values
+	// are left alone.
+	if hasBaseline {
+		if !hasPool {
+			pool = accountRestoreEvent{
+				position: baseline.position,
+				value:    baseline.pool,
+			}
+			hasPool = len(pool.value) > 0
+		}
+		if !hasDrep {
+			drep = accountRestoreEvent{
+				position:  baseline.position,
+				value:     baseline.drep,
+				valueType: baseline.drepType,
+			}
+			hasDrep = len(drep.value) > 0 || drep.valueType != 0
+		}
+	}
+	// A registration certificate proves the account was registered at its
+	// position; a baseline carries whatever the snapshot recorded. Without
+	// either, absence of a surviving deregistration is the only evidence
+	// available.
+	priorActive := true
+	if hasBaseline {
+		priorActive = baseline.active
+	}
+	state.active = priorActive &&
+		(!hasDeregistration ||
+			compareCertificatePosition(
+				registration.position,
+				deregistration.position,
+			) > 0)
+	// A delegation certificate is not the last word on the delegation:
+	// POOLREAP removes the delegations pointing at a pool reaped at an epoch
+	// boundary and writes no certificate of its own, so a certificate
+	// predating a reap that still stands at the slot must not put the account
+	// back on that pool. Before the reap the certificate is authoritative
+	// again, and the boundary check excludes that case.
+	if hasPool && len(pool.value) > 0 {
+		reaped, err := poolReapedAfterDelegation(
+			ctx,
+			db,
+			pool.value,
+			pool.position.slot,
+			slot,
+		)
+		if err != nil {
+			return state, err
+		}
+		if reaped {
+			pool.value = nil
+		}
+	}
+	// pool/drep are only known from a certificate, from the baseline, or
+	// from the account being deregistered.
+	state.setPool = hasRegistration || hasBaseline || hasPool || !state.active
+	state.setDrep = hasRegistration || hasBaseline || hasDrep || !state.active
+	if !state.active || hasDeregistration &&
+		hasPool &&
+		compareCertificatePosition(
+			deregistration.position,
+			pool.position,
+		) > 0 {
+		pool.value = nil
+	}
+	if !state.active || hasDeregistration &&
+		hasDrep &&
+		compareCertificatePosition(
+			deregistration.position,
+			drep.position,
+		) > 0 {
+		drep.value = nil
+		drep.valueType = 0
+	}
+	state.pool = pool.value
+	state.drep = drep.value
+	state.drepType = drep.valueType
+	state.latestSlot = registration.position.slot
+	for _, event := range []accountRestoreEvent{
+		deregistration,
+		pool,
+		drep,
+	} {
+		if event.position.slot > state.latestSlot {
+			state.latestSlot = event.position.slot
+		}
+	}
+	// A baseline established after the slot (a slot before the snapshot)
+	// must not leave the row claiming a modification slot ahead of it.
+	if state.latestSlot > slot {
+		state.latestSlot = slot
+	}
+	return state, nil
+}
+
 func (s *Store) RestoreAccountStateAtSlot(
 	slot uint64,
 	txn types.Txn,
@@ -996,212 +1206,45 @@ FROM account WHERE added_slot > ?`,
 			}
 			refs := make([]models.StakeCredentialRef, 0, len(accounts))
 			for _, account := range accounts {
-				registration, hasRegistration, err := latestAccountEvent(
+				ref := models.NewStakeCredentialRef(account.tag, account.key)
+				refs = append(refs, ref)
+				state, err := deriveAccountStateAtSlot(
 					ctx,
 					db,
-					accountRegistrationStateTables,
 					account.tag,
 					account.key,
+					account.createdSlot,
 					slot,
-					"",
 				)
 				if err != nil {
 					return err
 				}
-				ref := models.NewStakeCredentialRef(account.tag, account.key)
-				refs = append(refs, ref)
-				var baseline accountImportBaseline
-				hasBaseline := false
-				if !hasRegistration {
-					if account.createdSlot > slot {
-						if _, err := db.ExecContext(ctx, `
+				if state.absent {
+					if _, err := db.ExecContext(ctx, `
 DELETE FROM account
 WHERE credential_tag = ? AND staking_key = ?`,
-							account.tag,
-							account.key,
-						); err != nil {
-							return err
-						}
-						if err := deleteAccountImportBaseline(
-							ctx,
-							db,
-							account.tag,
-							account.key,
-						); err != nil {
-							return err
-						}
-						continue
+						account.tag,
+						account.key,
+					); err != nil {
+						return err
 					}
-					// No registration certificate is reachable at or before
-					// the rollback slot, so the account predates every
-					// certificate this database holds: an imported or
-					// genesis-delegated account. Its import baseline stands in
-					// for the missing registration certificate, and the same
-					// derivation below then applies whichever certificates do
-					// survive the rollback.
-					baseline, hasBaseline, err = readAccountImportBaseline(
+					if err := deleteAccountImportBaseline(
 						ctx,
 						db,
 						account.tag,
 						account.key,
-					)
-					if err != nil {
+					); err != nil {
 						return err
 					}
-					registration = accountRestoreEvent{
-						position: baseline.position,
-					}
-				}
-				deregistration, hasDeregistration, err := latestAccountEvent(
-					ctx,
-					db,
-					accountDeregistrationStateTables,
-					account.tag,
-					account.key,
-					slot,
-					"",
-				)
-				if err != nil {
-					return err
-				}
-				pool, hasPool, err := latestAccountEvent(
-					ctx,
-					db,
-					[]string{
-						"stake_delegation",
-						"stake_registration_delegation",
-						"stake_vote_delegation",
-						"stake_vote_registration_delegation",
-					},
-					account.tag,
-					account.key,
-					slot,
-					"pool_key_hash",
-				)
-				if err != nil {
-					return err
-				}
-				drep, hasDrep, err := latestAccountEvent(
-					ctx,
-					db,
-					[]string{
-						"vote_delegation",
-						"vote_registration_delegation",
-						"stake_vote_delegation",
-						"stake_vote_registration_delegation",
-					},
-					account.tag,
-					account.key,
-					slot,
-					"drep",
-				)
-				if err != nil {
-					return err
-				}
-				// An account with a baseline but no delegation certificate at
-				// or before the rollback slot delegates exactly as the
-				// snapshot recorded; without a baseline there is nothing to
-				// derive the pool or DRep from, and the live values are left
-				// alone.
-				if hasBaseline {
-					if !hasPool {
-						pool = accountRestoreEvent{
-							position: baseline.position,
-							value:    baseline.pool,
-						}
-						hasPool = len(pool.value) > 0
-					}
-					if !hasDrep {
-						drep = accountRestoreEvent{
-							position:  baseline.position,
-							value:     baseline.drep,
-							valueType: baseline.drepType,
-						}
-						hasDrep = len(drep.value) > 0 || drep.valueType != 0
-					}
-				}
-				// A registration certificate proves the account was registered
-				// at its position; a baseline carries whatever the snapshot
-				// recorded. Without either, absence of a surviving
-				// deregistration is the only evidence available.
-				priorActive := true
-				if hasBaseline {
-					priorActive = baseline.active
-				}
-				active := priorActive &&
-					(!hasDeregistration ||
-						compareCertificatePosition(
-							registration.position,
-							deregistration.position,
-						) > 0)
-				// A delegation certificate is not the last word on the
-				// delegation: POOLREAP removes the delegations pointing at a
-				// pool reaped at an epoch boundary and writes no certificate
-				// of its own, so a certificate predating a reap that still
-				// stands at the rollback slot must not put the account back on
-				// that pool. Rolling back past the reap is the other
-				// direction, and the boundary check below excludes it, so the
-				// certificate is authoritative again there.
-				if hasPool && len(pool.value) > 0 {
-					reaped, err := poolReapedAfterDelegation(
-						ctx,
-						db,
-						pool.value,
-						pool.position.slot,
-						slot,
-					)
-					if err != nil {
-						return err
-					}
-					if reaped {
-						pool.value = nil
-					}
-				}
-				// Only rewrite pool/drep when their value at the rollback slot
-				// is actually known: from a certificate, from the baseline, or
-				// from the account being deregistered.
-				setPool := hasRegistration || hasBaseline || hasPool || !active
-				setDrep := hasRegistration || hasBaseline || hasDrep || !active
-				if !active || hasDeregistration &&
-					hasPool &&
-					compareCertificatePosition(
-						deregistration.position,
-						pool.position,
-					) > 0 {
-					pool.value = nil
-				}
-				if !active || hasDeregistration &&
-					hasDrep &&
-					compareCertificatePosition(
-						deregistration.position,
-						drep.position,
-					) > 0 {
-					drep.value = nil
-					drep.valueType = 0
-				}
-				latestSlot := registration.position.slot
-				for _, event := range []accountRestoreEvent{
-					deregistration,
-					pool,
-					drep,
-				} {
-					if event.position.slot > latestSlot {
-						latestSlot = event.position.slot
-					}
-				}
-				// A baseline established after the rollback target (a rollback
-				// to before the snapshot slot) must not leave the row claiming
-				// a modification slot ahead of the tip.
-				if latestSlot > slot {
-					latestSlot = slot
+					continue
 				}
 				assignments := []string{"active = ?", "added_slot = ?"}
-				args := []any{active, latestSlot}
-				if setPool {
+				args := []any{state.active, state.latestSlot}
+				if state.setPool {
 					assignments = append(assignments, "pool = ?")
-					args = append(args, nullBytes(pool.value))
+					args = append(args, nullBytes(state.pool))
 				}
-				if setDrep {
+				if state.setDrep {
 					assignments = append(
 						assignments,
 						"drep = ?",
@@ -1209,8 +1252,8 @@ WHERE credential_tag = ? AND staking_key = ?`,
 					)
 					args = append(
 						args,
-						nullBytes(drep.value),
-						drep.valueType,
+						nullBytes(state.drep),
+						state.drepType,
 					)
 				}
 				args = append(args, account.tag, account.key)
