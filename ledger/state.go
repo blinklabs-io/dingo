@@ -5342,12 +5342,20 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 				"source-era protocol parameters are nil",
 			)
 		}
-		workingPParams, plutusV2CostModelWritten, err = ls.computeClassicPParamUpdates(
-			txn,
-			boundarySlot,
+		err = ls.timeRolloverPhase(
 			snapshotEpoch.EpochId+1,
-			snapshotEra,
-			ownedPParams,
+			"pparam_updates",
+			func() error {
+				var updateErr error
+				workingPParams, plutusV2CostModelWritten, updateErr = ls.computeClassicPParamUpdates(
+					txn,
+					boundarySlot,
+					snapshotEpoch.EpochId+1,
+					snapshotEra,
+					ownedPParams,
+				)
+				return updateErr
+			},
 		)
 		if err != nil {
 			return nil, 0, nil, false, fmt.Errorf(

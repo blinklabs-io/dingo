@@ -2374,7 +2374,7 @@ func (ls *LedgerState) electingPoolParamsCutoffSlotFromSnapshot(
 	}
 	var snapshotEpoch *models.Epoch
 	for i := range epochCache {
-		if epochCache[i].EpochId == snapshot.Epoch {
+		if epochCache[i].EpochId == snap.epoch {
 			snapshotEpoch = &epochCache[i]
 			break
 		}

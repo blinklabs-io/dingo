@@ -14031,8 +14031,9 @@ owns every EPOCH sub-rule below, including whether POOLREAP precedes SNAP.
    deltas through the boundary slot, so running it below step 5 or step 7
    would tally SPO votes against a mark carrying those steps' credits.
 4. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
-   At an era boundary this step was performed immediately before translation,
-   with the outgoing era's update decoder, and is not repeated here.
+   When the outgoing era supports classic updates, this step was performed
+   immediately before translation with that era's update decoder and is not
+   repeated here.
 5. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. The refunded amount is the deposit
    the pool's effective registration retains
