@@ -986,11 +986,13 @@ jobs:
           # formula documents: the source tarball url, its sha256, and the
           # CommitHash stamped into the version package (version.Version comes
           # from the formula's own #{version}, so it needs no edit here).
-          sed -i -E \
+          formula_tmp="${formula}.tmp"
+          sed -E \
             -e "s#^  url \".*\"#  url \"${TARBALL_URL}\"#" \
             -e "s#^  sha256 \".*\"#  sha256 \"${SHA256}\"#" \
             -e "s#(version\.CommitHash=)[0-9a-f]+#\1${SHORT_COMMIT}#" \
-            "$formula"
+            "$formula" > "$formula_tmp"
+          mv "$formula_tmp" "$formula"
           # sed exits 0 even when a pattern matches nothing. If the tap renames
           # a field or changes its indentation a substitution silently no-ops,
           # the next step sees a clean tree and ships a stale formula. Assert
