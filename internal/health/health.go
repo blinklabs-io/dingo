@@ -22,19 +22,24 @@
 //   - Liveness (/healthz, and /health as its alias) reports only that the
 //     process is up and this listener is serving. Docker, Swarm and ECS
 //     respond to an unhealthy container by killing and replacing it, and
-//     Kubernetes restarts a container whose livenessProbe fails. None of
-//     dingo's known wedges are repaired by a restart, and a node doing an
-//     initial sync legitimately takes hours or days to become useful, so
+//     Kubernetes restarts a container whose livenessProbe fails. A stalled
+//     fetch or a rejection loop is not repaired by a restart, and a node
+//     doing an initial sync legitimately takes hours or days to become useful, so
 //     folding sync state into liveness would put a healthy node into a
 //     replacement loop it can never escape. Liveness therefore stays
-//     independent of sync state.
+//     independent of sync state. The one condition beyond that is a
+//     liveness Check: the node supplies one that fails when the slot clock
+//     has ticked before and then stopped, which is a wedged event loop and
+//     is repaired by a restart.
 //
 //   - Readiness (/readyz) reports whether the node is usefully following
 //     the chain: its tip is within ReadyTipGapSlots of the wall-clock
-//     slot. Failing readiness removes a pod from a Service or a target
-//     from a load balancer without killing it, which is the correct
-//     response both while a node is still catching up and when its tip has
-//     frozen behind a stalled fetch or a rejection loop.
+//     slot, and every readiness Check passes (the node supplies database
+//     availability and, for a block producer, forging state). Failing
+//     readiness removes a pod from a Service or a target from a load
+//     balancer without killing it, which is the correct response both
+//     while a node is still catching up and when its tip has frozen behind
+//     a stalled fetch or a rejection loop.
 //
 // The liveness response body carries the readiness verdict and the tip gap
 // as well, so `docker inspect`'s health log shows why a live node is not
@@ -43,6 +48,7 @@ package health
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -63,9 +69,27 @@ const (
 // database open, Mithril bootstrap and ledger startup.
 type TipGapFunc func() (gap uint64, ok bool)
 
+// Check is one extra condition on the node's health, beyond the tip gap.
+type Check struct {
+	// Liveness marks a check whose failure fails /healthz as well as
+	// /readyz. Every other check gates /readyz alone.
+	Liveness bool
+	// Fn returns nil when the condition holds, and otherwise an error whose
+	// message is reported as the reason.
+	Fn func() error
+}
+
+func (c Check) evaluate() error {
+	if c.Fn == nil {
+		return errors.New("health check callback is unavailable")
+	}
+	return c.Fn()
+}
+
 // Status is the classified node health an individual probe reports.
 type Status struct {
-	// Live is true whenever this listener answered the request.
+	// Live is true whenever this listener answered the request and no
+	// liveness check failed.
 	Live bool `json:"live"`
 	// Ready is true when the node is following the chain within the
 	// configured tip-gap tolerance.
@@ -79,11 +103,27 @@ type Status struct {
 	Status string `json:"status"`
 }
 
-// Evaluate classifies the node against a tip-gap tolerance. A nil or
-// missing tipGap reports not-ready rather than defaulting to ready: a node
-// that has not reached its first slot tick is still starting up.
-func Evaluate(tipGap TipGapFunc, readyTipGapSlots uint64) Status {
+// Evaluate classifies the node against a tip-gap tolerance and the extra
+// checks. A nil or missing tipGap reports not-ready rather than defaulting to
+// ready: a node that has not reached its first slot tick is still starting up.
+// Readiness checks run only once the node is within the tolerance, so a node
+// that is still syncing reports the gap rather than a secondary condition.
+func Evaluate(
+	tipGap TipGapFunc,
+	readyTipGapSlots uint64,
+	checks ...Check,
+) Status {
 	status := Status{Live: true}
+	for _, check := range checks {
+		if !check.Liveness {
+			continue
+		}
+		if err := check.evaluate(); err != nil {
+			status.Live = false
+			status.Reason = err.Error()
+			return status
+		}
+	}
 	if tipGap == nil {
 		status.Reason = "tip gap unavailable"
 		return status
@@ -102,6 +142,15 @@ func Evaluate(tipGap TipGapFunc, readyTipGapSlots uint64) Status {
 		)
 		return status
 	}
+	for _, check := range checks {
+		if check.Liveness {
+			continue
+		}
+		if err := check.evaluate(); err != nil {
+			status.Reason = err.Error()
+			return status
+		}
+	}
 	status.Ready = true
 	return status
 }
@@ -109,12 +158,16 @@ func Evaluate(tipGap TipGapFunc, readyTipGapSlots uint64) Status {
 // NewMux builds the health listener's routes. readyTipGapSlots is the
 // number of slots the chain tip may trail the wall clock while still
 // counting as ready.
-func NewMux(tipGap TipGapFunc, readyTipGapSlots uint64) *http.ServeMux {
+func NewMux(
+	tipGap TipGapFunc,
+	readyTipGapSlots uint64,
+	checks ...Check,
+) *http.ServeMux {
 	mux := http.NewServeMux()
-	live := probeHandler(tipGap, readyTipGapSlots, false)
+	live := probeHandler(tipGap, readyTipGapSlots, false, checks)
 	mux.Handle(PathHealth, live)
 	mux.Handle(PathLive, live)
-	mux.Handle(PathReady, probeHandler(tipGap, readyTipGapSlots, true))
+	mux.Handle(PathReady, probeHandler(tipGap, readyTipGapSlots, true, checks))
 	return mux
 }
 
@@ -125,6 +178,7 @@ func probeHandler(
 	tipGap TipGapFunc,
 	readyTipGapSlots uint64,
 	requireReady bool,
+	checks []Check,
 ) http.Handler {
 	return http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -137,10 +191,10 @@ func probeHandler(
 				)
 				return
 			}
-			status := Evaluate(tipGap, readyTipGapSlots)
+			status := Evaluate(tipGap, readyTipGapSlots, checks...)
 			code := http.StatusOK
 			status.Status = "ok"
-			if requireReady && !status.Ready {
+			if !status.Live || (requireReady && !status.Ready) {
 				code = http.StatusServiceUnavailable
 				status.Status = "unhealthy"
 			}
