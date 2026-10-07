@@ -605,7 +605,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	if raw := strings.TrimSpace(c.TokenRegistry.ManifestURL); raw != "" {
 		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
 			errs = append(errs, errors.New(
 				"tokenRegistry.manifestUrl must be an absolute HTTPS URL",
 			))
@@ -613,7 +614,8 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 	if raw := strings.TrimSpace(c.TokenRegistry.SourceURL); raw != "" {
 		parsed, err := url.Parse(raw)
-		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+			parsed.User != nil {
 			errs = append(errs, errors.New(
 				"tokenRegistry.sourceUrl must be an absolute HTTPS URL",
 			))

@@ -159,6 +159,20 @@ func TestValidateTokenRegistryTrustConfiguration(t *testing.T) {
 		require.ErrorContains(t, err, "tokenRegistry.sourceUrl")
 	})
 
+	t.Run("URLs reject embedded credentials", func(t *testing.T) {
+		t.Parallel()
+		cfg := validTestConfig()
+		cfg.TokenRegistry.ManifestURL =
+			"https://user:secret@mirror.example/manifest.json"
+		cfg.TokenRegistry.SourceURL =
+			"https://user:secret@mirror.example/snapshot.tar.gz"
+
+		err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+
+		require.ErrorContains(t, err, "tokenRegistry.manifestUrl")
+		require.ErrorContains(t, err, "tokenRegistry.sourceUrl")
+	})
+
 	t.Run("complete trust configuration", func(t *testing.T) {
 		t.Parallel()
 		cfg := validTestConfig()

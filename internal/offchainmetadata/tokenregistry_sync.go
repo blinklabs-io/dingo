@@ -193,6 +193,7 @@ type TokenRegistrySync struct {
 	allowRollback        bool
 	userAgent            string
 	interval             time.Duration
+	requestTimeout       time.Duration
 	maxBytes             int64
 	maxDecompressedBytes int64
 	maxEntryBytes        int64
@@ -317,6 +318,7 @@ func NewTokenRegistrySync(
 		allowRollback:        cfg.AllowRollback,
 		userAgent:            userAgent,
 		interval:             interval,
+		requestTimeout:       client.Timeout,
 		maxBytes:             maxBytes,
 		maxDecompressedBytes: maxDecompressedBytes,
 		maxEntryBytes:        maxEntryBytes,
@@ -755,8 +757,10 @@ func (s *TokenRegistrySync) SyncOnce(
 			cause:     err,
 		}
 	}
+	downloadCtx, cancelDownload := context.WithTimeout(ctx, s.requestTimeout)
+	defer cancelDownload()
 	manifest, manifestETag, notModified, err := s.fetchManifest(
-		ctx,
+		downloadCtx,
 		previousETag,
 	)
 	if err != nil {
@@ -829,7 +833,7 @@ func (s *TokenRegistrySync) SyncOnce(
 		}
 	}
 	req, err := http.NewRequestWithContext(
-		ctx,
+		downloadCtx,
 		http.MethodGet,
 		s.sourceURL,
 		nil,
@@ -872,10 +876,11 @@ func (s *TokenRegistrySync) SyncOnce(
 			manifest.ArchiveBytes,
 		)
 	}
-	stage, err := s.stageAuthenticatedSnapshot(ctx, resp.Body, manifest)
+	stage, err := s.stageAuthenticatedSnapshot(downloadCtx, resp.Body, manifest)
 	if err != nil {
 		return 0, err
 	}
+	cancelDownload()
 	defer func() {
 		cleanupErr := stage.close(s.removeStageFile)
 		if cleanupErr == nil {

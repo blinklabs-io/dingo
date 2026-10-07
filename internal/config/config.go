@@ -485,7 +485,7 @@ type TokenRegistryConfig struct {
 	// link-local addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
 	// AllowRollback permits a correctly signed manifest sequence below the
-	// stored high-water mark. Leave false during normal operation.
+	// currently stored sequence. Accepting it lowers the stored sequence.
 	AllowRollback bool `yaml:"allowRollback"          envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK"`
 }
 

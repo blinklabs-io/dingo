@@ -2607,7 +2607,7 @@ The last applied manifest sequence and digest are stored with the snapshot
 rows in one metadata transaction. A lower sequence is rejected unless the
 operator explicitly enables rollback, and a different digest at the same
 sequence is always rejected. An interrupted, partially parsed, incorrectly
-signed, or digest-mismatched snapshot cannot advance that high-water state.
+signed, or digest-mismatched snapshot cannot advance that authenticated state.
 An unchanged authenticated manifest costs only the small manifest request.
 
 Upserting alone cannot retire anything, so each snapshot is also reconciled

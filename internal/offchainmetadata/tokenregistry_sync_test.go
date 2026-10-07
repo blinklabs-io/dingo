@@ -374,6 +374,8 @@ type registryServer struct {
 	sequence         uint64
 	archiveURL       string
 	notModifiedOnTag bool
+	manifestDelay    time.Duration
+	archiveDelay     time.Duration
 }
 
 var testRegistryServers sync.Map
@@ -388,12 +390,25 @@ func newRegistryServer(t *testing.T, body []byte) *registryServer {
 			rs.mu.Lock()
 			etag, body, status, sequence, archiveURL :=
 				rs.etag, rs.body, rs.status, rs.sequence, rs.archiveURL
+			delay := rs.archiveDelay
+			if r.URL.Path == "/manifest" {
+				delay = rs.manifestDelay
+			}
 			conditional := rs.notModifiedOnTag
 			if r.URL.Path == "/manifest" {
 				rs.requests++
 				rs.lastIfNoneMatch = r.Header.Get("If-None-Match")
 			}
 			rs.mu.Unlock()
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if r.URL.Path == "/manifest" {
 				if etag != "" {
 					w.Header().Set("ETag", etag)
@@ -1317,6 +1332,31 @@ func TestNewTokenRegistrySyncBoundsDefaultClient(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, 42*time.Second, sync.client.Timeout)
+}
+
+func TestTokenRegistrySyncSharesDownloadTimeout(t *testing.T) {
+	body := tarballOf(t, map[string]string{
+		"mappings/" + syncSubjectNut + ".json": mappingJSON(
+			syncSubjectNut, "nutcoin", "NUT", "",
+		),
+	})
+	server := newRegistryServer(t, body)
+	server.mu.Lock()
+	server.manifestDelay = 100 * time.Millisecond
+	server.archiveDelay = 100 * time.Millisecond
+	server.mu.Unlock()
+	sync := newTestSync(
+		t,
+		newFakeTokenRegistryStore(),
+		server.URL,
+		func(cfg *TokenRegistryConfig) {
+			cfg.RequestTimeout = 150 * time.Millisecond
+		},
+	)
+
+	_, err := sync.SyncOnce(t.Context())
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // TestTokenRegistrySyncStopWaitsForWorkerAfterContextExpiry is the shutdown

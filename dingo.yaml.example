@@ -405,8 +405,9 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --token-registry-allow-private-addresses
   # allowPrivateAddresses: false
-  # Permit a valid signed manifest below the stored sequence high-water mark.
-  # Leave false except for an intentional publisher rollback.
+  # Permit a valid signed manifest below the currently stored sequence.
+  # Accepting it lowers the stored sequence. Leave false except for an
+  # intentional publisher rollback.
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK
   # CLI: --token-registry-allow-rollback
   # allowRollback: false

@@ -1629,7 +1629,7 @@ subjects the failed run never reached. The sync passes one metadata transaction
 through the snapshot stamp, every upsert batch, the prune, and the authenticated
 manifest sequence, digest, validator, and source-identity writes; a limit,
 signature, rollback, digest, store, state, or commit failure therefore leaves
-the previously served rows and authenticated high-water state unchanged on
+the previously served rows and authenticated manifest state unchanged on
 SQLite, PostgreSQL, and MySQL. These values use the existing `sync_state` table,
 so no schema migration is required. Archive ingestion and exact compressed-byte
 hashing complete into a bounded temporary staging file before that transaction
