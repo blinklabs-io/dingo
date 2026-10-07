@@ -320,8 +320,6 @@ Dingo is a modular, high-performance Cardano node written in Go.
    - Exposes tools, resources, and documentation for autonomous AI agents and operator interfaces.
 `
 
-const defaultResourceQueryTimeout = 5 * time.Second
-
 // tableEnumerationTimeout is the minimum bound on the one-time construction
 // query that lists tables for per-table schema resources.
 const tableEnumerationTimeout = 30 * time.Second
@@ -335,8 +333,8 @@ func RegisterResources(
 	network string,
 	timeouts ...time.Duration,
 ) {
-	queryTimeout := defaultResourceQueryTimeout
-	if len(timeouts) > 0 && timeouts[0] > 0 {
+	var queryTimeout time.Duration
+	if len(timeouts) > 0 {
 		queryTimeout = timeouts[0]
 	}
 	registerResources(
@@ -359,6 +357,9 @@ func registerResources(
 	enumerationFloor time.Duration,
 	logger *slog.Logger,
 ) {
+	if queryTimeout <= 0 {
+		queryTimeout = defaultQueryTimeout
+	}
 	// Resource: dingo://docs/identity
 	server.AddResource(&mcp.Resource{
 		URI:         "dingo://docs/identity",

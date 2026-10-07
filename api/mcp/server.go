@@ -147,10 +147,6 @@ func NewMCPServer(
 		cfg.QueryTimeout,
 		addressLookup,
 	)
-	resourceQueryTimeout := cfg.QueryTimeout
-	if resourceQueryTimeout <= 0 {
-		resourceQueryTimeout = 5 * time.Second
-	}
 	resourceLogger := deps.Logger
 	if resourceLogger == nil {
 		resourceLogger = slog.Default()
@@ -160,7 +156,7 @@ func NewMCPServer(
 		db,
 		deps.LedgerState,
 		deps.Network,
-		resourceQueryTimeout,
+		cfg.QueryTimeout,
 		tableEnumerationTimeout,
 		resourceLogger,
 	)
