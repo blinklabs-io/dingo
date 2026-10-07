@@ -29,13 +29,13 @@ import (
 )
 
 // TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue covers
-// dingo#4876: a Mithril catch-up/repair import must delete not just the
+// the invariant that a Mithril catch-up import must delete not just the
 // epoch row above its own anchor but the rollover residue that boundary
 // wrote (reward-credit round, reward outputs, block nonces, network state)
 // before replay resumes. Deleting only the epoch row is not enough: if local
 // replay before the import already ran that boundary's rollover once, a
 // second import followed by a second rollover of the same boundary (the
-// node re-crossing it after a repeated or resumed catch-up) collides with
+// node re-crossing it after a repeated catch-up) collides with
 // the first round's surviving reward_credit_round marker and hard-fails
 // saveStakeRewardOutputs's credited-round guard instead of recomputing the
 // round.
@@ -75,13 +75,13 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	nonce := make([]byte, 32)
 
 	// importAndRollOver drives the two real production entry points a
-	// catch-up/repair import plus resumed replay use: ImportLedgerState (the
+	// catch-up import plus replay use: ImportLedgerState (the
 	// code under test, which must sweep the prior round's residue above the
 	// anchor) and processEpochRollover (the real boundary trigger
 	// ledgerProcessBlocks calls once a replayed block's slot crosses
 	// currentEpoch.StartSlot+LengthInSlots). Called twice, it models local
-	// replay re-crossing the same boundary after a second catch-up/repair
-	// import -- e.g. a resumed or repeated import -- the scenario an
+	// replay re-crossing the same boundary after a second catch-up
+	// import -- a repeated import -- the scenario an
 	// epoch-only sweep could not survive.
 	importAndRollOver := func() *EpochRolloverResult {
 		t.Helper()
@@ -216,7 +216,7 @@ func TestMithrilCatchUpImportDeletesStalePostAnchorEpochRolloverResidue(
 	require.Positive(t, rewardAccountBalanceRound0)
 	require.Zero(t, memberBalanceRound0)
 
-	// Round 1: a second catch-up/repair import re-crosses the same
+	// Round 1: a second catch-up import re-crosses the same
 	// boundary. The widened sweep must clear round 0's reward-credit round
 	// and reward-state residue above the anchor so this rollover recomputes
 	// cleanly instead of hitting saveStakeRewardOutputs's credited-round
