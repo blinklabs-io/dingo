@@ -743,7 +743,7 @@ func applyPoolRegistrationCertificate(
 	// validation at write time. PoP verification happens at read time in
 	// ledger/leios's on-chain key provider, which is allowed to depend on
 	// ledger/leios's BLS primitives; this package is not (see
-	// internal/architecture/import_boundary_test.go). An invalid-PoP key is
+	// internal/architecture/tests_test.go). An invalid-PoP key is
 	// therefore excluded there, not here -- both layers still end up
 	// treating it as absent, matching upstream.
 	var leiosKeyPublic, leiosKeyPoP []byte
@@ -790,7 +790,15 @@ RETURNING id`,
 	// and no history, so the held amount is derived from the registration and
 	// retirement rows strictly before this certificate's position rather than
 	// from live pool state.
-	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit)
+	executionSlot := at.slot
+	var closureSlot sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT lc.slot FROM leios_transaction_context lc JOIN certs ON certs.transaction_id = lc.transaction_id WHERE certs.id = ?`, certificateID).Scan(&closureSlot); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if closureSlot.Valid {
+		executionSlot = uint64(closureSlot.Int64)
+	}
+	held, err := poolRegistrationDepositHeld(ctx, db, poolID, at, deposit, executionSlot)
 	if err != nil {
 		return 0, err
 	}

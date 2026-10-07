@@ -112,6 +112,27 @@ func (d *Database) GetActiveGovernanceProposals(
 	return proposals, nil
 }
 
+// GetGovernanceProposalSet returns the Conway proposals set: every proposal
+// not yet enacted, dropped, or soft-deleted.
+func (d *Database) GetGovernanceProposalSet(
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.governanceStore().GetGovernanceProposalSet(
+		txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get governance proposal set: %w",
+			err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetExpiringGovernanceProposals returns unratified proposals whose
 // expires_epoch is strictly less than the given epoch and that have not yet
 // been enacted, expired, or soft-deleted.
@@ -161,7 +182,7 @@ func (d *Database) GetExpiredGovernanceProposalsAt(
 // expired_epoch is strictly below the given epoch and whose deposit has not
 // yet been returned. Used at epoch start, before marking any new proposals
 // expired, to return the deposit and finalize proposals expired as of a prior
-// boundary (dingo#4411).
+// boundary.
 func (d *Database) GetExpiredAwaitingDropGovernanceProposals(
 	epoch uint64,
 	txn *Txn,

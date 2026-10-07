@@ -489,13 +489,8 @@ func validateBlockSizes(
 			pparams,
 		)
 	}
-	headerCbor := block.Header().Cbor()
-	if uint64(len(headerCbor)) > limits.maxHeaderSize {
-		return fmt.Errorf(
-			"block header size %d exceeds maxBlockHeaderSize %d",
-			len(headerCbor),
-			limits.maxHeaderSize,
-		)
+	if err := limits.checkHeaderSize(block.Header()); err != nil {
+		return err
 	}
 	actualBodySize, err := serializedBlockBodySize(block)
 	if err != nil {
@@ -509,11 +504,26 @@ func validateBlockSizes(
 			actualBodySize,
 		)
 	}
-	if actualBodySize > limits.maxBodySize {
+	return limits.checkBodySize(actualBodySize)
+}
+
+func (l blockProtocolLimits) checkHeaderSize(header gledger.BlockHeader) error {
+	if size := uint64(len(header.Cbor())); size > l.maxHeaderSize {
+		return fmt.Errorf(
+			"block header size %d exceeds maxBlockHeaderSize %d",
+			size,
+			l.maxHeaderSize,
+		)
+	}
+	return nil
+}
+
+func (l blockProtocolLimits) checkBodySize(size uint64) error {
+	if size > l.maxBodySize {
 		return fmt.Errorf(
 			"block body size %d exceeds maxBlockBodySize %d",
-			actualBodySize,
-			limits.maxBodySize,
+			size,
+			l.maxBodySize,
 		)
 	}
 	return nil
@@ -523,12 +533,19 @@ func validateBlockSizes(
 // A main block is measured against ppMaxBlockSize and ppMaxHeaderSize as
 // adopted for its epoch when pparams carries them; genesis only initializes
 // those parameters. Epoch boundary blocks, and callers with no adopted
-// parameters, use the genesis limits.
+// parameters, use the genesis limits. A main block whose adopted parameters
+// are unknown (eras.ByronProtocolParameters.AdoptionUnknown) is not measured.
 func validateByronBlockSizes(
 	block gledger.Block,
 	pparams lcommon.ProtocolParameters,
 	config *cardano.CardanoNodeConfig,
 ) error {
+	if _, isMain := block.(*byron.ByronMainBlock); isMain {
+		if adopted, ok := pparams.(*eras.ByronProtocolParameters); ok &&
+			adopted != nil && adopted.AdoptionUnknown {
+			return nil
+		}
+	}
 	maxBlockSize, maxHeaderSize, err := byronBlockSizeLimits(
 		block, pparams, config,
 	)

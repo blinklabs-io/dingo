@@ -337,7 +337,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 // pool (`delegations ⋫ retired`, Shelley spec Fig. 41); keeping them lets the
 // stake return to the pool distribution the moment the pool re-registers, so
 // the node's total active stake exceeds the network's and every other pool's
-// VRF leader threshold is computed too small (dingo #3794).
+// VRF leader threshold is computed too small.
 //
 // A pool retiring at a different epoch keeps its delegators, so the clear is
 // scoped to the pools actually reaped at this boundary rather than to every
@@ -505,7 +505,7 @@ func TestApplyPoolRetirements_ClearedDelegationIsRollbackSafe(t *testing.T) {
 // reap writes no certificate — so an account touched again after the reap and
 // then rolled back to a point still past it had its delegation to the reaped
 // pool restored, putting the stake the reap removed straight back into the pool
-// distribution (dingo #3794).
+// distribution.
 //
 // A rollback to before the reap is the opposite case and must restore the
 // delegation, which the certificate derivation already does; that is covered by

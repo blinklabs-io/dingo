@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +36,6 @@ import (
 	"github.com/blinklabs-io/dingo/plugin"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"golang.org/x/sync/errgroup"
 )
 
 // Sync-status values stored under the "sync_status" key. A complete sync clears
@@ -75,6 +75,200 @@ func setStableMithrilLedgerTip(
 		)
 	}
 	return nil
+}
+
+func verifyRewardRepairStateNotBehindStablePoint(
+	db *database.Database,
+	prepared *preparedLedgerStateImport,
+) error {
+	anchorSlotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	if err != nil {
+		return fmt.Errorf("reading existing Mithril ledger slot: %w", err)
+	}
+	if anchorSlotText == "" {
+		return nil
+	}
+	anchorSlot, err := strconv.ParseUint(anchorSlotText, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parsing existing Mithril ledger slot: %w", err)
+	}
+	stateTip := prepared.state.Tip
+	if stateTip.Slot < anchorSlot {
+		return fmt.Errorf(
+			"%w: selected state at slot %d is behind existing stable ledger point %d",
+			ErrRewardStateRepairWaitingForSnapshot,
+			stateTip.Slot,
+			anchorSlot,
+		)
+	}
+	return nil
+}
+
+func cleanupInvalidRepairStoredGapBeforeImport(
+	db *database.Database,
+	certifiedTip ocommon.Point,
+	prepared *preparedLedgerStateImport,
+	preservedLocalTail map[string]struct{},
+	logger *slog.Logger,
+) (bool, error) {
+	stateTip := prepared.state.Tip
+	if stateTip.Slot <= certifiedTip.Slot {
+		return false, nil
+	}
+	recent, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return false, fmt.Errorf("reading local chain tip for repair gap: %w", err)
+	}
+	if len(recent) == 0 || recent[0].Slot <= certifiedTip.Slot {
+		return false, nil
+	}
+	resumeGapEnd := min(recent[0].Slot, stateTip.Slot)
+	storedGapBlocks, err := loadGapBlocksFromBlob(
+		db,
+		certifiedTip.Slot+1,
+		resumeGapEnd,
+	)
+	if err != nil {
+		return false, fmt.Errorf("loading stored repair gap before import: %w", err)
+	}
+	immutableTip, err := database.BlockByPoint(db, certifiedTip)
+	if err != nil {
+		return false, fmt.Errorf("reading certified tip for repair gap: %w", err)
+	}
+	var validateErr error
+	if recent[0].Slot < stateTip.Slot {
+		validateErr = errors.New(
+			"stored partial gap does not reach the signed ledger-state point",
+		)
+	} else if resumeGapEnd == stateTip.Slot {
+		validateErr = validateCompleteGapBlocks(
+			storedGapBlocks,
+			certifiedTip,
+			ocommon.NewPoint(stateTip.Slot, stateTip.BlockHash),
+		)
+	} else {
+		validateErr = validateStoredGapContinuity(storedGapBlocks, immutableTip)
+	}
+	if validateErr == nil {
+		return false, nil
+	}
+	logger.Warn(
+		"stored volatile gap blocks failed continuity check before reward-state import; refetching from relay",
+		"component", "mithril",
+		"immutable_tip_slot", certifiedTip.Slot,
+		"resume_gap_end_slot", resumeGapEnd,
+		"ledger_state_slot", stateTip.Slot,
+		"error", validateErr,
+	)
+	if err := deleteBlobBlocksAboveSlotExcept(
+		db,
+		certifiedTip.Slot,
+		preservedLocalTail,
+	); err != nil {
+		return false, fmt.Errorf("cleaning rejected stored repair gap before import: %w", err)
+	}
+	return true, nil
+}
+
+func verifyRewardRepairLocalTail(
+	db *database.Database,
+	localTip models.Block,
+	prepared *preparedLedgerStateImport,
+) (map[string]struct{}, error) {
+	anchorSlotText, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading existing Mithril ledger slot: %w", err)
+	}
+	anchorHashText, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reading existing Mithril ledger hash: %w", err)
+	}
+	if anchorSlotText == "" {
+		return nil, errors.New(
+			"cannot repair local-ahead Mithril database without its existing stable ledger point",
+		)
+	}
+	anchorSlot, err := strconv.ParseUint(anchorSlotText, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("parsing existing Mithril ledger slot: %w", err)
+	}
+	var anchorHash []byte
+	if anchorHashText == "" {
+		anchorBlock, found, blockErr := localChainBlockAtSlot(
+			db, localTip, anchorSlot,
+		)
+		if blockErr != nil {
+			return nil, fmt.Errorf(
+				"resolving existing Mithril ledger point at slot %d: %w",
+				anchorSlot,
+				blockErr,
+			)
+		}
+		if !found {
+			return nil, fmt.Errorf(
+				"resolving existing Mithril ledger point at slot %d: no block on local chain",
+				anchorSlot,
+			)
+		}
+		anchorHash = anchorBlock.Hash
+	} else {
+		anchorHash, err = hex.DecodeString(anchorHashText)
+		if err != nil || len(anchorHash) != 32 {
+			return nil, errors.New(
+				"existing Mithril ledger hash is not a 32-byte hexadecimal block hash",
+			)
+		}
+	}
+	anchorPoint := ocommon.NewPoint(anchorSlot, anchorHash)
+	stateTip := prepared.state.Tip
+	if stateTip.Slot < anchorSlot {
+		return nil, fmt.Errorf(
+			"%w: selected state at slot %d is behind existing stable ledger point %d.%x",
+			ErrRewardStateRepairWaitingForSnapshot,
+			stateTip.Slot,
+			anchorSlot,
+			anchorHash,
+		)
+	}
+	oldAnchorOnLocalChain, err := localChainDescendsFromPoint(
+		db,
+		localTip,
+		anchorPoint,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("validating existing Mithril ledger point: %w", err)
+	}
+	if !oldAnchorOnLocalChain {
+		return nil, fmt.Errorf(
+			"existing Mithril ledger point %d.%x is not on the local chain tip %d.%x",
+			anchorSlot,
+			anchorHash,
+			localTip.Slot,
+			localTip.Hash,
+		)
+	}
+	if stateTip.Slot > localTip.Slot {
+		// The signed ancillary state itself covers the previous local tip, so
+		// there is no locally stored tail beyond the new replay anchor to keep.
+		return nil, nil
+	}
+	statePoint := ocommon.NewPoint(stateTip.Slot, stateTip.BlockHash)
+	localTail, stateOnLocalChain, err := localChainBlockHashesAfterPoint(
+		db, localTip, statePoint,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("validating reward-repair snapshot ancestry: %w", err)
+	}
+	if !stateOnLocalChain {
+		return nil, fmt.Errorf(
+			"signed reward-repair state point %d.%x is not an ancestor of local chain tip %d.%x",
+			stateTip.Slot,
+			stateTip.BlockHash,
+			localTip.Slot,
+			localTip.Hash,
+		)
+	}
+	return localTail, nil
 }
 
 // syncMode is the state-detected disposition of a Sync run, decided from the
@@ -874,13 +1068,25 @@ func Sync(
 	//
 	// Released on the way out whether or not the extracted tree is cleaned up:
 	// a run that keeps the tree for a later sync still must not leak the
-	// descriptors. This runs after the import errgroup is joined, which is what
-	// makes clearing the fields safe against the goroutines that read them.
+	// descriptors. This runs after both import phases return, which makes
+	// clearing the fields safe against code that reads them.
 	defer bootstrapResult.CloseHandles()
 	certifiedImmutable, err := openBootstrappedImmutable(bootstrapResult)
 	if err != nil {
 		return SyncResult{}, err
 	}
+	certifiedTip, err := certifiedImmutable.GetTip()
+	if err != nil {
+		return SyncResult{}, fmt.Errorf(
+			"reading certified ImmutableDB tip: %w", err,
+		)
+	}
+	if certifiedTip == nil {
+		return SyncResult{}, errors.New("certified ImmutableDB has no chain tip")
+	}
+
+	var preparedRepairImport *preparedLedgerStateImport
+	var preservedLocalTail map[string]struct{}
 
 	// Catch-up: confirm the local chain is an ancestor of the target artifact
 	// before mutating anything. A divergent database is left untouched and the
@@ -888,19 +1094,25 @@ func Sync(
 	// markSyncInProgress so an aborted catch-up does not mark a healthy
 	// database incomplete.
 	if catchUp {
+		recent, recentErr := database.BlocksRecent(db, 1)
+		if recentErr != nil {
+			return SyncResult{}, fmt.Errorf("reading local chain tip: %w", recentErr)
+		}
+		if len(recent) == 0 {
+			return SyncResult{}, errors.New("catch-up: local database has no chain tip")
+		}
+		localTip := recent[0]
 		targetImmutable := uint64(0)
 		if bootstrapResult.Snapshot != nil {
 			targetImmutable = bootstrapResult.Snapshot.Beacon.ImmutableFileNumber
 		}
-		// A resuming run (sync_status still in_progress) never maps
-		// local-ahead to up-to-date: it must fall through to the import so the
-		// interrupted run's remaining work — gap-block transaction processing,
-		// deferred index rebuild, sync-state cleanup — completes. Returning
-		// early here would leave the node wedged (serve refuses to start on
-		// sync_status="in_progress" and every re-run would no-op).
+		// Interrupted syncs must complete their bookkeeping. Reward repair can
+		// also continue after a verified local-ahead result, but only after the
+		// selected ledger state passes the trust and ancestry checks below.
 		upToDate, interErr := verifyCatchupBeforeImport(
 			db, certifiedImmutable, targetImmutable,
-			mode == syncModeResume, logger,
+			mode == syncModeResume || cfg.RepairLegacyRewardState,
+			logger,
 		)
 		if interErr != nil {
 			return SyncResult{}, interErr
@@ -923,6 +1135,37 @@ func Sync(
 				return SyncResult{}, err
 			}
 			return SyncResult{}, nil
+		}
+		if cfg.RepairLegacyRewardState {
+			preparedRepairImport, err = prepareLedgerStateImport(
+				logger, bootstrapResult, certifiedTip.Slot,
+			)
+			if err != nil {
+				return SyncResult{}, fmt.Errorf(
+					"preparing reward-repair ledger state: %w", err,
+				)
+			}
+			defer preparedRepairImport.Close()
+			if err := verifyRewardRepairStateNotBehindStablePoint(
+				db, preparedRepairImport,
+			); err != nil {
+				return SyncResult{}, err
+			}
+			if localTip.Slot > certifiedTip.Slot {
+				preservedLocalTail, err = verifyRewardRepairLocalTail(
+					db, localTip, preparedRepairImport,
+				)
+				if err != nil {
+					return SyncResult{}, err
+				}
+				logger.Info(
+					"reward repair will preserve the verified local chain tail for startup replay",
+					"component", "mithril",
+					"snapshot_slot", preparedRepairImport.state.Tip.Slot,
+					"local_tip_slot", localTip.Slot,
+					"preserved_blocks", len(preservedLocalTail),
+				)
+			}
 		}
 		if cfg.RepairLegacyRewardState && isAPIMode(cfg.StorageMode) {
 			if err := resetMithrilBackfillCheckpoint(db); err != nil {
@@ -966,6 +1209,24 @@ func Sync(
 	// share the same pragma settings without racing.
 	defer node.WithBulkLoadPragmas(db, logger)()
 
+	// A rejected pre-existing gap must be cleared before importing an
+	// ancillary state beyond ImmutableDB: cleanup rolls back UTxO rows by
+	// slot, and doing that after import would remove the authoritative snapshot
+	// UTxOs whose AddedSlot is the selected state slot.
+	repairGapCleanedBeforeImport := false
+	if preparedRepairImport != nil {
+		repairGapCleanedBeforeImport, err = cleanupInvalidRepairStoredGapBeforeImport(
+			db,
+			*certifiedTip,
+			preparedRepairImport,
+			preservedLocalTail,
+			logger,
+		)
+		if err != nil {
+			return SyncResult{}, err
+		}
+	}
+
 	// Drop the deferred-index manifest BEFORE inserting any rows
 	// so secondary indexes are not maintained during ledger-state
 	// import, immutable blob load, or API backfill. The rebuild is
@@ -983,18 +1244,6 @@ func Sync(
 	// its newest state regardless of slot, vouched for by the ancillary
 	// manifest signature rather than by the certified range. Either way, later
 	// blocks must go through normal ledger validation when the node starts.
-	certifiedTip, err := certifiedImmutable.GetTip()
-	if err != nil {
-		return SyncResult{}, fmt.Errorf(
-			"reading certified ImmutableDB tip: %w",
-			err,
-		)
-	}
-	if certifiedTip == nil {
-		return SyncResult{}, errors.New(
-			"certified ImmutableDB has no tip",
-		)
-	}
 	// The certified tip is the artifact identity the ledger-state import
 	// actually depends on: the extraction cache is reused across runs, so a
 	// pinned artifact whose cache no longer yields the recorded tip must not
@@ -1006,32 +1255,56 @@ func Sync(
 		return SyncResult{}, err
 	}
 
-	// Import ledger state and copy blocks in parallel.
-	// Ledger state goes to metadata (SQLite), blocks go to the blob
-	// store (Badger) — completely independent data stores.
+	// Copy blocks before importing the ledger state. Both phases write metadata:
+	// block copy advances the chain and records its transaction metadata, while
+	// the ledger import writes the snapshot state. Keeping the phases ordered
+	// prevents independent SQLite write transactions from contending during a
+	// bootstrap. Each phase is resumable if the later phase fails.
 	var loadResult *node.LoadBlobsResult
 	var ledgerStateSlot uint64
 	var ledgerStateHash []byte
 	var ledgerStateBeyondCertifiedTip bool
-	g, gctx := errgroup.WithContext(ctx)
 
-	g.Go(func() error {
+	importLedgerStatePhase := func() error {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
-		slot, hash, beyondCertifiedTip, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, bootstrapResult, catchUp,
-			certifiedTip.Slot,
-			func(p ledgerstate.ImportProgress) {
-				cfg.emit(SyncProgress{
-					Phase:       PhaseLedgerImport,
-					Active:      true,
-					Percent:     p.Percent,
-					Count:       p.Current,
-					Total:       p.Total,
-					Description: p.Stage,
-				})
-			},
-		)
+		onLedger := func(p ledgerstate.ImportProgress) {
+			cfg.emit(SyncProgress{
+				Phase:       PhaseLedgerImport,
+				Active:      true,
+				Percent:     p.Percent,
+				Count:       p.Current,
+				Total:       p.Total,
+				Description: p.Stage,
+			})
+		}
+		var slot uint64
+		var hash []byte
+		var beyondCertifiedTip bool
+		var importErr error
+		if preparedRepairImport != nil {
+			slot, hash, beyondCertifiedTip, importErr = importPreparedLedgerState(
+				ctx,
+				db,
+				logger,
+				nodeCfg,
+				bootstrapResult,
+				preparedRepairImport,
+				catchUp,
+				onLedger,
+			)
+		} else {
+			slot, hash, beyondCertifiedTip, importErr = importLedgerState(
+				ctx,
+				db,
+				logger,
+				nodeCfg,
+				bootstrapResult,
+				catchUp,
+				certifiedTip.Slot,
+				onLedger,
+			)
+		}
 		if importErr != nil {
 			return fmt.Errorf("importing ledger state: %w", importErr)
 		}
@@ -1048,9 +1321,9 @@ func Sync(
 			)
 		}
 		return nil
-	})
+	}
 
-	g.Go(func() error {
+	copyImmutablePhase := func() error {
 		cfg.emit(SyncProgress{Phase: PhaseImmutableCopy, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseImmutableCopy, Active: false})
 		logger.Info(
@@ -1060,7 +1333,7 @@ func Sync(
 		)
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
-			gctx, nil, logger, bootstrapResult.ImmutableDir, db,
+			ctx, nil, logger, bootstrapResult.ImmutableDir, db,
 			node.WithImmutableDB(certifiedImmutable),
 			node.WithLoadBlobsProgress(func(p node.LoadBlobsProgress) {
 				cfg.emit(SyncProgress{
@@ -1088,10 +1361,37 @@ func Sync(
 			})
 		}
 		return nil
-	})
+	}
 
-	if err := g.Wait(); err != nil {
+	if err := copyImmutablePhase(); err != nil {
 		return SyncResult{}, err
+	}
+	if err := importLedgerStatePhase(); err != nil {
+		return SyncResult{}, err
+	}
+	if cfg.RepairLegacyRewardState && preparedRepairImport != nil {
+		// No gap blocks have been processed yet. Rolling back to the selected
+		// state must discard post-state metadata and restore spends, whether or
+		// not the local chain has a tail beyond the certified ImmutableDB tip.
+		if deferredIndexes != nil {
+			if err := deferredIndexes.BuildCritical(); err != nil {
+				return SyncResult{}, fmt.Errorf(
+					"rebuilding indexes before reward-repair metadata rollback: %w",
+					err,
+				)
+			}
+		}
+		if err := db.RollbackMetadataAfterSlot(
+			ocommon.NewPoint(ledgerStateSlot, ledgerStateHash),
+			0,
+			nil,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"rolling back metadata above reward-repair state slot %d: %w",
+				ledgerStateSlot,
+				err,
+			)
+		}
 	}
 	// A ledger state past the certified tip is refused unless
 	// importLedgerState itself vouches for the reason: a verified ancillary
@@ -1142,6 +1442,28 @@ func Sync(
 	if loadResult != nil {
 		immutableTipSlot = loadResult.ImmutableTipSlot
 	}
+	if cfg.RepairLegacyRewardState &&
+		ledgerStateSlot < immutableTipSlot &&
+		len(preservedLocalTail) > 0 {
+		// The selected state can precede the certified tip. Keep the verified
+		// local chain after that point, including certified blocks, and remove
+		// same-range fork blobs before ordinary ledger replay sees them.
+		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+			db, ledgerStateSlot, preservedLocalTail,
+		); cleanupErr != nil {
+			return SyncResult{}, fmt.Errorf(
+				"removing non-canonical blocks above reward-repair state slot %d: %w",
+				ledgerStateSlot, cleanupErr,
+			)
+		}
+		recentBlocks, err = database.BlocksRecent(db, 1)
+		if err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"reading chain tip after reward-repair tail cleanup: %w",
+				err,
+			)
+		}
+	}
 	// When the snapshot's ledger state lands exactly on an immutable
 	// boundary, there is no gap to fill — but stale volatile blocks
 	// from a prior run can still sit above it. Drop them now so the
@@ -1156,8 +1478,9 @@ func Sync(
 			"stored_tip_slot", recentBlocks[0].Slot,
 			"ledger_state_slot", ledgerStateSlot,
 		)
-		if cleanupErr := deleteBlobBlocksAboveSlot(
+		if cleanupErr := deleteBlobBlocksAboveSlotExcept(
 			db, immutableTipSlot,
+			preservedLocalTail,
 		); cleanupErr != nil {
 			return SyncResult{}, fmt.Errorf(
 				"removing stale volatile blocks above slot %d: %w",
@@ -1248,13 +1571,16 @@ func Sync(
 			// Drop the rejected blob blocks so neither the upcoming
 			// BlocksRecent query nor any slot-ordered iterator can
 			// resurface them as the chain tip after the relay refetch.
-			if cleanupErr := deleteBlobBlocksAboveSlot(
-				db, immutableTipSlot,
-			); cleanupErr != nil {
-				return SyncResult{}, fmt.Errorf(
-					"removing rejected gap blocks above slot %d: %w",
-					immutableTipSlot, cleanupErr,
-				)
+			if !repairGapCleanedBeforeImport {
+				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
+					db, immutableTipSlot,
+					preservedLocalTail,
+				); cleanupErr != nil {
+					return SyncResult{}, fmt.Errorf(
+						"removing rejected gap blocks above slot %d: %w",
+						immutableTipSlot, cleanupErr,
+					)
+				}
 			}
 			recentBlocks = []models.Block{immutableTip}
 		} else {
@@ -1266,8 +1592,9 @@ func Sync(
 					"stored_tip_slot", storedTipSlot,
 					"resume_gap_end_slot", resumeGapEnd,
 				)
-				if cleanupErr := deleteBlobBlocksAboveSlot(
+				if cleanupErr := deleteBlobBlocksAboveSlotExcept(
 					db, resumeGapEnd,
+					preservedLocalTail,
 				); cleanupErr != nil {
 					return SyncResult{}, fmt.Errorf(
 						"removing stored gap blocks above slot %d: %w",
@@ -1470,6 +1797,10 @@ func Sync(
 		indexRebuildElapsed,
 	)
 
+	if err := node.FinalizeBackfillPlannerStats(ctx, db, logger); err != nil {
+		return SyncResult{}, err
+	}
+
 	if err := updateMithrilReadyState(
 		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 		"", true,
@@ -1539,8 +1870,7 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	db := runtime.Database
 	defer runtime.Close(context.Background())
 	if recoveryErr := runtime.RecoveryError(); recoveryErr != nil {
-		var cte database.CommitTimestampError
-		if !errors.As(recoveryErr, &cte) {
+		if _, ok := errors.AsType[database.CommitTimestampError](recoveryErr); !ok {
 			return false, fmt.Errorf("opening database: %w", recoveryErr)
 		}
 	}

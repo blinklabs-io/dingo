@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,7 +24,38 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+func FuzzNewCardanoNodeConfigFromReader(f *testing.F) {
+	f.Add("")
+	f.Add("Protocol: Cardano\nRequiresNetworkMagic: RequiresMagic\n")
+	f.Add("PeerSharing: true\nTargetNumberOfActivePeers: 20\n")
+
+	f.Fuzz(func(t *testing.T, data string) {
+		if len(data) > 64*1024 {
+			t.Skip("config input is too large for fast fuzzing")
+		}
+
+		cfg, err := NewCardanoNodeConfigFromReader(bytes.NewBufferString(data))
+		if err != nil {
+			return
+		}
+		if cfg == nil {
+			t.Fatalf(
+				"NewCardanoNodeConfigFromReader returned nil without an error",
+			)
+		}
+
+		encoded, err := yaml.Marshal(cfg)
+		if err != nil {
+			t.Fatalf("yaml.Marshal(parsed config): %v", err)
+		}
+		if _, err := NewCardanoNodeConfigFromReader(bytes.NewReader(encoded)); err != nil {
+			t.Fatalf("reparse marshaled config: %v", err)
+		}
+	})
+}
 
 const (
 	testDataDir = "testdata"

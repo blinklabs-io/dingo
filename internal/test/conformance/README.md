@@ -22,9 +22,9 @@ vote-shape heuristic ("did each voter group say yes"), not by calling
 those two vectors need production's actual stake-weighted thresholds to
 distinguish. Building the `governance.ProposalTally` those two action types
 pass to `ShouldRatify` still happens in the harness rather than
-`ledger/governance`'s own tally, because that production tally does not yet
-count an active proposal's own deposit as part of its return account's DRep
-voting power (CIP-1694 active voting stake -- tracked as issue #4355).
+`ledger/governance`'s own tally. The harness adds active proposal deposits to
+each return account's delegated stake locally. Production applies the same
+CIP-1694 rule through `ActiveProposalDepositDRepPower`.
 
 ## What the vectors cover
 
@@ -50,16 +50,58 @@ networking, node-to-node protocol, or end-to-end compatibility with
 | Deterministic consensus | Shared `ouroboros-mock/consensus` captured scenarios | `go test ./ouroboros/ -run TestConsensusConformance` | Final chain choice, within-k and beyond-k behavior, rollback/intersection points, tie-breaking, and downstream ChainSync observations | Live sockets, full block bodies, and cardano-node process behavior |
 | Reference node | DevNet `--conformance` profile | `./internal/test/devnet/run-tests.sh --conformance` | Dingo beside `cardano-node` in the configured live topology | Not run by the ledger or deterministic consensus profiles |
 
-The deterministic corpus currently contains five scenarios: one origin
-roll-forward smoke test, one within-k fork, one longer fork using `local_tip`,
-one equal-length slot battle, and one beyond-k no-switch case. The tests log
-the exact scenario and ledger coverage counts; a passing ledger profile must
-not be summarized as complete node conformance.
+The deterministic corpus currently contains seven scenarios: one origin
+roll-forward smoke test, one non-origin intersection, one within-k fork, the
+same fork with the winning peer fed first, one longer fork using `local_tip`
+whose losing fork is denser after the fork point, one equal-length slot battle,
+and one beyond-k no-switch case. The corpus has no generated multi-peer
+schedules (see the Tweag runner below). The tests log the exact scenario and
+ledger coverage counts; a passing ledger profile must not be summarized as
+complete node conformance. The release and Linux CI gates run the ledger and
+deterministic consensus profiles as part of `./...`; the reference-node profile
+is a separate DevNet check and is not represented as passing when it was not
+run.
 
-The Tweag Node-vs-Environment runner/test-generator approach remains a
-feasibility reference rather than a dependency: no stable reusable upstream
-artifact is pinned here, so these shared local captures preserve equivalent
-fork-choice and rollback scenarios until one exists.
+The consensus replay feeds each peer's captured headers through Dingo's
+ChainSync client handlers into the real chain selector, then asserts the final
+tip, the selector's reported rollback point on fork switches, and the ChainSync
+messages Dingo serves downstream. For the last, the selected peer's headers
+are added to a Dingo chain as header-only blocks (the replay has no block
+bodies, and a node-to-node `RollForward` carries only the header) and a
+node-to-node client syncs that chain through Dingo's ChainSync server until it
+receives `AwaitReply`. The client intersects where the selected peer's trace
+starts: at origin, or at the point of a leading `RollBackward`, in which case a
+stand-in block with that point's slot and hash anchors the chain below the
+first header and is never served.
+
+### Tweag Node-vs-Environment runner
+
+[tweag/cardano-conformance-testing-of-consensus](https://github.com/tweag/cardano-conformance-testing-of-consensus)
+designs three tools around `ouroboros-consensus`'s Node-vs-Environment tests:
+`testgen` generates a test file holding a point schedule and a property,
+`runner` serves that schedule from simulated upstream peers and judges the
+node under test through a downstream observer peer, and `shrinkview` prints
+shrunk counterexamples. Each `testgen`/`runner` pair is one property-test
+case, to be run in a loop.
+
+Dingo does not consume it yet:
+
+- No release exists. The executables live on unreleased `conformance-testing`
+  branches of Tweag forks of `cardano-node` (based on 10.5.1) and
+  `ouroboros-consensus`, and there is no tagged test-file format or corpus to
+  pin in `go.mod` or `ouroboros-mock`.
+- The node under test must take a generated topology, connect to the runner's
+  peers over real sockets, and accept headers without VRF validation, because
+  the generators place blocks in arbitrary slots. Dingo has no option to skip
+  VRF validation.
+- Runs depend on the runner's wall-clock ticking and a Haskell toolchain, so
+  they belong beside the reference-node DevNet profile rather than in the
+  deterministic `go test` profile.
+
+What it would add is generated density, peer-scheduling and adversarial
+schedules with shrinking. Until a tagged runner release exists, the captured
+scenarios in `ouroboros-mock` are the deterministic consensus coverage, and new
+fork-choice cases are added there.
 
 ## Running the tests
 
@@ -143,7 +185,7 @@ temporary one per call; that directory is never cleared between vectors
 hashes and are simply never looked up again -- harmless, see
 `state_manager_postgres.go`'s doc comment). `TestMain` drops the process
 schema and removes this directory once, after every test in the process
-has finished -- see `conformance_main_test.go`.
+has finished -- see `process_cleanup_test.go`.
 
 **Reset semantics.** Between vectors, `DingoStateManager.Reset()` does not
 call the metadata store's own `Resettable.Reset` (`database/plugin/metadata/postgres`'s
@@ -220,7 +262,7 @@ recreating them), keeping the already-open store's connection pool live
 throughout instead of paying for a close/reopen/re-migrate cycle on every
 vector. `TestMain` drops the process database and removes this directory
 once, after every test in the process has finished -- see
-`conformance_main_test.go`.
+`process_cleanup_test.go`.
 
 `TestRulesConformanceVectorsMysql` follows the same count-comparison approach
 as the Postgres variant, for the same reason, and likewise reuses the memoized
@@ -279,12 +321,12 @@ implementations for the committee-certificate, unknown-voter, Plutus, fee and
 PlutusV1/V2 feature rules; the pre-Alonzo eras replace the upstream fee and
 max-size rules outright).
 
-The pinned `ouroboros-mock v0.20.2` corpus contains 2,574 Blueprint vectors
-and one synthetic rollback fixture. A complete SQLite run therefore reports
-2,575/2,575, 100%, with the breakdown by era and rule family shown in the
-verbose test output.
+The pinned `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c` corpus
+contains 2,574 Blueprint vectors and one synthetic rollback fixture. A complete
+SQLite run therefore reports 2,575/2,575, 100%, with the breakdown by era and
+rule family shown in the verbose test output.
 
-`entry_points_test.go` and `entry_points_replay_test.go` close that gap:
+`state_provider_test.go` closes that gap:
 
 - `TestConformanceVectorsExerciseDingoEraEntryPoints` replays the corpus a
   second time, routing every vector transaction through the production entry
@@ -318,7 +360,8 @@ rule coverage.
 Each backend replays the corpus **exactly once per `go test` process**, and
 every consumer reads that one memoized result set: the pass/fail gate, the
 progress statistics, and the cross-backend comparison. The vector extraction is
-shared the same way, once rather than once per replay. See `corpus_test.go`.
+shared the same way, once rather than once per replay. See
+`state_provider_test.go`.
 
 The one deliberate exception is the SQLite-only entry-point replay described in
 [Dingo validation entry point coverage](#dingo-validation-entry-point-coverage).
@@ -371,28 +414,45 @@ access patterns. That needs **one** pass per dialect, not several.
 
 | File | Purpose |
 |---|---|
-| `conformance_test.go` | Go test entry point, SQLite backend (`TestRulesConformanceVectors`) |
-| `corpus_test.go` | Memoized per-backend corpus replay, shared assertion/reporting/comparison helpers, and the shared vector extraction |
-| `corpus_main_test.go` | `TestMain` for the untagged build — removes the shared vector extraction (`!dingo_extra_plugins` build tag) |
-| `conformance_postgres_test.go` | Go test entry points, PostgreSQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
-| `conformance_mysql_test.go` | Go test entry points, MySQL backend, including restart/rollback/invalid-DSN acceptance tests (`dingo_extra_plugins` build tag) |
-| `conformance_main_test.go` | `TestMain` — drops this process's Postgres schema and MySQL database and removes their paired blob directories once, after every test in the process has finished (`dingo_extra_plugins` build tag) |
+| `process_cleanup_test.go` | SQLite conformance entry point, corpus replay and helpers, entry-point validation tests, and shared `TestMain` cleanup |
+| `conformance_postgres_test.go` | PostgreSQL and MySQL conformance entry points and acceptance tests (`dingo_extra_plugins` build tag) |
+| `dijkstra_state_manager_test.go` | Dijkstra state-manager regression tests |
 | `database.go` | `openRealDatabase`/`closeRealDatabase` — composes a real blob+metadata `database.Database` via `plugin.Resolve`, shared by all three backend constructors |
 | `state_manager.go`    | `DingoStateManager` — implements `conformance.StateManager` against a real Dingo `database.Database` and `ledger/governance`, reusing production persistence code |
 | `state_manager_postgres.go` | `NewDingoPostgresStateManager` — same `DingoStateManager`, real Postgres connection with schema isolation (`dingo_extra_plugins` build tag) |
 | `state_manager_mysql.go` | `NewDingoMysqlStateManager` — same `DingoStateManager`, real MySQL connection with database isolation (`dingo_extra_plugins` build tag) |
-| `state_manager_backend_test.go` | Real-backend acceptance tests against the default SQLite manager: restart survival, transaction rollback, and an epoch-transition/stake-snapshot test driving `ledger/governance.ProcessEpoch` and `ledger/snapshot.Manager` end to end |
-| `entry_points_test.go` | Assertions that Dingo's production era validation entry points actually execute for the corpus, plus the per-era and detector-proving regression tests |
-| `entry_points_replay_test.go` | Entry-point replay machinery: era-registry read, observing ledger state, per-vector routing evidence, and the bypass detector predicate |
+| `state_manager_test.go` | Real-backend acceptance tests against the default SQLite manager: restart survival, transaction rollback, and an epoch-transition/stake-snapshot test driving `ledger/governance.ProcessEpoch` and `ledger/snapshot.Manager` end to end |
 | `state_provider.go`   | State-query adapters used by the harness -- every read queries the real backend live (see its type doc comment for the one narrow, documented exception) |
 | `docker-compose.yml`  | Local PostgreSQL and MySQL for the SQL-backed tests |
+
+## Peras vectors
+
+`peras_vectors_test.go` discovers Peras (CIP-0140) conformance vectors in a
+`peras/` directory of the extracted `ouroboros-mock` corpus, beside `eras/`
+and `synthetic/`. The corpus does not ship that directory yet, and
+`TestPerasConformanceVectors` skips cleanly while it is absent or holds no
+vectors. Expected layout:
+
+```
+peras/
+├── <group>/              # optional, any depth
+│   └── <vector>          # one vector per file
+└── pparams-by-hash/      # skipped, as in eras/
+```
+
+Files are collected by `conformance.CollectVectorFiles`, the same rules the
+rest of the corpus uses: `pparams-by-hash/` and `scripts/` are skipped, as are
+`README` and `*.md` files, and the result is in lexical path order. Peras
+vectors arrive through an `ouroboros-mock` bump like every other vector. The
+loader performs no Peras validation yet; each discovered vector is only
+checked to be non-empty.
 
 ## Updating vectors
 
 The vectors themselves are **embedded in `ouroboros-mock`**, not in this repo.
-The current import is `ouroboros-mock v0.20.2`, whose `conformance/CORPUS.md`
-records Blueprint revision `0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive
-SHA-256
+The current import is `ouroboros-mock v0.20.5-0.20261002194245-6bfd701ae86c`,
+whose `conformance/CORPUS.md` records Blueprint revision
+`0f0c17e1ca24b062c868d216ae50708fc19c83ab`, archive SHA-256
 `574ff7a17857dfc1f0cf477f7eb9eba1c2a0f901453396a779de4b2392ef6863`, and
 the vector/protocol-parameter inventory. To update the corpus, bump the
 `ouroboros-mock` dependency in `go.mod`, update the expected count and this

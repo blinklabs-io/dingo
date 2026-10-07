@@ -16,7 +16,6 @@ package ledger
 
 import (
 	"bytes"
-	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -138,14 +137,18 @@ func (ls *LedgerState) epochAtTip(
 
 // nonceFromBytes converts a stored nonce into its wire form. An absent or
 // empty value is the neutral nonce, which is how the ledger represents "no
-// nonce yet" — notably at genesis and before the first epoch boundary.
-func nonceFromBytes(b []byte) lcommon.Nonce {
-	if len(b) != lcommon.Blake2b256Size {
-		return lcommon.Nonce{Type: lcommon.NonceTypeNeutral}
+// nonce yet" — notably at genesis and before the first epoch boundary. Any
+// other length is a malformed stored nonce and fails rather than being
+// reported as neutral.
+func nonceFromBytes(b []byte) (lcommon.Nonce, error) {
+	if len(b) == 0 {
+		return lcommon.Nonce{Type: lcommon.NonceTypeNeutral}, nil
 	}
-	nonce := lcommon.Nonce{Type: lcommon.NonceTypeNonce}
-	copy(nonce.Value[:], b)
-	return nonce
+	value, err := lcommon.NewBlake2b256Checked(b)
+	if err != nil {
+		return lcommon.Nonce{}, fmt.Errorf("stored nonce: %w", err)
+	}
+	return lcommon.Nonce{Type: lcommon.NonceTypeNonce, Value: value}, nil
 }
 
 // queryShelleyDebugChainDepState answers GetChainDepState, the consensus
@@ -155,12 +158,14 @@ func nonceFromBytes(b []byte) lcommon.Nonce {
 // schedule, so leaving it unhandled does not merely fail one query: an
 // unsupported query aborts the LocalStateQuery protocol, the node drops the
 // connection, and the caller sees only a closed bearer.
-func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
+func (ls *LedgerState) queryShelleyDebugChainDepState(
+	txn *database.Txn,
+) (any, error) {
 	// Every value in the reply is read from this one transaction, tip and epoch
 	// included; see epochAtTip for why neither may come from the in-memory
 	// snapshots.
-	txn := ls.db.Transaction(false)
-	defer txn.Release()
+	txn, release := ls.readTxn(txn)
+	defer release()
 
 	tip, current, err := ls.epochAtTip(txn)
 	if err != nil {
@@ -207,8 +212,14 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 				err,
 			)
 		}
-		evolvingNonce = nonceFromBytes(evolving)
-		candidateNonce = nonceFromBytes(candidate)
+		evolvingNonce, err = nonceFromBytes(evolving)
+		if err != nil {
+			return nil, fmt.Errorf("chain dep state evolving nonce: %w", err)
+		}
+		candidateNonce, err = nonceFromBytes(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("chain dep state candidate nonce: %w", err)
+		}
 	}
 
 	// The era at the tip decides the layout. Both records carry the last slot,
@@ -237,12 +248,21 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 		CandidateNonce: candidateNonce,
 	}
 	if current != nil {
-		state.EpochNonce = nonceFromBytes(current.Nonce)
+		state.EpochNonce, err = nonceFromBytes(current.Nonce)
+		if err != nil {
+			return nil, fmt.Errorf("chain dep state epoch nonce: %w", err)
+		}
 		// The lab carried into this epoch: the parent hash of the last block
 		// of the previous one.
-		state.LastEpochBlockNonce = nonceFromBytes(
+		state.LastEpochBlockNonce, err = nonceFromBytes(
 			current.LastEpochBlockNonce,
 		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"chain dep state last epoch block nonce: %w",
+				err,
+			)
+		}
 		// Epoch 0 has no predecessor; its previous-epoch nonce stays neutral.
 		if current.EpochId > 0 {
 			previous, err := ls.db.GetEpoch(current.EpochId-1, txn)
@@ -250,7 +270,13 @@ func (ls *LedgerState) queryShelleyDebugChainDepState() (any, error) {
 				return nil, err
 			}
 			if previous != nil {
-				state.PreviousEpochNonce = nonceFromBytes(previous.Nonce)
+				state.PreviousEpochNonce, err = nonceFromBytes(previous.Nonce)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"chain dep state previous epoch nonce: %w",
+						err,
+					)
+				}
 			}
 		}
 	}
@@ -291,7 +317,8 @@ func foldEndSlotForTip(tipSlot uint64) uint64 {
 // applied block's parent hash -- the PARENT, not the block's own hash, a
 // deliberate one-block lag that keeps the final block of an epoch out of the
 // nonce it seeds. See epochLabNonce, which computes the same value at a
-// boundary, and #2734 for what a shift by one costs.
+// boundary; a shift by one block makes every leader-VRF check in the next
+// epoch fail.
 //
 // Serving the epoch's carried last-epoch-block nonce instead is right only
 // until the epoch's first block lands, since that carried value is what the
@@ -307,14 +334,15 @@ func (ls *LedgerState) chainDepStateLabNonce(
 		// value the epoch opened with -- or a tip whose hash cannot name a
 		// block at all, which is the same answer and, more to the point, not
 		// a reason to abort the protocol and drop the connection.
-		return nonceFromBytes(carriedLabNonce), nil
+		return nonceFromBytes(carriedLabNonce)
 	}
 	// By point, not by hash. A hash lookup goes through the block hash index,
-	// which has only been written since #1915 and reports a miss rather than
-	// scanning for a block predating it -- so a database still carrying those
-	// blocks answers "no such block" for one it holds, and a node restarted on
-	// such a database has exactly one of them as its tip. The tip's slot and
-	// hash address the block's blob directly, which needs no index.
+	// which has only been populated for newer blocks and reports a miss rather
+	// than scanning for a block predating it -- so a database still carrying
+	// those blocks answers "no such block" for one it holds, and a node
+	// restarted on such a database has exactly one of them as its tip. The
+	// tip's slot and hash address the block's blob directly, which needs no
+	// index.
 	block, err := database.BlockByPointTxn(txn, tip.Point)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -324,7 +352,7 @@ func (ls *LedgerState) chainDepStateLabNonce(
 			// epoch's first block, which is wrong by at most one block;
 			// failing would abort the protocol and take the whole query
 			// with it.
-			return nonceFromBytes(carriedLabNonce), nil
+			return nonceFromBytes(carriedLabNonce)
 		}
 		return lcommon.Nonce{}, err
 	}
@@ -337,16 +365,16 @@ func (ls *LedgerState) chainDepStateLabNonce(
 		)
 	}
 	if len(prevHash) != lcommon.Blake2b256Size {
-		return nonceFromBytes(carriedLabNonce), nil
+		return nonceFromBytes(carriedLabNonce)
 	}
 	// prevHashToNonce maps GenesisHash to the neutral nonce rather than to the
 	// genesis hash bytes, so the chain's first block leaves the lab as it was.
 	if genesisHash, gErr := GenesisBlockHash(
 		ls.config.CardanoNodeConfig,
 	); gErr == nil && bytes.Equal(prevHash, genesisHash[:]) {
-		return nonceFromBytes(carriedLabNonce), nil
+		return nonceFromBytes(carriedLabNonce)
 	}
-	return nonceFromBytes(prevHash), nil
+	return nonceFromBytes(prevHash)
 }
 
 // chainDepStateOpCertCounters collects the highest operational-certificate
@@ -370,29 +398,18 @@ func (ls *LedgerState) chainDepStateOpCertCounters(txn *database.Txn) (
 	// map, but emitting CBOR null here would differ from the node's output.
 	counters := make(map[lcommon.Blake2b224]uint64, len(sequences))
 	for keyHash, sequence := range sequences {
-		if len(keyHash) != lcommon.Blake2b224Size {
-			// A stored issuer key that is not a pool key hash cannot be put in
-			// a map keyed by one, and padding or truncating it would report a
-			// counter against a cold key that is not the one the row meant.
-			// Skipping it leaves that key with no counter, which reads as "no
-			// certificate accepted yet" and so is permissive against a block
-			// claiming it -- worth a log rather than a silent drop.
-			//
-			// Logged rather than returned for the same reason
-			// queryShelleyPoolDistr2 omits an unregistered pool: an error here
-			// aborts the LocalStateQuery protocol and drops the client's
-			// connection, which would turn one malformed row into a total
-			// failure of leadership-schedule.
-			ls.config.Logger.Warn(
-				"skipping op-cert counter with malformed issuer key",
-				"key_hash", hex.EncodeToString([]byte(keyHash)),
-				"key_hash_len", len(keyHash),
-				"sequence", sequence,
-				"component", "ledger",
-			)
-			continue
+		// A stored issuer key that is not a pool key hash fails the query.
+		// Padding or truncating it would report a counter against a cold key
+		// the row did not mean, and dropping it would report "no certificate
+		// accepted yet" for a key the chain enforces a counter against. The
+		// cost is availability: the error aborts GetChainDepState and drops
+		// the client's LocalStateQuery connection, which is accepted because
+		// a degraded answer here would be a wrong one.
+		issuer, err := lcommon.NewBlake2b224Checked([]byte(keyHash))
+		if err != nil {
+			return nil, fmt.Errorf("op-cert counter issuer key: %w", err)
 		}
-		counters[lcommon.NewBlake2b224([]byte(keyHash))] = sequence
+		counters[issuer] = sequence
 	}
 	return counters, nil
 }

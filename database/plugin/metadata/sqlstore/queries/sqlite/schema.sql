@@ -259,6 +259,7 @@ CREATE TABLE reward_pool_output (
     optimal_reward TEXT NOT NULL,
     total_reward TEXT NOT NULL,
     leader_reward TEXT NOT NULL,
+    leader_reward_deficit TEXT NOT NULL DEFAULT '0',
     member_reward_total TEXT NOT NULL,
     owner_stake TEXT NOT NULL,
     undistributed TEXT NOT NULL,
@@ -531,3 +532,13 @@ CREATE TABLE transaction_metadata_label (
     json_value TEXT,
     UNIQUE (transaction_id, label)
 );
+
+-- Closure effects belong to the certifying RB for rollback, but execute on
+-- its parent's unticked ledger state for epoch snapshots and fee accounting.
+CREATE TABLE IF NOT EXISTS `leios_transaction_context` (
+    `transaction_id` integer PRIMARY KEY NOT NULL,
+    `slot` integer NOT NULL,
+    FOREIGN KEY (`transaction_id`) REFERENCES `transaction`(`id`) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS `idx_leios_transaction_context_slot`
+    ON `leios_transaction_context`(`slot`);

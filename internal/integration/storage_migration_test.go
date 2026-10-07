@@ -1,3 +1,5 @@
+//go:build dingo_extra_plugins
+
 // Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +14,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
-
 package integration
 
 import (
@@ -21,21 +21,176 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/nodesettings"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
+	aws "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
+	gcs "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 	"github.com/blinklabs-io/dingo/database/types"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/storagetest"
 	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/stretchr/testify/require"
 )
+
+// cloudStorageBenchmarkBackends returns GCS and S3 storage backends for the
+// storage benchmarks when their credentials are configured. Cloud blob stores
+// read the bucket (and S3 prefix) from provider config, so DataDir is consumed
+// only by the sqlite metadata store and must be a local filesystem path.
+func cloudStorageBenchmarkBackends(
+	diskDataDir, benchName string,
+) []storageBenchBackend {
+	var backends []storageBenchBackend
+	if hasGCSCredentials() {
+		bucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
+		if bucket == "" {
+			bucket = "dingo-test-bucket"
+		}
+		backends = append(backends, storageBenchBackend{
+			name: "GCS",
+			opts: dbtest.Options{
+				Config: &database.Config{
+					DataDir: filepath.Join(diskDataDir, "gcs-metadata"),
+				},
+				Blob: dbtest.StorageProvider{
+					Name:     "gcs",
+					Config:   map[string]any{"bucket": bucket},
+					Register: gcs.RegisterProvider,
+				},
+			},
+		})
+	}
+	if hasS3Credentials() {
+		bucket := os.Getenv("DINGO_TEST_S3_BUCKET")
+		if bucket == "" {
+			bucket = "dingo-test-bucket"
+		}
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		s3Config := map[string]any{
+			"bucket": bucket,
+			// A path prefix isolates concurrent benchmark runs within one
+			// bucket instead of requiring a unique bucket per run.
+			"prefix": strings.ReplaceAll(benchName, "/", "-") + "/",
+			"region": region,
+		}
+		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
+			s3Config["endpoint"] = endpoint
+		}
+		backends = append(backends, storageBenchBackend{
+			name: "S3",
+			opts: dbtest.Options{
+				Config: &database.Config{
+					DataDir: filepath.Join(diskDataDir, "s3-metadata"),
+				},
+				Blob: dbtest.StorageProvider{
+					Name:     "s3",
+					Config:   s3Config,
+					Register: aws.RegisterProvider,
+				},
+			},
+		})
+	}
+	return backends
+}
+
+func hasGCSCredentials() bool {
+	if os.Getenv("GOOGLE_APPLICATION_CREDENTIALS") != "" {
+		return true
+	}
+	home := os.Getenv("HOME")
+	if home != "" {
+		adcPath := filepath.Join(
+			home,
+			".config",
+			"gcloud",
+			"application_default_credentials.json",
+		)
+		if _, err := os.Stat(adcPath); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func hasS3Credentials() bool {
+	if os.Getenv("AWS_ACCESS_KEY_ID") != "" &&
+		os.Getenv("AWS_SECRET_ACCESS_KEY") != "" {
+		return true
+	}
+	home := os.Getenv("HOME")
+	if home != "" {
+		if _, err := os.Stat(filepath.Join(home, ".aws", "credentials")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCloudPluginGCS(t *testing.T) {
+	t.Parallel()
+
+	if !hasGCSCredentials() {
+		t.Skip("GCS credentials not found, skipping test")
+	}
+	testBucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
+	if testBucket == "" {
+		testBucket = "dingo-test-bucket"
+	}
+	gcsPlugin, err := gcs.NewWithOptions(
+		gcs.WithBucket(testBucket),
+	)
+	if err != nil {
+		t.Fatalf("failed to create GCS plugin: %v", err)
+	}
+	if err := gcsPlugin.Start(); err != nil {
+		t.Fatalf("failed to start GCS plugin: %v", err)
+	}
+	defer func() {
+		if err := gcsPlugin.Stop(); err != nil {
+			t.Errorf("failed to stop GCS plugin: %v", err)
+		}
+	}()
+}
+
+func TestCloudPluginS3(t *testing.T) {
+	t.Parallel()
+
+	if !hasS3Credentials() {
+		t.Skip("S3 credentials not found, skipping test")
+	}
+	testBucket := os.Getenv("DINGO_TEST_S3_BUCKET")
+	if testBucket == "" {
+		testBucket = "dingo-test-bucket"
+	}
+	opts := []aws.BlobStoreS3OptionFunc{
+		aws.WithBucket(testBucket),
+	}
+	if os.Getenv("AWS_ENDPOINT") != "" {
+		opts = append(opts, aws.WithEndpoint(os.Getenv("AWS_ENDPOINT")))
+	}
+	s3Plugin, err := aws.NewWithOptions(opts...)
+	if err != nil {
+		t.Fatalf("failed to create S3 plugin: %v", err)
+	}
+	if err := s3Plugin.Start(); err != nil {
+		t.Fatalf("failed to start S3 plugin: %v", err)
+	}
+	defer func() {
+		if err := s3Plugin.Stop(); err != nil {
+			t.Errorf("failed to stop S3 plugin: %v", err)
+		}
+	}()
+}
 
 // blobMigrationDataset is a small, fixed set of blob-store rows written
 // through the public blob.BlobStore API and replayed from one backend into
@@ -203,8 +358,8 @@ func cleanupBlobMigrationDataset(
 // TestBlobStoreMigration migrates a small dataset from the always-available
 // Badger backend into every cloud blob backend this environment has
 // credentials for, reusing cloudStorageBenchmarkBackends's existing
-// credential/bucket/prefix resolution (see benchmark_test.go and
-// cloud_test.go) instead of re-deriving it. It skips entirely when neither S3
+// credential/bucket/prefix resolution (see storage_migration_test.go and
+// storage_migration_test.go) instead of re-deriving it. It skips entirely when neither S3
 // (MinIO in CI) nor GCS (real bucket + ADC only, no local emulator exists)
 // is configured.
 func TestBlobStoreMigration(t *testing.T) {
@@ -334,7 +489,7 @@ func requireMetadataDatasetMatches(
 // TestMetadataStoreMigrationSQLiteToPostgres migrates a small dataset from
 // the always-available SQLite backend into Postgres, skipping when Postgres
 // is not configured -- matching the credential convention
-// database/plugin/metadata/postgres/conformance_test.go and
+// database/plugin/metadata/postgres/timeout_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToPostgres(t *testing.T) {
 	t.Parallel()
@@ -423,7 +578,7 @@ func postgresMigrationDSN() string {
 // TestMetadataStoreMigrationSQLiteToMySQL migrates a small dataset from the
 // always-available SQLite backend into MySQL, skipping when MySQL is not
 // configured for admin access -- matching the credential convention
-// database/plugin/metadata/mysql/conformance_test.go and
+// database/plugin/metadata/mysql/timeout_test.go and
 // internal/test/conformance use, so this runs automatically in CI.
 func TestMetadataStoreMigrationSQLiteToMySQL(t *testing.T) {
 	t.Parallel()

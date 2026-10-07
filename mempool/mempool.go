@@ -979,7 +979,7 @@ func (m *Mempool) processChainEvents() {
 	if m.eventBus == nil {
 		return
 	}
-	// Sized for catch-up bursts (one event per block). See #2106.
+	// Sized for catch-up bursts (one event per block).
 	chainUpdateSubId, chainUpdateChan := m.eventBus.SubscribeWithBuffer(
 		chain.ChainUpdateEventType,
 		event.EventQueueSize,
@@ -1751,7 +1751,7 @@ func (m *Mempool) maxAdmissionHeadroomBytesLocked() int64 {
 // happen under the same read lock, so a concurrent removal cannot be missed.
 func (m *Mempool) waitForAdmissionHeadroom(
 	minBytes int64,
-	done <-chan error,
+	done <-chan struct{},
 ) bool {
 	if minBytes < 0 || minBytes > m.MaxAdmissionHeadroomBytes() {
 		return false

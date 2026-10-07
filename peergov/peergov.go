@@ -127,7 +127,7 @@ const (
 	// of few, flaky relays (e.g. the Leios prototype) every connection is
 	// short-lived, so escalating backoff locks every known peer out for minutes
 	// and the pool collapses to one stalled upstream. Below this threshold we
-	// prioritize replenishment over port conservation. See issue #2765.
+	// prioritize replenishment over port conservation.
 	criticalHotPeerThreshold = 2
 	// emergencyReconnectDelay is the capped reconnect delay used when hot peers
 	// are at or below criticalHotPeerThreshold: frequent enough to replenish the
@@ -176,6 +176,7 @@ type PeerGovernor struct {
 	ctx                     context.Context      // Context for cancellation
 	cancel                  context.CancelFunc   // Cancels the context owned by Start
 	denyList                map[string]time.Time // address -> expiry time
+	inboundFlapHistory      map[string]inboundFlapRecord
 	networkMismatchDenyList map[string]time.Time // address -> expiry time (network-magic mismatch)
 	peers                   []*Peer
 	config                  PeerGovernorConfig
@@ -191,6 +192,16 @@ type PeerGovernor struct {
 	// is what lets reconcileLedgerKnownAddrs compare against a fresh on-chain
 	// candidate list without re-resolving every peer.
 	ledgerKnownAddrs map[string]string
+	// peerSnapshotRelays holds the relays of the last loaded peer snapshot.
+	// Below UseLedgerAfterSlot the ledger provider cannot answer, so urgent
+	// discovery refills from these instead. Guarded by mu.
+	peerSnapshotRelays []PoolRelay
+	// snapshotRefreshPending is set when a completed discovery round
+	// refilled from the peer snapshot. The first round above
+	// UseLedgerAfterSlot clears it along with the refresh timestamp and the
+	// emergency backoff, so snapshot rounds never delay the first query
+	// against the live ledger.
+	snapshotRefreshPending atomic.Bool
 	// emergencyRefreshRounds counts consecutive emergency ledger-discovery
 	// rounds since the node last had enough upstreams. It drives the
 	// escalating emergency refresh interval and resets on recovery.
@@ -483,6 +494,7 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		config:                  cfg,
 		peers:                   []*Peer{},
 		denyList:                make(map[string]time.Time),
+		inboundFlapHistory:      make(map[string]inboundFlapRecord),
 		networkMismatchDenyList: make(map[string]time.Time),
 		ledgerKnownAddrs:        make(map[string]string),
 		negativeDNS:             make(map[string]time.Time),

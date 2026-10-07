@@ -243,7 +243,7 @@ func RunMetadataStoreConformance(
 		require.NoError(t, err)
 		require.Nil(t, quorum)
 
-		count, err := governanceStore.GetCommitteeActiveCount(txn)
+		count, err := governanceStore.GetCommitteeAuthorizedCount(txn)
 		require.NoError(t, err)
 		require.Zero(t, count)
 

@@ -182,9 +182,15 @@ func (s State) AdoptedVersion() ProtocolVersion {
 	return s.adoptedVersion
 }
 
-// AdoptedParams returns a copy of the adopted protocol parameters.
+// AdoptedParams returns a copy of the adopted protocol parameters. When s
+// applied its first block after the chain's first, updates adopted before
+// that block are missing from it, and the copy is marked AdoptionUnknown.
 func (s State) AdoptedParams() *eras.ByronProtocolParameters {
-	return s.adoptedParams.Clone()
+	ret := s.adoptedParams.Clone()
+	if ret != nil && s.hasTip && !s.complete {
+		ret.AdoptionUnknown = true
+	}
+	return ret
 }
 
 // Candidates returns the candidate protocol updates, newest first.

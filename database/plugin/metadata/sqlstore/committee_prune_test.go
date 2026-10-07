@@ -29,7 +29,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// preprod tip and shape from issue #2756: 648,758 auth_committee_hot rows for
+// preprod tip and shape observed live: 648,758 auth_committee_hot rows for
 // 35 distinct cold credentials at slot ~79.48M.
 const (
 	preprodTipSlot         = uint64(79_480_000)
@@ -365,7 +365,7 @@ func TestCommitteeHotPruningBoundsEachDeleteCall(t *testing.T) {
 }
 
 // TestAuthCommitteeHotPruningKeepsTallyIdenticalAtPreprodScale builds the
-// dataset shape from issue #2756 -- 35 cold credentials each with a long run
+// dataset shape observed live -- 35 cold credentials each with a long run
 // of authorizations -- and proves GetActiveCommitteeMembers returns exactly
 // the same tally after pruning as before it. See preprodAuthsPerMember for
 // the full-size measurement.
@@ -607,7 +607,7 @@ func TestAuthCommitteeHotPruningSurvivesRollbackAcrossPrunedBoundary(
 }
 
 // TestAuthCommitteeHotPruningRespectsLiveImmutableSlotOnSparseChain is the
-// regression case for issue #4353: the slot-window assumption
+// regression case for sparse-block chains: the slot-window assumption
 // (tipSlot - DefaultCommitteeAuthRetentionSlots) approximates the rollback
 // bound by assuming typical block density, but Ouroboros's actual rollback
 // limit is k blocks, not a slot count. A sparse chain can have a legal
@@ -874,4 +874,47 @@ func TestAuthCommitteeHotPruningIsPerTaggedCredential(t *testing.T) {
 	)
 	require.Equal(t, 2, authRowCountFor(t, store, keyTag, shared))
 	require.Equal(t, 2, authRowCountFor(t, store, scriptTag, shared))
+}
+
+// GetCommitteeAuthorizedCount counts seated members that hold a hot key. A
+// member that never authorized one is seated but not counted, a resigned
+// member is not counted, and an expired term is not filtered.
+func TestGetCommitteeAuthorizedCountCountsOnlyAuthorizedMembers(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	const keyTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	authorized := credentialHash(0xd1)
+	unauthorized := credentialHash(0xd2)
+	resigned := credentialHash(0xd3)
+	expired := credentialHash(0xd4)
+
+	seatMember(t, store, keyTag, authorized, 1)
+	seatMember(t, store, keyTag, unauthorized, 1)
+	seatMember(t, store, keyTag, resigned, 1)
+	require.NoError(t, store.SetCommitteeMembers([]*models.CommitteeMember{{
+		ColdCredentialTag: keyTag,
+		ColdCredHash:      expired,
+		ExpiresEpoch:      1,
+		TermStartSlot:     1,
+		TermStartSlotSet:  true,
+		AddedSlot:         1,
+	}}, nil))
+	for i, cold := range [][]byte{authorized, resigned, expired} {
+		seedAuthorization(
+			t, store, keyTag, cold, keyTag, hotHash(0x60, i),
+			uint64(i+1), 10, // #nosec G115
+		)
+	}
+	seedResignation(t, store, keyTag, resigned, 100, 20)
+
+	count, err := store.GetCommitteeAuthorizedCount(nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, count, "authorized and expired members are counted")
+
+	seated, err := store.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(
+		t, seated, 4,
+		"the unauthorized and resigned members stay seated",
+	)
 }

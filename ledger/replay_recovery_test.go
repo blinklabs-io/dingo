@@ -18,32 +18,38 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"math/big"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	configcardano "github.com/blinklabs-io/dingo/config/cardano"
 	nodeconfig "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
-	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	shelley "github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -51,6 +57,62 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+// TestReplayRecoveryRollbackLockOrder protects the lock-order contract shared
+// with rollbackChainAndStateDeferred. The blockfetch lock must be acquired
+// before transactionEventMutex. The old implementation acquired those locks
+// in the opposite order, so this test fails against the unfixed code instead
+// of merely checking that both mutexes appear somewhere in the function.
+func TestReplayRecoveryRollbackLockOrder(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(
+		fset,
+		"replay_recovery.go",
+		nil,
+		0,
+	)
+	require.NoError(t, err)
+
+	var rollbackBody *ast.BlockStmt
+	ast.Inspect(file, func(node ast.Node) bool {
+		function, ok := node.(*ast.FuncDecl)
+		if ok && function.Name.Name == "rollbackPrimaryChainInSecurityParamWindows" {
+			rollbackBody = function.Body
+			return false
+		}
+		return true
+	})
+	require.NotNil(t, rollbackBody,
+		"replay recovery rollback function must remain present")
+
+	var lockOrder []string
+	ast.Inspect(rollbackBody, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Lock" {
+			return true
+		}
+		mutex, ok := selector.X.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch mutex.Sel.Name {
+		case "chainsyncBlockfetchMutex", "transactionEventMutex":
+			lockOrder = append(lockOrder, mutex.Sel.Name)
+		}
+		return true
+	})
+
+	require.Equal(
+		t,
+		[]string{"chainsyncBlockfetchMutex", "transactionEventMutex"},
+		lockOrder,
+		"replay recovery must use the same lock order as rollbackChainAndStateDeferred",
+	)
+}
 
 type replayRecoveryInput struct {
 	txId  []byte
@@ -1088,7 +1150,7 @@ func atTipDescentFailure(slot uint64, tag string) *txValidationError {
 // TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop verifies
 // that a descending series of distinct at-tip validation failures trips the
 // non-convergence guard: recovery holds at the ledger tip and records the
-// condition instead of rewinding the primary chain ever deeper (issue #2939).
+// condition instead of rewinding the primary chain ever deeper.
 func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 	t *testing.T,
 ) {
@@ -1098,7 +1160,7 @@ func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 
 	// Feed a descending series of DISTINCT failures. Each first appears
 	// (attempt 1: shallow rewind to ledger tip) then repeats (attempt 2:
-	// same block re-delivered), mirroring the field log in #2939.
+	// same block re-delivered), mirroring the field log.
 	for _, slot := range []uint64{500, 480, 460, 440} {
 		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
 		for range 2 {
@@ -1981,7 +2043,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 }
 
 // TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds
-// reproduces the terminal #3005 recovery cycle after prior, distinct failures
+// reproduces the terminal recovery cycle after prior, distinct failures
 // failed to advance the applied ledger high-water mark. Once the guard trips,
 // recovery must keep the applied tip instead of pruning another
 // security-parameter window and must force a fresh ChainSync connection even
@@ -2032,9 +2094,10 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 		),
 	)
 	// Preserve the replay candidates in the block store while leaving the
-	// primary chain tip below the applied ledger tip. This is the #3005
-	// topology: an earlier recovery rewind has already moved the primary
-	// chain back, but ledger replay rebuilt to its previous high-water mark.
+	// primary chain tip below the applied ledger tip. This is the
+	// non-converging topology: an earlier recovery rewind has already moved the
+	// primary chain back, but ledger replay rebuilt to its previous high-water
+	// mark.
 	for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Hash:     block.Hash,
@@ -2118,8 +2181,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	ls.publishSnapshotsLocked()
 
 	// Model the two earlier recovery cycles. Failure identities are
-	// intentionally absent from this tracker: #3005 showed that their slots
-	// can creep forward while the applied tip remains unchanged.
+	// intentionally absent from this tracker: field logs showed that their
+	// slots can creep forward while the applied tip remains unchanged.
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
@@ -2490,15 +2553,18 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
+	// The error comes from the real apply path, driven with validation
+	// bypassed: a withdrawal one lovelace above the persisted balance stands
+	// in for a balance that changed between validation and apply.
+	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
+	require.NoError(t, ls.db.CreateAccount(nil, &models.Account{
+		StakingKey:    credential,
+		CredentialTag: 0,
+		Active:        true,
+		Reward:        types.Uint64(rewardWithdrawalTestBalance),
+	}))
 	validation := func() *txValidationError {
-		return &txValidationError{
-			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
-			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
-			Cause: fmt.Errorf(
-				"record transaction: reward withdrawal amount 78446537 exceeds account balance 78446536: %w",
-				models.ErrRewardWithdrawalExceedsBalance,
-			),
-		}
+		return applyOverBalanceWithdrawal(t, ls, credential)
 	}
 
 	recovered, err := ls.tryRecoverFromTxValidationError(validation())
@@ -2526,6 +2592,60 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 		models.ErrRewardWithdrawalExceedsBalance,
 		"the halt error must carry the underlying mismatch",
 	)
+}
+
+const rewardWithdrawalTestBalance = uint64(1000)
+
+// applyOverBalanceWithdrawal drives a withdrawal one lovelace above the
+// persisted reward balance of credential through LedgerDelta.apply and returns
+// the validation error it surfaces.
+func applyOverBalanceWithdrawal(
+	t *testing.T,
+	ls *LedgerState,
+	credential []byte,
+) *txValidationError {
+	t.Helper()
+	rewardAddr, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, credential...),
+	)
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(testHashBytes("over-balance-withdrawal-tx"))
+	builder.WithValid(true)
+	builder.WithWithdrawals(
+		map[*lcommon.Address]uint64{
+			&rewardAddr: rewardWithdrawalTestBalance + 1,
+		},
+	)
+	var tx lcommon.Transaction = builder
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		uint(shelley.EraIdShelley),
+		4,
+	)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	err = ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	})
+	require.Error(t, err)
+	validationErr, ok := errors.AsType[*txValidationError](err)
+	require.True(
+		t,
+		ok,
+		"an apply-time withdrawal mismatch must surface as a validation error, got %T: %v",
+		err,
+		err,
+	)
+	require.ErrorIs(t, err, models.ErrRewardWithdrawalExceedsBalance)
+	require.True(t, isRewardWithdrawalStateDivergence(err))
+	return validationErr
 }
 
 // The Shelley-family UTxO rule reports a withdrawal that does not match the
@@ -2979,6 +3099,17 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+func TestIsDeterministicTxValidationErrorClassifiesByronInputIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	assert.True(t, isDeterministicTxValidationError(fmt.Errorf(
+		"byron UTxO rule: %w",
+		eras.InputIndexByronError{Index: 1 << 16},
+	)))
+}
+
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 	t.Parallel()
 
@@ -3171,7 +3302,7 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 }
 
 // TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs is the
-// dingo #3805 regression.
+// script-data-hash rejection regression.
 //
 // Replay recovery exists to repair one thing: a transaction spending an input
 // whose producer is missing from the applied chain. txValidationError carries
@@ -3288,7 +3419,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 // producer for two unrelated situations — the input is present so there is
 // nothing to find, and the input is missing and its producer could not be
 // located — and folding both into unresolvedInputs is what let a failure with
-// nothing missing drive a rewind (dingo #3805).
+// nothing missing drive a rewind.
 func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	t.Parallel()
 
@@ -3570,5 +3701,1006 @@ func TestReplayRecoveryKeepsBadInputsOnTheRewindPath(t *testing.T) {
 		t,
 		isDeterministicTxValidationError(shelley.BadInputsUtxoError{}),
 		"a missing input is decided by local UTxO state, not by the tx",
+	)
+}
+
+// trustWindowLedger is a LedgerState sitting at tip with a Mithril trust
+// anchor, plus the resync events its recovery publishes.
+type trustWindowLedger struct {
+	ls        *LedgerState
+	ledgerTip ochainsync.Tip
+	failing   *txValidationError
+	resyncs   <-chan event.Event
+}
+
+// newTrustWindowLedger builds this shape: the applied ledger tip
+// sits exactly on the Mithril trust anchor and the failing block is a short
+// distance past it, so the only rewind target at or above the anchor is the tip
+// itself. Every deeper target the at-tip recovery schedule produces lands on
+// the one earlier block, far below the anchor, and is refused by the trust
+// boundary guard.
+func newTrustWindowLedger(
+	t *testing.T,
+	anchorSlot uint64,
+) *trustWindowLedger {
+	t.Helper()
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	parentBlock := testRawBlock("trust-window-parent", 100, 1, nil)
+	ledgerTipBlock := testRawBlock(
+		"trust-window-ledger-tip",
+		200000,
+		2,
+		parentBlock.Hash,
+	)
+	failingBlock := testRawBlock(
+		"trust-window-failing",
+		200020,
+		3,
+		ledgerTipBlock.Hash,
+	)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		parentBlock,
+		ledgerTipBlock,
+		failingBlock,
+	}))
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	// Observe the bus-owned subscriber channel directly. Publish hands an
+	// event to this channel before it returns, so draining after a recovery
+	// attempt cannot race a SubscribeFunc dispatch goroutine that has not yet
+	// copied an already-published resync into a second test-only channel.
+	subId, resyncs := bus.SubscribeWithBuffer(
+		event.ChainsyncResyncEventType,
+		64,
+	)
+	require.NotZero(t, subId)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 32610},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 61), Port: 32611},
+	}
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		EventBus:          bus,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+			return &activeConnId
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(ls))
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ledgerTip := ochainsync.Tip{
+		Point: ocommon.NewPoint(
+			ledgerTipBlock.Slot,
+			ledgerTipBlock.Hash,
+		),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce-trust-window-tip")
+	ls.mithrilLedgerSlot = anchorSlot
+	ls.validationEnabled = true
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
+	producerTxHash := testHashBytes("trust-window-producer-tx")
+	seedReplayRecoveryTransaction(
+		t,
+		db,
+		producerTxHash,
+		parentBlock.Hash,
+		parentBlock.Slot,
+	)
+
+	return &trustWindowLedger{
+		ls:        ls,
+		ledgerTip: ledgerTip,
+		resyncs:   resyncs,
+		failing: &txValidationError{
+			BlockPoint: ocommon.NewPoint(
+				failingBlock.Slot,
+				failingBlock.Hash,
+			),
+			TxHash: testHashBytes("trust-window-failing-tx"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  producerTxHash,
+					index: 0,
+				},
+			},
+			// Conway rule 45. Deterministic in the same sense as a
+			// duplicate input, but state-dependent, so no fixed error
+			// list classifies it.
+			Cause: errors.New(
+				"conway certificate rule 45: delegate to an unregistered stake credential",
+			),
+		},
+	}
+}
+
+func (f *trustWindowLedger) drainResyncs() int {
+	count := 0
+	for {
+		select {
+		case <-f.resyncs:
+			count++
+		default:
+			return count
+		}
+	}
+}
+
+// requireResyncs consumes exactly n resync events, failing if fewer arrive.
+//
+// EventBus.Publish only enqueues; the SubscribeFunc handler runs on its own
+// goroutine, so drainResyncs can return before the last publish has landed. A
+// straggler then arrives during a later phase and is counted by an assertion
+// that expects silence, which fails on a false positive rather than a real one.
+func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
+	t.Helper()
+	for i := range n {
+		testutil.RequireReceive(
+			t,
+			f.resyncs,
+			testutil.AsyncWait,
+			fmt.Sprintf("pre-halt resync %d of %d", i+1, n),
+		)
+	}
+}
+
+// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers a
+// terminal case: when every rewind target the at-tip recovery schedule produces lies
+// inside the Mithril protected window, the trust boundary guard refuses all of
+// them. Each refusal rewinds to the applied tip and asks ChainSync for a fresh
+// intersection, which cannot help for a canonical block -- every peer serves
+// the same one. Recovery must therefore stop and surface a terminal condition
+// instead of rejecting peers forever.
+func TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	// Anchor exactly at the applied tip: rewinding to the tip is legal,
+	// everything deeper is not.
+	fixture := newTrustWindowLedger(t, 200000)
+
+	const maxAttempts = 32
+	halted := false
+	recoveries := 0
+	for range maxAttempts {
+		recovered, err := fixture.ls.tryRecoverFromTxValidationError(
+			fixture.failing,
+		)
+		if err != nil {
+			require.ErrorIs(
+				t,
+				err,
+				errHaltLedgerPipeline,
+				"the only terminal error recovery may raise is a pipeline halt",
+			)
+			assert.False(
+				t,
+				recovered,
+				"a halted recovery must not report itself recovered",
+			)
+			halted = true
+			break
+		}
+		require.True(t, recovered)
+		recoveries++
+	}
+	require.True(
+		t,
+		halted,
+		"recovery inside the Mithril trust window must reach a terminal state, not retry forever",
+	)
+	assert.Less(
+		t,
+		recoveries,
+		maxAttempts,
+		"the terminal state must be reached in a bounded number of attempts",
+	)
+	assert.Positive(
+		t,
+		recoveries,
+		"the existing recovery path must be tried before declaring a halt",
+	)
+
+	// The terminal state is sticky and quiet: further deliveries of the same
+	// block keep halting and must not ask for yet another fresh intersection.
+	fixture.requireResyncs(t, recoveries)
+	for range 3 {
+		recovered, err := fixture.ls.tryRecoverFromTxValidationError(
+			fixture.failing,
+		)
+		assert.False(t, recovered)
+		require.ErrorIs(t, err, errHaltLedgerPipeline)
+	}
+	assert.Zero(
+		t,
+		fixture.drainResyncs(),
+		"a halted recovery must not keep rotating peers",
+	)
+}
+
+// TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering is the negative case.
+// A failure whose rewind targets stay at or above the trust anchor is still
+// repairable by replaying a different local history, so it must keep taking the
+// existing recovery path however often it repeats. Short-circuiting it into a
+// halt would turn an ordinary fork-selection problem into an outage.
+func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
+	t.Parallel()
+
+	// Anchor far below the earliest block, so no rewind target the schedule
+	// produces is ever refused by the trust boundary guard.
+	fixture := newTrustWindowLedger(t, 50)
+
+	for i := range 32 {
+		recovered, err := fixture.ls.tryRecoverFromTxValidationError(
+			fixture.failing,
+		)
+		require.NoError(
+			t,
+			err,
+			"attempt %d: a repairable failure must not halt the pipeline",
+			i+1,
+		)
+		require.True(t, recovered, "attempt %d must still recover", i+1)
+	}
+}
+
+// TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState covers the
+// post-bootstrap replay paths covered by these tests. The producer is
+// canonical but below the imported anchor, so its parent can never be a legal
+// local rewind target. Changing failing block/transaction identities must not
+// rearm the budget while the applied tip remains fixed; replay failures can
+// creep forward in exactly that shape.
+func TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newTrustWindowLedger(t, 200000)
+	fixture.ls.reachedTip.Store(false)
+
+	var halted bool
+	for attempt := range maxMithrilBoundaryRecoveryRejections + 2 {
+		failure := *fixture.failing
+		failure.BlockPoint = ocommon.NewPoint(
+			fixture.failing.BlockPoint.Slot+uint64(attempt),
+			testHashBytes(fmt.Sprintf("replay-failing-block-%d", attempt)),
+		)
+		failure.TxHash = testHashBytes(
+			fmt.Sprintf("replay-failing-tx-%d", attempt),
+		)
+
+		recovered, err := fixture.ls.tryRecoverFromTxValidationError(&failure)
+		if errors.Is(err, errHaltLedgerPipeline) {
+			assert.False(t, recovered)
+			halted = true
+			break
+		}
+		require.NoError(t, err)
+		require.True(t, recovered)
+	}
+	require.True(
+		t,
+		halted,
+		"replay recovery must halt even when failure identities vary at a fixed applied tip",
+	)
+	assert.Equal(t, fixture.ledgerTip, fixture.ls.currentTip)
+	assert.Equal(
+		t,
+		1.0,
+		promtestutil.ToFloat64(
+			fixture.ls.metrics.mithrilTrustWindowUnrepairable,
+		),
+		"the terminal replay state must be operator-visible",
+	)
+}
+
+// TestMithrilBoundaryRollbackFailureDoesNotConsumeRecoveryBudget covers the
+// chain-selection race called out in review: a local rollback failure is not a
+// successful replay attempt and must not count toward declaring validation
+// unrepairable.
+func TestMithrilBoundaryRollbackFailureDoesNotConsumeRecoveryBudget(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	fixture := newTrustWindowLedger(t, 200000)
+
+	// Establish one successful boundary recovery, which removes the failing
+	// block from the primary chain while keeping its point available to this
+	// synthetic validation error.
+	require.NoError(
+		t,
+		fixture.ls.rejectRecoveryAtMithrilBoundary(
+			"test boundary recovery",
+			fixture.failing,
+			func(uint64, ocommon.Point) {},
+		),
+	)
+	require.Equal(
+		t,
+		1,
+		fixture.ls.mithrilBoundaryRecovery.rejections,
+	)
+
+	// Model chain selection moving off the captured ledger tip before the
+	// local rollback begins. The point no longer exists on the primary chain,
+	// so every attempt fails in rollback mechanics rather than completing a
+	// validation-recovery replay.
+	fixture.ls.currentTip = ochainsync.Tip{Point: fixture.failing.BlockPoint}
+	for range maxMithrilBoundaryRecoveryRejections + 2 {
+		err := fixture.ls.rejectRecoveryAtMithrilBoundary(
+			"test boundary recovery",
+			fixture.failing,
+			func(uint64, ocommon.Point) {},
+		)
+		require.Error(t, err)
+		require.NotErrorIs(
+			t,
+			err,
+			errHaltLedgerPipeline,
+			"rollback mechanics failures must not exhaust validation recovery",
+		)
+	}
+	assert.Equal(
+		t,
+		1,
+		fixture.ls.mithrilBoundaryRecovery.rejections,
+	)
+	assert.Zero(
+		t,
+		promtestutil.ToFloat64(
+			fixture.ls.metrics.mithrilTrustWindowUnrepairable,
+		),
+	)
+}
+
+// TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress verifies that
+// the trust-window tally is keyed on applied ledger progress rather than on a
+// reported failing-block identity. Replay can report changing failures while
+// rebuilding to the same applied tip; those are still one non-converging run.
+func TestResetMithrilBoundaryRejectionsRequiresAppliedTipProgress(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+
+	rejections, exhausted := ls.observeMithrilBoundaryRejection(500)
+	require.Equal(t, 1, rejections)
+	require.False(t, exhausted)
+
+	// Replaying to the same or an older applied tip is not progress.
+	ls.resetMithrilBoundaryRejections(500)
+	rejections, exhausted = ls.observeMithrilBoundaryRejection(499)
+	require.Equal(t, 2, rejections)
+	require.False(t, exhausted)
+
+	// Advancing the applied high-water mark is real progress and starts a
+	// later recovery run with a fresh budget.
+	ls.resetMithrilBoundaryRejections(501)
+	rejections, exhausted = ls.observeMithrilBoundaryRejection(501)
+	assert.Equal(t, 1, rejections)
+	assert.False(t, exhausted)
+
+	// Every scheduled rewind depth refused, plus the capped retry the
+	// schedule settles on: the legal rewind space is exhausted.
+	for rejections < maxMithrilBoundaryRecoveryRejections {
+		rejections, exhausted = ls.observeMithrilBoundaryRejection(501)
+		require.False(
+			t,
+			exhausted,
+			"%d refusals is still inside the bound",
+			rejections,
+		)
+	}
+	_, exhausted = ls.observeMithrilBoundaryRejection(501)
+	require.True(
+		t,
+		exhausted,
+		"the tally must be exhausted once every legal rewind depth has been refused",
+	)
+}
+
+func TestResetAtTipRecoveryDescentClearsSameFailureOnProgress(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	failure := &txValidationError{
+		BlockPoint: ocommon.NewPoint(510, []byte("failure-block")),
+		TxHash:     []byte("failure-tx"),
+	}
+	ls := &LedgerState{
+		lastAtTipRecovery:         newAtTipRecoveryAttempt(failure),
+		atTipRecoveryLastFailSlot: failure.BlockPoint.Slot,
+		atTipRecoveryDescentCount: 1,
+		atTipRecoveryHolding:      true,
+	}
+	ls.lastAtTipRecovery.Attempts = 2
+	require.Nil(t, ls.mithrilBoundaryRecovery)
+
+	// Replaying to the same applied tip is not progress. Preserve both the
+	// same-failure depth and distinct-failure convergence state.
+	ls.resetAtTipRecoveryDescent(failure.BlockPoint.Slot)
+	require.Equal(t, 2, ls.lastAtTipRecovery.Attempts)
+	require.Equal(t, 1, ls.atTipRecoveryDescentCount)
+	require.True(t, ls.atTipRecoveryHolding)
+
+	// A committed block past the failing region proves recovery converged.
+	// A later at-tip failure must start at the shallow first attempt.
+	ls.resetAtTipRecoveryDescent(failure.BlockPoint.Slot + 1)
+	require.Nil(t, ls.lastAtTipRecovery)
+	require.Zero(t, ls.atTipRecoveryLastFailSlot)
+	require.Zero(t, ls.atTipRecoveryDescentCount)
+	require.False(t, ls.atTipRecoveryHolding)
+}
+
+// newTestShelleyGenesisCfgWithK is newTestShelleyGenesisCfg with a caller
+// chosen security parameter, so a windowed rewind can be exercised with a
+// window small enough to need several steps over a short test chain.
+func newTestShelleyGenesisCfgWithK(
+	t testing.TB,
+	k int,
+) *configcardano.CardanoNodeConfig {
+	t.Helper()
+	shelleyGenesisJSON := fmt.Sprintf(`{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": %d,
+		"slotsPerKESPeriod": 129600,
+		"maxKESEvolutions": 62,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`, k)
+	cfg := &configcardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+	return cfg
+}
+
+// seedTestChain appends count linked blocks to the primary chain, spaced ten
+// slots apart so an appended block can always claim tip.Slot+1 without
+// colliding with a block that is already stored.
+func seedTestChain(
+	t testing.TB,
+	pc *chain.Chain,
+	prefix string,
+	count int,
+) []chain.RawBlock {
+	t.Helper()
+	raw := make([]chain.RawBlock, 0, count)
+	var prev []byte
+	for i := 1; i <= count; i++ {
+		h := testHashBytes(fmt.Sprintf("%s-%d", prefix, i))
+		raw = append(raw, chain.RawBlock{
+			Slot:        uint64(i * 10), //nolint:gosec
+			Hash:        h,
+			BlockNumber: uint64(i), //nolint:gosec
+			Type:        1,
+			PrevHash:    prev,
+			Cbor:        []byte{0x80},
+		})
+		prev = h
+	}
+	require.NoError(t, pc.AddRawBlocks(raw))
+	return raw
+}
+
+// TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins a
+// halting rule: a recovery rewind the chain refuses as exceeding K is not a
+// transient failure, so repeating it at an applied tip that never advances
+// must become terminal instead of restarting the pipeline forever.
+//
+// recoverFromDeterministicTxValidationError used to return the refusal as a
+// plain error. ledgerProcessBlocks treats anything that is not
+// errHaltLedgerPipeline as retryable, so the node logged "block processing
+// failed, restarting pipeline", waited out the backoff, and recomputed the
+// same impossible rewind -- 1150 times over nine hours in the report, with the
+// stuck-pipeline watchdog correctly announcing that the failure was
+// deterministic while the node kept retrying anyway.
+func TestDeterministicTxRecoveryHaltsOnUnreachableRewind(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	// A chain k of 2 against the ledger's much larger window means the
+	// single rewind step is refused on fork depth, which is the refusal the
+	// recovery path has to classify.
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	raw := seedTestChain(t, cm.PrimaryChain(), "halt-on-unreachable", 5)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	require.Greater(t, ls.SecurityParam(), 2, "ledger window must exceed k")
+
+	// The applied tip sits at the first block and the rejected block is the
+	// chain tip, so the rewind target is four blocks below a chain whose k
+	// is 2 and every rewind to it is refused.
+	ls.currentTip.Point = ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(raw[4].Slot, raw[4].Hash),
+		TxHash:     testHashBytes("halt-on-unreachable-tx"),
+		Cause: conway.PlutusScriptFailedError{
+			Err: errors.New("error explicitly called"),
+		},
+	}
+	require.True(t, isDeterministicTxValidationError(validationErr.Cause))
+
+	var lastErr error
+	halted := false
+	// Well past any bounded retry budget: an unreachable rewind still being
+	// retried after this many attempts is the nine-hour loop.
+	for range 32 {
+		_, lastErr = ls.recoverFromDeterministicTxValidationError(
+			validationErr,
+		)
+		require.Error(t, lastErr)
+		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		if errors.Is(lastErr, errHaltLedgerPipeline) {
+			halted = true
+			break
+		}
+	}
+	require.True(
+		t,
+		halted,
+		"a recovery rewind refused as exceeding K must stop the pipeline "+
+			"rather than be retried forever: %v",
+		lastErr,
+	)
+}
+
+// TestRecoveryRewindHaltBudgetResetsOnTipProgress pins the other side of that
+// budget. The halt is for a rewind that stays unreachable at an applied tip
+// that never moves; once the ledger advances past that tip the situation is a
+// different one and must start with a fresh budget rather than inherit a tally
+// that has nothing to do with it.
+func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2}))
+	raw := seedTestChain(t, cm.PrimaryChain(), "halt-budget-reset", 5)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	target := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	for range maxRecoveryRewindRejections {
+		rewindErr := ls.rewindPrimaryChainForRecovery(target)
+		require.ErrorIs(
+			t,
+			rewindErr,
+			chain.ErrRollbackExceedsSecurityParam,
+		)
+		require.NotErrorIs(t, rewindErr, errHaltLedgerPipeline)
+	}
+	// Forward progress past the tip the refusals could not cross clears the
+	// tally, so the budget starts over instead of halting on the next one.
+	ls.resetRecoveryRewindRejections(raw[3].Slot)
+	rewindErr := ls.rewindPrimaryChainForRecovery(target)
+	require.ErrorIs(t, rewindErr, chain.ErrRollbackExceedsSecurityParam)
+	require.NotErrorIs(t, rewindErr, errHaltLedgerPipeline)
+}
+
+// TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows pins the shape the
+// live reproduction on Preview showed (: a replay wedged at slot
+// 41098815 for over twenty minutes across 97 rejection attempts on one
+// transaction).
+//
+// Two properties of that run decide whether a fix works:
+//
+//   - The rewind target is recomputed on every attempt and differs every time
+//     -- intermediate points 1768501, 1774034, 1773427, 1779454, 1782037,
+//     1769017 -- all beyond K. So the terminal condition cannot key on one
+//     target that keeps failing; there is no such target. It keys on the
+//     applied ledger tip, which is the thing that is not moving.
+//   - The depth that must be rolled back grows monotonically, because the peer
+//     keeps extending the fork while the local tip is pinned
+//     (fork_path_headers 2462, 5031, 7615; fork_depth 5010 then 6020). A
+//     rewind already beyond K never comes back into range on its own, which is
+//     what makes the loop unrecoverable rather than merely slow.
+//
+// The chain is therefore extended between attempts, so every attempt computes
+// a different step target against a larger gap, and the halt must still
+// arrive.
+func TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows(t *testing.T) {
+	t.Parallel()
+
+	const (
+		chainK        = 4
+		ledgerWindow  = 8
+		startingChain = 40
+		growthPerTry  = 5
+		maxAttempts   = 16
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	// The chain enforces a smaller k than the ledger's rewind window, so every
+	// step the descent computes is refused wherever the tip has moved to.
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: chainK}),
+	)
+	pc := cm.PrimaryChain()
+	raw := seedTestChain(t, pc, "moving-target", startingChain)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, ledgerWindow),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+	require.Equal(t, ledgerWindow, ls.SecurityParam())
+
+	// The applied ledger tip stays at the first block for the whole test:
+	// that is the "tip pinned at slot 41098815" half of the report.
+	appliedTip := ocommon.NewPoint(raw[0].Slot, raw[0].Hash)
+	ls.currentTip.Point = appliedTip
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			raw[startingChain-1].Slot,
+			raw[startingChain-1].Hash,
+		),
+		TxHash: testHashBytes("moving-target-tx"),
+		Cause: conway.PlutusScriptFailedError{
+			Err: errors.New("error explicitly called"),
+		},
+	}
+	require.True(t, isDeterministicTxValidationError(validationErr.Cause))
+
+	seenTargets := map[string]struct{}{}
+	var (
+		chainTips []uint64
+		halted    bool
+		attempts  int
+		lastErr   error
+	)
+	for range maxAttempts {
+		attempts++
+		chainTips = append(chainTips, pc.Tip().Point.Slot)
+		_, lastErr = ls.recoverFromDeterministicTxValidationError(
+			validationErr,
+		)
+		require.ErrorIs(t, lastErr, chain.ErrRollbackExceedsSecurityParam)
+		// require.ErrorIs above fails the test on a nil lastErr, which nilaway
+		// does not model.
+		//nolint:nilaway // non-nil per the require.ErrorIs above
+		seenTargets[lastErr.Error()] = struct{}{}
+		if errors.Is(lastErr, errHaltLedgerPipeline) {
+			halted = true
+			break
+		}
+		// The peer keeps serving the fork while the ledger tip is stuck, so
+		// the next attempt faces a deeper rollback than this one did.
+		grow := make([]chain.RawBlock, 0, growthPerTry)
+		prev := pc.Tip()
+		for i := range growthPerTry {
+			h := testHashBytes(
+				fmt.Sprintf("moving-target-grow-%d-%d", attempts, i),
+			)
+			grow = append(grow, chain.RawBlock{
+				Slot:        prev.Point.Slot + 10,
+				Hash:        h,
+				BlockNumber: prev.BlockNumber + 1,
+				Type:        1,
+				PrevHash:    prev.Point.Hash,
+				Cbor:        []byte{0x80},
+			})
+			prev = ochainsync.Tip{
+				Point:       ocommon.NewPoint(prev.Point.Slot+10, h),
+				BlockNumber: prev.BlockNumber + 1,
+			}
+		}
+		require.NoError(t, pc.AddRawBlocks(grow))
+	}
+
+	require.True(
+		t,
+		halted,
+		"a rewind that stays beyond K must stop the pipeline even though "+
+			"every attempt computes a different target: %v",
+		lastErr,
+	)
+	require.Greater(
+		t,
+		len(seenTargets),
+		1,
+		"the test must exercise a target that moves between attempts",
+	)
+	require.Greater(
+		t,
+		// maxAttempts is a positive constant, so the loop above appended at
+		// least one tip; nilaway does not reason about the loop bound.
+		//nolint:nilaway // the loop above appends at least one entry
+		chainTips[len(chainTips)-1],
+		chainTips[0],
+		"the fork must extend while the applied ledger tip stays pinned",
+	)
+	require.True(
+		t,
+		slices.IsSorted(chainTips),
+		"required rollback depth must only grow across attempts: %v",
+		chainTips,
+	)
+}
+
+// TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold pins that the
+// entry check on rollbackPrimaryChainInSecurityParamWindows establishes
+// primary-chain membership, not store presence.
+//
+// The descent commits each step as it goes, so a target it can never reach
+// has to be refused before the first truncation. The check used to be a
+// database.BlockByPoint lookup, which a target the store still holds but the
+// chain has abandoned passes -- the retained-index shape rollbackPointBlock
+// documents. The descent then truncated every intermediate step and
+// Chain.Rollback refused the final one with ErrRollbackPointNotOnChain,
+// leaving the chain shortened for a rewind that never happened.
+//
+// The target below is written straight into the block store at an index above
+// the chain tip, so it is present by point and absent from the chain: the
+// store lookup accepts it and the chain's own membership check does not.
+func TestWindowedRewindRefusesRecoveryTargetTheChainDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 8
+		blockCount    = 60
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: securityParam}),
+	)
+	pc := cm.PrimaryChain()
+	raw := seedTestChain(t, pc, "target-not-on-chain", blockCount)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+
+	// A block the store holds at an index the chain does not: its slot falls
+	// inside the chain's span, so the descent would start, and its index sits
+	// above the chain tip, so no chain block occupies it.
+	orphan := models.Block{
+		ID:       blockCount + 5,
+		Slot:     raw[0].Slot + 5,
+		Hash:     testHashBytes("target-not-on-chain-orphan"),
+		Number:   raw[0].BlockNumber,
+		Type:     1,
+		PrevHash: raw[0].Hash,
+		Cbor:     []byte{0x80},
+	}
+	require.NoError(t, db.BlockCreate(orphan, nil))
+	target := ocommon.NewPoint(orphan.Slot, orphan.Hash)
+	_, err = database.BlockByPoint(db, target)
+	require.NoError(
+		t,
+		err,
+		"the store must hold the target for this to test anything",
+	)
+
+	tipBefore := pc.Tip()
+	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	require.ErrorIs(t, err, chain.ErrRollbackPointNotOnChain)
+	require.Equal(
+		t,
+		tipBefore,
+		pc.Tip(),
+		"a target the chain does not hold must be refused before any step is committed",
+	)
+	require.False(
+		t,
+		committed,
+		"the refusal must report that nothing was truncated",
+	)
+}
+
+// TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold pins the entry
+// check for a slot-zero target, from this package's side of the boundary.
+//
+// Slot 0 is a real slot, so a point carrying a hash names a block there. When
+// ValidateRollback gated its lookup on point.Slot > 0 such a target skipped
+// membership validation, passed the entry check and took the descent all the
+// way down, leaving the chain empty and its tip naming a block the store need
+// not hold; this package compensated with its own store lookup. ValidateRollback
+// now resolves any hash-bearing point, so the refusal comes from the chain's
+// membership check and the local lookup is gone -- this test is what proves
+// the coverage moved rather than disappeared.
+func TestWindowedRewindRefusesSlotZeroTargetTheStoreDoesNotHold(t *testing.T) {
+	t.Parallel()
+
+	const (
+		securityParam = 8
+		blockCount    = 30
+	)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: securityParam}),
+	)
+	pc := cm.PrimaryChain()
+	seedTestChain(t, pc, "slot-zero-target", blockCount)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: newTestShelleyGenesisCfgWithK(t, securityParam),
+		EventBus:          bus,
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	ls.currentEra = eras.ShelleyEraDesc
+
+	target := ocommon.NewPoint(0, testHashBytes("slot-zero-target-absent"))
+	tipBefore := pc.Tip()
+	committed, err := ls.rollbackPrimaryChainInSecurityParamWindows(target)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+	require.Equal(
+		t,
+		tipBefore,
+		pc.Tip(),
+		"a slot-zero target the store does not hold must not truncate the chain",
+	)
+	require.False(
+		t,
+		committed,
+		"the refusal must report that nothing was truncated",
+	)
+}
+
+// The deterministic transaction-validation recovery carries the identical
+// precedence test and the identical Byron boundary exposure.
+func TestDeterministicTxRecoveryRewindsToSameSlotPredecessor(t *testing.T) {
+	t.Parallel()
+
+	f := newSameSlotRecoveryFixture(t)
+	boundary := f.blocks[2]
+	failing := f.blocks[3]
+
+	recovered, recoverErr := f.ls.recoverFromDeterministicTxValidationError(
+		&txValidationError{
+			BlockPoint: makeTestPoint(failing),
+			TxHash:     testHashBytes("same-slot-duplicate-input"),
+			Cause:      errors.New("duplicate input"),
+		},
+	)
+	require.NoError(t, recoverErr)
+	require.True(t, recovered,
+		"the applied epoch-boundary block precedes the rejected block and "+
+			"is a rewind target")
+	require.Equal(t, makeTestPoint(boundary),
+		f.cm.PrimaryChain().Tip().Point,
+		"the chain must be rewound onto the boundary block")
+}
+
+// Same-slot, same-hash still declines on the transaction path.
+func TestDeterministicTxRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
+	t.Parallel()
+
+	f := newSameSlotRecoveryFixture(t)
+	chainTipBefore := f.cm.PrimaryChain().Tip().Point
+
+	recovered, recoverErr := f.ls.recoverFromDeterministicTxValidationError(
+		&txValidationError{
+			BlockPoint: makeTestPoint(f.blocks[2]),
+			TxHash:     testHashBytes("same-slot-same-hash"),
+			Cause:      errors.New("duplicate input"),
+		},
+	)
+	require.NoError(t, recoverErr)
+	require.False(t, recovered,
+		"the ledger tip cannot be a rewind target for itself")
+	require.Equal(t, chainTipBefore, f.cm.PrimaryChain().Tip().Point,
+		"declining must not disturb the chain")
+}
+
+// TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor covers the Mithril-
+// bootstrapped shape reported by the test. The Mithril anchor sits far below
+// the consumed-UTxO prune floor, so the existing trust-boundary check admits
+// every target the rewind schedule produces while the sweep has already made
+// them unrestorable. The prune floor is the binding constraint, and the node
+// halts at the anchor only after the descent has destroyed the UTxO set on the
+// way down.
+func TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor(t *testing.T) {
+	const mithrilAnchorSlot = pruneFixtureRootSlot
+	f := newPrunedUtxoFixture(t, mithrilAnchorSlot)
+
+	f.ls.cleanupConsumedUtxos()
+	floor, err := f.db.ConsumedUtxoPruneFloor(nil)
+	require.NoError(t, err)
+	require.Greater(
+		t,
+		floor,
+		uint64(mithrilAnchorSlot),
+		"the fixture must place the prune floor above the Mithril anchor",
+	)
+
+	f.driveAtTipRecovery(t, 3)
+
+	// The Mithril check alone would have allowed the descent: every target
+	// the schedule produced is above the anchor.
+	require.False(
+		t,
+		f.ls.recoveryRollbackExceedsMithrilBoundary(
+			ocommon.NewPoint(pruneFixtureDeepRewindSlot, nil),
+		),
+		"the descent target is above the Mithril anchor, so only the prune floor can refuse it",
+	)
+	f.assertLiveSetConsistentAtTip(t)
+	require.GreaterOrEqual(
+		t,
+		f.ls.currentTip.Point.Slot,
+		uint64(pruneFixtureFloorSlot),
 	)
 }

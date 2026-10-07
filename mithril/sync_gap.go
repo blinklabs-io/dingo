@@ -280,18 +280,13 @@ func fetchGapBlocksFromPeer(
 	return blocks, nil
 }
 
-// deleteBlobBlocksAboveSlot removes every block from the blob store
-// whose slot is greater than the given threshold AND drops any
-// metadata indexed for those blocks (transactions, UTxOs, governance
-// proposals/votes), and restores any UTxOs that the rejected gap
-// blocks had marked spent. Used to clean up rejected gap blocks from
-// a previous failed Mithril resume so the next BlocksRecent query and
-// any slot-ordered iterator (chainsync replay, etc.) cannot resurface
-// them, and so leftover metadata from the discarded fork cannot
-// shadow the refetched chain.
-func deleteBlobBlocksAboveSlot(
+// deleteBlobBlocksAboveSlotExcept removes blocks above slot unless their
+// hashes are preserved for replay. It drops derived metadata above slot and
+// restores UTxOs spent by removed blocks.
+func deleteBlobBlocksAboveSlotExcept(
 	db *database.Database,
 	slot uint64,
+	preserved map[string]struct{},
 ) error {
 	if slot == ^uint64(0) {
 		return nil
@@ -310,13 +305,16 @@ func deleteBlobBlocksAboveSlot(
 		if next == nil {
 			break
 		}
+		if _, keep := preserved[string(next.Hash)]; keep {
+			continue
+		}
 		stale = append(stale, ocommon.Point{
 			Slot: next.Slot,
 			Hash: append([]byte(nil), next.Hash...),
 		})
 	}
 	iter.Close()
-	if len(stale) == 0 {
+	if len(stale) == 0 && len(preserved) == 0 {
 		return nil
 	}
 	txn := db.Transaction(true)
@@ -692,15 +690,18 @@ func processGapBlockTransactions(
 			if !hasGovernance {
 				continue
 			}
-			if conwayPParams == nil {
+			if conwayPParams == nil &&
+				(len(level.ProposalProcedures()) > 0 ||
+					len(level.VotingProcedures()) > 0) {
 				return errors.New(
 					"missing Conway protocol parameters for governance gap block processing",
 				)
 			}
 			if len(level.ProposalProcedures()) > 0 {
-				if err := governance.ProcessProposals(
+				if err := governance.ProcessHistoricalProposals(
 					level,
 					point,
+					uint32(storageBaseIndex+uint64(levelIndex)), //nolint:gosec
 					epochId,
 					conwayPParams.GovActionValidityPeriod,
 					db,
@@ -714,11 +715,10 @@ func processGapBlockTransactions(
 				}
 			}
 			if len(level.VotingProcedures()) > 0 {
-				if err := governance.ProcessVotes(
+				if err := governance.ProcessHistoricalVotes(
 					level,
 					point,
 					epochId,
-					conwayPParams.DRepInactivityPeriod,
 					db,
 					txn,
 				); err != nil {
@@ -730,10 +730,9 @@ func processGapBlockTransactions(
 				}
 			}
 			if governance.HasDRepActivityCertificates(level) {
-				if err := governance.ProcessDRepActivityCertificates(
+				if err := governance.ProcessHistoricalDRepActivityCertificates(
 					level,
 					epochId,
-					conwayPParams.DRepInactivityPeriod,
 					db,
 					txn,
 				); err != nil {

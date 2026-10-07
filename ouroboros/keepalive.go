@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -22,6 +24,30 @@ import (
 	"github.com/blinklabs-io/gouroboros/connection"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
+
+// keepalivePongTimeoutErr is the exact message gouroboros protocol.go
+// reports when the keep-alive client's transition timer for the Server state
+// (waiting on the peer's pong) fires. The server side's ping-wait timeout
+// reports the Client state instead, so it does not match.
+var keepalivePongTimeoutErr = fmt.Sprintf(
+	"%s: timeout waiting on transition from protocol state %s",
+	okeepalive.ProtocolName,
+	okeepalive.StateServer,
+)
+
+// classifyKeepaliveTimeoutClose reports whether err is a keep-alive pong
+// timeout. gouroboros v0.208.0 has no typed error for it, and its connection
+// wraps every forwarded mini-protocol error ("protocol error: %w" in
+// connection.go), so this matches the protocol.go message exactly at any
+// level of the wrap chain rather than against the outer string.
+func classifyKeepaliveTimeoutClose(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if err.Error() == keepalivePongTimeoutErr {
+			return true
+		}
+	}
+	return false
+}
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	opts := []okeepalive.KeepAliveOptionFunc{

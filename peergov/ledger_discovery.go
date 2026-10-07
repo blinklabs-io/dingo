@@ -26,8 +26,9 @@ import (
 // LedgerPeerTarget. Emergency discovery may add one target-sized batch even
 // when the known ledger-peer target is already satisfied, because stale or
 // unusable peers must not block fresh relay candidates while the node is short
-// of connected upstreams. Candidates are shuffled uniformly so no single pool
-// dominates across refreshes.
+// of connected upstreams. Relays are drawn without replacement weighted by
+// their pool's delegated stake, so high-stake pools are favored while
+// zero-stake relays stay discoverable.
 //
 //nolint:unused // Kept as a context-free test helper for existing discovery tests.
 func (p *PeerGovernor) discoverLedgerPeers() {
@@ -57,18 +58,40 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		// Ledger peers are disabled
 		return
 	}
+	// Below UseLedgerAfterSlot the provider cannot answer. An urgent node
+	// with a loaded peer snapshot still refills from the snapshot's unused
+	// candidates, or a correlated collapse of the initial peer set would
+	// leave it without leads until the threshold slot is reached.
+	var snapshotRelays []PoolRelay
+	belowLedgerSlot := false
 	if p.config.UseLedgerAfterSlot > 0 {
 		currentSlot := p.config.LedgerPeerProvider.CurrentSlot()
 		// Safe conversion: UseLedgerAfterSlot is already checked to be > 0
 		useLedgerAfterSlot := uint64(p.config.UseLedgerAfterSlot) // #nosec G115
 		if currentSlot < useLedgerAfterSlot {
-			p.config.Logger.Debug(
-				"ledger peers not yet enabled",
-				"current_slot", currentSlot,
-				"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
-			)
-			return
+			belowLedgerSlot = true
+			p.mu.Lock()
+			snapshotRelays = p.peerSnapshotRelays
+			p.mu.Unlock()
+			urgent := p.ledgerPeersUrgent()
+			if !urgent {
+				p.emergencyRefreshRounds.Store(0)
+			}
+			if len(snapshotRelays) == 0 || !urgent {
+				p.config.Logger.Debug(
+					"ledger peers not yet enabled",
+					"current_slot", currentSlot,
+					"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
+				)
+				return
+			}
 		}
+	}
+
+	if !belowLedgerSlot &&
+		p.snapshotRefreshPending.CompareAndSwap(true, false) {
+		p.lastLedgerPeerRefresh.Store(0)
+		p.emergencyRefreshRounds.Store(0)
 	}
 
 	// Count existing ledger peers to determine how many we need.
@@ -139,14 +162,18 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	relays, err := p.config.LedgerPeerProvider.GetPoolRelays()
-	if err != nil {
-		p.config.Logger.Error(
-			"failed to get ledger peers",
-			"error", err,
-			"emergency", urgent,
-		)
-		return
+	relays := snapshotRelays
+	if !belowLedgerSlot {
+		var err error
+		relays, err = p.config.LedgerPeerProvider.GetPoolRelays()
+		if err != nil {
+			p.config.Logger.Error(
+				"failed to get ledger peers",
+				"error", err,
+				"emergency", urgent,
+			)
+			return
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return
@@ -193,6 +220,9 @@ func (p *PeerGovernor) discoverLedgerPeersContext(ctx context.Context) {
 		// Count only a complete urgent round. Interval-gated, failed, canceled,
 		// or panicking rounds retain the existing backoff and retry immediately.
 		p.emergencyRefreshRounds.Add(1)
+	}
+	if belowLedgerSlot {
+		p.snapshotRefreshPending.Store(true)
 	}
 	completed = true
 }
@@ -364,12 +394,17 @@ func (p *PeerGovernor) reconcileLedgerKnownAddrs(candidates []string) {
 //
 //nolint:unused // Kept as a context-free test helper for existing peer tests.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
-	return p.addLedgerPeerContext(context.Background(), address)
+	return p.addLedgerPeerContext(context.Background(), address, 0, false)
 }
 
+// addLedgerPeerContext adds a ledger peer for a relay whose pool has the given
+// delegated stake in lovelace, which the new peer carries as its StakeLovelace
+// scoring input. A peer that already exists keeps its own.
 func (p *PeerGovernor) addLedgerPeerContext(
 	ctx context.Context,
 	address string,
+	stake uint64,
+	stakeKnown bool,
 ) bool {
 	if err := ctx.Err(); err != nil {
 		return false
@@ -381,7 +416,7 @@ func (p *PeerGovernor) addLedgerPeerContext(
 	// entries for an unresolvable hostname are keyed on exactly the
 	// lock-free normalized form, which is what makes the dead-hostname case
 	// answerable here.
-	if p.ledgerPeerRejectedWithoutDNS(address) {
+	if p.ledgerPeerRejectedWithoutDNS(address, stake, stakeKnown) {
 		return false
 	}
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
@@ -459,6 +494,10 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		// fresh relay list (normalized the same way), without re-resolving
 		// every candidate.
 		p.ledgerKnownAddrs[p.normalizeAddress(existingPeer.Address)] = hostnameNormalized
+		if stakeKnown || stake > 0 {
+			existingPeer.StakeLovelace = stake
+			existingPeer.StakeKnown = true
+		}
 		p.mu.Unlock()
 		return false
 	}
@@ -492,6 +531,8 @@ func (p *PeerGovernor) addLedgerPeerContext(
 		Sharable:          true, // Ledger peers are public relays
 		EMAAlpha:          p.config.EMAAlpha,
 		FirstSeen:         time.Now(),
+		StakeLovelace:     stake,
+		StakeKnown:        stakeKnown || stake > 0,
 	}
 	p.peers = append(p.peers, newPeer)
 	p.updatePeerMetrics()
@@ -531,7 +572,11 @@ func (p *PeerGovernor) addLedgerPeerContext(
 // Only rejection is decided here: a peer is never added without a
 // resolution, so a candidate that survives this check still goes through the
 // full post-resolution deny and exists checks under the lock.
-func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
+func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(
+	address string,
+	stake uint64,
+	stakeKnown bool,
+) bool {
 	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -559,6 +604,10 @@ func (p *PeerGovernor) ledgerPeerRejectedWithoutDNS(address string) bool {
 		// see that function's existingPeer branch for why keying on the
 		// candidate's hostname form instead would be wrong.
 		p.ledgerKnownAddrs[p.normalizeAddress(peer.Address)] = hostnameNormalized
+		if stakeKnown || stake > 0 {
+			peer.StakeLovelace = stake
+			peer.StakeKnown = true
+		}
 		return true
 	}
 	return false

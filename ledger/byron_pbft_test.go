@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	byronconsensus "github.com/blinklabs-io/gouroboros/consensus/byron"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -36,8 +38,263 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestNewByronPBFTCacheDevnetEmptyGenesisIssuers reproduces
+// blinklabs-io/dingo's devnet startup regression: a Byron genesis with no
+// boot stakeholders (and therefore no heavy delegation, since a heavy
+// delegation certificate must name an existing boot stakeholder as its
+// issuer) has no possible PBFT signer, so no valid Byron main block can ever
+// be produced on that chain. internal/test/devnet/configurator.sh generates
+// exactly this genesis shape for a network that hard-forks away from Byron
+// at genesis (testnet.yaml sets every TestXHardForkAtEpoch to 0). Ledger
+// state construction must tolerate it rather than failing node startup.
+func TestNewByronPBFTCacheDevnetEmptyGenesisIssuers(t *testing.T) {
+	t.Parallel()
+
+	const byronGenesisJSON = `{
+		"protocolConsts": {"k": 60, "protocolMagic": 42},
+		"blockVersionData": {"slotDuration": "1000"},
+		"bootStakeholders": {},
+		"heavyDelegation": {}
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+	)
+
+	cache, err := newByronPBFTCache(LedgerStateConfig{CardanoNodeConfig: cfg})
+	require.NoError(
+		t,
+		err,
+		"a Byron genesis with no possible PBFT issuers must not fail ledger "+
+			"state construction",
+	)
+	assert.Nil(
+		t,
+		cache.config,
+		"no PBFT config should be cached when Byron has no eligible issuers",
+	)
+	assert.True(t, cache.noGenesisIssuers)
+}
+
+// TestNewByronPBFTCacheRealByronGenesis is the control: a Byron genesis that
+// does declare a boot stakeholder (every real chain -- mainnet, preprod,
+// preview -- always has at least one) must still build and cache a full PBFT
+// config, so this fix does not relax validation for a chain with real Byron
+// history.
+func TestNewByronPBFTCacheRealByronGenesis(t *testing.T) {
+	t.Parallel()
+
+	const byronGenesisJSON = `{
+		"protocolConsts": {"k": 60, "protocolMagic": 42},
+		"blockVersionData": {"slotDuration": "1000"}
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		loadByronGenesisForTest(t, cfg, strings.NewReader(byronGenesisJSON)),
+	)
+
+	cache, err := newByronPBFTCache(LedgerStateConfig{CardanoNodeConfig: cfg})
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		cache.config,
+		"a genesis with a real boot stakeholder must still build a PBFT config",
+	)
+	assert.Len(t, cache.config.GenesisKeyHashes, 1)
+}
+
+const noByronIssuersRule = "declares no boot stakeholders"
+
+// newNoByronIssuersTestLedger builds a LedgerState over the devnet genesis
+// shape: a Byron genesis with no boot stakeholders, its PBFT cache built the
+// way NewLedgerState builds it, a real primary chain and a working slot clock.
+// The Byron genesis hash is set explicitly because LoadByronGenesisFromReader
+// does not derive it; production config loading does.
+func newNoByronIssuersTestLedger(
+	t *testing.T,
+	genesisHash lcommon.Blake2b256,
+) (*LedgerState, *chain.Chain) {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(t, loadByronGenesisForTest(t, cfg, strings.NewReader(`{
+		"protocolConsts": {"k": 60, "protocolMagic": 42},
+		"blockVersionData": {"slotDuration": "1000"},
+		"bootStakeholders": {},
+		"heavyDelegation": {}
+	}`)))
+	cfg.ByronGenesisHash = genesisHash.String()
+	lsConfig := LedgerStateConfig{CardanoNodeConfig: cfg}
+	cache, err := newByronPBFTCache(lsConfig)
+	require.NoError(t, err)
+
+	cm, err := chain.NewManager(newTestDB(t), nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 10}),
+	)
+	ls := &LedgerState{
+		chain:     cm.PrimaryChain(),
+		config:    lsConfig,
+		byronPBFT: cache,
+	}
+	ls.slotClock = NewSlotClock(
+		newMockSlotTimeProvider(
+			time.Now().Add(-100*time.Second),
+			time.Second,
+			100,
+		),
+		DefaultSlotClockConfig(),
+	)
+	return ls, cm.PrimaryChain()
+}
+
+// TestByronHeaderRejectedWithoutGenesisIssuers feeds peer-shaped Byron
+// headers and blocks to a node whose Byron genesis has no boot stakeholders,
+// through every header entry point that routes Byron to
+// validateByronPBFTHeaderCrypto. An epoch-boundary block carries no PBFT
+// signature, so without a rule of its own a genesis-anchored EBB at origin,
+// or any EBB at or below the current slot after it, would pass every
+// entry point on this chain.
+func TestByronHeaderRejectedWithoutGenesisIssuers(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("devnet byron genesis"))
+	entryPoints := []struct {
+		name   string
+		verify func(*LedgerState, gledger.Block) error
+	}{
+		{"chainsync header", func(ls *LedgerState, b gledger.Block) error {
+			return ls.verifyBlockHeaderOnlyCrypto(b.Header())
+		}},
+		{"chain selection header", func(ls *LedgerState, b gledger.Block) error {
+			return ls.ValidateChainSelectionHeaderCrypto(b.Header())
+		}},
+		{"announced header", func(ls *LedgerState, b gledger.Block) error {
+			return ls.ValidateBlockHeaderCrypto(b.Header())
+		}},
+		{"fetched block", func(ls *LedgerState, b gledger.Block) error {
+			return ls.verifyBlockHeaderCryptoBeforeApply(b)
+		}},
+	}
+	inputs := []struct {
+		name     string
+		atOrigin bool
+		block    gledger.Block
+	}{
+		{
+			name:     "genesis-anchored EBB at origin",
+			atOrigin: true,
+			block: &byron.ByronEpochBoundaryBlock{
+				BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+					PrevBlock: genesisHash,
+				},
+			},
+		},
+		{
+			name: "EBB after a post-Byron tip",
+			block: &byron.ByronEpochBoundaryBlock{
+				BlockHeader: &byron.ByronEpochBoundaryBlockHeader{
+					PrevBlock: lcommon.Blake2b256Hash([]byte("conway tip")),
+				},
+			},
+		},
+		{
+			name: "main block after a post-Byron tip",
+			block: &byron.ByronMainBlock{
+				BlockHeader: &byron.ByronMainBlockHeader{},
+			},
+		},
+	}
+	for _, input := range inputs {
+		for _, entry := range entryPoints {
+			t.Run(input.name+"/"+entry.name, func(t *testing.T) {
+				t.Parallel()
+				ls, primaryChain := newNoByronIssuersTestLedger(
+					t,
+					genesisHash,
+				)
+				if !input.atOrigin {
+					require.NoError(t, primaryChain.AddRawBlocks(
+						[]chain.RawBlock{{
+							Slot:        1,
+							Hash:        bytes.Repeat([]byte{0xcc}, 32),
+							BlockNumber: 0,
+							Type:        gledger.BlockTypeConway,
+							Cbor:        []byte{0x80},
+						}},
+					))
+				}
+				require.Equal(
+					t,
+					input.atOrigin,
+					len(primaryChain.Tip().Point.Hash) == 0,
+				)
+				err := entry.verify(ls, input.block)
+				require.ErrorContains(t, err, noByronIssuersRule)
+			})
+		}
+	}
+}
+
+// TestByronPBFTStateAtTipRejectsChainWithoutGenesisIssuers pins the ledger
+// apply path: reconstructing Byron PBFT state for a batch containing a Byron
+// block must fail on the same rule rather than on missing configuration.
+func TestByronPBFTStateAtTipRejectsChainWithoutGenesisIssuers(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newNoByronIssuersTestLedger(
+		t,
+		lcommon.Blake2b256Hash([]byte("devnet byron genesis")),
+	)
+	_, err := ls.byronPBFTStateAtTip(
+		context.Background(),
+		ocommon.Tip{},
+	)
+	require.ErrorContains(t, err, noByronIssuersRule)
+}
+
+// TestByronHeaderGateReadsOnlyConstructionTimeFields runs the no-issuer
+// header gate while another goroutine commits Byron PBFT state under the
+// ledger lock, as ledger apply does concurrently with chainsync header
+// validation. The gate takes no lock, so under -race it must read only the
+// fields NewLedgerState sets once.
+func TestByronHeaderGateReadsOnlyConstructionTimeFields(t *testing.T) {
+	t.Parallel()
+
+	ls, _ := newNoByronIssuersTestLedger(
+		t,
+		lcommon.Blake2b256Hash([]byte("devnet byron genesis")),
+	)
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+	}
+	const iterations = 200
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range iterations {
+			ls.Lock()
+			ls.byronPBFT.tip = ocommon.NewPoint(uint64(i), nil)
+			ls.byronPBFT.initialized = true
+			ls.Unlock()
+		}
+	}()
+	for range iterations {
+		require.ErrorContains(
+			t,
+			ls.validateByronPBFTHeaderCrypto(ebb),
+			noByronIssuersRule,
+		)
+	}
+	<-done
+}
 
 type byronPBFTTestKey struct {
 	verificationKey []byte
@@ -1101,6 +1358,35 @@ func TestByronPBFTStateAtTipRebuildsAfterRestartAndRollback(t *testing.T) {
 	)
 }
 
+// TestByronPBFTCurrentSlotPastHorizonIsDeferred: a header past the known epoch
+// horizon (from-genesis sync reaching epoch 1 before its epoch is applied) is
+// not a peer fault. Reporting it as a hard failure recycles every peer at the
+// first epoch boundary.
+func TestByronPBFTCurrentSlotPastHorizonIsDeferred(t *testing.T) {
+	t.Parallel()
+
+	ls := &LedgerState{}
+	ls.slotClock = NewSlotClock(
+		pastHorizonSlotTimeProvider{
+			SlotTimeProvider: newMockSlotTimeProvider(
+				time.Now().Add(-100*time.Second),
+				time.Second,
+				100,
+			),
+			rejectedSlot: 21600,
+		},
+		DefaultSlotClockConfig(),
+	)
+	ebb := &byron.ByronEpochBoundaryBlock{
+		BlockHeader: &byron.ByronEpochBoundaryBlockHeader{},
+	}
+	ebb.BlockHeader.ConsensusData.Epoch = 1
+
+	err := ls.validateByronPBFTCurrentSlot(ebb)
+	require.ErrorIs(t, err, errByronPBFTCurrentSlotUnavailable)
+	require.True(t, IsHeaderVerificationDeferred(err))
+}
+
 func TestByronPBFTCurrentSlotFailureIsNotAHeaderRejection(t *testing.T) {
 	t.Parallel()
 
@@ -1154,9 +1440,8 @@ func TestValidateByronPBFTHeaderRejectsFutureEbb(t *testing.T) {
 
 // newByronGenesisAnchorTestLedger builds a LedgerState wired to a fresh,
 // real *chain.Chain and a Byron genesis hash, for testing
-// validateByronPBFTHeaderCrypto's origin-anchor checks
-// (blinklabs-io/dingo#4399). The chain starts at origin unless the caller
-// adds blocks to it first.
+// validateByronPBFTHeaderCrypto's origin-anchor checks.
+// The chain starts at origin unless the caller adds blocks to it first.
 func newByronGenesisAnchorTestLedger(
 	t *testing.T,
 	genesisHash string,
@@ -1194,7 +1479,7 @@ func newByronGenesisAnchorTestLedger(
 }
 
 // TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb is the
-// blinklabs-io/dingo#4399 positive case: at origin, an epoch-boundary block
+// positive case: at origin, an epoch-boundary block
 // whose previous hash matches the configured Byron genesis hash is accepted.
 func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 	t.Parallel()
@@ -1217,7 +1502,7 @@ func TestValidateByronPBFTHeaderAcceptsGenesisAnchoredEbb(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsGenesisHashMismatch is the
-// blinklabs-io/dingo#4399 regression itself: at origin, an epoch-boundary
+// regression itself: at origin, an epoch-boundary
 // block whose previous hash does not match the configured Byron genesis
 // hash must be rejected, even though it is otherwise correctly placed and
 // sized. The reference rejects this with ChainValidationGenesisHashMismatch.
@@ -1285,7 +1570,7 @@ func TestValidateByronPBFTHeaderRejectsNonZeroEpochEbbAtOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin is the
-// blinklabs-io/dingo#4399 acceptance criterion that a PBFT-signed regular
+// acceptance criterion that a PBFT-signed regular
 // Byron block must never be accepted as the first block of a from-genesis
 // chain, even one that (like the genuine first block) carries block number
 // and difficulty 0. Only an epoch-boundary block may open the chain. This
@@ -1314,7 +1599,7 @@ func TestValidateByronPBFTHeaderRejectsMainBlockAtOrigin(t *testing.T) {
 // genesis, and a ledger started from a trusted snapshot or bulk import at a
 // non-origin point has the same shape: its primary chain tip is that
 // trusted point, not origin. Both must reach the ordinary current-slot
-// check unaffected by the genesis hash, matching pre-#4399 behavior.
+// check unaffected by the genesis hash, matching the earlier behavior.
 func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -1348,7 +1633,7 @@ func TestValidateByronPBFTHeaderSkipsGenesisAnchorAwayFromOrigin(t *testing.T) {
 }
 
 // TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin is
-// the blinklabs-io/dingo#4399 acceptance criterion that the EBB-only
+// the acceptance criterion that the EBB-only
 // anchor rule applies identically after a rollback empties the chain back
 // to origin, not only on a chain that has never been touched.
 // chain.Chain.atOriginAfterMutation documents the equivalent chain-layer
@@ -1385,6 +1670,141 @@ func TestValidateByronPBFTHeaderAppliesGenesisAnchorAfterRollbackToOrigin(
 
 	err := ls.validateByronPBFTHeaderCrypto(ebb)
 	require.ErrorContains(t, err, "genesis hash")
+}
+
+// queueByronOriginEbbHeader queues a genesis-anchored epoch 0 EBB header on
+// the chain's header queue without applying any block, the state chainsync
+// leaves behind while it batches headers ahead of blockfetch.
+func queueByronOriginEbbHeader(
+	t *testing.T,
+	primaryChain *chain.Chain,
+	genesisHash lcommon.Blake2b256,
+) *byron.ByronEpochBoundaryBlockHeader {
+	t.Helper()
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
+	require.NoError(t, primaryChain.AddBlockHeader(ebbHeader))
+	require.Equal(t, 1, primaryChain.HeaderCount())
+	// Only headers are queued: the primary chain tip is still origin.
+	require.Zero(t, primaryChain.Tip().Point.Slot)
+	require.Empty(t, primaryChain.Tip().Point.Hash)
+	return ebbHeader
+}
+
+// TestValidateByronPBFTHeaderAcceptsMainBlockAfterQueuedOriginEbb covers a
+// from-genesis sync: chainsync verifies each header before blockfetch applies
+// any block, so the main block after the first EBB is verified while the
+// primary tip is still origin. It chains onto the queued EBB and is not the
+// first block of the chain.
+func TestValidateByronPBFTHeaderAcceptsMainBlockAfterQueuedOriginEbb(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{
+			PrevBlock: ebbHeader.Hash(),
+		},
+	}
+
+	// The unsigned header still fails PBFT verification, but past the
+	// first-block gate.
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+	require.NotContains(t, err.Error(), "first block")
+}
+
+// TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb confirms the queued
+// first EBB is still the first block when blockfetch verifies it again: it
+// keeps its epoch 0 and genesis-hash checks.
+func TestValidateByronPBFTHeaderKeepsAnchorForQueuedOriginEbb(t *testing.T) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+	require.NoError(
+		t,
+		ls.validateByronPBFTHeaderCrypto(
+			&byron.ByronEpochBoundaryBlock{BlockHeader: ebbHeader},
+		),
+	)
+
+	badHeader := &byron.ByronEpochBoundaryBlockHeader{
+		PrevBlock: lcommon.Blake2b256Hash([]byte("wrong prev hash")),
+	}
+	err := ls.validateByronPBFTHeaderCrypto(
+		&byron.ByronEpochBoundaryBlock{BlockHeader: badHeader},
+	)
+	require.ErrorContains(t, err, "genesis hash")
+}
+
+// TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb
+// confirms a rollback to origin drops the queued EBB, so a main block is the
+// first block of the chain again and is rejected.
+func TestValidateByronPBFTHeaderRejectsMainBlockAfterRollbackDropsQueuedEbb(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	ebbHeader := queueByronOriginEbbHeader(t, primaryChain, genesisHash)
+	require.NoError(t, primaryChain.RollbackUnbounded(ocommon.Point{}))
+	require.Zero(t, primaryChain.HeaderCount())
+
+	mainBlock := &byron.ByronMainBlock{
+		BlockHeader: &byron.ByronMainBlockHeader{
+			PrevBlock: ebbHeader.Hash(),
+		},
+	}
+	err := ls.validateByronPBFTHeaderCrypto(mainBlock)
+	require.ErrorContains(t, err, "epoch-boundary block")
+}
+
+// TestValidateChainSelectionHeaderCryptoSkipsByronFirstBlockGate covers the
+// peer-relative ingress path: a peer's headers are verified before they reach
+// the local header queue (the ChainsyncEvent that queues the EBB is delivered
+// asynchronously), so neither the primary tip nor the queue can say whether a
+// peer's header is the chain's first. The gate must not fire there; the ledger
+// header-queue path still enforces it.
+func TestValidateChainSelectionHeaderCryptoSkipsByronFirstBlockGate(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	genesisHash := lcommon.Blake2b256Hash([]byte("configured genesis"))
+	ls, primaryChain := newByronGenesisAnchorTestLedger(
+		t,
+		genesisHash.String(),
+	)
+	require.Zero(t, primaryChain.HeaderCount())
+	ebbHeader := &byron.ByronEpochBoundaryBlockHeader{PrevBlock: genesisHash}
+	mainHeader := &byron.ByronMainBlockHeader{PrevBlock: ebbHeader.Hash()}
+
+	err := ls.ValidateChainSelectionHeaderCrypto(mainHeader)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+	err = ls.ValidateBlockHeaderCrypto(mainHeader)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "epoch-boundary block")
+
+	// The ledger's own header-queue verification keeps the gate.
+	err = ls.verifyBlockHeaderOnlyCrypto(mainHeader)
+	require.ErrorContains(t, err, "epoch-boundary block")
 }
 
 // TestValidateByronPBFTHeaderCryptoRejectsNilHeaders calls the Byron header
@@ -1428,5 +1848,672 @@ func TestValidateByronPBFTHeaderCryptoRejectsNilHeaders(t *testing.T) {
 				require.ErrorContains(t, err, "nil header")
 			})
 		}
+	}
+}
+
+// byronParamUpdate is the protocol parameters a test proposal changes; a nil
+// field is left unchanged.
+type byronParamUpdate struct {
+	maxBlockSize, maxHeaderSize *uint64
+	// feeSummandNano and feeMultiplierNano are set together.
+	feeSummandNano, feeMultiplierNano *uint64
+}
+
+// newByronParamUpdateProposal returns a signed proposal for version that
+// changes the parameters in update, and the proposal's id.
+func newByronParamUpdateProposal(
+	t *testing.T,
+	protocolMagic uint32,
+	proposer byronPBFTTestKey,
+	version [3]uint64,
+	update byronParamUpdate,
+) ([]byte, []byte) {
+	t.Helper()
+	optional := func(value *uint64) []any {
+		if value == nil {
+			return []any{}
+		}
+		return []any{*value}
+	}
+	feePolicy := []any{}
+	if update.feeSummandNano != nil {
+		inner, err := cbor.Encode([]any{
+			*update.feeSummandNano, *update.feeMultiplierNano,
+		})
+		require.NoError(t, err)
+		feePolicy = []any{[]any{uint8(0), cbor.WrappedCbor(inner)}}
+	}
+	fields := make([]cbor.RawMessage, 0, 5)
+	for _, value := range []any{
+		[]any{uint16(version[0]), uint16(version[1]), uint8(version[2])},
+		[]any{
+			[]any{}, []any{}, optional(update.maxBlockSize),
+			optional(update.maxHeaderSize), []any{}, []any{}, []any{},
+			[]any{}, []any{}, []any{}, []any{}, []any{}, feePolicy, []any{},
+		},
+		[]any{"dingo-test", uint32(1)},
+		map[string]any{},
+		map[uint64]any{},
+	} {
+		encoded, err := cbor.Encode(value)
+		require.NoError(t, err)
+		fields = append(fields, encoded)
+	}
+	signedBody := []byte{0x85}
+	for _, field := range fields {
+		signedBody = append(signedBody, field...)
+	}
+	signature := ed25519.Sign(
+		proposer.privateKey,
+		byronUpdateSigned(
+			t,
+			byron.SignTagUSProposal,
+			protocolMagic,
+			signedBody,
+		),
+	)
+	raw, err := cbor.Encode([]any{
+		fields[0], fields[1], fields[2], fields[3], fields[4],
+		proposer.verificationKey, signature,
+	})
+	require.NoError(t, err)
+	var proposal byron.ByronUpdateProposal
+	_, err = cbor.Decode(raw, &proposal)
+	require.NoError(t, err)
+	return proposal.Cbor(), lcommon.Blake2b256Hash(proposal.Cbor()).Bytes()
+}
+
+// byronAdoptionChain is a Byron chain, k = 10 so an epoch is 100 slots, that
+// adopts two updates in turn: update A at the first block of epoch 1 and
+// update B at the first block of epoch 2. Each changes the block and header
+// limits and the fee policy from what came before.
+type byronAdoptionChain struct {
+	magic    uint32
+	issuer   byronPBFTTestKey
+	delegate byronPBFTTestKey
+	cert     []any
+	blocks   []*byron.ByronMainBlock
+	raw      []chain.RawBlock
+	// probe is an empty main block; probeBlock and probeHeader are its sizes.
+	probe       *byron.ByronMainBlock
+	probeBlock  uint64
+	probeHeader uint64
+	genesis     wantByronParams
+	adoptedA    wantByronParams
+	adoptedB    wantByronParams
+}
+
+// Indexes into byronAdoptionChain.blocks.
+const (
+	blockGenesisOnlyLast = 3 // last block before update A is adopted
+	blockFirstUnderA     = 4 // first block of epoch 1
+	blockLastUnderA      = 7 // last block before update B is adopted
+	blockFirstUnderB     = 8 // first block of epoch 2
+	blockTip             = 9
+)
+
+// wantByronParams are the adopted parameters a test asserts.
+type wantByronParams struct {
+	maxBlockSize, maxHeaderSize uint64
+	feeSummand                  uint64
+	feeMultiplierNano           int64
+}
+
+func newByronAdoptionChain(t *testing.T) *byronAdoptionChain {
+	t.Helper()
+	c := &byronAdoptionChain{
+		magic:    uint32(44),
+		issuer:   newByronPBFTTestKey(0x91),
+		delegate: newByronPBFTTestKey(0x92),
+	}
+	c.cert = newSignedByronPBFTDelegationCertificate(
+		t, c.magic, 0, c.issuer, c.delegate,
+	)
+	template := loadRealByronMainBlock(t)
+	newBlock := func(
+		epoch, slot, number uint64,
+		prev lcommon.Blake2b256,
+		payload []byte,
+		version byron.ByronBlockVersion,
+	) *byron.ByronMainBlock {
+		return newSignedByronPBFTBlockWithBody(
+			t, template, c.magic, epoch, slot, number, prev,
+			c.issuer, c.delegate, c.cert, nil,
+			&byronPBFTBodyOverride{
+				emptyTransactions: true,
+				updatePayload:     payload,
+				blockVersion:      &version,
+			},
+		)
+	}
+	c.probe = newBlock(
+		2, 10, 99, lcommon.Blake2b256{}, byronUpdatePayload(nil),
+		byron.ByronBlockVersion{Minor: 2},
+	)
+	c.probeBlock = uint64(len(c.probe.Cbor()))
+	c.probeHeader = uint64(len(c.probe.Header().Cbor()))
+
+	c.genesis = wantByronParams{
+		maxBlockSize: 2_000_000, maxHeaderSize: 2_000_000,
+		feeSummand: 155_381, feeMultiplierNano: 43_946_000_000,
+	}
+	c.adoptedA = wantByronParams{
+		maxBlockSize: c.probeBlock, maxHeaderSize: c.probeHeader,
+		feeSummand: 200_000, feeMultiplierNano: 100_000_000_000,
+	}
+	c.adoptedB = wantByronParams{
+		maxBlockSize: 2 * c.probeBlock, maxHeaderSize: c.probeHeader - 1,
+		feeSummand: 120_000, feeMultiplierNano: 20_000_000_000,
+	}
+	update := func(want wantByronParams) byronParamUpdate {
+		summand := want.feeSummand * 1_000_000_000
+		multiplier := uint64(want.feeMultiplierNano)
+		return byronParamUpdate{
+			maxBlockSize:      &want.maxBlockSize,
+			maxHeaderSize:     &want.maxHeaderSize,
+			feeSummandNano:    &summand,
+			feeMultiplierNano: &multiplier,
+		}
+	}
+	proposalA, idA := newByronParamUpdateProposal(
+		t, c.magic, c.delegate, [3]uint64{0, 1, 0}, update(c.adoptedA),
+	)
+	proposalB, idB := newByronParamUpdateProposal(
+		t, c.magic, c.delegate, [3]uint64{0, 2, 0}, update(c.adoptedB),
+	)
+	voteA := newByronUpdateVote(t, c.magic, c.delegate, idA, false)
+	voteB := newByronUpdateVote(t, c.magic, c.delegate, idB, false)
+	v0 := byron.ByronBlockVersion{}
+	vA := byron.ByronBlockVersion{Minor: 1}
+	vB := byron.ByronBlockVersion{Minor: 2}
+	for i, spec := range []struct {
+		epoch, slot uint64
+		payload     []byte
+		version     byron.ByronBlockVersion
+	}{
+		{0, 0, byronUpdatePayload(nil), v0},
+		{0, 6, byronUpdatePayload(proposalA), v0},
+		{0, 7, byronUpdatePayload(nil, voteA), v0},
+		{0, 30, byronUpdatePayload(nil), vA},
+		{1, 0, byronUpdatePayload(nil), vA},
+		{1, 6, byronUpdatePayload(proposalB), vA},
+		{1, 7, byronUpdatePayload(nil, voteB), vA},
+		{1, 30, byronUpdatePayload(nil), vB},
+		{2, 0, byronUpdatePayload(nil), vB},
+		{2, 10, byronUpdatePayload(nil), vB},
+	} {
+		var prev lcommon.Blake2b256
+		if i > 0 {
+			prev = c.blocks[i-1].Hash()
+		}
+		c.blocks = append(c.blocks, newBlock(
+			spec.epoch, spec.slot, uint64(i), prev, spec.payload, spec.version,
+		))
+		c.raw = append(c.raw, rawByronPBFTBlock(t, c.blocks[i]))
+	}
+	return c
+}
+
+// nodeConfig returns a Byron genesis whose limits and fee policy are the
+// chain's genesis ones, except for the block and header limits, which are
+// blockLimit when it is not zero.
+func (c *byronAdoptionChain) nodeConfig(
+	t *testing.T,
+	blockLimit int,
+) *cardano.CardanoNodeConfig {
+	t.Helper()
+	nodeConfig := newGeneratedByronPBFTTestNodeConfig(
+		t, c.magic, 10, c.issuer, c.delegate, c.cert,
+	)
+	data := &nodeConfig.ByronGenesis().BlockVersionData
+	data.MaxBlockSize = int(c.genesis.maxBlockSize)
+	data.MaxHeaderSize = int(c.genesis.maxHeaderSize)
+	if blockLimit != 0 {
+		data.MaxBlockSize = blockLimit
+		data.MaxHeaderSize = blockLimit
+	}
+	data.MaxTxSize = 100
+	data.MaxProposalSize = 4_000
+	data.TxFeePolicy.Summand = int64(c.genesis.feeSummand) * 1_000_000_000
+	data.TxFeePolicy.Multiplier = c.genesis.feeMultiplierNano
+	return nodeConfig
+}
+
+// newLedger returns a ledger with no cached Byron state, as after a restart,
+// over a chain holding raw.
+func (c *byronAdoptionChain) newLedger(
+	t *testing.T,
+	nodeConfig *cardano.CardanoNodeConfig,
+	raw []chain.RawBlock,
+) (*LedgerState, *chain.Chain) {
+	t.Helper()
+	cm, err := chain.NewManager(newTestDB(t), nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 10}))
+	primary := cm.PrimaryChain()
+	require.NoError(t, primary.AddRawBlocks(raw))
+	return &LedgerState{
+		chain:  primary,
+		config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+	}, primary
+}
+
+func rawTip(raw chain.RawBlock) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
+		BlockNumber: raw.BlockNumber,
+	}
+}
+
+// requireByronParams asserts the adopted limits and fee policy of params.
+func requireByronParams(
+	t *testing.T,
+	params *eras.ByronProtocolParameters,
+	want wantByronParams,
+	msg string,
+) {
+	t.Helper()
+	require.NotNil(t, params, msg)
+	require.False(t, params.AdoptionUnknown, msg)
+	require.Zero(
+		t,
+		params.MaxBlockSize.Cmp(new(big.Int).SetUint64(want.maxBlockSize)),
+		"%s: maxBlockSize %s",
+		msg,
+		params.MaxBlockSize,
+	)
+	require.Zero(
+		t,
+		params.MaxHeaderSize.Cmp(new(big.Int).SetUint64(want.maxHeaderSize)),
+		"%s: maxHeaderSize %s",
+		msg,
+		params.MaxHeaderSize,
+	)
+	require.Equal(
+		t,
+		want.feeSummand,
+		params.TxFeeSummand,
+		"%s: fee summand",
+		msg,
+	)
+	require.Zero(
+		t,
+		params.TxFeeMultiplierNano.Cmp(big.NewInt(want.feeMultiplierNano)),
+		"%s: fee multiplier %s",
+		msg,
+		params.TxFeeMultiplierNano,
+	)
+}
+
+// stateAt rebuilds the update state at raw[index] and returns the parameters
+// block application would validate the block at index with.
+func stateAt(
+	t *testing.T,
+	ls *LedgerState,
+	raw chain.RawBlock,
+) (byronPBFTState, *eras.ByronProtocolParameters) {
+	t.Helper()
+	state, err := ls.byronPBFTStateAtTip(context.Background(), rawTip(raw))
+	require.NoError(t, err)
+	decoded, err := byron.NewByronMainBlockFromCbor(raw.Cbor)
+	require.NoError(t, err)
+	params, ok := byronBlockPParams(decoded, state, nil).(*eras.ByronProtocolParameters)
+	require.True(t, ok)
+	return state, params
+}
+
+// TestByronAdoptedParamsRestoredFromStoredChain covers and for a
+// node that synced from genesis: a ledger with no cached state, as after a
+// restart, replays the stored chain to the adopted limits and fee policy at
+// every tip, and each of two successive adoptions replaces the previous one.
+func TestByronAdoptedParamsRestoredFromStoredChain(t *testing.T) {
+	t.Parallel()
+	c := newByronAdoptionChain(t)
+	nodeConfig := c.nodeConfig(t, 0)
+	for _, test := range []struct {
+		name string
+		tip  int
+		want wantByronParams
+	}{
+		{"genesis before any adoption", 0, c.genesis},
+		{"proposal registered but not adopted", 2, c.genesis},
+		{"last block before update A", blockGenesisOnlyLast, c.genesis},
+		{"first block under update A", blockFirstUnderA, c.adoptedA},
+		{"update B registered, A still adopted", blockLastUnderA, c.adoptedA},
+		{"first block under update B", blockFirstUnderB, c.adoptedB},
+		{"tip under update B", blockTip, c.adoptedB},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ls, _ := c.newLedger(t, nodeConfig, c.raw)
+			state, params := stateAt(t, ls, c.raw[test.tip])
+			require.True(t, state.update.Complete())
+			requireByronParams(t, params, test.want, test.name)
+		})
+	}
+
+	// After a restart at the tip the restored limits govern the next block.
+	ls, _ := c.newLedger(t, nodeConfig, c.raw)
+	_, params := stateAt(t, ls, c.raw[blockTip])
+	err := validateByronBlockSizes(c.probe, params, nodeConfig)
+	require.ErrorContains(t, err, "exceeds maxHeaderSize")
+	fee, err := params.MinFee(200)
+	require.NoError(t, err)
+	require.Equal(t, big.NewInt(124_000), fee)
+}
+
+// TestByronAdoptedParamsRollbackAcrossAdoptions covers the case where a
+// rollback to before an adoption restores the parameters adopted before it,
+// whether the ledger cached the state at the abandoned tip or not, and
+// replaying forward adopts them again.
+func TestByronAdoptedParamsRollbackAcrossAdoptions(t *testing.T) {
+	t.Parallel()
+	c := newByronAdoptionChain(t)
+	nodeConfig := c.nodeConfig(t, 0)
+	ls, primary := c.newLedger(t, nodeConfig, c.raw)
+
+	cache := func(state byronPBFTState, raw chain.RawBlock) {
+		ls.Lock()
+		ls.byronPBFT = byronPBFTCache{
+			state:       state,
+			tip:         rawTip(raw).Point,
+			initialized: true,
+		}
+		ls.Unlock()
+	}
+	state, params := stateAt(t, ls, c.raw[blockTip])
+	requireByronParams(t, params, c.adoptedB, "tip")
+	cache(state, c.raw[blockTip])
+
+	// Roll back across update B's adoption.
+	require.NoError(
+		t,
+		primary.RollbackUnbounded(rawTip(c.raw[blockLastUnderA]).Point),
+	)
+	state, params = stateAt(t, ls, c.raw[blockLastUnderA])
+	requireByronParams(t, params, c.adoptedA, "rolled back across B")
+	cache(state, c.raw[blockLastUnderA])
+
+	// Roll back across update A's adoption as well.
+	require.NoError(
+		t,
+		primary.RollbackUnbounded(rawTip(c.raw[blockGenesisOnlyLast]).Point),
+	)
+	state, params = stateAt(t, ls, c.raw[blockGenesisOnlyLast])
+	requireByronParams(t, params, c.genesis, "rolled back across A")
+	cache(state, c.raw[blockGenesisOnlyLast])
+
+	// Replaying forward from the cached ancestor adopts both again.
+	require.NoError(t, primary.AddRawBlocks(c.raw[blockGenesisOnlyLast+1:]))
+	_, params = stateAt(t, ls, c.raw[blockTip])
+	requireByronParams(t, params, c.adoptedB, "replayed forward")
+}
+
+// TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption covers
+// fork switching: when the chain switches to a fork that never endorsed update A, a
+// cached state from the abandoned fork's adoption is not reused, though the
+// new tip is later than the cached one.
+func TestByronAdoptedParamsForkDoesNotInheritAbandonedAdoption(t *testing.T) {
+	t.Parallel()
+	c := newByronAdoptionChain(t)
+	nodeConfig := c.nodeConfig(t, 0)
+	ls, primary := c.newLedger(t, nodeConfig, c.raw[:blockFirstUnderA+1])
+	state, params := stateAt(t, ls, c.raw[blockFirstUnderA])
+	requireByronParams(t, params, c.adoptedA, "abandoned fork")
+	ls.Lock()
+	ls.byronPBFT = byronPBFTCache{
+		state:       state,
+		tip:         rawTip(c.raw[blockFirstUnderA]).Point,
+		initialized: true,
+	}
+	ls.Unlock()
+
+	// The fork keeps the confirmed proposal but never endorses it, and its
+	// first epoch-1 block is one slot later than the abandoned one.
+	require.NoError(t, primary.RollbackUnbounded(rawTip(c.raw[2]).Point))
+	template := loadRealByronMainBlock(t)
+	unendorsed := newSignedByronPBFTBlockWithBody(
+		t, template, c.magic, 0, 30, 3, c.blocks[2].Hash(),
+		c.issuer, c.delegate, c.cert, nil,
+		&byronPBFTBodyOverride{
+			emptyTransactions: true,
+			updatePayload:     byronUpdatePayload(nil),
+			blockVersion:      &byron.ByronBlockVersion{},
+		},
+	)
+	nextEpoch := newSignedByronPBFTBlockWithBody(
+		t, template, c.magic, 1, 1, 4, unendorsed.Hash(),
+		c.issuer, c.delegate, c.cert, nil,
+		&byronPBFTBodyOverride{
+			emptyTransactions: true,
+			updatePayload:     byronUpdatePayload(nil),
+			blockVersion:      &byron.ByronBlockVersion{},
+		},
+	)
+	forkRaw := []chain.RawBlock{
+		rawByronPBFTBlock(t, unendorsed), rawByronPBFTBlock(t, nextEpoch),
+	}
+	require.NoError(t, primary.AddRawBlocks(forkRaw))
+	_, params = stateAt(t, ls, forkRaw[1])
+	requireByronParams(t, params, c.genesis, "fork without an adoption")
+}
+
+// TestByronTrustedMidByronStartHasUnknownAdoption covers the contract for a
+// node whose stored chain starts inside Byron: the updates adopted before its
+// first block are unknowable, so the state is marked incomplete and the size
+// and fee limits, both those of block application and those of the tip the
+// mempool validates against, are not enforced from genesis values.
+func TestByronTrustedMidByronStartHasUnknownAdoption(t *testing.T) {
+	t.Parallel()
+	c := newByronAdoptionChain(t)
+	// A genesis that would reject the probe block on either limit.
+	nodeConfig := c.nodeConfig(t, 1)
+	ls, _ := c.newLedger(t, nodeConfig, c.raw[blockFirstUnderA:])
+
+	state, params := stateAt(t, ls, c.raw[blockTip])
+	require.False(t, state.update.Complete())
+	require.True(t, params.AdoptionUnknown)
+	require.NoError(t, validateByronBlockSizes(c.probe, params, nodeConfig))
+
+	// The same parameters, were they treated as known, reject the block.
+	known := params.Clone()
+	known.AdoptionUnknown = false
+	require.ErrorContains(
+		t,
+		validateByronBlockSizes(c.probe, known, nodeConfig),
+		"exceeds maxHeaderSize",
+	)
+
+	ls.Lock()
+	ls.byronPBFT = byronPBFTCache{
+		state:       state,
+		tip:         rawTip(c.raw[blockTip]).Point,
+		initialized: true,
+	}
+	ls.Unlock()
+	atTip, err := ls.ByronProtocolParameters()
+	require.NoError(t, err)
+	require.True(t, atTip.AdoptionUnknown)
+
+	// A chain that starts at genesis enforces the same limits.
+	full, _ := c.newLedger(t, nodeConfig, c.raw[:1])
+	fullState, fullParams := stateAt(t, full, c.raw[0])
+	require.True(t, fullState.update.Complete())
+	require.False(t, fullParams.AdoptionUnknown)
+	require.ErrorContains(
+		t,
+		validateByronBlockSizes(c.probe, fullParams, nodeConfig),
+		"exceeds maxHeaderSize",
+	)
+}
+
+// TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint covers the
+// criterion that an adopted update's ppMaxBlockSize and ppMaxHeaderSize
+// govern inbound regular-block validation from the adoption point. A real
+// proposal is registered, voted, endorsed and stable through the update
+// state; with k = 10 the epoch is 100 slots, so it is adopted by the first
+// block of epoch 1. The block in the last slot of epoch 0 is measured against
+// the limits before adoption and the first block of epoch 1 against the
+// adopted ones, using the parameters block application takes from the state.
+func TestByronAdoptedUpdateChangesSizeLimitsAtAdoptionPoint(t *testing.T) {
+	t.Parallel()
+	const (
+		protocolMagic = uint32(44)
+		securityParam = 10
+		wide          = uint64(2_000_000)
+	)
+	issuer := newByronPBFTTestKey(0x91)
+	delegate := newByronPBFTTestKey(0x92)
+	certificate := newSignedByronPBFTDelegationCertificate(
+		t, protocolMagic, 0, issuer, delegate,
+	)
+	template := loadRealByronMainBlock(t)
+	newBlock := func(
+		epoch, slot, number uint64,
+		payload []byte,
+		version byron.ByronBlockVersion,
+	) *byron.ByronMainBlock {
+		return newSignedByronPBFTBlockWithBody(
+			t, template, protocolMagic, epoch, slot, number,
+			lcommon.Blake2b256{}, issuer, delegate, certificate, nil,
+			&byronPBFTBodyOverride{
+				emptyTransactions: true,
+				updatePayload:     payload,
+				blockVersion:      &version,
+			},
+		)
+	}
+	current := byron.ByronBlockVersion{}
+	adoptedVersion := byron.ByronBlockVersion{Minor: 1}
+	lastBefore := newBlock(0, 99, 4, byronUpdatePayload(nil), current)
+	firstAfter := newBlock(1, 0, 4, byronUpdatePayload(nil), current)
+	blockSizes := [2]uint64{
+		uint64(len(lastBefore.Cbor())), uint64(len(firstAfter.Cbor())),
+	}
+	headerSizes := [2]uint64{
+		uint64(len(lastBefore.Header().Cbor())),
+		uint64(len(firstAfter.Header().Cbor())),
+	}
+	lowest := func(sizes [2]uint64) uint64 { return min(sizes[0], sizes[1]) }
+	highest := func(sizes [2]uint64) uint64 { return max(sizes[0], sizes[1]) }
+	ptr := func(v uint64) *uint64 { return &v }
+
+	tests := []struct {
+		name string
+		// genesis and adopted are {maxBlockSize, maxHeaderSize}.
+		genesis, adopted [2]uint64
+		// beforeErr and afterErr are the substrings the last block of
+		// epoch 0 and the first block of epoch 1 must be rejected with, or
+		// empty when they must be accepted.
+		beforeErr, afterErr string
+	}{
+		{
+			"lower the block limit below the block",
+			[2]uint64{wide, wide},
+			[2]uint64{blockSizes[1] - 1, wide},
+			"", "exceeds maxBlockSize",
+		},
+		{
+			"lower the block limit to exactly the block",
+			[2]uint64{wide, wide},
+			[2]uint64{blockSizes[1], wide},
+			"", "",
+		},
+		{
+			"lower the header limit below the header",
+			[2]uint64{wide, wide},
+			[2]uint64{wide, headerSizes[1] - 1},
+			"", "exceeds maxHeaderSize",
+		},
+		{
+			"lower the header limit to exactly the header",
+			[2]uint64{wide, wide},
+			[2]uint64{wide, headerSizes[1]},
+			"", "",
+		},
+		{
+			"raise the block limit to admit the block",
+			[2]uint64{lowest(blockSizes) - 1, wide},
+			[2]uint64{highest(blockSizes), wide},
+			"exceeds maxBlockSize", "",
+		},
+		{
+			"raise the header limit to admit the header",
+			[2]uint64{wide, lowest(headerSizes) - 1},
+			[2]uint64{wide, highest(headerSizes)},
+			"exceeds maxHeaderSize", "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			nodeConfig := newGeneratedByronPBFTTestNodeConfig(
+				t, protocolMagic, securityParam, issuer, delegate, certificate,
+			)
+			limits := &nodeConfig.ByronGenesis().BlockVersionData
+			limits.MaxBlockSize = int(test.genesis[0])
+			limits.MaxHeaderSize = int(test.genesis[1])
+			// A transaction and a proposal must fit the smallest limits.
+			limits.MaxTxSize = 100
+			limits.MaxProposalSize = 700
+			ls := &LedgerState{
+				config: LedgerStateConfig{CardanoNodeConfig: nodeConfig},
+			}
+			ls.slotClock = NewSlotClock(
+				newMockSlotTimeProvider(time.Unix(0, 0), time.Second, 100),
+				DefaultSlotClockConfig(),
+			)
+			config, err := ls.byronPBFTConfig()
+			require.NoError(t, err)
+			genesisParams, err := ls.byronGenesisProtocolParameters()
+			require.NoError(t, err)
+			state, err := newByronPBFTState(config, genesisParams)
+			require.NoError(t, err)
+			state.update = state.update.Advance(0, 0)
+
+			proposal, proposalId := newByronUpdateProposal(
+				t, protocolMagic, delegate, [3]uint64{0, 1, 0},
+				ptr(test.adopted[0]), ptr(test.adopted[1]),
+			)
+			vote := newByronUpdateVote(
+				t, protocolMagic, delegate, proposalId, false,
+			)
+			// Header validation is off: one genesis key signs every block
+			// here and would exceed the PBFT signature window. A rejected
+			// update payload is then only logged, so the adopted version
+			// asserted below is what shows the proposal registered.
+			// Registered and confirmed in epoch 0, endorsed once confirmation
+			// is 2k slots old, and stable for 4k slots by the next epoch.
+			for _, block := range []*byron.ByronMainBlock{
+				newBlock(0, 6, 1, byronUpdatePayload(proposal), current),
+				newBlock(0, 7, 2, byronUpdatePayload(nil, vote), current),
+				newBlock(0, 30, 3, byronUpdatePayload(nil), adoptedVersion),
+			} {
+				state, err = ls.advanceByronPBFTState(state, block, false)
+				require.NoError(t, err)
+			}
+			require.Zero(t, state.update.AdoptedVersion().Minor)
+
+			check := func(
+				block *byron.ByronMainBlock,
+				wantVersion uint16,
+				wantErr string,
+			) {
+				t.Helper()
+				next, err := ls.advanceByronPBFTState(state, block, false)
+				require.NoError(t, err)
+				require.Equal(t, wantVersion, next.update.AdoptedVersion().Minor)
+				params, ok := byronBlockPParams(block, next, nil).(*eras.ByronProtocolParameters)
+				require.True(t, ok)
+				err = validateByronBlockSizes(block, params, nodeConfig)
+				if wantErr == "" {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorContains(t, err, wantErr)
+			}
+			check(lastBefore, 0, test.beforeErr)
+			check(firstAfter, 1, test.afterErr)
+		})
 	}
 }

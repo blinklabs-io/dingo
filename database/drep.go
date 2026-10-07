@@ -287,6 +287,33 @@ func (d *Database) UpdateDRepActivity(
 	})
 }
 
+// RecordDRepActivityEpoch sets a DRep's last activity epoch without touching
+// its expiry. Historical replay below a Mithril anchor uses it: the snapshot's
+// DRepState expiry already reflects the dormant-epoch rules replay does not
+// run, so recomputing expiry from a historical vote or certificate would
+// replace a correct value with a stale one.
+func (d *Database) RecordDRepActivityEpoch(
+	credentialTag uint8,
+	drepCredential []byte,
+	activityEpoch uint64,
+	txn *Txn,
+) error {
+	return d.withMetadataWriteTxn(txn, func(txn *Txn) error {
+		if err := d.governanceStore().RecordDRepActivityEpoch(
+			credentialTag,
+			drepCredential,
+			activityEpoch,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf(
+				"failed to record DRep activity epoch: %w",
+				err,
+			)
+		}
+		return nil
+	})
+}
+
 // GetExpiredDReps returns all active DReps whose expiry epoch is at
 // or before the given epoch.
 func (d *Database) GetExpiredDReps(

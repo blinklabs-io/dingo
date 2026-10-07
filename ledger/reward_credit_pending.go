@@ -171,24 +171,44 @@ func (ls *LedgerState) foldRewardCreditFor(
 	credentialTag uint8,
 	stakingKey []byte,
 ) error {
-	credits, err := ls.pendingRewardCreditOutputs(
-		txn,
-		credentialTag,
-		stakingKey,
-	)
-	if err != nil || len(credits) == 0 {
-		return err
-	}
-	if err := ls.db.AddAccountRewardsByCredential(credits, txn); err != nil {
-		return err
-	}
 	var metaTxn types.Txn
 	if txn != nil {
 		metaTxn = txn.Metadata()
 	}
-	return ls.db.Metadata().FoldPendingRewardAccountOutputs(
+	outputs, err := ls.db.Metadata().ClaimPendingRewardCreditsForCredential(
 		credentialTag, stakingKey, metaTxn,
 	)
+	if err != nil {
+		return err
+	}
+	return ls.writeClaimedRewardCredits(txn, outputs)
+}
+
+// writeClaimedRewardCredits writes claimed credits to their accounts with the
+// journal rows the boundary would have written: each at its round's boundary
+// slot, under its source hash.
+func (ls *LedgerState) writeClaimedRewardCredits(
+	txn *database.Txn,
+	outputs []*models.RewardAccountOutput,
+) error {
+	var credits []models.AccountRewardCredit
+	for _, output := range outputs {
+		roundCredits, err := rewardCreditsForOutputs(
+			models.RewardCreditRound{
+				SnapshotEpoch: output.Epoch,
+				BoundarySlot:  output.BoundarySlot,
+			},
+			[]*models.RewardAccountOutput{output},
+		)
+		if err != nil {
+			return err
+		}
+		credits = append(credits, roundCredits...)
+	}
+	if len(credits) == 0 {
+		return nil
+	}
+	return ls.db.AddAccountRewardsByCredential(credits, txn)
 }
 
 // foldRewardCreditsForWithdrawals writes the pending reward credits of every

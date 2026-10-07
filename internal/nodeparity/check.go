@@ -64,7 +64,7 @@ type CheckResult struct {
 //
 // When at is non-nil, Check skips the live-tip-agreement step entirely and
 // acquires the caller-named point directly on both connections instead --
-// explicit historical mode (blinklabs-io/dingo#382). This is what lets a
+// explicit historical mode. This is what lets a
 // caller fall behind the live chain and still walk through specific past
 // blocks (N, N+1, N+2, ...) one at a time rather than only ever comparing
 // "whatever the two nodes currently agree on." Neither node needs to be
@@ -75,10 +75,6 @@ type CheckResult struct {
 // directly as this call's error rather than a Skipped result -- there is no
 // live-tip race left to discard a cycle over once a point is explicitly
 // named.
-//
-// See QuerySnapshot's doc comment for the one accepted gap pinning doesn't
-// close in either mode (Dingo's protocol-params/stake-distribution queries
-// only honor a pinned point within the live tip's current epoch).
 //
 // ctx bounds the whole cycle: every query below is a synchronous protocol
 // call with no timeout of its own, so cancelling ctx (e.g. on SIGINT) is
@@ -105,7 +101,7 @@ func Check(
 		// checkpoint (interval, rollback, mismatch, epoch transition), so
 		// dialing this connection unconditionally meant every one of
 		// those checks paid for a handshake it then immediately closed
-		// unused (blinklabs-io/dingo#4183 review).
+		// unused.
 		cardanoTipConn, err := Dial(ctx, cardanoAddr, magic)
 		if err != nil {
 			return nil, fmt.Errorf("dial cardano-node %s: %w", cardanoAddr, err)

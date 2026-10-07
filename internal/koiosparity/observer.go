@@ -78,7 +78,7 @@ type ObserverConfig struct {
 	// on the first Koios/tool error or non-pass parity result, except an
 	// epoch whose only significant mismatches are reference_lag: Koios's
 	// own data had not caught up, so that result is logged and recorded
-	// but never triggers FatalFunc (dingo #4645; see Observer.fail). When
+	// but never triggers FatalFunc (see Observer.fail). When
 	// Strict is false, every failure is logged and recorded in the cache,
 	// and the observer keeps validating subsequent epochs — an explicit,
 	// non-default choice for advisory/observability-only use, since the
@@ -87,25 +87,24 @@ type ObserverConfig struct {
 	// DefaultKoiosParityConfig), not that non-strict mode is forbidden to
 	// exist.
 	Strict bool
-	// AccountsEnabled runs #3097's per-account exact-parity fetch+check
+	// AccountsEnabled runs the per-account exact-parity fetch+check
 	// phase (FetchAccountRewardsForEpoch / CompareAccountEpoch) alongside
 	// the existing epoch-aggregate/pool phases, for every epoch this
 	// observer processes. Unlike the standalone CLI's opt-in-only default
 	// (see FetchConfig.AccountsEnabled/CheckConfig.AccountsEnabled), the
 	// in-process observer is the operationally-real, continuously-driven
-	// path #3098 exists to make possible, so this defaults to true at the
-	// dingo.KoiosParityConfig/DefaultKoiosParityConfig level (not here --
+	// path the observer exists to make possible, so this defaults to true at
+	// the dingo.KoiosParityConfig/DefaultKoiosParityConfig level (not here --
 	// ObserverConfig itself has no zero-value magic, matching Strict's own
 	// pattern) -- set false explicitly to keep the observer pool-level-only,
-	// e.g. to bound Koios request volume on a resource-constrained
-	// deployment.
+	// e.g. to bound Koios request volume on a resource-constrained deployment.
 	AccountsEnabled bool
 	// GraceHours is forwarded to CheckEpoch/CompareEpochAggregates: the
 	// window after an epoch closes during which a missing Dingo-side row is
 	// reference/sync lag, not a failure. 0 selects the check package's own
 	// default handling (no grace window).
 	GraceHours int
-	// AccountChunkSize/AccountChunkMaxBytes (dingo #3099) bound each
+	// AccountChunkSize/AccountChunkMaxBytes bound each
 	// /account_reward_history request by both address count and encoded
 	// body size. <=0 means "use the package default"
 	// (koiosAccountChunkSize/koiosAccountChunkMaxBytesDefault). Unused when
@@ -123,6 +122,9 @@ type ObserverConfig struct {
 	// package defaults.
 	FetchRetryAttempts int
 	FetchRetryDelay    time.Duration
+	// ErrorRetryDelay is the minimum interval before rechecking ERROR epochs.
+	// Zero uses five minutes; timer polling can add one further interval.
+	ErrorRetryDelay time.Duration
 	// OnResult, if set, is called after every epoch this observer validates
 	// (pass, fail, or error), for tests/observability. Never called
 	// concurrently with itself.
@@ -139,7 +141,7 @@ type ObserverConfig struct {
 // Observer drives Koios fetch+check for each closed epoch as Dingo's own
 // EventBus reports event.EpochTransitionEventType, using an in-process
 // RewardParitySource instead of polling a separately synced metadata
-// database (dingo #3098). It is registered from node.go/internal/node
+// database. It is registered from node.go/internal/node
 // composition, not from ledger/database domain packages: this file is the
 // only place in the observer's call path that constructs a Koios HTTP
 // client or controls node lifecycle (via FatalFunc), matching every other
@@ -156,12 +158,12 @@ type ObserverConfig struct {
 // starts after the epoch-boundary transaction has committed and the ledger
 // lock has been released — this code never acquires it.
 //
-// Two independent background goroutines drain two independent queues (dingo
-// #4339): run/pending/wake drive the fast pool/epoch-aggregate fetch+check
+// Two independent background goroutines drain two independent queues:
+// run/pending/wake drive the fast pool/epoch-aggregate fetch+check
 // (CheckEpoch with accountsEnabled=false, regardless of
 // ObserverConfig.AccountsEnabled) for every epoch, and — only when
 // AccountsEnabled is true — runAccounts/pendingAccounts/wakeAccounts
-// separately drive the slow, rate-limited per-account fetch+check (#3097,
+// separately drive the slow, rate-limited per-account fetch+check (via
 // CheckEpoch with accountsEnabled=true) on its own schedule. Before this
 // split, a single goroutine fetched pools+params+accounts and only then
 // checked one epoch at a time in strict order, so an epoch's ~5,000-request
@@ -177,9 +179,11 @@ type Observer struct {
 	koios   *KoiosClient
 	metrics *metrics
 
-	mu       sync.Mutex
-	pending  map[uint64]struct{} // epochs requested for (re)validation
-	resultMu sync.Mutex
+	mu            sync.Mutex
+	pending       map[uint64]struct{} // epochs requested for (re)validation
+	resultMu      sync.Mutex
+	retry         map[uint64]time.Time
+	retryAccounts map[uint64]time.Time
 
 	// pendingAccounts is pending's twin for the slow per-account queue (see
 	// the Observer doc comment). Guarded by the same mu as pending: both are
@@ -210,7 +214,7 @@ type Observer struct {
 
 	// fatalFired is set once FatalFunc has been called for a strict-mode
 	// failure. Written from fail, which run and runAccounts's goroutines can
-	// now both call concurrently (dingo #4339's queue split), so it is an
+	// now both call concurrently (the queue split), so it is an
 	// atomic.Bool rather than a plain bool guarded only by "one goroutine at
 	// a time".
 	fatalFired atomic.Bool
@@ -249,6 +253,10 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		cfg.FetchRetryDelay = defaultFetchRetryDelay
 	}
 
+	if cfg.ErrorRetryDelay <= 0 {
+		cfg.ErrorRetryDelay = 5 * time.Minute
+	}
+
 	cache, err := OpenCache(cfg.CachePath, cfg.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("open koios parity cache: %w", err)
@@ -272,6 +280,8 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 		metrics:         newMetrics(cfg.PromRegistry),
 		pending:         make(map[uint64]struct{}),
 		pendingAccounts: make(map[uint64]struct{}),
+		retry:           make(map[uint64]time.Time),
+		retryAccounts:   make(map[uint64]time.Time),
 		wake:            make(chan struct{}, defaultQueueBuffer),
 		wakeAccounts:    make(chan struct{}, defaultQueueBuffer),
 	}, nil
@@ -284,11 +294,11 @@ func NewObserver(cfg ObserverConfig) (*Observer, error) {
 // — no separate checkpoint file is introduced), then launches the
 // background goroutine(s) that drain pending epochs: run always, for the
 // fast pool/aggregate queue, and — only when cfg.AccountsEnabled — a second,
-// independent runAccounts goroutine for the slow per-account queue (dingo
-// #4339; see the Observer doc comment). Subscribe the returned Observer's
-// HandleEpochTransitionEvent to event.EpochTransitionEventType before or
-// after calling Start; live events and the seeded backlog feed the same
-// pending sets either way.
+// independent runAccounts goroutine for the slow per-account queue (see the
+// Observer doc comment). Subscribe the returned Observer's
+// HandleEpochTransitionEvent to event.EpochTransitionEventType before or after
+// calling Start; live events and the seeded backlog feed the same pending sets
+// either way.
 //
 // Start may only be called once per Observer; a second call returns an
 // error rather than silently orphaning the first run/runAccounts goroutines
@@ -363,7 +373,7 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	// ledger history before that boundary by construction — would seed
 	// its entire backlog from epoch 0 and spend a Koios fetch on every
 	// one of what can be well over a thousand epochs it can never have
-	// local data for (dingo #4172). haveEarliestAvailable is false for
+	// local data for. haveEarliestAvailable is false for
 	// a non-Mithril, genesis-synced node, in which case seedFrom stays
 	// 0 and behavior is unchanged from before this bound existed.
 	seedFrom := uint64(0)
@@ -402,6 +412,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 	}
+	retryEpochs, err := o.cache.GetEpochsNeedingRetry(o.cfg.Network, false)
+	if err != nil {
+		return fmt.Errorf("seed koiosparity observer retries: %w", err)
+	}
+	needing = append(needing, retryEpochs...)
 	uncached, err := o.cache.GetUncachedEpochs(
 		o.cfg.Network,
 		seedFrom,
@@ -422,11 +437,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 		// other seed query below: GetEpochsNeedingCheck selects FROM that
 		// table and GetEpochsMissingAccountCoverage requires a row in it. It
 		// therefore has to be queued for the per-account check from here, or
-		// #3097's comparison would not run for any never-fetched epoch until
-		// some later restart re-seeded it — which is the whole backlog on the
-		// bulk-sync node dingo #4339 is about. processAccountEpoch fetches
-		// the aggregate reference itself, so the account queue does not
-		// depend on the aggregate queue having reached the epoch first.
+		// the per-account comparison would not run for any never-fetched epoch
+		// until some later restart re-seeded it — which is the whole backlog on
+		// the bulk-sync node this split exists for. processAccountEpoch fetches
+		// the aggregate reference itself, so the account queue does not depend
+		// on the aggregate queue having reached the epoch first.
 		if o.cfg.AccountsEnabled {
 			o.pendingAccounts[e] = struct{}{}
 		}
@@ -436,7 +451,7 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	// The account-coverage-aware variant additionally selects an epoch whose
 	// per-account reference data is absent, incomplete, or stale relative to
 	// the last check — queue those into the slow per-account queue rather
-	// than the fast one (dingo #4339). This can overlap with `needing` above
+	// than the fast one. This can overlap with `needing` above
 	// (an epoch can be stale on both dimensions at once); queuing it into
 	// pendingAccounts too is harmless since fetchAccountsIfNeeded's own
 	// coverage-completeness gate makes it a no-op Koios-request-wise for an
@@ -449,6 +464,11 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("seed koiosparity observer backlog: %w", err)
 		}
+		retryEpochs, err := o.cache.GetEpochsNeedingRetry(o.cfg.Network, true)
+		if err != nil {
+			return fmt.Errorf("seed koiosparity observer account retries: %w", err)
+		}
+		needingAccounts = append(needingAccounts, retryEpochs...)
 		o.mu.Lock()
 		for _, e := range needingAccounts {
 			if e >= seedFrom && e <= throughEpoch {
@@ -459,12 +479,12 @@ func (o *Observer) seedBacklog(ctx context.Context) error {
 	}
 
 	// An epoch whose pool data/check status is already fine can still be
-	// missing #3097's per-account coverage entirely (e.g. it was fetched
+	// missing the per-account coverage entirely (e.g. it was fetched
 	// before AccountsEnabled was turned on) — neither GetEpochsNeedingCheck
 	// nor GetUncachedEpochs above would ever flag it purely for that
 	// reason once accountsEnabled's own staleness branch is satisfied by a
-	// prior check. Add those epochs to the slow per-account queue (dingo
-	// #4339), independent of why GetEpochsNeedingCheck/GetUncachedEpochs may
+	// prior check. Add those epochs to the slow per-account queue,
+	// independent of why GetEpochsNeedingCheck/GetUncachedEpochs may
 	// or may not have already selected them, the same way
 	// fetchAccountsIfNeeded gates on account coverage independently of
 	// fetchPoolsIfNeeded. Deliberately not added to o.pending: nothing about
@@ -612,10 +632,12 @@ func (o *Observer) signalWakeAccounts() {
 //
 // run only ever performs the fast pool/epoch-aggregate fetch+check
 // (processEpoch, CheckEpoch with accountsEnabled=false); runAccounts is its
-// independent twin for the slow per-account fetch+check (dingo #4339). The
+// independent twin for the slow per-account fetch+check. The
 // two share o.cache/o.koios and o.fail/o.fatalFired but otherwise never
 // block on each other.
 func (o *Observer) run(ctx context.Context) {
+	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -626,6 +648,7 @@ func (o *Observer) run(ctx context.Context) {
 		o.mu.Lock()
 		todo := make([]uint64, 0, len(o.pending))
 		for e := range o.pending {
+			delete(o.retry, e)
 			todo = append(todo, e)
 		}
 		clear(o.pending)
@@ -651,15 +674,25 @@ func (o *Observer) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-o.wake:
+		case now := <-ticker.C:
+			o.mu.Lock()
+			for epoch, due := range o.retry {
+				if !now.Before(due) {
+					o.pending[epoch] = struct{}{}
+				}
+			}
+			o.mu.Unlock()
 		}
 	}
 }
 
-// runAccounts is run's twin for the slow, rate-limited per-account queue
-// (dingo #4339): same draining shape, over o.pendingAccounts/o.wakeAccounts,
+// runAccounts is run's twin for the slow, rate-limited per-account queue:
+// same draining shape, over o.pendingAccounts/o.wakeAccounts,
 // calling processAccountEpoch instead of processEpoch. Only launched by
 // Start when cfg.AccountsEnabled.
 func (o *Observer) runAccounts(ctx context.Context) {
+	ticker := time.NewTicker(o.cfg.ErrorRetryDelay)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -670,6 +703,7 @@ func (o *Observer) runAccounts(ctx context.Context) {
 		o.mu.Lock()
 		todo := make([]uint64, 0, len(o.pendingAccounts))
 		for e := range o.pendingAccounts {
+			delete(o.retryAccounts, e)
 			todo = append(todo, e)
 		}
 		clear(o.pendingAccounts)
@@ -695,6 +729,14 @@ func (o *Observer) runAccounts(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-o.wakeAccounts:
+		case now := <-ticker.C:
+			o.mu.Lock()
+			for epoch, due := range o.retryAccounts {
+				if !now.Before(due) {
+					o.pendingAccounts[epoch] = struct{}{}
+				}
+			}
+			o.mu.Unlock()
 		}
 	}
 }
@@ -709,7 +751,7 @@ func (o *Observer) stopping() bool {
 // processEpoch fetches (if not already cached) and checks exactly one
 // epoch's fast pool/epoch-aggregate data, then reports/records the outcome.
 // Strict-mode cancellation is triggered here, once, on the first failure.
-// The per-account phase (#3097) never runs from here — see
+// The per-account phase never runs from here — see
 // processAccountEpoch — regardless of cfg.AccountsEnabled.
 func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 	if err := o.fetchIfNeeded(ctx, epoch); err != nil {
@@ -755,6 +797,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, false, fmt.Errorf("check: %w", err))
 		return
 	}
+	o.scheduleErrorRetry(epoch, false, result.Status)
 	o.emitResult(result)
 	if result.Status != StatusPass {
 		significant := CountSignificant(result.Mismatches)
@@ -773,7 +816,7 @@ func (o *Observer) processEpoch(ctx context.Context, epoch uint64) {
 }
 
 // processAccountEpoch fetches (if not already cached) and checks exactly one
-// epoch's slow #3097 per-account data, then reports/records the outcome.
+// epoch's slow per-account data, then reports/records the outcome.
 // Strict-mode cancellation is triggered here, once, on the first failure —
 // independent of processEpoch's own strict-mode cancellation, so an
 // aggregate-phase failure and an account-phase failure both reach fail/
@@ -845,6 +888,16 @@ func (o *Observer) processAccountEpoch(ctx context.Context, epoch uint64) {
 		o.reportError(epoch, true, fmt.Errorf("check: %w", err))
 		return
 	}
+	if result.CoversScope(ScopeAccount) {
+		var accountMismatches []CheckMismatch
+		for _, mismatch := range result.Mismatches {
+			if mismatch.Scope == ScopeAccount {
+				accountMismatches = append(accountMismatches, mismatch)
+			}
+		}
+		// The merged verdict can hide an account ERROR under an aggregate FAIL.
+		o.scheduleErrorRetry(epoch, true, DetermineStatus(accountMismatches))
+	}
 	o.emitResult(result)
 	if err := o.cache.PruneAccountCoverage(o.cfg.Network, epoch); err != nil {
 		o.cfg.Logger.Warn(
@@ -892,11 +945,9 @@ func cancelled(ctx context.Context, err error) bool {
 // additionally invokes OnResult (when set) with a synthesized ERROR-status
 // result carrying err's text as a synthetic mismatch — otherwise these two
 // error branches in processEpoch would be invisible to OnResult callers,
-// unlike every other outcome (PASS/FAIL) processEpoch reports. Not
-// persisted to the cache: checkEpoch/CheckEpoch itself does not persist
-// check_epoch_status on this class of failure either (a fetch or query
-// error that occurs before any comparison could run), so this stays
-// consistent with that existing behavior.
+// unlike every other outcome (PASS/FAIL) processEpoch reports. The queue's
+// ERROR status is persisted so startup can recover its retry even when the
+// prior reference remains fresh; prior comparison evidence stays untouched.
 //
 // accountsChecked names the phases the caller's check would have covered, so
 // the synthesized result carries the same CheckedScopes a completed check
@@ -907,6 +958,13 @@ func (o *Observer) reportError(
 	accountsChecked bool,
 	err error,
 ) {
+	if persistErr := o.cache.RecordObserverError(o.cfg.Network, epoch, accountsChecked); persistErr != nil {
+		err = errors.Join(
+			err,
+			fmt.Errorf("persist observer retry: %w", persistErr),
+		)
+	}
+	o.scheduleErrorRetry(epoch, accountsChecked, StatusError)
 	o.fail(epoch, err, true)
 	now := time.Now()
 	o.emitResult(&EpochCompareResult{
@@ -945,8 +1003,8 @@ func (o *Observer) emitResult(result *EpochCompareResult) {
 // for epoch only if it is not already cached — a historical epoch's Koios
 // reference never changes, so a re-request (e.g. after a Dingo-side rollback
 // re-signals the same epoch) would just be wasted work. This deliberately
-// never fetches #3097's per-account reference data (fetchAccountsIfNeeded):
-// dingo #4339 moved that into its own, independently-scheduled queue (see
+// never fetches the per-account reference data (fetchAccountsIfNeeded):
+// it lives in its own, independently-scheduled queue (see
 // runAccounts/processAccountEpoch) precisely so a slow per-account fetch for
 // one epoch can never delay this fast fetch — and therefore the fast
 // pool/aggregate check that follows it — for any later epoch.
@@ -1128,7 +1186,7 @@ func (o *Observer) fetchPoolsIfNeeded(ctx context.Context, epoch uint64) error {
 	)
 }
 
-// fetchAccountsIfNeeded fetches #3097's per-account Koios reference data for
+// fetchAccountsIfNeeded fetches the per-account Koios reference data for
 // epoch only if koios_account_coverage is not already marked complete for
 // it — independent of fetchPoolsIfNeeded's own koios_epoch_info gate, so
 // turning AccountsEnabled on after pool-level data was already fetched for
@@ -1238,15 +1296,15 @@ func (o *Observer) fetchAccountsIfNeeded(
 // once (the first fatal-eligible failure across the observer's lifetime).
 // fatal is false only for a result whose significant mismatches are all
 // reference_lag (see referenceLagOnly): Koios's own data had not caught up,
-// so the comparison could not be trusted yet (dingo #4645). Such a call is
+// so the comparison could not be trusted yet. Such a call is
 // still logged, and processEpoch/processAccountEpoch have already persisted
 // the result, but it never reaches FatalFunc and never sets fatalFired, so
 // run/runAccounts keep processing later epochs. Every other non-pass result,
 // including dingo_db_missing and dingo_db_error, and every reportError call
 // stays fatal in strict mode.
 //
-// run and runAccounts's goroutines can both call this concurrently (dingo
-// #4339's queue split), so the exactly-once guarantee is enforced with an
+// run and runAccounts's goroutines can both call this concurrently (given
+// the queue split), so the exactly-once guarantee is enforced with an
 // atomic compare-and-swap on fatalFired rather than a plain read-then-write,
 // which could otherwise let both goroutines' near-simultaneous first failures
 // each observe fatalFired as false and both invoke FatalFunc.
@@ -1272,5 +1330,19 @@ func (o *Observer) fail(epoch uint64, err error, fatal bool) {
 	}
 	if o.cfg.FatalFunc != nil {
 		o.cfg.FatalFunc(fmt.Errorf("koios parity: epoch %d: %w", epoch, err))
+	}
+}
+
+func (o *Observer) scheduleErrorRetry(epoch uint64, accounts bool, status string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	retry := o.retry
+	if accounts {
+		retry = o.retryAccounts
+	}
+	if status == StatusError {
+		retry[epoch] = time.Now().Add(o.cfg.ErrorRetryDelay)
+	} else {
+		delete(retry, epoch)
 	}
 }
