@@ -6798,6 +6798,7 @@ func newTreasuryRolloverFixture(
 
 	cfg := newTestEraHistoryCfg(t)
 	cfg.ShelleyGenesisHash = treasuryRolloverGenesisHash
+	cfg.ShelleyGenesis().MaxLovelaceSupply = 45_000_000_000_000_000
 	currentEpoch := newTestEpoch(5, 500, 100, eras.ConwayEraDesc.Id)
 	require.NoError(t, db.SetEpoch(
 		currentEpoch.StartSlot,
@@ -6863,6 +6864,7 @@ func (f *treasuryRolloverFixture) rollover(
 	currentPParams lcommon.ProtocolParameters,
 ) *EpochRolloverResult {
 	t.Helper()
+	seedEmptyRewardBasisForRollover(t, f.db, currentEpoch, currentPParams)
 	var result *EpochRolloverResult
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {
@@ -6902,6 +6904,10 @@ func donationTestConwayPParams(major uint) *conway.ConwayProtocolParameters {
 	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
 	p := &conway.ConwayProtocolParameters{}
 	p.ProtocolVersion.Major = major
+	p.NOpt = 500
+	p.A0 = &cbor.Rat{Rat: big.NewRat(3, 10)}
+	p.Rho = &cbor.Rat{Rat: big.NewRat(3, 1000)}
+	p.Tau = &cbor.Rat{Rat: big.NewRat(1, 5)}
 	p.MinCommitteeSize = 3
 	p.DRepVotingThresholds = conway.DRepVotingThresholds{
 		MotionNoConfidence:    rat(67, 100),
@@ -7822,6 +7828,7 @@ func TestEpochRolloverUsesEraSpecificEnactmentSnapshot(t *testing.T) {
 					nil,
 				),
 			)
+			seedEmptyRewardBasisForRollover(t, f.db, f.currentEpoch, params)
 			var observed []uint64
 			f.ls.SetEpochBoundarySnapshotStakeHook(
 				func(txn *database.Txn, _ event.EpochTransitionEvent) error {

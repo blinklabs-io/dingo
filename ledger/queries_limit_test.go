@@ -100,10 +100,11 @@ func TestLocalStateQueryFilteredAccountLimitBoundary(t *testing.T) {
 				if queryName == "GetFilteredVoteDelegatees" {
 					result, err = state.queryShelleyFilteredVoteDelegatees(
 						credentials[:count],
+						QueryPoint{},
 						nil,
 					)
 				} else {
-					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(stakeCredentials[:count], nil)
+					result, err = state.queryShelleyFilteredDelegationAndRewardAccounts(stakeCredentials[:count], QueryPoint{}, nil)
 				}
 				if count > MaxLocalStateQueryItems {
 					require.ErrorIs(t, err, ErrLocalStateQueryLimitExceeded)
@@ -170,6 +171,7 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			run: func() (any, error) {
 				return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 					stakeCredentials,
+					QueryPoint{},
 					nil,
 				)
 			},
@@ -178,7 +180,7 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "filtered vote delegatees",
 			query: "GetFilteredVoteDelegatees",
 			run: func() (any, error) {
-				return ls.queryShelleyFilteredVoteDelegatees(credentials, nil)
+				return ls.queryShelleyFilteredVoteDelegatees(credentials, QueryPoint{}, nil)
 			},
 		},
 		{
@@ -415,7 +417,7 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 		}))
 	}
 	result, err := (&LedgerState{db: db}).
-		queryShelleyFilteredVoteDelegatees(credentials, nil)
+		queryShelleyFilteredVoteDelegatees(credentials, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)

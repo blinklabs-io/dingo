@@ -118,6 +118,12 @@ type Node struct {
 	// without recomputing them and drifting from Run.
 	ouroborosConfig ouroborosPkg.OuroborosConfig
 	blockForger     *forging.BlockForger
+	// blockProducerCreds is the live credential set the forger, builder and
+	// leader election draw on. The node owns it: it is the target of a
+	// credential reload and is closed, zeroizing the keys, when the forging
+	// path stops. An atomic pointer because the reload trigger runs on its
+	// own goroutine, concurrently with a live lifecycle teardown.
+	blockProducerCreds atomic.Pointer[forging.PoolCredentials]
 	// kesAgentClient is set when shelleyKESAgentSocket is configured, in
 	// either serve-key or sign mode. validateBlockProducerStartup owns
 	// dialing/closing it (closing the prior one before replacing it, so a
@@ -488,6 +494,71 @@ func effectiveBarkHost(configuredHost string, lifecycleEnabled bool) string {
 		return "127.0.0.1"
 	}
 	return ""
+}
+
+// defaultMaxTxSubmissionsPerSecond is the per-peer transaction offer rate the
+// node enforces on inbound TxSubmission.
+const defaultMaxTxSubmissionsPerSecond = 100
+
+// newOuroborosConfig builds the ouroboros configuration from the node's
+// dependencies and settings. Run stores the result in n.ouroborosConfig, and
+// the live restore path rebuilds from that copy, so the settings cannot differ
+// between the two.
+func (n *Node) newOuroborosConfig(
+	enableLeiosNetworking bool,
+	leiosTxFetchTailBudget time.Duration,
+	keepAliveTimeout time.Duration,
+) ouroborosPkg.OuroborosConfig {
+	return ouroborosPkg.OuroborosConfig{
+		Logger:                  n.config.logger,
+		EventBus:                n.eventBus,
+		ConnManager:             n.connManager,
+		LedgerState:             n.ledgerState,
+		LeiosAnnouncementLedger: n.ledgerState,
+		Mempool:                 n.mempool,
+		ChainsyncState:          n.chainsyncState,
+		PeerGov:                 n.peerGov,
+		NetworkMagic:            n.config.networkMagic,
+		PeerSharing:             n.config.peerSharing,
+		IntersectTip:            n.config.intersectTip,
+		IntersectPoints:         n.config.intersectPoints,
+		PromRegistry:            n.retainedComponentPromRegistry(),
+		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
+		EnableLeios:             enableLeiosNetworking,
+		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
+		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
+		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
+		// extension ahead of the IOG Leios prototype. The prototype relays do
+		// not run a protocol-20 responder and reset the connection if we
+		// initiate it, so disable it on the Leios prototype network; there
+		// votes are diffused inline over leios-notify. Keep it available for
+		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
+		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
+		// Request endorser-block transaction bodies over leios-fetch, driven by
+		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
+		// that the EB's transactions are ready. Fetching before that offer
+		// (e.g. right after the manifest) makes the prototype relay reset the
+		// connection, so the fetch is gated on the txs offer, not the block
+		// offer. Best-effort: a fetch failure never tears down the shared
+		// connection.
+		EnableLeiosTxFetch:           enableLeiosNetworking,
+		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
+		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
+		// On the Musashi prototype network every mini-protocol shares one muxer
+		// to a single relay; block/EB traffic can delay the relay's keep-alive
+		// pong past the tight 10s gouroboros default, making dingo drop the
+		// only relay and pay a reconnect + fork rollback. Wait up to the
+		// keep-alive server timeout there so a slow-but-alive relay is not
+		// dropped. Unset on other networks (fast dead-peer eviction retained).
+		KeepAliveTimeout: keepAliveTimeout,
+		// Production bound on peer TxSubmission work. The ouroboros package
+		// leaves the limiter off at zero, so the node must set it.
+		MaxTxSubmissionsPerSecond: defaultMaxTxSubmissionsPerSecond,
+	}
 }
 
 // ouroboros returns the current Ouroboros instance. Callers resolve it through
@@ -1272,53 +1343,11 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	// up front and validates them, so it can never be observed partially
 	// wired. This is deliberately the last construction before the peer
 	// governor and connection manager start below.
-	n.ouroborosConfig = ouroborosPkg.OuroborosConfig{
-		Logger:                  n.config.logger,
-		EventBus:                n.eventBus,
-		ConnManager:             n.connManager,
-		LedgerState:             n.ledgerState,
-		LeiosAnnouncementLedger: n.ledgerState,
-		Mempool:                 n.mempool,
-		ChainsyncState:          n.chainsyncState,
-		PeerGov:                 n.peerGov,
-		NetworkMagic:            n.config.networkMagic,
-		PeerSharing:             n.config.peerSharing,
-		IntersectTip:            n.config.intersectTip,
-		IntersectPoints:         n.config.intersectPoints,
-		PromRegistry:            n.retainedComponentPromRegistry(),
-		ChainsyncBlockTimeout:   n.config.chainsyncStallTimeout,
-		EnableLeios:             enableLeiosNetworking,
-		// Bounds how long a LocalStateQuery session holds one ledger snapshot.
-		LocalStateQueryViewMaxLifetime: n.config.LocalStateQueryViewMaxLifetimeDuration(),
-		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
-		// extension ahead of the IOG Leios prototype. The prototype relays do
-		// not run a protocol-20 responder and reset the connection if we
-		// initiate it, so disable it on the Leios prototype network; there
-		// votes are diffused inline over leios-notify. Keep it available for
-		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
-		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
-		// Request endorser-block transaction bodies over leios-fetch, driven by
-		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
-		// that the EB's transactions are ready. Fetching before that offer
-		// (e.g. right after the manifest) makes the prototype relay reset the
-		// connection, so the fetch is gated on the txs offer, not the block
-		// offer. Best-effort: a fetch failure never tears down the shared
-		// connection.
-		EnableLeiosTxFetch:           enableLeiosNetworking,
-		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
-		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
-		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
-		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
-		ChainsyncSyncTarget:          n.chainsyncSyncTarget,
-		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
-		// On the Musashi prototype network every mini-protocol shares one muxer
-		// to a single relay; block/EB traffic can delay the relay's keep-alive
-		// pong past the tight 10s gouroboros default, making dingo drop the
-		// only relay and pay a reconnect + fork rollback. Wait up to the
-		// keep-alive server timeout there so a slow-but-alive relay is not
-		// dropped. Unset on other networks (fast dead-peer eviction retained).
-		KeepAliveTimeout: keepAliveTimeout,
-	}
+	n.ouroborosConfig = n.newOuroborosConfig(
+		enableLeiosNetworking,
+		leiosTxFetchTailBudget,
+		keepAliveTimeout,
+	)
 	ouro, err := ouroborosPkg.NewOuroboros(n.ouroborosConfig)
 	if err != nil {
 		return fmt.Errorf("failed to construct ouroboros: %w", err)
@@ -2200,6 +2229,26 @@ func (n *Node) subscribeChainSelectorEvents() {
 				"alternate_head_slot", e.AlternateHead.Slot,
 				"canonical_head_slot", e.CanonicalHead.Slot,
 			)
+		},
+	)
+	// Feed rolled-back blocks to the blockfetch fork-battle ring so a
+	// dashboard can tell a fork-battle delay from a genuinely slow fetch.
+	// ChainUpdateEventType also carries chain.ChainBlockEvent for ordinary
+	// adds; only chain.ChainRollbackEvent is relevant here, so non-matching
+	// payloads are silently ignored rather than logged as unexpected. This
+	// observer only emits diagnostics; dropping it does not affect state.
+	n.subscribeDetachableEvent(
+		chain.ChainUpdateEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(chain.ChainRollbackEvent)
+			if !ok {
+				return
+			}
+			o := n.ouroboros()
+			if o == nil {
+				return
+			}
+			o.RecordForkBattleParticipants(e.RolledBackBlocks)
 		},
 	)
 	// Subscribe to connection closed events to remove peers from chain selector

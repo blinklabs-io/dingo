@@ -805,11 +805,10 @@ type Config struct {
 	// --shelley-kes-agent-socket.
 	//
 	// Block production is supported on Linux and macOS only, so this flag
-	// does not apply on Windows. The path must fit the platform's sun_path
-	// field -- 104 bytes on macOS, 108 on Linux -- because a socket address
-	// is a fixed-size struct. kesagent.NewClient rejects an over-long path at
-	// startup rather than leaving it to surface as a bare "invalid argument"
-	// from connect().
+	// does not apply on Windows. Relative filesystem paths are resolved once
+	// at client construction and reused for every reconnect. The resolved path
+	// must fit the platform's sun_path field -- 104 bytes on macOS, 108 on
+	// Linux -- because a socket address is a fixed-size struct.
 	ShelleyKESAgentSocket string `yaml:"shelleyKesAgentSocket"            envconfig:"SHELLEY_KES_AGENT_SOCKET"`
 	// ShelleyKESAgentMode selects the agent service mode: "serve-key" (the
 	// agent pushes the evolving KES sign key and the node signs headers
