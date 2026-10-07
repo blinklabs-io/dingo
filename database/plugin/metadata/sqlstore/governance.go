@@ -544,7 +544,10 @@ func (s *Store) GetGovernanceVotesAtSlot(
 	// A replaced vote keeps only its latest value; the value in effect at
 	// slot is the latest governance_vote_history entry at or before it,
 	// which SetGovernanceVote writes on every change including the first
-	// cast. A vote with no such entry predates the journal and keeps its row.
+	// cast. A vote with no such entry predates the journal: its row is the
+	// value at slot only when it took effect by then. One replaced before the
+	// v22 journal after slot has no record of its value there and is left
+	// out rather than reported with a later one.
 	rows, err := db.QueryContext(ctx, `
 SELECT v.id, v.proposal_id, v.voter_type, v.voter_credential_tag,
        v.voter_credential,
@@ -563,9 +566,12 @@ LEFT JOIN governance_vote_history h ON h.id = (
     LIMIT 1
 )
 WHERE v.proposal_id = ? AND v.added_slot <= ?
-  AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)`,
+  AND (v.deleted_slot IS NULL OR v.deleted_slot > ?)
+  AND (h.id IS NOT NULL
+       OR COALESCE(v.vote_updated_slot, v.added_slot) <= ?)`,
 		slotValue,
 		proposalID,
+		slotValue,
 		slotValue,
 		slotValue,
 	)

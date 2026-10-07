@@ -238,21 +238,20 @@ func (d *Database) GetDrepsAtSlot(
 	return d.governanceStore().GetDrepsAtSlot(refs, slot, txn.Metadata())
 }
 
-// GetDrepRegistrationDepositAtSlot returns the deposit recorded against a
-// DRep's latest registration at or before slot, or nil when there is none.
-func (d *Database) GetDrepRegistrationDepositAtSlot(
-	credentialTag uint8,
-	drepCredential []byte,
+// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+// the latest registration at or before slot of each of refs (every DRep when
+// empty), keyed by models.DrepDepositKey.
+func (d *Database) GetDrepRegistrationDepositsAtSlot(
+	refs []models.StakeCredentialRef,
 	slot uint64,
 	txn *Txn,
-) (*uint64, error) {
+) (map[string]uint64, error) {
 	if txn == nil {
 		txn = d.MetadataTxn(false)
 		defer txn.Release()
 	}
-	return d.governanceStore().GetDrepRegistrationDepositAtSlot(
-		credentialTag,
-		drepCredential,
+	return d.governanceStore().GetDrepRegistrationDepositsAtSlot(
+		refs,
 		slot,
 		txn.Metadata(),
 	)

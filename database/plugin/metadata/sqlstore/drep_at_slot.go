@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	sqlitequery "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/internal/query/sqlite"
@@ -148,7 +149,7 @@ FROM drep_expiry_history WHERE added_slot > ?`,
 		atSlot.AddedSlot = state.latestSlot
 		// The same rule RestoreDrepStateAtSlot applies when the expiry
 		// history has nothing at or before slot.
-		if state.hasExpiry || state.registrationSlot != 0 {
+		if !state.keepsCurrentExpiry(drep.AddedSlot, slot) {
 			atSlot.LastActivityEpoch = state.lastActivity
 			atSlot.ExpiryEpoch = state.expiry
 		}
@@ -157,12 +158,11 @@ FROM drep_expiry_history WHERE added_slot > ?`,
 	return ret, nil
 }
 
-func (s *Store) GetDrepRegistrationDepositAtSlot(
-	credentialTag uint8,
-	credential []byte,
+func (s *Store) GetDrepRegistrationDepositsAtSlot(
+	refs []models.StakeCredentialRef,
 	slot uint64,
 	txn types.Txn,
-) (*uint64, error) {
+) (map[string]uint64, error) {
 	slotValue, err := checkedInt64(slot)
 	if err != nil {
 		return nil, err
@@ -171,31 +171,57 @@ func (s *Store) GetDrepRegistrationDepositAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	var raw sql.NullString
-	err = db.QueryRowContext(ctx, `
-SELECT deposit_amount
-FROM registration_drep
-WHERE credential_tag = ? AND drep_credential = ? AND added_slot <= ?
-ORDER BY added_slot DESC
-LIMIT 1`,
-		credentialTag,
-		credential,
-		slotValue,
-	).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+	// The latest registration at or before slot, per DRep: registration_drep
+	// is unique on (credential_tag, drep_credential, added_slot).
+	query := `
+SELECT r.credential_tag, r.drep_credential, r.deposit_amount
+FROM registration_drep r
+WHERE r.added_slot = (
+    SELECT MAX(r2.added_slot) FROM registration_drep r2
+    WHERE r2.credential_tag = r.credential_tag
+      AND r2.drep_credential = r.drep_credential
+      AND r2.added_slot <= ?
+)`
+	argSets := [][]any{{slotValue}}
+	if len(refs) > 0 {
+		query += " AND r.credential_tag = ? AND r.drep_credential = ?"
+		argSets = argSets[:0]
+		for _, ref := range refs {
+			argSets = append(argSets, []any{slotValue, ref.Tag, ref.Key})
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("get drep registration deposit at slot: %w", err)
+	ret := make(map[string]uint64)
+	for _, args := range argSets {
+		rows, err := db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var tag uint8
+			var credential []byte
+			var raw sql.NullString
+			if err := rows.Scan(&tag, &credential, &raw); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if !raw.Valid {
+				continue
+			}
+			deposit, err := parseUint64("drep registration deposit", raw.String)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			ret[models.DrepDepositKey(tag, credential)] = deposit
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if !raw.Valid {
-		return nil, nil
-	}
-	deposit, err := parseUint64("drep registration deposit", raw.String)
-	if err != nil {
-		return nil, err
-	}
-	return &deposit, nil
+	return ret, nil
 }
 
 func (s *Store) GetDRepDelegatorsAtSlot(
@@ -212,9 +238,15 @@ func (s *Store) GetDRepDelegatorsAtSlot(
 		return nil, err
 	}
 	wanted := make(map[string]struct{}, len(dreps))
+	unique := make([]models.StakeCredentialRef, 0, len(dreps))
 	for _, drep := range dreps {
+		if _, dup := wanted[drep.MapKey()]; dup {
+			continue
+		}
 		wanted[drep.MapKey()] = struct{}{}
+		unique = append(unique, drep)
 	}
+	dreps = unique
 	ret := make(map[string][]models.StakeCredentialRef)
 	add := func(tag uint8, key []byte, drepType uint64, drep []byte) {
 		if len(drep) == 0 || drepType > models.DrepTypeScriptHash {
@@ -265,13 +297,45 @@ WHERE active = TRUE AND drep IS NOT NULL AND drep_type <= 1
 			return nil, err
 		}
 	}
-	rows, err := db.QueryContext(ctx, `
+	// An account written after slot is derived. For named DReps only the
+	// accounts that could delegate to one of them at slot are: those whose
+	// live row, import baseline or a vote delegation at or before slot names
+	// it, the only sources the derivation takes a DRep from.
+	changedQuery := `
 SELECT credential_tag, staking_key, created_slot, drep_type, drep
-FROM account WHERE added_slot > ?`,
-		slotValue,
-	)
-	if err != nil {
-		return nil, err
+FROM account WHERE added_slot > ?`
+	changedArgs := [][]any{{slotValue}}
+	if len(dreps) > 0 {
+		var filter strings.Builder
+		filter.WriteString(`
+  AND (
+      (drep_type = ? AND drep = ?)
+      OR EXISTS (
+          SELECT 1 FROM account_import_baseline b
+          WHERE b.credential_tag = account.credential_tag
+            AND b.staking_key = account.staking_key
+            AND b.drep_type = ? AND b.drep = ?
+      )`)
+		for _, table := range accountVoteDelegationTables {
+			filter.WriteString(`
+      OR EXISTS (
+          SELECT 1 FROM ` + table + ` e
+          WHERE e.credential_tag = account.credential_tag
+            AND e.staking_key = account.staking_key
+            AND e.added_slot <= ? AND e.drep_type = ? AND e.drep = ?
+      )`)
+		}
+		filter.WriteString(`
+  )`)
+		changedQuery += filter.String()
+		changedArgs = changedArgs[:0]
+		for _, drep := range dreps {
+			args := []any{slotValue, drep.Tag, drep.Key, drep.Tag, drep.Key}
+			for range accountVoteDelegationTables {
+				args = append(args, slotValue, drep.Tag, drep.Key)
+			}
+			changedArgs = append(changedArgs, args)
+		}
 	}
 	type changedAccount struct {
 		tag         uint8
@@ -281,34 +345,46 @@ FROM account WHERE added_slot > ?`,
 		drep        []byte
 	}
 	var changed []changedAccount
-	for rows.Next() {
-		var account changedAccount
-		var drepType sql.NullInt64
-		if err := rows.Scan(
-			&account.tag,
-			&account.key,
-			&account.createdSlot,
-			&drepType,
-			&account.drep,
-		); err != nil {
-			rows.Close()
+	seen := make(map[string]struct{})
+	for _, args := range changedArgs {
+		rows, err := db.QueryContext(ctx, changedQuery, args...)
+		if err != nil {
 			return nil, err
 		}
-		if drepType.Int64 < 0 {
-			rows.Close()
-			return nil, fmt.Errorf(
-				"account drep_type %d is negative",
-				drepType.Int64,
-			)
+		for rows.Next() {
+			var account changedAccount
+			var drepType sql.NullInt64
+			if err := rows.Scan(
+				&account.tag,
+				&account.key,
+				&account.createdSlot,
+				&drepType,
+				&account.drep,
+			); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if drepType.Int64 < 0 {
+				rows.Close()
+				return nil, fmt.Errorf(
+					"account drep_type %d is negative",
+					drepType.Int64,
+				)
+			}
+			account.drepType = uint64(drepType.Int64)
+			key := models.NewStakeCredentialRef(account.tag, account.key).MapKey()
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			changed = append(changed, account)
 		}
-		account.drepType = uint64(drepType.Int64)
-		changed = append(changed, account)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
 	for _, account := range changed {
 		state, err := deriveAccountStateAtSlot(

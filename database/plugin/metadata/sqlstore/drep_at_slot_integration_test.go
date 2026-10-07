@@ -82,12 +82,13 @@ func testDrepAndGovernanceAtSlot(t *testing.T, store *Store) {
 	}
 	require.Equal(t, uint64(21), expiryAt(200))
 	require.Equal(t, uint64(24), expiryAt(400))
-	recorded, err := store.GetDrepRegistrationDepositAtSlot(
-		0, credential, 200, nil,
-	)
+	deposits, err := store.GetDrepRegistrationDepositsAtSlot(nil, 200, nil)
 	require.NoError(t, err)
-	require.NotNil(t, recorded)
-	require.Equal(t, uint64(deposit), *recorded)
+	require.Equal(
+		t,
+		uint64(deposit),
+		deposits[models.DrepDepositKey(0, credential)],
+	)
 	delegators, err := store.GetDRepDelegatorsAtSlot(nil, 200, nil)
 	require.NoError(t, err)
 	require.Len(

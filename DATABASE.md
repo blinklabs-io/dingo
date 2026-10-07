@@ -1588,7 +1588,7 @@ updates preserve the previous activity and expiry epochs.
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. A DRep vote, registration, or update certificate sets `last_activity_epoch` to the containing epoch and `expiry_epoch` to that epoch plus the active Conway/Dijkstra `dRepInactivityPeriod`; certificate persistence and the activity refresh commit atomically. A Mithril bootstrap carries `expiry_epoch` from the imported snapshot's `DRepState` (`ledgerstate.importDReps`), so an imported DRep expires on the schedule the snapshot recorded. Historical replay at or below the Mithril anchor records activity while preserving the imported expiry, which already includes dormant epochs and proposal-driven bumps. `expiry_epoch = 0` means unset and is exempt from expiry by both `drepActiveAtEpoch` (`ledger/governance/epoch.go`) and the expiry sweep, whose predicate is `expiry_epoch > 0 AND expiry_epoch <= ?`, so failing to carry it holds every imported DRep in `countActiveDReps` for the life of the database and inflates the ratification quorum denominator. `last_activity_epoch` is still not carried by the import (the parsed DRep state has no such field) and imported rows are always written `active = 1`. |
-| `drep_expiry_history` | `id`, `credential_tag`, `credential`, `added_slot`, `last_activity_epoch`, `expiry_epoch` | PK `id`; unique `(credential_tag, credential, added_slot)`; index `added_slot` | Journal of every write to a DRep's `last_activity_epoch`/`expiry_epoch`, keyed by the slot it took effect. `drep` keeps only the latest values, and a vote renews them without a certificate or a `drep.added_slot` change, so this is the only record of the expiry in force at an earlier slot. `UpdateDRepActivity` (votes, registration and update certificates; it takes the activity's slot), `ImportDrep` and `CreateDrep` write a row; a second write at the same slot replaces the first. Historical replay below a Mithril anchor (`RecordDRepActivityEpoch`) leaves expiry alone and writes none. `RestoreDrepStateAtSlot` deletes rows above the rollback slot and restores each affected DRep's activity and expiry from its latest surviving row, revisiting DReps whose only change after the slot is a row here; without a surviving row it keeps the previous rule (an imported registration at slot 0 keeps its expiry, any other is reset to 0). Schema v36 seeds one row per existing DRep with its current values, dated at the latest of `drep.added_slot` and the DRep's newest vote, registration or update certificate, the event that set the current expiry; a database upgraded to v36 therefore has no expiry history before each DRep's latest pre-upgrade activity. `GetDrepsAtSlot` reads it. |
+| `drep_expiry_history` | `id`, `credential_tag`, `credential`, `added_slot`, `last_activity_epoch`, `expiry_epoch` | PK `id`; unique `(credential_tag, credential, added_slot)`; index `added_slot` | Journal of every write to a DRep's `last_activity_epoch`/`expiry_epoch`, keyed by the slot it took effect. `drep` keeps only the latest values, and a vote renews them without a certificate or a `drep.added_slot` change, so this is the only record of the expiry in force at an earlier slot. `UpdateDRepActivity` (votes, registration and update certificates; it takes the activity's slot), `ImportDrep` and `CreateDrep` write a row; a second write at the same slot replaces the first. Historical replay below a Mithril anchor (`RecordDRepActivityEpoch`) leaves expiry alone and writes none. `RestoreDrepStateAtSlot` deletes rows above the rollback slot and restores each affected DRep's activity and expiry from its latest surviving row, revisiting DReps whose only change after the slot is a row here. Without a surviving row the expiry at the slot is unknown: a DRep imported at slot 0, or one whose certificate state is not being rewound (`drep.added_slot` at or before the slot), keeps its current values, and any other is reset to 0. A DRep row the vote path recreated without a registration (`InsertDrepIfAbsent`) and reached only through this table has just its activity and expiry restored, where it used to abort the rollback. Schema v36 seeds one row per existing DRep with its current values, dated at the latest of `drep.added_slot` and the DRep's newest vote, registration or update certificate, the event that set the current expiry; a database upgraded to v36 therefore has no expiry history before each DRep's latest pre-upgrade activity. `GetDrepsAtSlot` reads it. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
@@ -4227,14 +4227,19 @@ certificates at or before `slot` for registration and anchor, and the latest
 except the catch-up reconcile's `DeactivateDreps`, which falls below the
 Mithril trust boundary that Acquire refuses. With no expiry history row at or
 before `slot`, the same fallback as rollback applies.
-`GetDrepRegistrationDepositAtSlot(tag, credential, slot, txn)` is
-`GetDrepLastRegistrationDeposit` restricted to registrations at or before
-`slot`. `GetDRepDelegatorsAtSlot(dreps, slot, txn)` returns the stake
+`GetDrepRegistrationDepositsAtSlot(refs, slot, txn)` returns, for each of
+`refs` (every DRep when empty), the deposit of its latest registration at or
+before `slot`, keyed by `models.DrepDepositKey`, in one query per ref (one in
+all for the unrestricted form). `GetDRepDelegatorsAtSlot(dreps, slot, txn)` returns the stake
 credentials delegating to each of `dreps` (every DRep when empty) at `slot`,
 keyed by the DRep's `StakeCredentialRef.MapKey()` in `(credential_tag,
 staking_key)` order: active accounts with `added_slot` at or before `slot`
 read from their row, and every account written after it derived by
-`deriveAccountStateAtSlot` (see `GetAccountsByCredentialAtSlot`).
+`deriveAccountStateAtSlot` (see `GetAccountsByCredentialAtSlot`). For named
+DReps (deduplicated) only the accounts written after `slot` that could
+delegate to one of them are derived: those whose row, import baseline, or a
+vote-delegation certificate at or before `slot` names it, the only sources the
+derivation takes a DRep from.
 
 `GetGovernanceProposalSetAtSlot(slot, txn)` is `GetGovernanceProposalSet` at
 `slot`: proposals with `added_slot` at or before it whose `enacted_slot`,
@@ -4242,8 +4247,10 @@ read from their row, and every account written after it derived by
 it, in the same order. `GetGovernanceVotesAtSlot(proposalID, slot, txn)`
 returns the votes with `added_slot` at or before `slot` and `deleted_slot`
 null or after it, each with the `vote` and anchor of its latest
-`governance_vote_history` entry at or before `slot`; a vote with no such
-entry predates the journal and keeps its row's values.
+`governance_vote_history` entry at or before `slot`. A vote with no such entry
+predates the v22 journal: it is returned with its row's values when they took
+effect at or before `slot`, and left out otherwise, since a vote replaced
+before the journal after `slot` has no record of its value there.
 
 ### `GetAccountSumsByCredential`
 

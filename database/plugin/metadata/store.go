@@ -499,14 +499,15 @@ type GovernanceStore interface {
 		types.Txn,
 	) ([]*models.Drep, error)
 
-	// GetDrepRegistrationDepositAtSlot is GetDrepLastRegistrationDeposit
-	// restricted to registrations at or before slot.
-	GetDrepRegistrationDepositAtSlot(
-		uint8, // credentialTag
-		[]byte, // drepCredential
+	// GetDrepRegistrationDepositsAtSlot returns the deposit recorded against
+	// the latest registration at or before slot of each of refs (every DRep
+	// when empty), keyed by models.DrepDepositKey. A DRep with no such
+	// registration, or a NULL deposit, is absent.
+	GetDrepRegistrationDepositsAtSlot(
+		[]models.StakeCredentialRef, // refs
 		uint64, // slot
 		types.Txn,
-	) (*uint64, error)
+	) (map[string]uint64, error)
 
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with

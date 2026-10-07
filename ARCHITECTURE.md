@@ -11794,8 +11794,10 @@ vote, so it is recorded in `drep_expiry_history` at the slot of each change;
 `RestoreDrepStateAtSlot` restores expiry from the same history on rollback.
 On a database upgraded to schema v36, history before the upgrade is one seed
 row per DRep (see DATABASE.md), so a point before a DRep's latest pre-upgrade
-activity reports its expiry as 0 (unset). `DebugChainDepState` still
-ignores the acquired point.
+activity has no recorded expiry: a DRep whose certificate state at that point
+is still its current one (or that was imported at slot 0) reports its current
+expiry, and any other reports 0 (unset). Rollback applies the same rule.
+`DebugChainDepState` still ignores the acquired point.
 
 Every pinned query also needs history the node actually holds, so
 `VerifyPointQueryable` refuses a point below the latest Mithril import's

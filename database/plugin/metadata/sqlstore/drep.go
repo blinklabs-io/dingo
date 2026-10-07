@@ -271,6 +271,20 @@ func deriveDrepStateAtSlot(
 	return state, true, nil
 }
 
+// keepsCurrentExpiry reports whether a DRep whose row was last written at
+// rowAddedSlot keeps its current activity and expiry at slot instead of the
+// derived ones. With no expiry history at or before slot the value there is
+// unknown: an imported registration (slot 0) or a row whose certificate state
+// is not being rewound keeps what it has, and any other is left unset. On a
+// database upgraded to v36 that covers every point before a DRep's seed row.
+func (state drepStateAtSlot) keepsCurrentExpiry(
+	rowAddedSlot uint64,
+	slot uint64,
+) bool {
+	return !state.hasExpiry &&
+		(state.registrationSlot == 0 || rowAddedSlot <= slot)
+}
+
 // latestDrepExpiry reads the drep_expiry_history row in force at slot.
 func latestDrepExpiry(
 	ctx context.Context,
@@ -335,7 +349,8 @@ WHERE added_slot > ?
 			// a DRep whose only change after slot is a vote is found
 			// through its expiry history instead.
 			rows, err := db.QueryContext(ctx, `
-SELECT credential_tag, credential, expiry_epoch, last_activity_epoch
+SELECT credential_tag, credential, added_slot, expiry_epoch,
+       last_activity_epoch
 FROM drep
 WHERE added_slot > ?
    OR EXISTS (
@@ -353,6 +368,7 @@ WHERE added_slot > ?
 			type restoreRow struct {
 				tag          uint8
 				credential   []byte
+				addedSlot    uint64
 				expiry       uint64
 				lastActivity uint64
 			}
@@ -362,6 +378,7 @@ WHERE added_slot > ?
 				if err := rows.Scan(
 					&item.tag,
 					&item.credential,
+					&item.addedSlot,
 					&item.expiry,
 					&item.lastActivity,
 				); err != nil {
@@ -388,16 +405,28 @@ WHERE added_slot > ?
 					return err
 				}
 				if !found {
-					return fmt.Errorf(
-						"DRep %x has no registration at or before slot %d",
+					if item.addedSlot > slot {
+						return fmt.Errorf(
+							"DRep %x has no registration at or before slot %d",
+							item.credential,
+							slot,
+						)
+					}
+					// A row the vote path recreated without a registration
+					// (InsertDrepIfAbsent) and selected only for its expiry
+					// history: nothing else of it is being rewound.
+					if err := restoreDrepExpiryOnly(
+						ctx,
+						db,
+						item.tag,
 						item.credential,
 						slot,
-					)
+					); err != nil {
+						return err
+					}
+					continue
 				}
-				// Without an expiry history row at or before slot, an
-				// imported DRep (registration at slot 0) keeps the expiry
-				// its snapshot recorded and any other one is left unset.
-				if !state.hasExpiry && state.registrationSlot == 0 {
+				if state.keepsCurrentExpiry(item.addedSlot, slot) {
 					state.expiry = item.expiry
 					state.lastActivity = item.lastActivity
 				}
@@ -425,6 +454,37 @@ DELETE FROM drep_expiry_history WHERE added_slot > ?`,
 			return err
 		},
 	)
+}
+
+// restoreDrepExpiryOnly sets a DRep's activity and expiry to its latest
+// drep_expiry_history row at or before slot, and leaves the row alone when it
+// has none.
+func restoreDrepExpiryOnly(
+	ctx context.Context,
+	db queryer,
+	tag uint8,
+	credential []byte,
+	slot uint64,
+) error {
+	lastActivity, expiry, hasExpiry, err := latestDrepExpiry(
+		ctx,
+		db,
+		tag,
+		credential,
+		slot,
+	)
+	if err != nil || !hasExpiry {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+UPDATE drep SET last_activity_epoch = ?, expiry_epoch = ?
+WHERE credential_tag = ? AND credential = ?`,
+		lastActivity,
+		expiry,
+		tag,
+		credential,
+	)
+	return err
 }
 
 type drepRestoreEvent struct {

@@ -1527,6 +1527,20 @@ func TestQueryShelleyDRepState_PinnedPointAnswersAtThatPoint(t *testing.T) {
 			},
 		},
 		{
+			name:  "restricted, named twice",
+			creds: []lcommon.Credential{retiringCred, retiringCred},
+			at:    QueryPoint{Slot: 380},
+			want: olocalstatequery.DRepStateResult{
+				retiringKey: entry(23, secondAnchor, early, moved),
+			},
+		},
+		{
+			name:  "restricted to a DRep not yet registered",
+			creds: []lcommon.Credential{lateCred},
+			at:    QueryPoint{Slot: 300},
+			want:  olocalstatequery.DRepStateResult{},
+		},
+		{
 			name: "renewed by a vote, second delegator",
 			at:   QueryPoint{Slot: 500},
 			want: olocalstatequery.DRepStateResult{

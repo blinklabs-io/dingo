@@ -98,7 +98,7 @@ var governanceStoreMethods = []string{
 	"GetDRepDelegators",
 	"GetDRepDelegatorsAtSlot",
 	"GetDrepsAtSlot",
-	"GetDrepRegistrationDepositAtSlot",
+	"GetDrepRegistrationDepositsAtSlot",
 	"GetDRepVotingPowerBatch",
 	"GetDRepVotingPowerByType",
 	"UpdateDRepActivity",

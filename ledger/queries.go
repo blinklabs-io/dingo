@@ -2122,39 +2122,35 @@ func (ls *LedgerState) queryShelleyDRepStateAt(
 	if err != nil {
 		return nil, err
 	}
-	var delegatorFilter []models.StakeCredentialRef
+	result := make(olocalstatequery.DRepStateResult)
+	// An empty filter would mean every DRep, not none.
+	if len(refs) > 0 && len(dreps) == 0 {
+		return []any{result}, nil
+	}
+	var filter []models.StakeCredentialRef
 	if len(refs) > 0 {
-		delegatorFilter = make([]models.StakeCredentialRef, 0, len(dreps))
+		filter = make([]models.StakeCredentialRef, 0, len(dreps))
 		for _, drep := range dreps {
-			delegatorFilter = append(delegatorFilter, models.StakeCredentialRef{
+			filter = append(filter, models.StakeCredentialRef{
 				Tag: drep.CredentialTag,
 				Key: drep.Credential,
 			})
 		}
 	}
-	delegatorRefs, err := ls.db.GetDRepDelegatorsAtSlot(
-		delegatorFilter,
-		slot,
-		txn,
-	)
+	delegatorRefs, err := ls.db.GetDRepDelegatorsAtSlot(filter, slot, txn)
 	if err != nil {
 		return nil, err
 	}
-	result := make(olocalstatequery.DRepStateResult)
+	// An absent deposit is reported as 0, as drepRecordedDeposit does.
+	deposits, err := ls.db.GetDrepRegistrationDepositsAtSlot(filter, slot, txn)
+	if err != nil {
+		return nil, err
+	}
 	for _, drep := range dreps {
-		recorded, err := ls.db.GetDrepRegistrationDepositAtSlot(
+		deposit := deposits[models.DrepDepositKey(
 			drep.CredentialTag,
 			drep.Credential,
-			slot,
-			txn,
-		)
-		if err != nil {
-			return nil, err
-		}
-		var deposit uint64
-		if recorded != nil {
-			deposit = *recorded
-		}
+		)]
 		var delegators []olocalstatequery.StakeCredential
 		for _, ref := range delegatorRefs[models.StakeCredentialRef{
 			Tag: drep.CredentialTag,
