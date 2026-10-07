@@ -1,7 +1,8 @@
-CREATE INDEX IF NOT EXISTS `idx_auth_committee_hot_cold_credential_prune_order`
-    ON `auth_committee_hot`(
-        `cold_credential_tag`,
-        `cold_credential`,
-        `added_slot` DESC,
-        `certificate_id` DESC
-    );
+CREATE TABLE IF NOT EXISTS `account_drep_clear` (
+    `credential_tag` integer NOT NULL DEFAULT 0,
+    `staking_key` blob NOT NULL,
+    `added_slot` integer NOT NULL,
+    PRIMARY KEY (`credential_tag`, `staking_key`, `added_slot`)
+);
+CREATE INDEX IF NOT EXISTS `idx_account_drep_clear_added_slot`
+    ON `account_drep_clear`(`added_slot`);

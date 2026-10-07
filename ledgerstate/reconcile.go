@@ -260,7 +260,7 @@ func reconcileStaleLedgerState(
 		)
 	}
 	if err := store.DeactivateAccounts(
-		wtxn.Metadata(), staleAccts,
+		wtxn.Metadata(), staleAccts, tipSlot,
 	); err != nil {
 		return fmt.Errorf(
 			"deactivating %d stale accounts: %w",

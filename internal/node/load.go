@@ -422,9 +422,8 @@ const criticalIndexRebuildLogThreshold = time.Second
 // The pending marker records that a cycle was interrupted; it does not
 // record which indexes exist, and it is not durable across a Mithril sync:
 // mithril/sync.go rebuilds the critical subset and then calls
-// updateMithrilReadyState, whose db.ClearSyncState is an unqualified
-// DELETE FROM sync_state. Until that clear learned to carry
-// deferred.SyncStateKey across it (mithril/sync_import.go), every completed
+// updateMithrilReadyState, which now leaves deferred.SyncStateKey untouched
+// (mithril/sync_import.go). Before that preservation, every completed
 // Mithril sync erased the marker moments after BuildCritical set it, leaving
 // the database with the critical subset built, the lazy remainder dropped,
 // and nothing recording either — the state two Mithril-bootstrapped preview
