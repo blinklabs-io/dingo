@@ -1036,6 +1036,46 @@ the `metadata.MetadataStore` methods
 `RetirePools` plus the existing
 `IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`. Live-state rows are never deleted.
 
+A reward credit or withdrawal applied locally after a snapshot's anchor
+leaves a row in `account_reward_delta`/`account_withdrawal_witness` with
+`added_slot` strictly after the anchor. `ImportAccount`'s upsert sets
+`account.reward` from the snapshot's anchor-time value
+(`reward = excluded.reward`, with no guard against a newer local value) and
+leaves those journal rows in place. `AddAccountRewardByCredential`/
+`AddPostSnapshotAccountRewardByCredential` and the transaction withdrawal
+path (`applyTransactionWithdrawals`) insert their journal row with
+`ON CONFLICT ... DO NOTHING` and skip the `UPDATE account SET reward` when
+the insert affects zero rows, an idempotency guard for a crash-replayed
+boundary. A surviving post-anchor row therefore makes replay of the same
+credit or withdrawal a no-op and leaves `account.reward` at the snapshot's
+anchor-time value.
+
+`ImportLedgerState` clears those rows with
+`Database.DeleteAccountRewardJournalForCredentialsAfterSlot`, called once
+cert-state import has written the `account` rows, scoped to exactly the
+credentials that import wrote. It deletes the `account_reward_delta` and
+`account_withdrawal_witness` rows above the anchor without touching
+`account.reward`, unlike `TruncateAfterSlot`'s `DeleteAccountRewardsAfterSlot`,
+which reverses credits by subtracting them from the current balance. The
+import sets `account.reward` from the snapshot, so that balance is not the
+one the journal rows were applied against and a subtracting rollback can
+underflow. The snapshot value is authoritative for these credentials; replay
+inserts fresh rows against it. A credential the snapshot does not cover is
+left alone, so its balance and journal stay consistent with each other.
+
+The cleanup also runs when an import resumes after cert-state but before tip:
+it derives the snapshot's credentials from cert state and repeats the
+idempotent delete. A `tip` checkpoint marks a completed import whose journal
+may contain legitimate post-anchor rows, so cleanup does not run there.
+
+Ordinary per-epoch delegator rewards applied through the deferred/precomputed
+round path keep their post-anchor rows across import: a `reward_credit_round`
+row registered locally after the anchor survives
+(`ImportLedgerState` does not call `Database.DeleteRewardStateAfterSlot`,
+unlike `TruncateAfterSlot`), and `resolveStakeRewardPrecomputeRoundInTxn`
+(`ledger/reward_precompute_chunked.go`) skips crediting a round already marked
+credited.
+
 The UTxO import itself (`ImportUtxos`/`ImportUtxosDeferredRewardLiveStakeRefresh`,
 used by every ledger-state import including this reconcile pass and the legacy
 reward-state repair) inserts with `ON CONFLICT (tx_id, output_idx) DO NOTHING`,

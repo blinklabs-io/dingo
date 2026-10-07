@@ -2022,6 +2022,81 @@ DELETE FROM account_withdrawal_witness WHERE added_slot > ?`,
 	)
 }
 
+// DeleteAccountRewardJournalForCredentialsAfterSlot deletes
+// account_reward_delta/account_withdrawal_witness rows with added_slot >
+// slot for exactly the given credentials, without reversing any balance.
+//
+// The caller has just overwritten account.reward from the snapshot, so the
+// current balance is not the one the journal rows were applied against, and
+// reversing them by subtraction can underflow. Clear only the stale journal
+// rows; replay inserts fresh ones against the snapshot balance.
+//
+// A credential cert-state import did not write this run must not appear in
+// refs: nothing else touches its account.reward, so deleting its journal
+// here would let replay double-apply a credit already reflected in its
+// current balance.
+func (s *Store) DeleteAccountRewardJournalForCredentialsAfterSlot(
+	slot uint64,
+	refs []models.StakeCredentialRef,
+	txn types.Txn,
+) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	slotValue, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	// Grouped by credential_tag and queried as a single-column staking_key
+	// IN (...), matching idx_account_reward_delta_credential
+	// (credential_tag, staking_key) for the delta delete, the same grouping
+	// GetAccountsByCredential uses and for the same reason. The witness
+	// table's credential index (idx_account_withdrawal_witness_credential_slot)
+	// orders staking_key before credential_tag instead, so this shape does
+	// not drive it the same way; its delete still only inspects the rows
+	// added_slot already narrows to.
+	byTag := make(map[uint8][][]byte, 2)
+	for _, ref := range refs {
+		byTag[ref.Tag] = append(byTag[ref.Tag], ref.Key)
+	}
+	return s.withWriteTransaction(
+		txn,
+		func(db queryer, ctx context.Context) error {
+			// One bound parameter is reserved for added_slot and one for
+			// credential_tag; the rest of the chunk is the staking_key IN
+			// list.
+			chunkSize := max(1, s.dialect.ParameterLimit()-2)
+			for tag, keys := range byTag {
+				for start := 0; start < len(keys); start += chunkSize {
+					end := min(start+chunkSize, len(keys))
+					chunk := keys[start:end]
+					placeholders := strings.TrimSuffix(
+						strings.Repeat("?,", len(chunk)), ",",
+					)
+					args := make([]any, 0, 2+len(chunk))
+					args = append(args, slotValue, tag)
+					for _, key := range chunk {
+						args = append(args, key)
+					}
+					if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+						"DELETE FROM account_reward_delta WHERE added_slot > ? "+
+							"AND credential_tag = ? AND staking_key IN ("+placeholders+")",
+					), args...); err != nil {
+						return err
+					}
+					if _, err := db.ExecContext(ctx, s.dialect.Rebind(
+						"DELETE FROM account_withdrawal_witness WHERE added_slot > ? "+
+							"AND credential_tag = ? AND staking_key IN ("+placeholders+")",
+					), args...); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		},
+	)
+}
+
 type accountQueryParams struct {
 	StakingKey      []byte
 	CredentialTag   int64
