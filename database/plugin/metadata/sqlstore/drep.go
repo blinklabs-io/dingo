@@ -287,7 +287,7 @@ func deriveDrepStateAtSlot(
 // derived ones. With no expiry history at or before slot the value there is
 // unknown: an imported registration (slot 0) or a row whose certificate state
 // is not being rewound keeps what it has, and any other is left unset. On a
-// database upgraded to v36 that covers every point before a DRep's seed row.
+// database upgraded to v37 that covers every point before a DRep's seed row.
 func (state drepStateAtSlot) keepsCurrentExpiry(
 	rowAddedSlot uint64,
 	slot uint64,

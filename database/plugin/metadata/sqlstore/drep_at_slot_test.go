@@ -48,7 +48,7 @@ func TestRestoreDrepStateAtSlot_RepairedDrepWithoutRegistration(
 }
 
 // TestRestoreDrepStateAtSlot_KeepsExpiryWithoutEarlierHistory covers a DRep
-// whose only expiry history is after the rollback slot, as the v36 seed row
+// whose only expiry history is after the rollback slot, as the v37 seed row
 // leaves a DRep active shortly before an upgrade. Its certificate state is not
 // being rewound, so it keeps the expiry it has rather than being reset to 0,
 // which exempts a DRep from expiry.

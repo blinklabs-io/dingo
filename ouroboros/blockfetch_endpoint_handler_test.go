@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	testfixtures "github.com/blinklabs-io/dingo/internal/test/fixtures"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -120,14 +121,14 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				t.Helper()
 				peer.send(t, oblockfetch.ProtocolId,
 					oblockfetch.NewMsgRequestRange(start, validEnd))
-				protocolId, payload := peer.readMessage(t, 5*time.Second)
+				protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
 					[]byte{0x81, oblockfetch.MessageTypeStartBatch},
 					payload,
 				)
-				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				protocolId, payload = peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				var msg oblockfetch.MsgBlock
 				_, err := cbor.Decode(payload, &msg)
@@ -142,7 +143,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				)
 				require.NoError(t, err)
 				require.Equal(t, wrapped, msg.WrappedBlock)
-				protocolId, payload = peer.readMessage(t, 5*time.Second)
+				protocolId, payload = peer.readMessage(t, testutil.AsyncWait)
 				require.Equal(t, oblockfetch.ProtocolId, protocolId)
 				require.Equal(
 					t,
@@ -156,7 +157,7 @@ func TestBlockfetchServerRequestRangeRejectsInvalidEnd(t *testing.T) {
 				oblockfetch.ProtocolId,
 				oblockfetch.NewMsgRequestRange(start, invalidEnd),
 			)
-			protocolId, payload := peer.readMessage(t, 5*time.Second)
+			protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 			require.Equal(t, oblockfetch.ProtocolId, protocolId)
 			require.Equal(
 				t,
@@ -205,7 +206,7 @@ func newRegisteredBlockfetchServerPeer(
 	}()
 	peer.send(t, handshake.ProtocolId,
 		ouroboros_mock.ConversationEntryHandshakeRequestOutput.Messages[0])
-	protocolId, payload := peer.readMessage(t, 5*time.Second)
+	protocolId, payload := peer.readMessage(t, testutil.AsyncWait)
 	require.Equal(t, uint16(handshake.ProtocolId), protocolId)
 	var accepted handshake.MsgAcceptVersion
 	_, err = cbor.Decode(payload, &accepted)
