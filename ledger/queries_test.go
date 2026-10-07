@@ -2590,6 +2590,7 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	}
 	result, err := ls.queryShelleyStakeDelegDeposits(
 		[]olocalstatequery.StakeCredential{queryCred, unknownCred},
+		QueryPoint{},
 		nil,
 	)
 	require.NoError(t, err)
