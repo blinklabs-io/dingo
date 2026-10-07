@@ -42,9 +42,14 @@ const (
 	maxCertificateBytes = 8 << 20
 
 	// maxCertificateChainBytes bounds the bytes of every certificate the
-	// walk reads, which is also what the walk retains in memory. Mainnet's
-	// whole chain is under 100 MB.
+	// walk reads. Decoded signer collections have a separate cumulative cap
+	// because short JSON entries can expand substantially in memory.
 	maxCertificateChainBytes = 512 << 20
+
+	// maxCertificateChainSigners bounds signer entries retained across the
+	// decoded chain. A separate cumulative limit is needed because small JSON
+	// entries expand into slice elements and allocated party-ID strings.
+	maxCertificateChainSigners = 1 << 22
 
 	// stmMaxSigners bounds signers in certificate metadata and signatures
 	// in an aggregate signature. Mainnet registers a few thousand pools at
@@ -90,10 +95,12 @@ var errCertificateChainBudget = errors.New(
 type certificateChainBudget struct {
 	maxCertificates int
 	maxBytes        int64
+	maxSigners      int
 	maxWork         uint64
 
 	certificates int
 	bytes        int64
+	signers      int
 	work         uint64
 }
 
@@ -101,6 +108,7 @@ func newCertificateChainBudget() *certificateChainBudget {
 	return &certificateChainBudget{
 		maxCertificates: maxCertificateChainLength,
 		maxBytes:        maxCertificateChainBytes,
+		maxSigners:      maxCertificateChainSigners,
 		maxWork:         maxCertificateChainWork,
 	}
 }
@@ -126,6 +134,19 @@ func (b *certificateChainBudget) certificateByteLimit() int64 {
 // chargeBytes records the size of a certificate already read.
 func (b *certificateChainBudget) chargeBytes(n int64) {
 	b.bytes += n
+}
+
+// chargeSigners bounds signer entries before the chain retains a certificate.
+func (b *certificateChainBudget) chargeSigners(n int) error {
+	if n < 0 || n > b.maxSigners-b.signers {
+		return fmt.Errorf(
+			"%w: certificate chain signer entries exceed limit %d",
+			errCertificateChainBudget,
+			b.maxSigners,
+		)
+	}
+	b.signers += n
+	return nil
 }
 
 // chargeWork reserves cost before the work it describes is done.

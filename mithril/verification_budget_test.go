@@ -162,6 +162,26 @@ func TestVerifyCertificateChainSignerCountCap(t *testing.T) {
 	require.Contains(t, err.Error(), "signers")
 }
 
+func TestVerifyCertificateChainCumulativeSignerCountCap(t *testing.T) {
+	t.Parallel()
+
+	client, leaf, _ := budgetChain(t, 3, 2)
+	run := func(maxSigners int) error {
+		budget := newCertificateChainBudget()
+		budget.maxSigners = maxSigners
+		_, err := verifyCertificateChain(
+			context.Background(), client, leaf, "",
+			VerificationModeStructural, budget,
+		)
+		return err
+	}
+
+	require.NoError(t, run(6), "a chain exactly at the signer cap is accepted")
+	err := run(5)
+	require.ErrorIs(t, err, errCertificateChainBudget)
+	require.Contains(t, err.Error(), "signer entries")
+}
+
 func TestCertificateMetadataSignerCountCapDuringDecode(t *testing.T) {
 	t.Parallel()
 

@@ -1308,6 +1308,13 @@ func verifyCertificateChain(
 				stmMaxSigners,
 			)
 		}
+		if err := budget.chargeSigners(len(cert.Metadata.Signers)); err != nil {
+			return nil, fmt.Errorf(
+				"certificate %s: %w",
+				currentHash,
+				err,
+			)
+		}
 		if cert.Hash != currentHash {
 			return nil, fmt.Errorf(
 				"certificate hash mismatch: requested %s, got %s",
