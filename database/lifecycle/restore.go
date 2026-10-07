@@ -146,6 +146,54 @@ type RestoreStorageConfig struct {
 	AlonzoLovelacePerUtxoWord uint64
 }
 
+const staleRestoreWorkDirAge = 7 * 24 * time.Hour
+
+var restoreWorkDirPrefixes = []string{
+	".dingo-restore-payloads-",
+	".dingo-cloud-snapshot-",
+	".dingo-verify-snapshot-",
+}
+
+// CleanStaleRestoreWorkDirs removes restore work directories older than a
+// week from parentDir. Recent directories may belong to another active
+// restore and are left alone.
+func CleanStaleRestoreWorkDirs(parentDir string) error {
+	entries, err := os.ReadDir(parentDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read restore work directory parent %q: %w", parentDir, err)
+	}
+	cutoff := time.Now().Add(-staleRestoreWorkDirAge)
+	for _, entry := range entries {
+		if !entry.IsDir() || !hasRestoreWorkDirPrefix(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("inspect restore work directory %q: %w", entry.Name(), err)
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		path := filepath.Join(parentDir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("remove stale restore work directory %q: %w", path, err)
+		}
+	}
+	return nil
+}
+
+func hasRestoreWorkDirPrefix(name string) bool {
+	for _, prefix := range restoreWorkDirPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Restore populates targetDataDir (which must not already exist, or must
 // be empty) from the snapshot at snapshotDir, then opens the result with
 // database.New to confirm it passes the same startup consistency checks
@@ -324,6 +372,9 @@ func restoreValidated(
 		return Manifest{}, fmt.Errorf(
 			"create parent directory for %q: %w", targetDataDir, err,
 		)
+	}
+	if err := CleanStaleRestoreWorkDirs(workParent); err != nil {
+		return Manifest{}, err
 	}
 	manifest, err := resolveManifest(
 		ctx, registry, snapshotDir, workParent, opts...,

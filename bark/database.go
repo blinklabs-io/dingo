@@ -1013,6 +1013,9 @@ func verifySnapshotIntegrity(
 	if err := os.MkdirAll(workParent, 0o755); err != nil {
 		return fmt.Errorf("create verification parent directory: %w", err)
 	}
+	if err := lifecycle.CleanStaleRestoreWorkDirs(workParent); err != nil {
+		return fmt.Errorf("clean stale verification directories: %w", err)
+	}
 	tempDir, err := os.MkdirTemp(workParent, ".dingo-verify-snapshot-*")
 	if err != nil {
 		return fmt.Errorf("create verification directory: %w", err)

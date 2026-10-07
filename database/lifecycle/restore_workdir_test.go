@@ -19,11 +19,37 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/lifecycle"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCleanStaleRestoreWorkDirs(t *testing.T) {
+	parent := t.TempDir()
+	staleNames := []string{
+		".dingo-restore-payloads-stale",
+		".dingo-cloud-snapshot-stale",
+		".dingo-verify-snapshot-stale",
+	}
+	for _, name := range staleNames {
+		path := filepath.Join(parent, name)
+		require.NoError(t, os.Mkdir(path, 0o700))
+		old := time.Now().Add(-8 * 24 * time.Hour)
+		require.NoError(t, os.Chtimes(path, old, old))
+	}
+	recent := filepath.Join(parent, ".dingo-restore-payloads-active")
+	require.NoError(t, os.Mkdir(recent, 0o700))
+
+	require.NoError(t, lifecycle.CleanStaleRestoreWorkDirs(parent))
+	for _, name := range staleNames {
+		_, err := os.Stat(filepath.Join(parent, name))
+		require.ErrorIs(t, err, os.ErrNotExist)
+	}
+	_, err := os.Stat(recent)
+	require.NoError(t, err)
+}
 
 // unusableSystemTempDir points the system temp directory at a path that does
 // not exist, so any snapshot-sized copy made there fails the restore. The
