@@ -472,6 +472,7 @@ func (m *Manager) handleEpochTransition(
 	if err != nil {
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
 	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(m.cfg.SnapshotMaxCommitPause))
 	_, err = lifecycle.SnapshotToCloud(
 		ctx,
 		m.destinationRegistry,

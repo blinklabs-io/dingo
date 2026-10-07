@@ -354,6 +354,37 @@ func TestManagerCapturesSnapshotOnEpochBoundary(t *testing.T) {
 	}, snapshotWait, 10*time.Millisecond)
 }
 
+// TestManagerAppliesMaxCommitPause verifies automatic snapshots pass
+// SnapshotMaxCommitPause to lifecycle.Snapshot. A nanosecond bound has
+// always elapsed by the time the state reads finish.
+func TestManagerAppliesMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	db := newManagerTestDB(t)
+	logBuf := &syncBuffer{}
+	logger := slog.New(slog.NewTextHandler(logBuf, nil))
+	eb := event.NewEventBus(nil, logger)
+	defer eb.Stop()
+
+	snapshotDir := t.TempDir()
+	m := dblifecycle.NewManager(db, eb, config.DatabaseLifecycleConfig{
+		SnapshotEnabled:        true,
+		SnapshotDir:            snapshotDir,
+		SnapshotEveryNEpochs:   1,
+		SnapshotMaxCommitPause: time.Nanosecond,
+	}, testManagerBlobPlugin, "sqlite", testDestinationRegistry, logger)
+	require.NoError(t, m.Start(context.Background()))
+	defer m.Stop()
+
+	publishEpochTransition(eb, 5)
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			logBuf.String(), lifecycle.ErrCommitPauseExceeded.Error(),
+		)
+	}, snapshotWait, 10*time.Millisecond)
+	require.NoDirExists(t, filepath.Join(snapshotDir, "epoch-5"))
+}
+
 // TestManagerRespectsEveryNEpochsGating verifies that with
 // SnapshotEveryNEpochs=2, only an epoch divisible by 2 is captured.
 func TestManagerRespectsEveryNEpochsGating(t *testing.T) {

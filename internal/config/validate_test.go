@@ -1096,6 +1096,18 @@ func TestValidateDatabaseLifecycleCloudDestinationRequiresTrustKey(t *testing.T)
 	require.ErrorContains(t, err, "snapshotTrustKeyFile is required")
 }
 
+func TestValidateDatabaseLifecycleSnapshotMaxCommitPause(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = -time.Second
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "snapshotMaxCommitPause")
+
+	cfg = validTestConfig()
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Minute
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
+}
+
 // TestValidateDatabaseLifecycleSnapshotDirWritability guards against a raw
 // filesystem permission error surfacing deep inside a snapshot attempt
 // instead of a clean, actionable one at startup -- the failure mode for a

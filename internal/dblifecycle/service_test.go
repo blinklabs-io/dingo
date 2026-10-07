@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/lifecycle"
@@ -136,6 +137,27 @@ func TestServiceSignsAndVerifiesSnapshotsWithTrustKey(t *testing.T) {
 		context.Background(), snapDir,
 	)
 	require.NoError(t, err)
+}
+
+// TestServiceSnapshotAppliesMaxCommitPause verifies the offline path passes
+// databaseLifecycle.snapshotMaxCommitPause to lifecycle.Snapshot. A
+// nanosecond bound has always elapsed by the time the state reads finish.
+func TestServiceSnapshotAppliesMaxCommitPause(t *testing.T) {
+	t.Parallel()
+
+	srcDir := filepath.Join(t.TempDir(), "src")
+	cfg := testConfig(srcDir)
+	cfg.DatabaseLifecycle.SnapshotMaxCommitPause = time.Nanosecond
+	svc := dblifecycle.NewService(cfg, nil, nil)
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: srcDir})
+	require.NoError(t, err)
+	require.NoError(t, dbtest.CloseDatabase(db))
+
+	snapDir := filepath.Join(t.TempDir(), "snap")
+	_, err = svc.Snapshot(context.Background(), snapDir, "", "")
+	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
+	require.NoDirExists(t, snapDir)
 }
 
 // TestServiceRestoreRejectsIncompatibleTarget verifies that Service.

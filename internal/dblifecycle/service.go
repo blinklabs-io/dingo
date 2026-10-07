@@ -182,6 +182,7 @@ func (s *Service) Snapshot(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(s.cfg.DatabaseLifecycle.SnapshotMaxCommitPause))
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		s.destinationRegistry,

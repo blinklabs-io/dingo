@@ -149,6 +149,14 @@ func (n *Node) quiesceComponentStops() []namedStop {
 			stop: n.leaderElection.Stop,
 		})
 	}
+	// After the forger, the agent client and the election: they all read or
+	// install key material, which this wipes.
+	if n.blockProducerCreds.Load() != nil {
+		stops = append(stops, namedStop{
+			name: "block producer credentials",
+			stop: func() error { n.closeBlockProducerCredentials(); return nil },
+		})
+	}
 	if n.leiosPipelineManager != nil {
 		stops = append(stops, namedStop{
 			name: "leios pipeline manager",
@@ -251,6 +259,10 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// back to a direct Stop would drop out of it.
 	stopTimeout := n.configuredShutdownTimeout()
 	for _, cs := range componentStopsForQuiesce(n) {
+		if cs.name == "block producer credentials" &&
+			errors.Is(err, errStorageDrainUnconfirmed) {
+			continue
+		}
 		if stopErr := stopWithDeadline(
 			stopTimeout, cs.name, cs.stop,
 		); stopErr != nil {
@@ -1035,7 +1047,7 @@ func (n *Node) reinitializeNetworkingCore(ctx context.Context) error {
 		BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 	}
 	applyPeerTargets(n.config, &peerGovConfig)
-	n.peerGov = peergov.NewPeerGovernor(peerGovConfig)
+	n.setPeerGovernor(peergov.NewPeerGovernor(peerGovConfig))
 	// Replace ouroboros. It takes its dependencies at construction and never
 	// reassigns them, so rebuilding those dependencies means rebuilding it
 	// too. Closing the old instance first is required, not merely tidy: it
@@ -1374,6 +1386,10 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	if err != nil {
 		return fmt.Errorf("block producer startup validation failed: %w", err)
 	}
+	// If teardown could not confirm the old consumers stopped, intentionally
+	// retain their credentials without closing them: they may still use the keys.
+	n.blockProducerCreds.Store(creds)
+	n.setEquivocationSelfPoolID(creds)
 	// validateBlockProducerStartup may have dialled a KES agent and started
 	// its serve-key loop. Unlike Run's failure path this one leaves the node
 	// running, so a failure below would otherwise leave that loop installing
@@ -1382,6 +1398,7 @@ func (n *Node) reinitializeBlockProducer() (retErr error) {
 	defer func() {
 		if retErr != nil {
 			n.closeKESAgentClient()
+			n.closeBlockProducerCredentials()
 		}
 	}()
 	if err := n.validateBlockProducerLedger(creds); err != nil {
@@ -1534,6 +1551,7 @@ func (n *Node) Snapshot(
 	if err != nil {
 		return lifecycle.Manifest{}, err
 	}
+	manifestOpts = append(manifestOpts, lifecycle.WithMaxCommitPause(n.config.databaseLifecycle.SnapshotMaxCommitPause))
 	return lifecycle.SnapshotToCloud(
 		ctx,
 		n.destinationRegistry,
