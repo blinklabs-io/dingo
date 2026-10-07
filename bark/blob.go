@@ -101,6 +101,7 @@ func normalizeArchiveOrigin(rawURL string) (string, string, error) {
 	if err != nil || portNumber == 0 {
 		return "", "", fmt.Errorf("URL has invalid port %q", port)
 	}
+	port = strconv.FormatUint(portNumber, 10)
 	return u.Scheme + "://" + net.JoinHostPort(host, port), u.Scheme, nil
 }
 
@@ -114,6 +115,9 @@ func archiveDownloadOrigins(
 		return nil, errors.New("invalid bark base URL")
 	}
 	base.User = nil
+	if base.Scheme == "http" {
+		base.Scheme = "https"
+	}
 	baseOrigin, _, err := normalizeArchiveOrigin(base.String())
 	if err != nil {
 		return nil, fmt.Errorf("invalid bark base URL: %w", err)
@@ -154,18 +158,20 @@ func archiveDownloadHTTPClient(
 	allowedOrigins map[string]struct{},
 	dial netguard.DialContextFunc,
 	lookup netguard.LookupIPAddrFunc,
-) (*http.Client, error) {
+) *http.Client {
 	secured := *client
 	previousRedirectPolicy := client.CheckRedirect
 	secured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("bark: too many archive redirects")
 		}
+		if previousRedirectPolicy != nil {
+			if err := previousRedirectPolicy(req, via); err != nil {
+				return err
+			}
+		}
 		if err := validateArchiveURL(req.URL.String(), allowedOrigins); err != nil {
 			return fmt.Errorf("bark: unsafe archive redirect: %w", err)
-		}
-		if previousRedirectPolicy != nil {
-			return previousRedirectPolicy(req, via)
 		}
 		return nil
 	}
@@ -176,10 +182,10 @@ func archiveDownloadHTTPClient(
 	}
 	transport, ok := baseTransport.(*http.Transport)
 	if !ok {
-		return nil, fmt.Errorf(
-			"bark: HTTP transport %T cannot enforce archive destination policy",
-			baseTransport,
-		)
+		transport, ok = http.DefaultTransport.(*http.Transport)
+		if !ok {
+			transport = &http.Transport{}
+		}
 	}
 	securedTransport := transport.Clone()
 	if dial == nil {
@@ -199,7 +205,7 @@ func archiveDownloadHTTPClient(
 	securedTransport.DialTLS = nil //nolint:staticcheck
 	securedTransport.DialTLSContext = nil
 	secured.Transport = securedTransport
-	return &secured, nil
+	return &secured
 }
 
 type BlobStoreBarkConfig struct {
@@ -237,16 +243,12 @@ func NewBarkBlobStore(
 	if archiveServiceHTTPClient == nil {
 		archiveServiceHTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	downloadHTTPClient, err := archiveDownloadHTTPClient(
+	downloadHTTPClient := archiveDownloadHTTPClient(
 		archiveServiceHTTPClient,
 		allowedOrigins,
 		config.dialContext,
 		config.lookupIPAddr,
 	)
-	if err != nil {
-		return nil, err
-	}
-
 	return &BlobStoreBark{
 		config: config,
 		archiveClient: archiveconnect.NewArchiveServiceClient(

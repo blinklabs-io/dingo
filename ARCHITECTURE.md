@@ -2704,8 +2704,9 @@ fallback:
   check local storage; expired or missing historical blocks fall back to the
   remote Bark archive and download the signed URL response. Block download URLs
   are accepted only when they are HTTPS, credential-free, and match the
-  effective scheme, hostname, and port of the archive or a configured
-  `barkBlockDownloadHosts` allowlist entry. The same check runs on redirects,
+  effective HTTPS hostname and port of the archive or a configured
+  `barkBlockDownloadHosts` allowlist entry. An HTTP Bark RPC base anchors the
+  corresponding HTTPS download origin. The same check runs on redirects,
   and every resolved address is rejected if it is private or special-use before
   dialing. The client ignores ambient proxy settings, and response bodies are
   capped before buffering.

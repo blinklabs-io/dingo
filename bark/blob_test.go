@@ -242,6 +242,10 @@ func TestValidateArchiveURL(t *testing.T) {
 			url:  "https://s3.example.com:443/block?sig=abc",
 		},
 		{
+			name: "numeric equivalent default HTTPS port",
+			url:  "https://s3.example.com:0443/block?sig=abc",
+		},
+		{
 			name:    "wrong port on expected host",
 			url:     "https://archive.example.com/block?sig=abc",
 			wantErr: "not allowed",
@@ -301,6 +305,34 @@ func TestArchiveDownloadOriginsAllowsAuthenticatedServiceURL(t *testing.T) {
 	)
 }
 
+func TestArchiveDownloadOriginsAnchorsHTTPServiceAtHTTPS(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		baseURL    string
+		wantOrigin string
+	}{
+		{
+			name:       "explicit port",
+			baseURL:    "http://archive.example.com:9091/api",
+			wantOrigin: "https://archive.example.com:9091",
+		},
+		{
+			name:       "default port",
+			baseURL:    "http://archive.example.com/api",
+			wantOrigin: "https://archive.example.com:443",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origins, err := archiveDownloadOrigins(tc.baseURL, nil)
+			require.NoError(t, err)
+			assert.Contains(t, origins, tc.wantOrigin)
+		})
+	}
+}
+
 func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 	t.Parallel()
 
@@ -309,7 +341,7 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 		[]string{"cdn.example.com:8443"},
 	)
 	require.NoError(t, err)
-	client, err := archiveDownloadHTTPClient(
+	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
 		func(context.Context, string, string) (net.Conn, error) {
@@ -319,8 +351,6 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
 	)
-	require.NoError(t, err)
-
 	allowed, err := http.NewRequest(
 		http.MethodGet,
 		"https://cdn.example.com:8443/block",
@@ -340,6 +370,69 @@ func TestArchiveHTTPClientValidatesRedirectOrigin(t *testing.T) {
 	assert.Contains(t, err.Error(), "not allowed")
 }
 
+func TestArchiveHTTPClientValidatesRedirectAfterCallerPolicy(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	client := archiveDownloadHTTPClient(
+		&http.Client{
+			Transport: &http.Transport{},
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				redirectURL, parseErr := url.Parse("https://evil.example.com/block")
+				if parseErr != nil {
+					return parseErr
+				}
+				req.URL = redirectURL
+				return nil
+			},
+		},
+		allowedOrigins,
+		func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("not used")
+		},
+		func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+		},
+	)
+	redirect, err := http.NewRequest(
+		http.MethodGet,
+		"https://archive.example.com/block",
+		nil,
+	)
+	require.NoError(t, err)
+	err = client.CheckRedirect(redirect, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+type customRoundTripper struct{}
+
+func (customRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("custom transport called")
+}
+
+func TestArchiveHTTPClientReplacesCustomTransport(t *testing.T) {
+	t.Parallel()
+
+	allowedOrigins, err := archiveDownloadOrigins(
+		"https://archive.example.com",
+		nil,
+	)
+	require.NoError(t, err)
+	original := &http.Client{Transport: customRoundTripper{}}
+	client := archiveDownloadHTTPClient(original, allowedOrigins, nil, nil)
+
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, transport.Proxy)
+	assert.NotNil(t, transport.DialContext)
+	assert.IsType(t, customRoundTripper{}, original.Transport)
+}
+
 func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 	t.Parallel()
 
@@ -349,7 +442,7 @@ func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 	)
 	require.NoError(t, err)
 	dialed := false
-	client, err := archiveDownloadHTTPClient(
+	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{}},
 		allowedOrigins,
 		func(context.Context, string, string) (net.Conn, error) {
@@ -360,7 +453,6 @@ func TestArchiveHTTPClientRejectsPrivateResolvedAddress(t *testing.T) {
 			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 		},
 	)
-	require.NoError(t, err)
 	transport := client.Transport.(*http.Transport)
 	_, err = transport.DialContext(
 		context.Background(),
@@ -380,7 +472,7 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	client, err := archiveDownloadHTTPClient(
+	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
 		allowedOrigins,
 		func(context.Context, string, string) (net.Conn, error) {
@@ -390,7 +482,6 @@ func TestArchiveHTTPClientDisablesProxy(t *testing.T) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
 	)
-	require.NoError(t, err)
 	assert.Nil(t, client.Transport.(*http.Transport).Proxy)
 }
 
@@ -403,7 +494,7 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 	)
 	require.NoError(t, err)
 	callerDialed := false
-	client, err := archiveDownloadHTTPClient(
+	client := archiveDownloadHTTPClient(
 		&http.Client{Transport: &http.Transport{
 			DialContext: func(
 				context.Context,
@@ -420,7 +511,6 @@ func TestArchiveDownloadHTTPClientDiscardsCallerDialer(t *testing.T) {
 			return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
 		},
 	)
-	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err = client.Transport.(*http.Transport).DialContext(

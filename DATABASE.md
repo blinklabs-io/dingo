@@ -2849,8 +2849,9 @@ older than the ledger stability window:
   with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
   preserving local block indexes and iteration semantics. Bark validates archive
   download URLs before fetching: they must be HTTPS, must not contain embedded
-  credentials, and must match the effective scheme, hostname, and port of
-  `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. The same check
+  credentials, and must match the effective HTTPS hostname and port of
+  `barkBaseUrl` or a configured `barkBlockDownloadHosts` entry. An HTTP Bark
+  RPC base anchors the corresponding HTTPS download origin. The same check
   applies after each redirect. Every resolved address must be public before
   dialing, and the download transport ignores ambient proxy settings. The
   operator-configured Bark RPC client remains separate so an explicitly chosen
