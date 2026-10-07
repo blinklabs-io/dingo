@@ -611,10 +611,11 @@ func TestImportTipPersistsSnapshotNetworkState(t *testing.T) {
 			slog.NewTextHandler(io.Discard, nil),
 		),
 		State: &RawLedgerState{
-			Epoch:    12,
-			Treasury: treasury,
-			Reserves: reserves,
-			EraIndex: 6,
+			Epoch:     1_234,
+			Treasury:  treasury,
+			Reserves:  reserves,
+			EraIndex:  EraConway,
+			EraBounds: make([]EraBound, EraConway+1),
 			Tip: &SnapshotTip{
 				Slot:      123_456,
 				BlockHash: make([]byte, 32),
@@ -1229,6 +1230,7 @@ func govImportConfigForTest(
 			GovStateData:  govStateData,
 			Epoch:         500,
 			EraIndex:      EraConway,
+			EraBounds:     make([]EraBound, EraConway+1),
 			EraBoundEpoch: 100,
 			EraBoundSlot:  10_000,
 		},

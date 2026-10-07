@@ -3718,7 +3718,7 @@ func TestLedgerViewTreasuryValueReadsMithrilBootstrapState(t *testing.T) {
 			State: &ledgerstate.RawLedgerState{
 				PParamsData:     paramsData,
 				PrevPParamsData: paramsData,
-				Epoch:           12,
+				Epoch:           1_234,
 				EraIndex:        ledgerstate.EraConway,
 				EraBounds: make(
 					[]ledgerstate.EraBound,

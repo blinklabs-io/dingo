@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -641,10 +640,9 @@ func TestSyncRewardRepairKeepsSnapshotUTxOsDuringTailCleanup(t *testing.T) {
 		Network:     "preprod",
 		DataDir:     dataDir,
 		StorageMode: "core",
-		CardanoNodeConfig: &cardano.CardanoNodeConfig{
-			MithrilGenesisVerificationKey:          fixture.genesisVKey,
-			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
-		},
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
 		Backend:                 BackendV2,
 		PinnedDigest:            "original-bootstrap-pin",
 		VerifyCertChain:         true,
@@ -921,10 +919,9 @@ func TestSyncRewardRepairUnspendsOutputsSpentAfterSnapshotState(t *testing.T) {
 		Network:     "preprod",
 		DataDir:     dataDir,
 		StorageMode: "core",
-		CardanoNodeConfig: &cardano.CardanoNodeConfig{
-			MithrilGenesisVerificationKey:          fixture.genesisVKey,
-			MithrilGenesisAncillaryVerificationKey: fixture.ancillaryVKey,
-		},
+		CardanoNodeConfig: testNodeConfigWithMithrilKeys(
+			t, fixture.genesisVKey, fixture.ancillaryVKey,
+		),
 		Backend:                 BackendV2,
 		PinnedDigest:            "original-bootstrap-pin",
 		VerifyCertChain:         true,
