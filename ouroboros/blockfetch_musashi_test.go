@@ -432,8 +432,23 @@ func runMusashiBlockfetchClientDelivery(
 	headerPath string,
 ) (gledger.Block, gledger.BlockHeader, []byte, error) {
 	t.Helper()
-	blockRaw := readHexFixture(t, blockPath)
-	headerRaw := readHexFixture(t, headerPath)
+	return runMusashiBlockfetchClientDeliveryRaw(
+		t,
+		blockType,
+		readHexFixture(t, blockPath),
+		readHexFixture(t, headerPath),
+	)
+}
+
+// runMusashiBlockfetchClientDeliveryRaw is runMusashiBlockfetchClientDelivery
+// for a block and header given as bytes.
+func runMusashiBlockfetchClientDeliveryRaw(
+	t *testing.T,
+	blockType uint,
+	blockRaw []byte,
+	headerRaw []byte,
+) (gledger.Block, gledger.BlockHeader, []byte, error) {
+	t.Helper()
 
 	eventBus := event.NewEventBus(nil, nil)
 	blockKey, blockCh := eventBus.Subscribe(ledger.BlockfetchEventType)
@@ -605,9 +620,9 @@ func TestDecodeBlockfetchBlockKeepsGenuineConwayBlocks(t *testing.T) {
 	}
 }
 
-// TestDecodeBlockfetchBlockRejectsLegacyDijkstraBodyWithMatchingHash verifies
-// the fixture's header commits to its four-field body, then confirms current
-// block-fetch decoding rejects that layout on every network.
+// TestDecodeBlockfetchBlockKeepsThreeComponentDijkstraBody verifies the
+// fixture's header commits to its three-field body, then confirms block-fetch
+// decoding accepts that layout on every network.
 func TestDecodeBlockfetchBlockKeepsThreeComponentDijkstraBody(t *testing.T) {
 	t.Parallel()
 
