@@ -284,9 +284,7 @@ func newPathFixture(
 			body[13] = []any{input(seedByte+0x0f, pathCollateralValue)}
 			body[17] = pathCollateralValue
 		}
-		for k, v := range level.fields {
-			body[k] = v
-		}
+		maps.Copy(body, level.fields)
 		return body, witnesses
 	}
 	for index, spec := range append(slices.Clone(blockTxs), pending...) {
