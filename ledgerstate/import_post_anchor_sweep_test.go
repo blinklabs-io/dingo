@@ -123,3 +123,66 @@ func TestImportLedgerStateSweepsPostAnchorNonceAndNetworkRows(t *testing.T) {
 		"SELECT COUNT(*) FROM network_donation WHERE slot <= ?", anchorSlot,
 	), "network donations at or below the anchor must be kept")
 }
+
+func TestImportLedgerStatePostAnchorSweepIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: t.TempDir()})
+	require.NoError(t, err)
+	t.Cleanup(func() { dbtest.CloseDatabase(db) })
+
+	const (
+		anchorSlot = uint64(1_000)
+		aboveSlot  = uint64(1_500)
+	)
+	tipHash := make([]byte, 32)
+	nonce := make([]byte, 32)
+	require.NoError(t, db.SetEpoch(
+		aboveSlot, 101, nonce, nonce, nonce, nonce, EraConway, 1, 1_000, nil,
+	))
+	require.NoError(t, db.Metadata().SetNetworkState(3, 4, aboveSlot, nil))
+	require.NoError(t, db.Metadata().SetBlockNonce(
+		bytes.Repeat([]byte{0x5a}, 32), aboveSlot, nonce, true, nil,
+	))
+
+	raw, err := dbtest.RawSQLiteMetadata(t, db)
+	require.NoError(t, err)
+	_, err = raw.Exec(`DROP TABLE network_donation`)
+	require.NoError(t, err)
+
+	err = ImportLedgerState(context.Background(), ImportConfig{
+		Database: db,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State: &RawLedgerState{
+			Epoch:               100,
+			EraIndex:            EraConway,
+			EraBounds:           make([]EraBound, EraConway+1),
+			EpochNonce:          nonce,
+			EvolvingNonce:       nonce,
+			CandidateNonce:      nonce,
+			LastEpochBlockNonce: nonce,
+			Tip: &SnapshotTip{
+				Slot:      anchorSlot,
+				BlockHash: tipHash,
+			},
+		},
+		EpochLength: func(uint) (uint, uint, error) {
+			return 1, 1_000, nil
+		},
+	})
+	require.ErrorContains(t, err, "deleting post-anchor network donations")
+
+	var count int
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM epoch WHERE slot > ?", anchorSlot,
+	).Scan(&count))
+	require.Equal(t, 1, count, "epoch sweep must roll back with the failed delete")
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM network_state WHERE slot > ?", anchorSlot,
+	).Scan(&count))
+	require.Equal(t, 1, count, "network-state sweep must roll back with the failed delete")
+	require.NoError(t, raw.QueryRow(
+		"SELECT COUNT(*) FROM block_nonce WHERE slot > ?", anchorSlot,
+	).Scan(&count))
+	require.Equal(t, 1, count, "nonce sweep must roll back with the failed delete")
+}
