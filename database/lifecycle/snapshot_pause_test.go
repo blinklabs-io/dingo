@@ -551,6 +551,7 @@ func TestSnapshotRejectsSuccessfulBackupAfterPauseDeadline(t *testing.T) {
 func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
+	started := make(chan struct{})
 	finished := make(chan struct{})
 	hooks := &backupHooks{}
 	db := newHookedDB(t, nil, hooks)
@@ -559,23 +560,40 @@ func TestSnapshotBoundsBlockedStateRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	hooks.read = func() error {
+		close(started)
+		defer close(finished)
 		select {
 		case <-release:
-			close(finished)
 			return nil
 		case <-ctx.Done():
-			close(finished)
 			return ctx.Err()
 		}
 	}
 	dir := filepath.Join(t.TempDir(), "snapshot")
-	_, err := snapshotAt(ctx, db, dir, lifecycle.WithMaxCommitPause(30*time.Millisecond))
-	close(release)
+	result := make(chan error, 1)
+	go func() {
+		_, err := snapshotAt(
+			ctx, db, dir,
+			lifecycle.WithMaxCommitPause(30*time.Millisecond),
+		)
+		result <- err
+	}()
 	select {
-	case <-finished:
-	case <-ctx.Done():
-		t.Fatal("snapshot state reader did not exit")
+	case <-started:
+	case err := <-result:
+		t.Fatalf("snapshot returned before the state reader started: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot state reader did not start")
 	}
+	err := testutil.RequireReceive(
+		t, result, 5*time.Second,
+		"snapshot must bound the blocked state read",
+	)
+	close(release)
+	testutil.RequireReceive(
+		t, finished, 5*time.Second,
+		"snapshot state reader must exit after release",
+	)
 	require.ErrorIs(t, err, lifecycle.ErrCommitPauseExceeded)
 	require.NoDirExists(t, dir)
 	requireBarrierReleased(t, db)
