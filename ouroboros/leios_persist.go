@@ -584,12 +584,22 @@ func (o *Ouroboros) StopLeiosPersistWriter() {
 }
 
 func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
+	return o.stopLeiosPersistenceWorkersWithWait(
+		timeout,
+		waitForLeiosPersistWorker,
+	)
+}
+
+func (o *Ouroboros) stopLeiosPersistenceWorkersWithWait(
+	timeout time.Duration,
+	wait func(<-chan struct{}, time.Duration) bool,
+) bool {
 	writerDone, writerStarted := o.requestLeiosPersistWriterStop()
 	gcDone, gcStarted := o.requestLeiosPersistenceGCStop()
 	writerStopped := true
 	if writerStarted {
 		writerTimeout := timeout
-		writerStopped = waitForLeiosPersistWorker(
+		writerStopped = wait(
 			writerDone,
 			writerTimeout,
 		)
@@ -600,7 +610,7 @@ func (o *Ouroboros) stopLeiosPersistenceWorkers(timeout time.Duration) bool {
 	gcStopped := true
 	if gcStarted {
 		gcTimeout := timeout
-		gcStopped = waitForLeiosPersistWorker(gcDone, gcTimeout)
+		gcStopped = wait(gcDone, gcTimeout)
 		if gcStopped {
 			o.leiosPersistGCStarted.Store(false)
 		} else {
@@ -707,7 +717,7 @@ func waitForLeiosPersistWorker(done <-chan struct{}, timeout time.Duration) bool
 // practice, not just "shouldn't" by convention.
 //
 // Returns ErrLeiosPersistDrainUnconfirmed, without resetting anything, if
-// either worker misses the shared drain deadline. The writer may still be
+// either worker misses its drain deadline. The writer may still be
 // writing against the old database, or the GC may still be scanning or
 // deleting through its pinned blob store. The caller must not proceed to close
 // or replace storage in that case; it must escalate to a supervised restart,

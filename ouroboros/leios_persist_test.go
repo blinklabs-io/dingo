@@ -1075,8 +1075,7 @@ func TestLeiosPersistStopDrainTimesOut(t *testing.T) {
 	}
 }
 
-// A writer that drains slowly but inside its budget must not shrink the GC's
-// budget: each worker that exits within the timeout counts as stopped.
+// Each worker receives the full shutdown budget independently.
 func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
 	t.Parallel()
 
@@ -1091,16 +1090,14 @@ func TestLeiosPersistenceWorkersEachGetFullDrainBudget(t *testing.T) {
 	o.leiosPersistGCStarted.Store(true)
 
 	const budget = 400 * time.Millisecond
-	writerDone := o.leiosPersistDone
-	gcDone := o.leiosPersistGCDone
-	go func() {
-		time.Sleep(budget * 3 / 4)
-		close(writerDone)
-		time.Sleep(budget / 2)
-		close(gcDone)
-	}()
+	waits := make([]time.Duration, 0, 2)
+	wait := func(_ <-chan struct{}, timeout time.Duration) bool {
+		waits = append(waits, timeout)
+		return true
+	}
 
-	require.True(t, o.stopLeiosPersistenceWorkers(budget))
+	require.True(t, o.stopLeiosPersistenceWorkersWithWait(budget, wait))
+	require.Equal(t, []time.Duration{budget, budget}, waits)
 }
 
 // TestLeiosPersistEnqueueAfterStopIsRejected verifies that once the writer is
