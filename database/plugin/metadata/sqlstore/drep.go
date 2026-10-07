@@ -1138,30 +1138,39 @@ func (s *Store) ClearDanglingDRepDelegations(
 	atSlot uint64,
 	txn types.Txn,
 ) (int, error) {
-	db, ctx, err := s.dbFromTxn(txn)
-	if err != nil {
-		return 0, err
-	}
 	slot, err := checkedInt64(atSlot)
 	if err != nil {
 		return 0, err
 	}
-	result, err := db.ExecContext(ctx, `
-UPDATE account
-SET drep = NULL, drep_type = 0, added_slot = ?
-WHERE drep IS NOT NULL
+	cleared := 0
+	err = s.withWriteTransaction(txn, func(db queryer, ctx context.Context) error {
+		const predicate = `drep IS NOT NULL
   AND drep_type IN (0, 1)
   AND NOT EXISTS (
       SELECT 1 FROM drep
       WHERE drep.credential_tag = account.drep_type
         AND drep.credential = account.drep
         AND drep.active = TRUE
-  )`, slot)
-	if err != nil {
-		return 0, err
-	}
-	affected, err := result.RowsAffected()
-	return int(affected), err
+  )`
+		if _, err := db.ExecContext(ctx, `
+INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+SELECT credential_tag, staking_key, ? FROM account
+WHERE `+predicate+`
+ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`, slot); err != nil {
+			return fmt.Errorf("record dangling DRep delegation clears: %w", err)
+		}
+		result, err := db.ExecContext(ctx, `
+UPDATE account
+SET drep = NULL, drep_type = 0, added_slot = ?
+WHERE `+predicate, slot)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		cleared = int(affected)
+		return err
+	})
+	return cleared, err
 }
 
 func expandDrepCollectionQuery(query string, count int) string {

@@ -55,6 +55,10 @@ var errRewardStakeInputsNotReady = errors.New(
 	"reward stake inputs are still being written",
 )
 
+var errRewardStakeInputsUnrecoverable = errors.New(
+	"reward stake inputs cannot be reconstructed",
+)
+
 func loadRewardStakeInputsPending(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -355,7 +359,8 @@ func (ls *LedgerState) ensureRewardStakeInputsReady(
 	}
 	if len(rebuilt) == 0 && snapshot.TotalDelegators > 0 {
 		return fmt.Errorf(
-			"rebuild pending reward stake inputs for epoch %d returned no rows for %d snapshot delegators",
+			"%w: pending epoch %d returned no rows for %d snapshot delegators",
+			errRewardStakeInputsUnrecoverable,
 			epoch,
 			snapshot.TotalDelegators,
 		)

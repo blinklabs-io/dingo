@@ -166,6 +166,7 @@ func TestVerifySTMSignatureGolden(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.NoError(t, err)
 }
@@ -184,6 +185,7 @@ func TestVerifySTMSignatureRejectsWrongMessage(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "lottery lost")
@@ -212,6 +214,7 @@ func TestVerifySTMSignatureRejectsTamperedBatchProof(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 5, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(
@@ -236,6 +239,7 @@ func TestVerifySTMSignatureRejectsZeroK(t *testing.T) {
 		encodedAVK,
 		encodedSig,
 		ProtocolParameters{K: 0, M: 10, PhiF: 0.8},
+		newCertificateChainBudget(),
 	)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "K=0")

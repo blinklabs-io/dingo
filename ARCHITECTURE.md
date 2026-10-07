@@ -7714,6 +7714,23 @@ Package layout:
    configured backend, and orchestrates the v1 snapshot workflow;
    `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
 
+The certificate-chain walk (`bootstrap.go`) runs before any certificate is
+trusted, so it is bounded on every axis the aggregator controls. Each
+certificate body is read through a limit of 8 MiB with overflow detection, and
+the bytes of every certificate read share one 512 MiB budget (the walk retains
+them all). The walk follows at most 10000 certificates, rejects metadata listing
+more than 8192 signers or a protocol message with more than 64 parts (a
+decoded map entry costs several times its JSON bytes, so the byte budget alone
+does not bound the retained heap), and, in STM mode, rejects an aggregate signature with
+more than 8192 signatures, 65536 lottery indices in total or 262144 Merkle path
+values. The binary parser and the message-part decoder check these counts before
+allocating, the index total included, and the checks
+precede signature, lottery and Merkle verification. Verification work is
+charged to one cumulative budget of 2^26 weighted units for the whole chain
+(64 per signer, 1 per lottery index, 1 per path value) before the work
+runs. Live data sits far inside each bound (mainnet: about 660
+certificates of at most 150 KB, 134 signers, 1949 lottery indices).
+
 Bootstrap progress is emitted through one callback even though v2 downloads
 the ancillary ledger state and immutable archives concurrently. Each progress
 event carries its artifact kind and snapshot hash; aggregate immutable events
@@ -11624,11 +11641,36 @@ credential's deposit from its latest registration event at or before the
 pinned slot (`GetLatestAccountRegistrationAtOrBefore`, one query), or from
 the credential's snapshot import baseline when that is at least as new, as
 `LedgerView.StakeCredentialDeposit` treats it; certificate rows and the
-baseline are likewise removed only by rollback. The remaining
-per-credential and per-proposal queries
-(`GetFilteredDelegationsAndRewardAccounts`, `GetDRepState`,
-`GetFilteredVoteDelegatees`, `GetProposals`) and `DebugChainDepState` still
+baseline are likewise removed only by rollback.
+`GetFilteredDelegationsAndRewardAccounts` and `GetFilteredVoteDelegatees`
+read the requested accounts as they stood at the pinned slot through
+`GetAccountsByCredentialAtSlot`: an account registered then, with the pool,
+DRep and reward balance it held. The pool and DRep come from the live account
+row when it was last written at or before the slot, and otherwise from the
+derivation `RestoreAccountStateAtSlot` applies on rollback. Certificate,
+snapshot-import baseline, POOLREAP, and PV10 dangling-DRep-clear history share
+that derivation. A snapshot baseline is the authoritative full state at its
+slot and wins ties; a same-slot certificate wins a PV10 clear because the
+clear runs at the epoch transition before the block. The reward balance is
+reconstructed from the
+`account_reward_delta` journal the way historical stake reads it, including
+the credits of a pending reward round applied at or before the slot, so the
+unpinned path's separate pending-credit addition is skipped. Certificates,
+baselines, PV10 clear rows, and the reward journal are removed only by
+rollback, so no retention floor applies. `GetDRepState`, `GetProposals` and
+`DebugChainDepState` still
 ignore the acquired point.
+
+Every pinned query also needs history the node actually holds, so
+`VerifyPointQueryable` refuses a point below the latest Mithril import's
+ledger slot (`mithril_ledger_slot`, `checkMithrilTrustBoundary`). The
+import writes the snapshot's state, not the history that led to it: the
+blocks below that slot carry no certificate, transaction or reward-journal
+rows. Catch-up reconciliation records accounts absent from the newer snapshot
+as an inactive full-state baseline at that slot; it also deactivates DReps,
+retires pools, and tombstones UTxOs the snapshot no longer holds. A point at
+the snapshot slot or after it is exact. A node synced from genesis has no such
+slot and is unaffected.
 
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the
@@ -13092,13 +13134,15 @@ producer absent from a populated snapshot always hard-rejects. See the retention
 section in `DATABASE.md` for the per-table
 detail.
 
-A skipped reward round is never made up later, and that has consequences
-well beyond the reward figures. Applying the round at the boundary into N
-requires this node's own `RewardSnapshot` for N-3 and `RewardAdaPots` for
-N-1; when either is absent the round is skipped, while the reference node
-credits it regardless. Reward balances — and the leadership stake
-distribution derived from them, since `reward_live_stake` sums UTxO plus
-reward — are then permanently short by that epoch's rewards. Leader
+At a boundary with a Shelley reward round, applying the round requires this
+node's own `RewardSnapshot` for N-3 and
+`RewardAdaPots` for N-1. When the authoritative boundary lacks either input,
+or lacks the retained stake inputs or performance block counts needed to
+consume them, it returns `errHaltLedgerPipeline` and stops before committing
+the boundary. Opportunistic precompute remains retryable while those inputs
+are not yet available. Continuing without the round would permanently shorten
+reward balances and the leadership stake distribution derived from them,
+since `reward_live_stake` sums UTxO plus reward. Leader
 eligibility compares a VRF value against a stake-derived threshold, so a
 sigma shortfall of eps flips a decision with probability about eps per
 block, and a flipped decision rejects a canonical block. Measured on preview:
@@ -13111,8 +13155,8 @@ predates the imported state or because an imported basis could not be derived
 without understating stake. The ledger-state import closes the pots half of
 that gap by seeding a `RewardAdaPots` row for the snapshot's own epoch from the
 state it already decodes -- treasury and reserves from `AccountState`, the fee
-pot from `UTxOState` -- so the round at the first boundary after import is not
-skipped for want of pots. The fee pot is decoded specifically for this,
+pot from `UTxOState` -- so the round at the first boundary after import has its
+required pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
 it.
@@ -14557,7 +14601,7 @@ reach the boundaries that applied them. The folded flag is the job's progress
 record, so a stopped job resumes where it left off, and a rollback over a
 compacted round reverts it the same way as a withdrawal's folds. A rollback below the boundary removes the round
 and clears `folded` on its surviving outputs in the transaction that reverts
-the folded credits' journal rows. Core-mode retention keeps a credited round's
+the folded credits' journal rows. A Mithril catch-up/repair import removes post-anchor credited rounds and clears their `folded` flags in its pre-phase sweep (`ledgerstate.ImportLedgerState`, see DATABASE.md's `reward_credit_round` row). After importing certified account balances, it also deletes later reward-journal entries for credentials covered by the snapshot, including entries for credits folded during the anchor-to-tip gap; resumed imports perform that journal cleanup even when the cert-state phase already completed. Core-mode retention keeps a credited round's
 unfolded rows. A precompute for a credited round does nothing, and replacing a
 credited round's outputs is refused: they are balances, and rewritten rows
 would count folded credits again.
@@ -14640,10 +14684,21 @@ workers set by `blockPipelineWorkerCount()` (`ledger/state.go`) — the host's
 and capped at `blockPipelineMaxWorkers` (8) — and validation disabled
 (`ValidateWorkers: 0`) unless `BlockPipelineValidateEnabled` is also set, in
 which case validate workers use the same CPU-scaled count. Each gathered batch
-of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline up
-front and drained back from `Results()` in submission order — the
-pipeline's apply stage guarantees this ordering regardless of which worker
-decodes first — so decode work for multiple blocks can overlap while
+of raw blocks (`decodeReadChainBatch`) is submitted to the pipeline from a
+separate goroutine while the caller drains `Results()` in submission order —
+the pipeline's apply stage guarantees this ordering regardless of which
+worker decodes first. Draining concurrently is required: `Submit` waits once
+`MaxPendingBlocks` sequences are outstanding, and once the `Results()`
+buffer is full the apply stage completes no further sequences until results
+are consumed, so a batch larger than that limit would otherwise stall in
+`Submit`. If a `Submit` fails, the results of the blocks already
+submitted are still drained before the error is returned, so none are left
+for a later batch to read. That drain is bounded by the pipeline shutdown
+timeout because a fatal apply-stage error can cancel the pipeline before every
+submitted block produces a result. The submission context is not derived from the
+reader attempt's context, so a per-attempt cancel cannot leave results
+misaligned with the batch; every return cancels it and joins the submitter.
+Decode work for multiple blocks can overlap while
 downstream ledger validation/apply remains fully serial and unchanged. The
 pipeline's own apply stage is a no-op here (`ApplyFunc` is nil): its only
 job in this phase is re-sequencing decoded results, not applying ledger
