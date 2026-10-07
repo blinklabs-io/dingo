@@ -147,25 +147,26 @@ type Store struct {
 	// boundaries without a production-sized fixture.
 	rewardLiveStakeBatchSize int
 
-	// committeeAuthImmutableSlot and committeeAuthImmutableSlotKnown cache
-	// the live rollback-safe immutable slot (tip depth securityParam blocks
-	// back), pushed in by SetCommitteeAuthImmutableSlot from outside the
-	// package -- sqlstore cannot import chain (chain already imports
-	// database) to compute it directly. committeeAuthImmutableSlotEverSet
-	// distinguishes "no live syncer has ever been wired for this Store"
+	// committeeAuthImmutableSlot caches the live rollback-safe immutable slot
+	// (tip depth securityParam blocks back), pushed in by
+	// SetCommitteeAuthImmutableSlot from outside the package -- sqlstore cannot
+	// import chain (chain already imports database) to compute it directly. Its
+	// everSet bit distinguishes "no live syncer has ever been wired for this Store"
 	// (committeeAuthHorizon falls back to the slot-window assumption, the
 	// pre-live-sync behavior every existing caller and test still gets)
 	// from "a live syncer is wired but has no current value" (bootstrap
 	// before the first successful resolution, or invalidated by a rollback
 	// in DeleteCertificatesAfterSlot -- pruning suspends rather than fall
 	// back to an assumption a sparse or recently-reorganized chain can
-	// violate). Read through committeeAuthHorizon(). Plain atomics, not a
-	// mutex: the setter runs from an independent periodic sync goroutine
-	// while readers run inline in the certificate write path and the
-	// maintenance sweep, and none of them may block on each other.
-	committeeAuthImmutableSlot        atomic.Uint64
-	committeeAuthImmutableSlotKnown   atomic.Bool
-	committeeAuthImmutableSlotEverSet atomic.Bool
+	// violate). The mutex keeps the three state fields coherent and, while a
+	// prune delete holds its read side, orders rollback invalidation before or
+	// after that delete. This closes the gap where invalidation could otherwise
+	// race between choosing a horizon and deleting rollback-required history.
+	committeeAuthImmutableSlotMu sync.RWMutex
+	committeeAuthImmutableSlot   committeeAuthImmutableSlotState
+	// Test hook runs after a prune has selected its horizon. Production leaves
+	// it nil.
+	committeeAuthPruneLocked func()
 
 	migrations        []migrations.Migration
 	migrationLocker   migrations.Locker

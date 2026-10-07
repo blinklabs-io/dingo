@@ -15,9 +15,11 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -225,6 +227,8 @@ func (h *recordingHandler) count(message string) int {
 type remoteLoad struct {
 	chain    *chain.Chain
 	cacheDir string
+	source   string
+	limits   remoteImmutableLimits
 	log      *recordingHandler
 }
 
@@ -232,9 +236,12 @@ func newRemoteLoad(t *testing.T) *remoteLoad {
 	t.Helper()
 	cm, err := chain.NewManager(newTestDB(t), nil)
 	require.NoError(t, err)
+	limits, err := remoteImmutableLimitsForSlots(4_320, true)
+	require.NoError(t, err)
 	return &remoteLoad{
 		chain:    cm.PrimaryChain(),
 		cacheDir: t.TempDir(),
+		limits:   limits,
 		log:      &recordingHandler{},
 	}
 }
@@ -250,8 +257,9 @@ func (l *remoteLoad) run(
 		for range batches { //nolint:revive // drain only
 		}
 	}()
+	l.source = rootURL
 	copied, _, err := copyBlocksRemote(
-		ctx, slog.New(l.log), rootURL, l.cacheDir, l.chain, batches,
+		ctx, slog.New(l.log), rootURL, l.cacheDir, l.limits, l.chain, batches,
 	)
 	close(batches)
 	<-drained
@@ -260,7 +268,9 @@ func (l *remoteLoad) run(
 
 func (l *remoteLoad) readyChunks(t *testing.T) []string {
 	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(l.cacheDir, "ready"))
+	sourceCache, err := remoteImmutableSourceCache(l.cacheDir, l.source)
+	require.NoError(t, err)
+	entries, err := os.ReadDir(filepath.Join(sourceCache, "ready"))
 	require.NoError(t, err)
 	var names []string
 	for _, entry := range entries {
@@ -343,7 +353,7 @@ func TestCopyBlocksRemoteHoldsChunksCompletedOutOfOrder(t *testing.T) {
 	load := newRemoteLoad(t)
 	chunk2Done := func() bool {
 		matches, _ := filepath.Glob(
-			filepath.Join(load.cacheDir, "*", "00002.secondary"),
+			filepath.Join(load.cacheDir, "*", "*", "00002.secondary"),
 		)
 		return len(matches) > 0
 	}
@@ -391,9 +401,43 @@ func TestCopyBlocksRemoteRejectsAMissingIndex(t *testing.T) {
 	t.Parallel()
 	root := newRemoteRoot(t, 3)
 	require.NoError(t, os.Remove(filepath.Join(root.dir, "00001.primary")))
+	var (
+		probeMu    sync.Mutex
+		probeRange string
+	)
+	root.handle = func(_ http.ResponseWriter, req *http.Request) bool {
+		if req.URL.Path == "/00001.chunk" {
+			probeMu.Lock()
+			probeRange = req.Header.Get("Range")
+			probeMu.Unlock()
+		}
+		return false
+	}
 	load := newRemoteLoad(t)
 	_, err := load.run(context.Background(), root.serve(t))
 	require.ErrorContains(t, err, "remote chunk 00001 is missing .primary")
+	probeMu.Lock()
+	gotProbeRange := probeRange
+	probeMu.Unlock()
+	require.Equal(t, "bytes=0-0", gotProbeRange)
+}
+
+func TestFetchRemoteChunkValidatesIndexesBeforeChunkBody(t *testing.T) {
+	t.Parallel()
+	root := newRemoteRoot(t, 1)
+	primary := filepath.Join(root.dir, "00000.primary")
+	data, err := os.ReadFile(primary)
+	require.NoError(t, err)
+	data[0] = 2
+	require.NoError(t, os.WriteFile(primary, data, 0o600))
+	limits, err := remoteImmutableLimitsForSlots(4_320, true)
+	require.NoError(t, err)
+	err = fetchRemoteChunk(
+		context.Background(), strings.TrimRight(root.serve(t), "/"),
+		t.TempDir(), 0, limits,
+	)
+	require.ErrorContains(t, err, "unsupported primary index version")
+	require.False(t, root.requested("00000.chunk"))
 }
 
 func TestCopyBlocksRemoteRejectsACorruptChunk(t *testing.T) {
@@ -422,7 +466,10 @@ func TestCopyBlocksRemoteResumesAPartialFile(t *testing.T) {
 	full, err := os.ReadFile(filepath.Join(root.dir, "00000.chunk"))
 	require.NoError(t, err)
 	load := newRemoteLoad(t)
-	staging := filepath.Join(load.cacheDir, "staging")
+	rootURL := root.serve(t)
+	sourceCache, err := remoteImmutableSourceCache(load.cacheDir, rootURL)
+	require.NoError(t, err)
+	staging := filepath.Join(sourceCache, "staging")
 	require.NoError(t, os.MkdirAll(staging, 0o750))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(staging, "00000.chunk.part"), full[:len(full)/2], 0o600,
@@ -437,7 +484,7 @@ func TestCopyBlocksRemoteResumesAPartialFile(t *testing.T) {
 		}
 		return false
 	}
-	copied, err := load.run(context.Background(), root.serve(t))
+	copied, err := load.run(context.Background(), rootURL)
 	require.NoError(t, err)
 	require.Equal(t, localBlockCount(t, newRemoteRoot(t, 2).dir), copied)
 	require.Equal(
@@ -474,6 +521,33 @@ func TestCopyBlocksRemoteRetriesAnInterruptedTransfer(t *testing.T) {
 func TestCopyBlocksRemoteResumesFromTheChunkHoldingTheTip(t *testing.T) {
 	t.Parallel()
 	load := newRemoteLoad(t)
+	root := newRemoteRoot(t, 2)
+	rootURL := root.serve(t)
+	_, err := load.run(context.Background(), rootURL)
+	require.NoError(t, err)
+
+	extended := newRemoteRoot(t, 3)
+	for _, ext := range []string{".chunk", ".primary", ".secondary"} {
+		data, readErr := os.ReadFile(filepath.Join(extended.dir, "00002"+ext))
+		require.NoError(t, readErr)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(root.dir, "00002"+ext), data, 0o600,
+		))
+	}
+	root.mu.Lock()
+	root.tip = extended.tip
+	root.seen = nil
+	root.mu.Unlock()
+	_, err = load.run(context.Background(), rootURL)
+	require.NoError(t, err)
+	require.Equal(t, root.tip.Slot, load.chain.Tip().Point.Slot)
+	require.False(t, root.requested("00000.chunk"))
+	require.True(t, root.requested("00002.chunk"))
+}
+
+func TestCopyBlocksRemoteDoesNotReuseAnotherSourceCache(t *testing.T) {
+	t.Parallel()
+	load := newRemoteLoad(t)
 	first := newRemoteRoot(t, 2)
 	_, err := load.run(context.Background(), first.serve(t))
 	require.NoError(t, err)
@@ -481,9 +555,82 @@ func TestCopyBlocksRemoteResumesFromTheChunkHoldingTheTip(t *testing.T) {
 	second := newRemoteRoot(t, 3)
 	_, err = load.run(context.Background(), second.serve(t))
 	require.NoError(t, err)
-	require.Equal(t, second.tip.Slot, load.chain.Tip().Point.Slot)
-	require.False(t, second.requested("00000.chunk"))
-	require.True(t, second.requested("00002.chunk"))
+	require.True(t, second.requested("00000.chunk"))
+}
+
+func TestFetchRemoteFileOnceRejectsBodyPastFormatLimit(t *testing.T) {
+	t.Parallel()
+	const limit = int64(16)
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			flusher := w.(http.Flusher)
+			w.WriteHeader(http.StatusOK)
+			flusher.Flush()
+			_, _ = w.Write(bytes.Repeat([]byte{0xaa}, int(limit+1)))
+		},
+	))
+	t.Cleanup(server.Close)
+	partPath := filepath.Join(t.TempDir(), "00000.chunk.part")
+	err := fetchRemoteFileOnce(
+		context.Background(), server.URL+"/00000.chunk", partPath, limit,
+	)
+	require.ErrorIs(t, err, errRemoteImmutableFileTooLarge)
+	_, statErr := os.Stat(partPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist))
+}
+
+func TestFetchRemoteFileOnceRedactsURLCredentials(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "no", http.StatusUnauthorized)
+		},
+	))
+	t.Cleanup(server.Close)
+	u, err := url.Parse(server.URL + "/00000.chunk")
+	require.NoError(t, err)
+	u.User = url.UserPassword("archive-user", "archive-secret")
+	err = fetchRemoteFileOnce(
+		context.Background(), u.String(),
+		filepath.Join(t.TempDir(), "00000.chunk.part"), 16,
+	)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), "archive-user")
+	require.NotContains(t, err.Error(), "archive-secret")
+}
+
+func TestRemoteImmutableRequestErrorRedactsURLCredentials(t *testing.T) {
+	t.Parallel()
+	const rawURL = "https://archive-user:archive-secret@example.invalid/tip.json"
+	err := remoteImmutableRequestError(
+		"fetching remote ImmutableDB tip",
+		rawURL,
+		&url.Error{
+			Op:  "Get",
+			URL: rawURL,
+			Err: errors.New("connection refused"),
+		},
+	)
+	require.NotContains(t, err.Error(), "archive-user")
+	require.NotContains(t, err.Error(), "archive-secret")
+	require.ErrorContains(t, err, "connection refused")
+}
+
+func TestRemoteImmutableMalformedURLsRedactCredentials(t *testing.T) {
+	t.Parallel()
+	const malformed = "https://archive-user:archive-secret@example.invalid/%zz"
+	_, classifyErr := classifyRemoteImmutableSource(malformed)
+	_, canonicalErr := canonicalRemoteImmutableRoot(malformed)
+	_, tipErr := fetchRemoteImmutableTip(context.Background(), malformed)
+	fileErr := fetchRemoteFileOnce(
+		context.Background(), malformed,
+		filepath.Join(t.TempDir(), "00000.chunk.part"), 16,
+	)
+	for _, err := range []error{classifyErr, canonicalErr, tipErr, fileErr} {
+		require.Error(t, err)
+		require.NotContains(t, err.Error(), "archive-user")
+		require.NotContains(t, err.Error(), "archive-secret")
+	}
 }
 
 func TestCopyBlocksRemoteStopsOnCancellation(t *testing.T) {

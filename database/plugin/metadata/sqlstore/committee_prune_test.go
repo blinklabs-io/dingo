@@ -939,6 +939,31 @@ func TestAuthCommitteeHotPruningSuspendsAfterRollbackInvalidatesLiveSlot(
 		"pruning must resume once a fresh post-rollback value is known")
 }
 
+func TestAuthCommitteeHotPruningSerializesRollbackInvalidation(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	store.SetCommitteeAuthImmutableSlot(150_000, true)
+	store.committeeAuthPruneLocked = func() {
+		acquired := store.committeeAuthImmutableSlotMu.TryLock()
+		if acquired {
+			store.committeeAuthImmutableSlotMu.Unlock()
+		}
+		require.False(
+			t,
+			acquired,
+			"rollback invalidation must wait until the bounded prune finishes",
+		)
+	}
+
+	queryer := newDialectQueryer(store.writeDB, store.dialect.Name())
+	_, err := store.pruneCommitteeHotAuthorizations(
+		context.Background(), queryer,
+		uint8(lcommon.CredentialTypeAddrKeyHash), credentialHash(0xca),
+		400_000,
+	)
+	require.NoError(t, err)
+}
+
 // TestAuthCommitteeHotPruningIsPerTaggedCredential covers the case where a
 // key-hash and a script-hash cold credential share the same 28 bytes. They are
 // different identities, so each credential is pruned only within its own

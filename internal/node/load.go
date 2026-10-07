@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -869,10 +870,37 @@ func LoadWithDB(
 		immutableTipSlot uint64
 	)
 	if remoteImmutable {
+		var (
+			regularSlots  uint64
+			canContainEBB bool
+		)
+		if byronGenesis := nodeCfg.ByronGenesis(); byronGenesis != nil {
+			if byronGenesis.ProtocolConsts.K <= 0 ||
+				uint64(byronGenesis.ProtocolConsts.K) > math.MaxUint64/10 {
+				return errors.New(
+					"remote ImmutableDB requires a valid Byron security parameter",
+				)
+			}
+			regularSlots = uint64(byronGenesis.ProtocolConsts.K) * 10 //nolint:gosec
+			canContainEBB = true
+		} else if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil &&
+			shelleyGenesis.EpochLength > 0 {
+			regularSlots = uint64(shelleyGenesis.EpochLength) //nolint:gosec
+		} else {
+			return errors.New(
+				"remote ImmutableDB requires an initial era epoch length",
+			)
+		}
+		limits, limitErr := remoteImmutableLimitsForSlots(
+			regularSlots, canContainEBB,
+		)
+		if limitErr != nil {
+			return limitErr
+		}
 		blocksCopied, immutableTipSlot, err = copyBlocksRemote(
 			replayCtx, logger, immutableDir,
 			filepath.Join(cfg.DatabasePath, remoteImmutableCacheDir),
-			c, replayBatches,
+			limits, c, replayBatches,
 		)
 	} else {
 		blocksCopied, immutableTipSlot, err = copyBlocksDirect(

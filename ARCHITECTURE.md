@@ -8433,7 +8433,13 @@ Accelerator CDN publishes. `copyBlocksRemote` in `internal/node` downloads up
 to four chunks ahead, resuming a partial file with a range request and
 retrying a failed one, and hands chunks to the existing `copyBlocksDirect`
 only in chunk order, so the ledger replays a contiguous prefix while later
-chunks download. Loading stops after the chunk that reaches the `tip.json`
+chunks download. The cache is keyed by the canonical source root so neither a
+complete file nor a resumed partial can cross source roots. Each response is
+bounded by the configured initial-era chunk layout: primary-index slots come
+from the initial epoch size, the primary index fixes the exact secondary-index
+length, and the block file is bounded by the number of possible block entries
+times the block-fetch protocol's encoded-block limit. Loading stops after the
+chunk that reaches the `tip.json`
 slot, whose hash must then match the loaded block, or at the first chunk the
 root does not publish; a chunk whose `.chunk` exists without its indexes is an
 error. The downloader lives in `internal/node` rather than reusing the

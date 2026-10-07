@@ -148,6 +148,12 @@ type committeeAuthIdentity struct {
 	credential []byte
 }
 
+type committeeAuthImmutableSlotState struct {
+	everSet bool
+	known   bool
+	slot    uint64
+}
+
 // committeeAuthRetentionSlots returns the configured rollback window, falling
 // back to the default. Zero means "unset", not "disabled", so a Store built
 // without the field still prunes safely rather than silently growing.
@@ -173,16 +179,25 @@ func (s *Store) committeeAuthRetention() uint64 {
 //
 // The caller -- a periodic sync outside this package, since sqlstore cannot
 // import chain -- may call this from a goroutine independent of any
-// certificate write or the maintenance sweep, so this is lock-free and never
-// blocks.
+// certificate write or the maintenance sweep. The state changes together
+// under one lock so a prune cannot observe fields from different updates.
 func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
-	s.committeeAuthImmutableSlotEverSet.Store(true)
-	if !known {
-		s.committeeAuthImmutableSlotKnown.Store(false)
-		return
+	s.committeeAuthImmutableSlotMu.Lock()
+	s.committeeAuthImmutableSlot = committeeAuthImmutableSlotState{
+		everSet: true,
+		known:   known,
+		slot:    slot,
 	}
-	s.committeeAuthImmutableSlot.Store(slot)
-	s.committeeAuthImmutableSlotKnown.Store(true)
+	s.committeeAuthImmutableSlotMu.Unlock()
+}
+
+func (s *Store) invalidateCommitteeAuthImmutableSlot() {
+	s.committeeAuthImmutableSlotMu.Lock()
+	if s.committeeAuthImmutableSlot.everSet {
+		s.committeeAuthImmutableSlot.known = false
+		s.committeeAuthImmutableSlot.slot = 0
+	}
+	s.committeeAuthImmutableSlotMu.Unlock()
 }
 
 // committeeAuthHorizon returns the retention horizon for a prune call at
@@ -191,8 +206,14 @@ func (s *Store) SetCommitteeAuthImmutableSlot(slot uint64, known bool) {
 // use the slot-window assumption once a live syncer is wired but currently
 // has no value.
 func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
-	if s.committeeAuthImmutableSlotEverSet.Load() &&
-		!s.committeeAuthImmutableSlotKnown.Load() {
+	s.committeeAuthImmutableSlotMu.RLock()
+	defer s.committeeAuthImmutableSlotMu.RUnlock()
+	return s.committeeAuthHorizonLocked(tipSlot)
+}
+
+func (s *Store) committeeAuthHorizonLocked(tipSlot uint64) (uint64, bool) {
+	state := s.committeeAuthImmutableSlot
+	if state.everSet && !state.known {
 		return 0, false
 	}
 	retention := s.committeeAuthRetention()
@@ -201,8 +222,8 @@ func (s *Store) committeeAuthHorizon(tipSlot uint64) (uint64, bool) {
 		return 0, false
 	}
 	horizon := tipSlot - retention
-	if s.committeeAuthImmutableSlotKnown.Load() {
-		if live := s.committeeAuthImmutableSlot.Load(); live < horizon {
+	if state.known {
+		if live := state.slot; live < horizon {
 			horizon = live
 		}
 	}
@@ -224,9 +245,14 @@ func (s *Store) pruneCommitteeHotAuthorizations(
 	coldCredential []byte,
 	tipSlot uint64,
 ) (int64, error) {
-	horizon, ok := s.committeeAuthHorizon(tipSlot)
+	s.committeeAuthImmutableSlotMu.RLock()
+	defer s.committeeAuthImmutableSlotMu.RUnlock()
+	horizon, ok := s.committeeAuthHorizonLocked(tipSlot)
 	if !ok {
 		return 0, nil
+	}
+	if s.committeeAuthPruneLocked != nil {
+		s.committeeAuthPruneLocked()
 	}
 	// The inner ORDER BY ... LIMIT ? OFFSET 1 is the rule: skip the single
 	// newest row at or below the horizon, take up to a batch of the rest. The
