@@ -61,6 +61,8 @@ func TestQueryStakeSnapshotsRejectsWrongLengthPoolKeyHash(t *testing.T) {
 	// result keys from the stored pool key hashes.
 	result, err := ls.queryShelleyStakeSnapshots(
 		&olocalstatequery.ShelleyStakeSnapshotsQuery{},
+		QueryPoint{},
+		nil,
 	)
 	require.Error(
 		t,
@@ -98,7 +100,7 @@ func TestQueryDRepStateRejectsWrongLengthCredential(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.Error(
 		t,
 		err,
@@ -120,7 +122,7 @@ func TestQueryDRepStateAcceptsExactLengthCredential(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -165,7 +167,7 @@ func TestQueryDRepStateRejectsPartialResultWhenOneCredentialIsCorrupt(
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.Error(t, err)
 	require.Nil(
 		t,
@@ -219,7 +221,7 @@ func TestGovernanceProposalStateRejectsWrongLengthAnchorHash(t *testing.T) {
 		GovActionCbor: []byte{0x80},
 	}
 	ls := &LedgerState{db: newTestDB(t)}
-	state, err := ls.governanceProposalState(proposal, lcommon.GovActionId{})
+	state, err := ls.governanceProposalState(proposal, lcommon.GovActionId{}, nil)
 	require.Error(t, err)
 	require.Equal(t, olocalstatequery.GovActionState{}, state)
 	require.Contains(t, err.Error(), "governance proposal anchor")

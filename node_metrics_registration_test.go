@@ -70,6 +70,7 @@ func TestNewMetricsRegistrationFailureRollsBack(t *testing.T) {
 		"dingo_build_info",
 		"cardano_node_metrics_RTS_gcMajorNum_int",
 		"dingo_chainselection_rollback_registrations_total",
+		"dingo_equivocation_total",
 		"event_delivery_blocked_total",
 	} {
 		t.Run(conflict, func(t *testing.T) {

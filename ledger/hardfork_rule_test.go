@@ -199,6 +199,19 @@ func seedByronUtxoWithAmount(
 	amount uint64,
 ) []byte {
 	t.Helper()
+	return seedByronUtxoAt(t, db, txIdSeed, 0, addr, amount)
+}
+
+// seedByronUtxoAt stores a Byron UTxO at the given output index.
+func seedByronUtxoAt(
+	t *testing.T,
+	db *database.Database,
+	txIdSeed byte,
+	outputIdx uint32,
+	addr lcommon.Address,
+	amount uint64,
+) []byte {
+	t.Helper()
 	out := byron.ByronTransactionOutput{
 		OutputAddress: addr,
 		OutputAmount:  amount,
@@ -210,12 +223,12 @@ func seedByronUtxoWithAmount(
 	txn := db.Transaction(true)
 	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
 		TxId:      txId,
-		OutputIdx: 0,
+		OutputIdx: outputIdx,
 		AddedSlot: 100,
 	}))
 	blob := db.Blob()
 	require.NotNil(t, blob)
-	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, 0, cborBytes))
+	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, outputIdx, cborBytes))
 	require.NoError(t, txn.Commit())
 	return txId
 }
