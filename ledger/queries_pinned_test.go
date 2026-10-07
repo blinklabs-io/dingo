@@ -1206,3 +1206,28 @@ func TestQuery_PinnedPointReachesFilteredDelegationsAndVoteDelegatees(
 	require.NoError(t, err)
 	require.Empty(t, voteDelegatees(t, result))
 }
+
+// TestVerifyPointQueryable_RejectsPointBelowMithrilTrustBoundary covers a point
+// below the latest Mithril import's snapshot slot, whose history the import
+// does not hold, and the snapshot slot itself, which it does.
+func TestVerifyPointQueryable_RejectsPointBelowMithrilTrustBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	ls := newStakeSnapshotsLedger(t, repeatedBytes(28, 0x27), 10, 10)
+	require.NoError(t, ls.db.Metadata().SetNetworkState(0, 0, 0, nil))
+	below := QueryPoint{Slot: 550, Hash: repeatedBytes(32, 0x63)}
+	boundary := QueryPoint{Slot: 560, Hash: repeatedBytes(32, 0x64)}
+	seedBlockAtSlot(t, ls, below.Slot, below.Hash)
+	seedBlockAtSlot(t, ls, boundary.Slot, boundary.Hash)
+	require.NoError(t, ls.VerifyPointQueryable(nil, below))
+
+	ls.mithrilLedgerSlot = boundary.Slot
+	require.ErrorIs(
+		t,
+		ls.VerifyPointQueryable(nil, below),
+		ErrHistoricalStateUnavailable,
+	)
+	require.NoError(t, ls.VerifyPointQueryable(nil, boundary))
+}

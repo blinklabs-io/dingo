@@ -393,6 +393,9 @@ func (ls *LedgerState) VerifyPointQueryable(
 	if err := ls.verifyPointOnChain(txn, at); err != nil {
 		return err
 	}
+	if err := ls.checkMithrilTrustBoundary(at); err != nil {
+		return err
+	}
 	if err := ls.checkUtxoRetentionWindow(txn, at); err != nil {
 		return err
 	}
@@ -427,6 +430,25 @@ func (ls *LedgerState) VerifyPointQueryable(
 		return err
 	}
 	return ls.checkAnnouncedPruneFloors(txn, at)
+}
+
+// checkMithrilTrustBoundary rejects a point below the latest Mithril import's
+// ledger slot. The import writes the snapshot's state, not the history that
+// led to it: blocks below the slot carry no certificate, transaction or reward
+// journal rows, and a catch-up import deactivates accounts the snapshot no
+// longer holds without recording when. The snapshot slot itself is exact.
+func (ls *LedgerState) checkMithrilTrustBoundary(at QueryPoint) error {
+	boundary := ls.mithrilLedgerSlotSnapshot()
+	if boundary == 0 || at.Slot >= boundary {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: pinned slot %d is below the Mithril snapshot slot %d this "+
+			"database was imported at",
+		ErrHistoricalStateUnavailable,
+		at.Slot,
+		boundary,
+	)
 }
 
 // checkAnnouncedPruneFloors rejects at when a pruning path has already

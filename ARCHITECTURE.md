@@ -11629,6 +11629,17 @@ the baseline and the journal are removed only by rollback, so no retention
 floor applies. `GetDRepState`, `GetProposals` and `DebugChainDepState` still
 ignore the acquired point.
 
+Every pinned query also needs history the node actually holds, so
+`VerifyPointQueryable` refuses a point below the latest Mithril import's
+ledger slot (`mithril_ledger_slot`, `checkMithrilTrustBoundary`). The
+import writes the snapshot's state, not the history that led to it: the
+blocks below that slot carry no certificate, transaction or reward-journal
+rows, and a catch-up import's reconcile deactivates accounts and DReps,
+retires pools and tombstones UTxOs the newer snapshot no longer holds,
+dating none of it before the snapshot slot. A point at the snapshot slot or
+after it is exact. A node synced from genesis has no such slot and is
+unaffected.
+
 Identifying a pinned point by slot alone is ambiguous across a rollback: a
 fork switch can leave a different block at the same slot than the one the
 caller acquired, and a slot-only reconstruction would then silently answer
