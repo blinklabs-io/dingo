@@ -22,11 +22,9 @@ import (
 
 const (
 	// blockfetchMaxRangesPerConnDefault bounds the BlockFetch ranges one
-	// connection may have streaming at once. A compliant client has at most
-	// one range outstanding, but the server's BatchDone is sent before the
-	// range's reservation is released, so a client that immediately requests
-	// its next range can briefly overlap its previous one. The remaining
-	// headroom is for that overlap only.
+	// connection may have streaming at once. BlockFetch permits pipelined
+	// range requests, so reaching this limit is normal backpressure rather
+	// than a protocol violation.
 	blockfetchMaxRangesPerConnDefault = 4
 	// blockfetchMaxRangesGlobalDefault bounds the BlockFetch ranges streaming
 	// across all connections. Each in-flight range holds a chain iterator and
@@ -39,11 +37,11 @@ const (
 // iterator and sender goroutine exist, so a saturated server rejects a request
 // without allocating either.
 //
-// A reservation is released only by the range that holds it, never by a
-// connection-closed event: the sender's iterator stays live until the sender
-// exits, and the event carries only a ConnectionId, which a replacement
-// connection may already reuse. The sender checks connection shutdown between
-// blocks, so a closed connection's reservations drain promptly.
+// A reservation is released globally only by the range that holds it. The
+// protocol DoneChan identifies the connection generation: a replacement that
+// reuses the same ConnectionId gets a fresh per-connection bucket as soon as
+// the old generation has closed, while old senders remain charged globally
+// until they exit.
 type blockfetchRangeAdmission struct {
 	mu         sync.Mutex
 	maxPerConn int
@@ -54,7 +52,8 @@ type blockfetchRangeAdmission struct {
 
 // blockfetchConnRanges is the in-flight range count of one connection.
 type blockfetchConnRanges struct {
-	active int
+	active     int
+	generation <-chan struct{}
 }
 
 type blockfetchRangeAdmitResult int
@@ -87,11 +86,19 @@ func newBlockfetchRangeAdmission(
 // On rejection the release function is nil.
 func (a *blockfetchRangeAdmission) reserve(
 	connId ouroboros.ConnectionId,
+	generation <-chan struct{},
 ) (func(), blockfetchRangeAdmitResult) {
 	key := connIdKey(connId)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	cr := a.conns[key]
+	if cr != nil && cr.generation != generation {
+		select {
+		case <-cr.generation:
+			cr = nil
+		default:
+		}
+	}
 	if cr != nil && cr.active >= a.maxPerConn {
 		return nil, blockfetchRangeConnSaturated
 	}
@@ -99,7 +106,7 @@ func (a *blockfetchRangeAdmission) reserve(
 		return nil, blockfetchRangeGlobalSaturated
 	}
 	if cr == nil {
-		cr = &blockfetchConnRanges{}
+		cr = &blockfetchConnRanges{generation: generation}
 		a.conns[key] = cr
 	}
 	cr.active++

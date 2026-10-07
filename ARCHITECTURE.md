@@ -828,17 +828,14 @@ Each admitted range owns a chain iterator and a sender goroutine.
 `blockfetchRangeAdmission` (`ouroboros/blockfetch_admission.go`) reserves a
 slot per connection (`blockfetchMaxRangesPerConnDefault`) and process-wide
 (`blockfetchMaxRangesGlobalDefault`) before any iterator is opened, and a
-saturated request is answered with `NoBlocks`. gouroboros holds a pipelined
-`RequestRange` until the previous range's `BatchDone`, so one connection holds
-at most the current range plus the previous sender's exit; the per-connection
-bound does not limit an honest pipelining client and fires only if that
-dispatch guarantee is lost. Per-connection saturation feeds the stuck-peer
-valve; global saturation does not, so an honest peer is not disconnected for
-the server's load. Only the sender goroutine releases its slot, on
-completion, error, or connection shutdown, which it checks between blocks. A
-connection-closed event does not release slots: the sender's iterator is live
-until it exits, and the event's `ConnectionId` may already belong to a
-replacement connection.
+saturated request is answered with `NoBlocks`. BlockFetch permits pipelined
+`RequestRange` messages while earlier batches are streaming, so saturation is
+normal backpressure and does not feed the stuck-peer disconnect valve. Only
+the sender goroutine releases global capacity, on completion, error, or
+connection shutdown. Per-connection buckets also carry the protocol
+generation: after an old generation closes, a replacement connection that
+reuses its `ConnectionId` starts with an empty bucket while the old senders
+remain charged against the process-wide limit until they exit.
 
 When a peer requests a range, `ouroboros/blockfetch.go` opens chain iterators
 at the requested start and end points to validate both endpoints against the

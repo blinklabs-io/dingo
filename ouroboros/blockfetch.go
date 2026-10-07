@@ -356,7 +356,10 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	// Reserve range capacity before the first allocation (the chain
 	// iterator below and the sender goroutine). Saturation is answered with
 	// NoBlocks, the only rejection BlockFetch defines for a request.
-	release, admitted := o.blockfetchRangeAdmission.reserve(ctx.ConnectionId)
+	release, admitted := o.blockfetchRangeAdmission.reserve(
+		ctx.ConnectionId,
+		ctx.Server.ProtocolInstance().DoneChan(),
+	)
 	if admitted != blockfetchRangeAdmitted {
 		return o.blockfetchRejectSaturated(ctx, start, admitted)
 	}
@@ -478,7 +481,9 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	handedOff = true
 	go func() {
 		defer release()
-		rawConn, connDone := o.connManager.GetConnectionWithDone(ctx.ConnectionId)
+		rawConn, connDone := o.connManager.GetConnectionWithDone(
+			ctx.ConnectionId,
+		)
 		if rawConn == nil {
 			chainIter.Cancel()
 			return
@@ -507,24 +512,15 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 }
 
 // blockfetchRejectSaturated answers a range request that exceeded the
-// per-connection or global admission bound. Per-connection saturation feeds
-// the stuck-peer valve: gouroboros dispatches a connection's requests one at a
-// time, so an honest client never holds more than the current range and the
-// previous sender's exit. Global saturation does not: it is not the peer's
-// fault, so repeating the request must not get an honest peer disconnected.
+// per-connection or global admission bound. BlockFetch permits pipelined range
+// requests, so saturation is backpressure and must not feed the stuck-peer
+// valve or disconnect a protocol-compliant peer.
 func (o *Ouroboros) blockfetchRejectSaturated(
 	ctx blockfetch.CallbackContext,
 	start ocommon.Point,
 	result blockfetchRangeAdmitResult,
 ) error {
-	// Global saturation is load from other peers and can repeat for every
-	// request on every connection, so it logs at Debug; per-connection
-	// saturation is this peer's doing and precedes a disconnect.
-	logFn := o.config.Logger.Debug
-	if result == blockfetchRangeConnSaturated {
-		logFn = o.config.Logger.Warn
-	}
-	logFn(
+	o.config.Logger.Debug(
 		"blockfetch: range admission saturated, sending NoBlocks",
 		"connection_id", ctx.ConnectionId.String(),
 		"start_slot", start.Slot,
@@ -532,14 +528,6 @@ func (o *Ouroboros) blockfetchRejectSaturated(
 	)
 	if err := ctx.Server.NoBlocks(); err != nil {
 		return fmt.Errorf("blockfetch NoBlocks after saturation: %w", err)
-	}
-	if result == blockfetchRangeConnSaturated {
-		o.blockfetchRecordNoBlocksAndMaybeClose(
-			ctx.ConnectionId,
-			start,
-			"blockfetch: closing peer that exceeds concurrent range bound",
-			"blockfetch: peer exceeded concurrent range bound",
-		)
 	}
 	return nil
 }

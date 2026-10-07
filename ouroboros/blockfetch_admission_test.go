@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -35,16 +34,16 @@ func TestBlockfetchRangeAdmission_PerConnAndGlobalBounds(t *testing.T) {
 	a := newBlockfetchRangeAdmission(2, 3)
 	c1, c2 := testConnIdWithPort(4001), testConnIdWithPort(4002)
 
-	r1, res := a.reserve(c1)
+	r1, res := a.reserve(c1, nil)
 	require.Equal(t, blockfetchRangeAdmitted, res)
-	_, res = a.reserve(c1)
+	_, res = a.reserve(c1, nil)
 	require.Equal(t, blockfetchRangeAdmitted, res)
-	_, res = a.reserve(c1)
+	_, res = a.reserve(c1, nil)
 	assert.Equal(t, blockfetchRangeConnSaturated, res)
 
-	_, res = a.reserve(c2)
+	_, res = a.reserve(c2, nil)
 	require.Equal(t, blockfetchRangeAdmitted, res)
-	_, res = a.reserve(testConnIdWithPort(4003))
+	_, res = a.reserve(testConnIdWithPort(4003), nil)
 	assert.Equal(t, blockfetchRangeGlobalSaturated, res)
 
 	r1()
@@ -52,47 +51,45 @@ func TestBlockfetchRangeAdmission_PerConnAndGlobalBounds(t *testing.T) {
 	total, conn := a.counts(c1)
 	assert.Equal(t, 2, total)
 	assert.Equal(t, 1, conn)
-	_, res = a.reserve(testConnIdWithPort(4003))
+	_, res = a.reserve(testConnIdWithPort(4003), nil)
 	assert.Equal(t, blockfetchRangeAdmitted, res)
 }
 
-// A connection-closed event must not free reservations still held by sender
-// goroutines: their iterators are live until each sender exits, so freeing the
-// slot early lets repeated disconnects exceed the global bound. The event is
-// also keyed only by ConnectionId, so a delayed one must not clear the
-// reservations of a replacement connection that reuses the same ID.
-func TestBlockfetchRangeAdmission_ConnClosedEventKeepsLiveSendersCharged(
+// A replacement connection may reuse the old ConnectionId before senders from
+// the closed protocol generation have exited. It gets a fresh per-connection
+// bucket, while every old sender stays charged against the global bound.
+func TestBlockfetchRangeAdmission_ReplacementGenerationStartsEmpty(
 	t *testing.T,
 ) {
 	t.Parallel()
 
-	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	o := newOuroboros(OuroborosConfig{
-		Logger:   logger,
-		EventBus: event.NewEventBus(nil, logger),
-	})
+	a := newBlockfetchRangeAdmission(2, 4)
 	peer := testConnIdWithPort(4001)
-	oldSender, res := o.blockfetchRangeAdmission.reserve(peer)
+	oldDone := make(chan struct{})
+	oldSender, res := a.reserve(peer, oldDone)
 	require.Equal(t, blockfetchRangeAdmitted, res)
-	replacement, res := o.blockfetchRangeAdmission.reserve(peer)
+	secondOldSender, res := a.reserve(peer, oldDone)
+	require.Equal(t, blockfetchRangeAdmitted, res)
+	_, res = a.reserve(peer, oldDone)
+	require.Equal(t, blockfetchRangeConnSaturated, res)
+
+	close(oldDone)
+	replacementDone := make(chan struct{})
+	replacement, res := a.reserve(peer, replacementDone)
 	require.Equal(t, blockfetchRangeAdmitted, res)
 
-	o.HandleConnClosedEvent(event.NewEvent(
-		connmanager.ConnectionClosedEventType,
-		connmanager.ConnectionClosedEvent{ConnectionId: peer},
-	))
-
-	total, conn := o.blockfetchRangeAdmission.counts(peer)
-	assert.Equal(t, 2, total, "global count while senders are live")
-	assert.Equal(t, 2, conn, "per-connection count while senders are live")
+	total, conn := a.counts(peer)
+	assert.Equal(t, 3, total, "old senders remain charged globally")
+	assert.Equal(t, 1, conn, "replacement has a fresh connection bucket")
 
 	oldSender()
-	total, conn = o.blockfetchRangeAdmission.counts(peer)
-	assert.Equal(t, 1, total, "replacement still charged globally")
+	secondOldSender()
+	total, conn = a.counts(peer)
+	assert.Equal(t, 1, total, "replacement remains charged globally")
 	assert.Equal(t, 1, conn, "replacement still charged per connection")
 
 	replacement()
-	total, conn = o.blockfetchRangeAdmission.counts(peer)
+	total, conn = a.counts(peer)
 	assert.Zero(t, total)
 	assert.Zero(t, conn)
 }
@@ -148,13 +145,19 @@ func TestBlockfetchServerRequestRange_SaturationRejectedBeforeIterator(
 			opts, peer := newMuxerServerPeer(t)
 			cfg, err := blockfetch.NewConfig(o.blockfetchServerConnOpts()...)
 			require.NoError(t, err)
-			peer.start(t, blockfetch.NewServer(opts, &cfg))
+			server := blockfetch.NewServer(opts, &cfg)
+			peer.start(t, server)
 
 			holder := testConnIdWithPort(9999)
+			var holderGeneration <-chan struct{}
 			if tc.holderIsPeer {
 				holder = opts.ConnectionId
+				holderGeneration = server.ProtocolInstance().DoneChan()
 			}
-			_, res := o.blockfetchRangeAdmission.reserve(holder)
+			_, res := o.blockfetchRangeAdmission.reserve(
+				holder,
+				holderGeneration,
+			)
 			require.Equal(t, blockfetchRangeAdmitted, res)
 
 			start := ocommon.NewPoint(10, make([]byte, 32))
@@ -164,6 +167,13 @@ func TestBlockfetchServerRequestRange_SaturationRejectedBeforeIterator(
 			protocolID, msg := peer.readMessage(t, testutil.AsyncWait)
 			require.Equal(t, blockfetch.ProtocolId, protocolID)
 			assert.Equal(t, byte(blockfetch.MessageTypeNoBlocks), msg[1])
+			if tc.holderIsPeer {
+				o.blockFetchMutex.Lock()
+				_, recorded := o.blockfetchNoBlocksCounts[opts.ConnectionId]
+				o.blockFetchMutex.Unlock()
+				assert.False(t, recorded,
+					"legal pipelining backpressure counted as a stuck peer")
+			}
 		})
 	}
 }
@@ -234,7 +244,10 @@ func TestBlockfetchServerRequestRange_AdmitsAfterRelease(t *testing.T) {
 
 	f := newBlockfetchRangeFixture(t)
 	f.o.blockfetchRangeAdmission = newBlockfetchRangeAdmission(1, 1)
-	release, res := f.o.blockfetchRangeAdmission.reserve(f.connID)
+	release, res := f.o.blockfetchRangeAdmission.reserve(
+		testConnIdWithPort(9999),
+		nil,
+	)
 	require.Equal(t, blockfetchRangeAdmitted, res)
 
 	f.requestRange(t, f.point(0), f.point(2))
