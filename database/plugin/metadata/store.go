@@ -2953,9 +2953,6 @@ type MetadataStore interface {
 	// markers so their retention floor survives a restart).
 	ListSyncStateKeysByPrefix(string, types.Txn) ([]string, error)
 
-	// ClearSyncState removes all sync state entries.
-	ClearSyncState(types.Txn) error
-
 	// Backfill checkpoint methods
 
 	// GetBackfillCheckpoint retrieves a backfill checkpoint by phase.

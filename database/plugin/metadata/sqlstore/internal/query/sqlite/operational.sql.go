@@ -59,15 +59,6 @@ func (q *Queries) ClaimOffchainMetadataFetch(ctx context.Context, arg ClaimOffch
 	return result.RowsAffected()
 }
 
-const clearSyncState = `-- name: ClearSyncState :exec
-DELETE FROM sync_state
-`
-
-func (q *Queries) ClearSyncState(ctx context.Context) error {
-	_, err := q.db.ExecContext(ctx, clearSyncState)
-	return err
-}
-
 const countPParamsByEra = `-- name: CountPParamsByEra :one
 SELECT COUNT(*)
 FROM pparams

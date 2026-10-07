@@ -246,6 +246,9 @@ func (n *Node) shutdown() error {
 	// then skips closing both.
 	storageDrainConfirmed := true
 	for _, cs := range componentStopsForShutdownPhase1(n) {
+		if cs.name == "block producer credentials" && !storageDrainConfirmed {
+			continue
+		}
 		if stopErr := stopWithDeadline(
 			max(time.Until(deadline), 0), cs.name, cs.stop,
 		); stopErr != nil {

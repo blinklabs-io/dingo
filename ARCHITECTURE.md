@@ -1152,10 +1152,28 @@ not durably adopted:
   cannot be written fails the forge, rather than signing unprotected.
   The `dingo_metrics_forgeFenceBlocked_int` counter is zero in normal
   operation: any increment points at a slot-clock regression or a
-  rolled-back database. The fence lives in `sync_state`, so a Mithril
-  import that ends in a full `ClearSyncState` drops it; a producer
-  bootstrapped from a snapshot has only the chain-tip check until it
-  next forges.
+  rolled-back database. The fence lives in `sync_state`, and the Mithril
+  import's completion cleanup (`mithril/sync_import.go`) deletes only
+  transient sync keys and leaves every `forge_fence:` row untouched.
+  Concurrent fence advances cannot be overwritten by a stale import read,
+  so a producer bootstrapped from a snapshot keeps its latest fence.
+- **Credential and rotation metrics.** Alongside the KES gauges
+  (`cardano_node_metrics_currentKESPeriod_int`,
+  `..._remainingKESPeriods_int`, `..._operationalCertificateStartKESPeriod_int`,
+  `..._operationalCertificateExpiryKESPeriod_int`) the forger exports, in
+  `core` and `api` storage modes alike and evaluated at scrape time:
+  `dingo_forge_opcert_counter_loaded` (issue number of the loaded certificate),
+  `dingo_forge_opcert_counter_onchain` (the highest counter the ledger applied
+  for this pool, the value `LedgerState.LatestOpCertSequence` returns and block
+  application persists; `NaN` until one is observed),
+  `dingo_forge_slots_per_kes_period`, and `dingo_forge_credentials_valid`
+  (1 when the loaded credentials could sign at the current slot). The next
+  certificate to issue carries counter `dingo_forge_opcert_counter_onchain + 1`.
+  `dingo_forge_missed_leader_slots_total` counts leader slots this node won
+  and did not turn into a block of its own on the chain after leader selection:
+  a build, validation or adoption failure, a post-selection refusal, or an
+  equal-slot alternative that lost. KES and tip safety refusals before leader
+  selection are excluded.
 
 ```mermaid
 sequenceDiagram
@@ -1656,6 +1674,17 @@ a path that runs *before* the replacement, so they would otherwise be set on the
 outgoing instance and silently lost.
 
 ### Shutdown Flow
+
+Credential zeroization is skipped if an earlier component's drain is unconfirmed,
+so abandoned key consumers retain their signing material. Reinitialization
+intentionally does not close such retained credentials when publishing a new
+set. Hot credential swaps
+serialize reciprocal moves and distinguish material revisions from invalidation
+generations: an outgoing attempt evolves its private KES snapshot without
+mutating the newly installed key. Remote signer readiness checks availability
+with a fresh bounded agent Hello handshake without signing or evolving a key.
+The handshake holds neither the credential lock nor the KES lock, so readiness
+I/O cannot block signing-key evolution.
 
 Bark serializes TLS/listener preflight and server publication with a lifecycle
 lock that shutdown can wait on with its context. A deadline during preflight
@@ -7480,6 +7509,42 @@ requires the same validated interval; `PoolCredentials.KESSign` remains the
 lower-level cryptographic primitive used by credential tooling and tests that
 may not have Shelley genesis context.
 
+**Reload.** A block producer re-reads its VRF, KES and operational certificate
+files on `SIGHUP` (`internal/node.reloadOnSignal`, registered only when
+`blockProducer` is set, so relays keep the signal's default behaviour). A
+Kubernetes Secret rotated in place is picked up with `kill -HUP` and no pod
+restart, so no leader schedule is lost. `Node.ReloadBlockProducerCredentials`
+loads the files into credentials of their own and runs the checks startup runs:
+certificate signature, KES window against the wall-clock slot, and the ledger
+cross-check against the pool registration and the on-chain counter. Only then
+does `PoolCredentials.ReplaceWith` move the material into the live set in one
+critical section. It refuses a replacement that is unvalidated, that belongs to
+another pool or VRF key, or whose counter is **below** the loaded one, and every
+refusal leaves the loaded credentials untouched: loading into the live set
+instead would fail closed on a bad file and stop a healthy producer. A
+successful reload logs the old and new counter and certificate KES period.
+Credentials sourced from a KES agent are rotated through the agent, and a
+reload against them is refused. A reload is also refused while startup,
+shutdown, or a live restore or truncate holds the lifecycle gates, since those
+replace the ledger state and the live credentials the reload reads. Unlike
+initial startup, reload refuses a wall-clock slot outside confirmed era history:
+it cannot replace working keys without verifying the replacement's KES window.
+
+`ReplaceWith` deliberately does not advance the credential generation. A forge
+attempt that already holds a snapshot owns a private copy of the outgoing
+material, still validly signed for the slot it selected, so the swap does not
+abandon it; an attempt begun afterwards acquires the new material. A double
+forge across the swap is prevented by the duplicate-slot fence, not by the
+generation.
+
+**Close.** `PoolCredentials.Close` zeroizes the VRF seed and the KES secret key
+and makes the credentials permanently unloaded, so no later load or reload can
+put keys back. The node owns the live set (`Node.blockProducerCreds`) and closes
+it in the same stop sequence that quiesces the forger, after the forger, the KES
+agent client and the leader election, which read from or install into it.
+The leader election holds no copy of the VRF seed: it takes one from the
+credentials for each schedule computation and wipes it afterwards.
+
 ### KES Agent (`kesagent/`, `ledger/forging/kes_signer.go`)
 
 `--shelley-kes-agent-socket` sources the KES signing key from an external
@@ -8448,7 +8513,7 @@ hash, and — once the certified ImmutableDB is open — the certified tip slot)
 The pin is written from `BootstrapConfig.OnArtifactSelected`, which both
 backends invoke after the artifact is identity-checked and, when enabled,
 certificate-verified, and before the first byte is downloaded. It is ephemeral:
-`ClearSyncState` on sync completion wipes it, so its presence means a run is
+Mithril completion cleanup deletes it, so its presence means a run is
 mid-flight against that artifact.
 
 A resuming run (`sync_status` non-empty) passes the pinned digest to
@@ -8751,17 +8816,13 @@ manifest. The metadata plugin exposes
 critical subset before clearing `sync_status`, then leaves the pending
 sync-state marker set. API-mode `serve` verifies the critical subset before
 startup and runs the full lazy rebuild as background maintenance; the rebuild
-paths clear the marker only after the full manifest has been rebuilt, but they
-are not the only writer of that row. `ClearSyncState`
-(`DELETE FROM sync_state`, no `WHERE`) removes it too, and Mithril sync runs
-that clear through `updateMithrilReadyState` immediately after the critical
-rebuild. It therefore re-writes every row a completed sync still needs —
-`mithril_ledger_slot`, `mithril_ledger_hash`, the post-backfill statistics marker,
-and the deferred-index marker —
-back after the clear; without the last of those, every Mithril-bootstrapped
-database loses the marker moments after `BuildCritical` set it and never builds
-the lazy manifest entries at all. Core-mode startup still
-repairs the full manifest synchronously before serving. Both repair entry
+paths clear the marker only after the full manifest has been rebuilt. Mithril
+completion cleanup leaves the deferred-index marker, post-backfill statistics
+marker, and forge fences untouched, and deletes transient keys individually.
+It writes `mithril_ledger_slot` and
+`mithril_ledger_hash` after cleanup. This preserves the pending marker set by
+`BuildCritical` so a bootstrapped database still builds the lazy manifest.
+Core-mode startup still repairs the full manifest synchronously before serving. Both repair entry
 points also restore any missing critical index when no cycle is pending at all:
 the marker records that a cycle was interrupted, not which indexes exist, and a
 database bootstrapped by a binary that predates the marker being carried across
@@ -8801,7 +8862,7 @@ the health listener on `healthPort` (default `12799`, `0` disables).
 The health listener is **not** gated on storage mode. The four API
 listeners start only when `storageMode.IsAPI()`, so a probe wired the same
 way would be inert in the default `core` mode — the mode the shipped
-`docker-compose.yml` runs. It binds `bindAddr`, the address the relay/NtN
+image runs. It binds `bindAddr`, the address the relay/NtN
 and metrics listeners already use, rather than the API listeners' own
 loopback-by-default address: a Docker `HEALTHCHECK` runs inside the
 container and would be satisfied by loopback, but a Kubernetes kubelet probe
@@ -8812,8 +8873,18 @@ onto a port an operator exposes for probing.
 
 | Path | Semantics |
 |------|-----------|
-| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered. Independent of sync state. |
-| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot; 503 otherwise. |
+| `/healthz`, `/health` | Liveness: 200 whenever the process is up and this listener answered, independent of sync state. The one exception is a wedged event loop: once the slot clock has ticked, 503 if it then stays silent for five minutes. A clock that pauses its ticks because era history does not reach the wall-clock slot reports each paused slot and is not silent. A node that has not ticked yet (database open, Mithril bootstrap, ledger startup) is live. |
+| `/readyz` | Readiness: 200 only when the chain tip is within `healthReadyGapSlots` of the wall-clock slot **and** the database answers a read (not ready during startup, live restore or truncate, and shutdown); for a node configured as a block producer, also when the forger is running and its credentials could sign at the current slot (operational certificate loaded, validated and inside its KES window). 503 otherwise, with the first failing condition as the body's `reason`. |
+
+The checks beyond the tip gap are supplied by `Node.EventLoopResponsive`,
+`Node.DatabaseReady` and `Node.BlockProducerReady` through
+`health.Check`, and `nodeHealthChecks` marks only the first as a liveness
+check. The database and forger pointers are read under the node's lifecycle
+gates with `TryLock`, so a probe never waits on a restore and a gate held by
+one reads as not ready. The gates are released before the database read and
+the forger check run: the chain-switch and chainsync callback handlers
+`TryLock` `liveLifecycleMu` and drop their work when it is held, so a probe
+must not hold it across I/O.
 
 The separation is a deliberate operational contract, not two names for one
 check. An orchestrator answers a liveness failure by *restarting* and a
