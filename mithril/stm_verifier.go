@@ -129,7 +129,10 @@ func (s *stmSingleSignatureWithRegisteredParty) UnmarshalJSON(
 	return nil
 }
 
-func verifySTMCertificate(cert *Certificate) error {
+func verifySTMCertificate(
+	cert *Certificate,
+	budget *certificateChainBudget,
+) error {
 	if cert == nil {
 		return errors.New("certificate is nil")
 	}
@@ -141,6 +144,7 @@ func verifySTMCertificate(cert *Certificate) error {
 		cert.AggregateVerificationKey,
 		cert.MultiSignature,
 		cert.Metadata.Parameters,
+		budget,
 	)
 }
 
@@ -149,6 +153,7 @@ func verifySTMSignature(
 	encodedAVK string,
 	encodedSig string,
 	params ProtocolParameters,
+	budget *certificateChainBudget,
 ) error {
 	avk, err := parseSTMAggregateVerificationKey(encodedAVK)
 	if err != nil {
@@ -157,6 +162,14 @@ func verifySTMSignature(
 	aggrSig, err := parseSTMAggregateSignature(encodedSig)
 	if err != nil {
 		return fmt.Errorf("parsing multi-signature: %w", err)
+	}
+	// Counts and cost are settled before any signature, lottery or Merkle
+	// verification runs.
+	if err := checkSTMAggregateSignatureCounts(aggrSig); err != nil {
+		return err
+	}
+	if err := budget.chargeWork(stmAggregateSignatureWork(aggrSig)); err != nil {
+		return err
 	}
 	return verifySTMConcatenationProof(msg, avk, aggrSig, params)
 }
@@ -281,6 +294,12 @@ func parseSTMAggregateSignatureBytes(
 		return nil, err
 	}
 	offset += 8
+	if totalSigs > stmMaxSigners {
+		return nil, fmt.Errorf(
+			"%w: %d signatures exceed limit %d",
+			errCertificateChainBudget, totalSigs, stmMaxSigners,
+		)
+	}
 	// Cap the pre-allocation against the remaining payload length to
 	// prevent OOM from a malformed totalSigs value.
 	remaining := len(raw) - offset
@@ -418,6 +437,12 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	if err != nil {
 		return nil, err
 	}
+	if nrIndexes > stmMaxLotteryIndices {
+		return nil, fmt.Errorf(
+			"%w: %d lottery indices exceed limit %d",
+			errCertificateChainBudget, nrIndexes, stmMaxLotteryIndices,
+		)
+	}
 	// Each index is 8 bytes; cap pre-allocation against remaining payload.
 	//nolint:gosec // non-negative: checked len >= 8.
 	remaining := uint64(len(raw) - 8)
@@ -465,6 +490,12 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 	lenIndices, err := readUint64BE(raw[8:16])
 	if err != nil {
 		return nil, err
+	}
+	if lenValues > stmMaxBatchPathValues || lenIndices > stmMaxSigners {
+		return nil, fmt.Errorf(
+			"%w: batch proof has %d values and %d indices",
+			errCertificateChainBudget, lenValues, lenIndices,
+		)
 	}
 	// Each value is 32 bytes and each index is 8 bytes; validate that the
 	// claimed counts are consistent with the remaining payload length.

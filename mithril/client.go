@@ -15,6 +15,7 @@
 package mithril
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -938,10 +939,22 @@ func (c *Client) GetCertificate(
 	ctx context.Context,
 	hash string,
 ) (*Certificate, error) {
+	cert, _, err := c.getCertificateWithLimit(ctx, hash, maxCertificateBytes)
+	return cert, err
+}
+
+// getCertificateWithLimit fetches a certificate, failing once its body
+// exceeds limit bytes, and returns the body size read. The limit is applied
+// to the read itself, so an oversized body is never buffered or decoded.
+func (c *Client) getCertificateWithLimit(
+	ctx context.Context,
+	hash string,
+	limit int64,
+) (*Certificate, int64, error) {
 	reqURL := c.aggregatorURL + "/certificate/" + url.PathEscape(hash)
 	body, err := c.doGet(ctx, reqURL)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"getting certificate %s: %w",
 			hash,
 			err,
@@ -949,15 +962,33 @@ func (c *Client) GetCertificate(
 	}
 	defer body.Close()
 
+	// Reading one byte past the limit distinguishes overflow from a body
+	// that ends exactly at it.
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"reading certificate %s: %w",
+			hash,
+			err,
+		)
+	}
+	if int64(len(data)) > limit {
+		return nil, 0, fmt.Errorf(
+			"%w: certificate %s body exceeds %d bytes",
+			errCertificateChainBudget,
+			hash,
+			limit,
+		)
+	}
 	var cert Certificate
-	if err := json.NewDecoder(body).Decode(&cert); err != nil {
-		return nil, fmt.Errorf(
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&cert); err != nil {
+		return nil, 0, fmt.Errorf(
 			"decoding certificate %s: %w",
 			hash,
 			err,
 		)
 	}
-	return &cert, nil
+	return &cert, int64(len(data)), nil
 }
 
 // GetLatestSnapshot returns the most recent snapshot from the
