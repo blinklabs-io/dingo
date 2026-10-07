@@ -496,6 +496,34 @@ func TestFetchEndorserBlockByPointFailsWhenSolePeerCannotAnswer(t *testing.T) {
 	)
 }
 
+// TestFetchEndorserBlockByPointReportsNoPeer verifies a fetch with no
+// leios-fetch connection reports ledger.ErrEndorserBlockFetchNoPeer, the cause
+// the ledger pipeline keeps out of its deterministic-halt count (dingo#5026).
+func TestFetchEndorserBlockByPointReportsNoPeer(t *testing.T) {
+	t.Parallel()
+
+	_, _, point, _ := leiosCertifiedRecoveryFixture(t, 0x54, 376040)
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		require.NoError(t, cm.Stop(ctx))
+	})
+	o := newOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+
+	err := o.FetchEndorserBlockByPoint(
+		t.Context(),
+		point.Slot,
+		point.Hash,
+	)
+	require.ErrorIs(t, err, ledger.ErrEndorserBlockFetchNoPeer)
+}
+
 // TestFetchEndorserBlockByPointHonoursCallerBudget verifies the by-point fetch
 // does not outlive the context the ledger hands it. Block application waits for
 // this fetch, so a fetch that ignored the budget would hold the apply loop past

@@ -889,8 +889,9 @@ type EndorserBlockProviderFunc func(
 // (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
 // caches it so a subsequent EndorserBlockProviderFunc call returns it. It
 // returns an error when no fetch connection is available or the relay does not
-// serve the block. The endorser block shares the slot of the ranking block that
-// references it (they are co-produced), so ebSlot is the ranking block's slot.
+// serve the block; the former must wrap ErrEndorserBlockFetchNoPeer. The
+// endorser block shares the slot of the ranking block that references it (they
+// are co-produced), so ebSlot is the ranking block's slot.
 //
 // ctx bounds the whole fetch, including its per-connection failover. The caller
 // owns the budget: block application waits for this fetch, so an implementation
@@ -900,6 +901,14 @@ type EndorserBlockFetcherFunc func(
 	ebSlot uint64,
 	ebHash []byte,
 ) error
+
+// ErrEndorserBlockFetchNoPeer reports that an EndorserBlockFetcherFunc had no
+// connection to ask. It says nothing about whether any peer holds the endorser
+// block, so the ledger pipeline does not count it toward its deterministic-halt
+// threshold.
+var ErrEndorserBlockFetchNoPeer = errors.New(
+	"no leios-fetch connection available",
+)
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a
 // blockfetch request for a range of blocks. It returns the request ID the
@@ -7232,6 +7241,21 @@ func (ls *LedgerState) trackPipelineProgress(
 	return p
 }
 
+// holdPipelineProgress records the tip like trackPipelineProgress, so a tip
+// that moved still resets the count, but never increments it. It is for a
+// restart that is no evidence either way about whether the failure is
+// deterministic.
+func (ls *LedgerState) holdPipelineProgress(
+	p pipelineProgress,
+) pipelineProgress {
+	next := ls.trackPipelineProgress(p)
+	next.consecutiveNoProgress = min(
+		next.consecutiveNoProgress,
+		p.consecutiveNoProgress,
+	)
+	return next
+}
+
 // ledgerProcessBlocks drives ledgerProcessBlocksFromSource against a fresh
 // chain-reader goroutine on each attempt (via runLedgerReadChainAttempt),
 // restarting whenever that attempt returns a recoverable error (see
@@ -7281,6 +7305,10 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 		ls.metrics.setPipelineNoProgress(0, false)
 	}()
 	var progress pipelineProgress
+	// noPeerWaits counts consecutive restarts whose endorser block could not
+	// be fetched because no peer was connected. It paces those restarts
+	// without feeding the halt threshold.
+	noPeerWaits := 0
 	for {
 		err := attempt(ctx)
 		if err == nil || ctx.Err() != nil {
@@ -7316,7 +7344,25 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 			// available wedged the pipeline without ever raising the stuck
 			// signal. Count it like any other failure to advance; the
 			// bespoke delay below still governs its pacing.
-			progress = ls.trackPipelineProgress(progress)
+			//
+			// The exception is a fetch that had no connection to ask: no
+			// peer has said it lacks the block, so the restart neither
+			// counts toward the halt nor resets the count, and a peer gap of
+			// any length waits for a connection instead of stopping the
+			// pipeline for good.
+			var retryCount int
+			if errors.Is(err, ErrEndorserBlockFetchNoPeer) {
+				progress = ls.holdPipelineProgress(progress)
+				noPeerWaits++
+				retryCount = min(
+					progress.consecutiveNoProgress+noPeerWaits,
+					noProgressStuckThreshold-1,
+				)
+			} else {
+				progress = ls.trackPipelineProgress(progress)
+				noPeerWaits = 0
+				retryCount = progress.consecutiveNoProgress
+			}
 			endorserStuck := progress.stuck()
 			ls.metrics.setPipelineNoProgress(
 				progress.consecutiveNoProgress,
@@ -7329,9 +7375,7 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 				return
 			}
 			timer := time.NewTimer(
-				certifiedEndorserBlockPipelineRetryDelay(
-					progress.consecutiveNoProgress,
-				),
+				certifiedEndorserBlockPipelineRetryDelay(retryCount),
 			)
 			select {
 			case <-ctx.Done():
@@ -7343,6 +7387,7 @@ func (ls *LedgerState) ledgerProcessBlocksWithAttempt(
 		}
 
 		progress = ls.trackPipelineProgress(progress)
+		noPeerWaits = 0
 		tipSlot := progress.lastTipSlot
 		if errors.Is(err, errRestartLedgerPipeline) {
 			// The no-progress Warn below fires only at 10 and every 100

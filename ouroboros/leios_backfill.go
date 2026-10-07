@@ -298,7 +298,10 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	}
 	connIds := o.connManager.LeiosFetchConnectionIds()
 	if len(connIds) == 0 {
-		return errors.New("leios backfill: no leios-fetch connection available")
+		return fmt.Errorf(
+			"leios backfill: %w",
+			ledger.ErrEndorserBlockFetchNoPeer,
+		)
 	}
 	overall, hasDeadline := ctx.Deadline()
 	if !hasDeadline {
