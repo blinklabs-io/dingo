@@ -1027,6 +1027,10 @@ func TestQueryHardForkEraHistory_TransitionImpossibleReturnsConfirmedEpochEnd(
 	end, ok := era[1].([]any)
 	require.True(t, ok, "confirmed current-epoch end must be finite")
 	require.Len(t, end, 3)
+	expectedEndTime := new(big.Int).SetUint64(
+		uint64(epochLen) * uint64(slotLenMs) * 1_000_000_000,
+	)
+	assert.Equal(t, expectedEndTime, end[0])
 	assert.Equal(t, uint64(epochStartSlot+uint64(epochLen)), end[1])
 	assert.Equal(t, uint64(epochId+1), end[2])
 
@@ -1037,7 +1041,11 @@ func TestQueryHardForkEraHistory_TransitionImpossibleReturnsConfirmedEpochEnd(
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)
 	decodedEra := decoded[0].([]any)
-	assert.Equal(t, end, decodedEra[1],
+	assert.Equal(t, []any{
+		expectedEndTime.Uint64(),
+		uint64(epochStartSlot + uint64(epochLen)),
+		uint64(epochId + 1),
+	}, decodedEra[1],
 		"confirmed current-epoch end must encode as a finite bound")
 }
 
