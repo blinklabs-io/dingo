@@ -129,6 +129,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosBySlot",
 	"GetUtxosDeletedBeforeSlot",
 	"GetUtxosByAddress",
+	"GetUtxosByAddressAsOf",
 	"GetUtxosByAddressWithOrdering",
 	"GetUtxosWithHistory",
 	"CountUtxosByAddressWithOrdering",
@@ -173,6 +174,7 @@ var transactionStoreMethods = []string{
 	"FlushBatch",
 	"SetTransactionBatched",
 	"SetTransactionLeiosClosure",
+	"SetTransactionLeiosClosureInContext",
 	"SetTransaction",
 	"SetGapBlockTransaction",
 	"RecomputeGapCollateralFee",
@@ -258,6 +260,7 @@ var certificateStoreMethods = []string{
 	"GetAccountDelegationHistoryByCredential",
 	"CountAccountDelegationHistoryByCredential",
 	"GetAccountRegistrationHistoryByCredential",
+	"GetLatestAccountRegistrationAtOrBefore",
 	"CountAccountRegistrationHistoryByCredential",
 	"SetCommitteeAuthImmutableSlot",
 }

@@ -192,7 +192,11 @@ func TestLocalStateQueryPerItemHandlersRejectOverLimitBeforeWork(t *testing.T) {
 			name:  "stake delegation deposits",
 			query: "GetStakeDelegDeposits",
 			run: func() (any, error) {
-				return ls.queryShelleyStakeDelegDeposits(stakeCredentials, nil)
+				return ls.queryShelleyStakeDelegDeposits(
+					stakeCredentials,
+					QueryPoint{},
+					nil,
+				)
 			},
 		},
 	}
@@ -459,7 +463,7 @@ func TestLocalStateQueryLargeBatchHandlers(t *testing.T) {
 	ls.consensus.Store(
 		&consensusSnapshot{currentEpoch: models.Epoch{EpochId: 2}},
 	)
-	result, err = ls.queryShelleyStakeSnapshots(query, nil)
+	result, err = ls.queryShelleyStakeSnapshots(query, QueryPoint{}, nil)
 	require.NoError(t, err)
 	outer, ok = result.([]any)
 	require.True(t, ok)
