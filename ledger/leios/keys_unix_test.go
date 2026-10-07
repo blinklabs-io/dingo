@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package forging
+package leios
 
 import (
 	"os"
@@ -24,45 +24,21 @@ import (
 
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/keystore"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadSecretKeyRejectsFIFOWithoutBlocking(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "key.fifo")
+func TestLoadVoteSigningKeyFileRejectsFIFOWithoutWriter(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "vote.fifo")
 	require.NoError(t, syscall.Mkfifo(path, 0o600))
 
-	err := requireFIFORejectionWithoutWriter(
-		t, path,
-		func() error { _, err := loadSecretKeyFromFile(path); return err },
-	)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "is not a regular file")
-}
-
-func TestLoadOperationalCertificateRejectsFIFOWithoutWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "opcert.fifo")
-	require.NoError(t, syscall.Mkfifo(path, 0o600))
-
-	err := requireFIFORejectionWithoutWriter(
-		t,
-		path,
-		func() error { _, err := LoadOperationalCertificateFile(path); return err },
-	)
-	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
-}
-
-func requireFIFORejectionWithoutWriter(
-	t *testing.T,
-	path string,
-	load func() error,
-) error {
-	t.Helper()
 	result := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		result <- load()
+		_, err := LoadVoteSigningKeyFile(path)
+		result <- err
 	}()
 	t.Cleanup(func() {
 		select {
@@ -82,7 +58,8 @@ func requireFIFORejectionWithoutWriter(
 			t, done, testutil.AsyncWait, "blocked FIFO loader cleanup",
 		)
 	})
-	return testutil.RequireReceive(
+	err := testutil.RequireReceive(
 		t, result, testutil.AsyncWait, "nonblocking FIFO rejection",
 	)
+	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
 }
