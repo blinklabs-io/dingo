@@ -909,6 +909,11 @@ func (o *Ouroboros) blockfetchClientBlock(
 				delaySeconds,
 				fetchDuration.Seconds(),
 			)
+			o.blockfetchMetrics.recentForks.recordParticipant(
+				block.BlockNumber(),
+				block.SlotNumber(),
+				block.Hash(),
+			)
 			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.
