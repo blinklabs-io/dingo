@@ -2333,10 +2333,10 @@ type MetadataStore interface {
 	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
 	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
 
-	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
-	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
-	// tombstoned via the active flag. Credentials that match no row are ignored.
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	// DeactivateAccounts records the imported snapshot's inactive state for the
+	// given accounts at the supplied slot. Used by Mithril v2 catch-up
+	// reconciliation; credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 
 	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
 	// Mithril v2 catch-up reconciliation; rows are never deleted, only

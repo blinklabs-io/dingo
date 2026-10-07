@@ -1061,6 +1061,7 @@ func TestQueryShelleyFilteredVoteDelegatees_PinnedPointKeepsPV10Clear(
 	cleared, err := db.ClearDanglingDRepDelegations(300, nil)
 	require.NoError(t, err)
 	require.Equal(t, 1, cleared)
+	seedPoolDelegationAt(t, db, key, repeatedBytes(28, 0xA5), 400)
 	creds := []lcommon.Credential{stakeKeyCredential(key)}
 	cred := stakeQueryCred(key)
 
@@ -1110,6 +1111,12 @@ func TestQueryShelleyFilteredDelegations_PinnedPointImportedBaseline(
 	laterPool := repeatedBytes(28, 0xA4)
 	importedDrep := repeatedBytes(28, 0xD3)
 	deposit := dbtypes.Uint64(2_000_000)
+	seedStakeCertAt(t, db, key, true, 200, 2_000_000)
+	seedPoolDelegationAt(t, db, key, repeatedBytes(28, 0xA2), 200)
+	seedVoteDelegationAt(t, db, key, lcommon.Drep{
+		Type:       lcommon.DrepTypeAddrKeyHash,
+		Credential: repeatedBytes(28, 0xD2),
+	}, 200)
 	require.NoError(t, db.Metadata().ImportAccount(&models.Account{
 		StakingKey:    key,
 		CredentialTag: 0,

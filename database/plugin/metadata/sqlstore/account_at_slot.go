@@ -39,10 +39,9 @@ func (s *Store) GetAccountsByCredentialAtSlot(
 	selected := make(map[historicalRewardKey]struct{}, len(live))
 	for key, account := range live {
 		state := *account
-		// Every write to active, pool or drep stamps added_slot, including
-		// the ones no certificate records (POOLREAP and the PV10 dangling
-		// DRep clear), so a row untouched since slot is exact there and the
-		// certificate derivation, which cannot see those two, is not needed.
+		// Every write to active, pool or drep stamps added_slot. A row
+		// untouched since slot is therefore already exact there and does not
+		// need historical derivation.
 		if account.AddedSlot > slot {
 			derived, err := deriveAccountStateAtSlot(
 				ctx,
