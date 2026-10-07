@@ -1093,7 +1093,7 @@ func (f *BlockForger) checkAndForge(ctx context.Context) error {
 }
 
 // checkAndForgeProduction implements production mode forging.
-func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
+func (f *BlockForger) checkAndForgeProduction(ctx context.Context) error {
 	forgeStartTime := time.Now()
 
 	// Get current slot from slot clock
@@ -2017,6 +2017,18 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.blockTxCount.Observe(
 			float64(len(block.Transactions())),
 		)
+	}
+
+	// Adoption and diffusion cannot be undone. The node context is cancelled
+	// when the ledger halts, so a forge that started before the halt must not
+	// finish into a chain the ledger can no longer follow.
+	if err := ctx.Err(); err != nil {
+		f.logger.Warn(
+			"forged block dropped: forging context cancelled before adoption",
+			"slot", currentSlot,
+			"hash", hex.EncodeToString(block.Hash().Bytes()),
+		)
+		return fmt.Errorf("forging context cancelled before adoption: %w", err)
 	}
 
 	// Attempt local adoption immediately after building and validation. Keep

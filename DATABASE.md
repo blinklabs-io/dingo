@@ -475,12 +475,13 @@ Migration `v30` (`reward-account-output-folded`, integer version 30) adds the
 per-output marker that keeps reward credits from being counted again after
 they are written into `account.reward`.
 
-Migration `v31` (`reward-credit-round-table`) stores applied reward rounds as
-rows rather than an epoch-sized JSON value.
+Migration `v31` (`reward-credit-round-table`, integer version 31) moves pending
+reward-credit round state from the metadata JSON list into an indexed table.
 
 Migration `v32` (`reward-pool-leader-deficit`, integer version 32) adds
 `leader_reward_deficit` to `reward_pool_output` so calculated Dijkstra reward
 rounds retain the magnitude of negative leader rewards.
+
 Migration `v33` (`governance-proposal-order`, integer version 33) adds the
 `governance_proposal_order` companion table and backfills it from each
 proposal's stored transaction.
@@ -492,19 +493,24 @@ older database that has already crossed PV10 can continue only when a complete
 Mithril account baseline at or after that boundary supersedes the unavailable
 PV10 clear history; otherwise the upgrade fails and requires a resync.
 
-Migration `v36` (`drep-expiry-history`) adds `drep_expiry_history` and
+Migration `v36` (`committee-hot-authorization-prune-order`, integer version
+36) adds a tagged cold-credential index ordered by descending `added_slot` and
+`certificate_id`. Batched pruning can select superseded rows in order without
+sorting the full authorization history for that credential.
+
+Migration `v37` (`drep-expiry-history`) adds `drep_expiry_history` and
 `drep_expiry_epoch_event`. The history stores pre-write expiry and activity
 state once per DRep and slot, allowing activity updates and dormant-epoch
 expiry extensions to roll back together. The event table makes each
 empty-governance boundary idempotent on replay.
 
-Migration `v37` (`drep-dormancy-state`) adds a singleton counter and history
+Migration `v38` (`drep-dormancy-state`) adds a singleton counter and history
 for consecutive no-proposal epochs. Boundary increments and proposal-driven
 resets are journaled for rollback; proposal-driven resets run before
 certificate processing, and snapshot import initializes the counter from
 parsed ledger state.
 
-Migration `v38` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
+Migration `v39` (`drep-delegator-state`) adds `drep_delegator`, a rollbackable
 reverse index of stake credentials recorded in each active DRep's ledger
 delegator set. Its backfill and PV10 transition follow the ledger's active
 account delegation rules, and the schema preserves reverse delegators imported
@@ -850,6 +856,16 @@ flowchart LR
     Metadata --> SQL
     Blob --> KV
 ```
+
+`dingo load` from an HTTPS ImmutableDB root, or HTTP on loopback for local
+development, keeps a source-keyed download cache under
+`<databasePath>/immutable-download`.
+Non-loopback HTTP is rejected. `staging/` holds chunk triads
+in flight, each file written as `<name>.part` and renamed when complete;
+`ready/` holds the contiguous chunks the loader reads. A copied chunk leaves
+`ready/` once a later chunk holding a block is copied, so the cache keeps the
+chunk holding the chain tip, which the next run resumes from. Source keys keep
+completed and partial files from one root out of another root's replay.
 
 ## SQL Conventions
 
@@ -1288,6 +1304,25 @@ which query paths it also serves. `SetTransaction` clears `key_witness`,
 b-tree descent with a full scan of a table the same import is still growing,
 which makes historical backfill quadratic rather than merely slower.
 
+On the batched path (`SetTransactionBatched` and
+`SetTransactionBatchedHistorical`, used by API backfill), the clearing
+delete runs at once but the API-mode detail rows -- `key_witness`,
+`witness_scripts`, `redeemer`, `plutus_data`, `address_transaction`,
+`transaction_metadata_label`, and `datum` -- wait in the batch accumulator.
+`FlushBatch` writes them as multi-row INSERTs, each bounded by the dialect's
+bind-parameter limit, inside the caller's transaction. Until then a re-applied
+transaction's flushed rows are cleared but its replacement rows are not yet
+visible; nothing reads these tables inside a batch window, and the window
+commits only after the flush. A write that fails queues nothing, and
+re-applying a transaction inside a window replaces its queued rows. Caller-owned transaction rollback automatically restores the accumulator
+queue to its pre-transaction checkpoint; rollback to a savepoint restores
+that savepoint's queue. Rows queued by earlier committed transactions remain
+available. A failed SQL commit also restores the initial queue. `SetTransaction`
+builds the same rows and writes them before it returns. UTxO spends and
+certificate rows stay per statement: a later transaction in the same window
+reads them for double-spend detection, live-stake deltas, and certificate
+state.
+
 Those seven indexes are named in `deferred.Retained`, and every drop and
 rebuild path creates any of them that is absent before touching the manifest.
 That includes the critical rebuild: it is the last step before `serve` clears
@@ -1627,7 +1662,7 @@ updates preserve the previous activity and expiry epochs.
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_credential_tag`, `cold_cred_hash`, `expires_epoch`, `term_start_slot`, `term_start_slot_set`, `added_slot`, `deleted_slot` | PK `id`; unique `(cold_credential_tag, cold_cred_hash, added_slot)`; indexes `added_slot`, `deleted_slot` | Snapshot-imported and enacted committee state. Credential tag 0 is a key hash and 1 is a script hash. `term_start_slot` bounds the authorization and resignation certificates that apply to this membership term; `term_start_slot_set` preserves an explicit slot-zero start. An `UpdateCommittee` enactment preserves the existing `term_start_slot` of a credential that is already a seated member and stamps a fresh one only for a credential new to the committee or rejoining after removal: the later of the proposal's `added_slot` and the first slot of the epoch the enactment boundary closes, because cardano-ledger drops a non-member's committee state at each epoch boundary. Rows written before this rule keep the proposal's slot until the database is resynced. Re-election creates a new historical row; soft deletion and rollback match the full tagged identity and mutation slot. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`; zero is a valid threshold, while SQL NULL marks a cleared quorum. Migration v23 converts legacy zero clear markers to NULL. |
-| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold and hot identities, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
+| `auth_committee_hot` | `id`, `cold_credential_tag`, `cold_credential`, `hot_credential_tag`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity and newest-first prune order, tagged hot identity, `certificate_id`, `added_slot` | Committee hot-credential authorization certificate. The SQL column is `host_credential` for backward compatibility. Resolution selects the latest authorization no earlier than the active member's `term_start_slot` and suppresses it after a resignation in that term. For a cold credential that is not seated, `GetCommitteeHotAuthorizationsSince` returns its latest authorization only when that row is at or after the given slot; the ledger passes the current epoch's first slot and suppresses the authorization after a later resignation. Superseded rows older than the rollback window are pruned on write; see Committee Hot-Key Authorization Retention. |
 | `resign_committee_cold` | `id`, `cold_credential_tag`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes tagged cold identity, `certificate_id`, `added_slot` | Committee cold-credential resignation certificate. A resignation is authoritative even when no earlier authorization row exists and is permanent for that membership term. Removal followed by re-election starts a new term; historical rows remain available for rollback. |
 
 When an enacted treasury withdrawal credits a proposal return account that also
@@ -2064,11 +2099,13 @@ read back (`GetActiveCommitteeMembers`, `GetCommitteeMember`). On preprod at
 slot ~79.48M the table held 648,758 rows for 35 distinct cold credentials. The
 certificate write path therefore prunes superseded rows for the credential it
 just wrote, in batches bounded per certificate so no single applied block turns
-into a large delete. A store-level maintenance sweep also deletes in batches no
-larger than the same bound across all credential partitions every 24 hours,
-repeating until no superseded rows remain. That second path is required for a
-credential that stops re-authorizing: its old rows must drain even though no
-later certificate will revisit that partition.
+into a large delete. Every 24 hours, store-level maintenance finds candidate
+credentials on the read connection, closes that cursor, and applies the same
+indexed bounded deletes one credential at a time until no superseded rows
+remain. Closing the discovery cursor before deleting prevents the maintenance
+sweep from holding a read snapshot while it drains the history. This second
+path is required for a credential that stops re-authorizing: its old rows must
+drain even though no later certificate will revisit that partition.
 
 Retention rule, applied per `(cold_credential_tag, cold_credential)`: keep every
 row with `added_slot` above the horizon, plus the single newest row at or below
@@ -2125,6 +2162,13 @@ every older row; if none does, the correct answer is the one pre-horizon row
 the rule retains. The post-rollback query result is therefore identical
 whether or not pruning ran, and a credential's last row is never removed, so a
 credential that has an authorization can never become one that has none.
+
+Pruning and rollback acquire the write connection before the immutable-slot
+mutex. Certificate writes pass their existing transaction to the prune; the
+maintenance sweep opens a write transaction before it calls the same helper.
+Rollback already owns that connection before it takes the mutex exclusively to
+invalidate the cached slot. The prune holds its read lock across the delete, so
+horizon selection and deletion stay ordered without a lock cycle.
 
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:

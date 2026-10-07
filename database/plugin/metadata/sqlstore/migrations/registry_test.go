@@ -31,7 +31,7 @@ func TestSQLiteRegistry(t *testing.T) {
 	registry, err := SQLiteRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "sqlite"))
-	require.Len(t, registry, 38)
+	require.Len(t, registry, 39)
 	require.Equal(t, accountDRepClearSchemaRelease, registry[34].Name)
 	require.Contains(t, registry[34].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `account_drep_clear`")
@@ -259,13 +259,20 @@ func TestSQLiteRegistry(t *testing.T) {
 		registry[32].SQL["sqlite"].Expand[0],
 		"CREATE TABLE IF NOT EXISTS `governance_proposal_order`",
 	)
+	require.Equal(t, 34, registry[33].Version)
+	require.Equal(t, "leios-transaction-ledger-context", registry[33].Name)
+	require.Contains(t, registry[33].SQL["sqlite"].Expand[0], "CREATE TABLE IF NOT EXISTS `leios_transaction_context`")
 	require.Equal(t, 36, registry[35].Version)
-	require.Equal(t, drepExpiryHistorySchemaRelease, registry[35].Name)
-	require.Contains(t, strings.Join(registry[35].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
+	require.Equal(t, committeeHotAuthorizationPruneOrderSchemaRelease, registry[35].Name)
+	require.Len(t, registry[35].SQL["sqlite"].Expand, 1)
+	require.Contains(t, registry[35].SQL["sqlite"].Expand[0], "idx_auth_committee_hot_cold_credential_prune_order")
 	require.Equal(t, 37, registry[36].Version)
-	require.Equal(t, drepDormancyStateSchemaRelease, registry[36].Name)
+	require.Equal(t, drepExpiryHistorySchemaRelease, registry[36].Name)
+	require.Contains(t, strings.Join(registry[36].SQL["sqlite"].Expand, "\n"), "drep_expiry_history")
 	require.Equal(t, 38, registry[37].Version)
-	require.Equal(t, drepDelegatorStateSchemaRelease, registry[37].Name)
+	require.Equal(t, drepDormancyStateSchemaRelease, registry[37].Name)
+	require.Equal(t, 39, registry[38].Version)
+	require.Equal(t, drepDelegatorStateSchemaRelease, registry[38].Name)
 }
 
 func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
@@ -283,8 +290,8 @@ func TestDrepDormancySeedUsesPortableIdempotentInsert(t *testing.T) {
 			registry, err := tc.registry()
 			require.NoError(t, err)
 			require.NoError(t, validateRegistry(registry, tc.dialect))
-			require.Len(t, registry, 38)
-			migration := registry[36]
+			require.Len(t, registry, 39)
+			migration := registry[37]
 			require.Equal(t, drepDormancyStateSchemaRelease, migration.Name)
 			seed := strings.Join(migration.SQL[tc.dialect].Expand, "\n")
 			require.Contains(t, seed, "WHERE NOT EXISTS")
@@ -512,7 +519,7 @@ func TestMySQLRegistryPrefixesPoolOpCertSequenceIndex(t *testing.T) {
 	registry, err := MySQLRegistry()
 	require.NoError(t, err)
 	require.NoError(t, validateRegistry(registry, "mysql"))
-	require.Len(t, registry, 38)
+	require.Len(t, registry, 39)
 	require.Contains(
 		t,
 		registry[0].SQL["mysql"].Expand,

@@ -2804,6 +2804,12 @@ the cached value on every rollback, since a value safe when cached is not
 necessarily safe after a rollback -- suspends pruning entirely until the next
 successful resolution. Only a `Store` no syncer has ever been wired to (every
 existing test, and any non-node caller) keeps the slot-window-only fallback.
+Both prune paths acquire the write transaction before taking the immutable-slot
+read lock: block application passes its existing transaction, and maintenance
+opens one before each bounded delete. Rollback holds the transaction before
+taking the exclusive lock to invalidate the cached slot, so this order prevents
+the maintenance sweep from waiting on the writer while blocking rollback on the
+same mutex.
 See DATABASE.md's Committee Hot-Key Authorization Retention section for the
 full retention rule, the gap this closes, and why
 suspension rather than fallback is required once live tracking is engaged.
@@ -3108,6 +3114,13 @@ The swap is crash-recoverable, not just correct in the no-failure case. Both ren
 Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `ledger.NewLedgerState`, the mempool/chainsync/connmanager/peerGov/snapshot managers, the block producer, the Midnight indexer and its gRPC server) registers Prometheus collectors under fixed names against `n.config.promRegistry` — re-registering the same names on a real (non-nil) registry panics. `New()` installs a `rebuildableRegisterer` (`metrics_registerer.go`) as `n.config.promRegistry` after the node's own one-time metrics (build info, RTS gauges, the EventBus's) are registered directly against the pre-wrap registerer, so those survive untouched; `closeStorageForLiveLifecycleOp` calls `n.rebuildableMetrics.unregisterAll()` before any rebuilt component (or `Truncate`'s own temporary target-resolution database) re-registers. `n.ouroboros` is a third case, distinct from both: it's built in `Run()` — *after* `n.config.promRegistry` has already become the wrapper — but, like `chainSelector`/`bark`, it is never reconstructed by a live restore/truncate. Registering its blockfetch/protocol/Leios collectors via `n.config.promRegistry` directly (the same call every genuinely rebuilt component makes) would make them indistinguishable from those components' collectors once tracked in `r.collectors`, so `unregisterAll` would wipe them right along with the components actually being rebuilt — and since nothing ever reconstructs `n.ouroboros` to re-register them, its metrics would permanently vanish from every scrape after the very first live restore/truncate. `retainedComponentPromRegistry()` is the one exception to "everything reads `n.config.promRegistry`": `n.ouroboros`'s construction call uses it instead, resolving to the real registry underneath `n.rebuildableMetrics` (`.inner`) rather than the wrapper itself, so its collectors are never tracked by the wrapper in the first place and `unregisterAll` cannot touch them. `Register` holds its lock for the whole call — the actual registration against the underlying registerer *and* recording the collector in its tracked list — not just the append: holding it only around the append would leave a window where a concurrent `unregisterAll`'s snapshot-and-clear could run between a `Register` call's underlying registration succeeding and it recording that collector, letting the collector "escape" that cleanup pass even though it's genuinely registered; the next rebuild cycle's attempt to register a fresh collector under the same name then hits a duplicate-registration error most callers don't handle gracefully. `Truncate`'s temporary target-resolution database (`tmpDB`) is deferred-closed as soon as `database.New` returns, before checking its error — `database.New` can return a non-nil `*Database` alongside a recoverable `CommitTimestampError`, and an early return on that error before the `defer` is registered would leak `tmpDB`'s open badger/sqlite handles, so `reinitializeAndResume`'s reopen of the same data directory a moment later could hit a lock-contention failure instead of gracefully recovering the same error.
 
 ### Database Models
+
+SQLStore batch accumulators stage API detail rows until `FlushBatch`. The SQL
+transaction owns queue checkpoints for each attached accumulator: rollback or a
+failed commit restores its initial queue, and savepoint rollback restores the
+queue at that savepoint. Transaction-scoped insert statements close when their
+SQL transaction finishes, including the implicit transaction path.
+
 
 Key models in `database/models/`:
 
@@ -8573,6 +8586,43 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+`dingo load` also reads an ImmutableDB served over HTTPS. Loopback HTTP is
+accepted for local development. A source that parses as an `http://` or
+`https://` URL with a host, whether from the
+positional argument, `immutableDbPath`, or `DINGO_IMMUTABLE_DB_PATH`, selects
+the remote root; non-loopback HTTP is rejected, including after a redirect,
+malformed HTTP(S) URLs are rejected, and inputs without an HTTP(S) scheme are
+local directories that load as before. The
+root serves `tip.json` (`slot`, `block_no`, and `hash` in hex) and `NNNNN.chunk`,
+`NNNNN.primary` and `NNNNN.secondary` per chunk, the layout a Genesis Sync
+Accelerator CDN publishes. `copyBlocksRemote` in `internal/node` downloads up
+to four chunks ahead, resuming a partial file with a range request and
+retrying a failed one, and hands chunks to the existing `copyBlocksDirect`
+only in chunk order, so the ledger replays a contiguous prefix while later
+chunks download. The cache is keyed by the canonical source root so neither a
+complete file nor a resumed partial can cross source roots. Each response is
+bounded by the configured initial-era chunk layout: primary-index slots come
+from the initial epoch size, the primary index fixes the exact secondary-index
+length, and the block file is bounded by the number of possible block entries
+times the block-fetch protocol's encoded-block limit. Loading stops after the
+chunk that reaches the `tip.json`
+slot, whose hash must then match the loaded block, or at the first chunk the
+root does not publish; a chunk whose `.chunk` exists without its indexes is an
+error. The downloader lives in `internal/node` rather than reusing the
+`mithril` one because `mithril` imports `internal/node`.
+
+Trust: remote chunk files carry no signature or digest, so authenticated
+transport establishes the remote root as the source. `dingo load` decodes
+every block and
+`Chain.AddBlocks` links each header to its predecessor, so a corrupt, truncated
+or reordered chunk fails the load. The replay is a trusted replay that skips
+body-hash checks, so it does not detect a root serving a self-consistent
+alternative history or altered block bodies. Load only from a root you trust.
+The blob-only copy that follows a Mithril ledger-state import
+(`LoadBlobsWithDB`) reads only the local ImmutableDB whose digests the Mithril
+certificate covers and never takes a remote root. To bootstrap without trusting
+a file source, use Mithril or peer sync.
+
 When serving a database marked for legacy Mithril reward-state repair, startup
 runs a v2 certified catch-up before exposing the node. The catch-up verifies
 the existing chain against the selected artifact before mutating ledger rows;
@@ -12147,6 +12197,9 @@ being requested rather than only once the whole transfer already
 finished. The operation's cancelled context is also the authoritative
 terminal-status signal because storage drivers such as SQLite may return
 their own interruption error without wrapping `context.Canceled`.
+When a worker returns, completion is reserved before releasing the service's
+busy flag. Later cancellation requests cannot replace the worker's outcome;
+terminal status is published only after the next operation can start.
 `StreamOperationProgress` is a plain poll loop over the
 operation's in-memory state (no push notification from the goroutine to a
 concurrently open stream) — adequate given operations run for seconds to
@@ -14140,13 +14193,30 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. It is a no-op until the required reward inputs exist (the mark
-   snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
-   Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
-   expansion and treasury tax synchronously with an empty Go distribution and
-   returns the post-tax amount to reserves. Epoch 1 uses empty previous block
-   counts, so its expansion is zero unless `d >= 0.8`. Neither is precomputed
-   because zero output rows cannot provide rollback-safe precompute provenance.
+   reads it. No round runs at epoch 0 or at a boundary whose ended or
+   performance epoch is Byron. Any other boundary whose required inputs are
+   absent (ADA pots, mark snapshot, reward stake inputs, or performance-epoch
+   block counts) fails with `errRequiredStakeRewardBasisUnavailable`, which
+   names the new epoch and the missing input and points the operator at
+   re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
+   in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the
+   rollover does not commit, the ledger tip stops advancing, and the node shuts
+   down rather than forging on a short reward state. The producer loop runs
+   under a child of the cancelled node context and exits, and a forge already
+   in progress re-checks that context after building and self-validating and
+   before local adoption, dropping the block instead of adopting or diffusing
+   it. The rollover itself runs only when the first block of the new epoch
+   reaches ledger apply, so that block is forged and adopted before the
+   boundary can fail; holding it back would need a ledger tick ahead of the
+   block, and waiting for the rollover first would stall a sole producer, which
+   has no other block to trigger it. The opportunistic
+   precompute reads the same inputs and returns without an error; see "Reward
+   Calculation And Precomputation". Where epoch 0 is already Shelley, epochs 1
+   and 2 are the bootstrap rounds: each applies expansion and treasury tax
+   synchronously with an empty Go distribution and returns the post-tax amount
+   to reserves. Epoch 1 uses empty previous block counts, so its expansion is
+   zero unless `d >= 0.8`. Neither is precomputed because zero output rows
+   cannot provide rollback-safe precompute provenance.
 2. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
    move-instantaneous-rewards certificates accumulated during the ended epoch —
    credit their rewards to registered reward accounts and apply the pot-to-pot

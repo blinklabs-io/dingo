@@ -1816,6 +1816,55 @@ func TestRun_MalformedBlockDoesNotAdvanceCheckpoint(t *testing.T) {
 	assert.False(t, checkpoint.Completed)
 }
 
+// TestRun_MidBatchFailureKeepsLastFlushedCheckpoint fails on the third block
+// of a batch of three, after two blocks are buffered but unflushed. The
+// checkpoint must stay at the last flushed batch; the failing blocks in the
+// boundary-aligned tests above cannot tell that apart from persisting
+// cp.LastSlot, which has already advanced past the flush.
+func TestRun_MidBatchFailureKeepsLastFlushedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	now := time.Now()
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  now,
+			UpdatedAt:  now,
+		},
+		nil,
+	))
+
+	// Slots 0-2 flush as the first batch; slots 3 and 4 stay buffered when
+	// the malformed block at slot 5 fails.
+	addValidBackfillBlocks(t, db, 5)
+	hash := make([]byte, 32)
+	hash[0] = 6
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot: 5,
+		Hash: hash,
+		Cbor: []byte{0xff},
+		Type: 1,
+	}, nil))
+
+	bf := NewBackfill(db, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, bf.SetBatchSize(3))
+	err := bf.Run(context.Background())
+	require.ErrorContains(t, err, "parsing block at slot 5")
+
+	checkpoint, err := db.Metadata().GetBackfillCheckpoint(
+		BackfillPhase,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, checkpoint)
+	assert.Equal(t, uint64(2), checkpoint.LastSlot)
+	assert.False(t, checkpoint.Completed)
+}
+
 func TestRun_OffsetFailureKeepsLastCommittedCheckpoint(t *testing.T) {
 	t.Parallel()
 
