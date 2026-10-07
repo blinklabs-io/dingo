@@ -978,7 +978,7 @@ func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraBoundary(
 	assert.Equal(t, expectedEpoch, epoch)
 }
 
-func TestQueryHardForkEraHistory_TransitionImpossibleEncodesUnboundedEnd(
+func TestQueryHardForkEraHistory_TransitionImpossibleReturnsConfirmedEpochEnd(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -1024,7 +1024,11 @@ func TestQueryHardForkEraHistory_TransitionImpossibleEncodesUnboundedEnd(
 	eraList := result.(cbor.IndefLengthList)
 	require.Len(t, eraList, 1)
 	era := eraList[0].([]any)
-	assert.Nil(t, era[1], "EraUnbounded must be represented by CBOR null")
+	end, ok := era[1].([]any)
+	require.True(t, ok, "confirmed current-epoch end must be finite")
+	require.Len(t, end, 3)
+	assert.Equal(t, uint64(epochStartSlot+uint64(epochLen)), end[1])
+	assert.Equal(t, uint64(epochId+1), end[2])
 
 	encoded, err := cbor.Encode(result)
 	require.NoError(t, err)
@@ -1033,7 +1037,8 @@ func TestQueryHardForkEraHistory_TransitionImpossibleEncodesUnboundedEnd(
 	require.NoError(t, err)
 	require.Len(t, decoded, 1)
 	decodedEra := decoded[0].([]any)
-	assert.Nil(t, decodedEra[1], "EraUnbounded must encode as CBOR null")
+	assert.Equal(t, end, decodedEra[1],
+		"confirmed current-epoch end must encode as a finite bound")
 }
 
 // seedBlockAtSlot writes a minimal block index entry for slot/hash, enough

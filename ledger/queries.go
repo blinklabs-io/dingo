@@ -1050,6 +1050,31 @@ func (ls *LedgerState) currentEraEnd(
 			"current era start[0] has unexpected type %T", era.start[0],
 		)
 	}
+	// BuildSummary cannot bound a TransitionImpossible era whose final
+	// safe zone is zero. The confirmed epoch history still supplies a finite
+	// end for the era reached so far.
+	if ti.State == hardfork.TransitionImpossible &&
+		shape.Eras[idx].Params.SafeZoneSlots == 0 {
+		endRel := new(big.Int).Set(startRel)
+		for _, ep := range era.epochs {
+			endRel.Add(
+				endRel,
+				epochPicoseconds(ep.SlotLength, ep.LengthInSlots),
+			)
+		}
+		lastEp := era.epochs[len(era.epochs)-1]
+		endSlot, err := checkedSlotAdd(
+			lastEp.StartSlot,
+			uint64(lastEp.LengthInSlots),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"current era epoch %d (start=%d, length=%d): %w",
+				lastEp.EpochId, lastEp.StartSlot, lastEp.LengthInSlots, err,
+			)
+		}
+		return []any{endRel, endSlot, lastEp.EpochId + 1}, nil
+	}
 
 	curr := hardfork.EraSummary{
 		EraID: shape.Eras[idx].EraID,
