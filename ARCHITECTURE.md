@@ -14113,7 +14113,15 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    re-running Mithril sync or ledger-state import. `applyStakeRewards` wraps it
    in an `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the
    rollover does not commit, the ledger tip stops advancing, and the node shuts
-   down rather than forging on a short reward state. The opportunistic
+   down rather than forging on a short reward state. The producer loop runs
+   under a child of the cancelled node context and exits, and a forge already
+   in progress re-checks that context after building and self-validating and
+   before local adoption, dropping the block instead of adopting or diffusing
+   it. The rollover itself runs only when the first block of the new epoch
+   reaches ledger apply, so that block is forged and adopted before the
+   boundary can fail; holding it back would need a ledger tick ahead of the
+   block, and waiting for the rollover first would stall a sole producer, which
+   has no other block to trigger it. The opportunistic
    precompute reads the same inputs and returns without an error; see "Reward
    Calculation And Precomputation". Where epoch 0 is already Shelley, epochs 1
    and 2 are the bootstrap rounds: each applies expansion and treasury tax

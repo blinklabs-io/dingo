@@ -4298,3 +4298,29 @@ func (v *trackingBlockValidator) ValidateForgedBlock(
 ) error {
 	return v.onValidate()
 }
+
+// A forge already in progress when the node context is cancelled must not
+// adopt or announce its block: cancellation is how a halted ledger stops the
+// node, and a block built on that ledger must not enter the local chain.
+func TestForgeDoesNotAdoptBlockWhenContextCancelledMidForge(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	forger, builder, broadcaster := newStaleTipTestForger(
+		t, 200, 199, 199, &logs,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builder.onBuild = cancel
+	forged := 0
+	forger.blockForged = func(ledger.Block, []byte, time.Duration) {
+		forged++
+	}
+
+	err := forger.checkAndForgeProduction(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, builder.calls, "the forge must have reached the build")
+	require.Zero(t, broadcaster.calls, "a block was adopted after cancellation")
+	require.Zero(t, forged, "a block was announced after cancellation")
+}
