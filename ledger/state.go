@@ -9816,7 +9816,13 @@ func (ls *LedgerState) pparamVotingCountStartSlot() (uint64, bool) {
 	if err != nil {
 		return 0, false
 	}
-	votingWindow := 2 * ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	// A stability window above half the slot range cannot be doubled
+	// without wrapping, and such a window covers the whole epoch anyway.
+	stabilityWindow := ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	if stabilityWindow > math.MaxUint64/2 {
+		return ls.currentEpoch.StartSlot, true
+	}
+	votingWindow := 2 * stabilityWindow
 	if nextEpochStart <= votingWindow ||
 		nextEpochStart-votingWindow < ls.currentEpoch.StartSlot {
 		return ls.currentEpoch.StartSlot, true
@@ -9826,9 +9832,12 @@ func (ls *LedgerState) pparamVotingCountStartSlot() (uint64, bool) {
 
 // blocksAppliedFromSlot returns how many blocks up to the ledger tip lie at or
 // after slot. Block numbers are contiguous along the chain, so it is the tip's
-// block number less that of the last block before slot. With no block before
-// slot it returns the tip's block number, which undercounts by at most the
-// first block and so can only delay a reported transition, never advance it.
+// block number less that of the last block before slot. When the chain holds
+// no block before slot it returns the tip's block number, which undercounts by
+// at most the first block. Any other failure, such as a predecessor evicted
+// from a non-persistent chain's cache, counts nothing: the tip's block number
+// would then include blocks before slot and could report a transition early.
+// Both fallbacks can only delay a reported transition, never advance it.
 func (ls *LedgerState) blocksAppliedFromSlot(slot uint64) uint64 {
 	tip := ls.currentTip
 	if tip.Point.Slot < slot {
@@ -9836,7 +9845,7 @@ func (ls *LedgerState) blocksAppliedFromSlot(slot uint64) uint64 {
 	}
 	before, err := ls.canonicalBlockBeforeSlot(nil, slot)
 	if err != nil {
-		if errors.Is(err, models.ErrBlockNotFound) {
+		if errors.Is(err, chain.ErrNoBlockBeforeSlot) {
 			return tip.BlockNumber
 		}
 		return 0

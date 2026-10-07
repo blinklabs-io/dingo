@@ -629,6 +629,14 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	require.NoError(t, db.SetTip(tipOf(pastDeadline), nil))
 	require.Equal(t, hardfork.TransitionKnown, evaluate().State)
 
+	// Clear what the evaluation above was seeded with, so the assertions
+	// after the rollback can only hold if it reloads them from the database.
+	ls.Lock()
+	ls.currentEra = eras.EraDesc{}
+	ls.currentEpoch = models.Epoch{}
+	ls.currentPParams = nil
+	ls.Unlock()
+
 	// The chain rolls back first and the ledger follows it, as in chainsync.
 	rollbackPoint := ocommon.NewPoint(preDeadline.Slot, preDeadline.Hash)
 	require.NoError(t, cm.PrimaryChain().Rollback(rollbackPoint))
@@ -636,12 +644,19 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	ls.RLock()
 	afterRollback := ls.transitionInfo
 	reloadedEra := ls.currentEra.Id
+	reloadedEraName := ls.currentEra.Name
+	reloadedEpochLength := ls.currentEpoch.LengthInSlots
 	reloadedPParams := ls.currentPParams
 	ls.RUnlock()
 	require.Equal(t, eras.BabbageEraDesc.Id, reloadedEra,
 		"the rollback must reload a Babbage epoch for the re-evaluation")
-	require.NotNil(t, reloadedPParams,
-		"the rollback must reload the epoch's pparams for the re-evaluation")
+	require.Equal(t, eras.BabbageEraDesc.Name, reloadedEraName)
+	require.Equal(t, uint(100), reloadedEpochLength,
+		"the rollback must reload the stored epoch")
+	reloadedVersion, err := GetProtocolVersion(reloadedPParams)
+	require.NoError(t, err,
+		"the rollback must reload the epoch's stored pparams")
+	require.Equal(t, uint(8), reloadedVersion.Major)
 	require.Equal(
 		t,
 		hardfork.TransitionUnknown,
@@ -669,6 +684,46 @@ func TestEvaluateProtocolVersionBump_RollbackRecountsFromSurvivingChain(
 	require.Equal(t, uint64(1), known.KnownEpoch)
 }
 
+// An empty prefix counts every block up to the tip, but a predecessor that
+// cannot be read counts nothing: the tip's block number would then include
+// blocks before the slot and could report a transition early.
+func TestBlocksAppliedFromSlot(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	// Blocks 1-3 at slots 30, 45 and 60.
+	testChain, tips := newVersionBumpChain(t, db, 30, 15, 3)
+	ls := &LedgerState{
+		db:         db,
+		chain:      testChain,
+		currentTip: tips[2],
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	assert.Equal(t, uint64(2), ls.blocksAppliedFromSlot(40))
+	assert.Equal(
+		t,
+		uint64(3),
+		ls.blocksAppliedFromSlot(30),
+		"with no block before the slot every block up to the tip counts",
+	)
+
+	first, err := database.BlockByHash(db, tips[0].Point.Hash)
+	require.NoError(t, err)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return database.BlockDeleteTxn(txn, first)
+	}))
+	assert.Zero(
+		t,
+		ls.blocksAppliedFromSlot(40),
+		"a predecessor that cannot be read must count nothing",
+	)
+}
+
 // Upstream counts only blocks of the current epoch, so an epoch shorter than
 // twice the stability window counts from its own first slot rather than from
 // a deadline that falls in the previous epoch.
@@ -691,6 +746,14 @@ func TestPParamVotingCountStartSlot(t *testing.T) {
 			name:             "epoch shorter than twice the stability window",
 			securityParam:    2,
 			activeSlotsCoeff: "0.1",
+			want:             100,
+		},
+		{
+			// A window of 2^63+1 slots: doubling it wraps to 2, which
+			// would put the deadline at slot 198, inside the epoch.
+			name:             "stability window too large to double",
+			securityParam:    3074457345618258603,
+			activeSlotsCoeff: "1",
 			want:             100,
 		},
 	} {
