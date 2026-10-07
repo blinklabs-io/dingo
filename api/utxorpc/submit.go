@@ -103,6 +103,12 @@ func (s *submitServiceServer) WaitForTx(
 	stream *connect.ServerStream[submit.WaitForTxResponse],
 ) error {
 	ref := req.Msg.GetRef() // [][]byte
+	if err := validateWaitForTxReferenceCount(
+		len(ref),
+		s.utxorpc.config.MaxTxRefs,
+	); err != nil {
+		return err
+	}
 	for i, hash := range ref {
 		if len(hash) != len(lcommon.Blake2b256{}) {
 			return connect.NewError(
@@ -135,6 +141,12 @@ func (s *submitServiceServer) waitForTx(
 	ref [][]byte,
 	send func(*submit.WaitForTxResponse) error,
 ) error {
+	if err := validateWaitForTxReferenceCount(
+		len(ref),
+		s.utxorpc.config.MaxTxRefs,
+	); err != nil {
+		return err
+	}
 	if len(ref) == 0 {
 		return nil
 	}
@@ -147,15 +159,6 @@ func (s *submitServiceServer) waitForTx(
 		hash := hex.EncodeToString(r)
 		if _, exists := pending[hash]; exists {
 			continue
-		}
-		if len(pending) >= s.utxorpc.config.MaxTxRefs {
-			return connect.NewError(
-				connect.CodeInvalidArgument,
-				fmt.Errorf(
-					"too many transaction references: more than %d distinct",
-					s.utxorpc.config.MaxTxRefs,
-				),
-			)
 		}
 		pending[hash] = r
 		uniqueRefs = append(uniqueRefs, r)
@@ -277,6 +280,16 @@ func (s *submitServiceServer) waitForTx(
 		}
 	}
 	return nil
+}
+
+func validateWaitForTxReferenceCount(count, maxRefs int) error {
+	if count <= maxRefs {
+		return nil
+	}
+	return connect.NewError(
+		connect.CodeInvalidArgument,
+		fmt.Errorf("too many transaction references: more than %d", maxRefs),
+	)
 }
 
 // waitForTxStopError reports why a WaitForTx wait ended: the client's own

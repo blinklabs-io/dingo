@@ -9164,7 +9164,7 @@ retract a confirmation already sent.
 applies before logging, point allocation, or ledger lookup, including duplicate
 references. Empty lists retain the current-tip fallback.
 
-`WaitForTx` rejects more than `MaxTxRefs` (default 1000) distinct references
+`WaitForTx` rejects more than `MaxTxRefs` (default 1000) references
 before subscribing or reading the ledger, and one `ServerTimeout` deadline
 covers the durable lookups as well as the wait. `FollowTip`, `WatchTx`,
 `WatchMempool`, and `WaitForTx` take a slot from a shared limiter

@@ -1646,7 +1646,7 @@ func TestMatchesTxPattern_SignedMint(t *testing.T) {
 	}
 }
 
-func TestWaitForTxLimitsDistinctReferences(t *testing.T) {
+func TestWaitForTxLimitsReferences(t *testing.T) {
 	t.Parallel()
 
 	ref := func(b byte) []byte { return bytes.Repeat([]byte{b}, 32) }
@@ -1656,8 +1656,9 @@ func TestWaitForTxLimitsDistinctReferences(t *testing.T) {
 		wantErr bool
 	}{
 		{"at the limit", [][]byte{ref(1), ref(2)}, false},
-		{"duplicates do not count", [][]byte{ref(1), ref(2), ref(1), ref(2)}, false},
-		{"over the limit", [][]byte{ref(1), ref(2), ref(3)}, true},
+		{"duplicate at the limit", [][]byte{ref(1), ref(1)}, false},
+		{"duplicate over the limit", [][]byte{ref(1), ref(1), ref(1)}, true},
+		{"distinct over the limit", [][]byte{ref(1), ref(2), ref(3)}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

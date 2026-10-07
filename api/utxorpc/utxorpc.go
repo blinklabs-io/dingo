@@ -108,7 +108,7 @@ type UtxorpcConfig struct {
 	// (0 = use default).
 	MaxHistoryBytes int
 	MaxDataKeys     int
-	// MaxTxRefs caps the distinct transaction references in one WaitForTx
+	// MaxTxRefs caps the transaction references in one WaitForTx
 	// request (0 = use default).
 	MaxTxRefs int
 	// MaxStreams caps concurrent FollowTip, WatchTx, WatchMempool and WaitForTx streams
