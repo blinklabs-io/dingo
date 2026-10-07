@@ -17,6 +17,7 @@ package sqlstore
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 )
@@ -103,8 +104,7 @@ func removeAllDrepDelegators(
 	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, `
-INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+	insert := `INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
 SELECT account.credential_tag, account.staking_key, ? FROM account
 WHERE EXISTS (
     SELECT 1 FROM drep_delegator
@@ -112,8 +112,13 @@ WHERE EXISTS (
       AND removed_slot IS NULL
       AND account.credential_tag = drep_delegator.stake_credential_tag
       AND account.staking_key = drep_delegator.stake_credential
-)
-ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`,
+)`
+	if wrapped, ok := unwrapDialectQueryer(db); ok && wrapped.dialect == "mysql" {
+		insert = strings.Replace(insert, "INSERT INTO", "INSERT IGNORE INTO", 1)
+	} else {
+		insert += "\nON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING"
+	}
+	if _, err := db.ExecContext(ctx, insert,
 		removedSlot, drepTag, drepCredential,
 	); err != nil {
 		return fmt.Errorf("record DRep delegator account clears: %w", err)
