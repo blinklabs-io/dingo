@@ -2591,16 +2591,24 @@ Operators may lower the four aggregate limits with
 negative values fail configuration validation.
 Parsed entries are written to a bounded, process-local temporary staging file;
 no more than one mapping is retained during ingestion. A mapping that fails to
-parse is skipped and counted rather than failing the snapshot, since one bad
-file out of thousands should not cost the whole sync. Exhausting any aggregate
-limit rejects the artifact and removes the staging file.
+parse is skipped and counted while the rest of the archive is inspected. A
+nonzero skipped count rejects the staged result for application, so API readers
+continue to see the previous complete snapshot. Exhausting any aggregate limit
+rejects the artifact and removes the staging file.
 
-Re-downloading that artifact on every interval would be indefensible, so the
-sync records the HTTP entity tag of the last successfully applied snapshot in
-`sync_state` under `token_registry_etag` and sends it as `If-None-Match`. An
-unchanged registry answers `304` and costs one request with no body. The tag is
-written only after the whole snapshot has been applied, so an interrupted sync
-retries in full rather than recording progress it did not make.
+Every archive is named by a signed manifest. The operator pins the manifest
+publisher's Ed25519 public key; the signature binds a monotonic sequence, the
+HTTPS archive URL, its exact compressed size, and its BLAKE2b-256 digest.
+Manifest and archive requests require HTTPS at the initial URL and through
+every redirect, even when private mirror addresses are allowed. Archive bytes
+are counted and hashed through EOF before the metadata transaction begins.
+
+The last applied manifest sequence and digest are stored with the snapshot
+rows in one metadata transaction. A lower sequence is rejected unless the
+operator explicitly enables rollback, and a different digest at the same
+sequence is always rejected. An interrupted, partially parsed, incorrectly
+signed, or digest-mismatched snapshot cannot advance that high-water state.
+An unchanged authenticated manifest costs only the small manifest request.
 
 Upserting alone cannot retire anything, so each snapshot is also reconciled
 against the table. Every row a snapshot carries is stamped with that snapshot's
@@ -2610,19 +2618,20 @@ retires a subject the registry has delisted, and a subject that remains in the
 archive but has lost every property (which the parser yields as an empty entry
 the sync skips). The prune runs only on a fully applied snapshot — never on a
 `304`, which applies none, and never after a failed one, where it would delete
-live subjects the failed run had not reached yet. Two further cases defer it:
+live subjects the failed run had not reached yet. Two further cases keep the
+previous snapshot:
 an archive carrying no `mappings/*.json` files at all (what an upstream layout
 change or a mirror serving the wrong repository looks like, as opposed to a
 genuinely empty registry, which does carry mapping files), and a snapshot in
-which any mapping was skipped as malformed or oversized — a skipped mapping
-does not re-stamp its row, so reconciling would delete metadata that is still
-good. Both log a warning rather than failing.
+which any mapping was skipped as malformed or oversized. Both log a warning
+and leave every row and its authenticated state unchanged.
 
 The recorded `sync_state` describes the snapshot **the table currently holds**,
 not a per-source cache — there is one `token_registry_entry` table, so there is
-one set of state, and all of it moves together on a successful apply. Three
-keys: the entity tag, a fingerprint of the `(source URL, logo mode)` pair that
-produced it, and the high-water snapshot stamp.
+one set of state, and all of it moves together on a successful apply. Five
+keys record the manifest entity tag, a fingerprint of the source URL, manifest
+URL, trusted key, and logo mode, the high-water snapshot stamp, the manifest
+sequence, and the archive digest.
 
 The fingerprint is what makes the tag safe to replay. A validator only
 describes the table while the table still holds what that source served under
@@ -2640,11 +2649,12 @@ exactly the subjects the new snapshot dropped. Each snapshot takes the later of
 the wall clock and the recorded stamp, so the sequence stays strictly
 increasing across process boundaries.
 
-The stamp, all row-upsert batches, reconciliation prune, entity tag, and source
-identity are applied through one metadata transaction. Until commit, API
-readers continue to see the previous complete snapshot. An expansion limit,
-entry limit, store error, state error, cancellation, or commit failure rolls
-the transaction back, so neither rows nor validator state advance. The
+The stamp, all row-upsert batches, reconciliation prune, manifest sequence,
+archive digest, entity tag, and source identity are applied through one
+metadata transaction. Until commit, API readers continue to see the previous
+complete snapshot. A skipped mapping, expansion limit, entry limit, store
+error, state error, cancellation, or commit failure rolls the transaction back,
+so neither rows nor authenticated state advance. The
 snapshot stamp is truncated to a
 whole second, because MySQL's `datetime` column carries no fractional seconds:
 an unrounded stamp would be stored rounded while the prune compared against
@@ -2692,12 +2702,13 @@ base64 logo payloads are roughly 90% of registry bytes and most consumers only
 need name, ticker, and decimals. The whole sync is disabled by default, since
 enabling it commits the node to that download.
 
-Operators configure source URL, interval, request timeout, user agent, max
-bytes, max entry bytes, logo storage, and private-address allowance through the
-`tokenRegistry` YAML block, matching `DINGO_TOKEN_REGISTRY_*` environment
-variables, or `--token-registry-*` CLI flags. An empty source URL selects by
-network: the Cardano Foundation registry for mainnet, the IOG testnet registry
-otherwise.
+Operators configure the manifest URL, trusted manifest key, source URL,
+interval, request timeout, limits, logo storage, private-address allowance,
+and intentional rollback permission through the `tokenRegistry` YAML block,
+matching `DINGO_TOKEN_REGISTRY_*` environment variables, or
+`--token-registry-*` CLI flags. Enabling the worker requires an explicit
+manifest URL and trusted key. An empty source URL still selects the expected
+archive URL by network, which the signed manifest must name exactly.
 
 `node.go` composes the sync at the node boundary the same way it composes the
 fetcher, through the shared `newTokenRegistrySync` helper that both the startup

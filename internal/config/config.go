@@ -452,6 +452,12 @@ type TokenRegistryConfig struct {
 	// operators running a mirror. Empty selects by network: the Cardano
 	// Foundation registry for mainnet, the IOG testnet registry otherwise.
 	SourceURL string `yaml:"sourceUrl"             envconfig:"DINGO_TOKEN_REGISTRY_SOURCE_URL"`
+	// ManifestURL identifies the signed manifest that authenticates each
+	// snapshot. It is required when the sync is enabled.
+	ManifestURL string `yaml:"manifestUrl"           envconfig:"DINGO_TOKEN_REGISTRY_MANIFEST_URL"`
+	// TrustedManifestKey is the hex-encoded Ed25519 public key used to verify
+	// signed manifests. It is required when the sync is enabled.
+	TrustedManifestKey string `yaml:"trustedManifestKey"    envconfig:"DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY"`
 	// Interval controls how often the registry is re-checked. Each check
 	// is a conditional request, so an unchanged registry costs no download.
 	// Values below one minute are raised to it.
@@ -478,6 +484,9 @@ type TokenRegistryConfig struct {
 	// AllowPrivateAddresses permits syncing from private, loopback, and
 	// link-local addresses. Leave false for the default SSRF guard.
 	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES"`
+	// AllowRollback permits a correctly signed manifest sequence below the
+	// stored high-water mark. Leave false during normal operation.
+	AllowRollback bool `yaml:"allowRollback"          envconfig:"DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK"`
 }
 
 // DefaultChainsyncConfig returns the default chainsync configuration.

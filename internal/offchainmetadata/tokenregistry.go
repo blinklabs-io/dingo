@@ -43,8 +43,8 @@ const (
 
 // tokenRegistryProperty is the CIP-26 property envelope. Every property in a
 // mapping is wrapped this way; only "subject" and "policy" are bare values.
-// Signatures are captured but not verified here — baseline trust is the
-// registry repository's PR gating plus HTTPS transport.
+// Per-property signatures are not used when extracting values. Snapshot
+// authenticity is established before parsing through the signed manifest.
 type tokenRegistryProperty struct {
 	Value          json.RawMessage `json:"value"`
 	SequenceNumber int             `json:"sequenceNumber"`

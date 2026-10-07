@@ -74,6 +74,7 @@ var logURIConfigFields = []string{
 	"KoiosParity.BaseURL",
 	"Mithril.AggregatorURL",
 	"OffchainMetadata.IPFSGatewayURL",
+	"TokenRegistry.ManifestURL",
 	"TokenRegistry.SourceURL",
 }
 
@@ -267,6 +268,7 @@ var logPlainConfigFields = []string{
 	"TlsCertFilePath",
 	"TlsKeyFilePath",
 	"TokenRegistry.AllowPrivateAddresses",
+	"TokenRegistry.AllowRollback",
 	"TokenRegistry.Enabled",
 	"TokenRegistry.Interval",
 	"TokenRegistry.MaxAcceptedEntries",
@@ -277,6 +279,7 @@ var logPlainConfigFields = []string{
 	"TokenRegistry.MaxEntryBytes",
 	"TokenRegistry.RequestTimeout",
 	"TokenRegistry.StoreLogos",
+	"TokenRegistry.TrustedManifestKey",
 	"TokenRegistry.UserAgent",
 	"Topology",
 	"Tracing",

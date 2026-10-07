@@ -151,6 +151,8 @@ type OffchainMetadataConfig struct {
 type TokenRegistryConfig struct {
 	HTTPClient            *http.Client
 	SourceURL             string
+	ManifestURL           string
+	TrustedManifestKey    string
 	UserAgent             string
 	Interval              time.Duration
 	RequestTimeout        time.Duration
@@ -163,6 +165,7 @@ type TokenRegistryConfig struct {
 	Enabled               bool
 	StoreLogos            bool
 	AllowPrivateAddresses bool
+	AllowRollback         bool
 }
 
 // MidnightConfig controls the Midnight indexer and optional gRPC listener.
@@ -841,6 +844,8 @@ func (c *Config) syncCompatFields() {
 	c.tokenRegistry = TokenRegistryConfig{
 		HTTPClient:            c.tokenRegistry.HTTPClient,
 		SourceURL:             c.cfg.TokenRegistry.SourceURL,
+		ManifestURL:           c.cfg.TokenRegistry.ManifestURL,
+		TrustedManifestKey:    c.cfg.TokenRegistry.TrustedManifestKey,
 		UserAgent:             c.cfg.TokenRegistry.UserAgent,
 		Interval:              c.cfg.TokenRegistry.Interval,
 		RequestTimeout:        c.cfg.TokenRegistry.RequestTimeout,
@@ -853,6 +858,7 @@ func (c *Config) syncCompatFields() {
 		Enabled:               c.cfg.TokenRegistry.Enabled,
 		StoreLogos:            c.cfg.TokenRegistry.StoreLogos,
 		AllowPrivateAddresses: c.cfg.TokenRegistry.AllowPrivateAddresses,
+		AllowRollback:         c.cfg.TokenRegistry.AllowRollback,
 	}
 	c.midnight = MidnightConfig{
 		Enabled:                     c.cfg.Midnight.Enabled,
@@ -1863,6 +1869,8 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 		c.cfg.TokenRegistry = internalconfig.TokenRegistryConfig{
 			Enabled:               cfg.Enabled,
 			SourceURL:             cfg.SourceURL,
+			ManifestURL:           cfg.ManifestURL,
+			TrustedManifestKey:    cfg.TrustedManifestKey,
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
 			UserAgent:             cfg.UserAgent,
@@ -1874,6 +1882,7 @@ func WithTokenRegistryConfig(cfg TokenRegistryConfig) ConfigOptionFunc {
 			MaxBatchBytes:         cfg.MaxBatchBytes,
 			StoreLogos:            cfg.StoreLogos,
 			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+			AllowRollback:         cfg.AllowRollback,
 		}
 	}
 }

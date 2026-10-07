@@ -342,6 +342,17 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_SOURCE_URL
   # CLI: --token-registry-source-url
   # sourceUrl: ""
+  # Signed manifest URL. Required when enabled. The manifest authenticates
+  # the snapshot URL, exact compressed size, BLAKE2b-256 digest, and monotonic
+  # sequence. HTTPS is required for the manifest, snapshot, and every redirect.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_MANIFEST_URL
+  # CLI: --token-registry-manifest-url
+  # manifestUrl: ""
+  # Hex-encoded Ed25519 public key trusted to sign manifests. Required when
+  # enabled. Key rotation is an explicit configuration change.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_TRUSTED_MANIFEST_KEY
+  # CLI: --token-registry-trusted-manifest-key
+  # trustedManifestKey: ""
   # How often the registry is re-checked. Each check is a conditional
   # request, so an unchanged registry costs no download. Values below one
   # minute are raised to it: polling a source that serves a roughly 240MB
@@ -394,6 +405,11 @@
   # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_PRIVATE_ADDRESSES
   # CLI: --token-registry-allow-private-addresses
   # allowPrivateAddresses: false
+  # Permit a valid signed manifest below the stored sequence high-water mark.
+  # Leave false except for an intentional publisher rollback.
+  # Can be overridden with DINGO_TOKEN_REGISTRY_ALLOW_ROLLBACK
+  # CLI: --token-registry-allow-rollback
+  # allowRollback: false
 
 # Optional in-process Koios reward-parity observer (dingo #3098). When
 # enabled, Dingo subscribes an observer to its own epoch.transition EventBus
