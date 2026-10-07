@@ -77,7 +77,7 @@ type accountStore interface {
 	GetActiveAccountCredentials(
 		types.Txn,
 	) ([]models.StakeCredentialRef, error)
-	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef, uint64) error
 	AddAccountRewardByCredential(
 		uint8,
 		[]byte,
@@ -258,6 +258,7 @@ func exerciseAccountStore(t *testing.T, store accountStore) accountState {
 		[]models.StakeCredentialRef{
 			models.NewStakeCredentialRef(0, activeKey),
 		},
+		1_000,
 	))
 	ret.deactivated, err = store.GetAccountByCredential(
 		0,

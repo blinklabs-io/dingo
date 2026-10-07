@@ -1452,6 +1452,17 @@ type LedgerState struct {
 	// one attempt's reader goroutine ever submits to it at a time -- see the
 	// loop's doc comment.
 	blockPipeline *pipeline.BlockPipeline
+	// blockPipelineSubmit, when non-nil, replaces blockPipeline.Submit in
+	// decodeReadChainBatchWithError. Test seam: a real Submit fails only on
+	// pipeline shutdown, which also closes Results(), so the drain of an
+	// already-submitted prefix after a Submit error cannot otherwise be
+	// reached.
+	blockPipelineSubmit func(
+		ctx context.Context,
+		blockType uint,
+		rawCbor []byte,
+		tip ocommon.Tip,
+	) error
 	// blockPipelineErrorsDone is closed once drainBlockPipelineErrors (the
 	// goroutine that continuously reads blockPipeline.Errors() for the
 	// pipeline's full lifetime) has returned. Set alongside blockPipeline.
@@ -1536,6 +1547,13 @@ type LedgerState struct {
 	// window between that snapshot and the later, transactionEventMutex-
 	// held undo-block resolution, without relying on scheduler timing.
 	beforeReconciliationUndoSnapshot func()
+	// beforeCommitRecoveryMutationBarrier is a test-only sequencing hook, nil
+	// in production. It runs after recovery samples the chain tip and before it
+	// enters the chain mutation barrier.
+	beforeCommitRecoveryMutationBarrier func()
+	// beforeCommitRecoveryCleanup is a test-only sequencing hook, nil in
+	// production. It runs after the chain rewind and before orphan cleanup.
+	beforeCommitRecoveryCleanup func() error
 
 	// beforeReadResultDoneSignal is a test-only hook called once per
 	// ledgerProcessBlocksFromSource outer-loop pass, immediately before that
@@ -1650,6 +1668,17 @@ type LedgerState struct {
 	// connection, so one divergence episode publishes a single request.
 	resyncCoalesce      map[string]*resyncCoalesceRecord
 	resyncCoalesceMutex sync.Mutex
+	// freshCursorPeers records, by remote address, each peer a chain switch
+	// closed for a fresh chainsync cursor that has not delivered a header to
+	// the ledger since. It is keyed by peer rather than connection because
+	// the close itself reconnects the peer under a new connection ID.
+	// Guarded by chainsyncMutex.
+	freshCursorPeers map[string]*freshCursorRequest
+	// freshCursorStallTip is the highest local tip reached, and
+	// freshCursorStallRequests the chain-switch fresh-cursor requests made
+	// since the tip last moved past it. Guarded by chainsyncMutex.
+	freshCursorStallTip      ochainsync.Tip
+	freshCursorStallRequests int
 
 	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
 	// us to cross to but that we cannot apply locally (block missing below
@@ -2079,6 +2108,15 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	if err := ls.loadMithrilTrustBoundary(); err != nil {
 		return fmt.Errorf("failed to load Mithril trust boundary: %w", err)
 	}
+	// Refuse to start on a snapshot-seeded database whose governance
+	// purpose roots are missing: tallying would skip ratifications the
+	// network performs and diverge at enactment. This runs before the
+	// worker pool and cleanup timer start because the caller only closes
+	// the ledger after Start succeeds, so the epoch comes from the stored
+	// epoch rows rather than currentEpoch, which loadEpochs sets later.
+	if err := ls.verifyGovernancePurposeRoots(); err != nil {
+		return fmt.Errorf("verify governance purpose roots: %w", err)
+	}
 	// Repopulate the in-memory deferred-header set from the persisted markers
 	// so the snapshot retention floor covers headers still awaiting apply from
 	// before the restart: without this the first
@@ -2432,11 +2470,17 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 	}
 	// Clean up orphaned blobs that may exist beyond the metadata tip.
 	// This handles the case where blob committed but metadata failed.
-	if cleanupErr := ls.cleanupOrphanedBlobs(currentTip.Point.Slot); cleanupErr != nil {
-		// Log but don't fail - partial cleanup is acceptable
+	cleaned, cleanupErr := ls.rewindPrimaryChainForOrphanCleanup(
+		currentTip.Point,
+	)
+	if cleanupErr != nil {
+		return errors.Join(committedRollbackErr, cleanupErr)
+	}
+	if !cleaned {
 		ls.config.Logger.Warn(
-			"failed to clean up orphaned blobs",
-			"error", cleanupErr,
+			"skipping orphaned blob cleanup: rewind exceeds the security parameter",
+			"tip_slot",
+			currentTip.Point.Slot,
 		)
 	}
 	if err := ls.db.ReconcileAlonzoPParamsUnitAfterRecovery(); err != nil {
@@ -2446,6 +2490,111 @@ func (ls *LedgerState) RecoverCommitTimestampConflict() error {
 		))
 	}
 	return committedRollbackErr
+}
+
+// rewindPrimaryChainForOrphanCleanup rewinds the primary chain to the
+// metadata tip before cleanupOrphanedBlobs deletes the blocks above it. The
+// chain manager loads its tip from the newest stored block before recovery
+// runs, so deleting those blocks underneath it leaves the chain naming a block
+// that no longer exists, and every later add or iteration fails. Rewinding
+// through the manager deletes the same blocks and moves its tip with them.
+//
+// It reports false without an error only when the configured security parameter
+// refuses the rewind before any block is removed. Every other rewind or cleanup
+// failure is returned so startup or live recovery stops on an inconsistent
+// chain rather than continuing with a partially repaired store.
+func (ls *LedgerState) rewindPrimaryChainForOrphanCleanup(
+	tip ocommon.Point,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, errors.New(
+			"recover orphaned blobs: primary chain manager is unavailable",
+		)
+	}
+	ls.chainsyncBlockfetchMutex.Lock()
+	priorGeneration := ls.chainRollbackGeneration.Load()
+	ls.chainRollbackGeneration.Add(1)
+	priorAudit, auditGeneration := ls.takeContinuationAuditForRewind()
+	tipBeforeRewind := ls.chain.Tip().Point
+	if ls.beforeCommitRecoveryMutationBarrier != nil {
+		ls.beforeCommitRecoveryMutationBarrier()
+	}
+	if tipBeforeRewind.Slot < tip.Slot {
+		ls.chainRollbackGeneration.Store(priorGeneration)
+		ls.settleAuditAfterRewind(
+			priorAudit,
+			auditGeneration,
+			false,
+			tip,
+		)
+		ls.chainsyncBlockfetchMutex.Unlock()
+		return false, fmt.Errorf(
+			"recover orphaned blobs: primary chain tip %d is behind metadata tip %d",
+			tipBeforeRewind.Slot,
+			tip.Slot,
+		)
+	}
+	cleanup := func() error {
+		if ls.beforeCommitRecoveryCleanup != nil {
+			if err := ls.beforeCommitRecoveryCleanup(); err != nil {
+				return err
+			}
+		}
+		return ls.cleanupOrphanedBlobs(tip.Slot)
+	}
+	var rewindErr error
+	if ls.config.ChainManager.SecurityParamConfigured() {
+		_, rewindErr = ls.chain.RollbackDeferredThen(tip, cleanup)
+	} else {
+		_, rewindErr = ls.chain.RollbackUnboundedDeferredThen(tip, cleanup)
+	}
+	tipAfterRewind := ls.chain.Tip().Point
+	chainRegressed := primaryChainTipRegressed(tipBeforeRewind, tipAfterRewind)
+	safeRefusal := errors.Is(rewindErr, chain.ErrRollbackExceedsSecurityParam) &&
+		!chainRegressed
+	truncated := chainRegressed || (rewindErr != nil && !safeRefusal)
+	if safeRefusal {
+		ls.chainRollbackGeneration.Store(priorGeneration)
+	}
+	// A prior audit whose fork point remains on the retained prefix still
+	// describes this chain. Re-arm it at the recovery target so the existing
+	// carry-forward rules keep only producers the rewind did not remove.
+	if rewindErr == nil && truncated && priorAudit != nil &&
+		(priorAudit.forkPoint.Slot < tip.Slot ||
+			pointMatches(priorAudit.forkPoint, tip)) {
+		restored := false
+		ls.continuationAuditMutex.Lock()
+		if ls.continuationAudit.Load() == nil &&
+			ls.continuationAuditGen == auditGeneration {
+			ls.publishContinuationAudit(priorAudit)
+			restored = true
+		}
+		ls.continuationAuditMutex.Unlock()
+		if restored {
+			ls.armContinuationAudit(tip, "commit timestamp recovery")
+		}
+	}
+	ls.settleAuditAfterRewind(
+		priorAudit,
+		auditGeneration,
+		truncated,
+		tip,
+	)
+	ls.chainsyncBlockfetchMutex.Unlock()
+	// RollbackDeferredThen queues chain events while the blockfetch mutex is
+	// held. Publish only after releasing it so a backpressured subscriber cannot
+	// deadlock the chainsync drain.
+	ls.chain.PublishPendingChainUpdates()
+	if safeRefusal {
+		return false, nil
+	}
+	if rewindErr != nil {
+		return false, fmt.Errorf(
+			"rewind primary chain and clean orphaned blobs: %w",
+			rewindErr,
+		)
+	}
+	return true, nil
 }
 
 // orphanedBlock holds information needed to delete an orphaned block from blob store.
@@ -2493,13 +2642,12 @@ func (ls *LedgerState) cleanupOrphanedBlobs(tipSlot uint64) error {
 
 	for _, orphan := range orphans {
 		if err := blobStore.DeleteBlock(writeTxn, orphan.slot, orphan.hash, orphan.id); err != nil {
-			ls.config.Logger.Warn(
-				"failed to delete orphaned block",
-				"slot", orphan.slot,
-				"hash", hex.EncodeToString(orphan.hash),
-				"error", err,
+			return fmt.Errorf(
+				"delete orphaned block at slot %d (%s): %w",
+				orphan.slot,
+				hex.EncodeToString(orphan.hash),
+				err,
 			)
-			continue
 		}
 		deleted++
 	}
@@ -6585,8 +6733,9 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // decodeReadChainBatch decodes a batch of raw blocks gathered from the chain
 // iterator into ledger.Block values, preserving input order. When
 // ls.blockPipeline is configured (LedgerStateConfig.BlockPipelineEnabled) it
-// submits the whole batch to the pipeline's decode worker pool up front, so
-// multiple blocks decode concurrently, then drains the results back in
+// submits the batch to the pipeline's decode worker pool while concurrently
+// draining results, so multiple blocks decode concurrently and a batch larger
+// than the pipeline's pending limit cannot stall Submit. Results come back in
 // submission order (the pipeline's apply stage guarantees this ordering
 // regardless of which worker finishes first). Otherwise it decodes serially,
 // exactly as ledgerReadChainIterator did before the pipeline existed.
@@ -6595,20 +6744,19 @@ func (ls *LedgerState) recordBlockPipelineError(err error) {
 // discards the whole batch. The preserved error lets a persisted-block
 // validation failure be recovered with its exact block point.
 //
-// Once a pipeline submission has started, it always runs to completion --
-// submit-and-drain is all-or-nothing, using a background context for the
-// Submit calls and the results drain regardless of ctx. ctx is only checked
-// up front, before anything has been submitted. blockPipeline is a single
-// instance shared across every ledgerProcessBlocks retry attempt (see that
-// method's doc comment): its apply stage reorders decoded results by a
-// single global sequence number with no notion of "whose submission is
-// whose", so a submission that aborted partway through ctx cancellation
-// would leave already-sequenced, already-submitted items in that shared
-// state for a *later* attempt's own call here to mistakenly drain --
-// misattributing decoded blocks across a restart. Bailing out only before
-// the first Submit call is safe because nothing has been submitted yet;
-// once started, only genuine pipeline shutdown (Stop(), which closes the
-// Results channel) can still interrupt the drain.
+// Once a pipeline submission has started, the call drains the result of every
+// block it submitted before returning, whatever the outcome, so none is left
+// on the shared results channel for a later attempt's call to mistake for its
+// own: blockPipeline is a single instance shared across every
+// ledgerProcessBlocks retry attempt (see that method's doc comment) whose
+// apply stage reorders results by one global sequence number. For that reason
+// the Submit calls use a context independent of ctx, which is only checked up
+// front, before anything has been submitted. That context is cancelled, and
+// the submitting goroutine joined, on every return. The drain is interrupted
+// only by pipeline shutdown (Stop(), which closes the Results channel) or,
+// after a Submit error, by CloseBlockPipelineDrainTimeout: a fatal
+// apply-stage error cancels the pipeline without closing Results(), so the
+// submitted prefix's results may never arrive.
 // decodeReadChainBatchWithError is the error-preserving form used by the
 // ledger reader. Keeping the cause lets a validation failure on an already
 // persisted block enter header-validation recovery instead of silently
@@ -6652,23 +6800,53 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	}()
 	// submitCtx is deliberately not ctx (attemptCtx) -- see the doc comment
 	// above.
-	submitCtx := context.Background()
-	for _, raw := range rawBatch {
-		tip := ocommon.Tip{
-			Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
-			BlockNumber: raw.Number,
-		}
-		//nolint:contextcheck // deliberately not derived from ctx; see the
-		// doc comment above -- a submission must run to completion once
-		// started, not abort partway through a mere per-attempt cancel.
-		if err := ls.blockPipeline.Submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
-			ls.config.Logger.Error(
-				"failed to submit block to decode pipeline",
-				"error", err,
-			)
-			return nil, fmt.Errorf("submit block to decode pipeline: %w", err)
-		}
+	submitCtx, cancelSubmit := context.WithCancel(context.Background())
+	submitExited := make(chan struct{})
+	defer func() {
+		cancelSubmit()
+		<-submitExited
+	}()
+	// Submit blocks once MaxPendingBlocks sequences are outstanding, and
+	// completions only advance as Results() is consumed, so submission runs
+	// in its own goroutine while this one drains results.
+	type submitOutcome struct {
+		submitted int
+		err       error
 	}
+	submitDone := make(chan submitOutcome, 1)
+	submit := ls.blockPipeline.Submit
+	if ls.blockPipelineSubmit != nil {
+		submit = ls.blockPipelineSubmit
+	}
+	go func() {
+		defer close(submitExited)
+		submitted := 0
+		for _, raw := range rawBatch {
+			tip := ocommon.Tip{
+				Point:       ocommon.NewPoint(raw.Slot, raw.Hash),
+				BlockNumber: raw.Number,
+			}
+			//nolint:contextcheck // deliberately not derived from ctx; see the
+			// doc comment above -- a submission must run to completion once
+			// started, not abort partway through a mere per-attempt cancel.
+			if err := submit(submitCtx, raw.Type, raw.Cbor, tip); err != nil {
+				ls.config.Logger.Error(
+					"failed to submit block to decode pipeline",
+					"error", err,
+				)
+				submitDone <- submitOutcome{
+					submitted: submitted,
+					err: fmt.Errorf(
+						"submit block to decode pipeline: %w",
+						err,
+					),
+				}
+				return
+			}
+			submitted++
+		}
+		submitDone <- submitOutcome{submitted: submitted}
+	}()
 	results := ls.blockPipeline.Results()
 	decoded = make([]ledger.Block, 0, len(rawBatch))
 	// retErr remembers a decode or validation failure anywhere in the batch.
@@ -6683,8 +6861,34 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 	// notion of "whose submission is whose" beyond result order (see this
 	// function's doc comment on why a submission always runs to
 	// completion).
-	for range rawBatch {
-		item, chOk := <-results
+	expected := -1
+	var submitErr error
+	var drainTimeout <-chan time.Time
+	for read := 0; expected < 0 || read < expected; {
+		var (
+			item *pipeline.BlockItem
+			chOk bool
+		)
+		select {
+		case outcome := <-submitDone:
+			expected = outcome.submitted
+			submitErr = outcome.err
+			if submitErr != nil {
+				drainTimeout = time.After(CloseBlockPipelineDrainTimeout)
+			}
+			submitDone = nil
+			continue
+		case <-drainTimeout:
+			return nil, errors.Join(
+				retErr,
+				submitErr,
+				fmt.Errorf(
+					"drain submitted block pipeline results: timeout after %s",
+					CloseBlockPipelineDrainTimeout,
+				),
+			)
+		case item, chOk = <-results:
+		}
 		if !chOk {
 			ls.config.Logger.Error(
 				"decode pipeline results channel closed unexpectedly",
@@ -6693,6 +6897,7 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 				"decode pipeline results channel closed unexpectedly",
 			)
 		}
+		read++
 		if retErr != nil {
 			continue
 		}
@@ -6795,6 +7000,9 @@ func (ls *LedgerState) decodeReadChainBatchWithError(
 			}
 		}
 		decoded = append(decoded, block)
+	}
+	if submitErr != nil {
+		return nil, errors.Join(retErr, submitErr)
 	}
 	if retErr != nil {
 		return nil, retErr
@@ -10027,6 +10235,20 @@ func (ls *LedgerState) computeGenesisProtocolParameters(
 	}
 
 	return pparams, nil
+}
+
+// verifyGovernancePurposeRoots runs governance.VerifyPurposeRoots at the
+// latest stored epoch, the epoch loadEpochs makes current.
+func (ls *LedgerState) verifyGovernancePurposeRoots() error {
+	epochs, err := ls.db.GetEpochs(nil)
+	if err != nil {
+		return fmt.Errorf("get epochs: %w", err)
+	}
+	var epoch uint64
+	if len(epochs) > 0 {
+		epoch = epochs[len(epochs)-1].EpochId
+	}
+	return governance.VerifyPurposeRoots(ls.db, nil, epoch)
 }
 
 func (ls *LedgerState) loadEpochs(txn *database.Txn) error {

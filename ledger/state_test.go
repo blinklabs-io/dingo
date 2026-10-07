@@ -382,6 +382,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
 	original := &shelley.ShelleyProtocolParameters{
 		MinFeeA:          44,
+		NOpt:             1,
 		A0:               rat(),
 		Rho:              rat(),
 		Tau:              rat(),
@@ -401,6 +402,7 @@ func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 	ls.publishSnapshotsLocked()
 	oldConsensus := ls.consensus.Load()
 
@@ -470,6 +472,7 @@ func TestProcessEpochRolloverRetainsDijkstraProtocolParameters(t *testing.T) {
 			),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, original)
 
 	var result *EpochRolloverResult
 	txn := db.Transaction(true)
@@ -8087,6 +8090,7 @@ func newBoundaryRolloverLedger(
 		currentPParams: &shelley.ShelleyProtocolParameters{
 			ProtocolMajor:    shelley.MinProtocolVersionShelley,
 			MinFeeA:          44,
+			NOpt:             1,
 			A0:               rat(),
 			Rho:              rat(),
 			Tau:              rat(),
@@ -8097,6 +8101,7 @@ func newBoundaryRolloverLedger(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, ls.currentPParams)
 	return ls, db
 }
 
@@ -8793,6 +8798,7 @@ INSERT INTO auth_committee_hot (
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	seedEmptyRewardBasisForRollover(t, db, currentEpoch, pparams)
 	return &hardForkRatifyFixture{
 		ls:       ls,
 		db:       db,
@@ -8807,6 +8813,7 @@ func (f *hardForkRatifyFixture) rollover(
 	pparams lcommon.ProtocolParameters,
 ) *EpochRolloverResult {
 	t.Helper()
+	seedEmptyRewardBasisForRollover(t, f.db, currentEpoch, pparams)
 	var result *EpochRolloverResult
 	txn := f.db.Transaction(true)
 	err := txn.Do(func(txn *database.Txn) error {

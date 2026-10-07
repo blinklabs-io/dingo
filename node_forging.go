@@ -24,7 +24,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -273,7 +272,7 @@ func (n *Node) startKESAgentServeKey(
 	creds *forging.PoolCredentials,
 	startupSlot uint64,
 ) error {
-	opCertKey, err := bursa.LoadKeyFromFile(
+	opCertKey, err := forging.LoadOperationalCertificateFile(
 		n.config.shelleyOperationalCertificate,
 	)
 	if err != nil {
@@ -408,7 +407,7 @@ func (n *Node) agentInstallSlot(fallbackSlot uint64) uint64 {
 // lifetime of the client. There is no background loop in this mode -- the
 // agent evolves its own key internally on every Sign call.
 func (n *Node) startKESAgentSign(creds *forging.PoolCredentials) error {
-	opCertKey, err := bursa.LoadKeyFromFile(
+	opCertKey, err := forging.LoadOperationalCertificateFile(
 		n.config.shelleyOperationalCertificate,
 	)
 	if err != nil {

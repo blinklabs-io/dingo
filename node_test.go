@@ -440,7 +440,7 @@ func TestNodeEventSubscriptionPoliciesAreExplicit(t *testing.T) {
 			},
 			"subscribeChainSelectorEvents": {
 				required:   8,
-				detachable: 1,
+				detachable: 2,
 			},
 		},
 		"node_lifecycle.go": {
@@ -4021,7 +4021,7 @@ func TestNodeEventSubscriptionClassifications(t *testing.T) {
 		expectedRequired[group.function] = group.count
 	}
 	expectedDetachable := map[string]int{
-		"subscribeChainSelectorEvents":  1,
+		"subscribeChainSelectorEvents":  2,
 		"subscribeEquivocationDetector": 1,
 	}
 	expectedPolicies := map[string]string{
@@ -4611,4 +4611,17 @@ VALUES (?, 'mark', ?, '0', '0', 0, 100, ?)`,
 	err = n.backfillRewardLiveStake()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "older accounting")
+}
+
+func TestNewOuroborosConfigAppliesTxSubmissionRateLimit(t *testing.T) {
+	t.Parallel()
+
+	n := &Node{config: NewConfig()}
+	cfg := n.newOuroborosConfig(false, 0, 0)
+
+	assert.Positive(
+		t,
+		cfg.MaxTxSubmissionsPerSecond,
+		"production ouroboros config must enable the TxSubmission limiter",
+	)
 }
