@@ -208,6 +208,34 @@ func TestGDDDisconnectsCompleteSparsePeerOverGenesisWindow(t *testing.T) {
 	assert.Equal(t, []ouroboros.ConnectionId{peer}, f.disconnected())
 }
 
+// A window derived without k or without a positive f is no Genesis window,
+// so a selector configured from it reports nothing even for a complete
+// sparse peer that a configured window would disconnect.
+func TestGDDInactiveWithoutGenesisParams(t *testing.T) {
+	t.Parallel()
+	for name, window := range map[string]uint64{
+		"zero k":     GenesisWindowSlotsForParams(0, big.NewRat(1, 20)),
+		"nil f":      GenesisWindowSlotsForParams(40, nil),
+		"zero f":     GenesisWindowSlotsForParams(40, new(big.Rat)),
+		"negative f": GenesisWindowSlotsForParams(40, big.NewRat(-1, 20)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newGDDFixtureWindow(t, true, window)
+			dense, sparse := corrConn(1), corrConn(2)
+			f.deliver(
+				t, dense, 0, append([]uint64{10}, slotRange(11, 50)...)...,
+			)
+			// 2 blocks, head past any window up to 6990 slots: complete.
+			f.deliver(t, sparse, 0, 10, 60, 100, 7000)
+
+			f.evaluate()
+
+			assert.Empty(t, f.disconnected())
+		})
+	}
+}
+
 func TestGDDNeverDisconnectsLastPeer(t *testing.T) {
 	t.Parallel()
 	f := newGDDFixture(t, true)

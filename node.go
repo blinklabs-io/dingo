@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
 	"slices"
 	"strconv"
@@ -1222,23 +1223,23 @@ func (n *Node) Run(ctx context.Context) (runErr error) {
 	if k := n.ledgerState.SecurityParam(); k > 0 {
 		chainSelectorSecurityParam = uint64(k) //nolint:gosec
 	}
-	genesisWindowSlots := n.config.genesisWindowSlots
-	if genesisWindowSlots == 0 {
-		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
-			chainSelectorSecurityParam,
-			n.ledgerState.ActiveSlotCoeffRat(),
-		)
-	}
+	genesisWindowSlots, genesisDensityDisconnect := chainSelectorGenesisWindow(
+		n.config.genesisWindowSlots,
+		chainSelectorSecurityParam,
+		n.ledgerState.ActiveSlotCoeffRat(),
+	)
 	genesisSelectionMode := n.config.genesisBootstrap &&
 		!n.config.intersectTip &&
 		len(n.config.intersectPoints) == 0
-	n.chainSelector = chainselection.NewChainSelector(
-		n.buildChainSelectorConfig(
-			chainSelectorSecurityParam,
-			genesisSelectionMode,
-			genesisWindowSlots,
-		),
+	chainSelectorConfig := n.buildChainSelectorConfig(
+		chainSelectorSecurityParam,
+		genesisSelectionMode,
+		genesisWindowSlots,
 	)
+	if !genesisDensityDisconnect {
+		chainSelectorConfig.OnGenesisDensityDisconnect = nil
+	}
+	n.chainSelector = chainselection.NewChainSelector(chainSelectorConfig)
 	// Seed chain selection from the applied ledger tip before peers connect.
 	// Without this initial observation, the plausibility guard treats the
 	// local tip as block zero until the recycler's first tick, leaving a
@@ -2091,6 +2092,30 @@ func (n *Node) subscribeConnectionEvents() {
 		connmanager.InboundConnectionEventType,
 		func(evt event.Event) { n.ouroboros().HandleInboundConnEvent(evt) },
 	)
+}
+
+// chainSelectorGenesisWindow returns the Genesis window to give the chain
+// selector and whether the Genesis Density Disconnector may run over it. A
+// configured window, or ceil(3k/f) from the genesis parameters, is a Genesis
+// window. Without either, DefaultGenesisWindowSlots keeps the selector's exit
+// horizon unchanged, but density compared over that stand-in can disconnect
+// honest peers, so the disconnector stays off.
+func chainSelectorGenesisWindow(
+	configured uint64,
+	securityParam uint64,
+	activeSlotsCoeff *big.Rat,
+) (uint64, bool) {
+	if configured > 0 {
+		return configured, true
+	}
+	window := chainselection.GenesisWindowSlotsForParams(
+		securityParam,
+		activeSlotsCoeff,
+	)
+	if window > 0 {
+		return window, true
+	}
+	return chainselection.DefaultGenesisWindowSlots, false
 }
 
 // buildChainSelectorConfig assembles the ChainSelectorConfig this node passes

@@ -4975,7 +4975,9 @@ so a from-origin node can prefer the denser (honest) chain before it has the
 history to run the full Praos comparison. The window is derived from Shelley
 genesis params (`GenesisWindowSlotsForParams`) as `ceil(3k/f)` over the exact
 genesis rational, matching the reference node's `computeStabilityWindow`, or
-overridden by `genesisWindowSlots`. Each tracked peer keeps a bounded recent
+overridden by `genesisWindowSlots`. Without k and a positive f,
+`GenesisWindowSlotsForParams` returns 0 and the node falls back to
+`DefaultGenesisWindowSlots` (6480) for density ranking and the exit horizon. Each tracked peer keeps a bounded recent
 frontier of `(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
 `observedSlots` used for density), trimmed to the window and on rollback.
 That rolling frontier ranks peers before a fork is available locally; it is not
@@ -5053,10 +5055,12 @@ implemented by this type.
 **Genesis Density Disconnector** (`chainselection/density_disconnector.go`)
 disconnects peers whose candidate chain is provably sparser than another
 candidate's. It runs only in Genesis mode with `GenesisWindowSlots`
-configured, which the node always sets to 3k/f through
-`GenesisWindowSlotsForParams`; the selector's 3k-slot fallback holds about 3kf
-blocks, few enough that an honest short fork can lose a complete-window
-comparison, so the disconnector stays off without a configured window. It runs
+configured. The selector's own 3k-slot fallback holds about 3kf blocks, few
+enough that an honest short fork can lose a complete-window comparison, so the
+disconnector stays off without a configured window. The node wires the
+disconnector only when the window is operator-configured or derived as 3k/f;
+when it falls back to `DefaultGenesisWindowSlots` for want of k or f, it leaves
+`OnGenesisDensityDisconnect` unset. It runs
 from `EvaluateAndSwitch`, at most
 once per `GenesisDensityEvaluationInterval` (one second, as upstream's
 `gcfGDDRateLimit`), because the pairwise comparison is quadratic in the number
