@@ -14105,9 +14105,18 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
    update derived from the mark snapshot three epochs back — credit spendable
    rewards through `account_reward_delta`, return undistributed rewards to
    reserves, and route unspendable rewards to the treasury before governance
-   reads it. It is a no-op until the required reward inputs exist (the mark
-   snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
-   Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
+   reads it. The only epochs with no round are epoch 0, boundaries whose ended
+   or performance epoch is Byron, and none else. Any other boundary
+   whose required inputs are absent (ADA pots, mark snapshot, reward stake
+   inputs, or performance-epoch block counts) fails with
+   `errRequiredStakeRewardBasisUnavailable`, which names the new epoch and the
+   missing input and points the operator at re-running Mithril sync or
+   ledger-state import. `applyStakeRewards` wraps it in an
+   `errHaltLedgerPipeline` error and calls `FatalErrorFunc`, so the rollover
+   does not commit, the ledger tip stops advancing, and the node shuts down
+   rather than forging on a short reward state. The opportunistic precompute
+   reads the same inputs and returns without an error; see "Reward Calculation
+   And Precomputation". Epochs 1 and 2 are the bootstrap exceptions: each applies
    expansion and treasury tax synchronously with an empty Go distribution and
    returns the post-tax amount to reserves. Epoch 1 uses empty previous block
    counts, so its expansion is zero unless `d >= 0.8`. Neither is precomputed

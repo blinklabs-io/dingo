@@ -10707,3 +10707,131 @@ func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
 	require.Equal(t, uint64(9_800), reserves)
 	require.Equal(t, uint64(210), treasury)
 }
+
+// Each required input the authoritative boundary reads fails with an error
+// that names the epoch, the missing input and the operator recovery, while the
+// opportunistic precompute reading the same state stays silent and error-free.
+func TestRequiredRewardBasisErrorNamesEpochInputAndRecovery(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		setup     func(t *testing.T) (*LedgerState, *database.Database)
+		wantInput string
+		wantEpoch string
+		tolerated bool
+	}{
+		{
+			name: "missing ADA pots",
+			setup: func(t *testing.T) (*LedgerState, *database.Database) {
+				return newRewardCalculationTestLedger(t)
+			},
+			wantInput: "missing ADA pots",
+			wantEpoch: "pots_epoch=3",
+			tolerated: true,
+		},
+		{
+			name: "missing reward snapshot",
+			setup: func(t *testing.T) (*LedgerState, *database.Database) {
+				ls, db := newRewardCalculationTestLedger(t)
+				seedRetentionRewardEpochs(t, db)
+				return ls, db
+			},
+			wantInput: "missing reward snapshot",
+			wantEpoch: "reward_snapshot_epoch=1",
+			tolerated: true,
+		},
+		{
+			name: "pruned reward stake inputs",
+			setup: func(t *testing.T) (*LedgerState, *database.Database) {
+				ls, db := newRewardCalculationTestLedger(t)
+				seedRetentionRewardEpochs(t, db)
+				seedPrunedStakeInputSnapshot(
+					t, db, rewardCalcHash(0x55), rewardCalcHash(0x66),
+				)
+				return ls, db
+			},
+			wantInput: "reward stake inputs",
+			wantEpoch: "reward_snapshot_epoch=1",
+			tolerated: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ls, db := tc.setup(t)
+
+			txn := db.Transaction(false)
+			defer func() { _ = txn.Rollback() }()
+
+			app, ok, err := ls.calculateStakeRewardApplication(
+				txn, retentionNewEpoch, retentionBoundarySlot,
+				retentionBoundarySlot, true,
+			)
+			require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+			require.False(t, ok)
+			require.Nil(t, app)
+			assert.Contains(t, err.Error(), tc.wantInput)
+			assert.Contains(t, err.Error(), tc.wantEpoch)
+			assert.Contains(t, err.Error(), "new epoch 4")
+			assert.Contains(t, err.Error(), "re-running Mithril sync")
+			assert.Contains(t, err.Error(), "ledger-state import")
+			assert.Contains(t, err.Error(), "ledgerstate import warnings")
+
+			app, ok, err = ls.calculateStakeRewardApplication(
+				txn, retentionNewEpoch, retentionBoundarySlot,
+				retentionBoundarySlot, false,
+			)
+			require.NoError(t, err)
+			require.False(t, ok)
+			require.Nil(t, app)
+		})
+	}
+}
+
+func TestRequiredRewardBasisErrorNamesHiddenBlockCounts(t *testing.T) {
+	t.Parallel()
+
+	ls, db := seedRewardPrecomputeTimingState(t, 7)
+	require.NoError(t, db.Metadata().SetSyncState(
+		mithrilLedgerSlotSyncKey, "199", nil,
+	))
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+
+	_, ok, err := ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, true)
+	require.ErrorIs(t, err, errRequiredStakeRewardBasisUnavailable)
+	require.False(t, ok)
+	assert.Contains(t, err.Error(), "new epoch 4")
+	assert.Contains(t, err.Error(), "performance_epoch=2")
+	assert.Contains(t, err.Error(), "re-running Mithril sync")
+
+	_, ok, err = ls.calculateStakeRewardApplication(txn, 4, 1_200, 1_200, false)
+	require.NoError(t, err)
+	require.False(t, ok)
+}
+
+// The only absences the authoritative boundary accepts: epoch 0 has no round,
+// epochs 1 and 2 are bootstrap rounds, and a round whose ended epoch is Byron
+// is suppressed. Every other epoch from 3 up requires a reward round.
+func TestRewardRoundEnumeratedAbsences(t *testing.T) {
+	t.Parallel()
+
+	_, ok := stakeRewardEpochsForApplication(0)
+	require.False(t, ok, "epoch 0 has no reward round")
+	for _, e := range []uint64{1, 2} {
+		epochs, ok := stakeRewardEpochsForApplication(e)
+		require.True(t, ok, "epoch %d", e)
+		require.True(t, epochs.bootstrap, "epoch %d", e)
+	}
+	for e := uint64(3); e < 10; e++ {
+		epochs, ok := stakeRewardEpochsForApplication(e)
+		require.True(t, ok, "epoch %d", e)
+		require.False(t, epochs.bootstrap, "epoch %d", e)
+	}
+
+	ls, db := newRewardCalculationTestLedger(t)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, 0, 0)
+	}))
+}
