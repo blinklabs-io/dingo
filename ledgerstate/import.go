@@ -585,12 +585,9 @@ func ImportLedgerState(
 			}
 			certStatePoolsImported = poolsImported > 0
 
-			// The snapshot's balance is authoritative for every credential
-			// in importedAccounts, so drop their post-anchor reward journal
-			// rows without reversing them: replay then re-derives them
-			// against the snapshot balance. A credential the snapshot does
-			// not cover keeps its balance and journal together. See
-			// DATABASE.md, "account_reward_delta".
+			// The snapshot sets account.reward at its anchor. Clear later
+			// journal entries without reversing amounts applied against the
+			// pre-import balance. See DATABASE.md, "account_reward_delta".
 			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
 				slot, importedAccounts, nil,
 			); err != nil {

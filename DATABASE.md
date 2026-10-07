@@ -1010,14 +1010,10 @@ underflow. The snapshot value is authoritative for these credentials; replay
 inserts fresh rows against it. A credential the snapshot does not cover is
 left alone, so its balance and journal stay consistent with each other.
 
-The delete runs on every import. Catch-up and legacy reward repair imports
-always run with `Reconcile` set; any other import is a fresh bootstrap or a
-resume of one, which has no post-anchor journal rows, so the delete is a
-no-op there. An import resumed from a checkpoint at or past `certstate` but
-short of `tip` skips cert-state import, so it repeats the delete for the
-snapshot's accounts, re-derived from its cert state. A `tip` checkpoint marks a
-completed import whose journal may since hold legitimate post-anchor rows, so
-a re-run at `tip` deletes nothing.
+The cleanup also runs when an import resumes after cert-state but before tip:
+it derives the snapshot's credentials from cert state and repeats the
+idempotent delete. A `tip` checkpoint marks a completed import whose journal
+may contain legitimate post-anchor rows, so cleanup does not run there.
 
 Ordinary per-epoch delegator rewards applied through the deferred/precomputed
 round path keep their post-anchor rows across import: a `reward_credit_round`
