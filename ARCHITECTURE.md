@@ -13134,13 +13134,15 @@ producer absent from a populated snapshot always hard-rejects. See the retention
 section in `DATABASE.md` for the per-table
 detail.
 
-A skipped reward round is never made up later, and that has consequences
-well beyond the reward figures. Applying the round at the boundary into N
-requires this node's own `RewardSnapshot` for N-3 and `RewardAdaPots` for
-N-1; when either is absent the round is skipped, while the reference node
-credits it regardless. Reward balances — and the leadership stake
-distribution derived from them, since `reward_live_stake` sums UTxO plus
-reward — are then permanently short by that epoch's rewards. Leader
+At a boundary with a Shelley reward round, applying the round requires this
+node's own `RewardSnapshot` for N-3 and
+`RewardAdaPots` for N-1. When the authoritative boundary lacks either input,
+or lacks the retained stake inputs or performance block counts needed to
+consume them, it returns `errHaltLedgerPipeline` and stops before committing
+the boundary. Opportunistic precompute remains retryable while those inputs
+are not yet available. Continuing without the round would permanently shorten
+reward balances and the leadership stake distribution derived from them,
+since `reward_live_stake` sums UTxO plus reward. Leader
 eligibility compares a VRF value against a stake-derived threshold, so a
 sigma shortfall of eps flips a decision with probability about eps per
 block, and a flipped decision rejects a canonical block. Measured on preview:
@@ -13153,8 +13155,8 @@ predates the imported state or because an imported basis could not be derived
 without understating stake. The ledger-state import closes the pots half of
 that gap by seeding a `RewardAdaPots` row for the snapshot's own epoch from the
 state it already decodes -- treasury and reserves from `AccountState`, the fee
-pot from `UTxOState` -- so the round at the first boundary after import is not
-skipped for want of pots. The fee pot is decoded specifically for this,
+pot from `UTxOState` -- so the round at the first boundary after import has its
+required pots. The fee pot is decoded specifically for this,
 because it is an addend of the reward pot and a row seeded with zero fees
 would credit the round at the wrong amount rather than visibly not running
 it.
