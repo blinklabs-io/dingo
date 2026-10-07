@@ -817,7 +817,9 @@ func checkedSlotAdd(
 type eraBoundData struct {
 	epochs []models.Epoch
 	start  []any // [picosecondsBigInt, slot, epoch] or nil if era is empty
-	end    []any // same shape; nil for empty eras and populated current era
+	// end is either a bound tuple or nil for HFC EraUnbounded, which CBOR
+	// encodes as null. An empty era is identified by a nil start instead.
+	end any
 }
 
 func (ls *LedgerState) queryHardForkEraHistory(
@@ -975,8 +977,14 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		perEra[currentIdx].end = end
 
 		if hasKnownSuccessor {
+			boundedEnd, ok := end.([]any)
+			if !ok {
+				return nil, errors.New(
+					"hardfork: known transition has unbounded current era",
+				)
+			}
 			successor, err := eraHistorySuccessor(
-				shape, currentIdx+1, end, tipSlot,
+				shape, currentIdx+1, boundedEnd, tipSlot,
 			)
 			if err != nil {
 				return nil, err
@@ -989,7 +997,7 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	for i, data := range perEra {
 		entry := shape.Eras[i]
 		tmpParams := eraParamsCBOR(entry.Params)
-		if data.start == nil || data.end == nil {
+		if data.start == nil {
 			continue
 		}
 		retData = append(retData, []any{
@@ -1007,7 +1015,7 @@ func (ls *LedgerState) currentEraEnd(
 	idx int,
 	tipSlot uint64,
 	ti hardfork.TransitionInfo,
-) ([]any, error) {
+) (any, error) {
 	firstEp := era.epochs[0]
 	startRel, ok := era.start[0].(*big.Int)
 	if !ok {
@@ -1031,9 +1039,7 @@ func (ls *LedgerState) currentEraEnd(
 	}
 	endBound := summ.Eras[0].End
 	if endBound == nil {
-		return nil, errors.New(
-			"hardfork: current era End unbounded (SafeZoneSlots==0)",
-		)
+		return nil, nil
 	}
 	return []any{
 		durationToPicoseconds(endBound.RelativeTime),
@@ -1080,9 +1086,9 @@ func eraHistorySuccessor(
 	)
 	end := successor.End
 	if end == nil {
-		return eraBoundData{}, errors.New(
-			"hardfork: successor era End unbounded (SafeZoneSlots==0)",
-		)
+		return eraBoundData{
+			start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},
+		}, nil
 	}
 	return eraBoundData{
 		start: []any{new(big.Int).Set(startRel), startSlot, startEpoch},

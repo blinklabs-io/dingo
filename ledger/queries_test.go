@@ -978,6 +978,64 @@ func TestQueryHardForkEraHistory_TransitionImpossibleStartsAtEraBoundary(
 	assert.Equal(t, expectedEpoch, epoch)
 }
 
+func TestQueryHardForkEraHistory_TransitionImpossibleEncodesUnboundedEnd(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	shape, err := eras.BuildShape(cfg)
+	require.NoError(t, err)
+	shape.Eras[len(shape.Eras)-1].Params.SafeZoneSlots = 0
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		transitionInfo: hardfork.NewTransitionUnknown(),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(epochStartSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.evaluateTransitionImpossible()
+	require.Equal(t, hardfork.TransitionImpossible, ls.transitionInfo.State)
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryHardForkEraHistory(nil)
+	require.NoError(t, err)
+	eraList := result.(cbor.IndefLengthList)
+	require.Len(t, eraList, 1)
+	era := eraList[0].([]any)
+	assert.Nil(t, era[1], "EraUnbounded must be represented by CBOR null")
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded []any
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	require.Len(t, decoded, 1)
+	decodedEra := decoded[0].([]any)
+	assert.Nil(t, decodedEra[1], "EraUnbounded must encode as CBOR null")
+}
+
 // seedBlockAtSlot writes a minimal block index entry for slot/hash, enough
 // for database.BlockBySlot to find it -- Query's verifyPointOnChain doesn't
 // decode the block, only compares Hash, so no real CBOR content is needed.
@@ -2972,6 +3030,57 @@ func TestQueryHardForkEraHistory_TransitionKnownIncludesSuccessor(
 	assert.Equal(t, currentEnd, nextStart)
 	assert.Equal(t, successorEnd, nextEnd[1])
 	assert.Equal(t, knownEpoch+1, nextEnd[2])
+}
+
+func TestQueryHardForkEraHistory_TransitionKnownIncludesUnboundedSuccessor(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	const (
+		tipSlot        = uint64(200_000)
+		epochStartSlot = uint64(100_000)
+		epochLen       = uint(432_000)
+		slotLenMs      = uint(1_000)
+		epochId        = uint64(500)
+		knownEpoch     = uint64(502)
+	)
+
+	db := newTestDB(t)
+	require.NoError(t, db.SetEpoch(
+		epochStartSlot, epochId,
+		nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, slotLenMs, epochLen,
+		nil,
+	))
+
+	cfg := newTestEraHistoryCfg(t)
+	shape, err := eras.BuildShapeWithDijkstra(cfg, true)
+	require.NoError(t, err)
+	shape.Eras[len(shape.Eras)-1].Params.SafeZoneSlots = 0
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
+		transitionInfo: hardfork.NewTransitionKnown(knownEpoch),
+		currentTip: ochainsync.Tip{
+			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			EnableDijkstra:    true,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.cachedShape.Store(&shape)
+	ls.publishSnapshotsLocked()
+
+	result, err := ls.queryHardForkEraHistory(nil)
+	require.NoError(t, err)
+	eraList := result.(cbor.IndefLengthList)
+	require.Len(t, eraList, 2)
+	successor := eraList[1].([]any)
+	assert.Nil(t, successor[1], "EraUnbounded must be represented by CBOR null")
 }
 
 // TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone confirms
