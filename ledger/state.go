@@ -5326,6 +5326,7 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 	}
 	boundarySlot := snapshotEpoch.StartSlot + uint64(snapshotEpoch.LengthInSlots)
 	workingPParams := currentPParams
+	priorVersion, priorVersionErr := GetProtocolVersion(currentPParams)
 	var plutusV2CostModelWritten bool
 	if snapshotEra.Id != eras.ByronEraDesc.Id {
 		ownedPParams, err := cloneProtocolParametersForEra(
@@ -5377,7 +5378,29 @@ func (ls *LedgerState) prepareEraTransitionsForRollover(
 		if err != nil {
 			return nil, 0, nil, false, err
 		}
+		newVersion, newVersionErr := GetProtocolVersion(result.NewPParams)
+		if priorVersionErr == nil && newVersionErr == nil &&
+			priorVersion.Major != newVersion.Major {
+			if err := ls.timeRolloverPhase(
+				snapshotEpoch.EpochId+1,
+				"hardfork",
+				func() error {
+					return ls.applyIntraEraHardForkRule(
+						txn,
+						newVersion.Major,
+						boundarySlot,
+						snapshotEpoch.EpochId+1,
+					)
+				},
+			); err != nil {
+				return nil, 0, nil, false, fmt.Errorf(
+					"apply transition major-version HARDFORK: %w",
+					err,
+				)
+			}
+		}
 		workingPParams = result.NewPParams
+		priorVersion, priorVersionErr = newVersion, newVersionErr
 		workingEraID = result.NewEra.Id
 		results = append(results, result)
 	}

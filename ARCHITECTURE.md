@@ -13939,10 +13939,13 @@ changes in a fixed order, mirroring `cardano-ledger`'s sequencing:
 
 At an era boundary, Dingo first enacts any pending classic protocol-parameter
 update with the outgoing era's decoder, translates the resulting state into the
-incoming era, and then calls `processEpochRollover` with that era. This matches
-the hard-fork combinator's `extendToSlot`-before-TICK ordering while preserving
-legacy update fields that the translation removes. The incoming era therefore
-owns every EPOCH sub-rule below, including whether POOLREAP precedes SNAP.
+incoming era, applies any per-major-version HARDFORK state rule selected by the
+translated parameters, and then calls `processEpochRollover` with that era. This
+matches the hard-fork combinator's `extendToSlot`-before-TICK ordering while
+preserving legacy update fields that the translation removes. Intra-era major
+version changes still run HARDFORK after ENACT inside `processEpochRollover`.
+The incoming era therefore owns every EPOCH sub-rule below, including whether
+POOLREAP precedes SNAP.
 
 1. Delayed stake reward application (`applyStakeRewards`): apply the reward
    update derived from the mark snapshot three epochs back — credit spendable
