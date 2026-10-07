@@ -952,7 +952,10 @@ func (s *TokenRegistrySync) SyncOnce(
 			"url",
 			registryLogURL(s.sourceURL),
 		)
-		return 0, nil
+		return 0, fmt.Errorf(
+			"token registry snapshot rejected: unusable mappings: %d",
+			stage.skipped,
+		)
 	}
 	// The snapshot applied in full and carried something, so it is
 	// authoritative: retire subjects

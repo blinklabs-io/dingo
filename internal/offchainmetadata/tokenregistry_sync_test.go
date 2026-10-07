@@ -838,7 +838,7 @@ func TestTokenRegistrySyncSkipsMalformedMappings(t *testing.T) {
 
 	written, err := sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "unusable mappings: 2")
 	require.Zero(t, written)
 	require.Empty(t, store.snapshot())
 }
@@ -1054,7 +1054,7 @@ func TestTokenRegistrySyncSkipsEntryAboveRetainedBatchLimit(t *testing.T) {
 
 	written, err = sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "unusable mappings: 1")
 	require.Zero(t, written)
 	require.LessOrEqual(t, store.maxBatchBytes, maxBatchBytes)
 	require.Equal(t, prunesBefore, store.prunes,
@@ -1911,7 +1911,7 @@ func TestTokenRegistrySyncRollsBackWhenMappingsSkipped(t *testing.T) {
 
 	_, err = sync.SyncOnce(t.Context())
 
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "unusable mappings: 1")
 	require.Equal(
 		t,
 		prunesBefore,
