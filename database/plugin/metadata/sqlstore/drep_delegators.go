@@ -104,6 +104,21 @@ func removeAllDrepDelegators(
 		return err
 	}
 	if _, err := db.ExecContext(ctx, `
+INSERT INTO account_drep_clear (credential_tag, staking_key, added_slot)
+SELECT account.credential_tag, account.staking_key, ? FROM account
+WHERE EXISTS (
+    SELECT 1 FROM drep_delegator
+    WHERE drep_credential_tag = ? AND drep_credential = ?
+      AND removed_slot IS NULL
+      AND account.credential_tag = drep_delegator.stake_credential_tag
+      AND account.staking_key = drep_delegator.stake_credential
+)
+ON CONFLICT (credential_tag, staking_key, added_slot) DO NOTHING`,
+		removedSlot, drepTag, drepCredential,
+	); err != nil {
+		return fmt.Errorf("record DRep delegator account clears: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
 UPDATE account SET drep = NULL, drep_type = 0, added_slot = ?
 WHERE EXISTS (
     SELECT 1 FROM drep_delegator

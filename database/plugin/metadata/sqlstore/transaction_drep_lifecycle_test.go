@@ -232,6 +232,87 @@ WHERE drep_credential = ? AND removed_slot IS NULL`, drepOne).Scan(&drepOneMembe
 	}
 }
 
+func TestDrepDeregistrationClearSurvivesRollback(t *testing.T) {
+	t.Parallel()
+
+	store := newMigratedSQLiteStore(t)
+	drep := bytes.Repeat([]byte{0x67}, 28)
+	stake := bytes.Repeat([]byte{0x68}, 28)
+	require.NoError(t, store.CreateDrep(nil, &models.Drep{
+		CredentialTag: 0,
+		Credential:    drep,
+		AddedSlot:     1,
+		Active:        true,
+	}))
+	require.NoError(t, store.ImportAccount(&models.Account{
+		StakingKey:    stake,
+		CredentialTag: 0,
+		Drep:          drep,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     1,
+		CreatedSlot:   1,
+		Active:        true,
+	}, nil))
+
+	stakeHash := common.NewBlake2b224(stake)
+	delegation := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.VoteDelegationCertificate{
+			CertType:        uint(common.CertificateTypeVoteDelegation),
+			StakeCredential: common.Credential{CredType: 0, Credential: stakeHash},
+			Drep:            common.Drep{Type: common.DrepTypeAddrKeyHash, Credential: drep},
+		},
+	)
+	delegation.WithId(bytes.Repeat([]byte{0x69}, 32))
+	delegation.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		delegation,
+		ocommon.Point{Slot: 20, Hash: delegation.Hash().Bytes()},
+		0,
+		nil,
+		false,
+		nil,
+		10,
+	))
+
+	drepHash := common.NewBlake2b224(drep)
+	deregistration := mockledger.NewTransactionBuilder().WithCertificates(
+		&common.DeregistrationDrepCertificate{
+			CertType:       uint(common.CertificateTypeDeregistrationDrep),
+			DrepCredential: common.Credential{CredType: 0, Credential: drepHash},
+			Amount:         500,
+		},
+	)
+	deregistration.WithId(bytes.Repeat([]byte{0x6a}, 32))
+	deregistration.WithValid(true)
+	require.NoError(t, store.SetTransaction(
+		deregistration,
+		ocommon.Point{Slot: 30, Hash: deregistration.Hash().Bytes()},
+		0,
+		nil,
+		false,
+		nil,
+		10,
+	))
+
+	_, err := store.writeDB.Exec(`
+UPDATE account SET added_slot = 40
+WHERE credential_tag = 0 AND staking_key = ?`, stake)
+	require.NoError(t, err)
+	require.NoError(t, store.RestoreDrepStateAtSlot(35, nil))
+	require.NoError(t, store.RestoreAccountStateAtSlot(35, nil))
+	account, err := store.GetAccountByCredential(0, stake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Empty(t, account.Drep)
+
+	require.NoError(t, store.RestoreDrepStateAtSlot(25, nil))
+	require.NoError(t, store.RestoreAccountStateAtSlot(25, nil))
+	account, err = store.GetAccountByCredential(0, stake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, drep, account.Drep)
+}
+
 func TestPV10DRepTransitionRebuildsReverseDelegatorsFromAccounts(t *testing.T) {
 	t.Parallel()
 

@@ -376,7 +376,6 @@ CREATE TABLE deregistration (credential_tag integer, staking_key blob, added_slo
 func TestAccountDRepClearSchemaTranslatesAllDialects(t *testing.T) {
 	t.Parallel()
 	for _, dialect := range []string{"sqlite", "postgres", "mysql"} {
-		dialect := dialect
 		t.Run(dialect, func(t *testing.T) {
 			t.Parallel()
 			registry, err := registryForDialect(dialect)
