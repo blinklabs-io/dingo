@@ -18,8 +18,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Reasons reported by dingo_chainselection_stalled_total.
@@ -51,31 +51,32 @@ type chainSelectionMetrics struct {
 // Every label value is materialized here so a scrape reports an explicit 0
 // instead of a missing series before the first occurrence -- a stall counter
 // that only appears once the node has stalled is useless for alerting.
-func (n *Node) registerChainSelectionMetrics() {
+func (n *Node) registerChainSelectionMetrics(r *promutil.Registration) {
 	if n.config.promRegistry == nil {
 		return
 	}
-	factory := promauto.With(n.config.promRegistry)
 	metrics := &chainSelectionMetrics{
-		stalls: factory.NewCounterVec(
+		stalls: promutil.Register(r, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_chainselection_stalled_total",
 				Help: "times chain selection transitioned to having no selectable peer",
 			},
 			[]string{"reason"},
-		),
-		rollbackRegistrations: factory.NewCounterVec(
+		)),
+		rollbackRegistrations: promutil.Register(r, prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "dingo_chainselection_rollback_registrations_total",
 				Help: "attempts to register a peer into chain selection from a chainsync rollback on an untracked connection, by outcome",
 			},
 			[]string{"outcome"},
-		),
+		)),
 	}
-	metrics.gddDisconnects = factory.NewCounter(prometheus.CounterOpts{
-		Name: "dingo_chainselection_gdd_disconnects_total",
-		Help: "peers the Genesis Density Disconnector reported for serving a provably sparser chain, counted whether or not the connection was still open to close",
-	})
+	metrics.gddDisconnects = promutil.Register(r, prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainselection_gdd_disconnects_total",
+			Help: "peers the Genesis Density Disconnector reported for serving a provably sparser chain, counted whether or not the connection was still open to close",
+		},
+	))
 	for _, reason := range []string{
 		chainSelectionStallNoSelectablePeer,
 		chainSelectionStallGenesisCorroboration,
@@ -93,20 +94,20 @@ func (n *Node) registerChainSelectionMetrics() {
 	n.chainSelectionMetrics = metrics
 	// Both read 0 while the cap is inactive (caught up) so a scrape never
 	// reports a stale limit.
-	factory.NewGaugeFunc(
+	promutil.Register(r, prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "dingo_chainselection_loe_block_number",
 			Help: "highest block number chain selection may reach under the Limit on Eagerness, 0 when the cap is inactive",
 		},
 		func() float64 { return n.eagernessLimitGauge(false) },
-	)
-	factory.NewGaugeFunc(
+	))
+	promutil.Register(r, prometheus.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Name: "dingo_chainselection_loe_intersection_slot",
 			Help: "slot of the point common to all candidate fragments that anchors the Limit on Eagerness, 0 when inactive or no common point",
 		},
 		func() float64 { return n.eagernessLimitGauge(true) },
-	)
+	))
 }
 
 // eagernessLimitGauge reads the current Limit on Eagerness at scrape time:

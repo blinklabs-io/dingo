@@ -82,6 +82,12 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 	return n.validateBlockProducerStartupForClock(supportedSlot, supported)
 }
 
+func (n *Node) setEquivocationSelfPoolID(creds *forging.PoolCredentials) {
+	if creds != nil {
+		n.equivocation.setSelfPoolID(creds.GetPoolID().String())
+	}
+}
+
 func (n *Node) validateBlockProducerStartupAtSlot(
 	currentSlot uint64,
 ) (creds *forging.PoolCredentials, retErr error) {
@@ -687,15 +693,15 @@ func (n *Node) handleGenesisSnapshotError(err error) error {
 	)
 }
 
-// applyForgeTuning copies the operator-tunable forging knobs from the node
-// configuration onto the forger config. It is the one place that mapping
-// happens on the runtime path, so a test can assert it without standing up
-// a node: a knob dropped here reaches the forger as its zero value, which
-// silently reverts it to the built-in default and leaves yaml, env and CLI
-// with no effect at all.
+// applyForgeTuning is the runtime mapping for operator-configured forge knobs.
+// Keeping the mapping together lets its test catch any setting that would
+// otherwise stop affecting the forger when configuration wiring changes.
 func applyForgeTuning(fc *forging.ForgerConfig, cfg *Config) {
 	fc.ForgeSyncToleranceSlots = cfg.forgeSyncToleranceSlots
 	fc.ForgeStaleGapThresholdSlots = cfg.forgeStaleGapThresholdSlots
+	fc.ForgeUpstreamStalenessSlots = cfg.forgeUpstreamStalenessSlots
+	fc.ForgeAppliedTipStalenessSlots = cfg.forgeAppliedTipStalenessSlots
+	fc.ForgeEndorserBlockStalenessSlots = cfg.forgeEndorserBlockStalenessSlots
 	fc.ForgeEBSelectionReserve = cfg.forgeEBSelectionReserve
 	fc.ForgeEBMaxTxRefs = cfg.forgeEBMaxTxRefs
 	fc.ForgeEBMaxBytes = cfg.forgeEBMaxBytes
@@ -724,6 +730,7 @@ func (n *Node) startBlockProducer(
 			err,
 		)
 	}
+	n.setEquivocationSelfPoolID(creds)
 	started = append(started, func() {
 		if n.blockForger != nil {
 			n.blockForger.Stop()
@@ -925,12 +932,8 @@ func (n *Node) initBlockForger(
 		// mkCurrentBlockContext's EQ case. The primary chain supplies the
 		// fork context; LedgerState arbitrates with the same Praos
 		// comparison a peer's competing block goes through.
-		ChainContext:                       n.chainManager.PrimaryChain(),
-		SiblingAdopter:                     n.ledgerState,
-		ForgePrimaryChainTipToleranceSlots: n.config.forgePrimaryChainTipToleranceSlots,
-		ForgeUpstreamStalenessSlots:        n.config.forgeUpstreamStalenessSlots,
-		ForgeAppliedTipStalenessSlots:      n.config.forgeAppliedTipStalenessSlots,
-		ForgeEndorserBlockStalenessSlots:   n.config.forgeEndorserBlockStalenessSlots,
+		ChainContext:   n.chainManager.PrimaryChain(),
+		SiblingAdopter: n.ledgerState,
 		// Closure, not a method value: n.ouroboros is rebuilt live, so this
 		// resolves the current instance when the forge loop asks.
 		LeiosVerifiedEbSlot: func() uint64 {
@@ -1329,6 +1332,14 @@ func (a *slotClockAdapter) ChainTip() ocommon.Point {
 	return a.ledgerState.Tip().Point
 }
 
+func (a *slotClockAdapter) ChainTipSnapshot() ochainsync.Tip {
+	return a.ledgerState.Tip()
+}
+
+func (a *slotClockAdapter) ForgeTipSnapshot() (ochainsync.Tip, int) {
+	return a.ledgerState.ForgeTipSnapshot()
+}
+
 // ChainTipHash satisfies the deprecated forging.ChainTipHashProvider. The
 // forger no longer calls it: it takes the tip hash from ChainTip above,
 // which returns slot and hash from one snapshot. Kept so the adapter still
@@ -1349,6 +1360,12 @@ func (a *slotClockAdapter) PrimaryChainTip() ocommon.Point {
 	return a.ledgerState.PrimaryChainTip().Point
 }
 
+func (a *slotClockAdapter) PrimaryChainTipRelation(
+	point ocommon.Point,
+) (ochainsync.Tip, uint64, bool, error) {
+	return a.ledgerState.PrimaryChainTipRelation(point)
+}
+
 func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 	return a.ledgerState.NextSlotTime()
 }
@@ -1359,6 +1376,14 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 
 func (a *slotClockAdapter) UpstreamSyncStatus() (uint64, bool) {
 	return a.ledgerState.UpstreamSyncStatus()
+}
+
+func (a *slotClockAdapter) UpstreamSyncTip() (ochainsync.Tip, bool) {
+	return a.ledgerState.UpstreamSyncTip()
+}
+
+func (a *slotClockAdapter) SecurityParam() int {
+	return a.ledgerState.SecurityParam()
 }
 
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
@@ -1445,7 +1470,13 @@ func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 		)
 	}
 	hash, _, ok := leiosheader.ReferencedEndorserBlock(decoded.Header())
-	rbHash := lcommon.NewBlake2b256(tip.Point.Hash)
+	rbHash, err := lcommon.NewBlake2b256Checked(tip.Point.Hash)
+	if err != nil {
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
+			"parent block hash: %w",
+			err,
+		)
+	}
 	return rbHash, hash, ok, nil
 }
 

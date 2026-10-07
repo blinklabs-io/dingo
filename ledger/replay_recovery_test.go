@@ -49,6 +49,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -2552,15 +2553,18 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
+	// The error comes from the real apply path, driven with validation
+	// bypassed: a withdrawal one lovelace above the persisted balance stands
+	// in for a balance that changed between validation and apply.
+	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
+	require.NoError(t, ls.db.CreateAccount(nil, &models.Account{
+		StakingKey:    credential,
+		CredentialTag: 0,
+		Active:        true,
+		Reward:        types.Uint64(rewardWithdrawalTestBalance),
+	}))
 	validation := func() *txValidationError {
-		return &txValidationError{
-			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
-			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
-			Cause: fmt.Errorf(
-				"record transaction: reward withdrawal amount 78446537 exceeds account balance 78446536: %w",
-				models.ErrRewardWithdrawalExceedsBalance,
-			),
-		}
+		return applyOverBalanceWithdrawal(t, ls, credential)
 	}
 
 	recovered, err := ls.tryRecoverFromTxValidationError(validation())
@@ -2588,6 +2592,60 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 		models.ErrRewardWithdrawalExceedsBalance,
 		"the halt error must carry the underlying mismatch",
 	)
+}
+
+const rewardWithdrawalTestBalance = uint64(1000)
+
+// applyOverBalanceWithdrawal drives a withdrawal one lovelace above the
+// persisted reward balance of credential through LedgerDelta.apply and returns
+// the validation error it surfaces.
+func applyOverBalanceWithdrawal(
+	t *testing.T,
+	ls *LedgerState,
+	credential []byte,
+) *txValidationError {
+	t.Helper()
+	rewardAddr, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, credential...),
+	)
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(testHashBytes("over-balance-withdrawal-tx"))
+	builder.WithValid(true)
+	builder.WithWithdrawals(
+		map[*lcommon.Address]uint64{
+			&rewardAddr: rewardWithdrawalTestBalance + 1,
+		},
+	)
+	var tx lcommon.Transaction = builder
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		uint(shelley.EraIdShelley),
+		4,
+	)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	err = ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	})
+	require.Error(t, err)
+	validationErr, ok := errors.AsType[*txValidationError](err)
+	require.True(
+		t,
+		ok,
+		"an apply-time withdrawal mismatch must surface as a validation error, got %T: %v",
+		err,
+		err,
+	)
+	require.ErrorIs(t, err, models.ErrRewardWithdrawalExceedsBalance)
+	require.True(t, isRewardWithdrawalStateDivergence(err))
+	return validationErr
 }
 
 // The Shelley-family UTxO rule reports a withdrawal that does not match the
@@ -3039,6 +3097,17 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 		"Byron deterministic recovery must request a fresh ChainSync intersection",
 	)
 	assert.Equal(t, ls.Tip().Point, resync.Point)
+}
+
+func TestIsDeterministicTxValidationErrorClassifiesByronInputIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	assert.True(t, isDeterministicTxValidationError(fmt.Errorf(
+		"byron UTxO rule: %w",
+		eras.InputIndexByronError{Index: 1 << 16},
+	)))
 }
 
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {

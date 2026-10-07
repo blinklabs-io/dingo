@@ -22,6 +22,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -687,6 +689,45 @@ WHERE tx_id = ? AND output_idx = ?
 		); err != nil {
 			return fmt.Errorf(
 				"hydrate UTxO collateral-return provenance: %w",
+				err,
+			)
+		}
+	}
+	// A certified snapshot's live UTxO set declares this specific output live
+	// (DeletedSlot == 0) as of its anchor. If the conflicting local row still
+	// carries a spend, that spend can only have been recorded after the
+	// anchor: a row genuinely spent at or before the anchor would not appear
+	// in the snapshot's live set at all, so this branch never observes a
+	// settled pre-anchor spend. Clear it, scoped to this exact (tx_id,
+	// output_idx) reference only -- never a table-wide unspend -- so a later
+	// replay of the real post-anchor spending block finds the output live
+	// instead of failing with "utxo not found". Mirrors the columns
+	// SetUtxosNotDeletedAfterSlot's rollback path clears.
+	//
+	// ImportUtxos/ImportUtxosDeferredRewardLiveStakeRefresh (and so this
+	// conflict path) are also reached by database/transaction.go's
+	// ensureTransactionConsumedUtxos and ensureGapConsumedUtxos, which
+	// recover a missing input's producer row from the blob store rather than
+	// hydrate a certified snapshot. Neither can trigger this clause in
+	// practice: ensureGapConsumedUtxos always sets its own DeletedSlot to the
+	// consuming slot (never 0), and ensureTransactionConsumedUtxos only ever
+	// inserts a reference GetUtxoIncludingSpent just confirmed absent, so
+	// reaching this ON CONFLICT branch for it would require a concurrent
+	// writer to the same row within one block's write transaction -- which
+	// the single-writer block-apply pipeline does not have today. If that
+	// invariant ever changes, this clause would need a way to tell "a
+	// certified snapshot's own declaration" apart from "a locally
+	// reconstructed row that merely happens to declare DeletedSlot == 0".
+	if utxo.DeletedSlot == 0 {
+		if _, err := db.ExecContext(ctx, `
+UPDATE utxo
+SET deleted_slot = 0, spent_at_tx_id = NULL
+WHERE tx_id = ? AND output_idx = ? AND deleted_slot > 0`,
+			utxo.TxId,
+			utxo.OutputIdx,
+		); err != nil {
+			return fmt.Errorf(
+				"clear stale spend on re-imported live UTxO: %w",
 				err,
 			)
 		}
@@ -1450,7 +1491,10 @@ func (s *Store) utxoRefsByTxID(
 	for start := 0; start < len(txIDs); start += 400 {
 		end := min(start+400, len(txIDs))
 		batch := txIDs[start:end]
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		placeholders := strings.TrimSuffix(
+			strings.Repeat("?,", len(batch)),
+			",",
+		)
 		args := make([]any, len(batch))
 		for i, txID := range batch {
 			args[i] = txID
@@ -1704,12 +1748,57 @@ func (s *Store) GetUtxosByAddress(
 	maxResults int,
 	txn types.Txn,
 ) ([]models.Utxo, error) {
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddress",
+		patterns,
+		"utxo.deleted_slot = 0",
+		nil,
+		maxResults,
+		txn,
+	)
+}
+
+func (s *Store) GetUtxosByAddressAsOf(
+	patterns []models.UtxoAddressPattern,
+	atSlot uint64,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	sqlSlot, err := checkedInt64(atSlot)
+	if err != nil {
+		return nil, err
+	}
+	return s.utxosByAddressPatterns(
+		"GetUtxosByAddressAsOf",
+		patterns,
+		"utxo.added_slot <= ? AND "+
+			"(utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)",
+		[]any{sqlSlot, sqlSlot},
+		maxResults,
+		txn,
+	)
+}
+
+// utxosByAddressPatterns runs the chunked, bounded address lookup shared by
+// GetUtxosByAddress and GetUtxosByAddressAsOf. liveness selects which rows
+// count as unspent and is ANDed ahead of every chunk's address branches;
+// livenessArgs are its bind parameters and count against each chunk's
+// parameter budget.
+func (s *Store) utxosByAddressPatterns(
+	name string,
+	patterns []models.UtxoAddressPattern,
+	liveness string,
+	livenessArgs []any,
+	maxResults int,
+	txn types.Txn,
+) ([]models.Utxo, error) {
 	if len(patterns) == 0 {
 		return nil, nil
 	}
 	if maxResults <= 0 {
 		return nil, fmt.Errorf(
-			"GetUtxosByAddress: maxResults must be positive, got %d",
+			"%s: maxResults must be positive, got %d",
+			name,
 			maxResults,
 		)
 	}
@@ -1744,9 +1833,9 @@ func (s *Store) GetUtxosByAddress(
 	// too, or a chunk that fills exactly to paramLimit on WHERE-clause
 	// args alone produces a statement with paramLimit+1 total parameters,
 	// which the dialect may reject.
-	limitParamReserve := 0
+	limitParamReserve := len(livenessArgs)
 	if chunkQueryLimit > 0 {
-		limitParamReserve = 1
+		limitParamReserve++
 	}
 	type utxoKey struct {
 		txId string
@@ -1762,8 +1851,8 @@ func (s *Store) GetUtxosByAddress(
 		}
 		utxos, err := s.queryUtxos(
 			txn,
-			"utxo.deleted_slot = 0 AND ("+strings.Join(branches, " OR ")+")",
-			args,
+			liveness+" AND ("+strings.Join(branches, " OR ")+")",
+			append(slices.Clone(livenessArgs), args...),
 			"",
 			chunkQueryLimit,
 		)
@@ -1779,7 +1868,8 @@ func (s *Store) GetUtxosByAddress(
 			ret = append(ret, utxos[i])
 			if len(ret) > maxResults {
 				return fmt.Errorf(
-					"GetUtxosByAddress: %w (maxResults=%d)",
+					"%s: %w (maxResults=%d)",
+					name,
 					models.ErrTooManyUtxoResults,
 					maxResults,
 				)
@@ -1828,8 +1918,12 @@ func (s *Store) GetUtxosByAddress(
 // GetUtxosByAddressWithOrdering applies.
 func utxoOrderingPredicate(
 	query *models.UtxoWithOrderingQuery,
+	disqualifyLivenessIndex bool,
 ) (string, []any, error) {
 	predicate := "utxo.deleted_slot = 0"
+	if disqualifyLivenessIndex {
+		predicate = "+utxo.deleted_slot = 0"
+	}
 	args := []any{}
 	switch {
 	case query.MatchAllAddresses:
@@ -1903,7 +1997,18 @@ func (s *Store) GetUtxosByAddressWithOrdering(
 	if err != nil {
 		return nil, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	// Disqualify the low-selectivity liveness index only for exact payment
+	// lookups, where stale statistics can otherwise cause a full live-row scan.
+	hint := s.dialect.Name() == "sqlite" && len(query.AddressPatterns) == 1 &&
+		len(query.AddressPatterns[0].ExactAddress) > 0
+	if hint {
+		addr, decodeErr := lcommon.NewAddressFromBytes(
+			query.AddressPatterns[0].ExactAddress,
+		)
+		hint = decodeErr == nil &&
+			addr.PaymentKeyHash() != lcommon.NewBlake2b224(nil)
+	}
+	predicate, args, err := utxoOrderingPredicate(query, hint)
 	if err != nil {
 		return nil, fmt.Errorf("GetUtxosByAddressWithOrdering: %w", err)
 	}
@@ -1979,6 +2084,206 @@ ORDER BY ` + slotExpr + ` ` + orderDir + `, ` + blockIndexExpr + ` ` + orderDir 
 	return ret, nil
 }
 
+// GetUtxosWithHistory returns the retained lifecycle of matching outputs,
+// rather than limiting the query to the live UTxO set. The transaction joins
+// are deliberately separate: transaction_id or collateral_return_for_tx_id
+// identifies the producing row, while spent_at_tx_id stores the consuming
+// transaction hash.
+func (s *Store) GetUtxosWithHistory(
+	query *models.UtxoHistoryQuery,
+	txn types.Txn,
+) ([]models.UtxoWithHistory, error) {
+	if query == nil {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w",
+			models.ErrNilUtxoHistoryQuery,
+		)
+	}
+	if query.Status > models.UtxoHistoryStatusSpent {
+		return nil, fmt.Errorf(
+			"GetUtxosWithHistory: %w: %d",
+			models.ErrInvalidUtxoHistoryStatus,
+			query.Status,
+		)
+	}
+	db, ctx, err := s.readDBFromTxn(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	createdSlotExpr := `COALESCE(created_transaction.slot, utxo.added_slot)`
+	createdBlockIndexExpr := `COALESCE(created_transaction.block_index, 0)`
+	predicate := "1 = 1"
+	args := []any{}
+	switch {
+	case query.MatchAllAddresses:
+	case len(query.AddressPatterns) == 0:
+		predicate += " AND 1 = 0"
+	default:
+		branches := []string{}
+		for _, pattern := range query.AddressPatterns {
+			if err := models.AppendUtxoAddressPatternOrBranch(
+				&branches,
+				&args,
+				pattern,
+			); err != nil {
+				return nil, fmt.Errorf("GetUtxosWithHistory: %w", err)
+			}
+		}
+		if len(branches) == 0 {
+			predicate += " AND 1 = 0"
+		} else {
+			predicate += " AND (" + strings.Join(branches, " OR ") + ")"
+		}
+	}
+
+	switch query.Status {
+	case models.UtxoHistoryStatusAll:
+	case models.UtxoHistoryStatusUnspent:
+		predicate += " AND utxo.deleted_slot = 0"
+	case models.UtxoHistoryStatusSpent:
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.FilterByAsset {
+		if len(query.AssetPolicyID) == 0 {
+			return nil, fmt.Errorf(
+				"GetUtxosWithHistory: %w",
+				models.ErrEmptyAssetPolicyID,
+			)
+		}
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM asset
+     WHERE asset.utxo_id = utxo.id AND asset.policy_id = ?`
+		args = append(args, query.AssetPolicyID)
+		if query.AssetName != nil {
+			predicate += " AND asset.name = ?"
+			args = append(args, query.AssetName)
+		}
+		predicate += ")"
+	}
+	if len(query.TransactionID) > 0 {
+		predicate += " AND utxo.tx_id = ?"
+		args = append(args, query.TransactionID)
+	}
+	if query.OutputIndex != nil {
+		predicate += " AND utxo.output_idx = ?"
+		args = append(args, *query.OutputIndex)
+	}
+	if query.MetadataLabel != nil {
+		predicate += `
+ AND EXISTS (
+     SELECT 1 FROM transaction_metadata_label AS metadata_label
+     WHERE metadata_label.transaction_id = COALESCE(
+         utxo.transaction_id,
+         utxo.collateral_return_for_tx_id
+     )
+       AND metadata_label.label = ?
+ )`
+		args = append(args, strconv.FormatUint(*query.MetadataLabel, 10))
+	}
+	if query.CreatedAfter != nil {
+		predicate += " AND " + createdSlotExpr + " >= ?"
+		args = append(args, *query.CreatedAfter)
+	}
+	if query.CreatedBefore != nil {
+		predicate += " AND " + createdSlotExpr + " <= ?"
+		args = append(args, *query.CreatedBefore)
+	}
+	if query.SpentAfter != nil || query.SpentBefore != nil {
+		// deleted_slot = 0 is the live sentinel and must not match an
+		// inclusive spent bound at slot zero.
+		predicate += " AND utxo.deleted_slot != 0"
+	}
+	if query.SpentAfter != nil {
+		predicate += " AND utxo.deleted_slot >= ?"
+		args = append(args, *query.SpentAfter)
+	}
+	if query.SpentBefore != nil {
+		predicate += " AND utxo.deleted_slot <= ?"
+		args = append(args, *query.SpentBefore)
+	}
+	if query.After != nil {
+		comparison := ">"
+		if query.Descending {
+			comparison = "<"
+		}
+		predicate += `
+ AND (
+     ` + createdSlotExpr + ` ` + comparison + ` ?
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx ` + comparison + ` ?)
+     OR (` + createdSlotExpr + ` = ? AND ` + createdBlockIndexExpr + ` = ?
+         AND utxo.output_idx = ? AND utxo.tx_id ` + comparison + ` ?)
+ )`
+		args = append(
+			args,
+			query.After.Slot,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.Slot,
+			query.After.BlockIndex,
+			query.After.OutputIdx,
+			query.After.TxId,
+		)
+	}
+
+	orderDirection := "ASC"
+	if query.Descending {
+		orderDirection = "DESC"
+	}
+	statement := `
+SELECT ` + qualifiedSQLiteUtxoColumns + `,
+       ` + createdSlotExpr + `,
+       ` + createdBlockIndexExpr + `,
+       created_transaction.block_hash,
+       spent_transaction.block_hash
+FROM utxo
+LEFT JOIN "transaction" AS created_transaction
+    ON COALESCE(utxo.transaction_id, utxo.collateral_return_for_tx_id) = created_transaction.id
+LEFT JOIN "transaction" AS spent_transaction
+    ON utxo.spent_at_tx_id = spent_transaction.hash
+WHERE ` + predicate + `
+ORDER BY ` + createdSlotExpr + ` ` + orderDirection + `,
+         ` + createdBlockIndexExpr + ` ` + orderDirection + `,
+         utxo.output_idx ` + orderDirection + `,
+         utxo.tx_id ` + orderDirection
+	statement, args = addLimitOffset(statement, args, query.Limit, 0)
+	rows, err := db.QueryContext(
+		ctx,
+		s.dialect.Rebind(statement),
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ret := []models.UtxoWithHistory{}
+	for rows.Next() {
+		item, err := scanUtxoWithHistory(rows)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	pointers := make([]*models.Utxo, len(ret))
+	for i := range ret {
+		pointers[i] = &ret[i].Utxo
+	}
+	if err := s.loadUtxoAssets(ctx, db, pointers); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
 // CountUtxosByAddressWithOrdering returns the number of live UTxOs matching
 // query's coarse SQL predicate (address patterns and asset filter), without
 // materializing rows. It rejects a query whose address patterns require
@@ -2006,7 +2311,7 @@ func (s *Store) CountUtxosByAddressWithOrdering(
 	if err != nil {
 		return 0, err
 	}
-	predicate, args, err := utxoOrderingPredicate(query)
+	predicate, args, err := utxoOrderingPredicate(query, false)
 	if err != nil {
 		return 0, fmt.Errorf("CountUtxosByAddressWithOrdering: %w", err)
 	}
@@ -2555,6 +2860,52 @@ func scanUtxoWithOrdering(
 		Utxo:         *utxo,
 		TxSlot:       uint64(slot.Int64),
 		TxBlockIndex: uint32(blockIndex.Int64),
+	}, nil
+}
+
+func scanUtxoWithHistory(
+	rows *sql.Rows,
+) (models.UtxoWithHistory, error) {
+	var raw sqlitequery.Utxo
+	var slot sql.NullInt64
+	var blockIndex sql.NullInt64
+	var createdBlockHash []byte
+	var spentBlockHash []byte
+	err := rows.Scan(
+		&raw.TransactionID,
+		&raw.CollateralReturnForTxID,
+		&raw.TxID,
+		&raw.PaymentKey,
+		&raw.StakingKey,
+		&raw.CredentialTag,
+		&raw.DatumHash,
+		&raw.SpentAtTxID,
+		&raw.ReferencedByTxID,
+		&raw.CollateralByTxID,
+		&raw.ID,
+		&raw.AddedSlot,
+		&raw.DeletedSlot,
+		&raw.Amount,
+		&raw.OutputIdx,
+		&raw.PaymentScript,
+		&slot,
+		&blockIndex,
+		&createdBlockHash,
+		&spentBlockHash,
+	)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	utxo, err := utxoFromSQLite(raw)
+	if err != nil {
+		return models.UtxoWithHistory{}, err
+	}
+	return models.UtxoWithHistory{
+		Utxo:             *utxo,
+		TxSlot:           uint64(slot.Int64),
+		TxBlockIndex:     uint32(blockIndex.Int64),
+		CreatedBlockHash: createdBlockHash,
+		SpentBlockHash:   spentBlockHash,
 	}, nil
 }
 

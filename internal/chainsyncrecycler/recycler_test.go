@@ -42,8 +42,8 @@ import (
 // It does, but only because of the rollback registration in chainselection.
 // The sequence a plateau resync produces is:
 //
-//  1. the resync closes the connection (LocalTipPlateau is in
-//     chainsyncResyncRequiresFreshConnection, ouroboros/chainsync.go);
+//  1. the resync closes the connection (SubscribeChainsyncResync in
+//     ouroboros/chainsync.go closes it for every resync reason);
 //  2. the ConnectionClosedEvent subscription in node.go calls
 //     ChainSelector.RemovePeer, which drops the peer tip and clears
 //     bestPeerConn;

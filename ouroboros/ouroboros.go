@@ -141,6 +141,24 @@ type Ouroboros struct {
 	// one and only terminal callback has already run.
 	blockFetchDoneEarly map[blockFetchKey]struct{}
 	blockFetchMutex     sync.Mutex
+	// blockfetchForward holds, per connection, the blockfetch events
+	// received but not yet published to the ledger; see
+	// blockfetch_forward.go.
+	blockfetchForward   map[ouroboros.ConnectionId]*blockfetchForwardState
+	blockfetchForwardMu sync.Mutex
+	// blockfetchForwardSpawn and blockfetchForwardBeforePublish are nil in
+	// production. Tests set them to observe forwarder starts and to hold a
+	// forwarder inside its publish.
+	blockfetchForwardSpawn         func(ouroboros.ConnectionId, func(ouroboros.ConnectionId))
+	blockfetchForwardBeforePublish func(ouroboros.ConnectionId, event.Event)
+	// blockfetchForwardMaxBytes and blockfetchForwardMaxEvents override the
+	// per-connection forward queue bounds when positive; tests lower them.
+	// blockfetchForwardClose, when set, replaces blockfetchForwardCloseLive
+	// for a connection whose queue reached a bound; tests set it to observe
+	// the close.
+	blockfetchForwardMaxBytes  int
+	blockfetchForwardMaxEvents int
+	blockfetchForwardClose     func(ouroboros.ConnectionId)
 	// blockfetchConnClient resolves the live request-range client for a
 	// connection. Defaults to blockfetchConnClientLive; tests override it to
 	// exercise BlockfetchClientRequestRange without a live connection.
@@ -154,8 +172,19 @@ type Ouroboros struct {
 	// cleared by localstatequeryServerRelease and on connection close.
 	localstatequeryAcquiredPoints map[ouroboros.ConnectionId]ledger.QueryPoint
 	localstatequeryOwners         map[ouroboros.ConnectionId]*olocalstatequery.Server
-	localstatequeryAcquireMutex   sync.Mutex
-	blockfetchNoBlocksCounts      map[ouroboros.ConnectionId]blockfetchNoBlocksState
+	// localstatequerySessions holds each connection's acquired ledger
+	// snapshot. It is guarded by localstatequeryAcquireMutex like the maps
+	// above. localstatequeryAcquisitions tracks a snapshot open in progress so
+	// connection close can cancel it before it installs a session.
+	localstatequerySessions     map[ouroboros.ConnectionId]*localstatequerySession
+	localstatequeryAcquisitions map[ouroboros.ConnectionId]*localstatequeryAcquisition
+	// localstatequeryVerifyHook and localstatequeryVerifiedHook, when set,
+	// run just before Acquire verifies its point and just after the
+	// verified view opens. Tests use them to act at those exact moments.
+	localstatequeryVerifyHook   func()
+	localstatequeryVerifiedHook func()
+	localstatequeryAcquireMutex sync.Mutex
+	blockfetchNoBlocksCounts    map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// blockfetchRangeBytes returns the expected wire size of a block range
 	// for RangeRequest.ExpectedBytes, or 0 for no estimate. Defaults to the
 	// ledger's queued-header estimate; tests override it.
@@ -187,8 +216,6 @@ type Ouroboros struct {
 	futureHeaderResyncCtx    context.Context
 	futureHeaderResyncCancel context.CancelFunc
 	futureHeaderResyncClosed bool
-	// Per-connection mutex to serialize chainsync restarts
-	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
 	// Cached Leios EB material fetched from peers. This lets NtC
@@ -406,6 +433,10 @@ type OuroborosConfig struct {
 	ChainsyncObservePeerRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LocalStateQueryViewMaxLifetime bounds how long a connection may hold
+	// one acquired LocalStateQuery ledger snapshot before it is forcibly
+	// closed. Values of 0 or below use the default of five minutes.
+	LocalStateQueryViewMaxLifetime time.Duration
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
 	// server waits for a certifying ranking block's endorser block transaction
 	// closure to become available before closing the connection. When 0 (the
@@ -495,8 +526,25 @@ type blockfetchMetrics struct {
 	// dingo_ledger_block_stage_duration_seconds in the ledger package for
 	// the header-verify/validate/apply stages that follow once a decoded
 	// block reaches the ledger.
-	stageDuration *prometheus.HistogramVec
-	stageDecode   prometheus.Observer
+	//
+	// "enqueue" is the time the blockfetch receive callbacks spend handing
+	// an event to the per-connection forward queue. "ledger_publish" is the
+	// time the forwarder spends in EventBus.Publish delivering it to the
+	// ledger, which includes any ledger backpressure.
+	stageDuration      *prometheus.HistogramVec
+	stageDecode        prometheus.Observer
+	stageEnqueue       prometheus.Observer
+	stageLedgerPublish prometheus.Observer
+	// inFlightBytes/inFlightBlocks are the aggregate size and count of
+	// blockfetch events received from peers but not yet handed to the
+	// ledger by the per-connection forwarder (blockfetch_forward.go).
+	// Aggregated across every connection rather than labelled by
+	// connection_id, whose series would grow without bound with reconnects.
+	inFlightBytes  prometheus.Gauge
+	inFlightBlocks prometheus.Gauge
+	// forwardOverflows counts connections closed because their forward
+	// queue reached blockfetchForwardMaxBytes or blockfetchForwardMaxEvents.
+	forwardOverflows prometheus.Counter
 }
 
 // NewOuroboros builds a fully-wired Ouroboros. Every dependency is supplied up
@@ -558,6 +606,9 @@ func newOuroboros(cfg OuroborosConfig) *Ouroboros {
 		),
 		localstatequeryOwners: make(
 			map[ouroboros.ConnectionId]*olocalstatequery.Server,
+		),
+		localstatequerySessions: make(
+			map[ouroboros.ConnectionId]*localstatequerySession,
 		),
 		blockfetchNoBlocksCounts: make(
 			map[ouroboros.ConnectionId]blockfetchNoBlocksState,
@@ -682,6 +733,28 @@ func (o *Ouroboros) initBlockfetchMetrics() {
 	)
 	o.blockfetchMetrics.stageDecode = o.blockfetchMetrics.stageDuration.
 		WithLabelValues("decode")
+	o.blockfetchMetrics.stageEnqueue = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("enqueue")
+	o.blockfetchMetrics.stageLedgerPublish = o.blockfetchMetrics.stageDuration.
+		WithLabelValues("ledger_publish")
+	o.blockfetchMetrics.inFlightBytes = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_bytes",
+			Help: "aggregate bytes of blockfetch blocks received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.inFlightBlocks = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_blockfetch_inflight_blocks",
+			Help: "aggregate count of blockfetch events (blocks and batch-done markers) received from peers but not yet handed to the ledger, across all connections",
+		},
+	)
+	o.blockfetchMetrics.forwardOverflows = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_blockfetch_forward_overflow_total",
+			Help: "connections closed because their queue of blockfetch events awaiting the ledger reached its byte or event limit",
+		},
+	)
 }
 
 // isTrustedNtCListener reports whether l is verified reachable only from
@@ -951,6 +1024,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	connId := e.ConnectionId
 	o.cancelFutureHeaderResync(connId)
 
+	// Counts keep-alive pong timeouts.
+	if classifyKeepaliveTimeoutClose(e.Error) {
+		o.recordKeepaliveTimeout()
+	}
+
 	// Record connection stability observation for peer scoring
 	// Connection closure indicates reduced stability
 	if o.peerGov != nil {
@@ -991,12 +1069,11 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	}
 	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
+	o.releaseBlockfetchForwardOverflow(connId)
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()
 	delete(o.chainsyncStats, connId)
 	o.chainsyncMutex.Unlock()
-	// Clean up per-connection restart mutex
-	o.restartMu.Delete(connId)
 	// Clean up TxSubmission rate limiter state
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)

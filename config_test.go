@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/internal/promutil"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,88 +35,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable covers the config
-// plumbing for the header-frontier forge gate. The bound decides whether a
-// block producer forges or skips, so an operator whose ledger pipeline is
-// legitimately slow on their deployment must be able to reach it without
-// rebuilding; the gate's own default lives in ledger/forging and is only a
-// fallback for a zero value.
-//
-// Each hop is asserted separately, because a break in any one of them leaves
-// the knob silently inert: the loaded config carries the value, the node
-// Config snapshot copies it out of the loaded config, and the accessor
-// reports it.
-//
-// IMPORTANT: this covers the NewConfigFromInternal path only. The binary does
-// NOT take it -- internal/node.buildDingoConfig composes dingo.Config via
-// dingo.NewConfig from an explicit With... list, and a field missing from that
-// list is dropped no matter how green this test is. That is exactly how
-// ForgePrimaryChainTipToleranceSlots shipped inert while every layer here
-// asserted green. The runtime composition path is covered by
-// TestBuildDingoConfigWiresForgeTolerances in internal/node; presence of a
-// field at each layer is not wiring.
-func TestForgePrimaryChainTipToleranceSlotsIsOperatorTunable(t *testing.T) {
-	t.Run("explicit value survives every hop", func(t *testing.T) {
-		loaded := &internalconfig.Config{
-			ForgePrimaryChainTipToleranceSlots: 42,
-		}
-		c := &Config{cfg: loaded}
-		// syncCompatFields is what the loaded-config constructor runs to
-		// project the parsed config onto the fields the node reads.
-		c.syncCompatFields()
-		require.Equal(
-			t,
-			uint64(42),
-			c.ForgePrimaryChainTipToleranceSlots(),
-			"loaded config value must reach the accessor",
-		)
-		require.Equal(
-			t,
-			uint64(42),
-			c.forgePrimaryChainTipToleranceSlots,
-			"the node Config snapshot the forger reads must carry it",
-		)
-	})
-
-	t.Run("option func sets it", func(t *testing.T) {
-		c := NewConfig(WithForgePrimaryChainTipToleranceSlots(17))
-		require.Equal(t, uint64(17), c.ForgePrimaryChainTipToleranceSlots())
-		c.syncCompatFields()
-		require.Equal(t, uint64(17), c.forgePrimaryChainTipToleranceSlots)
-	})
-
-	t.Run("defaults fill an unset value", func(t *testing.T) {
-		loaded := internalconfig.Config{}
-		loaded.ApplyDefaults()
-		require.Equal(
-			t,
-			uint64(internalconfig.DefaultForgePrimaryChainTipToleranceSlots),
-			loaded.ForgePrimaryChainTipToleranceSlots,
-		)
-		require.Equal(
-			t,
-			uint64(5),
-			loaded.ForgePrimaryChainTipToleranceSlots,
-			"the documented default must not drift silently",
-		)
-	})
-
-	t.Run(
-		"an explicit value is not overwritten by defaults",
-		func(t *testing.T) {
-			loaded := internalconfig.Config{
-				ForgePrimaryChainTipToleranceSlots: 9,
-			}
-			loaded.ApplyDefaults()
-			require.Equal(
-				t,
-				uint64(9),
-				loaded.ForgePrimaryChainTipToleranceSlots,
-			)
-		},
-	)
-}
 
 // TestForgeStalenessBoundsAreOperatorTunable covers the config plumbing for
 // the three opt-in forge staleness bounds.
@@ -1118,7 +1037,7 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 
 	reg := prometheus.NewRegistry()
 	n := &Node{config: Config{promRegistry: reg}}
-	n.registerRTSMetrics()
+	n.registerRTSMetrics(promutil.NewRegistration(reg))
 	require.NotNil(
 		t,
 		n.rtsMetrics,

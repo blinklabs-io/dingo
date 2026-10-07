@@ -633,7 +633,7 @@ func TestQueryHardForkEraHistory_EmitsAllKnownEras(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
 	require.True(t, ok)
@@ -706,7 +706,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_TipNearEpochEnd(
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	eraList := result.(cbor.IndefLengthList)
 	lastEra := eraList[len(eraList)-1].([]any)
@@ -795,7 +795,7 @@ func TestQueryHardForkEraHistory_AtEpochOverride_SurfacesKnownEnd(
 	require.Equal(t, override, ls.transitionInfo.KnownEpoch)
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
 	require.True(t, ok)
@@ -862,7 +862,7 @@ func TestQueryHardForkEraHistory_AdjacentErasContiguous(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	list, ok := result.(cbor.IndefLengthList)
 	require.True(t, ok)
@@ -967,7 +967,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_MultiEpochEra(
 	}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 	eraList := result.(cbor.IndefLengthList)
 	lastEra := eraList[len(eraList)-1].([]any)
@@ -1820,7 +1820,7 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -1859,7 +1859,7 @@ func TestQueryShelleyUtxoByAddress_EmptySlice(t *testing.T) {
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyUtxoByAddress(nil)
+	result, err := ls.queryShelleyUtxoByAddress(nil, QueryPoint{}, nil)
 	require.NoError(t, err)
 	// Should return []any{empty map}
 	arr, ok := result.([]any)
@@ -1921,7 +1921,11 @@ func TestQueryShelleyUtxoByAddress_MultipleAddresses(t *testing.T) {
 	seedAddressUtxo(addr2, txId2, 2_000_000)
 
 	ls := &LedgerState{db: db}
-	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr1, addr2})
+	result, err := ls.queryShelleyUtxoByAddress(
+		[]ledger.Address{addr1, addr2},
+		QueryPoint{},
+		nil,
+	)
 	require.NoError(t, err)
 
 	arr, ok := result.([]any)
@@ -2085,7 +2089,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 		poolHash28(0x11),
 		poolHash28(0x99),
 	}
-	result := stakePoolsResult(keyHashes)
+	result, err := stakePoolsResult(keyHashes)
+	require.NoError(t, err)
 
 	// Wire shape: []any{ cbor.Set{ poolIds... } }
 	require.Len(t, result, 1)
@@ -2120,7 +2125,8 @@ func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
 func TestStakePoolsResult_Empty(t *testing.T) {
 	t.Parallel()
 
-	result := stakePoolsResult(nil)
+	result, err := stakePoolsResult(nil)
+	require.NoError(t, err)
 	require.Len(t, result, 1)
 	set, ok := result[0].(cbor.Set)
 	require.True(t, ok, "inner element must be a cbor.Set")
@@ -2148,7 +2154,7 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.NoError(t, err)
 	// Wire shape: []any{ map }. cardano-cli expects the result map wrapped in
 	// the single-element result array; verified against cardano-node, whose
@@ -2200,7 +2206,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyDRepState(nil)
+	result, err := ls.queryShelleyDRepState(nil, nil)
 	require.NoError(t, err)
 
 	encoded, err := cbor.Encode(result)
@@ -2230,7 +2236,7 @@ func TestQueryShelleyAccountState_Empty(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
-	result, err := ls.queryShelleyAccountState()
+	result, err := ls.queryShelleyAccountState(QueryPoint{}, nil)
 	require.NoError(t, err)
 	arr, ok := result.([]any)
 	require.True(t, ok, "expected []any wrapper")
@@ -2297,7 +2303,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_EmptyCreds(
 	t.Parallel()
 
 	ls := &LedgerState{}
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(nil)
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(nil, nil)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
 	assert.Empty(t, dels, "delegations map should be empty for empty input")
@@ -2318,6 +2324,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_UnknownCred(
 	}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		[]olocalstatequery.StakeCredential{cred},
+		nil,
 	)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
@@ -2346,6 +2353,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(
 	}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		[]olocalstatequery.StakeCredential{cred},
+		nil,
 	)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
@@ -2386,6 +2394,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(
 	}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		[]olocalstatequery.StakeCredential{cred},
+		nil,
 	)
 	require.NoError(t, err)
 	_, rwds := unwrapFilteredDelegationResult(t, result)
@@ -2418,6 +2427,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(
 	}
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		[]olocalstatequery.StakeCredential{cred},
+		nil,
 	)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
@@ -2459,7 +2469,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 		{Tag: 0, Bytes: toBlake2b224(undelegatedKey)},
 		{Tag: 0, Bytes: toBlake2b224(unknownKey)},
 	}
-	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(creds)
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(creds, nil)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
 
@@ -2519,6 +2529,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(
 
 	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
 		[]olocalstatequery.StakeCredential{keyCred, scriptCred},
+		nil,
 	)
 	require.NoError(t, err)
 	dels, rwds := unwrapFilteredDelegationResult(t, result)
@@ -2579,6 +2590,8 @@ func TestQueryShelleyStakeDelegDeposits(t *testing.T) {
 	}
 	result, err := ls.queryShelleyStakeDelegDeposits(
 		[]olocalstatequery.StakeCredential{queryCred, unknownCred},
+		QueryPoint{},
+		nil,
 	)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
@@ -2618,6 +2631,7 @@ func TestQueryShelleyFilteredVoteDelegatees(t *testing.T) {
 
 	result, err := ls.queryShelleyFilteredVoteDelegatees(
 		[]lcommon.Credential{cred},
+		nil,
 	)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
@@ -2677,7 +2691,7 @@ func TestQueryShelleyGetProposalsReturnsDepositProcedure(t *testing.T) {
 	ls := &LedgerState{db: db}
 	ls.publishSnapshotsLocked()
 
-	result, err := ls.queryShelleyGetProposals(nil)
+	result, err := ls.queryShelleyGetProposals(nil, nil)
 	require.NoError(t, err)
 	outer, ok := result.([]any)
 	require.True(t, ok)
@@ -2878,7 +2892,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -2958,7 +2972,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3028,7 +3042,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3103,7 +3117,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3164,7 +3178,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList := result.(cbor.IndefLengthList)
@@ -3232,7 +3246,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(
 	}
 
 	eraEndSlot := func(ls *LedgerState) uint64 {
-		result, err := ls.queryHardForkEraHistory()
+		result, err := ls.queryHardForkEraHistory(nil)
 		require.NoError(t, err)
 		eraList := result.(cbor.IndefLengthList)
 		lastEra := eraList[len(eraList)-1].([]any)
@@ -3487,7 +3501,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3595,7 +3609,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3729,7 +3743,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(
 	}
 
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryHardForkEraHistory()
+	result, err := ls.queryHardForkEraHistory(nil)
 	require.NoError(t, err)
 
 	eraList, ok := result.(cbor.IndefLengthList)
@@ -3812,7 +3826,7 @@ func TestQueryChainBlockNoAtGenesis(t *testing.T) {
 
 	ls := &LedgerState{}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo()
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// WithOrigin at genesis: [0]
 	assert.Equal(t, []any{0}, result)
@@ -3830,7 +3844,7 @@ func TestQueryChainBlockNoAtBlock(t *testing.T) {
 		BlockNumber: 12345,
 	}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo()
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// WithOrigin at block: [1, blockNo]
 	assert.Equal(t, []any{1, uint64(12345)}, result)
@@ -3848,7 +3862,7 @@ func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
 		BlockNumber: 0,
 	}
 	ls.publishSnapshotsLocked()
-	result, err := ls.queryChainBlockNo()
+	result, err := ls.queryChainBlockNo(QueryPoint{}, nil)
 	assert.NoError(t, err)
 	// Cardano block numbers are 0-indexed, so block 0 is not origin.
 	assert.Equal(t, []any{1, uint64(0)}, result)
@@ -4163,6 +4177,7 @@ func TestVerifyPointQueryable_APIStorageMode_PastRetentionFloor_Accepted(
 	require.NoError(t, ls.db.SetPParams(
 		historicalCbor, 300, 3, conwayEraId, nil,
 	))
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(1050, repeatedBytes(32, 0x0C)),
 	}, nil))
@@ -4223,18 +4238,13 @@ func TestVerifyPointQueryable_NoNetworkStateRow_Rejected(t *testing.T) {
 	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
 }
 
-// TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive
-// covers the companion case: an unconditional network_state floor would
-// reject a point every real query would have answered whenever
-// totalCirculatingSupply itself never reaches GetNetworkStateAsOfSlot --
-// no CardanoNodeConfig (as here, and as every other ledger test in this
-// repository already constructs a LedgerState), no ShelleyGenesis, or a
-// genesis with no MaxLovelaceSupply. Identical to
-// TestVerifyPointQueryable_NoNetworkStateRow_Rejected (same missing row)
-// except CardanoNodeConfig is left nil, so this one must accept where that
-// one must reject -- proving the floor is genuinely conditional, not just
-// present or absent.
-func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
+// TestVerifyPointQueryable_NoNetworkStateRow_RejectedWithoutGenesis covers
+// the case TestVerifyPointQueryable_NoNetworkStateRow_Rejected cannot: with
+// CardanoNodeConfig nil, totalCirculatingSupply never reads network_state, so
+// the stake-distribution floor is inactive, but GetAccountState still needs
+// a row at or before the point. The point must be refused at Acquire, and
+// accepted once a row covers it.
+func TestVerifyPointQueryable_NoNetworkStateRow_RejectedWithoutGenesis(
 	t *testing.T,
 ) {
 	t.Parallel()
@@ -4254,9 +4264,13 @@ func TestVerifyPointQueryable_NoNetworkStateRow_AcceptedWhenFloorInactive(
 	require.NoError(t, db.SetTip(ochainsync.Tip{
 		Point: ocommon.NewPoint(350, hash),
 	}, nil))
+	at := QueryPoint{Slot: 350, Hash: hash}
 
-	err := ls.VerifyPointQueryable(nil, QueryPoint{Slot: 350, Hash: hash})
-	require.NoError(t, err)
+	err := ls.VerifyPointQueryable(nil, at)
+	require.ErrorIs(t, err, ErrHistoricalStateUnavailable)
+
+	require.NoError(t, db.Metadata().SetNetworkState(0, 0, 0, nil))
+	require.NoError(t, ls.VerifyPointQueryable(nil, at))
 }
 
 // TestVerifyPointQueryable_UnknownEraId_Rejected covers a regression:

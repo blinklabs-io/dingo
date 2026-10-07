@@ -86,6 +86,8 @@ type LedgerDelta struct {
 	// context, where every consumed input's producer must already be applied and
 	// live. See BatchedTxIngestOpts.StrictAppliedInputConservation.
 	strictConsumedInputs bool
+	closureContextSlot   *uint64
+	stageApplyEvents     func([]TransactionEvent)
 }
 
 func NewLedgerDelta(
@@ -102,6 +104,8 @@ func NewLedgerDelta(
 	delta.expandedIndexOffset = 0
 	delta.skipConsumedInputRecovery = false
 	delta.strictConsumedInputs = false
+	delta.closureContextSlot = nil
+	delta.stageApplyEvents = nil
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -123,6 +127,8 @@ func (d *LedgerDelta) Release() {
 	d.expandedIndexOffset = 0
 	d.skipConsumedInputRecovery = false
 	d.strictConsumedInputs = false
+	d.closureContextSlot = nil
+	d.stageApplyEvents = nil
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -229,6 +235,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				txn,
 				database.BatchedTxIngestOpts{
 					SkipConsumedInputRecovery:      d.skipConsumedInputRecovery,
+					LedgerContextSlot:              d.closureContextSlot,
 					StrictAppliedInputConservation: d.strictConsumedInputs,
 					SkipWithdrawalWitnessWrite:     !ls.config.DelegatorInactivityEnabled,
 				},
@@ -254,7 +261,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 				return fmt.Errorf("apply transaction body %d direct deposits: %w", levelIndex, err)
 			}
 			if level.IsValid() {
-				if err := d.processGovernance(ls, level, txn); err != nil {
+				if err := d.processGovernance(
+					ls, level, uint32(storageIndex), txn, //nolint:gosec
+				); err != nil {
 					return fmt.Errorf("process transaction body %d governance: %w", levelIndex, err)
 				}
 			}
@@ -322,7 +331,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			Rollback:    false,
 		})
 	}
-	if len(applyEvents) > 0 {
+	if len(applyEvents) > 0 && d.stageApplyEvents != nil {
+		d.stageApplyEvents(applyEvents)
+	} else if len(applyEvents) > 0 {
 		txn.AfterCommit(func() {
 			if ls.beforeTransactionApplyPublish != nil {
 				ls.beforeTransactionApplyPublish()
@@ -434,6 +445,7 @@ func (d *LedgerDelta) recordNetworkDonations(
 func (d *LedgerDelta) processGovernance(
 	ls *LedgerState,
 	tx lcommon.Transaction,
+	txIndex uint32,
 	txn *database.Txn,
 ) error {
 	proposals := tx.ProposalProcedures()
@@ -466,6 +478,7 @@ func (d *LedgerDelta) processGovernance(
 		if err := governance.ProcessProposals(
 			tx,
 			d.Point,
+			txIndex,
 			currentEpoch,
 			conwayPParams.GovActionValidityPeriod,
 			ls.db,

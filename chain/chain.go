@@ -162,6 +162,54 @@ func (c *Chain) Tip() ochainsync.Tip {
 	return c.currentTip
 }
 
+// TipRelation returns the current tip, the number of blocks between point and
+// that tip, and whether point is on the chain ending at the returned tip.
+// The tip and relation are read under the same chain lock. Origin is an
+// ancestor of every chain; points retained only in the block store after a
+// rollback are not ancestors.
+func (c *Chain) TipRelation(
+	point ocommon.Point,
+) (tip ochainsync.Tip, depth uint64, ancestor bool, err error) {
+	if c == nil {
+		return ochainsync.Tip{}, 0, false, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	if err := c.reconcile(); err != nil {
+		return ochainsync.Tip{}, 0, false, err
+	}
+	unlockBlockIndexReadLocks := c.lockBlockIndexReadLocks()
+	defer unlockBlockIndexReadLocks()
+	tip = c.currentTip
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		if c.tipBlockIndex >= initialBlockIndex {
+			return tip, c.tipBlockIndex, true, nil
+		}
+		return tip, 0, true, nil
+	}
+	block, err := c.manager.blockByPoint(point, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return tip, 0, false, nil
+		}
+		return tip, 0, false, err
+	}
+	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
+		return tip, 0, false, nil
+	}
+	activeBlock, err := c.blockByIndexLocked(block.ID)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return tip, 0, false, nil
+		}
+		return tip, 0, false, err
+	}
+	if activeBlock.Slot != point.Slot || !bytes.Equal(activeBlock.Hash, point.Hash) {
+		return tip, 0, false, nil
+	}
+	return tip, c.tipBlockIndex - block.ID, true, nil
+}
+
 // WithTip runs fn while holding the chain mutex. It is intended for operations
 // that must bind a result to the exact tip snapshot they observed, such as
 // signing a block header. fn must not call back into c or block on a chain
@@ -393,8 +441,10 @@ func (c *Chain) MaxQueuedHeaders() int {
 		return DefaultMaxQueuedHeaders
 	}
 	// Before SetLedger succeeds, securityParam is zero and the default
-	// floor applies (tests or early bootstrap only).
-	if sp := c.manager.securityParam; sp > 0 {
+	// floor applies (tests or early bootstrap only). Read through the
+	// manager lock: addBlockHeader calls this holding only c.mutex, and
+	// SetLedger can run again while headers are arriving.
+	if sp := c.manager.SecurityParam(); sp > 0 {
 		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
 	return DefaultMaxQueuedHeaders
@@ -952,6 +1002,16 @@ func (c *Chain) addBlockLocked(
 	if len(blockHashBytes) == 0 {
 		blockHashBytes = block.Hash().Bytes()
 		point = ocommon.NewPoint(block.SlotNumber(), blockHashBytes)
+	}
+	// The hash is stored as the block's key and read back into fixed-width
+	// hash types, so a wrong length is refused here rather than persisted.
+	if len(blockHashBytes) != lcommon.Blake2b256Size {
+		return event.Event{}, fmt.Errorf(
+			"block hash at slot %d: expected %d bytes, got %d",
+			point.Slot,
+			lcommon.Blake2b256Size,
+			len(blockHashBytes),
+		)
 	}
 	blockPrevHashBytes := []byte(nil)
 	blockNumber := block.BlockNumber()
@@ -2310,6 +2370,47 @@ func (c *Chain) PointAtDepth(
 	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
 }
 
+// PointAtDepthFrom returns the point depth blocks behind from when from is on
+// this chain. The relation and result are resolved under one chain lock, so a
+// concurrent tip change cannot move the anchor.
+func (c *Chain) PointAtDepthFrom(
+	from ocommon.Point,
+	depth uint64,
+) (point ocommon.Point, found bool, err error) {
+	if c == nil {
+		return ocommon.Point{}, false, errors.New("chain is nil")
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	unlocks := c.lockBlockIndexReadLocks()
+	defer unlocks()
+	block, err := c.manager.blockByPoint(from, nil)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
+		return ocommon.Point{}, false, nil
+	}
+	active, err := c.blockByIndexLocked(block.ID)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if active.Slot != from.Slot || !bytes.Equal(active.Hash, from.Hash) {
+		return ocommon.Point{}, false, nil
+	}
+	if depth >= block.ID {
+		return ocommon.Point{}, false, nil
+	}
+	if depth == 0 {
+		return ocommon.NewPoint(active.Slot, active.Hash), true, nil
+	}
+	ancestor, err := c.blockByIndexLocked(block.ID - depth)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	return ocommon.NewPoint(ancestor.Slot, ancestor.Hash), true, nil
+}
+
 // IntersectPoints returns up to count points in descending order for
 // chainsync FindIntersect. It keeps a dense window near the tip and
 // then samples exponentially older blocks so lagging peers can still
@@ -2433,6 +2534,26 @@ func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
 
 func (c *Chain) FirstVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
 	return c.firstHeaderMatchesPoint(point, true)
+}
+
+// QueuedVerifiedHeaderMatchesPoint reports whether any queued header matches
+// point by slot and hash and had its stateless crypto verified before
+// queueing. Blockfetch buffers fetched blocks before adding them to the
+// chain, so a fetched block's own header is usually queued behind the head.
+func (c *Chain) QueuedVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
+	if c == nil {
+		return false
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	for i := range c.headers {
+		header := &c.headers[i]
+		if header.point.Slot == point.Slot &&
+			bytes.Equal(header.point.Hash, point.Hash) {
+			return header.cryptoVerified
+		}
+	}
+	return false
 }
 
 func (c *Chain) firstHeaderMatchesPoint(

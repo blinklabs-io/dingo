@@ -277,6 +277,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// SQLite without a data directory is a shared-cache in-memory store whose
+	// table locks block the ledger's writes while any read transaction is
+	// open, which an acquired LocalStateQuery snapshot always holds.
+	if c.DatabasePath == "" &&
+		(c.Plugins.Storage.Metadata.Provider == "" ||
+			c.Plugins.Storage.Metadata.Provider == "sqlite") {
+		errs = append(errs, errors.New(
+			"databasePath must be set when the metadata provider is sqlite: "+
+				"an in-memory SQLite store blocks block production while "+
+				"a LocalStateQuery snapshot is held",
+		))
+	}
+
 	// Load mode requires a source ImmutableDB
 	if effectiveMode == RunModeLoad && c.ImmutableDbPath == "" {
 		errs = append(errs, errors.New(
@@ -300,7 +313,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	//     that port for the hours the bootstrap takes and a refused probe
 	//     has the container replaced mid-download;
 	//   - bark: serving modes only (not storage-gated);
-	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
+	//   - UTxORPC, Blockfrost, Kupo, Mesh, Midnight: serving modes under API
 	//     storage. Dev mode forces API storage on at startup, and node.Run
 	//     keys that off the *configured* runMode — `dingo serve` with
 	//     runMode "dev" still runs dev — so the configured mode is
@@ -315,7 +328,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	midnightServer := apiListeners && c.Midnight.ServerEnabled
 	utxorpcPort := APIPluginPort(c.Plugins.API.Utxorpc)
 	blockfrostPort := APIPluginPort(c.Plugins.API.Blockfrost)
+	kupoPort := APIPluginPort(c.Plugins.API.Kupo)
 	meshPort := APIPluginPort(c.Plugins.API.Mesh)
+	mcpHost := "127.0.0.1"
+	if host, ok := c.Plugins.API.Mcp.Config["host"].(string); ok {
+		mcpHost = host
+		if host == "" {
+			mcpHost = c.BindAddr
+		}
+	}
 	// Each entry's host is the bind address the listener actually uses
 	// at runtime: bindAddr for public listeners, privateBindAddr for the
 	// private listener, debugBindAddr for pprof, midnight.host for Midnight,
@@ -334,6 +355,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		{"healthPort", c.BindAddr, c.HealthPort, auxListeners, false},
 		{"barkPort", c.BarkHost, c.BarkPort, serving, false},
 		{
+			"plugins.api.mcp.config.port",
+			mcpHost,
+			APIPluginPort(c.Plugins.API.Mcp),
+			serving,
+			false,
+		},
+		{
 			"plugins.api.utxorpc.config.port",
 			c.BindAddr,
 			utxorpcPort,
@@ -344,6 +372,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"plugins.api.blockfrost.config.port",
 			c.BindAddr,
 			blockfrostPort,
+			apiListeners,
+			false,
+		},
+		{
+			"plugins.api.kupo.config.port",
+			c.BindAddr,
+			kupoPort,
 			apiListeners,
 			false,
 		},
@@ -416,7 +451,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 
 	// The shared api.tls mode enum is checked here so a typo is
 	// caught once, with a single clear message, rather than surfacing
-	// identically from every one of the three API providers that inherit
+	// identically from every one of the four API providers that inherit
 	// it. Certificate/key presence is deliberately NOT
 	// checked here: a provider legitimately may supply only its own
 	// certFilePath/keyFilePath while inheriting just `mode: server` from
@@ -678,6 +713,7 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}{
 		{"shutdownTimeout", c.ShutdownTimeout, true},
 		{"ledgerCatchupTimeout", c.LedgerCatchupTimeout, true},
+		{"localStateQueryViewMaxLifetime", c.LocalStateQueryViewMaxLifetime, true},
 		{"chainsync.stallTimeout", c.Chainsync.StallTimeout, true},
 		// Negative disables Mithril download idle detection
 		{"mithril.downloadIdleTimeout", c.Mithril.DownloadIdleTimeout, false},
@@ -745,6 +781,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
 			c.Mithril.Backend,
+		))
+	}
+
+	if c.Mithril.DownloadMaxBytes < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid mithril.downloadMaxBytes %d: must not be negative",
+			c.Mithril.DownloadMaxBytes,
 		))
 	}
 
@@ -821,6 +864,12 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		errs = append(errs, fmt.Errorf(
 			"invalid databaseLifecycle.snapshotEveryNEpochs: %d (must not be negative)",
 			c.DatabaseLifecycle.SnapshotEveryNEpochs,
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotMaxCommitPause < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotMaxCommitPause: %s (must not be negative)",
+			c.DatabaseLifecycle.SnapshotMaxCommitPause,
 		))
 	}
 	if dest := c.DatabaseLifecycle.SnapshotCloudDestination; dest != "" {

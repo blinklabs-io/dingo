@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	dchainsync "github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -462,9 +463,10 @@ func TestChainsyncFarFutureDropHasNoStateOrConnectionPenalty(t *testing.T) {
 	require.NotNil(t, droppedClient)
 	require.Equal(t, uint64(0), droppedClient.Cursor.Slot)
 
-	// The production resync handler clears the marker only after Client.Stop
-	// returns. Simulate that boundary and prove the restarted stream can advance.
-	o.completeFutureHeaderResync(droppedConn)
+	// The production resync handler closes the connection, and connection
+	// teardown clears the marker. Simulate that boundary and prove a
+	// replacement stream can advance.
+	o.cancelFutureHeaderResync(droppedConn)
 	header103 := newTestBlockHeader(103, 4, 0xad)
 	require.NoError(t, o.chainsyncClientRollForwardAt(
 		ochainsync.CallbackContext{ConnectionId: droppedConn},
@@ -509,7 +511,7 @@ func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
 	require.Equal(t, base.Add(5*time.Second), timers[1].onset)
 
 	// A canceled superseded callback cannot publish; the active earliest timer
-	// emits exactly one in-place, non-penalizing re-intersection request.
+	// emits exactly one non-penalizing re-intersection request.
 	timers[0].fn()
 	testutil.RequireNoReceive(t, resyncCh, 50*time.Millisecond,
 		"superseded timer must not publish")
@@ -526,7 +528,6 @@ func TestFutureHeaderResyncCoalescesEarliestOnset(t *testing.T) {
 		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
 		data.Reason,
 	)
-	require.False(t, chainsyncResyncRequiresFreshConnection(data.Reason))
 	require.False(t, chainsyncResyncDeniesPeer(data.Reason))
 	testutil.RequireNoReceive(t, resyncCh, 50*time.Millisecond,
 		"one onset must emit one recovery request")
@@ -1243,8 +1244,29 @@ func newTestLedgerStateWithChain(
 	blockCount uint64,
 ) (*ledger.LedgerState, *database.Database) {
 	t.Helper()
+	return newTestLedgerStateWithChainAt(t, blockCount, "")
+}
 
-	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+// newTestLedgerStateWithChainAt is newTestLedgerStateWithChain over a database
+// in dataDir. An empty dataDir makes dbtest.NewDatabase use a temporary
+// file-backed SQLite database; pass a dataDir to control where it lives.
+func newTestLedgerStateWithChainAt(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+) (*ledger.LedgerState, *database.Database) {
+	return newTestLedgerStateWithChainAtAndConfig(t, blockCount, dataDir, nil)
+}
+
+func newTestLedgerStateWithChainAtAndConfig(
+	t *testing.T,
+	blockCount uint64,
+	dataDir string,
+	cardanoConfig *cardano.CardanoNodeConfig,
+) (*ledger.LedgerState, *database.Database) {
+	t.Helper()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: dataDir})
 	require.NoError(t, err)
 	t.Cleanup(func() { dbtest.CloseDatabase(db) })
 
@@ -1271,9 +1293,10 @@ func newTestLedgerStateWithChain(
 	)
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
-		Database:     db,
-		ChainManager: cm,
-		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		Database:          db,
+		ChainManager:      cm,
+		CardanoNodeConfig: cardanoConfig,
+		Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	})
 	require.NoError(t, err)
 	return ls, db
@@ -2276,9 +2299,9 @@ func (f *chainsyncServerFixture) appendBlock(
 	).(*testBlockHeader)
 	require.True(t, ok)
 	block := &testBlock{
-		testBlockHeader: header,
-		blockType:       1,
-		cbor:            []byte{0x80},
+		BlockHeader: header,
+		blockType:   1,
+		cbor:        []byte{0x80},
 	}
 	require.NoError(t, f.o.ledgerState.Chain().AddBlock(block, nil))
 	return block, ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
@@ -2991,31 +3014,17 @@ func TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient(
 	)
 }
 
-// The post-AwaitReply waiter takes a chainsyncServerConnection, and the only
-// production caller hands it the *ouroboros.Connection the connection manager
-// resolved. Restating that here keeps the stand-in below from drifting away
-// from the type production actually passes.
-var _ chainsyncServerConnection = (*ouroboros.Connection)(nil)
-
-// stubChainsyncServerConnection is a single-consumer stand-in for the
-// connection the post-AwaitReply waiter watches, mirroring
-// stubBlockfetchConnection (blockfetch_test.go), which exists for the same
-// reason.
-//
-// The real conn.ErrorChan() is one buffered channel shared with the connection
-// manager's teardown watcher (and, in production, blockfetch and
-// tx-submission), and delivery goes to whichever consumer the runtime picks, so
-// a test cannot address this waiter on it. Publishing an extra error to cover
-// the other consumers is not an option either: the consumer that wins closes
-// the connection, and gouroboros' Connection.shutdown closes the error channel
-// it owns, so the extra send would race that closure.
+// stubChainsyncServerConnection stands in for the connection the
+// post-AwaitReply waiter watches: the test closes done to signal teardown,
+// exactly as the connection manager's watcher does for a real connection.
 //
 // closeFn delegates to the real connection, so closing the stand-in still drops
 // the actual transport and the harness can observe the parked peer being
 // released.
 type stubChainsyncServerConnection struct {
-	errChan chan error
-	closeFn func() error
+	done     chan struct{}
+	closeFn  func() error
+	closeErr error
 
 	mu         sync.Mutex
 	closeCalls int
@@ -3025,13 +3034,17 @@ func newStubChainsyncServerConnection(
 	closeFn func() error,
 ) *stubChainsyncServerConnection {
 	return &stubChainsyncServerConnection{
-		errChan: make(chan error, 1),
+		done:    make(chan struct{}),
 		closeFn: closeFn,
 	}
 }
 
-func (c *stubChainsyncServerConnection) ErrorChan() chan error {
-	return c.errChan
+func (c *stubChainsyncServerConnection) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *stubChainsyncServerConnection) CloseError() error {
+	return c.closeErr
 }
 
 func (c *stubChainsyncServerConnection) Close() error {
@@ -3051,7 +3064,7 @@ func (c *stubChainsyncServerConnection) closeCount() int {
 }
 
 // newChainsyncServerFixtureLogging is newChainsyncServerFixture with the
-// Ouroboros logger redirected into a buffer, for the two tests whose assertion
+// Ouroboros logger redirected into a buffer, for the teardown test whose assertion
 // includes the reason the waiter logged for a teardown.
 func newChainsyncServerFixtureLogging(
 	t *testing.T,
@@ -3069,52 +3082,45 @@ func newChainsyncServerFixtureLogging(
 	return f, logBuf
 }
 
-// TestChainsyncServerAwaitedWaiterClosesOnConnectionError covers the waiter's
-// error-channel exit: it consumes an error for the connection it is serving and
-// must close the transport rather than return silently. Closing is the whole
-// point of the exit -- once MsgAwaitReply is on the wire the server holds
-// agency in MustReply and nothing else releases the peer: an error-channel send
-// does not, a silent return does not, and ConnectionManager.RemoveConnection
-// only unregisters.
+// TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown covers the
+// waiter's teardown exit: once the connection manager signals teardown the
+// waiter must close the transport rather than return silently. Closing is the
+// whole point of the exit -- once MsgAwaitReply is on the wire the server holds
+// agency in MustReply and nothing else releases the peer: a silent return does
+// not, and ConnectionManager.RemoveConnection only unregisters.
 //
-// The waiter is driven directly here, over a single-consumer stand-in for the
-// connection whose Close is the real one; the test does not park a peer through
-// the protocol. Parking would arm the production waiter on the real error
-// channel, and since a test cannot address one consumer of that shared channel
-// the error would still have to be delivered to a second waiter -- a second
-// goroutine driving the same ChainIter. So the assertion here is the waiter's
-// own behavior on an error it has received, plus the transport actually going
-// away. A peer parked by the protocol is covered by
+// The waiter is driven directly, over a stand-in whose Close is the real one;
+// the test does not park a peer through the protocol. A peer parked by the
+// protocol is covered by
 // TestChainsyncServerRequestNextIteratorErrorAfterAwaitReplyUnparksClient and
 // TestChainsyncServerRequestNextNilBlockAfterAwaitReplyUnparksClient, which
 // park for real and drive the serve path on the real connection.
-func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
+func TestChainsyncServerAwaitedWaiterClosesOnConnectionTeardown(
 	t *testing.T,
 ) {
-	const connErrText = "simulated protocol error for the parked waiter"
 	f, logBuf := newChainsyncServerFixtureLogging(t)
 	clientState := f.registerClientAtOrigin(t)
 
 	conn := newStubChainsyncServerConnection(f.conn.Close)
+	conn.closeErr = errors.New("peer reset")
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
 	}()
 
-	conn.ErrorChan() <- errors.New(connErrText)
+	close(conn.done)
 
 	testutil.RequireReceive(
 		t,
 		done,
 		10*time.Second,
-		"the waiter must return once it has consumed a connection error",
+		"the waiter must return once the connection is torn down",
 	)
 	f.requireClientUnparked(
 		t,
-		"a connection error consumed by the waiter must drop the transport, "+
-			"which is the only thing that releases a peer the server has "+
-			"parked in MustReply",
+		"connection teardown must drop the transport, which is the only "+
+			"thing that releases a peer the server has parked in MustReply",
 	)
 	require.Equal(
 		t,
@@ -3125,69 +3131,10 @@ func TestChainsyncServerAwaitedWaiterClosesOnConnectionError(
 	require.Contains(
 		t,
 		logBuf.String(),
-		connErrText,
-		"the teardown must be logged with the error that caused it",
-	)
-}
-
-// TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure is the sibling of
-// the test above for the err == nil branch, which is the shape that fires most
-// often in production: gouroboros' Connection.shutdown closes the error channel
-// it owns, and every consumer then receives the zero value, whereas a live
-// error delivered to THIS consumer is the rarer race. Behavior is a Close()
-// either way, so what is distinct here is the reason -- the nil must not reach
-// the log as an empty or malformed error.
-//
-// Like its sibling it drives the waiter directly rather than through a peer
-// parked by the protocol, which here is also what makes the reason
-// attributable: a parked peer arms the production waiter on the real error
-// channel, and the delegated Close would wake that waiter with a closure of its
-// own whose teardown reason is textually identical to the one under test.
-func TestChainsyncServerAwaitedWaiterClosesOnErrorChannelClosure(
-	t *testing.T,
-) {
-	f, logBuf := newChainsyncServerFixtureLogging(t)
-	clientState := f.registerClientAtOrigin(t)
-
-	conn := newStubChainsyncServerConnection(f.conn.Close)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		f.o.chainsyncServerAwaitNext(f.callbackContext(), conn, clientState)
-	}()
-
-	close(conn.ErrorChan())
-
-	testutil.RequireReceive(
-		t,
-		done,
-		10*time.Second,
-		"the waiter must return once its error channel is closed",
-	)
-	f.requireClientUnparked(
-		t,
-		"a closed error channel must drop the transport, which is the only "+
-			"thing that releases a peer the server has parked in MustReply",
-	)
-	require.Equal(
-		t,
-		1,
-		conn.closeCount(),
-		"the waiter itself must close the connection",
-	)
-	logged := logBuf.String()
-	require.Contains(
-		t,
-		logged,
 		errChainsyncAwaitConnectionClosed.Error(),
-		"a closed error channel must be reported as a closed connection",
+		"the teardown must be logged as a closed connection",
 	)
-	require.NotContains(
-		t,
-		logged,
-		"%!w(<nil>)",
-		"the nil a closed channel yields must never reach the log verbatim",
-	)
+	require.Contains(t, logBuf.String(), conn.closeErr.Error())
 }
 
 // TestChainsyncServerServeAwaitedCancelledDoesNotCloseConnection pins the one
@@ -3323,7 +3270,7 @@ type testBlockHeader struct {
 // testBlock is the smallest block implementation needed to wake a server-side
 // ChainIterator and drive the async RollForward path.
 type testBlock struct {
-	*testBlockHeader
+	gledger.BlockHeader
 	blockType int
 	cbor      []byte
 }
@@ -3365,7 +3312,7 @@ func (h *testBlockHeader) BlockBodyHash() gledger.Blake2b256 {
 }
 
 func (b *testBlock) Header() gledger.BlockHeader {
-	return b.testBlockHeader
+	return b.BlockHeader
 }
 
 func (b *testBlock) Type() int {
@@ -3546,7 +3493,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				ouroboros_mock.ConversationEntryHandshakeNtCResponseInput,
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
@@ -3556,7 +3505,9 @@ func TestChainsyncConnectionConfigOptionCreatesPerConnectionBudget(
 				},
 				ouroboros_mock.ConversationEntryOutput{
 					ProtocolId: ochainsync.ProtocolIdNtC,
-					Messages:   []protocol.Message{ochainsync.NewMsgFindIntersect(points)},
+					Messages: []protocol.Message{
+						ochainsync.NewMsgFindIntersect(points),
+					},
 				},
 				ouroboros_mock.ConversationEntryInput{
 					ProtocolId:      ochainsync.ProtocolIdNtC,
@@ -3668,7 +3619,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
-		testBlockHeader: &testBlockHeader{
+		BlockHeader: &testBlockHeader{
 			hash:        gledger.Blake2b256{0x01},
 			blockNumber: 1,
 			slotNumber:  10,
@@ -3748,185 +3699,6 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 	// AddClient failure is returned directly from the callback.
 	require.ErrorContains(t, err, "add chainsync client")
 	require.ErrorContains(t, err, "no chain provider available")
-}
-
-// TestRestartChainsyncClientAsync_TimeoutClosesConnection verifies a hung
-// restart is bounded by chainsyncRestartTimeout and recycles the connection.
-// Not t.Parallel: swaps the package-level chainsyncRestartAfter.
-func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
-	t *testing.T,
-) {
-	// Replace the restart timer with a test channel and block the restart
-	// function so the timeout branch is deterministic.
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	timeoutCh := make(chan time.Time)
-	timeoutArgCh := make(chan time.Duration, 1)
-	oldRestartAfter := chainsyncRestartAfter
-	chainsyncRestartAfter = func(timeout time.Duration) <-chan time.Time {
-		timeoutArgCh <- timeout
-		return timeoutCh
-	}
-	t.Cleanup(func() { chainsyncRestartAfter = oldRestartAfter })
-	restartStarted := make(chan struct{})
-	releaseRestart := make(chan struct{})
-
-	// Start restart, wait until it is running, then trigger timeout.
-	f.o.restartChainsyncClientAsync(
-		context.Background(),
-		f.conn.Id(),
-		"test-timeout",
-		func() error {
-			close(restartStarted)
-			<-releaseRestart
-			return nil
-		},
-	)
-	testutil.RequireReceive(
-		t,
-		restartStarted,
-		5*time.Second,
-		"restart function should start",
-	)
-	require.Equal(
-		t,
-		chainsyncRestartTimeout,
-		testutil.RequireReceive(
-			t,
-			timeoutArgCh,
-			5*time.Second,
-			"restart timeout duration should be requested",
-		),
-	)
-	timeoutCh <- time.Now()
-
-	// The timeout branch closes/recycles the connection.
-	evt := testutil.RequireReceive(
-		t,
-		f.closedCh,
-		5*time.Second,
-		"restart timeout should close the connection",
-	)
-	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-	require.True(t, ok)
-	require.Equal(t, f.conn.Id(), closed.ConnectionId)
-	close(releaseRestart)
-}
-
-// TestRestartChainsyncClientAsync_ContextCancelClosesConnection verifies node
-// shutdown cancellation aborts restart and closes the connection.
-func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	// Start a restart under a cancellable context and block the restart
-	// function so ctx.Done can win the select.
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	ctx, cancel := context.WithCancel(context.Background())
-	restartStarted := make(chan struct{})
-	releaseRestart := make(chan struct{})
-
-	// Start restart, wait until it is running, then cancel the context.
-	f.o.restartChainsyncClientAsync(
-		ctx,
-		f.conn.Id(),
-		"test-context-cancel",
-		func() error {
-			close(restartStarted)
-			<-releaseRestart
-			return nil
-		},
-	)
-	testutil.RequireReceive(
-		t,
-		restartStarted,
-		5*time.Second,
-		"restart function should start",
-	)
-	cancel()
-
-	// Cancellation closes/recycles the connection.
-	evt := testutil.RequireReceive(
-		t,
-		f.closedCh,
-		5*time.Second,
-		"context cancellation should close the connection",
-	)
-	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-	require.True(t, ok)
-	require.Equal(t, f.conn.Id(), closed.ConnectionId)
-	close(releaseRestart)
-}
-
-// TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen verifies a
-// completed restart does not emit connection-close lifecycle events.
-func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	// Prepare a restart function that completes normally and signals when the
-	// goroutine has run.
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	restartDone := make(chan struct{})
-
-	// Run the restart path without returning an error.
-	f.o.restartChainsyncClientAsync(
-		context.Background(),
-		f.conn.Id(),
-		"test-success",
-		func() error {
-			close(restartDone)
-			return nil
-		},
-	)
-	testutil.RequireReceive(
-		t,
-		restartDone,
-		5*time.Second,
-		"restart function should complete",
-	)
-
-	// A successful restart does not close the connection.
-	testutil.RequireNoReceive(
-		t,
-		f.closedCh,
-		100*time.Millisecond,
-		"successful restart should leave connection open",
-	)
-}
-
-// TestRestartChainsyncClientAsync_RestartFailureClosesConnection verifies
-// restart function errors recycle the affected connection.
-func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	// Prepare a restart function that fails immediately.
-	f := newChainsyncServerFixture(t, csmock.ModeNtC)
-	expectedErr := errors.New("restart failed")
-
-	// Run the async restart path with a failing function.
-	f.o.restartChainsyncClientAsync(
-		context.Background(),
-		f.conn.Id(),
-		"test-failure",
-		func() error {
-			return expectedErr
-		},
-	)
-	evt := testutil.RequireReceive(
-		t,
-		f.closedCh,
-		5*time.Second,
-		"restart failure should close the connection",
-	)
-
-	// Restart failure closes/recycles the affected connection.
-	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
-	require.True(t, ok)
-	require.Equal(t, f.conn.Id(), closed.ConnectionId)
 }
 
 func TestNormalizeIntersectPoints(t *testing.T) {
@@ -5001,6 +4773,23 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonPeerTipBehindMithril,
+		event.ChainsyncResyncReasonLiveTxValidationRecovery,
+		event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
+		event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
+		event.ChainsyncResyncReasonReplayRecoveryNonConverging,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		// Every re-sync reason replaces the connection: an in-place
+		// re-intersect sends FindIntersect while RequestNext replies are
+		// still in flight, which the peer's replies then violate.
+		event.ChainsyncResyncReasonRollbackAhead,
+		event.ChainsyncResyncReasonHeaderValidationRecovery,
+		event.ChainsyncResyncReasonBlockfetchRangeUnavailable,
+		event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
+		event.ChainsyncResyncReasonForkQueueOverflowRestartFailed,
+		event.ChainsyncResyncReasonForkExtensionRestartFailed,
+		event.ChainsyncResyncReasonFutureHeaderAdmissionRecovery,
 	}
 	for _, reason := range reasons {
 		t.Run(reason, func(t *testing.T) {
@@ -5558,77 +5347,62 @@ func makeFindIntersectPoints(n int) []ocommon.Point {
 	return points
 }
 
-// Both Mithril-boundary rejection reasons must close the connection for a
-// fresh intersect AND deny the peer for a cooldown. Without the deny, a
-// peer whose chain is refused at the trust boundary is redialed roughly
-// every backoff interval and rejected ~600ms later, forever.
-func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
+// Both Mithril-boundary rejection reasons must deny the peer for a cooldown.
+// Without the deny, a peer whose chain is refused at the trust boundary is
+// redialed roughly every backoff interval and rejected ~600ms later, forever.
+// The connection close every reason triggers is covered by
+// TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons.
+func TestChainsyncResyncDeniesPeerByReason(
 	t *testing.T,
 ) {
 	t.Parallel()
 
 	tests := []struct {
 		reason         string
-		wantFresh      bool
 		wantDeniesPeer bool
 	}{
 		{
 			reason:         event.ChainsyncResyncReasonRollbackExceedsMithril,
-			wantFresh:      true,
 			wantDeniesPeer: true,
 		},
 		{
 			reason:         event.ChainsyncResyncReasonPeerTipBehindMithril,
-			wantFresh:      true,
 			wantDeniesPeer: true,
 		},
 		// Existing behavior pins
 		{
 			reason:         event.ChainsyncResyncReasonRollbackExceedsK,
-			wantFresh:      true,
 			wantDeniesPeer: true,
 		},
 		{
 			reason:         event.ChainsyncResyncReasonLocalTipPlateau,
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 		{
 			reason:         event.ChainsyncResyncReasonLiveTxValidationRecovery,
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 		{
 			reason:         event.ChainsyncResyncReasonDeterministicTxValidationRecovery,
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 		{
 			reason: event.ChainsyncResyncReasonRollbackBelowUtxoPruneFloor,
 			// The rollback cannot be crossed locally, so the stale bearer
 			// must be replaced before the peer can retry its chain.
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 		{
 			reason: event.
 				ChainsyncResyncReasonReplayRecoveryNonConverging,
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 		{
 			reason:         event.ChainsyncResyncReasonChainSwitchCursorAhead,
-			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
 	}
 	for _, tt := range tests {
-		if got := chainsyncResyncRequiresFreshConnection(tt.reason); got != tt.wantFresh {
-			t.Errorf(
-				"chainsyncResyncRequiresFreshConnection(%q) = %v, want %v",
-				tt.reason, got, tt.wantFresh,
-			)
-		}
 		if got := chainsyncResyncDeniesPeer(tt.reason); got != tt.wantDeniesPeer {
 			t.Errorf(
 				"chainsyncResyncDeniesPeer(%q) = %v, want %v",
@@ -5848,5 +5622,131 @@ func TestChainsyncClientRollForwardEagernessWaitErrorWithholdsHeader(
 		ledgerCh,
 		200*time.Millisecond,
 		"header must not reach the ledger when the eagerness wait fails",
+	)
+}
+
+// TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer
+// pins that a deferred-header failure attributed to one of two connected peers
+// closes and denies that peer only.
+type chainsyncResyncTestConn struct {
+	net.Conn
+	localAddr  net.Addr
+	remoteAddr net.Addr
+}
+
+func (c chainsyncResyncTestConn) LocalAddr() net.Addr  { return c.localAddr }
+func (c chainsyncResyncTestConn) RemoteAddr() net.Addr { return c.remoteAddr }
+
+func newChainsyncResyncTestConnection(
+	t *testing.T,
+	remote string,
+) *ouroboros.Connection {
+	t.Helper()
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", remote)
+	require.NoError(t, err)
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		ouroboros_mock.ConversationKeepAlive,
+	)
+	conn, err := ouroboros.New(
+		ouroboros.WithConnection(chainsyncResyncTestConn{
+			Conn:       mockConn,
+			localAddr:  localAddr,
+			remoteAddr: remoteAddr,
+		}),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(true),
+		ouroboros.WithKeepAliveConfig(keepalive.NewConfig(
+			keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
+			keepalive.WithPeriod(30*time.Second),
+			keepalive.WithTimeout(15*time.Second),
+		)),
+	)
+	require.NoError(t, err)
+	return conn
+}
+
+func TestSubscribeChainsyncResyncPenalizesOnlyTheResponsibleDeferredHeaderPeer(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	require.True(t, chainsyncResyncDeniesPeer(
+		event.ChainsyncResyncReasonDeferredHeaderValidationFailure,
+	))
+
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			EventBus: bus,
+			Logger:   logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
+	badConn := newChainsyncResyncTestConnection(t, "10.0.0.1:3001")
+	honestConn := newChainsyncResyncTestConnection(t, "10.0.0.2:3001")
+	require.True(t, connManager.AddConnection(
+		badConn,
+		false,
+		"10.0.0.1:3001",
+	))
+	require.True(t, connManager.AddConnection(
+		honestConn,
+		false,
+		"10.0.0.2:3001",
+	))
+	o := newOuroboros(OuroborosConfig{EventBus: bus, Logger: logger})
+	o.eventBus = bus
+	o.peerGov = peerGov
+	o.connManager = connManager
+	o.SubscribeChainsyncResync(t.Context())
+	bad := badConn.Id()
+	honest := honestConn.Id()
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: bad,
+				Reason: event.
+					ChainsyncResyncReasonDeferredHeaderValidationFailure,
+			},
+		),
+	)
+
+	require.Eventually(
+		t,
+		func() bool { return peerGov.IsDenied(bad.RemoteAddr.String()) },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.Eventually(
+		t,
+		func() bool { return connManager.GetConnectionById(bad) == nil },
+		2*time.Second,
+		20*time.Millisecond,
+	)
+	require.NotNil(t, connManager.GetConnectionById(honest))
+	require.Never(
+		t,
+		func() bool { return peerGov.IsDenied(honest.RemoteAddr.String()) },
+		200*time.Millisecond,
+		20*time.Millisecond,
 	)
 }

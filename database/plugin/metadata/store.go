@@ -350,9 +350,10 @@ type GovernanceStore interface {
 		types.Txn,
 	) (map[string]bool, error)
 
-	// GetCommitteeActiveCount returns the number of active (non-resigned)
-	// committee members.
-	GetCommitteeActiveCount(types.Txn) (int, error)
+	// GetCommitteeAuthorizedCount returns the number of seated, non-resigned
+	// committee members that hold a current hot-key authorization. Members
+	// without a hot key are not counted and term expiry is not applied.
+	GetCommitteeAuthorizedCount(types.Txn) (int, error)
 
 	// Snapshot-imported committee member methods
 
@@ -491,6 +492,16 @@ type GovernanceStore interface {
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod
+		types.Txn,
+	) error
+
+	// RecordDRepActivityEpoch updates only the DRep's last activity epoch,
+	// for historical replay below a snapshot anchor whose recorded expiry
+	// must stand.
+	RecordDRepActivityEpoch(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		uint64, // activityEpoch
 		types.Txn,
 	) error
 
@@ -724,6 +735,19 @@ type UtxoStore interface {
 		types.Txn,
 	) ([]models.Utxo, error)
 
+	// GetUtxosByAddressAsOf is GetUtxosByAddress as the outputs stood at
+	// atSlot, using GetUtxosByRefsAsOf's predicate: a row is included when
+	// its AddedSlot is at-or-before atSlot and it was either never spent or
+	// was spent strictly after atSlot. It inherits GetUtxosByRefsAsOf's
+	// ambiguity for an old atSlot, so callers must reject a point below
+	// their retention floor before calling it.
+	GetUtxosByAddressAsOf(
+		patterns []models.UtxoAddressPattern,
+		atSlot uint64,
+		maxResults int,
+		txn types.Txn,
+	) ([]models.Utxo, error)
+
 	// GetControlledAmountByCredential returns the sum of live UTxO
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
@@ -772,6 +796,18 @@ type UtxoStore interface {
 		*models.UtxoWithOrderingQuery,
 		types.Txn,
 	) ([]models.UtxoWithOrdering, error)
+
+	// GetUtxosWithHistory returns both live and spent UTxOs matching q,
+	// including their producing transaction position and producing/spending
+	// block hashes. Snapshot-imported outputs without a producing transaction
+	// retain AddedSlot as their position and have an empty producing block
+	// hash. Exact-address patterns are coarse-filtered here and completed by
+	// the coordinated Database after it resolves output CBOR. q must be
+	// non-nil.
+	GetUtxosWithHistory(
+		*models.UtxoHistoryQuery,
+		types.Txn,
+	) ([]models.UtxoWithHistory, error)
 
 	// CountUtxosByAddressWithOrdering returns the number of live UTxOs
 	// matching q's coarse SQL predicate, without materializing rows. It
@@ -1052,6 +1088,10 @@ type TransactionStore interface {
 		bool, // skipWithdrawalWitness
 		types.Txn,
 	) error
+
+	// SetTransactionLeiosClosureInContext applies a closure using the parent's
+	// unticked slot while retaining point as its rollback owner.
+	SetTransactionLeiosClosureInContext(lcommon.Transaction, ocommon.Point, uint32, map[int]uint64, bool, uint64, types.Txn) error
 
 	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
 	// for batched transaction ingestion.
@@ -1383,12 +1423,23 @@ type CertificateStore interface {
 	) ([]lcommon.StakeRegistrationCertificate, error)
 
 	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
-	// certificate for genesisHash before the supplied block slot.
+	// certificate for genesisHash that has taken effect by blockSlot: one
+	// whose certificate slot plus stabilityWindow is at or below it.
 	GetGenesisDelegationForSlot(
 		[]byte, // genesisHash
 		uint64, // blockSlot
+		uint64, // stabilityWindow
 		types.Txn,
 	) (*models.GenesisDelegation, error)
+
+	// GetGenesisDelegationsInSlotRange returns the genesis-key delegation
+	// certificates with a certificate slot from fromSlot through uptoSlot
+	// inclusive, oldest first.
+	GetGenesisDelegationsInSlotRange(
+		uint64, // fromSlot
+		uint64, // uptoSlot
+		types.Txn,
+	) ([]models.GenesisDelegation, error)
 
 	// GetAccountDelegationHistoryByCredential retrieves delegation history
 	// rows for a stake credential tag/hash pair.
@@ -1419,6 +1470,17 @@ type CertificateStore interface {
 		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// GetLatestAccountRegistrationAtOrBefore returns the newest registration
+	// history row for a stake credential whose AddedSlot is at or before
+	// slot, ordered as GetAccountRegistrationHistoryByCredential orders them,
+	// or nil when there is none. It does not consult the import baseline.
+	GetLatestAccountRegistrationAtOrBefore(
+		credentialTag uint8,
+		stakingKey []byte,
+		slot uint64,
+		txn types.Txn,
+	) (*models.AccountRegistrationHistoryRow, error)
 
 	// CountAccountRegistrationHistoryByCredential retrieves the total count of
 	// registration history rows for a stake credential tag/hash pair.
@@ -1983,6 +2045,14 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetEpochBoundaryActivePoolKeyHashes excludes boundary retirements in
+	// Dijkstra, while retaining the pre-boundary transaction certificate cut.
+	GetEpochBoundaryActivePoolKeyHashes(
+		slot uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([][]byte, error)
+
 	// GetPoolVrfKeyHashAtSlot returns the VRF key hash the pool had
 	// registered as of a slot, using the same latest-certificate-wins
 	// ordering as GetActivePoolKeyHashesAtSlot. The bool reports whether any
@@ -2242,6 +2312,13 @@ type MetadataStore interface {
 	// the sqlstore implementation for why the import baseline is left alone.
 	ClearDelegationsToRetiredPool([]byte, uint64, types.Txn) error
 
+	// RestoreImportedAccountStates sets active, pool and DRep delegation back
+	// to each account's import baseline recorded at or after the given slot,
+	// leaving reward untouched, and returns the number of rows changed.
+	// Historical API backfill calls it at the Mithril anchor, because replay
+	// runs certificates but not POOLREAP or the PV10 HARDFORK rule.
+	RestoreImportedAccountStates(uint64, types.Txn) (int, error)
+
 	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
 	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
 	// tombstoned via the active flag. Credentials that match no row are ignored.
@@ -2404,6 +2481,16 @@ type MetadataStore interface {
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
 		keyDeposit uint64,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
+	// SetGenesisStakingWithDeposits also records the genesis pool deposit.
+	SetGenesisStakingWithDeposits(
+		pools map[string]lcommon.PoolRegistrationCertificate,
+		stakeDelegations map[string]string,
+		keyDeposit uint64,
+		poolDeposit uint64,
 		blockHash []byte,
 		txn types.Txn,
 	) error
@@ -2929,7 +3016,17 @@ type BulkLoadOptimizer interface {
 }
 
 // PlannerStatsUpdater is an optional interface for metadata stores that can
-// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+// collect query-planner statistics. SQLite and PostgreSQL run ANALYZE; MySQL
+// refreshes statistics through deferred-index maintenance instead.
 type PlannerStatsUpdater interface {
 	UpdatePlannerStats() error
 }
+
+// ContextPlannerStatsUpdater refreshes planner statistics with cancellation.
+type ContextPlannerStatsUpdater interface {
+	UpdatePlannerStatsContext(context.Context) error
+}
+
+// PlannerStatsBackfillSyncKey records the completed backfill whose planner
+// statistics were refreshed after rebuilding critical indexes.
+const PlannerStatsBackfillSyncKey = "metadata_planner_stats_backfill"

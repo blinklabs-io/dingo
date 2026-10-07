@@ -51,6 +51,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -59,6 +60,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNegativeLeaderRewardApplicationRespectsExpiredAccountGuard(t *testing.T) {
+	t.Parallel()
+	credential, err := rewards.NewCredential(0, bytes.Repeat([]byte{0x41}, rewards.CredentialHashSize))
+	require.NoError(t, err)
+	negative := []rewards.NegativeLeaderReward{{
+		Credential: credential,
+		Amount:     10,
+		Spendable:  true,
+	}}
+	require.ErrorIs(
+		t,
+		negativeLeaderRewardApplicationError(negative, nil),
+		rewards.ErrNegativeLeaderReward,
+	)
+	guarded := map[string]struct{}{
+		models.NewStakeCredentialRef(credential.Tag, credential.Hash[:]).MapKey(): {},
+	}
+	require.NoError(t, negativeLeaderRewardApplicationError(negative, guarded))
+}
 
 const (
 	retentionNewEpoch            = uint64(4)
@@ -5675,6 +5696,54 @@ func TestRewardParametersSplitCalculationAndPerformanceEpochInputs(
 	)
 }
 
+func TestRewardParametersUsesDijkstraLeverageAtFirstEraRound(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.activeEras = append(
+		append([]eras.EraDesc(nil), eras.Eras...),
+		eras.DijkstraEraDesc,
+	)
+	ls.config.PledgeLeverageEnabled = true
+	ls.config.PledgeLeverage = 100
+	ls.config.MinPoolMargin = 250
+	performancePParamsValue := mockledger.NewMockConwayProtocolParams()
+	performancePParamsValue.NOpt = 10
+	performancePParamsValue.A0 = rewardCalcRat(1, 2)
+	performancePParamsValue.Rho = rewardCalcRat(1, 100)
+	performancePParamsValue.Tau = rewardCalcRat(0, 1)
+	performancePParamsValue.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 9}
+	performancePParams := &performancePParamsValue
+	calculationPParams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters:  mockledger.NewMockConwayProtocolParams(),
+		RefScriptCostMultiplier:   rewardCalcRat(1, 1),
+		MaxPledgeLeverage:         rewardCalcRat(1, 2),
+		MinPoolMargin:             rewardCalcRat(1, 20),
+		LeiosQuorumStakeThreshold: rewardCalcRat(1, 2),
+		CommitteeStakeCoverage:    rewardCalcRat(1, 2),
+		QuorumStakeThreshold:      rewardCalcRat(1, 2),
+	}
+	performanceCBOR, err := cbor.Encode(performancePParams)
+	require.NoError(t, err)
+	calculationCBOR, err := cbor.Encode(calculationPParams)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	require.NoError(t, meta.SetEpoch(100, 2, nil, nil, nil, nil, eras.ConwayEraDesc.Id, 1, 100, nil))
+	require.NoError(t, meta.SetEpoch(200, 3, nil, nil, nil, nil, eras.DijkstraEraDesc.Id, 1, 1_000, nil))
+	require.NoError(t, db.SetPParams(performanceCBOR, 100, 2, eras.ConwayEraDesc.Id, nil))
+	require.NoError(t, db.SetPParams(calculationCBOR, 200, 3, eras.DijkstraEraDesc.Id, nil))
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	_, params, _, err := ls.rewardParameters(
+		txn, 2, 3, &models.RewardAdaPots{Reserves: 100_000_000},
+	)
+	require.NoError(t, err)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(1, 2), params.PledgeLeverage)
+	require.Equal(t, big.NewRat(1, 40), params.MinPoolMargin)
+}
+
 func TestRewardParametersBabbageDefaultsDecentralizationAndForgoesPrefilter(
 	t *testing.T,
 ) {
@@ -5724,11 +5793,11 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 	require.ErrorContains(t, err, "missing treasury expansion")
 }
 
-func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+func TestApplyPledgeLeveragePreDijkstraUsesExperimentalConfig(t *testing.T) {
 	t.Parallel()
 
 	params := rewards.Parameters{}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+	applyPledgeLeveragePParams(&params, &shelley.ShelleyProtocolParameters{}, LedgerStateConfig{
 		PledgeLeverageEnabled: true,
 		PledgeLeverage:        100,
 	})
@@ -5736,17 +5805,28 @@ func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
 	require.Equal(t, big.NewRat(100, 1), params.PledgeLeverage)
 }
 
-func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+func TestApplyPledgeLeverageDijkstraPParamOverridesConfig(t *testing.T) {
 	t.Parallel()
 
-	params := rewards.Parameters{
-		PledgeLeverageEnabled: true,
-		PledgeLeverage:        big.NewRat(50, 1),
-	}
-	applyPledgeLeverageConfig(&params, LedgerStateConfig{
-		PledgeLeverageEnabled: false,
-		PledgeLeverage:        100,
-	})
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{MaxPledgeLeverage: rewardCalcRat(5, 1)},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(5, 1), params.PledgeLeverage)
+}
+
+func TestApplyPledgeLeverageDijkstraNilIgnoresConfig(t *testing.T) {
+	t.Parallel()
+
+	params := rewards.Parameters{}
+	applyPledgeLeveragePParams(
+		&params,
+		&dijkstra.DijkstraProtocolParameters{},
+		LedgerStateConfig{PledgeLeverageEnabled: true, PledgeLeverage: 100},
+	)
 	require.False(t, params.PledgeLeverageEnabled)
 	require.Nil(t, params.PledgeLeverage)
 }
@@ -6689,37 +6769,38 @@ func TestMinPoolMarginRat(t *testing.T) {
 }
 
 // applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
-// calculation is for Dijkstra (major >= 12); otherwise it leaves the field nil.
+// calculation era is Dijkstra or later; otherwise it leaves the field nil.
 func TestApplyMinPoolMarginConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name    string
 		bp      uint
-		major   uint64
+		eraID   uint
 		wantRat *big.Rat // nil => expect nil
 	}{
-		{name: "disabled zero at dijkstra", bp: 0, major: 12},
-		{name: "pre-dijkstra ignored", bp: 150, major: 11},
+		{name: "disabled zero at dijkstra", bp: 0, eraID: eras.DijkstraEraDesc.Id},
+		{name: "pre-dijkstra ignored", bp: 150, eraID: eras.ConwayEraDesc.Id},
 		{
 			name:    "dijkstra sets rat",
 			bp:      150,
-			major:   12,
+			eraID:   eras.DijkstraEraDesc.Id,
 			wantRat: big.NewRat(150, 10_000),
 		},
 		{
 			name:    "post-dijkstra sets rat",
 			bp:      500,
-			major:   13,
+			eraID:   eras.DijkstraEraDesc.Id + 1,
 			wantRat: big.NewRat(500, 10_000),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			params := rewards.Parameters{ProtocolMajorVersion: tt.major}
+			params := rewards.Parameters{ProtocolMajorVersion: 9}
 			applyMinPoolMarginConfig(
 				&params,
 				LedgerStateConfig{MinPoolMargin: tt.bp},
+				tt.eraID,
 			)
 			if tt.wantRat == nil {
 				require.Nil(t, params.MinPoolMargin)
@@ -7359,6 +7440,13 @@ func epochBoundaryBenchHash(domain byte, index uint64) []byte {
 	return h
 }
 
+func epochBoundaryBenchVRFHash(index uint64) []byte {
+	h := make([]byte, 32)
+	h[0] = 0x11
+	binary.BigEndian.PutUint64(h[24:], index)
+	return h
+}
+
 // splitmix64 gives the fixture a heavy-tailed but reproducible stake
 // distribution without seeding math/rand.
 func splitmix64(x uint64) uint64 {
@@ -7737,15 +7825,16 @@ VALUES (?, ?, 0)`)
 	}
 	for p := range pools {
 		pool := &pools[p]
+		vrfKeyHash := epochBoundaryBenchVRFHash(uint64(p) + 1)
 		_, err := poolStmt.Exec(
-			p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			p+1, pool.key, vrfKeyHash,
 			pool.rewardAccount, pool.margin,
 			strconv.FormatUint(pool.pledge, 10),
 			strconv.FormatUint(pool.cost, 10),
 		)
 		require.NoError(tb, err)
 		_, err = poolRegStmt.Exec(
-			p+1, p+1, pool.key, epochBoundaryBenchHash(0x11, uint64(p)+1),
+			p+1, p+1, pool.key, vrfKeyHash,
 			pool.rewardAccount, pool.margin,
 			strconv.FormatUint(pool.pledge, 10),
 			strconv.FormatUint(pool.cost, 10),
@@ -8925,7 +9014,7 @@ func TestBootstrapStakeRewardRoundSurvivesAMithrilAnchor(t *testing.T) {
 // TestStakeRewardEpochsForInitialApplication pins the two bootstrap rounds.
 // The round into epoch 1 reads genesis pots and empty previous block counts;
 // the round into epoch 2 reads epoch 1's pots and epoch 0's blocks. Both have
-// empty Go distributions. Byron-prefix networks are suppressed by
+// genesis Go distributions. Byron-prefix networks are suppressed by
 // applyStakeRewards' Byron performance-epoch guard, not by this helper.
 func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	t.Parallel()
@@ -8960,46 +9049,6 @@ func TestStakeRewardEpochsForInitialApplication(t *testing.T) {
 	}, epochs)
 }
 
-func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
-	t *testing.T,
-) {
-	t.Parallel()
-
-	result := &rewards.Result{
-		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
-		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
-		TotalRewardPot:   1_000,
-		AvailableRewards: 800,
-		EffectiveRewards: 600,
-		Unspendable:      50,
-		Undistributed:    150,
-	}
-	suppressBootstrapStakeRewards(result)
-
-	require.Empty(t, result.PoolRewards)
-	require.Empty(t, result.AccountRewards)
-	require.Zero(t, result.EffectiveRewards)
-	require.Zero(t, result.Unspendable)
-	require.Equal(t, uint64(800), result.Undistributed)
-
-	app := &stakeRewardApplication{
-		params: rewards.Parameters{
-			TreasuryExpansion: big.NewRat(1, 5),
-		},
-		pots: &models.RewardAdaPots{
-			Reserves: types.Uint64(10_000),
-			Treasury: types.Uint64(10),
-		},
-		totalRewardPot:   result.TotalRewardPot,
-		availableRewards: result.AvailableRewards,
-		undistributed:    result.Undistributed,
-	}
-	reserves, treasury, err := stakeRewardUpdatedPots(app)
-	require.NoError(t, err)
-	require.Equal(t, uint64(9_800), reserves)
-	require.Equal(t, uint64(210), treasury)
-}
-
 func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 	t.Parallel()
 
@@ -9026,9 +9075,12 @@ func TestBootstrapStakeRewardsRejectStalePrecompute(t *testing.T) {
 // With d=0 this gives eta=0; the same 180 blocks enter the next update,
 // giving eta=180/(500*0.4)=0.9. Fees collected in epoch 0 enter that update
 // too. These are the reference devnet inputs and pots.
-func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
+func TestApplyStakeRewardsPrototypeGenesisPerformance(t *testing.T) {
 	t.Parallel()
 	ls, db := newRewardCalculationTestLedger(t)
+	ls.config.EnableDijkstra = true
+	zero := uint64(0)
+	ls.config.CardanoNodeConfig.TestShelleyHardForkAtEpoch = &zero
 	ls.currentEra = eras.ConwayEraDesc
 	require.NoError(t, ls.config.CardanoNodeConfig.
 		LoadShelleyGenesisFromReader(strings.NewReader(`{
@@ -9105,8 +9157,27 @@ INSERT INTO "transaction" (
 		fraction *big.Rat
 	}{
 		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
-		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+		{2, 1_080_080_000, 1_998_876_009_026, big.NewRat(1_000_022_155_487, 4_001_123_990_974)},
 	} {
+		if tc.epoch == 2 {
+			readTxn := db.Transaction(false)
+			app, ok, err := ls.calculateStakeRewardApplication(
+				readTxn,
+				2,
+				1000,
+				1000,
+				true,
+			)
+			require.NoError(t, readTxn.Rollback())
+			require.NoError(t, err)
+			require.True(t, ok)
+			require.NotEmpty(
+				t,
+				app.accountOutputs,
+				"genesis staking must receive rewards from epoch 0's blocks",
+			)
+		}
+
 		boundary := tc.epoch * 500
 		ended, err := meta.GetEpoch(tc.epoch-1, nil)
 		require.NoError(t, err)
@@ -10354,4 +10425,168 @@ func TestMissingRewardSnapshotReportsImportedSeedFailure(t *testing.T) {
 			assert.NotContains(t, logs.String(), tc.notReason)
 		})
 	}
+}
+
+func TestApplyStakeRewardsConwayGenesisPerformance(t *testing.T) {
+	t.Parallel()
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.currentEra = eras.ConwayEraDesc
+	require.NoError(t, ls.config.CardanoNodeConfig.
+		LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 500,
+		"maxLovelaceSupply": 6000000000000,
+		"securityParam": 40,
+		"slotLength": 1,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`)))
+	pp := mockledger.NewMockConwayProtocolParams()
+	pp.NOpt = 150
+	pp.A0 = rewardCalcRat(3, 10)
+	pp.Rho = rewardCalcRat(3, 1_000)
+	pp.Tau = rewardCalcRat(1, 5)
+	pp.ProtocolVersion = lcommon.ProtocolParametersProtocolVersion{Major: 10}
+	encoded, err := cbor.Encode(&pp)
+	require.NoError(t, err)
+	meta := db.Metadata()
+	for epoch := range uint64(3) {
+		require.NoError(t, meta.SetEpoch(
+			epoch*500, epoch, nil, nil, nil, nil,
+			eras.ConwayEraDesc.Id, 1, 500, nil,
+		))
+		require.NoError(t, db.SetPParams(
+			encoded, epoch*500, epoch, eras.ConwayEraDesc.Id, nil,
+		))
+	}
+	require.NoError(t, meta.SetNetworkState(0, 2_000_000_000_000, 0, nil))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch: 0, Reserves: 2_000_000_000_000,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch: 0, SnapshotType: "mark", ProtocolVersion: 10,
+		TotalActiveStake: 2_000_000_000_000,
+		TotalPoolCount:   2, TotalDelegators: 2,
+	}, nil))
+	for _, key := range []byte{0x11, 0x22} {
+		poolKey := rewardCalcHash(key)
+		poolID := seedLiveStakeFixture(
+			t, db, poolKey, bytes.Repeat([]byte{key}, 32),
+			1_000_000_000_000, 0,
+		)
+		require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{{
+			Epoch: 0, PoolKeyHash: poolKey, RewardAccount: poolKey,
+			Margin:         &types.Rat{Rat: big.NewRat(0, 1)},
+			DelegatedStake: 1_000_000_000_000, DelegatorCount: 1,
+		}}, nil))
+		require.NoError(
+			t,
+			meta.SaveRewardStakeInputs([]*models.RewardStakeInput{{
+				Epoch: 0, PoolKeyHash: poolKey, StakingKey: poolKey,
+				Stake: 1_000_000_000_000, Registered: true,
+			}}, nil),
+		)
+		for i := range uint64(90) {
+			require.NoError(t, db.UpdatePoolOpCertSequence(
+				poolID, i+1, 1+2*i+uint64(key), nil,
+			))
+		}
+	}
+	_, err = rewardCalcSQLDB(t, db).Exec(`
+INSERT INTO "transaction" (
+    id, hash, block_hash, slot, type, fee, collateral_fee, ttl,
+    block_index, valid
+) VALUES (1, ?, ?, 60, 7, '400000', '0', '0', 0, TRUE)`,
+		[]byte("genesis-performance-tx"), []byte("genesis-performance-block"))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		epoch    uint64
+		treasury uint64
+		reserves uint64
+		fraction *big.Rat
+	}{
+		{1, 0, 2_000_000_000_000, big.NewRat(1, 4)},
+		{2, 1_080_080_000, 1_998_920_320_000, big.NewRat(1_562_500, 6_251_687)},
+	} {
+		boundary := tc.epoch * 500
+		ended, err := meta.GetEpoch(tc.epoch-1, nil)
+		require.NoError(t, err)
+		require.NotNil(t, ended)
+		txn := db.Transaction(true)
+		require.NoError(t, txn.Do(func(txn *database.Txn) error {
+			if err := ls.applyStakeRewards(txn, tc.epoch, boundary); err != nil {
+				return err
+			}
+			return ls.saveRewardAdaPotsForEpoch(txn, tc.epoch, *ended, boundary)
+		}))
+		state, err := meta.GetNetworkState(nil)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		require.Equal(t, tc.treasury, uint64(state.Treasury),
+			"treasury at boundary into epoch %d", tc.epoch)
+		require.Equal(t, tc.reserves, uint64(state.Reserves),
+			"reserves at boundary into epoch %d", tc.epoch)
+		pots, err := meta.GetRewardAdaPots(tc.epoch, nil)
+		require.NoError(t, err)
+		require.NotNil(t, pots)
+		require.Equal(t, state.Treasury, pots.Treasury)
+		require.Equal(t, state.Reserves, pots.Reserves)
+		if tc.epoch == 1 {
+			require.Equal(t, uint64(400_000), uint64(pots.Fees))
+		}
+
+		hash := bytes.Repeat([]byte{byte(tc.epoch)}, 32)
+		seedBlockAtSlot(t, ls, boundary, hash)
+		require.NoError(t, db.SetTip(ochainsync.Tip{
+			Point: ocommon.NewPoint(boundary, hash),
+		}, nil))
+		result, err := ls.Query(stakeDistributionQuery(), QueryPoint{})
+		require.NoError(t, err)
+		dist := decodeStakeDistributionResult(t, result)
+		require.Len(t, dist.Results, 2)
+		for _, entry := range dist.Results {
+			require.Equal(t, tc.fraction, entry.StakeFraction.Rat,
+				"stake fraction at boundary into epoch %d", tc.epoch)
+		}
+	}
+}
+
+func TestSuppressBootstrapStakeRewardsReturnsAvailableRewardsToReserves(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	result := &rewards.Result{
+		PoolRewards:      []rewards.PoolReward{{PoolReward: 600}},
+		AccountRewards:   []rewards.AccountReward{{Amount: 600}},
+		TotalRewardPot:   1_000,
+		AvailableRewards: 800,
+		EffectiveRewards: 600,
+		Unspendable:      50,
+		Undistributed:    150,
+	}
+	suppressBootstrapStakeRewards(result)
+
+	require.Empty(t, result.PoolRewards)
+	require.Empty(t, result.AccountRewards)
+	require.Zero(t, result.EffectiveRewards)
+	require.Zero(t, result.Unspendable)
+	require.Equal(t, uint64(800), result.Undistributed)
+
+	app := &stakeRewardApplication{
+		params: rewards.Parameters{
+			TreasuryExpansion: big.NewRat(1, 5),
+		},
+		pots: &models.RewardAdaPots{
+			Reserves: types.Uint64(10_000),
+			Treasury: types.Uint64(10),
+		},
+		totalRewardPot:   result.TotalRewardPot,
+		availableRewards: result.AvailableRewards,
+		undistributed:    result.Undistributed,
+	}
+	reserves, treasury, err := stakeRewardUpdatedPots(app)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9_800), reserves)
+	require.Equal(t, uint64(210), treasury)
 }

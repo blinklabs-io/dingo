@@ -931,6 +931,39 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
 }
 
+func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	pg.AddPeer("44.0.0.9:3001", PeerSourceTopologyLocalRoot)
+
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+		remoteAddr, _ := net.ResolveTCPAddr("tcp", remote)
+		return ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+	}
+	first := connFor("44.0.0.1:3001")
+	second := connFor("44.0.0.9:3001")
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: first, IsClient: true}
+	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
+	pg.mu.Unlock()
+
+	assert.Equal(t, "ipv4:44.0.0.0/24", pg.DiversityGroupByConnId(first))
+	assert.Equal(
+		t,
+		pg.DiversityGroupByConnId(first),
+		pg.DiversityGroupByConnId(second),
+		"addresses in one /24 are one diversity group",
+	)
+	assert.Empty(t, pg.DiversityGroupByConnId(connFor("45.0.0.1:3001")))
+}
+
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -7989,6 +8022,25 @@ func TestResolveInboundIdentity(t *testing.T) {
 			},
 			inboundAddr: "44.0.0.1:51432",
 			wantIdx:     -1,
+		},
+		{
+			name: "ambiguous topology host reuses disconnected inbound record",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+				{
+					addr: "44.0.0.1:3002", normalized: "44.0.0.1:3002",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-1",
+				},
+				{
+					addr: "44.0.0.1:51000", normalized: "44.0.0.1:51000",
+					source: PeerSourceInboundConn,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     2,
 		},
 		{
 			name: "gossip peer sharing host does not widen identity",
