@@ -7449,3 +7449,81 @@ func TestIsFirstOnHeaderChain(t *testing.T) {
 		}
 	})
 }
+
+// SetLedger can run again while the node is serving, so readiness checks
+// must synchronize with it.
+func TestSecurityParamConfiguredConcurrentWithSetLedger(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 1; i <= 2000; i++ {
+			if err := cm.SetLedger(
+				&mockLedgerState{securityParam: i},
+			); err != nil {
+				t.Errorf("SetLedger(%d): %v", i, err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 2000 {
+			_ = cm.SecurityParamConfigured()
+		}
+	}()
+	close(start)
+	wg.Wait()
+	if !cm.SecurityParamConfigured() {
+		t.Fatal("expected security parameter to be configured")
+	}
+}
+
+func TestMaxQueuedHeadersConcurrentWithSetLedger(t *testing.T) {
+	t.Parallel()
+
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 1; i <= 2000; i++ {
+			if err := cm.SetLedger(
+				&mockLedgerState{securityParam: i},
+			); err != nil {
+				t.Errorf("SetLedger(%d): %v", i, err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 2000 {
+			_ = c.MaxQueuedHeaders()
+		}
+	}()
+	close(start)
+	wg.Wait()
+	if got, want := c.MaxQueuedHeaders(), max(
+		2000*2,
+		chain.DefaultMaxQueuedHeaders,
+	); got != want {
+		t.Fatalf("MaxQueuedHeaders() = %d, want %d", got, want)
+	}
+}

@@ -441,8 +441,10 @@ func (c *Chain) MaxQueuedHeaders() int {
 		return DefaultMaxQueuedHeaders
 	}
 	// Before SetLedger succeeds, securityParam is zero and the default
-	// floor applies (tests or early bootstrap only).
-	if sp := c.manager.securityParam; sp > 0 {
+	// floor applies (tests or early bootstrap only). Read through the
+	// manager lock: addBlockHeader calls this holding only c.mutex, and
+	// SetLedger can run again while headers are arriving.
+	if sp := c.manager.SecurityParam(); sp > 0 {
 		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
 	return DefaultMaxQueuedHeaders
@@ -2366,6 +2368,47 @@ func (c *Chain) PointAtDepth(
 		return ocommon.Point{}, false, err
 	}
 	return ocommon.NewPoint(block.Slot, block.Hash), true, nil
+}
+
+// PointAtDepthFrom returns the point depth blocks behind from when from is on
+// this chain. The relation and result are resolved under one chain lock, so a
+// concurrent tip change cannot move the anchor.
+func (c *Chain) PointAtDepthFrom(
+	from ocommon.Point,
+	depth uint64,
+) (point ocommon.Point, found bool, err error) {
+	if c == nil {
+		return ocommon.Point{}, false, errors.New("chain is nil")
+	}
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	unlocks := c.lockBlockIndexReadLocks()
+	defer unlocks()
+	block, err := c.manager.blockByPoint(from, nil)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if block.ID < initialBlockIndex || block.ID > c.tipBlockIndex {
+		return ocommon.Point{}, false, nil
+	}
+	active, err := c.blockByIndexLocked(block.ID)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	if active.Slot != from.Slot || !bytes.Equal(active.Hash, from.Hash) {
+		return ocommon.Point{}, false, nil
+	}
+	if depth >= block.ID {
+		return ocommon.Point{}, false, nil
+	}
+	if depth == 0 {
+		return ocommon.NewPoint(active.Slot, active.Hash), true, nil
+	}
+	ancestor, err := c.blockByIndexLocked(block.ID - depth)
+	if err != nil {
+		return ocommon.Point{}, false, err
+	}
+	return ocommon.NewPoint(ancestor.Slot, ancestor.Hash), true, nil
 }
 
 // IntersectPoints returns up to count points in descending order for
