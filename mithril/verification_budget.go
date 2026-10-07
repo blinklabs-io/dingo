@@ -57,6 +57,11 @@ const (
 	// proof: at most one path of 30 levels per signer.
 	stmMaxBatchPathValues = stmMaxSigners * 32
 
+	// maxProtocolMessageParts bounds the entries of one certificate's
+	// protocol message. Upstream defines about ten part keys and a
+	// certificate carries a few of them.
+	maxProtocolMessageParts = 64
+
 	// maxCertificateChainWork bounds the weighted verification cost of a
 	// whole chain. Mainnet costs about 5400 units per certificate, 3.6
 	// million for the chain; the budget is a few times that, and about a

@@ -226,6 +226,66 @@ type ProtocolMessage struct {
 	MessageParts map[string]string `json:"message_parts"`
 }
 
+// UnmarshalJSON decodes the message parts, failing once they exceed
+// maxProtocolMessageParts entries.
+func (p *ProtocolMessage) UnmarshalJSON(data []byte) error {
+	var aux struct {
+		MessageParts boundedMessageParts `json:"message_parts"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.MessageParts = aux.MessageParts
+	return nil
+}
+
+// boundedMessageParts decodes a JSON object one entry at a time, so an
+// oversized object is rejected before the map holds it. A certificate's map
+// is retained for the whole chain walk, and a map entry costs several times
+// the few JSON bytes that declare it, so the body byte budget alone does not
+// bound the retained heap.
+type boundedMessageParts map[string]string
+
+func (m *boundedMessageParts) UnmarshalJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if tok == nil {
+		*m = nil
+		return nil
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return errors.New("message_parts is not a JSON object")
+	}
+	parts := make(map[string]string)
+	for dec.More() {
+		if len(parts) >= maxProtocolMessageParts {
+			return fmt.Errorf(
+				"%w: message parts exceed limit %d",
+				errCertificateChainBudget,
+				maxProtocolMessageParts,
+			)
+		}
+		keyTok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return errors.New("message_parts key is not a string")
+		}
+		var value string
+		if err := dec.Decode(&value); err != nil {
+			return fmt.Errorf("message part %q: %w", key, err)
+		}
+		parts[key] = value
+	}
+	*m = parts
+	return nil
+}
+
 // ComputeHash matches the upstream Mithril protocol-message hash.
 func (p ProtocolMessage) ComputeHash() string {
 	hasher := sha256.New()

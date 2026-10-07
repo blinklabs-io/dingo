@@ -315,6 +315,9 @@ func parseSTMAggregateSignatureBytes(
 	ret := &stmAggregateSignature{
 		Signatures: make([]stmSingleSignatureWithRegisteredParty, 0, totalSigs),
 	}
+	// The index cap is aggregate, so each signature may only allocate what
+	// the signatures before it left over.
+	indicesLeft := uint64(stmMaxLotteryIndices)
 	for i := range totalSigs {
 		if offset+8 > len(raw) {
 			return nil, fmt.Errorf(
@@ -336,10 +339,12 @@ func parseSTMAggregateSignatureBytes(
 		sigRegEnd := offset + int(sizeSigReg)
 		sigReg, err := parseSTMSignatureWithRegisteredPartyBytes(
 			raw[offset:sigRegEnd],
+			indicesLeft,
 		)
 		if err != nil {
 			return nil, err
 		}
+		indicesLeft -= uint64(len(sigReg.Sig.Indexes))
 		ret.Signatures = append(ret.Signatures, *sigReg)
 		offset = sigRegEnd
 	}
@@ -353,6 +358,7 @@ func parseSTMAggregateSignatureBytes(
 
 func parseSTMSignatureWithRegisteredPartyBytes(
 	raw []byte,
+	maxIndexes uint64,
 ) (*stmSingleSignatureWithRegisteredParty, error) {
 	if len(raw) < 8 {
 		return nil, fmt.Errorf(
@@ -397,7 +403,7 @@ func parseSTMSignatureWithRegisteredPartyBytes(
 	}
 	//nolint:gosec // bounded by available.
 	sigEnd := sigStart + int(sigSize)
-	sig, err := parseSTMSingleSignatureBytes(raw[sigStart:sigEnd])
+	sig, err := parseSTMSingleSignatureBytes(raw[sigStart:sigEnd], maxIndexes)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +432,10 @@ func parseSTMClosedRegistrationEntryBytes(
 	}, nil
 }
 
-func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
+func parseSTMSingleSignatureBytes(
+	raw []byte,
+	maxIndexes uint64,
+) (*stmSingleSignature, error) {
 	if len(raw) < 8 {
 		return nil, fmt.Errorf(
 			"single signature payload too short: need >= 8, got %d",
@@ -437,10 +446,10 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 	if err != nil {
 		return nil, err
 	}
-	if nrIndexes > stmMaxLotteryIndices {
+	if nrIndexes > maxIndexes {
 		return nil, fmt.Errorf(
-			"%w: %d lottery indices exceed limit %d",
-			errCertificateChainBudget, nrIndexes, stmMaxLotteryIndices,
+			"%w: lottery indices exceed limit %d",
+			errCertificateChainBudget, stmMaxLotteryIndices,
 		)
 	}
 	// Each index is 8 bytes; cap pre-allocation against remaining payload.

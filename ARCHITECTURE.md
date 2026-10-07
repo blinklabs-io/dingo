@@ -7719,9 +7719,12 @@ trusted, so it is bounded on every axis the aggregator controls. Each
 certificate body is read through a limit of 8 MiB with overflow detection, and
 the bytes of every certificate read share one 512 MiB budget (the walk retains
 them all). The walk follows at most 10000 certificates, rejects metadata listing
-more than 8192 signers, and, in STM mode, rejects an aggregate signature with
+more than 8192 signers or a protocol message with more than 64 parts (a
+decoded map entry costs several times its JSON bytes, so the byte budget alone
+does not bound the retained heap), and, in STM mode, rejects an aggregate signature with
 more than 8192 signatures, 65536 lottery indices in total or 262144 Merkle path
-values. The binary parser checks these counts before allocating, and the checks
+values. The binary parser and the message-part decoder check these counts before
+allocating, the index total included, and the checks
 precede signature, lottery and Merkle verification. Verification work is
 charged to one cumulative budget of 2^26 weighted units for the whole chain
 (64 per signer, 1 per lottery index, 1 per path value) before the work

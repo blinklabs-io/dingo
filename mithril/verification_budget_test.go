@@ -236,6 +236,11 @@ func TestParseSTMAggregateSignatureCountCaps(t *testing.T) {
 		{"signers over cap", stmMaxSigners + 1, 0, 0, "signatures"},
 		{"indices at cap", 1, stmMaxLotteryIndices, 0, ""},
 		{"indices over cap", 1, stmMaxLotteryIndices + 1, 0, "lottery indices"},
+		{"aggregate indices at cap", 2, stmMaxLotteryIndices / 2, 0, ""},
+		{
+			"aggregate indices over cap",
+			2, stmMaxLotteryIndices/2 + 1, 0, "lottery indices",
+		},
 		{"path values at cap", 0, 0, stmMaxBatchPathValues, ""},
 		{"path values over cap", 0, 0, stmMaxBatchPathValues + 1, "batch proof"},
 	}
@@ -363,4 +368,118 @@ func TestVerifyCertificateChainChargesSTMWorkToChainBudget(t *testing.T) {
 	err = run(maxCertificateChainWork - work + 1)
 	require.ErrorIs(t, err, errCertificateChainBudget)
 	require.Contains(t, err.Error(), "work")
+}
+
+// budgetJSONSignature rewrites the golden JSON aggregate signature so that
+// it carries sigs copies of its first signature, indices lottery indices
+// on that signature and values batch-proof values.
+func budgetJSONSignature(t *testing.T, sigs, indices, values int) string {
+	t.Helper()
+	var agg map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(
+		[]byte(stmGoldenAggregateSignatureJSON), &agg,
+	))
+	var entries [][]json.RawMessage
+	require.NoError(t, json.Unmarshal(agg["signatures"], &entries))
+	first := entries[0]
+	if indices > 0 {
+		var sig map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(first[0], &sig))
+		idx := make([]int, indices)
+		for i := range idx {
+			idx[i] = i
+		}
+		sig["indexes"] = mustJSON(t, idx)
+		first = []json.RawMessage{mustJSON(t, sig), first[1]}
+	}
+	out := make([][]json.RawMessage, sigs)
+	for i := range out {
+		out[i] = first
+	}
+	agg["signatures"] = mustJSON(t, out)
+	if values > 0 {
+		var proof map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(agg["batch_proof"], &proof))
+		vals := make([][]int, values)
+		for i := range vals {
+			vals[i] = make([]int, 32)
+		}
+		proof["values"] = mustJSON(t, vals)
+		agg["batch_proof"] = mustJSON(t, proof)
+	}
+	return hex.EncodeToString(mustJSON(t, agg))
+}
+
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	require.NoError(t, err)
+	return b
+}
+
+func TestVerifySTMSignatureRejectsOverCapJSONSignature(t *testing.T) {
+	t.Parallel()
+
+	msg := make([]byte, 16)
+	avk := hex.EncodeToString([]byte(stmGoldenAggregateVerificationKeyJSON))
+	params := ProtocolParameters{K: 5, M: 10, PhiF: 0.8}
+	tests := []struct {
+		name    string
+		sigs    int
+		indices int
+		values  int
+		wantErr string
+	}{
+		{"signers", stmMaxSigners + 1, 0, 0, "signatures"},
+		{"lottery indices", 1, stmMaxLotteryIndices + 1, 0, "lottery indices"},
+		{"batch proof values", 1, 0, stmMaxBatchPathValues + 1, "batch proof"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			encoded := budgetJSONSignature(t, tt.sigs, tt.indices, tt.values)
+			// The JSON form must reach the verifier as JSON, not fall
+			// through to the binary parser.
+			parsed, err := parseSTMAggregateSignature(encoded)
+			require.NoError(t, err)
+			require.NotEmpty(t, parsed.Signatures)
+
+			err = verifySTMSignature(
+				msg, avk, encoded, params, newCertificateChainBudget(),
+			)
+			require.ErrorIs(t, err, errCertificateChainBudget)
+			require.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestProtocolMessagePartsCap(t *testing.T) {
+	t.Parallel()
+
+	parts := func(n int) string {
+		entries := make([]string, n)
+		for i := range entries {
+			entries[i] = fmt.Sprintf(`"k%d":"v"`, i)
+		}
+		return `{"protocol_message":{"message_parts":{` +
+			strings.Join(entries, ",") + `}}}`
+	}
+
+	var cert Certificate
+	require.NoError(t, json.Unmarshal(
+		[]byte(parts(maxProtocolMessageParts)), &cert,
+	), "parts exactly at the cap are accepted")
+	require.Len(t, cert.ProtocolMessage.MessageParts, maxProtocolMessageParts)
+	require.Equal(t, "v", cert.ProtocolMessage.MessageParts["k0"])
+
+	err := json.Unmarshal([]byte(parts(maxProtocolMessageParts+1)), &cert)
+	require.ErrorIs(t, err, errCertificateChainBudget)
+
+	var msg ProtocolMessage
+	require.NoError(t, json.Unmarshal([]byte(`{"message_parts":null}`), &msg))
+	require.Nil(t, msg.MessageParts)
+	require.NoError(t, json.Unmarshal([]byte(`{}`), &msg))
+	require.Nil(t, msg.MessageParts)
+	require.Error(t, json.Unmarshal([]byte(`{"message_parts":[]}`), &msg))
+	require.Error(t, json.Unmarshal([]byte(`{"message_parts":{"a":1}}`), &msg))
 }
