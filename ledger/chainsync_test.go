@@ -11817,6 +11817,115 @@ func TestHandleChainSwitchEventCyclingPeersRequestsOneFreshCursorEach(
 	)
 }
 
+// A rollback is not progress, and neither is re-applying blocks up to a tip
+// already reached. Only moving past the highest tip resets the stall count.
+func TestFreshCursorStallCountIgnoresRollbackAndReapply(t *testing.T) {
+	t.Parallel()
+
+	chainAtSlot := func(slot uint64) *chain.Chain {
+		t.Helper()
+		chainManager, err := chain.NewManager(nil, nil)
+		require.NoError(t, err)
+		c := chainManager.PrimaryChain()
+		require.NoError(t, c.AddLocalBlock(&mockBabbageBlock{slot: slot}))
+		return c
+	}
+	reached := chainAtSlot(200)
+	rolledBack := chainAtSlot(100)
+	advanced := chainAtSlot(300)
+
+	logs := &syncSafeBuffer{}
+	ls := &LedgerState{
+		chain: reached,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+		},
+	}
+	const stallWarning = "fresh chainsync cursor requests are not advancing the local tip"
+
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3001))
+	ls.chain = rolledBack
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3002))
+	ls.chain = reached
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3003))
+	assert.Equal(
+		t,
+		1,
+		strings.Count(logs.String(), stallWarning),
+		"rolling back and re-applying to the same tip must not reset the stall count",
+	)
+
+	ls.chain = advanced
+	ls.markFreshCursorRequestedLocked(testChainsyncConnId(6000, 3004))
+	assert.Equal(
+		t,
+		1,
+		ls.freshCursorStallRequests,
+		"moving past the highest tip reached starts a new count",
+	)
+}
+
+// A fresh-cursor request coalesced into a resync made moments earlier for the
+// same connection closes nothing, so it must not arm the per-peer record or
+// count toward the stall.
+func TestHandleChainSwitchEventCoalescedFreshCursorIsNotRecorded(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	previousConnId := testChainsyncConnId(6000, 3001)
+	peerConnId := testChainsyncConnId(6000, 3002)
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	require.True(t, ls.requestChainsyncResync(
+		peerConnId,
+		event.ChainsyncResyncReasonPersistentFork,
+		nil,
+	))
+	testutil.RequireReceive(
+		t,
+		resyncCh,
+		testutil.AsyncWait,
+		"earlier resync on the peer's connection",
+	)
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: previousConnId,
+			NewConnectionId:      peerConnId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		},
+	))
+
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
+	assert.False(
+		t,
+		ls.freshCursorAwaitingHeadersLocked(peerConnId),
+		"a coalesced request must not arm the per-peer record",
+	)
+	assert.Zero(
+		t,
+		ls.freshCursorStallRequests,
+		"a coalesced request must not count toward the stall",
+	)
+}
+
 func TestChainSwitchNeedsFreshCursorUsesObservedTip(
 	t *testing.T,
 ) {

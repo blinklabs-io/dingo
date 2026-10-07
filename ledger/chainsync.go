@@ -1333,12 +1333,15 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			"peer_tip_slot",
 			effectiveObservedTip.Point.Slot,
 		)
-		ls.markFreshCursorRequestedLocked(effectiveConnId)
-		ls.requestChainsyncResync(
+		// A request coalesced into a recent one closes nothing, so it
+		// must not arm the per-peer record or count toward the stall.
+		if ls.requestChainsyncResync(
 			effectiveConnId,
 			event.ChainsyncResyncReasonChainSwitchCursorAhead,
 			&pending,
-		)
+		) {
+			ls.markFreshCursorRequestedLocked(effectiveConnId)
+		}
 		return
 	}
 	if connIdKey(replayConnId) != "" {
@@ -1756,10 +1759,7 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 		return false
 	}
 	localTip := ls.PrimaryChainTip()
-	ahead := newObservedTip.BlockNumber > localTip.BlockNumber ||
-		(newObservedTip.BlockNumber == localTip.BlockNumber &&
-			newObservedTip.Point.Slot > localTip.Point.Slot)
-	if !ahead {
+	if !tipAhead(newObservedTip, localTip) {
 		return false
 	}
 	if ls.chainSwitchPeerStillStreamingLocked(e, connId, newObservedTip) {
@@ -1783,38 +1783,50 @@ func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
 	return true
 }
 
+// tipAhead reports whether a is past b: a higher block number, or the same
+// block number at a later slot.
+func tipAhead(a, b ochainsync.Tip) bool {
+	return a.BlockNumber > b.BlockNumber ||
+		(a.BlockNumber == b.BlockNumber && a.Point.Slot > b.Point.Slot)
+}
+
 // chainSwitchPeerStillStreamingLocked reports whether connId's peer has at
 // least headerMismatchResyncThreshold blocks left to deliver before its
-// advertised tip. Such a peer keeps sending headers, so a cursor that has
-// moved past the local tip shows up in the header handler as consecutive
+// target tip. Such a peer keeps sending headers, so a cursor that has moved
+// past the local tip shows up in the header handler as consecutive
 // mismatches, which request a resync from received headers. Closing it
 // speculatively instead is what, far behind the network, closes every
 // reconnected peer before it delivers anything. A peer at its tip may send
 // nothing for many slots, so only there is the speculative close needed.
 //
-// The advertised tip is untrusted, but it is used only to withhold a close:
-// overstating it routes the peer through the evidence-based path and cannot
-// force one.
+// For the selected peer the target is the untrusted advertised tip the
+// switch event carries. It is used only to withhold a close: overstating it
+// routes the peer through the evidence-based path and cannot force one. A
+// fallback connection has no advertised tip here, so its target is the chain
+// selector's sync target, which is the advertised tip or, when that is
+// implausibly far ahead, the delivered frontier. It never exceeds the
+// advertised tip, so the fallback withholds a close less often and keeps the
+// speculative close, which freshCursorPeers still limits to one per peer.
 func (ls *LedgerState) chainSwitchPeerStillStreamingLocked(
 	e chainselection.ChainSwitchEvent,
 	connId ouroboros.ConnectionId,
 	observedTip ochainsync.Tip,
 ) bool {
-	var advertisedTip ochainsync.Tip
+	var targetTip ochainsync.Tip
 	switch {
 	case sameConnectionId(connId, e.NewConnectionId):
-		advertisedTip = e.NewTip
+		targetTip = e.NewTip
 	case ls.config.GetPeerSyncTargetFunc != nil:
 		var ok bool
-		advertisedTip, ok = ls.config.GetPeerSyncTargetFunc(connId)
+		targetTip, ok = ls.config.GetPeerSyncTargetFunc(connId)
 		if !ok {
 			return false
 		}
 	default:
 		return false
 	}
-	return advertisedTip.BlockNumber > observedTip.BlockNumber &&
-		advertisedTip.BlockNumber-observedTip.BlockNumber >=
+	return targetTip.BlockNumber > observedTip.BlockNumber &&
+		targetTip.BlockNumber-observedTip.BlockNumber >=
 			headerMismatchResyncThreshold
 }
 
@@ -1895,12 +1907,14 @@ func (ls *LedgerState) markFreshCursorRequestedLocked(
 }
 
 // noteFreshCursorProgressLocked counts fresh-cursor requests made since the
-// local tip last advanced and warns when they reach
-// freshCursorStallWarnRequests.
+// local tip last moved past the highest tip it had reached, and warns when
+// they reach freshCursorStallWarnRequests. Neither a rollback nor a return to
+// a tip already reached is progress, so comparing against the previous
+// request's tip instead would let a node that rolls back and re-applies the
+// same blocks reset the count indefinitely.
 func (ls *LedgerState) noteFreshCursorProgressLocked() {
 	localTip := ls.PrimaryChainTip()
-	if localTip.BlockNumber != ls.freshCursorStallTip.BlockNumber ||
-		localTip.Point.Slot != ls.freshCursorStallTip.Point.Slot {
+	if tipAhead(localTip, ls.freshCursorStallTip) {
 		ls.freshCursorStallTip = localTip
 		ls.freshCursorStallRequests = 0
 	}
@@ -2565,18 +2579,21 @@ func desiredBlockfetchBatchHeaders(
 // may be nil otherwise. This event's subscriber calls
 // RecoverAfterLocalRollback, which takes that mutex, so publishing inline
 // from under the lock is the deadlock pendingPublishes exists to break.
+//
+// It reports whether the request was queued for publication, which is false
+// when it was coalesced into one made within chainsyncResyncCoalesceWindow.
 func (ls *LedgerState) requestChainsyncResync(
 	connId ouroboros.ConnectionId,
 	reason string,
 	pending *pendingPublishes,
-) {
+) bool {
 	ls.headerMismatchCount = 0
 	ls.clearRollbackHistory()
 	ls.bufferedHeaderMutex.Lock()
 	delete(ls.bufferedHeaderEvents, connIdKey(connId))
 	ls.bufferedHeaderMutex.Unlock()
 	if ls.coalesceChainsyncResync(connId, reason) {
-		return
+		return false
 	}
 	pending.add(
 		ls.config.EventBus,
@@ -2589,6 +2606,7 @@ func (ls *LedgerState) requestChainsyncResync(
 			},
 		),
 	)
+	return true
 }
 
 // coalesceChainsyncResync reports whether a resync request for connId repeats

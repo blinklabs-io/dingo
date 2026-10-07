@@ -1656,9 +1656,9 @@ type LedgerState struct {
 	// the close itself reconnects the peer under a new connection ID.
 	// Guarded by chainsyncMutex.
 	freshCursorPeers map[string]*freshCursorRequest
-	// freshCursorStallTip and freshCursorStallRequests count chain-switch
-	// fresh-cursor requests made since the local tip last advanced. Guarded
-	// by chainsyncMutex.
+	// freshCursorStallTip is the highest local tip reached, and
+	// freshCursorStallRequests the chain-switch fresh-cursor requests made
+	// since the tip last moved past it. Guarded by chainsyncMutex.
 	freshCursorStallTip      ochainsync.Tip
 	freshCursorStallRequests int
 
