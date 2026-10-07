@@ -18,8 +18,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -75,6 +76,7 @@ type AggregatorConfig struct {
 // key and issues the genesis certificate.
 type Aggregator struct {
 	cfg               AggregatorConfig
+	operatorTokenKey  [sha256.Size]byte
 	operatorTokenHash [sha256.Size]byte
 
 	mu     sync.Mutex
@@ -151,10 +153,15 @@ func NewAggregator(
 			minOperatorTokenBytes,
 		)
 	}
-	tokenHash := sha256.Sum256([]byte(cfg.OperatorToken))
+	var tokenKey [sha256.Size]byte
+	if _, err := rand.Read(tokenKey[:]); err != nil {
+		return nil, fmt.Errorf("generating operator token key: %w", err)
+	}
+	tokenHash := operatorTokenHash(tokenKey[:], cfg.OperatorToken)
 	cfg.OperatorToken = ""
 	a := &Aggregator{
 		cfg:               cfg,
+		operatorTokenKey:  tokenKey,
 		operatorTokenHash: tokenHash,
 		regs:              make(map[string]stmRegistration),
 		now:               time.Now,
@@ -360,16 +367,22 @@ func (a *Aggregator) authorizeOperator(
 	header := r.Header.Get("Authorization")
 	scheme, token, ok := strings.Cut(header, " ")
 	if ok && strings.EqualFold(scheme, "Bearer") && token != "" {
-		candidate := sha256.Sum256([]byte(token))
-		if subtle.ConstantTimeCompare(
-			candidate[:], a.operatorTokenHash[:],
-		) == 1 {
+		candidate := operatorTokenHash(a.operatorTokenKey[:], token)
+		if hmac.Equal(candidate[:], a.operatorTokenHash[:]) {
 			return true
 		}
 	}
 	w.Header().Set("WWW-Authenticate", "Bearer")
 	http.Error(w, "operator authorization required", http.StatusUnauthorized)
 	return false
+}
+
+func operatorTokenHash(key []byte, token string) [sha256.Size]byte {
+	h := hmac.New(sha256.New, key)
+	_, _ = h.Write([]byte(token))
+	var ret [sha256.Size]byte
+	copy(ret[:], h.Sum(nil))
+	return ret
 }
 
 func (a *Aggregator) registerSigner(req registerSignerRequest) error {
