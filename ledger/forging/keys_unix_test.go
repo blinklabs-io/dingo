@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,35 +32,57 @@ func TestLoadSecretKeyRejectsFIFOWithoutBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "key.fifo")
 	require.NoError(t, syscall.Mkfifo(path, 0o600))
 
-	_, err := loadSecretKeyFromFile(path)
+	err := requireFIFORejectionWithoutWriter(
+		t, path,
+		func() error { _, err := loadSecretKeyFromFile(path); return err },
+	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "is not a regular file")
 }
 
-func TestLoadOperationalCertificateRejectsFIFOContent(t *testing.T) {
+func TestLoadOperationalCertificateRejectsFIFOWithoutWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "opcert.fifo")
 	require.NoError(t, syscall.Mkfifo(path, 0o600))
 
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		f, err := os.OpenFile(path, os.O_WRONLY, 0)
-		if err != nil {
-			return
-		}
-		_, _ = f.WriteString(testOpCertJSON)
-		_ = f.Close()
-	}()
-
-	_, err := LoadOperationalCertificateFile(path)
-	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
-
-	drain, openErr := os.OpenFile(
+	err := requireFIFORejectionWithoutWriter(
+		t,
 		path,
-		os.O_RDONLY|syscall.O_NONBLOCK,
-		0,
+		func() error { _, err := LoadOperationalCertificateFile(path); return err },
 	)
-	require.NoError(t, openErr)
-	<-writerDone
-	require.NoError(t, drain.Close())
+	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
+}
+
+func requireFIFORejectionWithoutWriter(
+	t *testing.T,
+	path string,
+	load func() error,
+) error {
+	t.Helper()
+	result := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		result <- load()
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		writer, err := os.OpenFile(
+			path,
+			os.O_WRONLY|syscall.O_NONBLOCK,
+			0,
+		)
+		if err == nil {
+			_ = writer.Close()
+		}
+		testutil.RequireReceive(
+			t, done, testutil.AsyncWait, "blocked FIFO loader cleanup",
+		)
+	})
+	return testutil.RequireReceive(
+		t, result, testutil.AsyncWait, "nonblocking FIFO rejection",
+	)
 }

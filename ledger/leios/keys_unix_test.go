@@ -17,42 +17,49 @@
 package leios
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/keystore"
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadVoteSigningKeyFileRejectsFIFOContent(t *testing.T) {
+func TestLoadVoteSigningKeyFileRejectsFIFOWithoutWriter(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "vote.fifo")
 	require.NoError(t, syscall.Mkfifo(path, 0o600))
 
-	writerDone := make(chan struct{})
+	result := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		defer close(writerDone)
-		f, err := os.OpenFile(path, os.O_WRONLY, 0)
-		if err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(f, "%064x", 42)
-		_ = f.Close()
+		defer close(done)
+		_, err := LoadVoteSigningKeyFile(path)
+		result <- err
 	}()
-
-	_, err := LoadVoteSigningKeyFile(path)
-	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
-
-	drain, openErr := os.OpenFile(
-		path,
-		os.O_RDONLY|syscall.O_NONBLOCK,
-		0,
+	t.Cleanup(func() {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		writer, err := os.OpenFile(
+			path,
+			os.O_WRONLY|syscall.O_NONBLOCK,
+			0,
+		)
+		if err == nil {
+			_ = writer.Close()
+		}
+		testutil.RequireReceive(
+			t, done, testutil.AsyncWait, "blocked FIFO loader cleanup",
+		)
+	})
+	err := testutil.RequireReceive(
+		t, result, testutil.AsyncWait, "nonblocking FIFO rejection",
 	)
-	require.NoError(t, openErr)
-	<-writerDone
-	require.NoError(t, drain.Close())
+	require.ErrorIs(t, err, keystore.ErrNotRegularFile)
 }

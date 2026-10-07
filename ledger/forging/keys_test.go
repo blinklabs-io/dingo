@@ -642,7 +642,7 @@ func TestLoadSecretKeyRejectsOversizedFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oversized.skey")
 	require.NoError(t, os.WriteFile(
 		path,
-		make([]byte, maxSecretKeyFileSize+1),
+		make([]byte, 2<<20),
 		0o600,
 	))
 	testutil.RestrictFileToCurrentUser(t, path)
@@ -656,7 +656,7 @@ func TestLoadOperationalCertificateRejectsOversizedEnvelope(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "oversized.cert")
 	content := testOpCertJSON + strings.Repeat(
 		" ",
-		maxSecretKeyFileSize-len(testOpCertJSON)+1,
+		2<<20,
 	)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 

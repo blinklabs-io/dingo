@@ -94,7 +94,10 @@ func ReadRegularKeyFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
+	return readBoundedKeyFile(f, path)
+}
 
+func readBoundedKeyFile(f *os.File, path string) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize+1))
 	if err != nil {
 		return nil, err
@@ -108,6 +111,20 @@ func ReadRegularKeyFile(path string) ([]byte, error) {
 	return data, nil
 }
 
+// ReadSecretKeyFile reads a bounded Cardano key envelope from a regular file
+// after verifying that the file is accessible only to its owner.
+func ReadSecretKeyFile(path string) ([]byte, error) {
+	f, err := OpenRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	if err := CheckOpenFilePermissions(f); err != nil {
+		return nil, err
+	}
+	return readBoundedKeyFile(f, path)
+}
+
 // loadKeyFromFile loads a key from a file path (cardano-cli format).
 // Supports VRF, KES, and operational certificates.
 // Returns ErrInsecureFileMode if the file has group or other access.
@@ -116,27 +133,9 @@ func ReadRegularKeyFile(path string) ([]byte, error) {
 // (via fstat on Unix) to avoid a TOCTOU race between the permission check
 // and the read.
 func loadKeyFromFile(path string) (*loadedKey, error) {
-	f, err := OpenRegularFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open key file %q: %w", path, err)
-	}
-	defer f.Close()
-
-	if err := checkOpenFilePermissions(f); err != nil {
-		return nil, err
-	}
-
-	// Limit read to 1 MiB to guard against accidentally pointing at a
-	// large file. Valid key files are well under this size.
-	data, err := io.ReadAll(io.LimitReader(f, maxKeyFileSize+1))
+	data, err := ReadSecretKeyFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read key file %q: %w", path, err)
-	}
-	if len(data) > maxKeyFileSize {
-		return nil, fmt.Errorf(
-			"key file %q exceeds maximum size of %d bytes",
-			path, maxKeyFileSize,
-		)
 	}
 	key, err := parseKeyEnvelope(data)
 	if err != nil {

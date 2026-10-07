@@ -22,51 +22,53 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-func TestKeyFileLoadersRejectFIFOContent(t *testing.T) {
+func TestKeyFileLoadersRejectFIFOWithoutWriter(t *testing.T) {
 	tests := []struct {
-		name    string
-		content string
-		load    func(string) (*loadedKey, error)
+		name string
+		load func(string) (*loadedKey, error)
 	}{
-		{name: "secret key", content: testVRFSKeyJSON, load: loadKeyFromFile},
-		{
-			name:    "operational certificate",
-			content: testOpCertJSON,
-			load:    loadOpCertFromFile,
-		},
+		{name: "secret key", load: loadKeyFromFile},
+		{name: "operational certificate", load: loadOpCertFromFile},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "key.fifo")
 			require.NoError(t, syscall.Mkfifo(path, 0o600))
 
-			writerDone := make(chan struct{})
+			result := make(chan error, 1)
+			done := make(chan struct{})
 			go func() {
-				defer close(writerDone)
-				f, err := os.OpenFile(path, os.O_WRONLY, 0)
-				if err != nil {
-					return
-				}
-				_, _ = f.WriteString(test.content)
-				_ = f.Close()
+				defer close(done)
+				_, err := test.load(path)
+				result <- err
 			}()
+			t.Cleanup(func() {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				writer, err := os.OpenFile(
+					path,
+					os.O_WRONLY|syscall.O_NONBLOCK,
+					0,
+				)
+				if err == nil {
+					_ = writer.Close()
+				}
+				testutil.RequireReceive(
+					t, done, testutil.AsyncWait, "blocked FIFO loader cleanup",
+				)
+			})
 
-			_, err := test.load(path)
-			require.ErrorIs(t, err, ErrNotRegularFile)
-
-			// If the validated reader closed before the writer was scheduled,
-			// connect a nonblocking reader so the writer can finish.
-			drain, openErr := os.OpenFile(
-				path,
-				os.O_RDONLY|syscall.O_NONBLOCK,
-				0,
+			err := testutil.RequireReceive(
+				t, result, testutil.AsyncWait, "nonblocking FIFO rejection",
 			)
-			require.NoError(t, openErr)
-			<-writerDone
-			require.NoError(t, drain.Close())
+			require.ErrorIs(t, err, ErrNotRegularFile)
 		})
 	}
 }
