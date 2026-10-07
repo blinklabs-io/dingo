@@ -938,36 +938,39 @@ func validateImportState(cfg ImportConfig) error {
 		previousEpoch := state.Epoch - 1
 		previousEra, known := importedEraForEpoch(state, previousEpoch)
 		if !known {
-			return fmt.Errorf(
-				"validating previous protocol parameters for epoch %d: era cannot be determined",
-				previousEpoch,
-			)
-		}
-		previous, err := previousPParamsForEra(
-			state.EraIndex,
-			state.PrevPParamsData,
-			previousEra,
-		)
-		if err == nil {
-			err = validatePParamsData(previousEra, previous)
-		}
-		if err != nil {
-			stored, storedErr := storedValidPParams(
-				cfg.Database.Metadata(), nil, previousEpoch, previousEra,
-			)
-			if storedErr != nil {
+			if state.SnapShotsData != nil {
 				return fmt.Errorf(
-					"checking stored previous protocol parameters for epoch %d: %w",
+					"validating previous protocol parameters for epoch %d: era cannot be determined",
 					previousEpoch,
-					storedErr,
 				)
 			}
-			if stored == nil {
-				return fmt.Errorf(
-					"validating previous protocol parameters for epoch %d: %w",
-					previousEpoch,
-					err,
+		} else {
+			previous, err := previousPParamsForEra(
+				state.EraIndex,
+				state.PrevPParamsData,
+				previousEra,
+			)
+			if err == nil {
+				err = validatePParamsData(previousEra, previous)
+			}
+			if err != nil {
+				stored, storedErr := storedValidPParams(
+					cfg.Database.Metadata(), nil, previousEpoch, previousEra,
 				)
+				if storedErr != nil {
+					return fmt.Errorf(
+						"checking stored previous protocol parameters for epoch %d: %w",
+						previousEpoch,
+						storedErr,
+					)
+				}
+				if stored == nil {
+					return fmt.Errorf(
+						"validating previous protocol parameters for epoch %d: %w",
+						previousEpoch,
+						err,
+					)
+				}
 			}
 		}
 	}

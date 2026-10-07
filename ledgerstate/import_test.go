@@ -2906,6 +2906,7 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 		name    string
 		mutate  func(*RawLedgerState)
 		wantErr string
+		wantLog string
 	}{
 		{name: "valid input imports"},
 		{
@@ -2969,6 +2970,16 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				s.EraBoundEpoch = s.Epoch
 			},
 			wantErr: "previous protocol parameters for epoch 99: era cannot be determined",
+		},
+		{
+			name: "previous parameters era unknown without snapshots",
+			mutate: func(s *RawLedgerState) {
+				s.PParamsData = currentPParams
+				s.PrevPParamsData = previousPParams
+				s.EraBounds = nil
+				s.EraBoundEpoch = s.Epoch
+			},
+			wantLog: "not importing historical protocol parameters from snapshot because the epoch's era cannot be determined",
 		},
 		{
 			name: "go snapshot without historical parameters",
@@ -3066,9 +3077,10 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 				tt.mutate(state)
 			}
 
+			var logOutput bytes.Buffer
 			err = ImportLedgerState(context.Background(), ImportConfig{
 				Database: db,
-				Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Logger:   slog.New(slog.NewTextHandler(&logOutput, nil)),
 				State:    state,
 				EpochLength: func(uint) (uint, uint, error) {
 					return 1, 1_000, nil
@@ -3084,6 +3096,9 @@ func TestImportLedgerStateRejectsMalformedInputBeforePersisting(t *testing.T) {
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				require.Equal(t, 1, utxos)
+				if tt.wantLog != "" {
+					require.Contains(t, logOutput.String(), tt.wantLog)
+				}
 				return
 			}
 			require.ErrorContains(t, err, tt.wantErr)
