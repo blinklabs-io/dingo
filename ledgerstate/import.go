@@ -689,6 +689,17 @@ func ImportLedgerState(
 				"(already completed)",
 			"component", "ledgerstate",
 		)
+		// The checkpoint may predate the root verifier, so verify the
+		// seeded roots even though the phase is not re-run.
+		if cfg.State.GovStateData != nil &&
+			cfg.State.EraIndex >= EraConway {
+			if err := verifyImportedPurposeRoots(cfg); err != nil {
+				return fmt.Errorf(
+					"verifying per-purpose governance roots: %w",
+					err,
+				)
+			}
+		}
 	}
 
 	// Mithril v2 catch-up: the snapshot is the complete, trusted ledger state
@@ -3681,6 +3692,7 @@ func importGovState(
 				cfg.State.Epoch,
 			)
 		}
+		ratifiedCommitteeActions := 0
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
@@ -3715,6 +3727,10 @@ func importGovState(
 					rs := currentEpochSlot
 					ratifiedEpoch = &re
 					ratifiedSlot = &rs
+					if prop.ActionType == govActionTypeNoConfidence ||
+						prop.ActionType == govActionTypeUpdateCommittee {
+						ratifiedCommitteeActions++
+					}
 				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
@@ -3759,6 +3775,18 @@ func importGovState(
 				"saving governance proposals: %w", err,
 			)
 		}
+		if ratifiedCommitteeActions > 0 {
+			// The committee imported above is the one in force at the
+			// snapshot; the ratified action only takes effect at the next
+			// epoch boundary, so committee-dependent validation before then
+			// sees the pre-action committee.
+			cfg.Logger.Warn(
+				"snapshot holds ratified committee actions not yet enacted",
+				"component", "ledgerstate",
+				"count", ratifiedCommitteeActions,
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		cfg.Logger.Info(
 			"imported governance proposals",
 			"component", "ledgerstate",
@@ -3791,6 +3819,14 @@ func importGovState(
 				"seeded per-purpose governance chain roots",
 				"component", "ledgerstate",
 				"count", seeded,
+			)
+		}
+		if err := verifyPrevGovActionIdsSeeded(
+			cfg, store, govState.PrevGovActionIds,
+		); err != nil {
+			return fmt.Errorf(
+				"verifying per-purpose governance roots: %w",
+				err,
 			)
 		}
 	}
@@ -4072,6 +4108,120 @@ func seedPrevGovActionIds(
 		)
 	}
 	return count, nil
+}
+
+// verifyImportedPurposeRoots parses the snapshot governance state and
+// verifies its per-purpose roots against the database.
+func verifyImportedPurposeRoots(cfg ImportConfig) error {
+	govState, err := ParseGovState(
+		cfg.State.GovStateData,
+		cfg.State.EraIndex,
+	)
+	if govState == nil {
+		if err != nil {
+			return fmt.Errorf("parsing governance state: %w", err)
+		}
+		return nil
+	}
+	// A GovRelation that fails to decode leaves PrevGovActionIds nil, which
+	// would otherwise read as a snapshot with no roots.
+	if govState.ImportParseError != nil {
+		return fmt.Errorf(
+			"parsing governance state: %w",
+			govState.ImportParseError,
+		)
+	}
+	if govState.PrevGovActionIds == nil {
+		return nil
+	}
+	return verifyPrevGovActionIdsSeeded(
+		cfg, cfg.Database.Metadata(), govState.PrevGovActionIds,
+	)
+}
+
+// verifyPrevGovActionIdsSeeded fails unless every non-null per-purpose
+// root in the snapshot is an enacted governance_proposal row that the tally
+// resolves as that purpose's current root. Without it a skipped seed, or an
+// enacted row left above the snapshot that outranks the seed, is only
+// visible later as chained proposals that never ratify.
+func verifyPrevGovActionIdsSeeded(
+	cfg ImportConfig,
+	store metadata.MetadataStore,
+	prev *ParsedPrevGovActionIds,
+) error {
+	roots := []struct {
+		purpose     string
+		id          *ParsedGovActionId
+		actionTypes []uint8
+	}{
+		{
+			"parameter-change", prev.PParamUpdate,
+			[]uint8{govActionTypeParameterChange},
+		},
+		{
+			"hard-fork", prev.HardFork,
+			[]uint8{govActionTypeHardForkInitiation},
+		},
+		{
+			"committee", prev.Committee,
+			[]uint8{
+				govActionTypeNoConfidence,
+				govActionTypeUpdateCommittee,
+			},
+		},
+		{
+			"constitution", prev.Constitution,
+			[]uint8{govActionTypeNewConstitution},
+		},
+	}
+	txn := cfg.Database.MetadataTxn(false)
+	defer txn.Release()
+	for _, r := range roots {
+		if r.id == nil {
+			continue
+		}
+		row, err := store.GetGovernanceProposal(
+			r.id.TxHash, r.id.ActionIndex, txn.Metadata(),
+		)
+		if err != nil && !errors.Is(
+			err, models.ErrGovernanceProposalNotFound,
+		) {
+			return fmt.Errorf(
+				"looking up %s root %s#%d: %w",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+				err,
+			)
+		}
+		if row == nil || row.EnactedEpoch == nil {
+			return fmt.Errorf(
+				"%s root %s#%d is not an enacted governance proposal",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+		current, err := store.GetLastEnactedGovernanceProposal(
+			r.actionTypes, txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"resolving current %s root: %w", r.purpose, err,
+			)
+		}
+		if current == nil ||
+			!bytes.Equal(current.TxHash, r.id.TxHash) ||
+			current.ActionIndex != r.id.ActionIndex {
+			return fmt.Errorf(
+				"%s root %s#%d does not resolve as the current root",
+				r.purpose,
+				hex.EncodeToString(r.id.TxHash),
+				r.id.ActionIndex,
+			)
+		}
+	}
+	return nil
 }
 
 // findRatifiedHFICandidate returns the unique active HFI proposal whose

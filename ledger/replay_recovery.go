@@ -441,10 +441,10 @@ func (ls *LedgerState) checkReplayRecoveryRollbackFloor(
 // Every Shelley-family era delegates the rule to
 // shelley.UtxoValidateNoDuplicateInputs and therefore reports
 // shelley.DuplicateInputError for a duplicated regular, collateral, or
-// reference input. Byron permits a repeated input, but its size and
-// unknown-attribute limits are the same kind of verdict: they read only the
-// transaction and the protocol parameters, so they must not fall through to
-// state-dependent producer resolution either.
+// reference input. Byron permits a repeated input, but its size, input-index
+// and unknown-attribute limits are the same kind of verdict: they read only
+// the transaction and the protocol parameters, so they must not fall through
+// to state-dependent producer resolution either.
 //
 // lcommon.MalformedReferenceScriptsError and
 // lcommon.MalformedScriptWitnessesError are the same class: both are raised
@@ -571,6 +571,9 @@ func isDeterministicTxValidationError(err error) bool {
 		return true
 	}
 	if _, ok := errors.AsType[eras.UnknownAttributesByronError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[eras.InputIndexByronError](err); ok {
 		return true
 	}
 	_, ok := errors.AsType[eras.UnknownAddressAttributesByronError](err)

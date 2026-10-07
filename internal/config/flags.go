@@ -103,6 +103,12 @@ var flagSpecs = []flagSpec{
 		"ledger catch-up timeout for load mode",
 	),
 	stringFlag(
+		"LocalStateQueryViewMaxLifetime",
+		"local-state-query-view-max-lifetime",
+		"",
+		"maximum lifetime of a local-state-query ledger snapshot",
+	),
+	stringFlag(
 		"TlsCertFilePath",
 		"tls-cert-file-path",
 		"",
@@ -947,6 +953,11 @@ var flagSpecs = []flagSpec{
 		"DatabaseLifecycle.SnapshotEveryNEpochs",
 		"db-snapshot-every-n-epochs",
 		"capture an automatic snapshot every N epoch boundaries",
+	),
+	durationFlag(
+		"DatabaseLifecycle.SnapshotMaxCommitPause",
+		"db-snapshot-max-commit-pause",
+		"cancel a snapshot still holding the commit barrier after this long (0 = no bound)",
 	),
 }
 
