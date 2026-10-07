@@ -571,7 +571,7 @@ func TestPeerGovernor_Reconcile_Removal(t *testing.T) {
 
 	pg.reconcile(t.Context())
 
-	// A node with no eligible upstream keeps its last known peers (#4664).
+	// A node with no eligible upstream keeps its last known peers.
 	peers := pg.GetPeers()
 	require.Len(t, peers, 1)
 	pg.mu.Lock()
@@ -785,7 +785,7 @@ func TestPeerGovernor_TransitionMetrics_GossipChurnDemotion(t *testing.T) {
 			State: PeerStateHot, PerformanceScore: 0.2,
 		},
 		// Warm replacement so the demotion below is not blocked by the
-		// "no promotable replacement" guard (dingo#4783).
+		// "no promotable replacement" guard.
 		{
 			Address: "gossip3:3001", Source: PeerSourceP2PGossip,
 			State: PeerStateWarm, PerformanceScore: 0.5,
@@ -929,6 +929,39 @@ func TestPeerGovernor_TouchPeerByConnId(t *testing.T) {
 	peers := pg.GetPeers()
 	require.Len(t, peers, 1)
 	assert.True(t, peers[0].LastActivity.After(oldActivity))
+}
+
+func TestPeerGovernor_DiversityGroupByConnId(t *testing.T) {
+	t.Parallel()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.AddPeer("44.0.0.1:3001", PeerSourceTopologyLocalRoot)
+	pg.AddPeer("44.0.0.9:3001", PeerSourceTopologyLocalRoot)
+
+	connFor := func(remote string) ouroboros.ConnectionId {
+		localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:6000")
+		remoteAddr, _ := net.ResolveTCPAddr("tcp", remote)
+		return ouroboros.ConnectionId{
+			LocalAddr:  localAddr,
+			RemoteAddr: remoteAddr,
+		}
+	}
+	first := connFor("44.0.0.1:3001")
+	second := connFor("44.0.0.9:3001")
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{Id: first, IsClient: true}
+	pg.peers[1].Connection = &PeerConnection{Id: second, IsClient: true}
+	pg.mu.Unlock()
+
+	assert.Equal(t, "ipv4:44.0.0.0/24", pg.DiversityGroupByConnId(first))
+	assert.Equal(
+		t,
+		pg.DiversityGroupByConnId(first),
+		pg.DiversityGroupByConnId(second),
+		"addresses in one /24 are one diversity group",
+	)
+	assert.Empty(t, pg.DiversityGroupByConnId(connFor("45.0.0.1:3001")))
 }
 
 func TestPeerGovernorAppendChainSelectionEventsLocked(t *testing.T) {
@@ -3263,7 +3296,7 @@ func TestPeerGovernor_GossipChurn_DemotesLowestScoringPeers(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.2,
 		}, // Below threshold
-		// Warm replacements (dingo#4783): churn only demotes a hot peer
+		// Warm replacements: churn only demotes a hot peer
 		// to cold when a promotable replacement is available, so these
 		// stand in for the 2 peers the 50% churn rate demotes below.
 		{
@@ -3347,7 +3380,7 @@ func TestPeerGovernor_GossipChurn_DemotesToCold(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
 		},
-		// Warm replacements (dingo#4783) so both demotions above are not
+		// Warm replacements so both demotions above are not
 		// blocked by the "no promotable replacement" guard.
 		{
 			Address:          "gossip2:3001",
@@ -3403,7 +3436,7 @@ func TestPeerGovernor_GossipChurn_SkipsLocalRoots(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
 		},
-		// Warm replacement (dingo#4783, using the Ledger source so it
+		// Warm replacement (using the Ledger source so it
 		// does not collide with the PeerSourceP2PGossip assertion below)
 		// so the gossip demotion is not blocked by the "no promotable
 		// replacement" guard.
@@ -3461,7 +3494,7 @@ func TestPeerGovernor_GossipChurn_SkipsPublicRoots(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.5,
 		},
-		// Warm replacement (dingo#4783, using the Ledger source so it
+		// Warm replacement (using the Ledger source so it
 		// does not collide with the PeerSourceP2PGossip assertion below)
 		// so the gossip demotion is not blocked by the "no promotable
 		// replacement" guard.
@@ -3561,7 +3594,7 @@ func TestPeerGovernor_GossipChurn_PromotesWarmPeers(t *testing.T) {
 }
 
 // TestPeerGovernor_GossipChurn_NoWarmReplacement_LeavesHotCountUnchanged is
-// the dingo#4783 regression: gossip churn used to demote its lowest-scoring
+// the regression: gossip churn used to demote its lowest-scoring
 // hot peers to cold on every interval regardless of whether anything was
 // available to promote in their place. On a live sync where warm stayed at
 // 0, that drained the hot set to a single peer over a few hours with no
@@ -3938,7 +3971,7 @@ func TestPeerGovernor_GossipChurn_AtLeastOneChurned(t *testing.T) {
 			State:            PeerStateHot,
 			PerformanceScore: 0.4,
 		},
-		// Warm replacement (dingo#4783) so the demotion below is not
+		// Warm replacement so the demotion below is not
 		// blocked by the "no promotable replacement" guard.
 		{
 			Address:          "ledger1:3001",
@@ -6484,7 +6517,7 @@ func TestPeerGovernor_ChurnMetricsBySource(t *testing.T) {
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.4,
 		},
-		// Warm peers to be promoted. Both are needed (dingo#4783): churn
+		// Warm peers to be promoted. Both are needed: churn
 		// only demotes a hot peer to cold when a promotable replacement
 		// is available, and this test demotes both hot peers above.
 		{
@@ -6607,7 +6640,7 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.9,
 		},
-		// Warm replacement (dingo#4783) so the demotion is not blocked by
+		// Warm replacement so the demotion is not blocked by
 		// the "no promotable replacement" guard.
 		{
 			Address:          "192.168.1.3:3001",
@@ -7989,6 +8022,25 @@ func TestResolveInboundIdentity(t *testing.T) {
 			},
 			inboundAddr: "44.0.0.1:51432",
 			wantIdx:     -1,
+		},
+		{
+			name: "ambiguous topology host reuses disconnected inbound record",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+				{
+					addr: "44.0.0.1:3002", normalized: "44.0.0.1:3002",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-1",
+				},
+				{
+					addr: "44.0.0.1:51000", normalized: "44.0.0.1:51000",
+					source: PeerSourceInboundConn,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     2,
 		},
 		{
 			name: "gossip peer sharing host does not widen identity",

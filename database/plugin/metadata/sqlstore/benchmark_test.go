@@ -290,7 +290,7 @@ func BenchmarkRefreshRewardLiveStakeAggregateAccountAndUpsert(b *testing.B) {
 }
 
 // BenchmarkRefreshRewardLiveStakeAggregateDeltaAtScale is the direct
-// before/after comparison for dingo #4421: refreshRewardLiveStakeAggregate's
+// before/after comparison of refreshRewardLiveStakeAggregate's
 // full sumCredentialUtxoStake rescan against
 // refreshRewardLiveStakeAggregateDelta's O(1) running-total update, for a
 // credential holding as many live UTxOs as the 20,003-UTxO case the issue
@@ -647,6 +647,9 @@ func logRewardLiveStakeRangeQueryPlan(
 // BenchmarkRebuildRewardLiveStakeFromRunningTotals measures the Mithril
 // bootstrap finalizer over live key histories and deregistered-key history.
 func BenchmarkRebuildRewardLiveStakeFromRunningTotals(b *testing.B) {
+	runTxn := func(runBatch func(types.Txn) error) error {
+		return runBatch(nil)
+	}
 	for _, scenario := range []struct {
 		credentials     int
 		assignmentsEach int
@@ -663,22 +666,45 @@ func BenchmarkRebuildRewardLiveStakeFromRunningTotals(b *testing.B) {
 			scenario.deadAssignments,
 		)
 		b.Run(name, func(b *testing.B) {
-			store := newMigratedSQLiteStore(b)
-			seedRewardLiveStakeScaleFixture(
-				b,
-				store,
-				scenario.credentials,
-				scenario.assignmentsEach,
-				80,
-				scenario.deadAssignments,
-			)
-			logRewardLiveStakeBatchPlan(b, store)
-			b.ResetTimer()
-			for b.Loop() {
-				require.NoError(
-					b,
-					store.RebuildRewardLiveStakeFromRunningTotals(1_000_000, nil),
-				)
+			for _, path := range []struct {
+				name    string
+				rebuild func(*Store) error
+			}{
+				{
+					name: "single-transaction",
+					rebuild: func(store *Store) error {
+						return store.RebuildRewardLiveStakeFromRunningTotals(
+							1_000_000,
+							nil,
+						)
+					},
+				},
+				{
+					name: "per-range-transactions",
+					rebuild: func(store *Store) error {
+						return store.RebuildRewardLiveStakeFromRunningTotalsInBatches(
+							1_000_000,
+							runTxn,
+						)
+					},
+				},
+			} {
+				b.Run(path.name, func(b *testing.B) {
+					store := newMigratedSQLiteStore(b)
+					seedRewardLiveStakeScaleFixture(
+						b,
+						store,
+						scenario.credentials,
+						scenario.assignmentsEach,
+						80,
+						scenario.deadAssignments,
+					)
+					logRewardLiveStakeBatchPlan(b, store)
+					b.ResetTimer()
+					for b.Loop() {
+						require.NoError(b, path.rebuild(store))
+					}
+				})
 			}
 		})
 	}

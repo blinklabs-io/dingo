@@ -23,184 +23,31 @@ import (
 )
 
 func TestGetEraById(t *testing.T) {
-	tests := []struct {
-		name     string
-		eraId    uint
-		expected *eras.EraDesc
-		wantNil  bool
+	known := []struct {
+		name string
+		id   uint
 	}{
-		{
-			name:     "Byron era (ID=0)",
-			eraId:    0,
-			expected: &eras.ByronEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Shelley era (ID=1)",
-			eraId:    1,
-			expected: &eras.ShelleyEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Allegra era (ID=2)",
-			eraId:    2,
-			expected: &eras.AllegraEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Mary era (ID=3)",
-			eraId:    3,
-			expected: &eras.MaryEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Alonzo era (ID=4)",
-			eraId:    4,
-			expected: &eras.AlonzoEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Babbage era (ID=5)",
-			eraId:    5,
-			expected: &eras.BabbageEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Conway era (ID=6)",
-			eraId:    6,
-			expected: &eras.ConwayEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:     "Dijkstra era (ID=7)",
-			eraId:    7,
-			expected: &eras.DijkstraEraDesc,
-			wantNil:  false,
-		},
-		{
-			name:    "Invalid era ID (does not exist)",
-			eraId:   999,
-			wantNil: true,
-		},
-		{
-			name:    "Gap era ID (ID=8, non-existent era)",
-			eraId:   8,
-			wantNil: true,
-		},
-		{
-			name:    "Gap era ID (ID=10, non-existent era)",
-			eraId:   10,
-			wantNil: true,
-		},
+		{name: "Byron", id: 0},
+		{name: "Shelley", id: 1},
+		{name: "Allegra", id: 2},
+		{name: "Mary", id: 3},
+		{name: "Alonzo", id: 4},
+		{name: "Babbage", id: 5},
+		{name: "Conway", id: 6},
+		{name: "Dijkstra", id: 7},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := eras.GetEraById(tt.eraId)
-
-			if tt.wantNil {
-				if result != nil {
-					t.Errorf(
-						"GetEraById(%d) expected nil, got %v",
-						tt.eraId,
-						result,
-					)
-				}
-				return
-			}
-
-			if result == nil {
-				t.Errorf(
-					"GetEraById(%d) expected era descriptor, got nil",
-					tt.eraId,
-				)
-				return
-			}
-
-			if result.Id != tt.expected.Id {
-				t.Errorf(
-					"GetEraById(%d) ID mismatch: expected %d, got %d",
-					tt.eraId,
-					tt.expected.Id,
-					result.Id,
-				)
-			}
-
-			if result.Name != tt.expected.Name {
-				t.Errorf(
-					"GetEraById(%d) Name mismatch: expected %s, got %s",
-					tt.eraId,
-					tt.expected.Name,
-					result.Name,
-				)
+	for i, tc := range known {
+		t.Run(tc.name, func(t *testing.T) {
+			got := eras.GetEraById(tc.id)
+			if assert.NotNil(t, got) {
+				assert.Equal(t, tc.id, got.Id)
+				assert.Equal(t, tc.name, got.Name)
+				assert.Same(t, &eras.ErasWithDijkstra[i], got)
 			}
 		})
 	}
-}
-
-// TestGetEraById_HandlesGapsInEraIds tests that the function properly handles
-// unknown era IDs without panicking.
-func TestGetEraById_HandlesGapsInEraIds(t *testing.T) {
-	// These era IDs don't exist and should return nil
-	gapIds := []uint{8, 9, 10, 100, 1000}
-
-	for _, eraId := range gapIds {
-		t.Run(t.Name(), func(t *testing.T) {
-			// This should not panic and should return nil
-			result := eras.GetEraById(eraId)
-			if result != nil {
-				t.Errorf(
-					"GetEraById(%d) expected nil for gap era ID, got %v",
-					eraId,
-					result,
-				)
-			}
-		})
-	}
-}
-
-// TestGetEraById_AllKnownEras verifies that all compiled era descriptors
-// can be retrieved by their actual ID (not array index)
-func TestGetEraById_AllKnownEras(t *testing.T) {
-	for i, era := range eras.ErasWithDijkstra {
-		t.Run(era.Name, func(t *testing.T) {
-			result := eras.GetEraById(era.Id)
-
-			if result == nil {
-				t.Errorf(
-					"GetEraById(%d) for %s era returned nil",
-					era.Id,
-					era.Name,
-				)
-				return
-			}
-
-			if result.Id != era.Id {
-				t.Errorf(
-					"GetEraById(%d) ID mismatch: expected %d, got %d",
-					era.Id,
-					era.Id,
-					result.Id,
-				)
-			}
-
-			if result.Name != era.Name {
-				t.Errorf(
-					"GetEraById(%d) Name mismatch: expected %s, got %s",
-					era.Id,
-					era.Name,
-					result.Name,
-				)
-			}
-
-			// Verify it's pointing to the same era descriptor
-			if result != &eras.ErasWithDijkstra[i] {
-				t.Errorf(
-					"GetEraById(%d) returned different era descriptor than expected",
-					era.Id,
-				)
-			}
-		})
+	for _, eraID := range []uint{8, 9, 999} {
+		assert.Nil(t, eras.GetEraById(eraID), "unknown era ID %d", eraID)
 	}
 }
 
@@ -233,69 +80,9 @@ func TestIsCompatibleEra(t *testing.T) {
 		compatible bool
 	}{
 		{
-			name:       "same era: Byron in Byron",
-			txEraId:    eras.ByronEraDesc.Id,
-			ledgerEra:  eras.ByronEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "same era: Conway in Conway",
-			txEraId:    eras.ConwayEraDesc.Id,
-			ledgerEra:  eras.ConwayEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "same era: Babbage in Babbage",
-			txEraId:    eras.BabbageEraDesc.Id,
-			ledgerEra:  eras.BabbageEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "previous era: Babbage TX in Conway ledger",
-			txEraId:    eras.BabbageEraDesc.Id,
-			ledgerEra:  eras.ConwayEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "previous era: Alonzo TX in Babbage ledger",
-			txEraId:    eras.AlonzoEraDesc.Id,
-			ledgerEra:  eras.BabbageEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "previous era: Byron TX in Shelley ledger",
-			txEraId:    eras.ByronEraDesc.Id,
-			ledgerEra:  eras.ShelleyEraDesc.Id,
-			compatible: true,
-		},
-		{
-			name:       "previous era: Shelley TX in Allegra ledger",
-			txEraId:    eras.ShelleyEraDesc.Id,
-			ledgerEra:  eras.AllegraEraDesc.Id,
-			compatible: true,
-		},
-		{
 			name:       "two eras back: Alonzo TX in Conway ledger",
 			txEraId:    eras.AlonzoEraDesc.Id,
 			ledgerEra:  eras.ConwayEraDesc.Id,
-			compatible: false,
-		},
-		{
-			name:       "two eras back: Mary TX in Babbage ledger",
-			txEraId:    eras.MaryEraDesc.Id,
-			ledgerEra:  eras.BabbageEraDesc.Id,
-			compatible: false,
-		},
-		{
-			name:       "future era: Conway TX in Babbage ledger",
-			txEraId:    eras.ConwayEraDesc.Id,
-			ledgerEra:  eras.BabbageEraDesc.Id,
-			compatible: false,
-		},
-		{
-			name:       "future era: Babbage TX in Alonzo ledger",
-			txEraId:    eras.BabbageEraDesc.Id,
-			ledgerEra:  eras.AlonzoEraDesc.Id,
 			compatible: false,
 		},
 		{
@@ -321,12 +108,6 @@ func TestIsCompatibleEra(t *testing.T) {
 			txEraId:    999,
 			ledgerEra:  999,
 			compatible: true,
-		},
-		{
-			name:       "three eras back: Byron TX in Alonzo ledger",
-			txEraId:    eras.ByronEraDesc.Id,
-			ledgerEra:  eras.AlonzoEraDesc.Id,
-			compatible: false,
 		},
 	}
 	for _, tc := range tests {

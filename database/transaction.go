@@ -318,7 +318,7 @@ func (d *Database) SetTransactionWithOpts(
 	// UTxO offsets MUST be available - no fallback to full CBOR storage
 	produced := tx.Produced()
 	// Producing no UTxOs is a legal shape: a valid transaction can spend its
-	// whole input on deposits plus the fee and return no change (issue #3932),
+	// whole input on deposits plus the fee and return no change,
 	// and an invalid transaction without a collateral return produces nothing
 	// either. Produced() is Outputs() for a valid transaction and the
 	// collateral return for an invalid one, so an empty set means outputs were
@@ -391,7 +391,12 @@ func (d *Database) SetTransactionWithOpts(
 	// legitimate cross-EB double-consume. Ranking-block application keeps the
 	// hard conflict check.
 	setTxErr := error(nil)
-	if opts.SkipConsumedInputRecovery {
+	if opts.LedgerContextSlot != nil {
+		if !opts.SkipConsumedInputRecovery {
+			return errors.New("ledger context requires a prototype closure")
+		}
+		setTxErr = d.transactionStore().SetTransactionLeiosClosureInContext(tx, point, idx, certDeposits, opts.SkipWithdrawalWitnessWrite, *opts.LedgerContextSlot, txn.Metadata())
+	} else if opts.SkipConsumedInputRecovery {
 		setTxErr = d.transactionStore().SetTransactionLeiosClosure(
 			tx, point, idx, certDeposits,
 			opts.SkipWithdrawalWitnessWrite,
@@ -706,9 +711,9 @@ func (d *Database) ensureTransactionConsumedUtxos(
 		}
 		// For a validated block past the Mithril trust boundary, recover a
 		// missing producer only when its block is still on the applied primary
-		// chain (issue #3005). Core-mode cleanup can remove a spent row before a
+		// chain. Core-mode cleanup can remove a spent row before a
 		// rollback needs to restore it, even though the producer itself remains
-		// canonical (issue #3170). The primary-chain check preserves the
+		// canonical. The primary-chain check preserves the
 		// input-conservation guard: an abandoned-fork producer is still refused.
 		recoveredUtxo, err := d.recoverConsumedUtxo(
 			input,
@@ -904,7 +909,7 @@ func (d *Database) recoveredProducerOnPrimaryChain(
 // refuseOffPrimaryChainProducer returns a wrapped ErrUtxoNotFound when the
 // producer block of a blob-recovered consumed input is not on the applied
 // primary chain. Recovering such a producer would splice in a UTxO the applied
-// chain never produced (issue #3005 cross-fork input-conservation violation).
+// chain never produced (a cross-fork input-conservation violation).
 // It is enforced for validated blocks past the Mithril trust boundary, where
 // the producer must be a live, applied, on-chain UTxO, so an abandoned-fork
 // producer is never legitimate. Below the boundary and on the Mithril
@@ -1251,11 +1256,32 @@ func (d *Database) SetGenesisStaking(
 	blockHash []byte,
 	txn *Txn,
 ) error {
+	return d.SetGenesisStakingWithDeposits(
+		pools,
+		stakeDelegations,
+		keyDeposit,
+		0,
+		blockHash,
+		txn,
+	)
+}
+
+// SetGenesisStakingWithDeposits stores genesis staking with the key and pool
+// deposits that the reference ledger retains for later refunds.
+func (d *Database) SetGenesisStakingWithDeposits(
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
+	keyDeposit uint64,
+	poolDeposit uint64,
+	blockHash []byte,
+	txn *Txn,
+) error {
 	if txn == nil {
-		if err := d.metadata.SetGenesisStaking(
+		if err := d.metadata.SetGenesisStakingWithDeposits(
 			pools,
 			stakeDelegations,
 			keyDeposit,
+			poolDeposit,
 			blockHash,
 			nil,
 		); err != nil {
@@ -1263,10 +1289,11 @@ func (d *Database) SetGenesisStaking(
 		}
 		return nil
 	}
-	if err := d.metadata.SetGenesisStaking(
+	if err := d.metadata.SetGenesisStakingWithDeposits(
 		pools,
 		stakeDelegations,
 		keyDeposit,
+		poolDeposit,
 		blockHash,
 		txn.Metadata(),
 	); err != nil {
@@ -1899,7 +1926,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 		// the store rejects every further staged write, including the
 		// commit timestamp Txn.Commit puts into this same transaction, so
 		// an unbounded stage costs the caller its whole commit rather than
-		// just the tail of this set (blinklabs-io/dingo#4657). What is left
+		// just the tail of this set. What is left
 		// unstaged is counted with the deletes that failed and reported
 		// through ErrBlobDeleteIncomplete below: the metadata naming these
 		// objects goes away either way, so both are orphans rather than

@@ -140,7 +140,7 @@ func CalculateEtaVAlonzo(
 	// See CalculateEtaVShelley for the rationale: TPraos folds bnonce ∈
 	// Seed into the rolling nonce, where bnonce is BLAKE2b-256 of the
 	// raw VRF certificate output. Folding the raw certificate bytes
-	// directly produces nonces that disagree with peers (#2125).
+	// directly produces nonces that disagree with peers.
 	contribution := lcommon.Blake2b256Hash(h.Body.NonceVrf.Output).Bytes()
 	tmpNonce, err := lcommon.CalculateRollingNonce(
 		prevBlockNonce,
@@ -205,23 +205,8 @@ func ValidateTxAlonzo(
 	if err = ValidateTxSize(tx, tmpPparams.MaxTxSize); err != nil {
 		return err
 	}
-	// Validate fee covers base cost + execution unit prices
-	var pricesMem, pricesSteps *big.Rat
-	if tmpPparams.ExecutionCosts.MemPrice != nil {
-		pricesMem = tmpPparams.ExecutionCosts.MemPrice.ToBigRat()
-	}
-	if tmpPparams.ExecutionCosts.StepPrice != nil {
-		pricesSteps = tmpPparams.ExecutionCosts.StepPrice.ToBigRat()
-	}
-	if err = ValidateTxFee(
-		tx,
-		tmpPparams.MinFeeA,
-		tmpPparams.MinFeeB,
-		pricesMem,
-		pricesSteps,
-	); err != nil {
-		return err
-	}
+	// The fee minimum, including declared execution units, is enforced by
+	// alonzo.UtxoValidationRules (FeeTooSmall); do not price it again here.
 	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}

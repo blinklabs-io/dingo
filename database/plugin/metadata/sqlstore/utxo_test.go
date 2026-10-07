@@ -154,7 +154,7 @@ func getUtxoGeneratedOneShot(
 
 // legacyGetUtxosByRefsQuery rebuilds GetUtxosByRefs' pre-fix predicate: an OR
 // of (tx_id = ? AND output_idx = ?) equalities gated by "deleted_slot = 0",
-// the same shape issue #4067 named for queryUtxoStakeRefs.
+// the same shape described by queryUtxoStakeRefs.
 func legacyGetUtxosByRefsQuery(refs []models.UtxoId) (string, []any) {
 	predicate, args := utxoIDPredicate(refs)
 	return "deleted_slot = 0 AND (" + predicate + ")", args
@@ -174,7 +174,7 @@ func legacyGetUtxosByRefsAsOfQuery(
 
 // TestGetUtxosByRefsUsesTxIDIndex pins the query plan of the predicate
 // GetUtxosByRefs and GetUtxosByRefsAsOf run, the same planner-fallback shape
-// issue #4067 documents for queryUtxoStakeRefs: the legacy OR-predicate form
+// documents for queryUtxoStakeRefs: the legacy OR-predicate form
 // abandons tx_id_output_idx for idx_utxo_deleted_payment_script/
 // idx_utxo_deleted_staking_amount past a handful of terms, and the tx_id-IN
 // form this test also exercises does not.
@@ -583,7 +583,7 @@ func TestMarkUtxosDeletedAtSlotUpdatesOnlyRequestedLiveRows(t *testing.T) {
 // The lookup fix alone left the update carrying "deleted_slot = 0", and with
 // no sqlite_stat1 SQLite drives that form from
 // idx_utxo_deleted_payment_script (deleted_slot=?) from two terms upwards,
-// evaluating "id IN (...)" against every live row. That is issue #4067's
+// evaluating "id IN (...)" against every live row. That is
 // whole-table pass moved from the first statement to the second. Statistics
 // hide it, so this test must not run ANALYZE.
 func TestMarkUtxosDeletedAtSlotUpdatePlansOnPrimaryKey(t *testing.T) {
@@ -751,7 +751,7 @@ func seedRollbackUtxos(
 }
 
 // analyzeStore populates sqlite_stat1 for the fixture. A node only runs
-// ANALYZE at the points added by #2367 (after a Mithril import, before
+// ANALYZE at the points added by (after a Mithril import, before
 // API-mode backfill), so a producer's utxo table is normally queried without
 // current stats -- which is the state in which the DISTINCT plan goes wrong.
 func analyzeStore(tb testing.TB, store *Store) {
@@ -795,7 +795,7 @@ func queryPlan(tb testing.TB, db *sql.DB, query string, args ...any) string {
 // only visits the rolled-back window, and it does so whether or not
 // sqlite_stat1 has been populated. That stats independence is the reason to
 // dedupe in Go rather than to rely on ANALYZE: a long-running node's utxo
-// stats are stale or absent (#2367 runs ANALYZE only around a Mithril import),
+// stats are stale or absent ( runs ANALYZE only around a Mithril import),
 // and the MySQL and Postgres stores have their own planners.
 //
 // The assertion is on the plan rather than on elapsed time so it is
@@ -1312,7 +1312,7 @@ func BenchmarkGetUtxosAddedAfterSlot(b *testing.B) {
 }
 
 // legacyUtxoStakeRefsQuery rebuilds the OR-of-pairs statement
-// queryUtxoStakeRefs used to run (see issue #4067): a per-(tx_id,
+// queryUtxoStakeRefs used to run: a per-(tx_id,
 // output_idx) equality OR'd together, gated by liveOnly's "deleted_slot = 0".
 // Kept here, rather than in production code, purely so the plan and
 // correctness tests below can show the old and new statements side by side
@@ -1398,7 +1398,7 @@ func utxoIDAt(i int) models.UtxoId {
 // tx_id_output_idx index once liveOnly's "deleted_slot = 0" gives the
 // planner a falsely attractive alternative: idx_utxo_deleted_staking_amount
 // matches nearly every live row, so past a handful of OR terms SQLite drives
-// off that index instead and visits the whole table (issue #4067). The
+// off that index instead and visits the whole table. The
 // tx_id-IN form this test also exercises stays on tx_id_output_idx
 // regardless of term count, because a plain IN list has no such competing
 // index to be lured by.
@@ -1566,7 +1566,7 @@ func BenchmarkQueryUtxoStakeRefs(b *testing.B) {
 // repeated (Hash, Idx) pairs, including a repeat that would otherwise land
 // in a different 400-ref chunk, while preserving order of first occurrence
 // and leaving distinct refs (including a same-hash-different-index pair)
-// untouched (#392).
+// untouched.
 func TestDedupeUtxoIDs(t *testing.T) {
 	hashA := []byte{0x01, 0x02, 0x03}
 	hashB := []byte{0x04, 0x05, 0x06}
@@ -2197,4 +2197,135 @@ func utxoTxIDForGroup(group, index int) []byte {
 	txID[6] = byte(index >> 8)
 	txID[7] = byte(index)
 	return txID
+}
+
+func TestExactAddressOrderingUsesPaymentIndex(t *testing.T) {
+	t.Parallel()
+	store := newMigratedSQLiteStore(t)
+	address, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyNone,
+		0,
+		bytes.Repeat([]byte{1}, 28),
+		nil,
+	)
+	require.NoError(t, err)
+	pattern, err := models.ExactUtxoAddressPattern(address)
+	require.NoError(t, err)
+	predicate, args, err := utxoOrderingPredicate(
+		&models.UtxoWithOrderingQuery{
+			AddressPatterns: []models.UtxoAddressPattern{pattern},
+		},
+		true,
+	)
+	require.NoError(t, err)
+	plan := queryPlan(
+		t,
+		store.writeDB,
+		"SELECT utxo.id FROM utxo WHERE "+predicate,
+		args...)
+	require.Contains(t, plan, "idx_utxo_payment_key")
+	require.NotContains(t, plan, "idx_utxo_deleted_payment_script")
+	require.NotContains(t, plan, "SCAN utxo")
+}
+
+// TestGetUtxosByAddressAsOfSelectsRowsLiveAtSlot checks GetUtxosByAddressAsOf
+// against GetUtxosByRefsAsOf's predicate: a row counts when it was added at
+// or before atSlot and spent strictly after it, or never.
+func TestGetUtxosByAddressAsOfSelectsRowsLiveAtSlot(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+
+	key := bytes.Repeat([]byte{0x5A}, lcommon.AddressHashSize)
+	for i, r := range []struct{ added, deleted uint64 }{
+		{100, 0},     // included
+		{100, 3_000}, // spent after atSlot: included
+		{100, 2_000}, // spent at atSlot: excluded
+		{3_000, 0},   // added after atSlot: excluded
+	} {
+		txId := make([]byte, 32)
+		txId[31] = byte(i + 1)
+		require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+			TxId:        txId,
+			OutputIdx:   0,
+			PaymentKey:  key,
+			AddedSlot:   r.added,
+			DeletedSlot: r.deleted,
+			Amount:      types.Uint64(i + 1),
+		}))
+	}
+	patterns := []models.UtxoAddressPattern{{PaymentPart: key}}
+
+	got, err := store.GetUtxosByAddressAsOf(patterns, 2_000, 10, nil)
+	require.NoError(t, err)
+	amounts := make([]uint64, 0, len(got))
+	for _, u := range got {
+		amounts = append(amounts, uint64(u.Amount))
+	}
+	require.ElementsMatch(t, []uint64{1, 2}, amounts)
+
+	live, err := store.GetUtxosByAddress(patterns, 10, nil)
+	require.NoError(t, err)
+	liveAmounts := make([]uint64, 0, len(live))
+	for _, u := range live {
+		liveAmounts = append(liveAmounts, uint64(u.Amount))
+	}
+	require.ElementsMatch(
+		t, []uint64{1, 4}, liveAmounts,
+		"live: the never-spent row and the one added later",
+	)
+
+	_, err = store.GetUtxosByAddressAsOf(patterns, math.MaxUint64, 10, nil)
+	require.Error(t, err, "a slot above math.MaxInt64 must be rejected")
+}
+
+// TestGetUtxosByAddressAsOfCountsSlotArgsInChunkBudget fills a chunk to the
+// last bind parameter SQLite allows: 248 base-address branches of four
+// arguments and three enterprise branches of two reach 998 address arguments
+// unless the two slot arguments are reserved, which with the LIMIT argument
+// would exceed the 999-variable limit.
+func TestGetUtxosByAddressAsOfCountsSlotArgsInChunkBudget(t *testing.T) {
+	t.Parallel()
+	store := newManagementTestStore(t)
+	limit := store.dialect.ParameterLimit()
+	require.Equal(t, 999, limit)
+	limitSQLiteVariableNumber(t, store.readDB, limit)
+
+	hash := func(prefix byte, i int) []byte {
+		h := make([]byte, lcommon.AddressHashSize)
+		h[0] = prefix
+		binary.BigEndian.PutUint32(h[1:], uint32(i))
+		return h
+	}
+	var patterns []models.UtxoAddressPattern
+	add := func(addr lcommon.Address) {
+		addrBytes, err := addr.Bytes()
+		require.NoError(t, err)
+		patterns = append(
+			patterns,
+			models.UtxoAddressPattern{ExactAddress: addrBytes},
+		)
+	}
+	for i := range 248 {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			lcommon.AddressNetworkTestnet,
+			hash(0x01, i),
+			hash(0x02, i),
+		)
+		require.NoError(t, err)
+		add(addr)
+	}
+	for i := range 3 {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			lcommon.AddressNetworkTestnet,
+			hash(0x03, i),
+			nil,
+		)
+		require.NoError(t, err)
+		add(addr)
+	}
+
+	_, err := store.GetUtxosByAddressAsOf(patterns, 1_000, 10, nil)
+	require.NoError(t, err)
 }

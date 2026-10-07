@@ -84,6 +84,8 @@ var logURIConfigFields = []string{
 // recursively and classified per key rather than as a whole.
 var logProviderConfigFields = []string{
 	"Plugins.API.Blockfrost.Config",
+	"Plugins.API.Kupo.Config",
+	"Plugins.API.Mcp.Config",
 	"Plugins.API.Mesh.Config",
 	"Plugins.API.Utxorpc.Config",
 	"Plugins.Mempool.Config",
@@ -128,6 +130,7 @@ var logPlainConfigFields = []string{
 	"DatabaseLifecycle.SnapshotDir",
 	"DatabaseLifecycle.SnapshotEnabled",
 	"DatabaseLifecycle.SnapshotEveryNEpochs",
+	"DatabaseLifecycle.SnapshotMaxCommitPause",
 	"DatabaseLifecycle.SnapshotRetention",
 	"DatabasePath",
 	"DatabaseQueueSize",
@@ -141,7 +144,6 @@ var logPlainConfigFields = []string{
 	"ForgeEBMaxTxRefs",
 	"ForgeEBSelectionReserve",
 	"ForgeEndorserBlockStalenessSlots",
-	"ForgePrimaryChainTipToleranceSlots",
 	"ForgeStaleGapThresholdSlots",
 	"ForgeSyncToleranceSlots",
 	"ForgeUpstreamStalenessSlots",
@@ -179,6 +181,7 @@ var logPlainConfigFields = []string{
 	"KoiosParity.Strict",
 	"LedgerCatchupTimeout",
 	"LeiosVoteSigningKeyFile",
+	"LocalStateQueryViewMaxLifetime",
 	"Logging.Format",
 	"Logging.Level",
 	"MaxConnectionsPerIP",
@@ -211,6 +214,7 @@ var logPlainConfigFields = []string{
 	"Mithril.CleanupAfterLoad",
 	"Mithril.DownloadDir",
 	"Mithril.DownloadIdleTimeout",
+	"Mithril.DownloadMaxBytes",
 	"Mithril.DownloadMaxIdleRetries",
 	"Mithril.Enabled",
 	"Mithril.PinnedDigest",
@@ -227,6 +231,8 @@ var logPlainConfigFields = []string{
 	"PledgeLeverage",
 	"PledgeLeverageEnabled",
 	"Plugins.API.Blockfrost.Provider",
+	"Plugins.API.Kupo.Provider",
+	"Plugins.API.Mcp.Provider",
 	"Plugins.API.Mesh.Provider",
 	"Plugins.API.Utxorpc.Provider",
 	"Plugins.Mempool.Provider",
@@ -315,7 +321,7 @@ var providerConfigPlainKeys = []string{
 	// mempool
 	"capacity", "evictionwatermark", "rejectionwatermark",
 	"revalidationdeltacap",
-	// api/{blockfrost,mesh,utxorpc} TLS policy keys
+	// api/{blockfrost,kupo,mesh,utxorpc} TLS policy keys
 	"mode", "certfilepath", "keyfilepath",
 }
 

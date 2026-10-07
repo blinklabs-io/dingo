@@ -49,7 +49,7 @@ import (
 // low-activeSlotCoefficient devnets hit routinely and which nothing stops a
 // sparse span of the honest chain from doing occasionally -- can have a
 // legal S below tipSlot - retentionSlots, and pruning to the wrong horizon
-// permanently deletes the row a legal rollback needs (issue #4353).
+// permanently deletes the row a legal rollback needs.
 //
 // liveImmutableSlot is that actual bound when it is fresh: the slot
 // securityParam blocks behind the tip, as observed on the live chain (see

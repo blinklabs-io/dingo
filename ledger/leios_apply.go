@@ -163,6 +163,19 @@ func (ls *LedgerState) applyEndorserBlock(
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
 ) (int, uint64, error) {
+	ls.publishUntickedClosureAfterCommit(txn, rbPoint)
+	return ls.applyEndorserBlockInContext(txn, rbPoint, rbBlockNumber, ebSlot, ebHashBytes, rawTxs, nil)
+}
+
+func (ls *LedgerState) applyEndorserBlockInContext(
+	txn *database.Txn,
+	rbPoint ocommon.Point,
+	rbBlockNumber uint64,
+	ebSlot uint64,
+	ebHashBytes []byte,
+	rawTxs []cbor.RawMessage,
+	contextSlot *uint64,
+) (int, uint64, error) {
 	if len(rawTxs) == 0 {
 		return 0, 0, nil
 	}
@@ -236,8 +249,7 @@ func (ls *LedgerState) applyEndorserBlock(
 	//   - Musashi/no-validation path (LeiosApplyEndorserBlockTxs false): commit
 	//     in its own blob transaction (nil txn) to avoid overflowing the shared
 	//     50-block chunk transaction with ErrTxnTooBig on a dense Leios backlog;
-	//     the blob is never read back within the chunk, so an independent commit
-	//     is safe.
+	//     offset reads use a fresh blob snapshot if the shared LRU misses.
 	//   - CIP/validating path (LeiosApplyEndorserBlockTxs true): keep the blob in
 	//     the shared txn so a later block spending an endorser-produced output can
 	//     resolve it via read-your-writes.
@@ -250,6 +262,9 @@ func (ls *LedgerState) applyEndorserBlock(
 			err: fmt.Errorf("store endorser block blob: %w", err),
 		}
 	}
+	if !ls.config.LeiosApplyEndorserBlockTxs {
+		txn.MarkBlockCborCommittedSeparately(ebSlot, ebHash)
+	}
 
 	delta := NewLedgerDelta(
 		rbPoint,
@@ -258,6 +273,13 @@ func (ls *LedgerState) applyEndorserBlock(
 	)
 	defer delta.Release()
 	delta.Offsets = offsets
+	delta.closureContextSlot = contextSlot
+	if contextSlot != nil {
+		delta.stageApplyEvents = func(events []TransactionEvent) {
+			pending := &pendingLeiosClosure{point: ocommon.Point{Slot: rbPoint.Slot, Hash: bytes.Clone(rbPoint.Hash)}, events: events}
+			txn.AfterCommit(func() { ls.Lock(); ls.untickedClosure = pending; ls.Unlock() })
+		}
+	}
 	if ls.config.LeiosApplyEndorserBlockTxs {
 		for i, tx := range txs {
 			delta.addTransaction(tx, i)
@@ -557,7 +579,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// unavailable certified closure reports WHY it is unavailable. Without it the
 	// only field evidence for a wedged pipeline was the bare
 	// "certified Leios endorser block unavailable" line -- the fetch failures
-	// were logged at Debug and dropped in production (dingo #3552).
+	// were logged at Debug and dropped in production.
 	fetchErrs := make(map[string]error, len(required))
 	ensureRequiredAvailable := func() error {
 		for _, r := range required {
@@ -594,7 +616,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// certified closure is mandatory whether or not the best-effort
 	// announcement window is configured, and returning "unavailable" without
 	// having tried to fetch it is what left the pipeline restarting on an
-	// endorser block nobody had asked any peer for (dingo #3552).
+	// endorser block it had not fetched from any peer.
 	fetchMissingRequired := func(poll time.Duration) {
 		if !certDrivenHistorical || ls.leiosBackfill == nil {
 			return
@@ -726,7 +748,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// which a fetch skipped as "connection busy" does within microseconds -- so
 	// before this the pipeline aborted the chunk, restarted, re-read and
 	// re-decoded the batch, and made at most one endorser block of progress per
-	// restart, or none at all when every connection was unusable (dingo #3552).
+	// restart, or none at all when every connection was unusable.
 	fetchMissingRequired(poll)
 	return ensureRequiredAvailable()
 }
@@ -1031,11 +1053,10 @@ type leiosEbRef struct {
 
 // leiosEbRefKey returns a stable per-(slot, hash) dedup key for r, not hash
 // alone. The manifest is content-addressed, so the same hash can legitimately
-// be a distinct requirement at two different slots at once (issue #3513
-// review); every dedup/in-flight-tracking map keyed on an endorser-block
-// reference in this file uses this key, so a second, slot-distinct reference
-// to an already-seen hash is never collapsed into (or suppressed by) the
-// first.
+// be a distinct requirement at two different slots at once; every
+// dedup/in-flight-tracking map keyed on an endorser-block reference in this
+// file uses this key, so a second, slot-distinct reference to an already-seen
+// hash is never collapsed into (or suppressed by) the first.
 func leiosEbRefKey(r leiosEbRef) string {
 	return fmt.Sprintf("%d:%s", r.slot, r.hash.Bytes())
 }
@@ -1044,7 +1065,7 @@ func leiosEbRefKey(r leiosEbRef) string {
 // endorser block identified by hash bound to exactly the given slot -- not
 // merely present under some slot. The manifest is content-addressed, so the
 // same hash can be a live, independently required occurrence at more than
-// one slot at once (issue #3513); every call site here already knows the
+// one slot at once; every call site here already knows the
 // slot its own reference requires (leiosEbRef pairs them), and the provider
 // itself resolves exactly that (slot, hash) occurrence rather than
 // whichever one happens to be cached for the hash. Without this, a stale
@@ -1085,7 +1106,7 @@ type leiosBlockInfo struct {
 // rejected: proceeding would commit a ledger state known to be incomplete.
 // Deduped by leiosEbRefKey (slot, hash), not hash alone: two certifying
 // blocks in the same batch can legitimately require the same hash at
-// different slots (issue #3513 review), and a hash-only dedup would drop the
+// different slots, and a hash-only dedup would drop the
 // second requirement from the result entirely.
 func requiredCertifiedEndorserBlocks(
 	infos []leiosBlockInfo,
@@ -1240,8 +1261,8 @@ func (ls *LedgerState) validateDijkstraLeiosCertificate(
 // endorser block); the caller supplies parents outside the batch. cached
 // reports whether an endorser block is already available *at r's slot*, so a
 // stale occurrence of the hash under a different slot is not mistaken for
-// availability and is fetched like any other missing reference (issue #3513
-// review). backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
+// availability and is fetched like any other missing reference.
+// backfillSeen/tipWaitSeen (via appendRef's leiosEbRefKey) dedup by
 // (slot, hash), not hash alone, for the same reason: two blocks in the batch
 // can legitimately require the same hash at different slots, and a
 // hash-only dedup would drop the second requirement's fetch entirely. When
@@ -1344,7 +1365,7 @@ func leiosAnnouncementFromBlockCbor(
 // provider result against it (endorserBlockAvailableAt) rather than trust
 // whatever slot the provider itself reports, since the manifest is
 // content-addressed and the same hash can legitimately recur at a different
-// slot (issue #3513 review).
+// slot.
 func (ls *LedgerState) leiosEndorserBlockForApply(
 	block ledger.Block,
 ) (hash lcommon.Blake2b256, expectedSlot, size uint64, announced bool, err error) {
@@ -1460,7 +1481,7 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 // requirement's spawn find the first already in flight and silently no-op,
 // and then let awaitFetch's "not in flight" skip-fast fire the moment the
 // *first* requirement's fetch cleared the (shared) key, even though the
-// second requirement's slot was never fetched at all (issue #3513 review).
+// second requirement's slot was never fetched at all.
 // ctx bounds the spawned fetch: it is the block-processing context, so a
 // shutdown or a pipeline restart stops the fetch instead of leaving it running
 // against a connection the node is tearing down.
@@ -1852,4 +1873,81 @@ func (b *leiosBackfiller) awaitFetch(
 		case <-ticker.C:
 		}
 	}
+}
+
+// applyUntickedBoundaryClosure folds a prototype closure onto the parent's
+// ledger before NEWEPOCH, retaining the certifying RB point for rollback.
+func (ls *LedgerState) applyUntickedBoundaryClosure(
+	txn *database.Txn,
+	block ledger.Block,
+	parentPoint ocommon.Point,
+) error {
+	if err := ls.validateBlockCheckpoint(block); err != nil {
+		return err
+	}
+	if !bytes.Equal(block.PrevHash().Bytes(), parentPoint.Hash) {
+		return fmt.Errorf("%w: boundary closure does not extend the ledger tip", errStaleChainIterator)
+	}
+	if err := ls.validateDijkstraLeiosCertificate(block, nil); err != nil {
+		return err
+	}
+	hash, slot, _, referenced, err := ls.leiosEndorserBlockForApply(block)
+	if err != nil {
+		return err
+	}
+	if !referenced {
+		return nil
+	}
+	if ls.config.EndorserBlockProvider == nil {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	txs, found := ls.config.EndorserBlockProvider(hash.Bytes(), slot)
+	if !found {
+		return errCertifiedEndorserBlockUnavailable
+	}
+	point := ocommon.Point{Slot: block.SlotNumber(), Hash: block.Hash().Bytes()}
+	_, donation, err := ls.applyEndorserBlockInContext(txn, point, block.BlockNumber(), slot, hash.Bytes(), txs, &parentPoint.Slot)
+	if err != nil {
+		return err
+	}
+	if donation > 0 {
+		ls.RLock()
+		epoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		if err := ls.db.Metadata().AddNetworkDonation(point.Slot, epoch, donation, txn.Metadata()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type pendingLeiosClosure struct {
+	point  ocommon.Point
+	events []TransactionEvent
+}
+
+// publishUntickedClosureAfterCommit keeps transaction Apply notifications with
+// the certifying RB's commit, including when a failed body is retried.
+func (ls *LedgerState) publishUntickedClosureAfterCommit(txn *database.Txn, point ocommon.Point) {
+	ls.RLock()
+	pending := ls.untickedClosure
+	ls.RUnlock()
+	if pending == nil || !pointMatches(pending.point, point) {
+		return
+	}
+	txn.AfterCommit(func() {
+		ls.Lock()
+		if ls.untickedClosure != pending {
+			ls.Unlock()
+			return
+		}
+		ls.untickedClosure = nil
+		ls.Unlock()
+		if ls.beforeTransactionApplyPublish != nil {
+			ls.beforeTransactionApplyPublish()
+		}
+		for _, evt := range pending.events {
+			ls.publishTransactionEvent(evt)
+		}
+	})
 }

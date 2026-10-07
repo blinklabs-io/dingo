@@ -33,7 +33,7 @@ import (
 )
 
 // The snapshots carry each epoch's pool parameters in full, and reading them
-// is what closes issue #3165.
+// is what closes.
 //
 // The seeding's remaining gap was a pool that held stake in the go or set
 // snapshot and retired before the snapshot's own epoch: gone from cert state
@@ -236,8 +236,6 @@ func requireOwnersConsistent(
 	}
 }
 
-// The resolution of issue #3165, stated as the property that was failing.
-//
 // A pool that held stake in one of the three snapshots and retired before the
 // snapshot's own epoch is absent from cert state and from the current pool
 // distribution, so no registration in an imported database describes it. Its
@@ -735,18 +733,17 @@ func TestParseW32SnapshotPoolParamsCarriesLeiosKeyIntoStakeRows(
 	require.Equal(t, possessionProof, rows[0].LeiosKeyPossessionProof)
 }
 
-// TestAggregatePoolStakeKeepsZeroStakePool is the blinklabs-io/dingo#4152
+// TestAggregatePoolStakeKeepsZeroStakePool is the
 // regression: a pool whose only delegator has zero stake at snapshot time
 // (registered and delegated, but with no lovelace behind the credential --
 // e.g. its UTxOs spent and no reward balance) must still get a
 // PoolStakeSnapshot row. A real cardano-node reports such a pool in
 // GetStakeDistribution with an explicit zero fraction rather than omitting
-// it (confirmed live against a real Preview cardano-node during #4152's
-// investigation), and dingo's own live snapshot-rotation path
-// (calculateLiveStakeDistributionInTxn) already does the same. Before the
-// fix, AggregatePoolStake silently dropped this pool's row entirely --
-// exactly the "pool present on a real node, completely absent from dingo's
-// answer" symptom #4152 reported for 36 real Preview pools after a Mithril
+// it (confirmed live against a real Preview cardano-node), and dingo's own live
+// snapshot-rotation path (calculateLiveStakeDistributionInTxn) already does the
+// same. Before the fix, AggregatePoolStake silently dropped this pool's row
+// entirely -- exactly the "pool present on a real node, completely absent from
+// dingo's answer" symptom seen for 36 real Preview pools after a Mithril
 // bootstrap.
 func TestAggregatePoolStakeKeepsZeroStakePool(t *testing.T) {
 	t.Parallel()

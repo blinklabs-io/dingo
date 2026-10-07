@@ -324,15 +324,17 @@ func validateUnknownVoters(
 	ls lcommon.LedgerState,
 	pp lcommon.ProtocolParameters,
 ) error {
+	// Votes belong to the GOV state transition, which a phase-2-invalid
+	// transaction does not apply. This must precede the upstream Dijkstra
+	// call, which resolves protocol parameters and ledger-state levels before
+	// it reaches any validity check.
+	if !tx.IsValid() {
+		return nil
+	}
 	if _, isDijkstra := tx.(*gdijkstra.DijkstraTransaction); isDijkstra {
 		if err := gdijkstra.UtxoValidateUnknownVoters(tx, slot, ls, pp); err != nil {
 			return err
 		}
-	}
-	// Votes belong to the GOV state transition, which a phase-2-invalid
-	// transaction does not apply.
-	if !tx.IsValid() {
-		return nil
 	}
 	state, ok := ls.(CommitteeCredentialState)
 	if !ok {
@@ -395,12 +397,12 @@ func parameterChangeSetsProtocolVersionKey(paramUpdateCbor []byte) bool {
 
 // validateParameterChangeExcludesProtocolVersion rejects a Conway or
 // Dijkstra ParameterChange governance action that carries protocol-version
-// key 14 (dingo#4439). The reference excludes protocol version from
-// PParamsUpdate: a protocol change must go through HardForkInitiation
-// instead, which carries separate SPO/DRep threshold semantics and, at PV9,
-// bootstrap restrictions that a same-purpose ParameterChange would
-// otherwise bypass. Rejecting here, before ProcessProposals, keeps a
-// malformed proposal from ever being persisted or reaching enactment.
+// key 14. The reference excludes protocol version from PParamsUpdate: a
+// protocol change must go through HardForkInitiation instead, which carries
+// separate SPO/DRep threshold semantics and, at PV9, bootstrap restrictions
+// that a same-purpose ParameterChange would otherwise bypass. Rejecting here,
+// before ProcessProposals, keeps a malformed proposal from ever being persisted
+// or reaching enactment.
 func validateParameterChangeExcludesProtocolVersion(
 	tx lcommon.Transaction,
 	_ uint64,

@@ -672,6 +672,15 @@ func TestRollbackRegisteredIncumbentDoesNotPinOutDeliveredChallenger(
 	)
 }
 
+// forkTipAt builds a tip whose block number equals its slot, so a sequence of
+// calls describes a dense chain fragment.
+func forkTipAt(slot uint64, hash string) ochainsync.Tip {
+	return ochainsync.Tip{
+		Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+		BlockNumber: slot,
+	}
+}
+
 func newTestConnectionId(n int) ouroboros.ConnectionId {
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
 	remoteAddr, _ := net.ResolveTCPAddr(
@@ -2474,7 +2483,7 @@ func TestUpdatePeerTipAcceptsDuringCatchUp(t *testing.T) {
 // lone-claim bound: a frontier beyond the localTip+2*K catch-up ceiling that no
 // other connection corroborates stays rejected on every retry, because a
 // rejected frontier is never recorded as a reference. The gap (>4M blocks at
-// K=432) matches the live report on dingo #3624.
+// K=432) matches a live Preview report.
 func TestUpdatePeerTipFarBehindHonestPeerPermanentlyRejectedAlone(
 	t *testing.T,
 ) {
@@ -3824,7 +3833,7 @@ func TestValencyOneUpstreamBeyondKIsRetainedNotEvicted(t *testing.T) {
 }
 
 // TestChainSelectorByronEBBBeatsRegularIncumbentAtEqualBlockNumber exercises
-// normal multi-peer selection (blinklabs-io/dingo#4413): an incumbent peer
+// normal multi-peer selection: an incumbent peer
 // on a Byron regular tip, and a second peer that delivers the EBB successor
 // sharing the same protocol block number, the way Byron routes an EBB and
 // its predecessor. Without the era-aware tiebreak this is exactly
@@ -3940,7 +3949,7 @@ const chainSwitchBarrierTimeout = 30 * time.Second
 // been delivered yet".
 //
 // ChainSelector.publishSelection routes chain switches through
-// EventBus.PublishOrdered (blinklabs-io/dingo#3550), so the call that drove
+// EventBus.PublishOrdered, so the call that drove
 // the decision returns before the lane worker has handed the event to any
 // subscriber. A lane is a FIFO drained by exactly one worker, so a sentinel
 // enqueued after those switches is delivered after them: receiving it back is
@@ -4004,7 +4013,7 @@ func peerSelectable(
 	defer cs.mutex.RUnlock()
 	peerTip, ok := cs.peerTips[connId]
 	require.True(t, ok, "peer must be tracked")
-	return cs.isPeerSelectableLocked(connId, peerTip, false)
+	return cs.isPeerSelectableLocked(connId, peerTip)
 }
 
 // TestSameChainFrontierLeadKeepsLaggingIncumbentSelectable pins the
@@ -4471,7 +4480,7 @@ func TestUnadvertisedTipIsNotSameChainEvidence(t *testing.T) {
 // chainselection.peer_activity subscription. The mechanism under test is
 // buffer-size independent: a handler that stops returning stops draining, and
 // the buffer only decides how long that takes to become visible. In the
-// blinklabs-io/dingo#3550 Preview run the 1024-slot buffer took 12h31m of
+// Preview run the 1024-slot buffer took 12h31m of
 // keepalive traffic to fill, which is exactly why the buffer is shrunk here
 // rather than the events slowed down.
 const peerActivityStallBuffer = 4
@@ -4551,7 +4560,7 @@ func newStalledSelectionFixture(
 
 // A blocked downstream consumer must not stop the internal
 // chainselection.peer_activity subscriber from draining. The Preview run in
-// blinklabs-io/dingo#3550 shows the opposite: the handler stopped returning,
+// shows the opposite: the handler stopped returning,
 // its 1024-slot buffer filled over the next 12h31m, and from then on every
 // keepalive response parked a protocol goroutine inside EventBus.Publish
 // (ouroboros/keepalive.go) with 299 of them blocked by the end of the log.
@@ -5169,7 +5178,7 @@ func TestPinNoSwitchOnMicroForkDuringCatchUp(t *testing.T) {
 
 	// Confirm the pin is in the catch-up regime.
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	cs.mutex.RUnlock()
 	assert.True(t, catchingUp, "expected catch-up regime for this scenario")
 }
@@ -5207,7 +5216,7 @@ func TestPinNoSwitchOnSiblingHeadForkAtTip(t *testing.T) {
 
 	// Confirm we are NOT in the catch-up regime (tip-hold path exercised).
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	cs.mutex.RUnlock()
 	assert.False(t, catchingUp, "expected tip-hold (non-catch-up) regime")
 }
@@ -5458,10 +5467,177 @@ func TestPinInactiveWithoutLocalTip(t *testing.T) {
 
 	// Confirm catchingUpLocked is false with no local tip.
 	cs.mutex.RLock()
-	catchingUp := cs.catchingUpLocked()
+	catchingUp := cs.catchingUpLocked(nil)
 	stalled := cs.localTipStalledLocked()
 	cs.mutex.RUnlock()
 	assert.False(t, catchingUp)
 	assert.False(t, stalled,
 		"stall must be false before any forward progress is recorded")
+}
+
+func TestChainSelectorForkSwitchReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+
+	// Both peers share slots 1-2 and fork at slot 3; B ends up longer.
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"), forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
+		forkTipAt(5, "b5"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestChainSelectorForkSwitchWithoutSharedPointHasNoRollbackPoint(
+	t *testing.T,
+) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+
+	// The fragments share no (slot, hash) point, so the selector cannot
+	// establish an intersection and must not report one.
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "a1"), forkTipAt(2, "a2"), forkTipAt(3, "a3"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "b1"), forkTipAt(2, "b2"), forkTipAt(3, "b3"), forkTipAt(4, "b4"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "fork switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.Equal(t, connA, switchEvt.PreviousConnectionId)
+	assert.Nil(t, switchEvt.RollbackPoint)
+}
+
+func TestChainSelectorRemoveBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:      eventBus,
+		SecurityParam: 10,
+	})
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	} {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	cs.RemovePeer(connA)
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "disconnect switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
+}
+
+func TestChainSelectorStaleBestPeerReportsRollbackPoint(t *testing.T) {
+	t.Parallel()
+	eventBus := event.NewEventBus(nil, nil)
+	t.Cleanup(eventBus.Stop)
+	cs := NewChainSelector(ChainSelectorConfig{
+		EventBus:          eventBus,
+		SecurityParam:     10,
+		StaleTipThreshold: 50 * time.Millisecond,
+	})
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	installFakeClock(cs, clk)
+	_, evtCh := eventBus.Subscribe(ChainSwitchEventType)
+
+	connA := newTestConnectionId(1)
+	connB := newTestConnectionId(2)
+	for _, tip := range []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "a3"),
+		forkTipAt(4, "a4"),
+	} {
+		cs.UpdatePeerTip(connA, tip, nil)
+	}
+	bTips := []ochainsync.Tip{
+		forkTipAt(1, "c1"), forkTipAt(2, "c2"), forkTipAt(3, "b3"),
+	}
+	for _, tip := range bTips {
+		cs.UpdatePeerTip(connB, tip, nil)
+	}
+	cs.EvaluateAndSwitch()
+	drainChainSwitchesUntilBest(t, evtCh, connA)
+
+	advancePastStale(t, cs, clk, connA, 100*time.Millisecond)
+	cs.UpdatePeerTip(connB, bTips[len(bTips)-1], nil)
+	cs.cleanupStalePeers()
+
+	evt := testutil.RequireReceive(
+		t, evtCh, 5*time.Second, "stale cleanup switch event",
+	)
+	switchEvt, ok := evt.Data.(ChainSwitchEvent)
+	require.True(t, ok, "expected ChainSwitchEvent")
+	require.Equal(t, connB, switchEvt.NewConnectionId)
+	require.NotNil(t, switchEvt.RollbackPoint, "rollback point missing")
+	assert.Equal(t, uint64(2), switchEvt.RollbackPoint.Slot)
+	assert.Equal(t, []byte("c2"), switchEvt.RollbackPoint.Hash)
 }

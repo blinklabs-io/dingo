@@ -99,7 +99,7 @@ func processByronBlockWithPParams(
 	})
 }
 
-// TestLedgerProcessBlockByronAdoptedFeePolicy covers #4419 through block
+// TestLedgerProcessBlockByronAdoptedFeePolicy covers through block
 // application: a real, signed Byron transaction paying a 200 lovelace fee is
 // judged by the fee policy adopted for the block, which ledgerProcessBlock
 // receives as pparams, and not by the genesis policy. Each case changes the

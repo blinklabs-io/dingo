@@ -166,6 +166,11 @@ type ImportedPoolBlockCount struct {
 	CapturedSlot   int64
 }
 
+type LeiosTransactionContext struct {
+	TransactionID int64
+	Slot          int64
+}
+
 type MidnightAriadneParam struct {
 	ID    int64
 	Epoch int64
@@ -395,6 +400,7 @@ type RewardPoolOutput struct {
 	OptimalReward       string
 	TotalReward         string
 	LeaderReward        string
+	LeaderRewardDeficit string
 	MemberRewardTotal   string
 	OwnerStake          string
 	Undistributed       string

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -88,10 +89,10 @@ func PParamsUpdateDijkstra(
 		)
 	}
 	// ParameterChange must never change protocol version; only
-	// HardForkInitiation may (dingo#4439). Transaction validation already
-	// rejects a ParameterChange carrying key 14 before it can be persisted,
-	// so this only guards an already-stored malformed proposal that reaches
-	// enactment some other way (e.g. replay of pre-fix data).
+	// HardForkInitiation may. Transaction validation already rejects a
+	// ParameterChange carrying key 14 before it can be persisted, so this only
+	// guards an already-stored malformed proposal that reaches enactment some
+	// other way (e.g. replay of pre-fix data).
 	dijkstraPParamsUpdate.ProtocolVersion = nil
 	if err := dijkstraPParams.ApplyUpdate(&dijkstraPParamsUpdate); err != nil {
 		return nil, err
@@ -459,7 +460,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 	hasOverlap := false
 	for levelIndex := range levels {
 		level := &levels[levelIndex]
-		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(level.body)
+		level.overlap, level.hasOverlap = dijkstraReferenceInputOverlap(
+			level.body,
+		)
 		hasOverlap = hasOverlap || level.hasOverlap
 	}
 	if !hasOverlap {
@@ -469,7 +472,9 @@ func validateDijkstraPlutusV4ReferenceInputOverlap(
 		return nil
 	}
 	if ls == nil {
-		return errors.New("ledger state is required for Dijkstra script validation")
+		return errors.New(
+			"ledger state is required for Dijkstra script validation",
+		)
 	}
 
 	available := make(map[lcommon.ScriptHash]lcommon.Script)
@@ -598,8 +603,22 @@ func EvaluateTxDijkstra(
 	pp lcommon.ProtocolParameters,
 ) (uint64, lcommon.ExUnits, map[lcommon.RedeemerKey]lcommon.ExUnits, error) {
 	tmpPparams, ok := pp.(*gdijkstra.DijkstraProtocolParameters)
-	if !ok {
+	if !ok || tmpPparams == nil {
 		return 0, lcommon.ExUnits{}, nil, ErrIncompatibleProtocolParams
 	}
-	return EvaluateTxConway(tx, ls, &tmpPparams.ConwayProtocolParameters)
+	stride := uint64(tmpPparams.RefScriptCostStride)
+	if stride == 0 {
+		stride = conwayRefScriptCostStride
+	}
+	multiplier := big.NewRat(6, 5)
+	if tmpPparams.RefScriptCostMultiplier != nil {
+		multiplier = tmpPparams.RefScriptCostMultiplier.ToBigRat()
+	}
+	return evaluateTxConway(
+		tx,
+		ls,
+		&tmpPparams.ConwayProtocolParameters,
+		stride,
+		multiplier,
+	)
 }

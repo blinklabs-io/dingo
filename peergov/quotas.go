@@ -539,7 +539,7 @@ func (p *PeerGovernor) isReusableInboundTopologyConnectionLocked(
 	peer *Peer,
 ) bool {
 	if peer == nil || !p.isTopologyPeer(peer.Source) ||
-		!peer.hasClientConnection() {
+		!p.usableClientLocked(peer) {
 		return false
 	}
 	if p.config.ConnManager != nil {

@@ -85,7 +85,7 @@ func TestCheckMithrilInactivityCompat(t *testing.T) {
 	require.Contains(t, err.Error(), "cannot use Mithril bootstrap")
 }
 
-// TestCheckMithrilInactivityCompatLegacyMarker covers the pre-v0.62.0 (#2694)
+// TestCheckMithrilInactivityCompatLegacyMarker covers the pre-v0.62.0
 // bootstrap case: a database Mithril-bootstrapped before the immutable-import
 // marker existed carries only the durable mithril_ledger_slot trust boundary.
 // Serving with the gate enabled must still be refused, or such a database could

@@ -424,7 +424,7 @@ WHERE credential_tag = ? AND staking_key = ? AND amount = ? AND deleted_slot = 0
 // TestRefreshRewardLiveStakeAggregateDeltaGain proves a single UTxO gain
 // applied through the incremental path produces the same stored total a
 // fresh authoritative sumCredentialUtxoStake scan would, and that it does so
-// without falling back to that scan (the whole point of dingo #4421).
+// without falling back to that scan.
 func TestRefreshRewardLiveStakeAggregateDeltaGain(t *testing.T) {
 	t.Parallel()
 	store := newMigratedSQLiteStore(t)
@@ -691,7 +691,7 @@ func TestApplyUtxoStakeDeltaOverflowAndUnderflow(t *testing.T) {
 }
 
 // TestRewardLiveStakeNeedsBackfillHealsCorruptedRunningTotal is the
-// load-bearing test for the whole design (dingo #4421): the incremental
+// load-bearing test for the whole design: the incremental
 // running total this change introduces trades away sumCredentialUtxoStake's
 // self-healing full-scan property, so it depends entirely on
 // RewardLiveStakeNeedsBackfill (run at every node startup, before block
@@ -1134,7 +1134,7 @@ func TestSumCredentialUtxoStakeConcurrentReuse(t *testing.T) {
 }
 
 // TestStaleConsensusStakeSnapshotsExistFailsClosed covers the fail-closed
-// gate itself (dingo #4026 finding 3): every prior test writes the symbolic
+// gate itself: every prior test writes the symbolic
 // current version, so none of them exercise a literal old
 // calculation_version tripping the gate. It also covers finding 2: a
 // non-authoritative (fallback) Mark reward_snapshot row must fail the gate
@@ -1165,6 +1165,16 @@ func TestStaleConsensusStakeSnapshotsExistFailsClosed(t *testing.T) {
 		stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
 		require.NoError(t, err)
 		require.False(t, stale)
+	})
+
+	t.Run("version 2 Dijkstra snapshot requires replay", func(t *testing.T) {
+		store := newManagementTestStore(t)
+		require.NoError(t, store.SaveRewardSnapshot(&models.RewardSnapshot{
+			Epoch: 4, SnapshotType: "mark", Authoritative: true, CalculationVersion: 2,
+		}, nil))
+		stale, err := store.StaleConsensusStakeSnapshotsExist(nil)
+		require.NoError(t, err)
+		require.True(t, stale)
 	})
 
 	t.Run(

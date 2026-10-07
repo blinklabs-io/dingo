@@ -37,7 +37,7 @@ func restampBackfillDB(t *testing.T) (*sql.DB, func()) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 31)
+	require.Len(t, registry, 34)
 	runner := migrations.Runner{
 		DB:       db,
 		Dialect:  "sqlite",
@@ -130,7 +130,7 @@ func calculationVersion(
 }
 
 // A stale pool_stake_snapshot row is always safe to re-stamp: its stored
-// totals never depended on calculation version (dingo #4026).
+// totals never depended on calculation version.
 func TestRewardStakeVersionRestampAlwaysFixesPoolStakeSnapshot(t *testing.T) {
 	t.Parallel()
 	db, runRestamp := restampBackfillDB(t)
@@ -143,8 +143,7 @@ func TestRewardStakeVersionRestampAlwaysFixesPoolStakeSnapshot(t *testing.T) {
 
 // A stale Mark reward_snapshot row whose total_active_stake already agrees
 // with the epoch's epoch_summary is re-stamped: that agreement is exactly
-// what identifies an epoch the version bump did not actually change (dingo
-// #4026 finding 1).
+// what identifies an epoch the version bump did not actually change.
 func TestRewardStakeVersionRestampFixesAgreeingRewardSnapshot(t *testing.T) {
 	t.Parallel()
 	db, runRestamp := restampBackfillDB(t)

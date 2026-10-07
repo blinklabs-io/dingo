@@ -20,7 +20,7 @@
 // transaction's consumed/collateral/reference inputs. Building the WHERE clause
 // as a variable-length list of OR-ed placeholder pairs made the SQL text vary
 // with the input count, so prepared statements could not be reused and
-// thrashed on parse/prepare under dense sync (issue #2943).
+// thrashed on parse/prepare under dense sync.
 //
 // Chunks pads each chunk's term count up to the next power of two by repeating
 // the chunk's last ref. Because these UPDATEs match rows by an OR of composite

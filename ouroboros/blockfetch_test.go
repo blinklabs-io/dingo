@@ -367,7 +367,7 @@ func TestBlockfetchServerSendBatch_ExactEndpointContract(t *testing.T) {
 			})
 			iter := &stubBlockfetchIterator{steps: test.steps}
 			server := &stubBlockfetchBatchServer{}
-			conn := &stubBlockfetchConnection{errChan: make(chan error)}
+			conn := &stubBlockfetchConnection{done: make(chan struct{})}
 			err := node.blockfetchServerSendBatch(
 				testConnId().String(),
 				test.steps[0].result.Point,
@@ -577,9 +577,8 @@ func (f *blockfetchRangeFixture) point(idx int) ocommon.Point {
 	return ocommon.NewPoint(f.blocks[idx].Slot, f.blocks[idx].Hash)
 }
 
-// readMessageTypes reads count response segments and returns the message type
-// byte of each. Every blockfetch server message is a CBOR array whose first
-// element is the message type, so the second payload byte identifies it.
+// readMessageTypes decodes messages independently of muxer segment boundaries:
+// one segment may contain several messages, or only part of a message.
 func (f *blockfetchRangeFixture) readMessageTypes(
 	t *testing.T,
 	count int,
@@ -587,10 +586,10 @@ func (f *blockfetchRangeFixture) readMessageTypes(
 	t.Helper()
 	types := make([]byte, 0, count)
 	for range count {
-		segment := f.peer.readResponse(t, 5*time.Second)
-		require.Equal(t, blockfetch.ProtocolId, segment.GetProtocolId())
-		require.GreaterOrEqual(t, len(segment.Payload), 2)
-		types = append(types, segment.Payload[1])
+		protocolID, message := f.peer.readMessage(t, 5*time.Second)
+		require.Equal(t, blockfetch.ProtocolId, protocolID)
+		require.GreaterOrEqual(t, len(message), 2)
+		types = append(types, message[1])
 	}
 	return types
 }
@@ -607,7 +606,7 @@ func newBlockfetchRangeFixture(t *testing.T) *blockfetchRangeFixture {
 // newBlockfetchRangeFixtureWithSlots is newBlockfetchRangeFixture generalized
 // to caller-chosen slots, so a test can reproduce a sparse or
 // low-active-slot-coefficient custom network where consecutive real blocks
-// span far more slots than mainnet's stability window (#4354).
+// span far more slots than mainnet's stability window.
 func newBlockfetchRangeFixtureWithSlots(
 	t *testing.T,
 	slots []uint64,
@@ -800,8 +799,8 @@ func TestBlockfetchServerRequestRange_InChainRangeStillServedInFull(
 	)
 }
 
-// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire is issue
-// #4354, end to end: a real MsgRequestRange whose endpoint slots differ by
+// TestBlockfetchServerRequestRange_SparseNetworkRangeServedOverWire covers a
+// sparse network range end to end: a real MsgRequestRange whose endpoint slots differ by
 // more than 129600 (the old, now-removed MaxBlockFetchRange) must still be
 // served in full when every requested block is a real point on the chain --
 // this is what a sparse or low-active-slot-coefficient custom network
@@ -868,7 +867,7 @@ func smallSecurityParamCardanoConfig(
 }
 
 // TestBlockfetchServerRequestRange_OversizedRangeRejectedWithNoBlocks is
-// review comment feedback on #4354's original fix: enforcing the block-count
+// review comment feedback on original fix: enforcing the block-count
 // bound only in blockfetchServerSendBatch, after StartBatch, made an
 // over-cap range unrecoverable for an honest peer -- the transport drops
 // with no protocol-level signal, and retrying the identical range repeats
@@ -1488,13 +1487,13 @@ func (i *stubBlockfetchIterator) Cancel() {
 }
 
 type stubBlockfetchConnection struct {
-	errChan    chan error
+	done       chan struct{}
 	closeCalls int
 	closeErr   error
 }
 
-func (c *stubBlockfetchConnection) ErrorChan() chan error {
-	return c.errChan
+func (c *stubBlockfetchConnection) Done() <-chan struct{} {
+	return c.done
 }
 
 func (c *stubBlockfetchConnection) Close() error {
@@ -1589,20 +1588,20 @@ func TestBlockfetchServerRequestRange_EqualPoints(t *testing.T) {
 	}, "equal slot range should pass validation and reach LedgerState call")
 }
 
-// TestBlockfetchServerRequestRange_SparseNetworkSlotSpanNotRejected is issue
-// #4354: a slot span far larger than mainnet's stability window (129600)
-// must not be rejected at the request-validation stage, since a sparse or
+// TestBlockfetchServerRequestRange_SparseNetworkSlotSpanNotRejected covers that
+// a slot span far larger than mainnet's stability window (129600) must not be
+// rejected at the request-validation stage, since a sparse or
 // low-active-slot-coefficient custom network can have a valid run of
 // consecutive blocks spanning far more slots than that. Only actual block
 // count, scaled to the network's security parameter, bounds the response.
 // LedgerState is nil, so the call panics either way -- assert.Panics alone
 // cannot tell "rejected by a slot-range check" (which panics inside the nil
-// ctx.Server.NoBlocks()) apart from "reached GetChainFromPoint" (which
-// panics on the nil LedgerState). Every early-rejection branch in
-// blockfetchServerRequestRange logs before it calls NoBlocks, so an empty
-// log buffer at the point of the panic is what actually proves no rejection
-// branch ran; asserting on specific log wording would pass again if a
-// slot-range check returned with different wording.
+// ctx.Server.NoBlocks()) apart from "reached GetChainFromPoint" (which panics
+// on the nil LedgerState). Every early-rejection branch in
+// blockfetchServerRequestRange logs before it calls NoBlocks, so an empty log
+// buffer at the point of the panic is what actually proves no rejection branch
+// ran; asserting on specific log wording would pass again if a slot-range check
+// returned with different wording.
 func TestBlockfetchServerRequestRange_SparseNetworkSlotSpanNotRejected(
 	t *testing.T,
 ) {
@@ -1654,7 +1653,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionOnIteratorError(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1687,7 +1686,7 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	iter := &stubBlockfetchIterator{}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1734,7 +1733,7 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 	}
 	server := &stubBlockfetchBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
@@ -1766,7 +1765,7 @@ func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
 // spans more than 129600 slots (the old, now-removed MaxBlockFetchRange).
 // This reproduces a sparse or low-active-slot-coefficient custom network
 // where real consecutive blocks span far more slots than mainnet's
-// stability window (#4354).
+// stability window.
 func sparseBlockfetchSteps(
 	n int,
 	startSlot uint64,
@@ -1786,7 +1785,7 @@ func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
 ) {
 	t.Parallel()
 
-	// #4354: valid blocks whose endpoint slots differ by more than 129600
+	// Valid blocks whose endpoint slots differ by more than 129600
 	// (the old MaxBlockFetchRange) must be served in full rather than
 	// rejected, since resource usage is now bounded by block count. This
 	// exercises blockfetchServerSendBatch's own backstop bound directly
@@ -1804,7 +1803,7 @@ func TestBlockfetchServerSendBatch_ServesSparseRangeUpToMaxBlocks(
 	steps := sparseBlockfetchSteps(testMaxBlocks, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 	require.Greater(
@@ -1863,7 +1862,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
 	steps := sparseBlockfetchSteps(testMaxBlocks+1, startSlot)
 	iter := &stubBlockfetchIterator{steps: steps}
 	server := &stubBlockfetchBatchServer{}
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(startSlot, []byte{0x01})
 	end := steps[len(steps)-1].result.Point
 
@@ -1894,9 +1893,9 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenBlockCountExceedsMax(
 // maxBlockFetchBlocksForSecurityParam's two behaviors: a small or
 // unconfigured security parameter K must not cap below
 // blockfetchMaxBlocksFloor (or Dingo-to-Dingo catch-up on a small-K network
-// would ride the same connection-closing edge #4354 fixed), and a K large
-// enough to matter -- the class #4354 is about -- must scale the cap
-// linearly with K rather than staying fixed.
+// would ride the same connection-closing edge the range fix removed), and a K
+// large enough to matter must scale the cap linearly with K rather than staying
+// fixed.
 func TestMaxBlockFetchBlocksForSecurityParam(t *testing.T) {
 	t.Parallel()
 
@@ -1927,8 +1926,8 @@ func TestMaxBlockFetchBlocksForSecurityParam(t *testing.T) {
 // coupling blockfetchMaxBlocksFloor's doc comment only asserts in prose:
 // the floor must stay comfortably above ledger.BlockfetchBatchSize, the
 // largest range Dingo's own chainsync client ever requests, or a small- or
-// zero-K network starts riding the same connection-closing edge #4354
-// fixed. Without this, a future change to either constant could silently
+// zero-K network starts riding the same connection-closing edge the range
+// fix removed. Without this, a future change to either constant could silently
 // erode or eliminate that margin.
 func TestBlockfetchMaxBlocksFloorHasHeadroomOverChainsyncBatchSize(
 	t *testing.T,
@@ -1961,7 +1960,7 @@ func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	}
 	server := &stubBlockfetchDrainBatchServer{}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2008,7 +2007,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 		drainResults: []bool{true, false},
 	}
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		done: make(chan struct{}),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(101, []byte{101})
@@ -2043,7 +2042,7 @@ func TestReportBlockfetchServerAsyncError_ClosesConnection(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	conn := &stubBlockfetchConnection{errChan: make(chan error)}
+	conn := &stubBlockfetchConnection{done: make(chan struct{})}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 	o.reportBlockfetchServerAsyncError(
@@ -2068,7 +2067,7 @@ func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	conn := &stubBlockfetchConnection{
-		errChan:  make(chan error),
+		done:     make(chan struct{}),
 		closeErr: errors.New("close failed"),
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
@@ -2285,7 +2284,7 @@ func newBlockfetchServerPeer(t *testing.T, o *Ouroboros) *muxerServerPeer {
 }
 
 // TestBlockfetchServerRequestRange_RepeatedInvertedRangeReachesCloseThreshold
-// is issue #3428: an inverted range (start after end) sent NoBlocks without
+// covers that an inverted range (start after end) sent NoBlocks without
 // calling blockfetchRecordNoBlocksAndMaybeClose, the same valve oversized and
 // missing-point rejections use, so a peer repeating an inverted request never
 // counted toward blockfetchMaxConsecutiveNoBlocks and was never closed.

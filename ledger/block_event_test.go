@@ -125,7 +125,7 @@ func TestPublishBlockEventIgnoresOptionalSubscriberDetachment(t *testing.T) {
 // goroutine is already free to apply the post-rollback chain and publish
 // forward transaction events on the same lane, so anything the handler emits
 // races it and loses. Emitting undo events here reproducibly delivered the
-// forward event first. See blinklabs-io/dingo#2287.
+// forward event first.
 func TestChainUpdateHandlerPublishesNoTransactionEvents(t *testing.T) {
 	t.Parallel()
 
@@ -654,7 +654,7 @@ func TestRejectedRollbackEmitsNoUndoEvents(t *testing.T) {
 }
 
 // TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock covers issue
-// #3516's review: reconciliationUndoBlocks used to build its list from the
+// review: reconciliationUndoBlocks used to build its list from the
 // ledgerTip snapshotted at the very top of reconcilePrimaryChainTipWithLedgerTip,
 // with no lock held between that snapshot and the later,
 // transactionEventMutex-guarded resolution. A concurrent
@@ -770,8 +770,8 @@ func TestReconciliationUndoBlocksCoversConcurrentlyAppliedBlock(t *testing.T) {
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating
-// covers the live primary-chain/ledger divergence reconciler
-// (issue #3516): rewinding the primary chain to their common ancestor must
+// covers the live primary-chain/ledger divergence reconciler:
+// rewinding the primary chain to their common ancestor must
 // follow the same validate-then-emit-then-truncate contract
 // rollbackChainAndState uses for a peer-driven rollback, so ledger.tx
 // subscribers still see an undo for blocks this reconciliation discards.
@@ -852,8 +852,8 @@ func TestReconcilePrimaryChainTipWithLedgerTipEmitsUndoEventsBeforeTruncating(
 // must still complete and roll the ledger back correctly -- refusing to
 // reconcile over a missing notification would, at this function's call
 // sites, mean refusing to start the node or halting the block-processing
-// reader goroutine, considerably worse than an incomplete notification
-// (issue #3516 review). The gap must be observable, not silent: an
+// reader goroutine, considerably worse than an incomplete notification.
+// The gap must be observable, not silent: an
 // error-level log and the reconciliationUndoUnresolved counter.
 func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 	t.Parallel()
@@ -933,7 +933,7 @@ func TestReconciliationUndoDegradesGracefullyAfterRestart(t *testing.T) {
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewindAndEmit
-// covers wolf31o2's P1 finding on PR #3611: the common-ancestor branch
+// covers wolf31o2's P1 finding on the common-ancestor branch
 // truncates the primary chain (RewindPrimaryChainToPoint) before
 // publishing ledger.tx undo events (emitRollbackTransactionEvents). A
 // crash between those two steps leaves the primary chain already
@@ -958,7 +958,7 @@ func TestReconcilePrimaryChainTipWithLedgerTipRecoversUndoAfterCrashBetweenRewin
 	ls := fixture.ls
 
 	bus := event.NewEventBus(nil, nil)
-	t.Cleanup(bus.Stop)
+	t.Cleanup(bus.Close)
 	ls.config.EventBus = bus
 
 	errSubID, errCh := bus.SubscribeWithBuffer(LedgerErrorEventType, 64)
@@ -1164,7 +1164,7 @@ func TestRollbackRetainsIntentUntilOrderedDelivery(t *testing.T) {
 }
 
 // TestReconcilePrimaryChainTipWithLedgerTipDeclinesMithrilBoundaryWithoutEmitting
-// covers wolf31o2's fourth-round review on PR #3611: rollbackChainAndState
+// covers wolf31o2's fourth-round review on rollbackChainAndState
 // pre-checks the Mithril boundary before it ever calls
 // validateAndEmitRollbackUndo, so its own ls.rollback call can never
 // observe ErrRollbackExceedsMithrilBoundary in practice. This reconciler
@@ -1403,7 +1403,7 @@ func TestReconciliationUndoBlocksDetectsMissingBlockNonceRecords(t *testing.T) {
 // the ancestor rewind through RewindPrimaryChainToPoint unconditionally
 // would return ErrSecurityParamNotConfigured here and fail node startup
 // outright for exactly the local, already-durable divergence this function
-// exists to repair (issue #3516 review). Reconciliation must still land.
+// exists to repair. Reconciliation must still land.
 func TestReconcilePrimaryChainTipWithLedgerTipSucceedsBeforeSetLedger(
 	t *testing.T,
 ) {

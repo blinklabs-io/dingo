@@ -49,6 +49,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	pdata "github.com/blinklabs-io/plutigo/data"
 	"github.com/prometheus/client_golang/prometheus"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -1149,7 +1150,7 @@ func atTipDescentFailure(slot uint64, tag string) *txValidationError {
 // TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop verifies
 // that a descending series of distinct at-tip validation failures trips the
 // non-convergence guard: recovery holds at the ledger tip and records the
-// condition instead of rewinding the primary chain ever deeper (issue #2939).
+// condition instead of rewinding the primary chain ever deeper.
 func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 	t *testing.T,
 ) {
@@ -1159,7 +1160,7 @@ func TestTryRecoverFromTxValidationErrorAtTipStopsDescendingRewindLoop(
 
 	// Feed a descending series of DISTINCT failures. Each first appears
 	// (attempt 1: shallow rewind to ledger tip) then repeats (attempt 2:
-	// same block re-delivered), mirroring the field log in #2939.
+	// same block re-delivered), mirroring the field log.
 	for _, slot := range []uint64{500, 480, 460, 440} {
 		ferr := atTipDescentFailure(slot, fmt.Sprintf("%d", slot))
 		for range 2 {
@@ -2042,7 +2043,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 }
 
 // TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds
-// reproduces the terminal #3005 recovery cycle after prior, distinct failures
+// reproduces the terminal recovery cycle after prior, distinct failures
 // failed to advance the applied ledger high-water mark. Once the guard trips,
 // recovery must keep the applied tip instead of pruning another
 // security-parameter window and must force a fresh ChainSync connection even
@@ -2093,9 +2094,10 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 		),
 	)
 	// Preserve the replay candidates in the block store while leaving the
-	// primary chain tip below the applied ledger tip. This is the #3005
-	// topology: an earlier recovery rewind has already moved the primary
-	// chain back, but ledger replay rebuilt to its previous high-water mark.
+	// primary chain tip below the applied ledger tip. This is the
+	// non-converging topology: an earlier recovery rewind has already moved the
+	// primary chain back, but ledger replay rebuilt to its previous high-water
+	// mark.
 	for _, block := range []chain.RawBlock{ledgerTipBlock, failingBlock} {
 		require.NoError(t, db.BlockCreate(models.Block{
 			Hash:     block.Hash,
@@ -2179,8 +2181,8 @@ func TestTryRecoverFromTxValidationErrorReplayFallbackStopsNonConvergingRewinds(
 	ls.publishSnapshotsLocked()
 
 	// Model the two earlier recovery cycles. Failure identities are
-	// intentionally absent from this tracker: #3005 showed that their slots
-	// can creep forward while the applied tip remains unchanged.
+	// intentionally absent from this tracker: field logs showed that their
+	// slots can creep forward while the applied tip remains unchanged.
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 	require.False(t, ls.observeReplayRecoveryTip(ledgerTip.Point.Slot))
 
@@ -2551,15 +2553,18 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 	t.Cleanup(bus.Close)
 	resyncCh := deterministicResyncChannel(t, ls, bus)
 	ls.config.EventBus = bus
+	// The error comes from the real apply path, driven with validation
+	// bypassed: a withdrawal one lovelace above the persisted balance stands
+	// in for a balance that changed between validation and apply.
+	credential := bytes.Repeat([]byte{0xAB}, lcommon.Blake2b224Size)
+	require.NoError(t, ls.db.CreateAccount(nil, &models.Account{
+		StakingKey:    credential,
+		CredentialTag: 0,
+		Active:        true,
+		Reward:        types.Uint64(rewardWithdrawalTestBalance),
+	}))
 	validation := func() *txValidationError {
-		return &txValidationError{
-			BlockPoint: ocommon.NewPoint(160, testHashBytes("audit-failing")),
-			TxHash:     testHashBytes("reward-withdrawal-mismatch-tx"),
-			Cause: fmt.Errorf(
-				"record transaction: reward withdrawal amount 78446537 exceeds account balance 78446536: %w",
-				models.ErrRewardWithdrawalExceedsBalance,
-			),
-		}
+		return applyOverBalanceWithdrawal(t, ls, credential)
 	}
 
 	recovered, err := ls.tryRecoverFromTxValidationError(validation())
@@ -2587,6 +2592,60 @@ func TestReplayRecoveryHaltsRepeatedRewardWithdrawalMismatch(t *testing.T) {
 		models.ErrRewardWithdrawalExceedsBalance,
 		"the halt error must carry the underlying mismatch",
 	)
+}
+
+const rewardWithdrawalTestBalance = uint64(1000)
+
+// applyOverBalanceWithdrawal drives a withdrawal one lovelace above the
+// persisted reward balance of credential through LedgerDelta.apply and returns
+// the validation error it surfaces.
+func applyOverBalanceWithdrawal(
+	t *testing.T,
+	ls *LedgerState,
+	credential []byte,
+) *txValidationError {
+	t.Helper()
+	rewardAddr, err := lcommon.NewAddressFromBytes(
+		append([]byte{0xE1}, credential...),
+	)
+	require.NoError(t, err)
+	builder := mockledger.NewTransactionBuilder()
+	builder.WithId(testHashBytes("over-balance-withdrawal-tx"))
+	builder.WithValid(true)
+	builder.WithWithdrawals(
+		map[*lcommon.Address]uint64{
+			&rewardAddr: rewardWithdrawalTestBalance + 1,
+		},
+	)
+	var tx lcommon.Transaction = builder
+	var txHash [32]byte
+	copy(txHash[:], tx.Hash().Bytes())
+	delta := NewLedgerDelta(
+		ocommon.NewPoint(160, testHashBytes("audit-failing")),
+		uint(shelley.EraIdShelley),
+		4,
+	)
+	defer delta.Release()
+	delta.addTransaction(tx, 0)
+	delta.Offsets = &database.BlockIngestionResult{
+		TxOffsets:   map[[32]byte]database.CborOffset{txHash: {}},
+		UtxoOffsets: make(map[database.UtxoRef]database.CborOffset),
+	}
+	err = ls.db.Transaction(true).Do(func(txn *database.Txn) error {
+		return delta.apply(ls, txn)
+	})
+	require.Error(t, err)
+	validationErr, ok := errors.AsType[*txValidationError](err)
+	require.True(
+		t,
+		ok,
+		"an apply-time withdrawal mismatch must surface as a validation error, got %T: %v",
+		err,
+		err,
+	)
+	require.ErrorIs(t, err, models.ErrRewardWithdrawalExceedsBalance)
+	require.True(t, isRewardWithdrawalStateDivergence(err))
+	return validationErr
 }
 
 // The Shelley-family UTxO rule reports a withdrawal that does not match the
@@ -3040,6 +3099,17 @@ func TestReplayRecoveryRejectsDeterministicByronUnknownAttributes(
 	assert.Equal(t, ls.Tip().Point, resync.Point)
 }
 
+func TestIsDeterministicTxValidationErrorClassifiesByronInputIndex(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	assert.True(t, isDeterministicTxValidationError(fmt.Errorf(
+		"byron UTxO rule: %w",
+		eras.InputIndexByronError{Index: 1 << 16},
+	)))
+}
+
 func TestReplayRecoveryDoesNotArmAuditWhenPrimaryAlreadyHeld(t *testing.T) {
 	t.Parallel()
 
@@ -3232,7 +3302,7 @@ func TestIsGenesisPrevHashRejectsMalformedHashes(t *testing.T) {
 }
 
 // TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs is the
-// dingo #3805 regression.
+// script-data-hash rejection regression.
 //
 // Replay recovery exists to repair one thing: a transaction spending an input
 // whose producer is missing from the applied chain. txValidationError carries
@@ -3349,7 +3419,7 @@ func TestTryRecoverFromTxValidationErrorIgnoresFailureWithResolvableInputs(
 // producer for two unrelated situations — the input is present so there is
 // nothing to find, and the input is missing and its producer could not be
 // located — and folding both into unresolvedInputs is what let a failure with
-// nothing missing drive a rewind (dingo #3805).
+// nothing missing drive a rewind.
 func TestResolveReplayRecoveryProducerReportsPresentInput(t *testing.T) {
 	t.Parallel()
 
@@ -3643,7 +3713,7 @@ type trustWindowLedger struct {
 	resyncs   <-chan event.Event
 }
 
-// newTrustWindowLedger builds the shape of issue #3261: the applied ledger tip
+// newTrustWindowLedger builds this shape: the applied ledger tip
 // sits exactly on the Mithril trust anchor and the failing block is a short
 // distance past it, so the only rewind target at or above the anchor is the tip
 // itself. Every deeper target the at-tip recovery schedule produces lands on
@@ -3791,8 +3861,8 @@ func (f *trustWindowLedger) requireResyncs(t *testing.T, n int) {
 	}
 }
 
-// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers issue
-// #3261: when every rewind target the at-tip recovery schedule produces lies
+// TestAtTipRecoveryInsideMithrilTrustWindowReachesTerminalState covers a
+// terminal case: when every rewind target the at-tip recovery schedule produces lies
 // inside the Mithril protected window, the trust boundary guard refuses all of
 // them. Each refusal rewinds to the applied tip and asks ChainSync for a fresh
 // intersection, which cannot help for a canonical block -- every peer serves
@@ -3893,7 +3963,7 @@ func TestAtTipRecoveryAboveMithrilTrustWindowKeepsRecovering(t *testing.T) {
 }
 
 // TestReplayRecoveryBelowMithrilTrustBoundaryReachesTerminalState covers the
-// post-bootstrap replay path from issues #3301 and #3318. The producer is
+// post-bootstrap replay paths covered by these tests. The producer is
 // canonical but below the imported anchor, so its parent can never be a legal
 // local rewind target. Changing failing block/transaction identities must not
 // rearm the budget while the applied tip remains fixed; replay failures can
@@ -4134,8 +4204,8 @@ func seedTestChain(
 	return raw
 }
 
-// TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins the second half of
-// issue #3889: a recovery rewind the chain refuses as exceeding K is not a
+// TestDeterministicTxRecoveryHaltsOnUnreachableRewind pins a
+// halting rule: a recovery rewind the chain refuses as exceeding K is not a
 // transient failure, so repeating it at an applied tip that never advances
 // must become terminal instead of restarting the pipeline forever.
 //
@@ -4255,7 +4325,7 @@ func TestRecoveryRewindHaltBudgetResetsOnTipProgress(t *testing.T) {
 }
 
 // TestRecoveryRewindHaltsThoughTargetMovesAndDepthGrows pins the shape the
-// live reproduction on Preview showed (issue #3889: a replay wedged at slot
+// live reproduction on Preview showed (: a replay wedged at slot
 // 41098815 for over twenty minutes across 97 rejection attempts on one
 // transaction).
 //
@@ -4596,7 +4666,7 @@ func TestDeterministicTxRecoveryDeclinesAtSameSlotSameHash(t *testing.T) {
 }
 
 // TestAtTipRecoveryPruneFloorBindsAboveMithrilAnchor covers the Mithril-
-// bootstrapped shape reported in issue #3766. The Mithril anchor sits far below
+// bootstrapped shape reported by the test. The Mithril anchor sits far below
 // the consumed-UTxO prune floor, so the existing trust-boundary check admits
 // every target the rewind schedule produces while the sweep has already made
 // them unrestorable. The prune floor is the binding constraint, and the node

@@ -27,13 +27,15 @@ go.work
 /node-parity
 
 # Local data directory
-/.dingo
+/.dingo*
 /.devnet
 /.tools
 /.koios
 
 # node_modules for npm publishing
 node_modules/
+/npm/vendor/
+/npm/checksums.json
 
 # IDEs
 .idea/

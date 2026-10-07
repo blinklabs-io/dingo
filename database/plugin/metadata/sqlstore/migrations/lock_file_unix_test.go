@@ -27,15 +27,15 @@ import (
 )
 
 // TestAssetAmountFingerprintIndexDropRemovesIndexes proves migration v21
-// (asset-amount-fingerprint-index-drop, dingo#4598) drops idx_asset_amount
+// drops idx_asset_amount
 // and idx_asset_fingerprint from a database migrated all the way through,
 // while leaving the asset.amount and asset.fingerprint columns themselves
-// untouched -- unlike dingo#4482's asset.name_hex, both columns are still
+// untouched -- unlike asset.name_hex, both columns are still
 // genuinely read and returned via the blockfrost/mesh API adapters. Before
 // this migration existed, a fully migrated (through v20) database still
 // carried both indexes: a real WAL-frame-churn measurement during genesis
 // sync found neither backs any WHERE/JOIN/ORDER BY predicate anywhere in the
-// tree (dingo#4464).
+// tree.
 func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 	t.Parallel()
 
@@ -111,7 +111,7 @@ func TestAssetAmountFingerprintIndexDropRemovesIndexes(t *testing.T) {
 }
 
 // TestAssetNameHexColumnDropRemovesColumnAndIndex proves migration v19
-// (asset-name-hex-column-drop, dingo#4464) drops both asset.name_hex and
+// drops both asset.name_hex and
 // idx_asset_name_hex from a database migrated all the way through. Before
 // this migration existed, a fully migrated (through v18) database still
 // carried both: name_hex was a write-only column nothing filtered on.
@@ -182,7 +182,7 @@ func TestCommitteeCredentialMigrationPreservesExistingRows(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 31)
+	require.Len(t, registry, 34)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -381,7 +381,7 @@ func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 // testDBPragmas relaxes durability for throwaway per-test SQLite databases:
 // each one is created, migrated, asserted against, and deleted inside a
 // single test, so an fsync'd rollback journal buys nothing and is expensive
-// on a contended CI runner (dingo#4171). No test in this package kills a
+// on a contended CI runner. No test in this package kills a
 // connection mid-transaction, simulates crash recovery, or inspects a
 // journal/WAL file, so relaxing durability does not change what any
 // assertion observes. This is a twin of the identical constant in package
@@ -390,7 +390,7 @@ func TestCommitteeZeroQuorumMigrationConvertsLegacyClearMarkers(t *testing.T) {
 const testDBPragmas = "_pragma=journal_mode(MEMORY)&_pragma=synchronous(OFF)"
 
 // TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals covers
-// dingo#4411's upgrade path. Before v17 the epoch tick refunded an expired
+// upgrade path. Before v17 the epoch tick refunded an expired
 // proposal's deposit in the tick that marked it expired, so on an upgraded
 // database every expired_epoch row has already been refunded. The drop step
 // selects on `dropped_epoch IS NULL`, so without the v17 backfill it would
@@ -405,7 +405,7 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 31)
+	require.Len(t, registry, 34)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,
@@ -468,7 +468,7 @@ func TestGovernanceProposalDropBackfillMarksAlreadyRefundedProposals(
 	require.Zero(t, activeDropRows)
 }
 
-// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers dingo#3975's v24
+// TestRewardAdaPotsImportedEpochFeesColumnIsAdditive covers v24
 // migration: a row written before the column existed must read back as NULL,
 // not fail the migration or silently coerce to zero (zero is a legitimate
 // "imported nothing before the anchor" value and must stay distinguishable
@@ -481,7 +481,7 @@ func TestRewardAdaPotsImportedEpochFeesColumnIsAdditive(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	registry, err := migrations.SQLiteRegistry()
 	require.NoError(t, err)
-	require.Len(t, registry, 31)
+	require.Len(t, registry, 34)
 	runTo := func(versions []migrations.Migration) {
 		runner := migrations.Runner{
 			DB:       db,

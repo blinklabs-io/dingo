@@ -227,7 +227,7 @@ func (s *Store) setTransactionBatched(
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, accumulator, txn,
+		tolerateConsumedInputConflict, accumulator, nil, txn,
 	)
 }
 
@@ -254,6 +254,15 @@ func (s *Store) SetTransactionLeiosClosure(
 	)
 }
 
+// SetTransactionLeiosClosureInContext records the execution context before
+// certificates are applied, so epoch-dependent effects use the unticked state.
+func (s *Store) SetTransactionLeiosClosureInContext(transaction lcommon.Transaction, point ocommon.Point, index uint32, certDeposits map[int]uint64, skipWithdrawalWitness bool, slot uint64, txn types.Txn) error {
+	if slot >= point.Slot {
+		return errors.New("closure context must precede its certifying block")
+	}
+	return s.setTransactionWithAccumulator(transaction, point, index, certDeposits, skipWithdrawalWitness, false, true, nil, &slot, txn)
+}
+
 func (s *Store) setTransaction(
 	transaction lcommon.Transaction,
 	point ocommon.Point,
@@ -278,7 +287,7 @@ func (s *Store) setTransaction(
 	return s.setTransactionWithAccumulator(
 		transaction, point, index, certDeposits,
 		skipWithdrawalWitness, historicalBackfill,
-		tolerateConsumedInputConflict, nil, txn,
+		tolerateConsumedInputConflict, nil, nil, txn,
 	)
 }
 
@@ -291,6 +300,7 @@ func (s *Store) setTransactionWithAccumulator(
 	historicalBackfill bool,
 	tolerateConsumedInputConflict bool,
 	accumulator types.MetadataBatchAccumulator,
+	ledgerContextSlot *uint64,
 	txn types.Txn,
 ) error {
 	if transaction == nil {
@@ -354,6 +364,11 @@ func (s *Store) setTransactionWithAccumulator(
 			}
 			if err != nil {
 				return fmt.Errorf("create transaction %x: %w", hash, err)
+			}
+			if ledgerContextSlot != nil {
+				if err := recordTransactionLedgerContext(ctx, db, transactionID, *ledgerContextSlot); err != nil {
+					return err
+				}
 			}
 			if err := s.applyTransactionMetadataLabels(
 				ctx,
@@ -471,7 +486,7 @@ func (s *Store) setTransactionWithAccumulator(
 			// because the row was already spent -- by an earlier certified
 			// endorser block on the Leios closure path, or by an earlier
 			// application of this same transaction. Those changed nothing in
-			// the utxo table, so they contribute no delta (dingo #4421); they
+			// the utxo table, so they contribute no delta; they
 			// are still refreshed at zero delta so the set of credentials this
 			// write touches is unchanged from the full-scan path.
 			spentRefs := make([]models.UtxoId, 0, len(transaction.Consumed()))
@@ -593,7 +608,7 @@ FROM utxo WHERE tx_id = ? AND output_idx = ?`,
 			// certificates, consumed inputs, and produced outputs -- into
 			// one incremental refresh pass instead of the full
 			// sumCredentialUtxoStake rescan refreshRewardLiveStakeRefs would
-			// run once per occurrence (dingo #4421): a transaction with
+			// run once per occurrence: a transaction with
 			// several outputs to the same staking credential (an ordinary
 			// change pattern), or one that both spends from and pays back to
 			// the credential a certificate in the same transaction just
@@ -1086,7 +1101,7 @@ WHERE id = ?`,
 	utxo.ID = uint(id)
 	// A pointer address names a certificate position rather than carrying a
 	// credential, so the position is recorded alongside the output and
-	// resolved when stake is computed (dingo #3854). This runs on the
+	// resolved when stake is computed. This runs on the
 	// conflict path too: an output a snapshot import created before its
 	// producing transaction was replayed has no pointer row yet.
 	if err := persistUtxoPointer(ctx, db, id, utxo.Pointer); err != nil {
@@ -1216,7 +1231,7 @@ func (s *Store) applyTransactionWithdrawals(
 			// paths read this table (see BatchedTxIngestOpts.
 			// SkipWithdrawalWitnessWrite), so gate-off callers elide the
 			// insert rather than growing an unbounded, never-pruned table
-			// nothing reads (issue #2919).
+			// nothing reads.
 			if _, err := db.ExecContext(ctx, `
 INSERT INTO account_withdrawal_witness (
     staking_key, credential_tag, tx_hash, added_slot
@@ -1339,4 +1354,13 @@ ON CONFLICT (
 		}
 	}
 	return nil
+}
+
+func recordTransactionLedgerContext(ctx context.Context, db queryer, transactionID int64, slot uint64) error {
+	value, err := checkedInt64(slot)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO leios_transaction_context (transaction_id, slot) VALUES (?, ?) ON CONFLICT (transaction_id) DO UPDATE SET slot = excluded.slot`, transactionID, value)
+	return err
 }

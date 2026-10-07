@@ -30,7 +30,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -92,7 +94,7 @@ func TestParseCommitteeQuorumRange(t *testing.T) {
 // pots and is skipped — and a skipped round is never made up. Reward
 // balances, and the leadership stake derived from them, stay short by an
 // epoch's rewards for the life of the database, which is what makes such a
-// node reject canonical blocks near the eligibility threshold (#3165).
+// node reject canonical blocks near the eligibility threshold.
 func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 	t.Parallel()
 
@@ -141,7 +143,7 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 // pre-anchor fee pot, UTxOState.utxosFees (RawLedgerState.Fees) minus
 // SnapShots' ssFee. A later local boundary calculation adds it to the fees
 // this node observes after the anchor instead of silently omitting
-// everything before it (dingo #3975).
+// everything before it.
 func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	t.Parallel()
 
@@ -157,11 +159,18 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 	cfg := ImportConfig{
 		Database: db,
 		State: &RawLedgerState{
-			Epoch: epoch,
-			Fees:  stateFees,
+			Epoch:         epoch,
+			Fees:          stateFees,
+			EraIndex:      EraConway,
+			EraBoundEpoch: epoch,
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	current, previous := distinctConwayPParams(t)
+	cfg.State.PParamsData = current
+	cfg.State.PrevPParamsData = previous
+	cfg.State.EraBounds = previewEraBounds()
+	cfg.State.EraBounds[EraConway] = EraBound{Epoch: epoch, Slot: anchorSlot}
 	snapshots := &ParsedSnapShots{Fee: snapshotFee}
 
 	require.NoError(
@@ -183,8 +192,7 @@ func TestImportSeedsPreAnchorFeesFromStateMinusSnapshotFee(t *testing.T) {
 // epoch, so RawLedgerState.Fees < SnapShots.Fee means the snapshot was not
 // decoded as a consistent ledger state. seedImportedRewardBasis must refuse
 // it: leaving ImportedEpochFees unset would make the next boundary sum only
-// the local post-anchor fees and credit that round short, the defect in
-// dingo #3975.
+// the local post-anchor fees and credit that round short.
 func TestImportRejectsSnapshotWhoseFeesDoNotReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -1031,8 +1039,23 @@ func govStateWithRootsAndProposals(
 	drepPulsingState any,
 ) []byte {
 	t.Helper()
+	return govStateWithEncodedRoots(
+		t, encodeRootsAsAny(t, roots), committeePresent, proposals,
+		drepPulsingState,
+	)
+}
 
-	rootsAny := encodeRootsAsAny(t, roots)
+// govStateWithEncodedRoots is govStateWithRootsAndProposals with the
+// GovRelation supplied pre-encoded, so a test can pass a malformed one.
+func govStateWithEncodedRoots(
+	t *testing.T,
+	rootsAny any,
+	committeePresent bool,
+	proposals []any,
+	drepPulsingState any,
+) []byte {
+	t.Helper()
+
 	proposalsContainer := []any{rootsAny, proposals}
 
 	var committee any
@@ -1216,15 +1239,50 @@ func govImportConfigForTest(
 }
 
 func committeeWithMember(t *testing.T, hash []byte, expiry uint64) any {
+	return committeeWithCredentialTag(t, 0, hash, expiry)
+}
+
+func committeeWithCredentialTag(
+	t *testing.T,
+	tag uint64,
+	hash []byte,
+	expiry uint64,
+) any {
 	t.Helper()
 	// Credential array keys must be kept as raw CBOR map keys; encoding a
 	// Go map with []byte keys would produce a bytestring key instead.
-	key, err := cbor.Encode([]any{uint64(0), hash})
+	key, err := cbor.Encode([]any{tag, hash})
 	require.NoError(t, err)
 	value, err := cbor.Encode(expiry)
 	require.NoError(t, err)
 	memberMap := cbor.RawMessage(append(append([]byte{0xa1}, key...), value...))
 	return []any{[]any{memberMap, cbor.Rat{Rat: big.NewRat(2, 3)}}}
+}
+
+func TestImportGovStatePreservesScriptCommitteeCredentialTag(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	hash := bytes.Repeat([]byte{0x44}, 28)
+	committee := committeeWithCredentialTag(t, 1, hash, 700)
+	govStateData := conwayGovStateWithPulsing(
+		t,
+		committee,
+		drepPulsingStateWithEnactCommittee(t, committee),
+	)
+
+	require.NoError(t, importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	))
+
+	members, err := db.GetCommitteeMembers(nil)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, uint8(1), members[0].ColdCredentialTag)
+	assert.Equal(t, hash, members[0].ColdCredHash)
 }
 
 func TestParseGovStateCommitteeMatchesEnactState(t *testing.T) {
@@ -1367,6 +1425,76 @@ func TestImportGovStateAcceptsNoConfidenceInRsEnacted(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, activeHash, members[0].ColdCredHash)
+}
+
+func TestImportedProposalDepositContributesToDRepVotingPower(t *testing.T) {
+	t.Parallel()
+
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
+	require.NoError(t, err)
+	drepCredential := bytes.Repeat([]byte{0x91}, 28)
+	returnCredential := bytes.Repeat([]byte{0x92}, 28)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential: drepCredential,
+		Active:     true,
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: returnCredential,
+		Drep:       drepCredential,
+		DrepType:   models.DrepTypeAddrKeyHash,
+		AddedSlot:  1,
+		Active:     true,
+	}))
+	returnAddress, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		returnCredential,
+	)
+	require.NoError(t, err)
+	returnAddressBytes, err := returnAddress.Bytes()
+	require.NoError(t, err)
+
+	proposalTxHash := bytes.Repeat([]byte{0x93}, 32)
+	proposalAction := []any{
+		uint64(govActionTypeParameterChange),
+		[]any{},
+		map[uint64]uint64{},
+		nil,
+	}
+	proposal := []any{
+		[]any{proposalTxHash, uint64(0)},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		map[uint64]uint64{},
+		[]any{
+			uint64(100),
+			returnAddressBytes,
+			proposalAction,
+			[]any{
+				"https://example.com/imported-proposal",
+				bytes.Repeat([]byte{0x94}, 32),
+			},
+		},
+		uint64(499),
+		uint64(504),
+	}
+	govStateData := govStateWithRootsAndProposals(
+		t, [4]*ParsedGovActionId{}, false, []any{proposal}, nil,
+	)
+	require.NoError(t, importGovState(
+		context.Background(),
+		govImportConfigForTest(db, govStateData),
+		func(ImportProgress) {},
+	))
+
+	imported, err := db.GetGovernanceProposal(proposalTxHash, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), imported.Deposit)
+	state, err := governance.LoadDRepVotingState(db, nil, 500, false)
+	require.NoError(t, err)
+	ref := models.StakeCredentialRef{Tag: 0, Key: drepCredential}
+	assert.Equal(t, uint64(100), state.Powers[ref.MapKey()])
 }
 
 // TestImportGovStateRejectsMismatchWithNonCommitteeRsEnacted keeps the
