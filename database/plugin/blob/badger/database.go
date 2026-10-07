@@ -508,6 +508,7 @@ func (d *BlobStoreBadger) blobGc(
 			}
 			if d.gcMetrics != nil {
 				d.gcMetrics.consecutive.Set(0)
+				d.gcMetrics.reclaimedBytes.Set(0)
 			}
 			for {
 				var beforeSize int64
@@ -549,13 +550,12 @@ func (d *BlobStoreBadger) blobGc(
 						d.gcMetrics.vlogBytes.Set(float64(afterVlog))
 					}
 					afterSize := afterLSM + afterVlog
-					if sizeKnown && sizeErr == nil && beforeSize > afterSize {
-						d.gcMetrics.reclaimedBytes.Set(
-							float64(beforeSize - afterSize),
-						)
-					} else {
-						d.gcMetrics.reclaimedBytes.Set(0)
-					}
+					addReclaimedBytes(
+						d.gcMetrics.reclaimedBytes,
+						beforeSize,
+						afterSize,
+						sizeKnown && sizeErr == nil,
+					)
 					d.gcMetrics.consecutive.Inc()
 					d.gcMetrics.lastSuccess.SetToCurrentTime()
 				}
@@ -571,6 +571,16 @@ func (d *BlobStoreBadger) blobGc(
 		case <-stop:
 			return
 		}
+	}
+}
+
+func addReclaimedBytes(
+	gauge prometheus.Gauge,
+	before, after int64,
+	sizesKnown bool,
+) {
+	if sizesKnown && before > after {
+		gauge.Add(float64(before - after))
 	}
 }
 

@@ -89,6 +89,25 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	populateGCFixture(t, store)
+	runValueLogGC := store.runValueLogGC
+	var wantReclaimed float64
+	store.runValueLogGC = func(ratio float64) error {
+		beforeLSM, beforeVlog, err := store.onDiskSize()
+		if err != nil {
+			return err
+		}
+		gcErr := runValueLogGC(ratio)
+		afterLSM, afterVlog, sizeErr := store.onDiskSize()
+		if sizeErr != nil {
+			return sizeErr
+		}
+		before := beforeLSM + beforeVlog
+		after := afterLSM + afterVlog
+		if gcErr == nil && before > after {
+			wantReclaimed += float64(before - after)
+		}
+		return gcErr
+	}
 
 	ticks := make(chan time.Time, 1)
 	stop := make(chan struct{})
@@ -103,7 +122,11 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.successes))
 	require.Positive(t, testutil.ToFloat64(store.gcMetrics.consecutive))
-	require.Positive(t, testutil.ToFloat64(store.gcMetrics.reclaimedBytes))
+	require.Equal(
+		t,
+		wantReclaimed,
+		testutil.ToFloat64(store.gcMetrics.reclaimedBytes),
+	)
 	_, vlog, err := store.onDiskSize()
 	require.NoError(t, err)
 	require.Equal(
@@ -111,4 +134,16 @@ func TestValueLogGCMetricsReportReclaimedBytes(t *testing.T) {
 		float64(vlog),
 		testutil.ToFloat64(store.gcMetrics.vlogBytes),
 	)
+}
+
+func TestReclaimedBytesAccumulateWithinCycle(t *testing.T) {
+	t.Parallel()
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{Name: "test_reclaimed"})
+
+	addReclaimedBytes(gauge, 300, 200, true)
+	addReclaimedBytes(gauge, 200, 200, true)
+	addReclaimedBytes(gauge, 200, 150, true)
+	addReclaimedBytes(gauge, 150, 100, false)
+
+	require.Equal(t, float64(150), testutil.ToFloat64(gauge))
 }
