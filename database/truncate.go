@@ -438,7 +438,9 @@ func (d *Database) rollbackAfterSlot(
 		Point: point,
 	}
 	var newNonce []byte
-	if point.Slot > 0 {
+	// Origin is the empty-hash point. A block at slot 0 (e.g. the first
+	// Preview block) is a real point whose height and nonce must load.
+	if point.Slot > 0 || len(point.Hash) > 0 {
 		truncateBlock, err := BlockByPointTxn(txn, point)
 		if err != nil {
 			return ochainsync.Tip{}, nil, fmt.Errorf(

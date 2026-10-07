@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -646,4 +647,82 @@ func TestRollbackAfterSlotLowersHistoryExpiryCursor(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestTruncateAfterSlotLoadsNonceForSlotZeroBlock covers a network whose
+// first block is a real (non-Byron) block at slot 0. A rollback to that block
+// is not a rollback to origin: the point carries the block's hash, so its
+// height and nonce must load. Returning a nil nonce made the next applied
+// block seed the evolving nonce from the genesis hash instead.
+func TestTruncateAfterSlotLoadsNonceForSlotZeroBlock(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	block0 := testIndexedBlock(0, 1, 0x20)
+	block0.Number = 0
+	block0.Type = babbage.BlockTypeBabbage
+	require.NoError(t, db.BlockCreate(block0, nil))
+	nonce0 := bytes.Repeat([]byte{0xd0}, 32)
+	require.NoError(t, db.SetBlockNonce(
+		block0.Hash, block0.Slot, nonce0, true, nil,
+	))
+	block1 := testIndexedBlock(20, 2, 0x21)
+	block1.Type = babbage.BlockTypeBabbage
+	require.NoError(t, db.BlockCreate(block1, nil))
+	require.NoError(t, db.SetBlockNonce(
+		block1.Hash, block1.Slot, bytes.Repeat([]byte{0xd1}, 32), false, nil,
+	))
+
+	tip, nonce, err := db.TruncateAfterSlot(
+		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, nonce0, nonce,
+		"rollback to a slot-0 block must return that block's nonce")
+	require.Equal(t, block0.Hash, tip.Point.Hash)
+	require.Equal(t, block0.Number, tip.BlockNumber)
+}
+
+// TestTruncateAfterSlotByronSlotZeroBlockHasNoNonce keeps the Byron-start
+// behavior: a slot-0 Byron block carries no Praos nonce and is exempt from
+// the empty-nonce check.
+func TestTruncateAfterSlotByronSlotZeroBlockHasNoNonce(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	block0 := testIndexedBlock(0, 1, 0x30)
+	block0.Number = 0
+	block0.Type = byron.BlockTypeByronEbb
+	require.NoError(t, db.BlockCreate(block0, nil))
+
+	tip, nonce, err := db.TruncateAfterSlot(
+		ocommon.Point{Slot: 0, Hash: block0.Hash}, 0, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, nonce)
+	require.Equal(t, block0.Hash, tip.Point.Hash)
+}
+
+// TestTruncateAfterSlotOriginClearsNonce verifies a rollback to true origin
+// (slot 0, empty hash) still returns no nonce and no block height.
+func TestTruncateAfterSlotOriginClearsNonce(t *testing.T) {
+	t.Parallel()
+
+	db := newTestDB(t)
+
+	block0 := testIndexedBlock(0, 1, 0x40)
+	block0.Number = 0
+	block0.Type = babbage.BlockTypeBabbage
+	require.NoError(t, db.BlockCreate(block0, nil))
+	require.NoError(t, db.SetBlockNonce(
+		block0.Hash, block0.Slot, bytes.Repeat([]byte{0xe0}, 32), true, nil,
+	))
+
+	tip, nonce, err := db.TruncateAfterSlot(ocommon.NewPointOrigin(), 0, nil)
+	require.NoError(t, err)
+	require.Empty(t, nonce)
+	require.Zero(t, tip.BlockNumber)
+	require.Empty(t, tip.Point.Hash)
 }

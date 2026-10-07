@@ -4712,7 +4712,7 @@ func (ls *LedgerState) rollbackWithBlocksAndIntent(
 		ls.publishLocalLedgerRollback(point)
 	}
 	var hash string
-	if point.Slot == 0 {
+	if point.Slot == 0 && len(point.Hash) == 0 {
 		hash = "<genesis>"
 	} else {
 		hash = hex.EncodeToString(point.Hash)
@@ -10794,7 +10794,8 @@ func (ls *LedgerState) loadTip() error {
 	}
 	// Load tip block nonce before acquiring lock
 	var tipNonce []byte
-	if tmpTip.Point.Slot > 0 {
+	isOrigin := tmpTip.Point.Slot == 0 && len(tmpTip.Point.Hash) == 0
+	if !isOrigin {
 		tipNonce, err = ls.db.GetBlockNonce(
 			tmpTip.Point,
 			nil,
@@ -10810,7 +10811,7 @@ func (ls *LedgerState) loadTip() error {
 	// Lock only for in-memory state updates
 	ls.Lock()
 	ls.currentTip = tmpTip
-	if tmpTip.Point.Slot > 0 {
+	if !isOrigin {
 		ls.currentTipBlockNonce = tipNonce
 	}
 	ls.updateTipMetrics(tipDensity)
