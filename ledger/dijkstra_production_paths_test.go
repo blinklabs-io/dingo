@@ -66,7 +66,9 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 	t.Helper()
 	initial := make(map[byte]uint64, len(sc.accounts))
 	initialScript := make(map[byte]uint64)
+	seeded := make(map[pathAccountID]bool, len(sc.accounts))
 	for _, account := range sc.accounts {
+		seeded[account.id()] = true
 		if account.script {
 			initialScript[account.key] = account.reward
 		} else {
@@ -108,6 +110,23 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 			)
 		}
 	}
+	// requireNoRegistrationLeaks checks that the scenario's transaction set
+	// created no account unless the scenario seeded it.
+	requireNoRegistrationLeaks := func(t *testing.T, f *pathFixture) {
+		t.Helper()
+		for index := range sc.txs {
+			for _, id := range f.registeredAccounts(index) {
+				require.Equal(
+					t,
+					seeded[id],
+					f.accountPresent(id),
+					"tx %d registered account %x",
+					index,
+					id.hash,
+				)
+			}
+		}
+	}
 	// requirePending checks the pending transactions against the ledger as
 	// it stands: through validation and the mempool.
 	requirePending := func(t *testing.T, f *pathFixture, accepted bool) {
@@ -134,15 +153,8 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 		}
 		sc.reject(t, err)
 		requireRewards(t, f, initial, initialScript)
+		requireNoRegistrationLeaks(t, f)
 		requireInputs(t, f, true)
-		for key := range sc.rewards {
-			_, seeded := initial[key]
-			require.Equal(t, seeded, f.accountPresent(0, key), "key account %x", key)
-		}
-		for key := range sc.scriptRewards {
-			_, seeded := initialScript[key]
-			require.Equal(t, seeded, f.accountPresent(1, key), "script account %x", key)
-		}
 	}
 	// Admission sees only the ledger state before the block, so it decides a
 	// lone transaction.
@@ -166,6 +178,7 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 			}
 			sc.reject(t, err)
 			requireRewards(t, f, initial, initialScript)
+			requireNoRegistrationLeaks(t, f)
 		})
 	}
 	t.Run("live block", func(t *testing.T) {
@@ -197,11 +210,8 @@ func runPathScenario(t *testing.T, sc pathScenario) {
 			ocommon.Point{Slot: pathOriginSlot, Hash: f.originHash},
 		))
 		requireRewards(t, f, initial, initialScript)
+		requireNoRegistrationLeaks(t, f)
 		requireInputs(t, f, true)
-		for key := range sc.rewards {
-			_, seeded := initial[key]
-			require.Equal(t, seeded, f.accountPresent(0, key), "account %x", key)
-		}
 		requirePending(t, f, false)
 		require.NoError(t, f.applyBlock())
 		requireRewards(t, f, sc.rewards, sc.scriptRewards)
@@ -391,6 +401,21 @@ func TestDijkstraDirectDepositOrderingThroughProductionPaths(t *testing.T) {
 					},
 				},
 			}}},
+			reject: rejectWith[dijkstra.DirectDepositAccountsMissingError],
+		}},
+		{"rejected block discards an earlier transaction's registration", pathScenario{
+			accounts: []pathAccount{{key: 0x42, reward: 5}},
+			txs: []pathTx{
+				{top: pathLevel{fields: map[uint]any{
+					4: []any{pathRegistration(pathSignerKey)},
+				}}},
+				{top: pathLevel{
+					fields: pathDeposits(map[cbor.ByteString]uint64{
+						pathKeyAccount(0x77): 20,
+					}),
+					funds: 20,
+				}},
+			},
 			reject: rejectWith[dijkstra.DirectDepositAccountsMissingError],
 		}},
 		{"top-level registration is too late for a child deposit", pathScenario{

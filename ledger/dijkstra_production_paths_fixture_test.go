@@ -643,10 +643,55 @@ func (f *pathFixture) inputUnspent(index int) bool {
 	return true
 }
 
+// pathAccountID identifies a reward account by credential tag and hash.
+type pathAccountID struct {
+	tag  uint
+	hash lcommon.Blake2b224
+}
+
+func (a pathAccount) id() pathAccountID {
+	id := pathAccountID{hash: lcommon.NewBlake2b224(pathStakeKey(a.key))}
+	if a.script {
+		id.tag = lcommon.CredentialTypeScriptHash
+	}
+	return id
+}
+
+// registeredAccounts lists accounts registered at every transaction level.
+func (f *pathFixture) registeredAccounts(index int) []pathAccountID {
+	tx := f.txs[index]
+	certs := slices.Clone(tx.Certificates())
+	for _, child := range tx.Body.TxSubTransactions.Items() {
+		certs = append(certs, child.Body.Certificates()...)
+	}
+	var ids []pathAccountID
+	for _, cert := range certs {
+		var cred lcommon.Credential
+		switch c := cert.(type) {
+		case *lcommon.StakeRegistrationCertificate:
+			cred = c.StakeCredential
+		case *lcommon.RegistrationCertificate:
+			cred = c.StakeCredential
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			cred = c.StakeCredential
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			cred = c.StakeCredential
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			cred = c.StakeCredential
+		default:
+			continue
+		}
+		ids = append(ids, pathAccountID{tag: cred.CredType, hash: cred.Credential})
+	}
+	return ids
+}
+
 // accountPresent reports whether the reward account exists.
-func (f *pathFixture) accountPresent(tag uint8, key byte) bool {
+func (f *pathFixture) accountPresent(id pathAccountID) bool {
 	f.t.Helper()
-	_, err := f.db.GetAccountByCredential(tag, pathStakeKey(key), false, nil)
+	_, err := f.db.GetAccountByCredential(
+		uint8(id.tag), id.hash.Bytes(), false, nil,
+	)
 	if errors.Is(err, models.ErrAccountNotFound) {
 		return false
 	}
