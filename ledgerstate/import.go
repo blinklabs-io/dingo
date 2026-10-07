@@ -574,7 +574,7 @@ func ImportLedgerState(
 	) {
 		certStatePhaseRan = true
 		if cfg.State.CertStateData != nil {
-			poolsImported, err := importCertState(
+			poolsImported, importedAccounts, err := importCertState(
 				ctx, cfg, slot, progress,
 			)
 			if err != nil {
@@ -584,6 +584,18 @@ func ImportLedgerState(
 				)
 			}
 			certStatePoolsImported = poolsImported > 0
+
+			// The snapshot sets account.reward at its anchor. Clear later
+			// journal entries without reversing amounts applied against the
+			// pre-import balance. See DATABASE.md, "account_reward_delta".
+			if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+				slot, importedAccounts, nil,
+			); err != nil {
+				return fmt.Errorf(
+					"rolling back post-anchor account reward journal: %w",
+					err,
+				)
+			}
 		}
 		if err := setCheckpoint(
 			cfg, models.ImportPhaseCertState,
@@ -595,6 +607,26 @@ func ImportLedgerState(
 			"skipping cert state import (already completed)",
 			"component", "ledgerstate",
 		)
+		// A checkpoint at or past cert-state but short of tip belongs to an
+		// import that never finished, so the node has not served (and
+		// journaled nothing) since that cert-state phase ran. A checkpoint
+		// written by an importer without the journal cleanup above can
+		// therefore still leave stale post-anchor rows behind the account
+		// balances it overwrote; repeat the cleanup for the same
+		// credentials. It is idempotent when the cleanup already ran. A
+		// tip checkpoint marks a completed import whose journal may since
+		// hold legitimate post-anchor rows, so it is left alone.
+		if cfg.State.CertStateData != nil &&
+			!models.IsPhaseCompleted(
+				completedPhase,
+				models.ImportPhaseTip,
+			) {
+			if err := rollbackResumedAccountRewardJournal(
+				cfg, slot,
+			); err != nil {
+				return err
+			}
+		}
 	}
 	// Import stake snapshots
 	if !models.IsPhaseCompleted(
@@ -1036,7 +1068,7 @@ func importCertState(
 	cfg ImportConfig,
 	slot uint64,
 	progress func(ImportProgress),
-) (int, error) {
+) (int, []models.StakeCredentialRef, error) {
 	cfg.Logger.Info(
 		"parsing cert state",
 		"component", "ledgerstate",
@@ -1045,7 +1077,7 @@ func importCertState(
 	certState, err := ParseCertState(cfg.State.CertStateData)
 	if err != nil {
 		if certState == nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state: %w", err,
 			)
 		}
@@ -1055,7 +1087,7 @@ func importCertState(
 		// reconcile forbids checkpoint resume, so a re-run fails here again —
 		// tell the operator how to get unstuck instead of looping.
 		if cfg.Reconcile {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"parsing cert state for reconcile: %w; catch-up cannot "+
 					"continue with a partial cert state and the database may "+
 					"contain a partial import — perform a full Mithril "+
@@ -1066,7 +1098,7 @@ func importCertState(
 		// A skipped or partially decoded entry would import an account,
 		// pool or DRep set that differs from the ledger state, and every
 		// stake distribution and reward derived from it would be wrong.
-		return 0, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"parsing cert state: %w; the ledger state cannot be "+
 				"imported with skipped or partially decoded entries",
 			err,
@@ -1108,15 +1140,27 @@ func importCertState(
 	}
 
 	// Import accounts
+	var importedAccounts []models.StakeCredentialRef
 	if len(certState.Accounts) > 0 {
 		if err := importAccounts(
 			ctx, cfg, certState.Accounts, slot,
 		); err != nil {
-			return 0, fmt.Errorf(
+			return 0, nil, fmt.Errorf(
 				"importing accounts: %w",
 				err,
 			)
 		}
+		// importAccounts has already validated every entry's credential type
+		// (it errors out above otherwise), so converting again here cannot
+		// fail in practice; still handled rather than ignored, since a
+		// dropped credential here would silently widen the "untouched"
+		// exemption DeleteAccountRewardJournalForCredentialsAfterSlot relies
+		// on for coverage it does not have.
+		refs, refsErr := accountCredentialRefs(certState.Accounts)
+		if refsErr != nil {
+			return 0, nil, refsErr
+		}
+		importedAccounts = refs
 		progress(ImportProgress{
 			Stage:   "accounts",
 			Current: len(certState.Accounts),
@@ -1136,7 +1180,7 @@ func importCertState(
 			ctx, cfg, certState.Pools, slot,
 			certState.PendingPoolRetirements,
 		); err != nil {
-			return 0, fmt.Errorf("importing pools: %w", err)
+			return 0, nil, fmt.Errorf("importing pools: %w", err)
 		}
 		importedPools = len(certState.Pools)
 		progress(ImportProgress{
@@ -1156,7 +1200,7 @@ func importCertState(
 		if err := importDReps(
 			ctx, cfg, certState.DReps, slot,
 		); err != nil {
-			return 0, fmt.Errorf("importing DReps: %w", err)
+			return 0, nil, fmt.Errorf("importing DReps: %w", err)
 		}
 		progress(ImportProgress{
 			Stage:   "dreps",
@@ -1175,10 +1219,72 @@ func importCertState(
 		snapshotEpochAnchorSlot(cfg, cfg.State.Epoch),
 		nil,
 	); err != nil {
-		return 0, fmt.Errorf("importing committee authorizations: %w", err)
+		return 0, nil, fmt.Errorf("importing committee authorizations: %w", err)
 	}
 
-	return importedPools, nil
+	return importedPools, importedAccounts, nil
+}
+
+// accountCredentialRefs converts parsed accounts to the stake credential
+// refs cert-state import writes them under.
+func accountCredentialRefs(
+	accounts []ParsedAccount,
+) ([]models.StakeCredentialRef, error) {
+	refs := make([]models.StakeCredentialRef, 0, len(accounts))
+	for i := range accounts {
+		tag, err := models.CredentialTagFromUint(
+			uint(accounts[i].StakingKey.Type),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"resolving imported account %x credential type %d: %w",
+				accounts[i].StakingKey.Hash,
+				accounts[i].StakingKey.Type,
+				err,
+			)
+		}
+		refs = append(
+			refs,
+			models.NewStakeCredentialRef(tag, accounts[i].StakingKey.Hash),
+		)
+	}
+	return refs, nil
+}
+
+// rollbackResumedAccountRewardJournal deletes post-anchor reward journal
+// rows for the snapshot's accounts when a resumed import skips the
+// cert-state phase. The accounts are re-derived from the snapshot's cert
+// state, since the phase that returned them ran in an earlier process.
+func rollbackResumedAccountRewardJournal(
+	cfg ImportConfig,
+	slot uint64,
+) error {
+	certState, err := ParseCertState(cfg.State.CertStateData)
+	if err != nil {
+		if certState == nil {
+			return fmt.Errorf(
+				"parsing cert state for resumed journal rollback: %w", err,
+			)
+		}
+		cfg.Logger.Warn(
+			"cert state parse warnings",
+			"component", "ledgerstate",
+			"warning", err.Error(),
+		)
+	}
+	refs, err := accountCredentialRefs(certState.Accounts)
+	if err != nil {
+		return err
+	}
+	if err := cfg.Database.DeleteAccountRewardJournalForCredentialsAfterSlot(
+		slot, refs, nil,
+	); err != nil {
+		return fmt.Errorf(
+			"rolling back post-anchor account reward journal: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // importAccounts imports parsed accounts into the metadata store.
