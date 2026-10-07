@@ -866,7 +866,13 @@ func (ls *LedgerState) queryHardForkEraHistory(
 			currentEraId,
 		)
 	}
-	perEra := make([]eraBoundData, currentIdx+1)
+	hasKnownSuccessor := transitionInfo.State == hardfork.TransitionKnown &&
+		currentIdx+1 < len(shape.Eras)
+	perEraLen := currentIdx + 1
+	if hasKnownSuccessor {
+		perEraLen++
+	}
+	perEra := make([]eraBoundData, perEraLen)
 	timespan := big.NewInt(0)
 
 	for i, entry := range shape.Eras[:currentIdx+1] {
@@ -968,15 +974,14 @@ func (ls *LedgerState) queryHardForkEraHistory(
 		}
 		perEra[currentIdx].end = end
 
-		if transitionInfo.State == hardfork.TransitionKnown &&
-			currentIdx+1 < len(shape.Eras) {
+		if hasKnownSuccessor {
 			successor, err := eraHistorySuccessor(
 				shape, currentIdx+1, end, tipSlot,
 			)
 			if err != nil {
 				return nil, err
 			}
-			perEra = append(perEra, successor)
+			perEra[currentIdx+1] = successor
 		}
 	}
 
