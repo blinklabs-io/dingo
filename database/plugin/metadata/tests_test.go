@@ -134,6 +134,7 @@ var utxoStoreMethods = []string{
 	"GetUtxosBySlot",
 	"GetUtxosDeletedBeforeSlot",
 	"GetUtxosByAddress",
+	"GetUtxosByAddressAsOf",
 	"GetUtxosByAddressWithOrdering",
 	"GetUtxosWithHistory",
 	"CountUtxosByAddressWithOrdering",
@@ -264,6 +265,7 @@ var certificateStoreMethods = []string{
 	"GetAccountDelegationHistoryByCredential",
 	"CountAccountDelegationHistoryByCredential",
 	"GetAccountRegistrationHistoryByCredential",
+	"GetLatestAccountRegistrationAtOrBefore",
 	"CountAccountRegistrationHistoryByCredential",
 	"SetCommitteeAuthImmutableSlot",
 }

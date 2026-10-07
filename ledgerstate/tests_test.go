@@ -115,7 +115,7 @@ func TestImportSeedsAdaPotsForTheImportedEpoch(t *testing.T) {
 	}
 	noProgress := func(ImportProgress) {}
 	ctx := context.Background()
-	_, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
+	_, _, err = importCertState(ctx, cfg, state.Tip.Slot, noProgress)
 	require.NoError(t, err)
 	require.NoError(t, importSnapShots(
 		ctx, cfg, state.Tip.Slot, noProgress, false,
@@ -1039,8 +1039,23 @@ func govStateWithRootsAndProposals(
 	drepPulsingState any,
 ) []byte {
 	t.Helper()
+	return govStateWithEncodedRoots(
+		t, encodeRootsAsAny(t, roots), committeePresent, proposals,
+		drepPulsingState,
+	)
+}
 
-	rootsAny := encodeRootsAsAny(t, roots)
+// govStateWithEncodedRoots is govStateWithRootsAndProposals with the
+// GovRelation supplied pre-encoded, so a test can pass a malformed one.
+func govStateWithEncodedRoots(
+	t *testing.T,
+	rootsAny any,
+	committeePresent bool,
+	proposals []any,
+	drepPulsingState any,
+) []byte {
+	t.Helper()
+
 	proposalsContainer := []any{rootsAny, proposals}
 
 	var committee any

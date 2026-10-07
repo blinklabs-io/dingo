@@ -178,6 +178,7 @@ func TestFilteredDelegationsRejectsMalformedStoredPool(t *testing.T) {
 			Tag:   0,
 			Bytes: lcommon.NewBlake2b224(cred),
 		}},
+		QueryPoint{},
 		nil,
 	)
 	require.ErrorContains(t, err, "delegation pool id")
@@ -275,7 +276,11 @@ func TestQueryUtxoByAddressRejectsMalformedStoredTransactionID(t *testing.T) {
 	) {
 		addr = seedShortTxIDUtxo(t, db, s)
 	})
-	result, err := ls.queryShelleyUtxoByAddress([]ledger.Address{addr}, nil)
+	result, err := ls.queryShelleyUtxoByAddress(
+		[]ledger.Address{addr},
+		QueryPoint{},
+		nil,
+	)
 	require.ErrorContains(t, err, "invalid blake2b-256 hash")
 	require.Nil(t, result)
 }

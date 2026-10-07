@@ -256,3 +256,43 @@ func TestValidateTxRejectsNonAccountProposalReturnAddress(t *testing.T) {
 		})
 	}
 }
+
+// During the Conway bootstrap phase an unregistered but well-formed account
+// address is an acceptable return address, while the registration check
+// applies from PV10 and in Dijkstra. The wire-shape check is independent of
+// both and is covered by TestValidateTxRejectsNonAccountProposalReturnAddress.
+func TestValidateTxProposalReturnAccountRegistrationBootstrapBoundary(
+	t *testing.T,
+) {
+	t.Parallel()
+
+	_, paymentKey := committeeTestVotingKey(0x5b)
+	for _, tc := range []struct {
+		name        string
+		era         committeeVotingEra
+		major       uint
+		wantMissing bool
+	}{
+		{"Conway PV9 bootstrap", committeeVotingConway, lcommon.ProtocolVersionConway, false},
+		{"Conway PV10", committeeVotingConway, lcommon.ProtocolVersionPlomin, true},
+		{"Dijkstra PV12", committeeVotingDijkstra, lcommon.ProtocolVersionDijkstra, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pparams := tc.era.pparams(tc.major)
+			lv, _ := committeeTestView(t, pparams)
+			cred := committeeTestCredential(0x5c)
+			err := proposalReturnAccountValidate(
+				t, tc.era, lv, pparams, paymentKey, nil,
+				proposalReturnAccountAddress(t, 0xe, cred.Credential),
+				&lcommon.InfoGovAction{}, true,
+			)
+			if tc.wantMissing {
+				var missing conway.ProposalReturnAccountDoesNotExistError
+				require.ErrorAs(t, err, &missing)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
