@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlstore/migrations"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -174,6 +175,103 @@ func newCommitteeMaintenanceTestStore(t *testing.T) *Store {
 	require.NoError(t, store.Start(context.Background()))
 	t.Cleanup(func() { require.NoError(t, store.Close()) })
 	return store
+}
+
+func TestCommitteeAuthMaintenanceDoesNotDeadlockRollback(t *testing.T) {
+	t.Parallel()
+	store := newCommitteeMaintenanceTestStore(t)
+	const coldTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	cold := credentialHash(0xd0)
+	for i := 1; i <= 3; i++ {
+		seedAuthorization(
+			t, store, coldTag, cold,
+			uint8(lcommon.CredentialTypeAddrKeyHash), hotHash(0xd1, i),
+			uint64(i), uint64(i),
+		)
+	}
+	require.NoError(t, store.SetTip(ochainsync.Tip{
+		Point: ocommon.Point{Slot: preprodTipSlot, Hash: []byte("tip")},
+	}, nil))
+	store.SetCommitteeAuthImmutableSlot(100, true)
+
+	// Rollback holds the only write connection before invalidating the pruning
+	// horizon under the exclusive side of the same mutex.
+	rollbackTxn := store.Transaction(context.Background())
+	require.NoError(t, rollbackTxn.(*sqlTxn).beginErr)
+	maintenanceCtx, cancelMaintenance := context.WithCancel(
+		context.Background(),
+	)
+	pruneLocked := make(chan struct{}, 1)
+	store.committeeAuthPruneLocked = func() {
+		select {
+		case pruneLocked <- struct{}{}:
+		default:
+		}
+	}
+	maintenanceDone := make(chan error, 1)
+	maintenanceResultReceived := false
+	defer func() {
+		cancelMaintenance()
+		_ = rollbackTxn.Rollback()
+		if !maintenanceResultReceived {
+			select {
+			case <-maintenanceDone:
+			case <-time.After(5 * time.Second):
+				t.Error("maintenance did not stop")
+			}
+		}
+	}()
+
+	waitCount := store.writeDB.Stats().WaitCount
+	go func() {
+		maintenanceDone <- store.pruneCommitteeHotAuthorizationsMaintenance(
+			maintenanceCtx,
+		)
+	}()
+	testutil.WaitForCondition(
+		t,
+		func() bool { return store.writeDB.Stats().WaitCount > waitCount },
+		5*time.Second,
+		"maintenance waiting for the held write connection",
+	)
+
+	rollbackDone := make(chan error, 1)
+	go func() {
+		rollbackDone <- store.DeleteCertificatesAfterSlot(0, rollbackTxn)
+	}()
+	select {
+	case err := <-rollbackDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		cancelMaintenance()
+		_ = rollbackTxn.Rollback()
+		maintenanceErr := testutil.RequireReceive(
+			t, maintenanceDone, 5*time.Second,
+			"cancelled maintenance to release its wait",
+		)
+		maintenanceResultReceived = true
+		rollbackErr := testutil.RequireReceive(
+			t, rollbackDone, 5*time.Second,
+			"rollback to leave the mutex after maintenance is cancelled",
+		)
+		t.Fatalf(
+			"rollback deadlocked with committee authorization maintenance (maintenance: %v, rollback: %v)",
+			maintenanceErr,
+			rollbackErr,
+		)
+	}
+	select {
+	case <-pruneLocked:
+		t.Fatal("maintenance took the prune mutex before acquiring the writer")
+	default:
+	}
+	require.NoError(t, rollbackTxn.Commit())
+	maintenanceErr := testutil.RequireReceive(
+		t, maintenanceDone, 5*time.Second,
+		"maintenance to finish after rollback releases the writer",
+	)
+	maintenanceResultReceived = true
+	require.NoError(t, maintenanceErr)
 }
 
 func TestCommitteeHotPruneSelectionUsesOrderedIndex(t *testing.T) {

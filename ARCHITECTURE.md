@@ -2753,6 +2753,12 @@ the cached value on every rollback, since a value safe when cached is not
 necessarily safe after a rollback -- suspends pruning entirely until the next
 successful resolution. Only a `Store` no syncer has ever been wired to (every
 existing test, and any non-node caller) keeps the slot-window-only fallback.
+Both prune paths acquire the write transaction before taking the immutable-slot
+read lock: block application passes its existing transaction, and maintenance
+opens one before each bounded delete. Rollback holds the transaction before
+taking the exclusive lock to invalidate the cached slot, so this order prevents
+the maintenance sweep from waiting on the writer while blocking rollback on the
+same mutex.
 See DATABASE.md's Committee Hot-Key Authorization Retention section for the
 full retention rule, the gap this closes, and why
 suspension rather than fallback is required once live tracking is engaged.

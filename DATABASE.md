@@ -2086,6 +2086,13 @@ the rule retains. The post-rollback query result is therefore identical
 whether or not pruning ran, and a credential's last row is never removed, so a
 credential that has an authorization can never become one that has none.
 
+Pruning and rollback acquire the write connection before the immutable-slot
+mutex. Certificate writes pass their existing transaction to the prune; the
+maintenance sweep opens a write transaction before it calls the same helper.
+Rollback already owns that connection before it takes the mutex exclusively to
+invalidate the cached slot. The prune holds its read lock across the delete, so
+horizon selection and deletion stay ordered without a lock cycle.
+
 The partition is the tagged credential, so a script-hash credential never prunes
 a key-hash credential sharing its 28 bytes. `committee_member` is not pruned:
 `CommitteeStateAvailable` reads it including soft-deleted rows to tell an

@@ -160,8 +160,12 @@ type Store struct {
 	// back to an assumption a sparse or recently-reorganized chain can
 	// violate). The mutex keeps the three state fields coherent and, while a
 	// prune delete holds its read side, orders rollback invalidation before or
-	// after that delete. This closes the gap where invalidation could otherwise
-	// race between choosing a horizon and deleting rollback-required history.
+	// after that delete. Production prune callers already own the single write
+	// connection: block application supplies its transaction, and maintenance
+	// opens one before calling the pruning helper. This matches rollback's
+	// connection-then-mutex order and closes the gap where invalidation could
+	// otherwise race between choosing a horizon and deleting rollback-required
+	// history.
 	committeeAuthImmutableSlotMu sync.RWMutex
 	committeeAuthImmutableSlot   committeeAuthImmutableSlotState
 	// Test hook runs after a prune has selected its horizon. Production leaves

@@ -309,7 +309,6 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 	if !ok {
 		return nil
 	}
-	writeDB := s.instrumentedQueryer(s.writeDB)
 	var after *committeeAuthIdentity
 	for {
 		// Candidate discovery closes its read cursor before any write batch so
@@ -325,17 +324,26 @@ func (s *Store) pruneCommitteeHotAuthorizationsMaintenance(
 		}
 		for _, identity := range identities {
 			for {
-				pruned, err := s.pruneCommitteeHotAuthorizations(
+				var pruned int64
+				pruneErr := s.withWriteTransactionContext(
 					ctx,
-					writeDB,
-					identity.tag,
-					identity.credential,
-					tip.Point.Slot,
+					nil,
+					func(db queryer, txnCtx context.Context) error {
+						var err error
+						pruned, err = s.pruneCommitteeHotAuthorizations(
+							txnCtx,
+							db,
+							identity.tag,
+							identity.credential,
+							tip.Point.Slot,
+						)
+						return err
+					},
 				)
-				if err != nil {
+				if pruneErr != nil {
 					return fmt.Errorf(
 						"prune committee hot authorization maintenance: %w",
-						err,
+						pruneErr,
 					)
 				}
 				if pruned == 0 {
