@@ -33,6 +33,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
@@ -914,6 +915,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 
 	if cfg.PromRegistry != nil {
 		f.metrics = initForgingMetrics(cfg.PromRegistry)
+		if cfg.Mode == ModeProduction {
+			f.registerCredentialMetrics(cfg.PromRegistry, cfg.OpCertLedgerView)
+		}
 	}
 
 	// Set static OpCert gauges immediately so SPO dashboards show
@@ -1533,6 +1537,17 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return nil
 	}
 
+	// Every path out of here that does not adopt this node's own block is a
+	// leader slot lost, whatever the refusal; counting at the exit keeps a new
+	// refusal from escaping the series. Several of them return before
+	// node_is_leader moves, so that counter cannot stand in for this one.
+	leaderSlotMissed := true
+	defer func() {
+		if leaderSlotMissed && f.metrics != nil {
+			f.metrics.forgeMissedLeaderSlots.Inc()
+		}
+	}()
+
 	// Pre-flight the OpCert counter against the ledger's observed on-chain
 	// state and the era-scoped rule block application enforces (see
 	// checkOpCertSequence). This covers genesis/era context the KES-lifetime
@@ -1719,6 +1734,9 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return err
 	}
 	if !proceed {
+		// The fence says an earlier attempt already committed to this slot,
+		// so it was counted there.
+		leaderSlotMissed = false
 		return nil
 	}
 
@@ -2036,6 +2054,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to add block: %w", addErr)
 	}
 	forgeAdopted = true
+	leaderSlotMissed = false
 
 	// Publish only after durable acceptance. The observer republishes the
 	// block on the event bus and enqueues its Leios announcement for
@@ -3698,6 +3717,80 @@ func (f *BlockForger) reportForgeCallbackPanic(phase string, r any) {
 		"phase", phase,
 		"panic", r,
 		"stack", string(debug.Stack()),
+	)
+}
+
+// CredentialsUsable reports why the loaded credentials could not sign at the
+// current slot, or nil when they could: loaded, carrying a validated KES
+// lifetime, and inside the operational certificate's KES window.
+func (f *BlockForger) CredentialsUsable() error {
+	slot, err := f.slotClock.CurrentSlot()
+	if err != nil {
+		return fmt.Errorf("current slot: %w", err)
+	}
+	period, err := CurrentKESPeriod(slot, f.slotClock.SlotsPerKESPeriod())
+	if err != nil {
+		return err
+	}
+	return f.creds.usableAtKESPeriod(period)
+}
+
+// registerCredentialMetrics exports the operational-certificate state an
+// operator reads to schedule rotation and failover. They are evaluated when
+// scraped rather than on every slot, and nothing is cached: a credential
+// reload or a newly applied block shows on the next scrape.
+func (f *BlockForger) registerCredentialMetrics(
+	reg prometheus.Registerer,
+	ledgerView LedgerView,
+) {
+	factory := promauto.With(reg)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_opcert_counter_loaded",
+			Help: "issue number of the operational certificate currently loaded; the next certificate to issue carries the on-chain counter plus one",
+		},
+		func() float64 {
+			if opCert := f.creds.GetOpCert(); opCert != nil {
+				return float64(opCert.IssueNumber)
+			}
+			return math.NaN()
+		},
+	)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_opcert_counter_onchain",
+			Help: "highest operational certificate issue number the ledger has applied for this pool, as persisted by block application; NaN while none has been observed",
+		},
+		func() float64 {
+			if ledgerView == nil {
+				return math.NaN()
+			}
+			poolID := f.creds.GetPoolID()
+			counter, found, err := ledgerView.LatestOpCertSequence(poolID)
+			if err != nil || !found {
+				return math.NaN()
+			}
+			return float64(counter)
+		},
+	)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_slots_per_kes_period",
+			Help: "slots in one KES period, from the Shelley genesis",
+		},
+		func() float64 { return float64(f.slotClock.SlotsPerKESPeriod()) },
+	)
+	factory.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "dingo_forge_credentials_valid",
+			Help: "1 when the loaded credentials could sign at the current slot (loaded, validated, inside the operational certificate's KES window), 0 otherwise",
+		},
+		func() float64 {
+			if f.CredentialsUsable() != nil {
+				return 0
+			}
+			return 1
+		},
 	)
 }
 

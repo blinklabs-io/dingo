@@ -47,6 +47,27 @@ func currentUserSIDString(t *testing.T) string {
 	return tokenUser.User.Sid.String()
 }
 
+func TestOpenRegularFileRejectsNamedPipe(t *testing.T) {
+	pipeName := fmt.Sprintf(`\\.\pipe\dingo-keyfile-%d`, os.Getpid())
+	name, err := windows.UTF16PtrFromString(pipeName)
+	require.NoError(t, err)
+	handle, err := windows.CreateNamedPipe(
+		name,
+		windows.PIPE_ACCESS_INBOUND,
+		windows.PIPE_TYPE_BYTE|windows.PIPE_WAIT,
+		1,
+		4096,
+		4096,
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, windows.CloseHandle(handle)) })
+
+	_, err = OpenRegularFile(pipeName)
+	require.Error(t, err)
+}
+
 // setOwnerOnlyDACL sets a protected DACL on the file that grants
 // access only to the current user. It uses SDDL to avoid unsafe
 // pointer operations that cause heap corruption on Go 1.24+.

@@ -1098,7 +1098,7 @@ func TestCascadeChildColumnsIndexedAfterCriticalRebuild(t *testing.T) {
 	// The Mithril bootstrap sequence: drop the manifest for the bulk load,
 	// then rebuild only the critical subset before the database is marked
 	// ready. The lazy remainder is finished by later maintenance, and on a
-	// database whose pending marker the sync's own ClearSyncState wiped,
+	// database whose pending marker an older sync's blanket clear wiped,
 	// never — so whatever the rollback path needs has to be in this
 	// subset.
 	require.NoError(t, store.DropDeferredIndexes())
@@ -1787,7 +1787,6 @@ type operationalStore interface {
 	GetSyncState(string, types.Txn) (string, error)
 	SetSyncState(string, string, types.Txn) error
 	DeleteSyncState(string, types.Txn) error
-	ClearSyncState(types.Txn) error
 	SetEpoch(
 		uint64,
 		uint64,
