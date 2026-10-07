@@ -2827,7 +2827,8 @@ const (
 	publishPipeline = ".github/workflows/publish.yml"
 )
 
-// pipelineStages are the jobs both pipelines must define identically. They are
+// pipelineStages share their execution steps; only PRs have a docs-only gate.
+// They are
 // duplicated between the files rather than factored into a reusable workflow
 // because `needs:` cannot cross workflow files, and a called workflow would
 // rename every check context that branch protection matches on. The price of
@@ -2902,8 +2903,8 @@ func jobNeeds(t *testing.T, workflow, name string, job any) []string {
 	}
 }
 
-// TestPipelineStagesMatch checks that every shared stage is defined the same
-// way in both pipelines. A fix applied to the pull-request pipeline and not to
+// TestPipelineStagesMatch checks that every shared stage runs the same steps
+// in both pipelines, allowing only the PR documentation gate. A fix applied to the pull-request pipeline and not to
 // the publish one means main is tested differently from the change that was
 // reviewed, which is the failure mode the old split between go-test.yml and
 // publish.yml's `ci` job actually produced: the release gate drifted into
@@ -2923,6 +2924,17 @@ func TestPipelineStagesMatch(t *testing.T) {
 		if !ok {
 			t.Errorf("%s has no %s job", publishPipeline, stage)
 			continue
+		}
+		// PRs may skip documentation-only changes; release validation always runs.
+		if stage == "lint" || stage == "govulncheck" {
+			fields := pr.(map[string]any)
+			if !reflect.DeepEqual(fields["needs"], []any{"changes"}) ||
+				fields["if"] != "${{ !cancelled() && "+
+					"needs.changes.outputs.run-ci != 'false' }}" {
+				t.Errorf("%s must use the documentation-only changes gate", stage)
+			}
+			delete(fields, "needs")
+			delete(fields, "if")
 		}
 		if !reflect.DeepEqual(pr, published) {
 			t.Errorf(

@@ -6,7 +6,8 @@ name: ci
 #
 # Shape:
 #
-#   lint, govulncheck                     2 runners, ~3 min
+#   changes                             documentation-only PRs stop here
+#     -> lint, govulncheck                2 runners, ~3 min
 #     -> go-test (Linux, quick)           1 runner,  ~8 min
 #       -> go-test (Linux)                    services, no race
 #          go-test (Linux, race)              race, no services
@@ -51,11 +52,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run-ci: ${{ steps.detect.outputs.run-ci }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 https://github.com/actions/checkout/releases/tag/v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: test-change-selection
+        run: python3 .github/scripts/test-ci-changes.py
+      - id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/ci-changes.sh
+
   # Stage 1. The cheapest signal in the pipeline and the gate for everything
   # below it: golangci-lint typechecks the whole tree, so a change that does
   # not compile is rejected here for ~3 runner-minutes rather than after four
   # platform jobs have each spent twenty.
   lint:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.run-ci != 'false' }}
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -111,6 +134,8 @@ jobs:
   # while it is triaged. It still fails the run, which is the same standing it
   # had as a job of the old go-test workflow.
   govulncheck:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.run-ci != 'false' }}
     name: govulncheck
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -544,7 +569,8 @@ jobs:
   # ledger, database, api, chain, mempool and the rest -- so a change confined
   # to those never built an image until publish.yml did it on main, after
   # merge. The job is ~3 minutes (run 33526005799), which is not worth a
-  # filter to maintain.
+  # filter to maintain. Documentation-only changes skip it through the
+  # upstream CI gate.
   docker:
     name: docker
     needs: [go-test-linux, go-test-linux-race]
