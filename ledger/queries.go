@@ -575,6 +575,16 @@ func (ls *LedgerState) queryInTxn(
 	protocolVersion uint16,
 	txn *database.Txn,
 ) (any, error) {
+	return ls.queryInTxnWithTransition(query, at, protocolVersion, txn, nil)
+}
+
+func (ls *LedgerState) queryInTxnWithTransition(
+	query any,
+	at QueryPoint,
+	protocolVersion uint16,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
+) (any, error) {
 	if at.pinned() {
 		var release func()
 		txn, release = ls.readTxn(txn)
@@ -585,7 +595,7 @@ func (ls *LedgerState) queryInTxn(
 	}
 	switch q := query.(type) {
 	case *olocalstatequery.BlockQuery:
-		return ls.queryBlock(q, at, txn, protocolVersion)
+		return ls.queryBlock(q, at, txn, protocolVersion, transitionInfo)
 	case *olocalstatequery.SystemStartQuery:
 		return ls.querySystemStart()
 	case *olocalstatequery.ChainBlockNoQuery:
@@ -602,10 +612,11 @@ func (ls *LedgerState) queryBlock(
 	at QueryPoint,
 	txn *database.Txn,
 	protocolVersion uint16,
+	transitionInfo *hardfork.TransitionInfo,
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkQuery:
-		return ls.queryHardFork(q, at, txn)
+		return ls.queryHardForkWithTransition(q, at, txn, transitionInfo)
 	case *olocalstatequery.ShelleyQuery:
 		return ls.queryShelley(q, at, txn, protocolVersion)
 	default:
@@ -717,6 +728,15 @@ func (ls *LedgerState) queryHardFork(
 	at QueryPoint,
 	txn *database.Txn,
 ) (any, error) {
+	return ls.queryHardForkWithTransition(query, at, txn, nil)
+}
+
+func (ls *LedgerState) queryHardForkWithTransition(
+	query *olocalstatequery.HardForkQuery,
+	at QueryPoint,
+	txn *database.Txn,
+	transitionInfo *hardfork.TransitionInfo,
+) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
 		if !at.pinned() {
@@ -772,6 +792,9 @@ func (ls *LedgerState) queryHardFork(
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		// The held snapshot answers pinned and unpinned queries alike, so the
 		// table does not change within an acquired session.
+		if transitionInfo != nil {
+			return ls.queryHardForkEraHistory(txn, *transitionInfo)
+		}
 		return ls.queryHardForkEraHistory(txn)
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
@@ -824,6 +847,7 @@ type eraBoundData struct {
 
 func (ls *LedgerState) queryHardForkEraHistory(
 	txn *database.Txn,
+	acquiredTransition ...hardfork.TransitionInfo,
 ) (any, error) {
 	// Read the tip, current era, and transition info from the lock-free
 	// snapshots so this (potentially slow) DB-querying path never contends
@@ -832,9 +856,12 @@ func (ls *LedgerState) queryHardForkEraHistory(
 	tipSlot := tipState.currentTip.Point.Slot
 	currentEraId := consensusState.currentEra.Id
 	transitionInfo := consensusState.transitionInfo
+	if len(acquiredTransition) > 0 {
+		transitionInfo = acquiredTransition[0]
+	}
 	if txn != nil {
 		// A QueryView describes the tip and era it froze. The transition
-		// forecast stays live: it is predicted state with no stored form.
+		// forecast is captured by QueryView because it has no stored form.
 		tip, err := ls.db.GetTip(txn)
 		if err != nil {
 			return nil, err

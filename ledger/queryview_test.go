@@ -493,6 +493,46 @@ func TestQueryViewEraHistoryUsesFrozenTip(t *testing.T) {
 	require.Equal(t, before, viewed)
 }
 
+func TestQueryViewEraHistoryUsesFrozenTransition(t *testing.T) {
+	t.Parallel()
+
+	ls, db := newDiskTestLedger(t)
+	ls.config.CardanoNodeConfig = newTestEraHistoryCfg(t)
+	require.NoError(t, db.SetEpoch(
+		100_000, 500, nil, nil, nil, nil,
+		eras.ConwayEraDesc.Id, 1_000, 432_000, nil,
+	))
+	tip := ochainsync.Tip{
+		Point: ocommon.NewPoint(200_000, repeatedBytes(32, 0x0D)),
+	}
+	require.NoError(t, db.SetTip(tip, nil))
+	ls.currentTip = tip
+	ls.currentEra = eras.ConwayEraDesc
+	ls.transitionInfo = hardfork.NewTransitionUnknown()
+	ls.publishSnapshotsLocked()
+	query := &olocalstatequery.BlockQuery{
+		Query: &olocalstatequery.HardForkQuery{
+			Query: &olocalstatequery.HardForkEraHistoryQuery{},
+		},
+	}
+
+	before, err := ls.Query(query, QueryPoint{})
+	require.NoError(t, err)
+	view, err := ls.AcquireQueryView(t.Context(), QueryPoint{})
+	require.NoError(t, err)
+	t.Cleanup(view.Close)
+
+	ls.transitionInfo = hardfork.NewTransitionKnown(502)
+	ls.publishSnapshotsLocked()
+	live, err := ls.Query(query, QueryPoint{})
+	require.NoError(t, err)
+	require.NotEqual(t, before, live)
+
+	viewed, err := view.Query(query, 0)
+	require.NoError(t, err)
+	require.Equal(t, before, viewed)
+}
+
 // TestQueryViewLeavesAReadConnectionForOtherReaders proves acquired views
 // cannot occupy the whole metadata read pool. A view holds its read
 // connection for its whole lifetime, so without a cap as many clients as
